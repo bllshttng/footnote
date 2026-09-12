@@ -4829,25 +4829,20 @@ def test_ac1_cli_passthrough_reaches_dispatch(tmp_path: Path, monkeypatch) -> No
     assert captured["passthrough"] == ["--verbose"]
 
 
-@pytest.mark.parametrize(
-    "substrate_args",
-    [
-        ["--substrate", "bg"],
-        ["--substrate", "headless"],
-        ["--once"],
-        ["--headless"],
-    ],
-)
-def test_ac7_cli_refuses_passthrough_off_pane(
+@pytest.mark.parametrize("substrate_args", [
+    ["--substrate", "bg"],
+    ["--substrate", "headless"],
+])
+def test_ac7_claude_off_pane_forwards_fenced_tokens(
     tmp_path: Path, monkeypatch, substrate_args: list[str]
 ) -> None:
-    """AC7-ERR: bg/headless builders carry none of the pane's guards; the
-    tokens are refused by name, never silently dropped."""
+    """The off-pane lanes forward fenced tokens; the pane lane never runs."""
+    import typer
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
-    import fno.agents.dispatch as dispatch
     import fno.agents.mux_spawn as mux_spawn
+    from fno.agents import dispatch as _dispatch
 
     use_tmpdir(monkeypatch, tmp_path)
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
@@ -4856,17 +4851,21 @@ def test_ac7_cli_refuses_passthrough_off_pane(
         "dispatch_spawn_pane",
         lambda **_kwargs: pytest.fail("pane dispatch must not run"),
     )
-    monkeypatch.setattr(
-        dispatch,
-        "dispatch_spawn",
-        lambda **_kwargs: pytest.fail("bg/headless dispatch must not run"),
-    )
+    sent: dict = {}
+
+    def recorder(**kwargs):
+        sent.update(kwargs)
+        raise typer.Exit(code=0)
+
+    monkeypatch.setattr(_dispatch, "dispatch_spawn", recorder)
     result = CliRunner().invoke(
         agents_cli.agents_app,
         ["spawn", "--name", "peer", *substrate_args, "hi", "--", "--verbose", "x"],
     )
-    assert result.exit_code == 2, result.output
-    assert "pane-only" in result.output
+    assert sent.get("passthrough") == ["--verbose", "x"], (
+        f"the fenced tokens must ride the off-pane dispatch: {result.output}"
+    )
+    assert "pane-only" not in result.output, result.output
 
 
 # -- an unanswered control read is reconciled, never asserted absent --

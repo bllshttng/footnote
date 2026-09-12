@@ -1175,6 +1175,47 @@ def thread_seatable(harness: str) -> bool:
     return spawn_state(harness) == "native"
 
 
+def thread_uncarried(
+    harness: str,
+    axes: dict[str, object],
+    passthrough: list[str] | None,
+) -> str | None:
+    """The first launch flag this harness's thread lane cannot carry, or None.
+
+    Reads the ``[harness.<name>.thread]`` carrier row, else the ``keeper``
+    row. ``axes`` maps ``keeper_thread.LAUNCH_AXES`` axis names to set values;
+    ``passthrough`` is the fenced ``--`` token list. A non-None answer
+    demotes the spawn to the pane; it never refuses on the substrate.
+    """
+    caps = _BUNDLED_CAPS.get(harness) or {}
+    arm = caps.get("thread") or caps.get("keeper")
+    if not arm:
+        return None
+    carries = set(arm.get("carries") or [])
+    from fno.agents.keeper_thread import LAUNCH_AXES
+
+    for flag, axis in LAUNCH_AXES:
+        if axis not in carries and axes.get(axis):
+            return flag
+    covered = set(arm.get("passthrough") or [])
+    if "*" in covered:
+        return None
+    skip_value = False
+    for token in passthrough or []:
+        if skip_value:
+            skip_value = False
+            continue
+        if token in covered:
+            # A carried spelling consumes its value token too: `-c` and
+            # `model_reasoning_effort=high` arrive as two fenced tokens.
+            skip_value = True
+        elif token.split("=", 1)[0] in covered:
+            continue
+        else:
+            return token
+    return None
+
+
 def substrate_default(harness: str) -> str:
     """Per-harness default substrate: ``thread`` where the spawn claim reads
     ``native`` (a journey-proven launch seam), else ``headless``. Pane

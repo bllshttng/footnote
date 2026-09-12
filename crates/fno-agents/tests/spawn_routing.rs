@@ -642,6 +642,7 @@ fn spawn_codex_once_happy_path() {
         None,
         None,
         None,
+        &[],
     );
 
     match old_path {
@@ -702,7 +703,17 @@ fn spawn_codex_once_collision_exits_2() {
     seed_registry(&home, "taken", "codex");
 
     let out = dispatch_codex_once(
-        &home, "taken", "msg", "fno", &cwd, false, None, None, None, None,
+        &home,
+        "taken",
+        "msg",
+        "fno",
+        &cwd,
+        false,
+        None,
+        None,
+        None,
+        None,
+        &[],
     );
 
     assert_eq!(out.exit_code, 2, "collision must exit 2: {}", out.stderr);
@@ -740,6 +751,7 @@ fn spawn_codex_once_create_failure_no_registry_entry() {
         None,
         None,
         None,
+        &[],
     );
 
     match old_path {

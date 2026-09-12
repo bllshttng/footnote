@@ -414,10 +414,16 @@ async fn granted_thread_puts_the_roots_on_every_turn_start() {
         .current_dir(worktree.path())
         .output()
         .expect("git init runs");
-    let mut thread =
-        CodexThread::start_with_state_dirs(worktree.path(), None, false, None, &grant_roots())
-            .await
-            .expect("thread starts");
+    let mut thread = CodexThread::start_with_state_dirs(
+        worktree.path(),
+        None,
+        false,
+        None,
+        &grant_roots(),
+        None,
+    )
+    .await
+    .expect("thread starts");
     thread.drive_turn("first").await.expect("turn 1");
     thread.drive_turn("second").await.expect("turn 2");
 
@@ -458,9 +464,10 @@ async fn ungranted_thread_emits_todays_frames_unchanged() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let daemon = FakeDaemon::start(Behavior::quick().with_thread_id("thread-plain"));
     let worktree = tempfile::tempdir().unwrap();
-    let mut thread = CodexThread::start_with_state_dirs(worktree.path(), None, false, None, &[])
-        .await
-        .expect("thread starts");
+    let mut thread =
+        CodexThread::start_with_state_dirs(worktree.path(), None, false, None, &[], None)
+            .await
+            .expect("thread starts");
     thread.drive_turn("go").await.expect("turn");
 
     let start = daemon.first_params("thread/start").expect("a thread/start");
@@ -489,7 +496,7 @@ async fn yolo_thread_still_sends_the_git_grant() {
         .output()
         .expect("git init runs");
     let mut thread =
-        CodexThread::start_with_state_dirs(worktree.path(), None, true, None, &grant_roots())
+        CodexThread::start_with_state_dirs(worktree.path(), None, true, None, &grant_roots(), None)
             .await
             .expect("thread starts");
     thread.drive_turn("go").await.expect("turn");

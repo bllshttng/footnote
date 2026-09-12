@@ -1052,10 +1052,7 @@ async fn run(args: Vec<String>) -> i32 {
     // this spawn's environment, so a `state_dirs_from_env()` call over there
     // would read the daemon's own env instead of ours.
     if daemon_bound_thread_spawn {
-        let roots = fno_agents::claude_ask::state_dirs_from_env();
-        if !roots.is_empty() {
-            params["state_dirs"] = Value::from(roots);
-        }
+        attach_codex_thread_state_dirs(&mut params);
     }
     // Snapshot before `params` moves into the request: the relocated gate
     // honors the same spawn-control flags the shared construction reads.
@@ -1694,11 +1691,15 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         return Some(2);
     }
     // Fail-closed (Locked Decision 1/2): only claude's bg/headless lanes accept
-    // a mapped --permission-mode. codex/gemini/agy one-shot lanes and the
-    // opencode bg serve lane hardcode their own bypass form, so a mode here
-    // can't be honored without a silent downgrade - reject it, pointing at the
-    // pane substrate (which DOES map every provider's vocabulary).
-    if permission_mode.is_some() && provider != "claude" {
+    // a mapped --permission-mode. gemini/agy one-shot lanes and the opencode
+    // bg serve lane hardcode their own bypass form, so a mode here can't be
+    // honored without a silent downgrade - reject it, pointing at the pane
+    // substrate (which DOES map every provider's vocabulary). The codex
+    // THREAD lane (substrate "bg" after the thread normalization) is exempt:
+    // the shared app-server resolves the posture server-side
+    // (resolve_thread_posture), so a mapped mode is native there.
+    let codex_thread_lane = provider == "codex" && substrate == "bg";
+    if permission_mode.is_some() && provider != "claude" && !codex_thread_lane {
         let remedy = if provider == "codex" {
             "drop --permission-mode and pass -Y/--yolo"
         } else {
@@ -1713,6 +1714,48 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     if let Err(reason) = validate_effort_for_spawn(provider, substrate, effort) {
         eprintln!("{reason}");
         return Some(2);
+    }
+    // A fenced token naming a flag fno itself emits is two sources for one
+    // value; the pane lane refuses that by name (pane_passthrough_tokens) and
+    // so does this one, instead of letting argv order pick the winner.
+    let carries_axis = |flag: &str| -> bool {
+        let set = |k: &str| {
+            params
+                .get(k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .is_some()
+        };
+        match flag {
+            "--permission-mode" => set("permission_mode"),
+            "--effort" => set("effort"),
+            "--add-dir" => set("add_dir"),
+            "--agent" => set("agent"),
+            "--tools" | "--allowedTools" => set("tools"),
+            "--deny-tools" | "--disallowedTools" => set("deny_tools"),
+            "--model" => set("model"),
+            _ => false,
+        }
+    };
+    for token in params
+        .get("harness_args")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+    {
+        let Some(flag) = token.strip_prefix('-') else {
+            continue;
+        };
+        let flag = format!("--{}", flag.split('=').next().unwrap_or(flag));
+        if carries_axis(&flag) {
+            eprintln!(
+                "refusing {flag} on both sides: fno emitted it from its own flag \
+                 and the passthrough carries it too. Two sources for one value is \
+                 the defect, not the collision. Drop one."
+            );
+            return Some(2);
+        }
     }
 
     // x-b6e2 fail-closed matrix for the client-owned bg/headless lanes (pane
@@ -1733,11 +1776,9 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 py_repr(provider)
             );
         };
-        if provider == "codex" && substrate == "bg" && add_dir.is_some() {
-            unsupported("--add-dir");
-            return Some(2);
-        }
         // --add-dir: claude/codex/agy map it; gemini has no verified equivalent.
+        // (The codex thread lane carries it too: the client puts it ahead of
+        // the state-root grant in params.state_dirs for the daemon.)
         if add_dir.is_some() && !matches!(provider, "claude" | "codex" | "agy") {
             unsupported("--add-dir");
             return Some(2);
@@ -1761,6 +1802,17 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // reads that node free while it works. Read once here so every lane below
     // carries it.
     let state_dirs = fno_agents::claude_ask::state_dirs_from_env();
+    let harness_args: Vec<String> = params
+        .get("harness_args")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     // The claude-only bundle, resolved once for both claude lanes.
     let claude_flags = fno_agents::claude_ask::HarnessFlags {
         add_dir,
@@ -1768,6 +1820,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         agent,
         allowed_tools: tools,
         disallowed_tools: deny_tools,
+        passthrough: &harness_args,
     };
 
     // Spawn gate (x-c5cc): cap + RAM floor for the CLIENT-SIDE substrates only.
@@ -1950,7 +2003,17 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 }
             };
             let mut outcome = dispatch_codex_once(
-                home, name, &message, from_name, &cwd, yolo, timeout, model, effort, add_dir,
+                home,
+                name,
+                &message,
+                from_name,
+                &cwd,
+                yolo,
+                timeout,
+                model,
+                effort,
+                add_dir,
+                &harness_args,
             );
             if let Some(receipt) = daemon_receipt.as_ref() {
                 fno_agents::codex_ask::append_daemon_receipt(&mut outcome, receipt);
@@ -1967,7 +2030,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // docs, it does not exist in `run --help`, and a comment naming it has
         // twice been read as proof this arm was never built.
         ("opencode", "headless") => emit!(dispatch_opencode_once(
-            home, name, &message, from_name, &cwd, yolo, timeout, model, effort,
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            yolo,
+            timeout,
+            model,
+            effort,
+            &harness_args,
         )),
 
         // opencode bg: the serve-HTTP worker lane (x-d9f9). A shared
@@ -1992,7 +2064,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             // It ignores `yolo` (headless create always passes
             // --dangerously-skip-permissions) and honors optional effort/model.
             emit!(dispatch_agy_once_with_effort(
-                home, name, &message, from_name, &cwd, model, effort, timeout, add_dir,
+                home,
+                name,
+                &message,
+                from_name,
+                &cwd,
+                model,
+                effort,
+                timeout,
+                add_dir,
+                &harness_args,
             ))
         }
 
@@ -2976,6 +3057,24 @@ fn default_substrate(params: &Value) -> &'static str {
     }
 }
 
+/// Join the typed `--add-dir` ahead of the seam-published state-root grant on
+/// a daemon-bound codex thread spawn. The operator's own grant leads, the same
+/// precedence the argv lanes give it. Extracted from `run` so the ordering
+/// contract stays unit-testable.
+fn attach_codex_thread_state_dirs(params: &mut Value) {
+    let mut roots = fno_agents::claude_ask::state_dirs_from_env();
+    if let Some(add_dir) = params
+        .get("add_dir")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        roots.insert(0, add_dir.to_string());
+    }
+    if !roots.is_empty() {
+        params["state_dirs"] = Value::from(roots);
+    }
+}
+
 fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String> {
     let mut params = Map::new();
     let mut positional: Vec<String> = Vec::new();
@@ -3024,6 +3123,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--tools",
         "--deny-tools",
         "--account",
+        "--harness-arg",
     ];
     let mut normalized: Vec<String> = Vec::with_capacity(rest.len());
     let mut rest_iter = rest.iter();
@@ -3252,6 +3352,19 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--deny-tools" => {
                 params.insert("deny_tools".into(), str_arg(&mut it, "--deny-tools")?);
+            }
+            // The front door's carrier for a fenced `--` token a thread or
+            // one-shot lane maps (codex: -c/--config/--add-dir). Repeatable;
+            // the daemon-side harness_args parser owns the per-harness
+            // vocabulary and refuses an unmapped token by name.
+            "--harness-arg" => {
+                let v = str_arg(&mut it, "--harness-arg")?;
+                let items = params
+                    .entry(String::from("harness_args"))
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Value::Array(list) = items {
+                    list.push(v);
+                }
             }
             "--account" => {
                 // x-d012 per-spawn account selection. Parsed here so the spawn

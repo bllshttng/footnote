@@ -45,6 +45,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
 )
 
 if TYPE_CHECKING:
@@ -642,6 +643,7 @@ def _codex_create_path(
     effort: Optional[str] = None,
     add_dir: Optional[str] = None,
     node: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
 ) -> DispatchAskResult:
     """Spawn a new codex agent under the per-agent flock.
 
@@ -673,6 +675,7 @@ def _codex_create_path(
             role=role,
             reasoning_effort=effort,
             add_dir=add_dir,
+            passthrough=list(passthrough) if passthrough else None,
         )
     except RouteCompositionError as exc:
         events.emit(
@@ -1000,6 +1003,7 @@ def _lane_b_thread_spawn(
     add_dir: Optional[str] = None,
     resume_session_id: Optional[str] = None,
     effort: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
 ) -> dict:
     """Host a lane-B harness thread on a pane-less keeper (x-889a).
@@ -1085,6 +1089,10 @@ def _lane_b_thread_spawn(
             add_dir=add_dir,
             effort=effort,
         )
+        if passthrough:
+            from fno.agents.mux_spawn import pane_passthrough_tokens
+
+            argv = [*argv, *pane_passthrough_tokens(passthrough, emitted=argv)]
 
         sock = _lane_b_keeper_socket(name)
         log_path = paths.state_dir() / "agents" / name / "keeper.log"
@@ -1425,6 +1433,7 @@ def _claude_create_path(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
     account_env: Optional[Mapping[str, str]] = None,
     launch_account: Optional[str] = None,
     route_provider_id: Optional[str] = None,
@@ -1603,6 +1612,7 @@ def _claude_create_path(
             agent=agent,
             tools=tools,
             deny_tools=deny_tools,
+            passthrough=list(passthrough) if passthrough else None,
             account_env=account_env,
             sandbox_settings=sandbox_settings,
         )
@@ -2379,6 +2389,7 @@ def dispatch_spawn(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
     headless: bool = False,
     output_format: Optional[str] = None,
     resume_session_id: Optional[str] = None,
@@ -2605,28 +2616,9 @@ def dispatch_spawn(
 
     # 3b. Codex thread spawns are held by the Rust app-server lane. The Python
     # runtime delegates there instead of silently downgrading to a one-shot.
+    # The spawn front door already demoted every flag the thread lane cannot
+    # carry to the pane, so whatever reaches here rides the lane natively.
     if harness == "codex" and not once:
-        unsupported = next(
-            (
-                flag
-                for flag, value in (
-                    ("--role", launch_role),
-                    ("--add-dir", add_dir),
-                    ("--agent", agent),
-                    ("--tools", tools),
-                    ("--deny-tools", deny_tools),
-                    ("--effort", effort),
-                )
-                if value
-            ),
-            None,
-        )
-        if unsupported is not None:
-            raise DispatchAskError(
-                f"{unsupported} is not supported on the codex thread lane; "
-                "drop it or use --substrate pane",
-                exit_code=2,
-            )
         if resume_session_id:
             raise DispatchAskError(
                 f"--resume {resume_session_id} is not supported on the codex "
@@ -2643,6 +2635,10 @@ def dispatch_spawn(
             model=model,
             yolo=yolo,
             node=node,
+            effort=effort,
+            add_dir=add_dir,
+            permission_mode=permission_mode,
+            passthrough=list(passthrough) if passthrough else None,
             account_env=account_env,
             route_env=route_env,
         )
@@ -2678,6 +2674,7 @@ def dispatch_spawn(
             "launch_role": launch_role, "agent": agent, "tools": tools,
             "deny_tools": deny_tools, "permission_mode": permission_mode,
             "resume_session_id": resume_session_id,
+            "passthrough": list(passthrough) if passthrough else None,
         },
         lock_timeout=lock_timeout,
     )
@@ -2902,6 +2899,7 @@ def dispatch_spawn(
                                 account_env=account_env,
                                 route_env=route_env,
                                 name=name,
+                                passthrough=list(passthrough) if passthrough else None,
                             )
                         except claude_mod.ProviderSubprocessError as exc:
                             # A quota death here is the freshest signal there is:
@@ -2951,6 +2949,7 @@ def dispatch_spawn(
                         agent=agent,
                         tools=tools,
                         deny_tools=deny_tools,
+                        passthrough=passthrough,
                         account_env=account_env,
                         launch_account=row_launch_account,
                         sandbox_settings=sandbox_settings,
@@ -3001,12 +3000,6 @@ def dispatch_spawn(
                         raise DispatchAskError(
                             "--resume is not carried on the opencode serve lane "
                             "yet; resume on --substrate pane or spawn fresh",
-                            exit_code=2,
-                        )
-                    if launch_role is not None:
-                        raise DispatchAskError(
-                            "--role is not carried on the opencode serve lane; "
-                            f"spawn {name!r} without --role or on --substrate pane",
                             exit_code=2,
                         )
                     short_id = _opencode_serve_spawn(
@@ -3063,6 +3056,7 @@ def dispatch_spawn(
                         effort=effort,
                         add_dir=add_dir,
                         node=node,
+                        passthrough=passthrough,
                     )
                 else:
                     raise DispatchAskError(

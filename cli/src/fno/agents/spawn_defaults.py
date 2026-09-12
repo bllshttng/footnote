@@ -119,17 +119,6 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
 # `-H` selects the harness and `-P` the vendor, so both are value flags here.
 _EXPLICIT_SUBSTRATE_BOOLS = ("--headless", "-p", "-o", "--once")
 
-#: x-1caa: the pane-only `--` passthrough refusal body, shared by this seam
-#: (explicit-flag substrate, pre-config-injection, covers the Rust-routed lane)
-#: and the Python CLI lane (resolved substrate incl. config defaults). One
-#: string, two triggers - reword it here, not per lane.
-PASSTHROUGH_PANE_ONLY = (
-    "passthrough after -- is pane-only; the "
-    "bg/headless argv builders carry none of the pane's provider "
-    "refusals, so the tokens cannot be forwarded. Use --substrate pane "
-    "(the default) or drop them."
-)
-
 #: A claude thread spawned with no message starts with no prompt: claude's job
 #: state reads `needs: send a prompt to start` and the row holds a worker slot
 #: for nothing. Printed by the seam (explicit substrate, both runtimes) and by
@@ -281,27 +270,37 @@ def _positional_indices(toks: Sequence[str]) -> List[int]:
     return idxs
 
 
-def _refuse_off_pane_passthrough(toks: Sequence[str], err: IO[str]) -> None:
-    """Refuse `--` passthrough tokens on an explicit bg/headless substrate
-    (x-1caa AC7): those argv builders carry none of the pane's provider
-    refusals, so forwarding there would be a second, unguarded surface.
-
-    Passthrough is fenced tokens in EITHER shape: more than one token after
-    the fence, or any fenced token beside a pre-fence positional message (the
-    legacy flag-shaped-seed idiom is exactly ONE fenced token with NO message
-    before the fence). Runs at the seam on operator argv and again after
-    config injection, so a substrate that arrived by config default - which
-    reroutes to the Rust lane before the Python CLI's own refusal can run -
-    is refused here too.
+def _demote_thread_uncarried_passthrough(toks: List[str], err: IO[str]) -> None:
+    """Rewrite an explicit or injected thread/bg substrate to pane when the
+    harness's thread lane cannot carry the fenced `--` tokens. Runs on
+    operator argv and again after config injection, covering the Rust-routed
+    lane the Python resolver never sees; the daemon-side harness_args parser
+    stays the trust-boundary backstop. Headless keeps its tokens: the
+    one-shot lanes carry them.
     """
     fence = next((i for i, t in enumerate(toks) if t == "--"), None)
     if fence is None:
         return
-    if _has_explicit_substrate(toks) not in ("thread", "bg", "headless"):
+    if _has_explicit_substrate(toks) not in ("thread", "bg"):
         return
-    if len(toks) - fence - 1 > 1 or _positional_indices(toks[:fence]):
-        print(f"fno agents spawn: {PASSTHROUGH_PANE_ONLY}", file=err)
-        raise SystemExit(2)
+    from fno.agents.harness_map import thread_uncarried
+
+    harness = _flag_value(toks, "--harness", "-H") or "claude"
+    uncarried = thread_uncarried(harness, {}, toks[fence + 1 :])
+    if uncarried is None:
+        return
+    for i, t in enumerate(toks[:fence]):
+        if t == "--substrate" and i + 1 < len(toks):
+            toks[i + 1] = "pane"
+            break
+        if t.startswith("--substrate="):
+            toks[i] = "--substrate=pane"
+            break
+    print(
+        f"fno agents spawn: substrate: pane (the {harness} thread lane "
+        f"has no carrier for {uncarried})",
+        file=err,
+    )
 
 
 def _mint_slug(existing: Set[str], rng: random.Random, err: IO[str]) -> str:
@@ -546,18 +545,12 @@ def normalize_spawn_args(
             toks = toks[:cut] + ["--substrate", "bg"] + toks[cut:]
             print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
 
-    # x-1caa: a bare `--` fence carries provider passthrough (the first fenced
-    # token is the MESSAGE only in the legacy no-message idiom; click fills
-    # positionals in order). The pane substrate splices those tokens into the
-    # provider argv behind the composed-argv refusals; bg/headless build argv
-    # in Rust with none of those guards, so forwarding there would be a second,
-    # unguarded surface. Refuse here - this seam is the one front door both
-    # runtimes share - rather than dropping the tokens or corrupting the seed.
-    # A single fenced token with NO message before the fence stays the legacy
-    # flag-shaped-seed idiom, untouched.
+    # A thread lane carries only what its contract row maps: a spawn pinning
+    # thread/bg with an unmapped fenced token demotes to the pane here, on
+    # both runtimes (the Rust-routed lane never reaches the CLI's resolver).
     fence = next((i for i, t in enumerate(toks) if t == "--"), None)
     if fence is not None:
-        _refuse_off_pane_passthrough(toks, err)
+        _demote_thread_uncarried_passthrough(toks, err)
 
     # Pass 3: the NAME axis. `spawn` takes ONE positional and it is the MESSAGE;
     # the agent name is a handle the caller rarely picks, so it is minted unless
@@ -1796,10 +1789,10 @@ def inject_spawn_defaults(
         out = [*out, *_bundle_inject]
     if inject or _bundle_inject:
         # x-1caa: injection can pin the substrate the operator left open, and
-        # the Rust-routed lane never reaches the Python CLI's own refusal - so
-        # the off-pane passthrough gate re-runs on the final argv, not just the
-        # operator's.
-        _refuse_off_pane_passthrough(out[1:], err)
+        # the Rust-routed lane never reaches the Python CLI's own refusal, so
+        # the gate re-runs on the final argv. The helper rewrites `--substrate`
+        # in place and ignores toks[0], so `out` itself is the safe view.
+        _demote_thread_uncarried_passthrough(out, err)
     # `from_config` is the record of what was actually INJECTED, so it is the
     # only honest answer to "did anyone choose this model?". Reading the config
     # value instead would refuse a typed model that merely happens to sit

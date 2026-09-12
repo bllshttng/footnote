@@ -30,6 +30,7 @@ fn entry(name: &str, harness: &str, sid: Option<&str>) -> RegistryEntry {
         requested_model: None,
         requested_provider: None,
         requested_effort: None,
+        harness_args: Vec::new(),
         route_provider_id: None,
         model_name: None,
         account_record_id: None,

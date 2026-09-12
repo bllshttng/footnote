@@ -34,7 +34,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from fno.agents.harnesses.base import ReachabilityProbeError
 
@@ -753,6 +753,7 @@ def create(
     role: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     add_dir: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
 ) -> CodexResult:
     """Spawn ``codex exec --json --cd <cwd> --skip-git-repo-check ...``.
 
@@ -824,6 +825,12 @@ def create(
         *git_args,
         *plan_args,
         *sandbox_flag(eff_yolo),
+    ]
+    if passthrough:
+        from fno.agents.mux_spawn import pane_passthrough_tokens
+
+        argv = [*argv, *pane_passthrough_tokens(passthrough, emitted=argv)]
+    argv += [
         # Behind `--` (codex's own clap tip): a leading-flag seed must be the
         # prompt positional, not a codex flag.
         "--",

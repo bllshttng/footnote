@@ -3646,28 +3646,12 @@ async fn ensure_codex_thread_handle(
     // `codex_threads` is the map every other codex ask, stop and retask goes
     // through. Holding it across that await let one slow connect stall every
     // other codex thread on the machine, including the recovery loop.
-    // The state-root grant (x-f22f) cannot be reconstructed here, and the loss
-    // is announced rather than taken quietly. The roots reach a spawn from the
-    // Python seam's `FNO_WORKER_ADD_DIRS`, which this long-lived shared daemon
-    // does not have, and Rust deliberately runs no second copy of the resolver
-    // (`writable_dirs.published_worker_writable_dirs`: one published value, two
-    // readers). Reading this daemon's own env instead would grant whatever
-    // shell started it, which is wrong in a more dangerous direction.
-    //
-    // In practice the grant usually survives: a turn-level `sandboxPolicy`
-    // becomes the thread's default server-side, so a thread still loaded by the
-    // codex app-server keeps it across an `fno-agents-daemon` restart. It is
-    // lost only when the app-server itself restarted and reloaded the thread
-    // from its rollout. That worker is then mute again, so it gets an event
-    // instead of silence. The durable fix is a granted-roots receipt on the
-    // registry row, which belongs to the sibling node that owns that schema.
-    //
-    // Emitted only for a thread that COULD have lost something. A yolo thread
-    // is `danger-full-access` and needs no grant, and a resume that succeeds
-    // says nothing on its own, so the event fires after the resume and only
-    // for a bounded thread. An unconditional emit on every cache miss reports
-    // a loss that never happened, which is the kind of telemetry an operator
-    // learns to ignore.
+    let carry = crate::codex_thread::parse_harness_args(&entry.harness_args).map_err(|reason| {
+        format!(
+            "codex thread '{}' stored harness_args refuse to re-parse: {reason}",
+            entry.name
+        )
+    })?;
     let bounded = !entry_posture_is_full_access(entry);
     let driver = crate::codex_thread::CodexThread::resume(
         cwd,
@@ -3675,6 +3659,7 @@ async fn ensure_codex_thread_handle(
         entry.model.as_deref(),
         entry_posture_is_full_access(entry),
         entry.effort.as_deref(),
+        Some(&carry.config),
     )
     .await
     .map_err(|error| format!("codex thread '{}' resume refused: {error}", entry.name))?;

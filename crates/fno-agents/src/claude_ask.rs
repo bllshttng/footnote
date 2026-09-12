@@ -651,6 +651,10 @@ pub struct HarnessFlags<'a> {
     pub agent: Option<&'a str>,
     pub allowed_tools: Option<&'a str>,
     pub disallowed_tools: Option<&'a str>,
+    /// The fenced `--` tokens the operator typed, appended verbatim before the
+    /// message. claude's row carries `["*"]`: the harness argv takes them all.
+    /// `&[String]` defaults to the empty slice, so older constructors stay.
+    pub passthrough: &'a [String],
 }
 
 impl<'a> HarnessFlags<'a> {
@@ -673,6 +677,7 @@ impl<'a> HarnessFlags<'a> {
             argv.push("--add-dir".to_string());
             argv.push(dir.clone());
         }
+        argv.extend(self.passthrough.iter().cloned());
     }
 }
 
@@ -3395,6 +3400,29 @@ mod tests {
         );
     }
 
+    // The fenced `--` tokens ride the harness argv verbatim, before the
+    // message fence: claude's row carries ["*"].
+    #[test]
+    fn bg_argv_appends_fenced_tokens_before_the_message() {
+        let flags = HarnessFlags {
+            passthrough: &["--verbose".to_string(), "--dangerously-debug".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            build_argv("a", "hi", false, None, None, None, flags),
+            vec![
+                "claude",
+                "--bg",
+                "--name",
+                "a",
+                "--verbose",
+                "--dangerously-debug",
+                "--",
+                "hi"
+            ]
+        );
+    }
+
     // x-dfa4: an explicit --permission-mode rides between --name and --model as
     // an exact passthrough; empty/None is byte-identical to today (AC1-HP/AC7).
     #[test]
@@ -3555,6 +3583,7 @@ mod tests {
             agent: Some("reviewer"),
             allowed_tools: Some("Read,Edit"),
             disallowed_tools: Some("Bash"),
+            passthrough: &[],
         };
         assert_eq!(
             build_argv("a", "hi", false, None, None, None, flags),

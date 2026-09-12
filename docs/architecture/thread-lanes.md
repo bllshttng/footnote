@@ -74,6 +74,23 @@ The mint is per row too. `cursor-agent` and `agy` are callee-minted-read-back: t
 
 A row's status comes from what drives it, never from a pane that is not there. A pane row's verdict is scraped from its grid. A thread row's is written by its driver: the inside-leg hooks on claude, the daemon's own turn state on codex. Both land in the same `inside_leg` field, so the reader never knows or cares which driver wrote it. A driver fno cannot reach answers nothing. Its ttl'd report ages out and the row honestly reads `?`, the gap admitted rather than a death inferred.
 
+## What a thread lane carries
+
+A spawn never refuses a flag because of the substrate. The carrier facts live in the capability contract beside the lane tables. A `[harness.<name>.thread]` row covers the daemon/argv lanes (claude, codex, opencode). A keeper row answers through its `passthrough` field. `carries` names the launch axes the lane takes in its native form. `passthrough` names the fenced `--` token spellings it maps. `["*"]` means the lane appends every token to its argv. One predicate (`harness_map.thread_uncarried`) reads the row. The spawn front door demotes a spawn carrying an unmapped flag to the pane. The demotion is loud: never a refusal on the substrate, never a silent drop.
+
+| Flag | codex thread (app-server) | claude thread (`claude --bg`) | keeper threads (agy, cursor-agent, grok, pi) | opencode thread (serve) | headless |
+|---|---|---|---|---|---|
+| `--effort` | `turn/start.effort` | argv | argv where `carries` names it | no token | argv |
+| `--add-dir` | `state_dirs`, which becomes `turn/start.sandboxPolicy.writableRoots` | argv | argv where `carries` names it, else pane | pane | argv |
+| `--permission-mode` | `thread/start.sandbox` through `resolve_thread_posture` | argv | argv where `carries` names it, else pane | pane | claude only |
+| `--role` | pane (a route needs env the shared daemon cannot see) | carried | pane | pane | claude only |
+| `--agent`, `--tools`, `--deny-tools` | pane, which refuses (codex has no spelling) | argv | pane | pane | claude only |
+| `-- <tokens>` | `-c`/`--config key=value` to `thread/start.config`, `--add-dir dir` to `state_dirs`, any other token to pane | appended to the argv | appended to the keeper launch argv | pane | appended to the one-shot argv |
+
+Some flags are not harness CLI flags at all: codex `--agent` has no spelling on any substrate. The pane refuses those on every substrate. The text names the `--` fence as the way to pass the harness's own flag. On codex, `-c` is `--cwd` on `fno agents spawn`. The codex config spelling rides the fence instead: `-- -c key=value`. The daemon parses it into `thread/start.config` with TOML-typed values. The raw tokens are stored on the registry row. A daemon restart re-parses them onto `thread/resume`, so the operator's per-thread config is not silently dropped.
+
+Seat and honesty are different answers. `thread_seatable` measured True on 2026-09-11 for claude, codex, opencode, agy, cursor-agent, grok and pi. That is why the table gives opencode a `thread` row carrying `model` only. Every other opencode flag demotes to the pane until the serve lane maps it. Whether the opencode thread lane is HONEST is a separate open question with its own verdict. This row records only what the lane carries today.
+
 ## The gate rule
 
 A `thread` row flips to true only in the same commit as a passing unattended restart journey. The journey is a dispatched worker that resumes into a fresh session, completes its task, and stops on its own; for a keeper lane it is the restart journey above, asserting a named pid outlived a named death. Flip the row early and the honest refusal becomes a spawn that accepts and then fails at launch. Until that commit lands, a false row records an fno backlog item. It never records a harness verdict.
