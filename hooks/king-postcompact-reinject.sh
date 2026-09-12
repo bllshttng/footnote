@@ -195,9 +195,7 @@ fi
 # after a compact. Reads the same manifest every king arm resolves; a missing
 # manifest or a foreign session id means the king-for-a-day brief above is the
 # whole teaching, so nothing is appended (fail to the narrower rule).
-REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
-REIGN_MANIFEST="$(fno agents king manifest-path --harness-session-id "$SID" \
-    --state-root "$REPO_ROOT/.fno" 2>/dev/null || true)"
+REIGN_MANIFEST="$(fno agents king manifest-path --harness-session-id "$SID" 2>/dev/null || true)"
 if [[ -n "$REIGN_MANIFEST" && -f "$REIGN_MANIFEST" ]]; then
     REIGN_SHAPE="$(sed -n 's/^shape:[[:space:]]*//p' "$REIGN_MANIFEST" | head -1 | tr -d '[:space:]')"
     REIGN_SID="$(sed -n 's/^harness_session_id:[[:space:]]*//p' "$REIGN_MANIFEST" | head -1 | tr -d '[:space:]')"

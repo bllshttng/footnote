@@ -57,12 +57,14 @@ def test_live_registry_crown_resolves_scope_path_after_session_id_changes(tmp_pa
     path = state.king_manifest_path("x-f3d0", state_root=tmp_path / ".fno")
     write_manifest(path, scope="x-f3d0", harness_session_id="old-session")
 
-    assert resolve(
+    resolved, reason = resolve(
         "new-session",
         "codex",
         state_root=tmp_path / ".fno",
         registry=[row],
-    ) == path
+    )
+    assert resolved == path
+    assert reason == ""
 
 
 def test_stale_scope_file_without_a_live_crown_resolves_nothing(tmp_path):
@@ -81,12 +83,14 @@ def test_stale_scope_file_without_a_live_crown_resolves_nothing(tmp_path):
         short_id=None,
     )
 
-    assert resolve(
+    resolved, reason = resolve(
         "old-session",
         "codex",
         state_root=tmp_path / ".fno",
         registry=[row],
-    ) is None
+    )
+    assert resolved is None
+    assert "exited" in reason and "terminal" in reason
 
 
 def test_coronation_refreshes_scope_manifest_for_a_successor(monkeypatch, tmp_path):
@@ -236,11 +240,80 @@ def test_a_crashed_king_s_leftover_manifest_captures_nobody(tmp_path):
         short_id=None,
     )
 
-    assert resolve("dead-session", "claude", state_root=root, registry=[crashed_king]) is None
-    assert resolve("successor-session", "claude", state_root=root, registry=[successor]) is None
+    dead_resolved, dead_reason = resolve(
+        "dead-session", "claude", state_root=root, registry=[crashed_king]
+    )
+    assert dead_resolved is None
+    assert "orphaned" in dead_reason and "terminal" in dead_reason
+    successor_resolved, successor_reason = resolve(
+        "successor-session", "claude", state_root=root, registry=[successor]
+    )
+    assert successor_resolved is None
+    assert "crown_scope" in successor_reason and "unstamped" in successor_reason
     # The file is still there - inert, not deleted. Crash safety is row
     # authority, not cleanup.
     assert path.is_file()
+
+
+def test_a_wrong_state_root_names_the_path_it_looked_for(tmp_path):
+    """The defect this node is: a stamped crown with --state-root pointing
+    nowhere read as the same bare silence as an uncrowned row. The reason
+    must name the path it looked for and the remedy, and the same row over
+    the right root stays a clean resolve."""
+    import fno.king.state as state
+
+    resolve = state.resolve_king_manifest_path
+    row = SimpleNamespace(
+        status="live",
+        crown_scope="x-f3d0",
+        harness="claude",
+        harness_session_id="crowned-session",
+        cc_session_id=None,
+        short_id=None,
+    )
+    right_root = tmp_path / "space"
+    path = state.king_manifest_path("x-f3d0", state_root=right_root)
+    write_manifest(path, scope="x-f3d0", harness_session_id="crowned-session")
+
+    resolved, reason = resolve(
+        "crowned-session",
+        "claude",
+        state_root=tmp_path / "elsewhere",
+        registry=[row],
+    )
+    assert resolved is None
+    assert str(tmp_path / "elsewhere" / "kings" / "x-f3d0.md") in reason
+    assert "--state-root" in reason
+
+    ok, ok_reason = resolve(
+        "crowned-session", "claude", state_root=right_root, registry=[row]
+    )
+    assert ok == path
+    assert ok_reason == ""
+
+
+def test_a_missing_manifest_without_the_flag_skips_the_flag_advice(monkeypatch, tmp_path):
+    """The 'omit --state-root' remedy only makes sense when one was passed.
+    With the default root taken, the reason names the absent manifest and
+    stops there instead of advising a flag the caller never used."""
+    import fno.king.state as state
+
+    monkeypatch.setattr(state, "king_state_root", lambda: tmp_path)
+    row = SimpleNamespace(
+        status="live",
+        crown_scope="x-f3d0",
+        harness="claude",
+        harness_session_id="crowned-session",
+        cc_session_id=None,
+        short_id=None,
+    )
+
+    resolved, reason = state.resolve_king_manifest_path(
+        "crowned-session", "claude", registry=[row]
+    )
+    assert resolved is None
+    assert "no manifest exists" in reason
+    assert "--state-root" not in reason
 
 
 def test_init_writes_a_manifest_carrying_the_fields_the_loop_reads(tmp_path):

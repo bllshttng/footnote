@@ -381,7 +381,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
         if (( KNUM <= MAX_UNAVAIL_RETRIES )); then
             emit_block_for_harness "king manifest resolver unavailable (${KNUM}/${MAX_UNAVAIL_RETRIES}) for an active kings dir, keeping session running"
         fi
-        echo "target stop-hook: king manifest resolver unavailable ${KNUM} times (counter ${KCOUNT}); allowing stop (king gate off for this stop)" >&2
+        echo "target stop-hook: king manifest resolver unavailable ${KNUM} times (counter ${KCOUNT}); allowing stop. The counter only increments, so the king gate stays OFF for the rest of this session. Delete ${KCOUNT} to re-arm it." >&2
         exit 0
     else
         if [[ "$TARGET_NO_MATCH" -eq 1 ]]; then

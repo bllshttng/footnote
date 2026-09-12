@@ -527,12 +527,13 @@ def manifest_path_cmd(
     """Print this live crowned session's existing scope manifest path."""
     from fno.king.state import resolve_king_manifest_path
 
-    path = resolve_king_manifest_path(
+    path, reason = resolve_king_manifest_path(
         harness_session_id,
         harness or None,
         state_root=state_root,
     )
     if path is None:
+        typer.echo(f"king manifest-path: {reason}", err=True)
         raise typer.Exit(1)
     typer.echo(path)
 
@@ -659,7 +660,7 @@ def board_cmd(
             or ""
         )
         if session_id:
-            resolved = resolve_king_manifest_path(
+            resolved, _ = resolve_king_manifest_path(
                 session_id, getattr(caller, "harness", None)
             )
             if resolved is not None:

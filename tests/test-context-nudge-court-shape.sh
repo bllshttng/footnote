@@ -55,8 +55,13 @@ export PATH="$BINDIR:$PATH"
 # binary, not a stale one elsewhere on PATH (see test-context-nudge.sh sibling
 # comment for the full reasoning).
 AGENTS_BIN_DIR="$REPO_ROOT/crates/fno-agents/target/debug"
-if [ ! -x "$AGENTS_BIN_DIR/fno-agents" ]; then
-  echo "FAIL: $AGENTS_BIN_DIR/fno-agents not built." >&2
+# Spell the binary path contiguously: the smoke runner greps this file for
+# `target/debug/fno-agents` to decide whether selecting this harness must
+# carry the cargo build step, and a split spelling selects the harness
+# without its build (the red this comment prevents).
+AGENTS_BIN="$REPO_ROOT/crates/fno-agents/target/debug/fno-agents"
+if [ ! -x "$AGENTS_BIN" ]; then
+  echo "FAIL: $AGENTS_BIN not built." >&2
   echo "      Fix: (cd crates/fno-agents && cargo build --bin fno-agents)" >&2
   exit 1
 fi
@@ -64,7 +69,7 @@ export PATH="$AGENTS_BIN_DIR:$PATH"
 
 SBX="$(mktemp -d)"
 trap 'rm -rf "$SBX" "$BINDIR"' EXIT
-mkdir -p "$SBX/.fno/agents" "$SBX/.fno/latches" "$SBX/.fno/kings"
+mkdir -p "$SBX/.fno/agents" "$SBX/.fno/latches"
 printf 'schema_version: 1\nconfig:\n  state_dir: %s/.fno/\n' "$SBX" > "$SBX/.fno/settings.yaml"
 touch "$SBX/.fno/.path-migration-done"
 printf '[target.handoff]\nking_used_pct_trigger = 40\nused_pct_trigger = 50\n' > "$SBX/.fno/config.toml"
@@ -105,8 +110,13 @@ run_hook() {
 events_has() { grep -q "\"type\":\"$1\"" "$SBX/.fno/events.jsonl" 2>/dev/null; }
 reset_events() { rm -f "$SBX/.fno/events.jsonl"; }
 
+# The hook reads the manifest from the resolver's DEFAULT root (the space dir
+# keyed on this cwd), no longer a repo-local .fno: compute it with the same
+# shim + env the hook sees rather than re-deriving the slug here.
+KINGS_DIR="$(cd "$SBX" && PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c 'from fno.paths import space_dir; print(space_dir() / "kings")')"
+mkdir -p "$KINGS_DIR"
 write_shape() {  # write_shape <shape|none|garbage>
-  local _path="$SBX/.fno/kings/$SCOPE.md"
+  local _path="$KINGS_DIR/$SCOPE.md"
   rm -f "$_path"
   case "$1" in
     none) ;;
