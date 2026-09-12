@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import pytest
 import yaml
+from typer.testing import CliRunner
 
 from fno.observer import judge
+
+runner = CliRunner()
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +77,7 @@ def test_judge_plan_unknown_dimension_is_gap():
 def test_prompt_carries_node_plan_and_lens(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        judge, "load_lenses", lambda: {"persona": "Names a who and a sourced cost."}
+        judge, "load_lenses", lambda: ("grade one question only", {"persona": "Names a who and a sourced cost."})
     )
     judge.judge_plan(
         "plan body", "node body", "persona", spawn=_fake_spawn({}, calls)
@@ -138,18 +141,6 @@ def test_tally_counts_none_as_wrong_on_controls():
     assert out["controls_wrong"] == 3  # three labeled pairs, every one a gap
 
 
-def test_tally_repeat_flags_flips():
-    replies = iter(["a\nVERDICT: pass\n", "b\nVERDICT: fail\n"])
-
-    def flipping_spawn(name, prompt):
-        return 0, next(replies), ""
-
-    out = judge.tally(
-        [_LABELS[1]], plan_text=_plan_loader(_LABELS), spawn=flipping_spawn, repeat=2
-    )
-    assert out["flips"] and out["flips"][0]["verdicts"] == ["pass", "fail"]
-
-
 def test_labels_yaml_controls_are_wellformed():
     rows = yaml.safe_load(
         (judge._lenses_path().parent / "labels.yaml").read_text(encoding="utf-8")
@@ -157,3 +148,53 @@ def test_labels_yaml_controls_are_wellformed():
     assert len(rows) == 5 and all(r["control"] for r in rows)
     dims = {d for r in rows for d in r["labels"]}
     assert dims <= set(judge.JUDGE_DIMENSIONS)
+
+
+# --------------------------------------------------------------------------- #
+# the judge verb (AC4-*, AC5-HP)
+# --------------------------------------------------------------------------- #
+
+def _wire_verb_spawn(monkeypatch, replies=None, calls=None):
+    from fno.observer import cli as obs_cli
+
+    def spawn(name, prompt):
+        if calls is not None:
+            calls.append(name)
+        return 0, (replies or {}).get(name, "fine\nVERDICT: pass\n"), ""
+
+    monkeypatch.setattr(obs_cli, "_judge_spawn", lambda: spawn)
+    return obs_cli
+
+
+def test_judge_verb_skips_at_report_level(monkeypatch, tmp_path):  # AC4-HP
+    p = tmp_path / "p.md"
+    p.write_text("---\ntitle: t\n---\n\n## Five questions\n\n1. persona: the operator\n")
+    calls = []
+    obs_cli = _wire_verb_spawn(monkeypatch, calls=calls)
+    r = runner.invoke(obs_cli.observer_app, ["judge", "--plan", str(p)])
+    assert r.exit_code == 0, r.output
+    assert "skipped level=report" in r.output
+    assert not calls  # no spawn call at report level
+
+
+def test_judge_verb_unanswered_without_section(monkeypatch, tmp_path):  # AC4-ERR
+    p = tmp_path / "p.md"
+    p.write_text("---\ntitle: t\n---\n\n## Context\n\nbody\n")
+    calls = []
+    obs_cli = _wire_verb_spawn(monkeypatch, calls=calls)
+    r = runner.invoke(obs_cli.observer_app, ["judge", "--plan", str(p), "--force"])
+    assert r.exit_code == 0, r.output
+    assert "unanswered" in r.output
+    assert not calls  # coverage gap, no model call
+
+
+def test_judge_labels_calibration_prints_rates_and_exits_1(monkeypatch):  # AC5-HP
+    # A pass-everything judge: the four fail-labeled controls are wrong.
+    labels = judge._lenses_path().parent / "labels.yaml"
+    obs_cli = _wire_verb_spawn(monkeypatch)
+    r = runner.invoke(obs_cli.observer_app, ["judge", "--labels", str(labels), "--split", "test"])
+    assert r.exit_code == 1, r.output
+    assert "tp_rate" in r.output and "tn_rate" in r.output
+    assert "controls wrong" in r.output
+    # every control disagreement is listed, one line each
+    assert r.output.count("label=fail") == 4

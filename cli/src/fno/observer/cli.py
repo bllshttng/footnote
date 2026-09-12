@@ -29,8 +29,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import typer
+import yaml
 
-from fno.observer import fold
+from fno.loops import loop_level
+from fno.observer import fold, judge
+from fno.plan._doc import load_plan_text
 
 observer_app = typer.Typer(
     name="observer",
@@ -345,6 +348,7 @@ def sweep(
     since: int = typer.Option(28, "--since", help="Window in days (default 28)."),
     repo: Optional[str] = typer.Option(None, "--repo", help="target only: pin one repo (owner/name); default = the graph's distinct PR repos."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the run summary as JSON."),
+    judge_n: int = typer.Option(0, "--judge", help="blueprint only: judge the N newest window plans after code scoring."),
 ) -> None:
     """Retrospective read-only sweep: score a recorded corpus and emit events.
 
@@ -420,6 +424,21 @@ def sweep(
         raise typer.Exit(5)
     digest = _write_digest(summary, skill, mode="sweep")
 
+    if judge_n > 0 and skill == "blueprint":
+        # x-9983: the N newest corpus items (the window is chronological) get
+        # the model judge after the code scoring; findings join the same run.
+        # Deliberately NOT wired into the session-start hook: an autonomous
+        # spawner needs its own registry row and a config.autonomy gate.
+        for item in items[-judge_n:]:
+            pp = item.get("plan_path")
+            text = _plan_text_of(Path(pp)) if pp else None
+            if not text or not _has_five_questions(text):
+                continue  # coverage gap, never a fail
+            n = by_id.get(item.get("graph_node_id")) or {}
+            node_text = "\n".join(filter(None, [str(n.get("title") or ""), str(n.get("details") or "")]))
+            _run_judge(text, node_text, item, run_id, events_paths)
+        typer.echo(f"  judge: offered the model judge to {min(judge_n, len(items))} window plan(s)")
+
     state = "ok" if scored_count == len(items) else "partial"
     if json_out:
         typer.echo(json.dumps({**summary, "state": state, "digest": str(digest)}, indent=2))
@@ -441,6 +460,100 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
     if dimension == "shipped_outcome":
         return f"node {nid} outcome={item.get('outcome')} attribution={item.get('attribution_class')}"
     return f"session {sid} node {nid}: {dimension}={verdict}"
+
+
+# --------------------------------------------------------------------------- #
+# the advisory five-question judge (x-9983)
+# --------------------------------------------------------------------------- #
+
+
+def _judge_spawn() -> "Callable[[str, str], tuple[int, str, str]]":
+    """judge.judge_plan's spawn seam: _default_spawn bound to cwd/timeout/model."""
+    return lambda name, prompt: _default_spawn(
+        name, prompt, cwd=Path.cwd(), timeout=600, model=judge.JUDGE_MODEL
+    )
+
+
+def _plan_text_of(path: Path) -> Optional[str]:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _has_five_questions(text: str) -> bool:
+    try:
+        return load_plan_text(text).has_section("Five questions")
+    except Exception:  # unparseable -> no section, no judge call
+        return False
+
+
+def _node_text_of(node_id: Optional[str]) -> str:
+    if not node_id:
+        return ""
+    from fno import paths as _paths
+    from fno.scoreboard.fold import read_graph_nodes
+
+    n = {x.get("id"): x for x in read_graph_nodes(_paths.graph_json())}.get(node_id) or {}
+    return "\n".join(filter(None, [str(n.get("title") or ""), str(n.get("details") or "")]))
+
+
+def _run_judge(text: str, node_text: str, item: dict, run_id: str, events_paths: list[Path]) -> int:
+    """Grade all five lenses sequentially into run_id; returns fails printed."""
+    fails = 0
+    for dimension in judge.JUDGE_DIMENSIONS:
+        verdict, reason = judge.judge_plan(text, node_text, dimension, spawn=_judge_spawn())
+        if verdict is None:
+            typer.echo(f"  {dimension}: unanswered ({reason[:120]})")
+            continue
+        fails += verdict == "fail"
+        typer.echo(f"  {dimension}: {verdict} - {reason[:160]}")
+        _emit_finding(
+            run_id=run_id, item=item, dimension=dimension, verdict=verdict,
+            evidence=reason, cost_usd=0.0, skill_ref=None, events_paths=events_paths,
+        )
+    return fails
+
+
+@observer_app.command("judge")
+def judge_cmd(
+    plan: Optional[Path] = typer.Option(None, "--plan", help="The plan doc to judge."),
+    node: Optional[str] = typer.Option(None, "--node", help="Graph node id for title/details context."),
+    labels: Optional[Path] = typer.Option(None, "--labels", help="labels.yaml: run calibration instead."),
+    split: str = typer.Option("dev", "--split", help="Calibration split (dev|test)."),
+    force: bool = typer.Option(False, "--force", help="Judge even at level=report."),
+) -> None:
+    """Advisory five-question judge (x-9983): never blocks; a judge error is never a fail."""
+    if labels is not None:
+        rows = [r for r in (yaml.safe_load(labels.read_text(encoding="utf-8")) or []) if r.get("split", "dev") == split]
+        base = labels.parent
+        texts = {r["plan"]: (_plan_text_of(base / r["plan"]) or "") for r in rows}
+        out = judge.tally(rows, plan_text=texts, spawn=_judge_spawn())
+        for dim, s in out["dimensions"].items():
+            typer.echo(f"{dim}: n={s['n']} tp_rate={s['tp_rate']} tn_rate={s['tn_rate']}")
+        for d in out["disagreements"]:
+            typer.echo(f"{d['plan']}  {d['dimension']}  label={d['label']}  judge={d['judge']}  {d['reason'][:120]}")
+        if out["controls_wrong"]:
+            typer.echo(f"controls wrong: {out['controls_wrong']}")
+            raise typer.Exit(1)
+        return
+    if plan is None:
+        raise typer.BadParameter("give --plan or --labels")
+    if not force and loop_level("blueprint_judge") == "report":
+        typer.echo("skipped level=report")
+        return
+    text = _plan_text_of(plan)
+    if text is None:
+        typer.echo(f"unanswered: no plan at {plan}")
+        raise typer.Exit(1)
+    if not _has_five_questions(text):
+        typer.echo("unanswered: plan carries no ## Five questions section; no judge call")
+        return
+    typer.echo(f"judging {plan} ({node or 'no node'})")
+    fails = _run_judge(text, _node_text_of(node), {"session_id": None, "graph_node_id": node},
+                       _mint_run_id("fno:blueprint"), _events_paths())
+    if fails:
+        typer.echo("revise the plan once, or write a one-line disposition under that question; intake proceeds either way")
 
 
 # --------------------------------------------------------------------------- #
