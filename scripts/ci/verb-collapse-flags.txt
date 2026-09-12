@@ -68,3 +68,5 @@ target init !--provider
 target resolve-model !--provider
 target start !--provider
 worker external !--pr
+do pr publish-review !--pr
+pr publish-review !--pr
