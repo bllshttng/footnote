@@ -18,9 +18,9 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Optional
 
-import yaml
-
 from fno.cost._register import LEDGER_SESSION_UNRESOLVED
+from fno.plan._doc import FrontmatterError, ParseError, load_plan_text
+from fno.plan.execution_validation import validate_execution
 from fno.scoreboard.fold import (
     _WEDGE_REASONS,
     _ci_reds_from_fires,
@@ -163,51 +163,33 @@ def build_corpus(
     return {"items": items, "total_rows": len(windowed), "attributed": len(items)}
 
 
-# -- Structural checks (blueprint dimension), reused-in-spirit from
-# skills/blueprint/mutate_doc.py's hard-refuse check and
-# skills/execute/orchestrator.py's detect_hidden_output_conflicts. Reimplemented
-# in pure Python rather than imported: cli/src/fno doctor lint (shellout-drift)
-# forbids a packaged verb shelling to a repo-root script, and those two
-# checks live in skill scripts outside the installable package.
+BLUEPRINT_DIMENSIONS = ("collision_free", "shipped_outcome")
+JUDGE_DIMENSIONS = ("persona", "surface_fit", "uncovered_case", "deletable", "duplication")
 
-_FAILURE_MODES_RE = re.compile(r"^## Failure Modes\s*$", re.MULTILINE)
-_EXEC_STRATEGY_FENCE_RE = re.compile(
-    r"## Execution Strategy\s*\n```ya?ml\n(.*?)\n```", re.DOTALL
-)
+# The failure-modes heading and file-ownership copies that lived here were
+# deleted 2026-09-12 (x-9983): the heading refusal was retired from
+# mutate_doc.py on 2026-08-12, leaving this copy grading a dead rule (160 of
+# 163 plans "failing"), and the collision copy diverged from the validator's
+# check. collision_free now imports the validator's own parallel-surface
+# check instead of forking it.
 
 
-def has_failure_modes_heading(plan_text: str) -> bool:
-    """The literal check /blueprint hard-refuses without (mutate_doc.py)."""
-    return bool(_FAILURE_MODES_RE.search(plan_text))
-
-
-def find_file_ownership_collisions(plan_text: str) -> list[str]:
-    """Files claimed by more than one task's ``surface`` list in the plan's
-    Execution Strategy block. Missing/unparseable block -> no collisions
-    detectable, not an error (the plan is simply not judgeable on this
-    dimension by this best-effort check)."""
-    m = _EXEC_STRATEGY_FENCE_RE.search(plan_text)
-    if not m:
-        return []
+def _surface_collisions(plan_text: str) -> Optional[list[str]]:
+    """Files claimed by more than one task of a parallel wave, per the
+    validator. ``None`` when the text does not parse as a plan (a PR diff,
+    malformed frontmatter): a coverage gap, never a fail."""
     try:
-        strategy = yaml.safe_load(m.group(1))
-    except yaml.YAMLError:
-        return []
-    if not isinstance(strategy, dict):
-        return []
-    tasks = strategy.get("tasks")
-    if not isinstance(tasks, list):
-        return []
-    owners: dict[str, int] = Counter()
-    for t in tasks:
-        if not isinstance(t, dict):
-            continue
-        surface = t.get("surface")
-        if isinstance(surface, list):
-            for f in surface:
-                if isinstance(f, str):
-                    owners[f] += 1
-    return sorted(f for f, n in owners.items() if n > 1)
+        doc = load_plan_text(plan_text)
+        if not doc.frontmatter:
+            return None
+        violations = validate_execution(doc).violations
+    except (FrontmatterError, ParseError):
+        return None
+    return [
+        v.message
+        for v in violations
+        if v.field.startswith("waves.") and v.field.endswith(".surface")
+    ]
 
 
 def score_blueprint_item(item: dict, *, plan_text: Optional[str]) -> dict[str, Optional[str]]:
@@ -223,12 +205,10 @@ def score_blueprint_item(item: dict, *, plan_text: Optional[str]) -> dict[str, O
     result: dict[str, Optional[str]] = {}
 
     if plan_text is None:
-        result["structural_validity"] = None
         result["collision_free"] = None
     else:
-        result["structural_validity"] = "pass" if has_failure_modes_heading(plan_text) else "fail"
-        collisions = find_file_ownership_collisions(plan_text)
-        result["collision_free"] = "pass" if not collisions else "fail"
+        collisions = _surface_collisions(plan_text)
+        result["collision_free"] = "pass" if collisions == [] else ("fail" if collisions else None)
 
     if item.get("include_shipped_outcome", True):
         outcome = item.get("outcome")
@@ -721,14 +701,14 @@ if __name__ == "__main__":
     # insufficient guard
     summary = build_run_summary(
         run_id="obs-x", skill_id="fno:blueprint", skill_version="unknown",
-        findings=[("structural_validity", "pass")], corpus_size=3, scored_count=3,
+        findings=[("surface_fit", "pass")], corpus_size=3, scored_count=3,
     )
     assert summary == {"state": "insufficient", "need": 10, "n": 3}, summary
 
     # ok state: ranking + coverage
     findings = [
-        ("structural_validity", "pass"),
-        ("structural_validity", "fail"),
+        ("surface_fit", "pass"),
+        ("surface_fit", "fail"),
         ("collision_free", "fail"),
         ("shipped_outcome", "degraded"),
     ]
@@ -741,28 +721,28 @@ if __name__ == "__main__":
     assert summary["coverage_pct"] == 83, summary  # round(100*10/12)
     assert summary["failure_ranking"][0]["fail_count"] == 1, summary  # both dims tied at 1
 
-    # structural checks
-    text_missing = "# Plan\n\n## Overview\nno failure modes here\n"
-    assert has_failure_modes_heading(text_missing) is False
-    text_ok = "# Plan\n\n## Failure Modes\n\nstuff\n"
-    assert has_failure_modes_heading(text_ok) is True
-
-    strategy_text = (
-        "## Execution Strategy\n\n```yaml\n"
-        "tasks:\n- id: '1.1'\n  surface: ['a.py', 'b.py']\n"
-        "- id: '1.2'\n  surface: ['b.py', 'c.py']\n"
+    # collision_free rides the validator's parallel-surface check
+    assert _surface_collisions("# Plan\n\n## Overview\nno frontmatter, not a plan\n") is None
+    colliding = (
+        "---\ntitle: t\n---\n\n## Execution Strategy\n\n```yaml\n"
+        "execution_mode: parallel\n"
+        "waves:\n- wave: 1\n  mode: parallel\n  tasks: ['1.1', '1.2']\n"
+        "tasks:\n- id: '1.1'\n  title: t\n  surface: ['a.py', 'b.py']\n"
+        "  verify: uv run pytest -q\n  acceptance: ['AC1']\n"
+        "- id: '1.2'\n  title: t\n  surface: ['b.py']\n"
+        "  verify: uv run pytest -q\n  acceptance: ['AC1']\n"
         "```\n"
     )
-    assert find_file_ownership_collisions(strategy_text) == ["b.py"], find_file_ownership_collisions(strategy_text)
+    assert _surface_collisions(colliding), "shared surface in one parallel wave must collide"
 
     # score_blueprint_item: bounced + plan-attributable -> fail; execution -> degraded
     item = {"judgeable": True, "outcome": "bounced", "attribution_class": "plan-attributable"}
-    assert score_blueprint_item(item, plan_text=text_ok)["shipped_outcome"] == "fail"
+    assert score_blueprint_item(item, plan_text=colliding)["shipped_outcome"] == "fail"
     item2 = {"judgeable": True, "outcome": "bounced", "attribution_class": "execution-attributable"}
-    assert score_blueprint_item(item2, plan_text=text_ok)["shipped_outcome"] == "degraded"
+    assert score_blueprint_item(item2, plan_text=colliding)["shipped_outcome"] == "degraded"
     item3 = {"judgeable": False, "outcome": None}
     assert score_blueprint_item(item3, plan_text=None)["shipped_outcome"] is None
-    assert score_blueprint_item(item3, plan_text=None)["structural_validity"] is None
+    assert score_blueprint_item(item3, plan_text=None)["collision_free"] is None
 
     # score_review_item
     assert score_review_item(addressed_ids=set(), skipped_ids=set(), all_finding_ids=set()) == {
