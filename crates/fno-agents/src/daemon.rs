@@ -5328,12 +5328,30 @@ where
             // transcript reading from a fired falsifier. Null on a `fno` too old
             // to emit them: a stale probe that did not answer must read as
             // absent, never as no-evidence.
+            // (x-6d16) The age's instrument rides the same tuple:
+            // `last-entry` | `mtime` | `opencode-db` when the probe answered,
+            // the resolver's reason word (`not-found` | `no-records` |
+            // `resolver-error`) when it could not resolve the handle, and
+            // `unmeasured` when the batch never ran for this page. The three
+            // unknown-reason words are the difference between "this worker
+            // has no transcript" and "the resolver crashed"; both rendered as
+            // the same blank before (d-d6cb1827: a null stays alone no more).
+            let activity_basis = match truth.as_ref().and_then(|t| t.last_activity_basis.clone()) {
+                Some(basis) => json!(basis),
+                None if truth.is_none()
+                    && batch_outcome == crate::truth_probe::BatchOutcome::NotMeasured =>
+                {
+                    json!("unmeasured")
+                }
+                None => Value::Null,
+            };
             let evidence = (
                 json!(truth.as_ref().and_then(|t| t.reachability.as_deref())),
                 basis_word,
                 json!(truth.as_ref().and_then(|t| t.last_activity_age_s)),
                 json!(truth.as_ref().and_then(|t| t.last_event_at.as_deref())),
                 json!(truth.as_ref().and_then(|t| t.last_message.as_deref())),
+                activity_basis,
             );
             // The orthogonal axis: reachability answers "can I reach this
             // process"; progress answers "is it advancing, awaiting the
@@ -5383,8 +5401,14 @@ where
         )
         .map(
             |(e, rendered_status, observed_model, evidence, progress, progress_basis)| {
-                let (reachability, basis, last_activity_age_s, last_event_at, last_message) =
-                    evidence;
+                let (
+                    reachability,
+                    basis,
+                    last_activity_age_s,
+                    last_event_at,
+                    last_message,
+                    last_activity_basis,
+                ) = evidence;
                 // Return the full row shape matching Python's serialize_entry. The
                 // key set is pinned by schemas/agents-list-row.json, asserted here
                 // and by the Python test; edit that file before adding a key.
@@ -5541,6 +5565,14 @@ where
                     "progress": progress,
                     "progress_basis": progress_basis,
                     "last_activity_age_s": last_activity_age_s,
+                    // (x-6d16) The instrument the age came from (`last-entry` |
+                    // `mtime` | `opencode-db`), the resolver's reason word
+                    // (`not-found` | `no-records` | `resolver-error`) when it
+                    // could not resolve the handle, or `unmeasured` when the
+                    // batch never ran for this page - never a bare null: the
+                    // three unknown-reason words are the difference between
+                    // "no transcript" and "the resolver crashed".
+                    "last_activity_basis": last_activity_basis,
                     // The absolute stamp of the newest transcript activity and the
                     // flattened LAST-turn text, from the same probe as the age -
                     // the pair that makes a wedged-but-`working` row visible. Null
@@ -11906,6 +11938,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             reachability: None,
             basis: None,
             last_activity_age_s: None,
+            last_activity_basis: None,
             last_event_at: None,
             last_message: None,
             observed_model: Value::Null,
@@ -12462,6 +12495,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             reachability: Some(reachability.into()),
             basis: Some("transcript".into()),
             last_activity_age_s: Some(12.0),
+            last_activity_basis: None,
             last_event_at: Some("2026-08-15T17:00:00+00:00".into()),
             last_message: Some(
                 "Still growing (101 lines, 26 percent through the pytest run)".into(),
@@ -13154,6 +13188,7 @@ done
                     reachability: Some("reachable".into()),
                     basis: Some("transcript".into()),
                     last_activity_age_s: Some(3.5),
+                    last_activity_basis: None,
                     last_event_at: None,
                     last_message: None,
                     observed_model: json!({
@@ -13576,6 +13611,11 @@ done
         for row in rows {
             assert_eq!(row["basis"], "unmeasured", "row {}", row["name"]);
             assert_eq!(row["progress_basis"], "unmeasured", "row {}", row["name"]);
+            assert_eq!(
+                row["last_activity_basis"], "unmeasured",
+                "row {}",
+                row["name"]
+            );
             assert!(row["reachability"].is_null(), "row {}", row["name"]);
             assert!(row["last_activity_age_s"].is_null(), "row {}", row["name"]);
             assert_eq!(row["status"], "unknown", "row {}", row["name"]);

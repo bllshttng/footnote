@@ -49,6 +49,14 @@ pub struct TruthProbe {
     /// from a fired falsifier.
     pub basis: Option<String>,
     pub last_activity_age_s: Option<f64>,
+    /// The instrument the activity age came from (`last-entry` | `mtime` |
+    /// `opencode-db`), or the resolver's reason word (`not-found` |
+    /// `no-records` | `resolver-error`) when it could not resolve the handle
+    /// at all (x-6d16). Those three are the difference between "this worker
+    /// has no transcript" and "the resolver crashed", and both rendered as
+    /// the same blank before. `None` on a truth build that predates the
+    /// field: absence renders as absence.
+    pub last_activity_basis: Option<String>,
     /// The absolute ISO8601 stamp of the newest transcript activity, and the
     /// flattened text of the LAST turn (compact `[tool_use: name]` markers
     /// included, capped at 200 chars Python-side). Derived by the same probe as
@@ -556,6 +564,28 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
             .and_then(|value| value.get("reachability")?.as_str().map(str::to_owned)),
         basis: parsed.and_then(|value| value.get("basis")?.as_str().map(str::to_owned)),
         last_activity_age_s: parsed.and_then(|value| value.get("last_activity_age_s")?.as_f64()),
+        // (x-6d16) The age's instrument, straight off the payload. When the
+        // resolver answered `unknown`, that key is null and `reason` carries
+        // why; fall back to the reason, but ONLY the three unknown-path
+        // words - a `stalled` row's `api-error-tail` reason is about its
+        // tail, not about the age's instrument, and must not stand in for it.
+        last_activity_basis: parsed
+            .and_then(|value| {
+                value
+                    .get("last_activity_basis")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                parsed
+                    .and_then(|value| value.get("reason")?.as_str().map(str::to_owned))
+                    .filter(|reason| {
+                        matches!(
+                            reason.as_str(),
+                            "not-found" | "no-records" | "resolver-error"
+                        )
+                    })
+            }),
         last_event_at: parsed
             .and_then(|value| value.get("last_event_at")?.as_str().map(str::to_owned)),
         last_message: parsed
@@ -989,6 +1019,58 @@ mod tests {
         assert!(parse_truth_payload(&junk)
             .unwrap()
             .provider_refusal
+            .is_none());
+    }
+
+    /// x-6d16: the age's instrument parses off the same wire, and on the
+    /// unknown paths the resolver's reason word stands in for it - but ONLY
+    /// the three unknown-path words. A `stalled` row's `api-error-tail`
+    /// reason describes its tail, not the age's instrument, and must never
+    /// masquerade as one. An older `fno` sending neither key parses None, so
+    /// absence renders as absence.
+    #[test]
+    fn the_activity_basis_parses_with_the_unknown_reason_as_fallback() {
+        let answered = serde_json::json!({
+            "state": "working",
+            "last_activity_age_s": 12.0,
+            "last_activity_basis": "last-entry",
+        });
+        assert_eq!(
+            parse_truth_payload(&answered)
+                .unwrap()
+                .last_activity_basis
+                .as_deref(),
+            Some("last-entry")
+        );
+        let unresolvable = serde_json::json!({
+            "state": "unknown",
+            "reason": "resolver-error",
+        });
+        assert_eq!(
+            parse_truth_payload(&unresolvable)
+                .unwrap()
+                .last_activity_basis
+                .as_deref(),
+            Some("resolver-error"),
+            "a crashed resolver must not render as a blank row"
+        );
+        let stalled_with_tail_reason = serde_json::json!({
+            "state": "stalled",
+            "reason": "api-error-tail",
+            "last_activity_basis": "mtime",
+        });
+        assert_eq!(
+            parse_truth_payload(&stalled_with_tail_reason)
+                .unwrap()
+                .last_activity_basis
+                .as_deref(),
+            Some("mtime"),
+            "a tail reason never stands in for the instrument word"
+        );
+        let older = serde_json::json!({"state": "working"});
+        assert!(parse_truth_payload(&older)
+            .unwrap()
+            .last_activity_basis
             .is_none());
     }
 
