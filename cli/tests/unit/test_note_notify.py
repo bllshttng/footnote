@@ -476,8 +476,15 @@ def test_an_unknown_node_refuses_with_the_verb_text(tmp_path) -> None:
     assert got.exit_code == 1
 
 
-def test_the_exact_slug_resolves_like_the_write_path(tmp_path) -> None:
+def test_the_exact_slug_resolves_like_the_write_path(tmp_path, monkeypatch) -> None:
     """The store's by-id write path accepts the exact slug; so must the read."""
+    _free(monkeypatch)
+    monkeypatch.setattr(note_notify, "own_session", lambda: "sess-me")
+    monkeypatch.setattr(note_notify, "crowned_over", lambda scope: [])
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry",
+        lambda: [_row("t-0d08-worker", node="x-0d08")],
+    )
     got = readers_before_append(
         "Worker-Slug", _graph(tmp_path, [{"id": "x-0d08", "slug": "worker-slug"}])
     )
