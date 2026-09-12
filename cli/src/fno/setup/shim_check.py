@@ -1,9 +1,8 @@
 """fno shims must never dangle into a cleaned mktemp dir (x-c911).
 
-Five shims in ~/.local/bin were links into a cleaned mktemp staging dir and
-every gh read degraded. This scans the tool bin for fno* symlinks that
-dangle or resolve under a temp root, and repoints them to the durable
-uv tools copy (`python -m fno.setup.shim_check [--repair] [--bin-dir D]`).
+Scans the tool bin for fno* symlinks whose target dangles or resolves under
+a temp root, and repoints them to the durable uv tools copy.
+Run: `python -m fno.setup.shim_check [--repair] [--bin-dir D]`.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ import tempfile
 from pathlib import Path
 
 UV_TOOL_FNO_BIN = Path.home() / ".local" / "share" / "uv" / "tools" / "fno" / "bin"
-DEFAULT_BIN_DIR = Path.home() / ".local" / "bin"
 
 
 def _temp_root() -> str:
@@ -22,19 +20,16 @@ def _temp_root() -> str:
 
 
 def scan(bin_dir: Path | None = None) -> dict:
-    """Report every fno* symlink defect in bin_dir (dangling or temp-resolving).
+    """Report every fno* symlink defect (dangling or temp-resolving).
 
-    Unrelated links stay out: the fno prefix is the scope, so a broken
-    third-party link is never this installer's finding.
+    Scope is the fno prefix, so a broken third-party link is not our finding.
     """
-    directory = Path(bin_dir) if bin_dir else DEFAULT_BIN_DIR
+    directory = Path(bin_dir) if bin_dir else Path.home() / ".local" / "bin"
     temp_root = _temp_root()
     defects: list[dict] = []
-    checked = 0
     for entry in sorted(Path(directory).glob("fno*")):
         if not entry.is_symlink():
             continue
-        checked += 1
         target = Path(os.readlink(entry))
         if not target.is_absolute():
             target = entry.parent / target
@@ -43,12 +38,7 @@ def scan(bin_dir: Path | None = None) -> dict:
             defects.append(_defect(entry, resolved, "dangling"))
         elif str(resolved).startswith(temp_root):
             defects.append(_defect(entry, resolved, "temp-resolving"))
-    return {
-        "bin_dir": str(directory),
-        "checked": checked,
-        "defects": defects,
-        "healthy": not defects,
-    }
+    return {"bin_dir": str(directory), "defects": defects, "healthy": not defects}
 
 
 def _defect(link: Path, resolved: Path, problem: str) -> dict:
@@ -69,9 +59,7 @@ def repair(defects: list[dict]) -> list[str]:
     for defect in defects:
         durable = defect.get("repair")
         if not durable:
-            remaining.append(
-                f"{defect['name']}: no durable copy at {UV_TOOL_FNO_BIN / defect['name']}"
-            )
+            remaining.append(f"{defect['name']}: no durable copy at {durable}")
             continue
         link = Path(defect["link"])
         tmp = link.with_name(f".{link.name}.relink.{os.getpid()}")
@@ -110,3 +98,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

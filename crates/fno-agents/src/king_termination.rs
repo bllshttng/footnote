@@ -94,6 +94,17 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
     })
 }
 
+/// The quiet journal row both blind-board blocks emit: a blind board must
+/// still advance the fire counter with its row.
+pub(crate) fn king_quiet_body(session_id: &str, actionable: i64) -> Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "actionable": actionable,
+        "actionable_ids": [],
+        "cleared": false,
+    })
+}
+
 /// The x-c911 unknown-count message: -1 means a blind actionable queue, so
 /// the board has no row count to name and the failure rides instead.
 pub(crate) fn blind_count_message(board: &KingBoard) -> String {

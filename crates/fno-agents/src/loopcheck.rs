@@ -11689,12 +11689,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         }
         emit(
             "king_loop_check",
-            serde_json::json!({
-                "session_id": session_id,
-                "actionable": actionable,
-                "actionable_ids": [],
-                "cleared": false,
-            }),
+            crate::king_termination::king_quiet_body(&session_id, actionable),
         );
         (0, king_output("block", None, message, actionable, dry + 1))
     };
@@ -11730,10 +11725,12 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     };
 
     if board.actionable < 0 {
-        // x-c911: -1 is "unknown", never a row count; the message names the
-        // blind queue.
-        let message = crate::king_termination::blind_count_message(&board);
-        return blind_block(&message, -1, dry);
+        // x-c911: -1 is "unknown", never a row count; the message names the blind queue.
+        return blind_block(
+            &crate::king_termination::blind_count_message(&board),
+            -1,
+            dry,
+        );
     }
 
     if board.actionable == 0 {

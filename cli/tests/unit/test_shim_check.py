@@ -38,12 +38,12 @@ def test_dangling_fno_link_detected_and_unrelated_link_ignored(bin_dir):
 
     report = scan(bin_dir)
 
-    assert report["checked"] == 1, "the fno prefix is the scope; pyfiglet is not ours"
     assert report["healthy"] is False
     defect = report["defects"][0]
     assert defect["name"] == "fno-py"
     assert defect["problem"] == "dangling"
     assert defect["repair"] is None, "no durable copy was ever created"
+    assert not any(d["name"] == "pyfiglet" for d in report["defects"])
 
 
 def test_temp_resolving_live_link_detected(bin_dir, tmp_path):
@@ -66,7 +66,6 @@ def test_healthy_link_outside_temp_is_clean(bin_dir):
     report = scan(bin_dir)
 
     assert report["healthy"] is True
-    assert report["checked"] == 1
     assert report["defects"] == []
 
 
