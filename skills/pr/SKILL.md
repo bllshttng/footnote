@@ -147,7 +147,7 @@ A failed worker is never reported as a silent success. If the worker died withou
 The review that gated this branch ran BEFORE the PR existed. The emit-time mirror finds no open PR at that moment, so the attestation does not auto-post. With the PR now open, mirror it:
 
 ```bash
-fno pr publish-review --pr <N>
+fno pr publish-review --pr-number <N>
 ```
 
 The verb defaults its verdict to the newest head-pinned attestation for HEAD. It refuses on a collision or a stale pin. It can only re-post a verdict the local gate already accepted. On an unconfigured lane it prints one `bot-review: skipped` receipt and nothing else happens. Report the receipt line verbatim. A `refused` or `failed` receipt is a finding to surface. It is never a reason to stop the pipeline.

@@ -836,16 +836,23 @@ def sync_canonical(
     ),
 )
 def publish_review_cmd(
-    pr_number: int = typer.Option(..., "--pr", help="GitHub PR number"),
+    pr_number: int = typer.Option(..., "--pr-number", help="GitHub PR number"),
+    pr_legacy: Optional[int] = typer.Option(
+        None, "--pr", hidden=True, help="[DEPRECATED] alias for --pr-number."
+    ),
     verdict: Optional[str] = typer.Option(
         None, "--verdict", help="pass | fail; default: newest head-pinned attestation for HEAD."
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Resolve and refuse-check, but make no POST."
+        False, "--dry-run", "-N", help="Resolve and refuse-check, but make no POST."
     ),
 ) -> None:
+    from fno._flag_aliases import merge_deprecated_alias
     from fno.pr._publish_review import PublishReviewUnavailable, publish_review_call
 
+    pr_number = merge_deprecated_alias(
+        pr_number, pr_legacy, canonical_flag="--pr-number", legacy_flag="--pr"
+    )
     try:
         result = publish_review_call(
             {
