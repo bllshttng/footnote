@@ -29,11 +29,13 @@ pub(crate) const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration
 /// King fires hold this much of the fire budget back for the drain read, the
 /// last read and the one that decides completion. Drain cost scales with
 /// graph rows: measured standalone 4.5s to 7.9s on one scope and 8.8s to
-/// 11.2s on the largest, so the reserve is sized off the BIGGEST scope with
-/// headroom, not the median. Without a reservation a spent budget clamps the
-/// drain to the 250ms floor and the kill is deterministic. Every cheaper
-/// read before the drain is clamped to `remaining - reserve`, and the drain
-/// itself reads against the full remaining (`stopgate_drain_timeout`).
+/// 11.2s on the largest. 16s is 1.4x that worst measurement; the multiplier
+/// is a judgment call, not a measured bound, and no larger scope has been
+/// measured yet. The drain's own ceiling is the wider `min(30s, remaining)`
+/// (`stopgate_drain_timeout`): the reserve guarantees only the floor a
+/// starved fire still leaves, which is what turns a spent budget from a
+/// silent 250ms kill into a readable timeout. Every cheaper read before the
+/// drain is clamped to `remaining - reserve`.
 const STOPGATE_DRAIN_RESERVE: std::time::Duration = std::time::Duration::from_secs(16);
 
 thread_local! {
