@@ -79,14 +79,14 @@ def _pattern(row: dict, *, include_all: bool = False) -> str | None:
     return f"{event_type}:{label}"
 
 
-def _ordered_rows(rows: list[dict]) -> list[dict]:
+def _ordered_rows(rows: list[dict]) -> list[tuple[int, dict]]:
     return sorted(enumerate(rows), key=lambda item: (_timestamp(item[1]) is None,
                                                       _timestamp(item[1]) or datetime.max.replace(tzinfo=timezone.utc),
                                                       item[0]))
 
 
 def _suspects_for_pattern(rows: list[dict], target: str, *, window: int,
-                          include_all: bool) -> list[dict]:
+                          include_all: bool) -> list[dict[str, Any]]:
     sessions: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         session = _session_id(row)
@@ -111,7 +111,7 @@ def _suspects_for_pattern(rows: list[dict], target: str, *, window: int,
                 continue
             candidate_sessions[pattern].add(session)
             candidate_counts[pattern] += 1
-    suspects = []
+    suspects: list[dict[str, Any]] = []
     for pattern, support_sessions in candidate_sessions.items():
         support = len(support_sessions)
         if support < 2:
