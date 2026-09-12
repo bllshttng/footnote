@@ -3,7 +3,9 @@
 //! One decision about what a node's evidence means, so the main, provider,
 //! skill, efficiency, lane, calibration and fidelity views cannot drift into
 //! seven answers. The terminal vocabulary arrives from the caller (Python owns
-//! `fno.terminals`); the decision lives here:
+//! `fno.terminals`); the decision lives here. The `flow` section rides the
+//! same answer: the weekly delivery/cycle/waiting aggregates every board and
+//! view reads (x-b07a), so presentation layers never re-classify.
 //!
 //! - a confirmed merge delivers the node, ledger row or not;
 //! - an explicit doc/delivery terminal delivers the node with its evidence;
@@ -12,6 +14,7 @@
 //! - a session terminal on a node the graph lost stays a fallback, labeled
 //!   `inferred`, never equal to a confirmed merge.
 
+use chrono::{Datelike, TimeZone};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
@@ -67,6 +70,278 @@ fn iso_secs(raw: &str) -> Option<i64> {
         .ok()
         .and_then(|dt| chrono::TimeZone::from_local_datetime(&chrono::Local, &dt).single())
         .map(|dt| dt.timestamp())
+}
+
+fn local_dt(secs: i64) -> Option<chrono::DateTime<chrono::Local>> {
+    chrono::Local.timestamp_opt(secs, 0).single()
+}
+
+/// Monday of the local calendar week containing `secs`, as "YYYY-MM-DD".
+fn week_start_of(secs: i64) -> Option<String> {
+    let dt = local_dt(secs)?;
+    Some(
+        (dt.date_naive() - chrono::Duration::days(dt.weekday().num_days_from_monday() as i64))
+            .format("%Y-%m-%d")
+            .to_string(),
+    )
+}
+
+/// Epoch seconds of local midnight on the Monday of the week holding `secs`.
+/// DST shifts make this ±1h around the transition; the partial-week flags it
+/// feeds tolerate that.
+fn week_start_secs(secs: i64) -> Option<i64> {
+    let dt = local_dt(secs)?;
+    let monday =
+        dt.date_naive() - chrono::Duration::days(dt.weekday().num_days_from_monday() as i64);
+    chrono::Local
+        .from_local_datetime(&monday.and_hms_opt(0, 0, 0)?)
+        .single()
+        .map(|dt| dt.timestamp())
+}
+
+fn has_pr(obj: &Map<String, Value>) -> bool {
+    match obj.get("pr_number") {
+        Some(Value::Number(n)) => n.as_i64().is_some(),
+        Some(Value::String(s)) => !s.is_empty(),
+        _ => false,
+    }
+}
+
+/// Oldest age in whole days from `created_at` to now over the given entries;
+/// null when no entry carries a usable created_at. Ages name their basis in
+/// the payload (`age_basis`): node creation, never a touched_at inference.
+fn oldest_age_days<'a>(
+    entries: impl Iterator<Item = &'a Map<String, Value>>,
+    now_secs: i64,
+) -> Value {
+    let oldest = entries
+        .filter_map(|n: &Map<String, Value>| {
+            n.get("created_at")
+                .and_then(Value::as_str)
+                .and_then(iso_secs)
+        })
+        .filter_map(|created| now_secs.checked_sub(created))
+        .filter(|age| *age >= 0)
+        .max()
+        .map(|age| age / 86400);
+    match oldest {
+        Some(days) => json!(days),
+        None => Value::Null,
+    }
+}
+
+/// The weekly delivery flow (x-b07a) over the scoped entries/rows and the
+/// classification they already received: merged PRs per local calendar week,
+/// code/document deliveries separately, PR created-to-merged median and
+/// nearest-rank p85 with sample count, current open-PR age, and the canonical
+/// WIP/review/blocked populations with oldest ages. Aggregates only, so the
+/// payload can ride the public boards; never estimates interval durations
+/// from snapshots or touched_at. Confirmed deliveries bucket weekly; a
+/// session-terminal delivery on a node the graph lost, and a delivered PR row
+/// with no node, ride `coverage.unlinked` - counted in the repository
+/// measure's coverage, never passed off as confirmed work.
+fn flow(
+    by_id: &BTreeMap<String, &Map<String, Value>>,
+    rows: &[Value],
+    by_node: &Map<String, Value>,
+    now_raw: Option<&str>,
+    since_days: i64,
+    vocab_terms: &[&str],
+) -> Value {
+    let Some(now_secs) = now_raw.and_then(iso_secs) else {
+        return json!({"available": false, "reason": "no usable now"});
+    };
+    if since_days <= 0 {
+        return json!({"available": false, "reason": "non-positive window"});
+    }
+    let window_start = now_secs - since_days * 86400;
+
+    // Enumerate the local calendar weeks the window touches, oldest first.
+    let Some(first_week) = week_start_secs(window_start) else {
+        return json!({"available": false, "reason": "no usable window start"});
+    };
+    let current_week = match week_start_secs(now_secs) {
+        Some(w) => w,
+        None => return json!({"available": false, "reason": "no usable now"}),
+    };
+    let mut buckets: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    let mut week_rows: Vec<(String, i64, bool)> = Vec::new();
+    let (Some(week_start_d), Some(current_monday_d)) = (
+        local_dt(first_week).map(|dt| dt.date_naive()),
+        local_dt(current_week).map(|dt| dt.date_naive()),
+    ) else {
+        return json!({"available": false, "reason": "no usable window start"});
+    };
+    let mut wd = week_start_d;
+    while wd <= current_monday_d {
+        let label = wd.format("%Y-%m-%d").to_string();
+        let Some(naive) = wd.and_hms_opt(0, 0, 0) else {
+            break;
+        };
+        let wsecs = match chrono::Local.from_local_datetime(&naive).single() {
+            Some(dt) => dt.timestamp(),
+            None => break,
+        };
+        let partial = window_start > wsecs || now_secs < wsecs + 7 * 86400;
+        week_rows.push((label.clone(), 0, partial));
+        buckets.insert(label, (0, 0));
+        wd += chrono::Duration::weeks(1);
+    }
+
+    // Weekly buckets count CONFIRMED deliveries only: merged, explicit
+    // delivery, and doc. Class decides the column, ship_ts decides the week.
+    let mut code = 0i64;
+    let mut doc = 0i64;
+    let mut cycle_days: Vec<f64> = Vec::new();
+    for (nid, c) in by_node {
+        if c["delivered"] != true || c["confirmed"] != true {
+            continue;
+        }
+        let Some(ts) = c["ship_ts"].as_str().and_then(iso_secs) else {
+            continue;
+        };
+        let is_doc = c["class"] == "delivered_doc";
+        if let Some(bucket) = week_start_of(ts).and_then(|w| buckets.get_mut(&w)) {
+            if is_doc {
+                bucket.1 += 1;
+            } else {
+                bucket.0 += 1;
+            }
+        }
+        if is_doc {
+            doc += 1;
+        } else {
+            code += 1;
+        }
+        if c["class"] == "merged" {
+            if let (Some(created), Some(merged)) = (
+                by_id
+                    .get(nid)
+                    .and_then(|n| n.get("created_at"))
+                    .and_then(Value::as_str)
+                    .and_then(iso_secs),
+                c["ship_ts"].as_str().and_then(iso_secs),
+            ) {
+                let elapsed = (merged - created) as f64 / 86400.0;
+                if elapsed >= 0.0 {
+                    cycle_days.push(elapsed);
+                }
+            }
+        }
+    }
+
+    // Waiting populations: the canonical graph statuses, current counts and
+    // oldest ages. Accumulated blocked time is deliberately absent - the
+    // graph carries no interval history, and touched_at is not one.
+    let waiting_for = |status: &str| -> Value {
+        let matched: Vec<&Map<String, Value>> = by_id
+            .values()
+            .filter(|n| str_field(n, "status") == Some(status))
+            .copied()
+            .collect();
+        json!({
+            "count": matched.len(),
+            "oldest_age_days": oldest_age_days(matched.into_iter(), now_secs),
+        })
+    };
+
+    // Unlinked coverage: a delivered session terminal on a node the graph
+    // lost, and a delivered PR row with no node. Counted, never folded into
+    // the confirmed weekly series.
+    let unlinked_inferred = by_node
+        .values()
+        .filter(|c| c["delivered"] == true && c["node_known"] == false)
+        .count() as i64;
+    let mut unlinked_rows = 0i64;
+    for row in rows {
+        let Some(obj) = row.as_object() else {
+            continue;
+        };
+        if str_field(obj, "graph_node_id").is_some() || !has_pr(obj) {
+            continue;
+        }
+        let Some(tr) = str_field(obj, "termination_reason") else {
+            continue;
+        };
+        if !vocab_terms.contains(&tr) {
+            continue;
+        }
+        if str_field(obj, "completed").and_then(iso_secs).is_some() {
+            unlinked_rows += 1;
+        }
+    }
+
+    let cycle = if cycle_days.is_empty() {
+        json!({"available": false, "reason": "no merged PR with created_at and merged_at in window"})
+    } else {
+        cycle_days.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = cycle_days.len();
+        let median = if n % 2 == 1 {
+            cycle_days[n / 2]
+        } else {
+            (cycle_days[n / 2 - 1] + cycle_days[n / 2]) / 2.0
+        };
+        let rank = ((0.85 * n as f64).ceil() as usize).clamp(1, n);
+        let round1 = |x: f64| (x * 10.0).round() / 10.0;
+        json!({
+            "median_days": round1(median),
+            "p85_days": round1(cycle_days[rank - 1]),
+            "n": n,
+        })
+    };
+
+    let open: Vec<&Map<String, Value>> = by_id
+        .values()
+        .filter(|n| {
+            has_pr(n)
+                && str_field(n, "merge_status") != Some("merged")
+                && n.get("merged_at").is_none()
+                && str_field(n, "status") != Some("done")
+                && str_field(n, "status") != Some("superseded")
+        })
+        .copied()
+        .collect();
+
+    let weeks: Vec<Value> = week_rows
+        .iter()
+        .map(|(label, _idx, partial)| {
+            let (c, d) = buckets.get(label).copied().unwrap_or((0, 0));
+            json!({"week_start": label, "code": c, "doc": d, "partial": partial})
+        })
+        .collect();
+    let tz = local_dt(now_secs).map(|dt| dt.format("%:z").to_string());
+    json!({
+        "available": true,
+        "window": {
+            "since_days": since_days,
+            "start": local_dt(window_start).map(|dt| dt.format("%Y-%m-%d").to_string()),
+            "end": local_dt(now_secs).map(|dt| dt.format("%Y-%m-%d").to_string()),
+            "week_start": "monday",
+            "tz_offset": tz,
+        },
+        "deliveries": {
+            "total": code + doc,
+            "code": code,
+            "doc": doc,
+            "weeks": weeks,
+        },
+        "cycle": cycle,
+        "open_prs": {
+            "count": open.len(),
+            "oldest_age_days": oldest_age_days(open.into_iter(), now_secs),
+        },
+        "waiting": {
+            "in_progress": waiting_for("in_progress"),
+            "in_review": waiting_for("in_review"),
+            "blocked": waiting_for("blocked"),
+        },
+        "coverage": {
+            "nodes": by_id.len(),
+            "rows": rows.len(),
+            "unlinked": unlinked_inferred + unlinked_rows,
+            "age_basis": "node created_at",
+        },
+    })
 }
 
 /// The 14-day quality cohort over the classified nodes: a delivery survives
@@ -376,6 +651,23 @@ pub fn classify(params: &Value) -> Result<Value, String> {
             .and_then(Value::as_i64)
             .unwrap_or(14),
     );
+    let vocab_terms: Vec<&str> = doc
+        .iter()
+        .chain(delivery.iter())
+        .chain(ship.iter())
+        .map(String::as_str)
+        .collect();
+    let flow = flow(
+        &by_id,
+        &rows,
+        &by_node,
+        params.get("now").and_then(Value::as_str),
+        params
+            .get("since_days")
+            .and_then(Value::as_i64)
+            .unwrap_or(28),
+        &vocab_terms,
+    );
     let mut result = json!({
         "by_node": by_node,
         "coverage": {
@@ -385,6 +677,7 @@ pub fn classify(params: &Value) -> Result<Value, String> {
             "inferred_nodes": inferred,
         },
         "survival": survival,
+        "flow": flow,
     });
     if let Some(scope) = scope {
         result["coverage"]["project_scope"] = scope.clone();
@@ -597,5 +890,153 @@ mod tests {
         assert_eq!(out["by_node"]["x-lost"]["class"], "inferred");
         assert_eq!(out["coverage"]["rows_without_node"], 1);
         assert_eq!(out["coverage"]["inferred_nodes"], 1);
+    }
+
+    /// Wednesday-noon timestamps keep local-date bucketing stable on any
+    /// test machine zone: no boundary shifts for offsets under 12h.
+    #[test]
+    fn flow_buckets_confirmed_deliveries_by_local_week() {
+        let params = json!({
+            "entries": [
+                {"id": "x-1", "merge_status": "merged", "merged_at": "2026-09-02T12:00:00"},
+                {"id": "x-2", "merge_status": "merged", "merged_at": "2026-09-08T12:00:00"},
+                {"id": "d-1", "status": "done", "completed_at": "2026-09-03T12:00:00"},
+                {"id": "v-1", "status": "done", "completed_at": "2026-09-04T12:00:00"}
+            ],
+            "rows": [
+                {"graph_node_id": "d-1", "termination_reason": "DoneAdvisory", "completed": "2026-09-03T12:00:00"},
+                {"graph_node_id": "v-1", "termination_reason": "DoneDelivery", "completed": "2026-09-04T12:00:00"}
+            ],
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DonePRGreen", "DoneBatched"],
+            "now": "2026-09-09T12:00:00",
+            "since_days": 28
+        });
+        let out = classify(&params).unwrap();
+        let flow = &out["flow"];
+        assert_eq!(flow["available"], true);
+        assert_eq!(flow["window"]["since_days"], 28);
+        assert_eq!(flow["window"]["week_start"], "monday");
+        // Aug 12 (window start, a Wednesday) .. Sep 9 (now): Mondays Aug 10
+        // (partial), Aug 17, Aug 24, Aug 31, Sep 7 (current, partial).
+        let weeks = flow["deliveries"]["weeks"].as_array().unwrap();
+        assert_eq!(weeks.len(), 5);
+        assert_eq!(weeks[0]["week_start"], "2026-08-10");
+        assert_eq!(weeks[0]["partial"], true);
+        assert_eq!(weeks[1]["partial"], false);
+        assert_eq!(weeks[4]["week_start"], "2026-09-07");
+        assert_eq!(weeks[4]["partial"], true);
+        // Week of Aug 31: x-1 merged + v-1 explicit delivery (code), d-1 doc.
+        // Week of Sep 7: x-2 merged.
+        assert_eq!(weeks[3]["code"], 2);
+        assert_eq!(weeks[3]["doc"], 1);
+        assert_eq!(weeks[4]["code"], 1);
+        assert_eq!(flow["deliveries"]["code"], 3);
+        assert_eq!(flow["deliveries"]["doc"], 1);
+    }
+
+    #[test]
+    fn flow_cycle_median_and_nearest_rank_p85() {
+        // created_at is exactly n days before the merge, so elapsed days are
+        // 1..=10: median 5.5, nearest-rank p85 the 9th sorted value.
+        let mut entries = Vec::new();
+        let merge = "2026-09-02T12:00:00";
+        for n in 1..=10i64 {
+            let created = (chrono::NaiveDateTime::parse_from_str(merge, "%Y-%m-%dT%H:%M:%S")
+                .unwrap()
+                - chrono::Duration::days(n))
+            .format("%Y-%m-%dT%H:%M:%S");
+            entries.push(json!({
+                "id": format!("x-{n}"),
+                "merge_status": "merged",
+                "merged_at": merge,
+                "created_at": created.to_string()
+            }));
+        }
+        let params = json!({
+            "entries": entries,
+            "rows": [],
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DonePRGreen", "DoneBatched"],
+            "now": "2026-09-09T12:00:00",
+            "since_days": 28
+        });
+        let out = classify(&params).unwrap();
+        let cycle = &out["flow"]["cycle"];
+        assert_eq!(cycle["n"], 10);
+        assert_eq!(cycle["median_days"], 5.5);
+        // Nearest-rank p85 at n=10 is the 9th sorted value.
+        assert_eq!(cycle["p85_days"], 9.0);
+    }
+
+    #[test]
+    fn flow_unlinked_pr_row_rides_coverage_never_weeks() {
+        let params = json!({
+            "entries": [],
+            "rows": [
+                {"completed": "2026-09-02T12:00:00", "termination_reason": "DonePRGreen",
+                 "pr_number": 404, "pr_url": "https://github.com/o/r/pull/404"},
+                {"completed": "2026-09-02T12:00:00", "termination_reason": "DonePRGreen"}
+            ],
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DonePRGreen", "DoneBatched"],
+            "now": "2026-09-09T12:00:00",
+            "since_days": 28
+        });
+        let out = classify(&params).unwrap();
+        let flow = &out["flow"];
+        assert_eq!(flow["deliveries"]["code"], 0);
+        let weeks = flow["deliveries"]["weeks"].as_array().unwrap();
+        assert!(weeks.iter().all(|w| w["code"] == 0 && w["doc"] == 0));
+        assert_eq!(flow["coverage"]["unlinked"], 1);
+    }
+
+    #[test]
+    fn flow_reports_waiting_and_open_prs_with_ages() {
+        let params = json!({
+            "entries": [
+                {"id": "x-wip", "status": "in_progress", "created_at": "2026-08-30T12:00:00"},
+                {"id": "x-blk", "status": "blocked", "created_at": "2026-09-06T12:00:00"},
+                {"id": "x-open", "status": "in_review", "pr_number": 7,
+                 "created_at": "2026-08-28T12:00:00"},
+                {"id": "x-shipped", "status": "done", "pr_number": 8,
+                 "merge_status": "merged", "merged_at": "2026-09-02T12:00:00",
+                 "created_at": "2026-08-20T12:00:00"}
+            ],
+            "rows": [],
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DonePRGreen", "DoneBatched"],
+            "now": "2026-09-09T12:00:00",
+            "since_days": 28
+        });
+        let out = classify(&params).unwrap();
+        let flow = &out["flow"];
+        assert_eq!(flow["waiting"]["in_progress"]["count"], 1);
+        assert_eq!(flow["waiting"]["in_progress"]["oldest_age_days"], 10);
+        assert_eq!(flow["waiting"]["blocked"]["count"], 1);
+        assert_eq!(flow["waiting"]["blocked"]["oldest_age_days"], 3);
+        assert_eq!(flow["waiting"]["in_review"]["count"], 1);
+        // x-shipped has a PR but is merged and done: never an open PR.
+        assert_eq!(flow["open_prs"]["count"], 1);
+        assert_eq!(flow["open_prs"]["oldest_age_days"], 12);
+        assert_eq!(flow["coverage"]["age_basis"], "node created_at");
+    }
+
+    #[test]
+    fn flow_is_unavailable_without_a_usable_now() {
+        let params = json!({
+            "entries": [node("x-1", Some("merged"))],
+            "rows": [],
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DonePRGreen", "DoneBatched"]
+        });
+        let out = classify(&params).unwrap();
+        assert_eq!(out["flow"]["available"], false);
+        assert!(out["flow"]["reason"].as_str().is_some());
     }
 }

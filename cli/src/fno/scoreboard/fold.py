@@ -52,12 +52,36 @@ def classify_deliveries(
     rows: list[dict],
     project: str | None = None,
     now=None,
+    since_days: int | None = None,
 ) -> dict:
     """The one delivery classification (Rust keeper): by_node, coverage,
-    survival, and with a project the scoped entries/rows/node_ids."""
+    survival, flow, and with a project the scoped entries/rows/node_ids."""
     from fno.graph.store import request_scoreboard_classify
 
-    return request_scoreboard_classify(graph_nodes, rows, project, now)
+    return request_scoreboard_classify(graph_nodes, rows, project, now, since_days)
+
+
+def build_flow(
+    graph_nodes: list[dict],
+    rows: list[dict],
+    *,
+    project: str | None = None,
+    now=None,
+    since_days: int = 28,
+) -> dict:
+    """The board's flow panel payload (x-b07a): the keeper's weekly
+    delivery/cycle/waiting aggregates for one scope. Never raises - the board
+    render runs on every graph mutation and a metrics panel must never wedge
+    a write - so any classifier or transport failure degrades to an
+    unavailable payload naming the reason."""
+    try:
+        classified = classify_deliveries(graph_nodes, rows, project, now=now, since_days=since_days)
+    except Exception as exc:  # noqa: BLE001 - degrade, never wedge the render
+        return {"available": False, "reason": f"classifier unavailable ({type(exc).__name__})"}
+    flow = classified.get("flow")
+    if not isinstance(flow, dict):
+        return {"available": False, "reason": "classifier gave no flow"}
+    return flow
 
 
 def emission_failures_snapshot() -> dict:
