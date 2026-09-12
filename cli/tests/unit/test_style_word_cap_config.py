@@ -88,6 +88,7 @@ def test_the_encounter_surface_carries_the_cap():
     assert 7 in {v.rule for v in style.check(_words(81), surface="encounter")}
     assert "encounter" in style.CAPPED_SURFACES
     assert "mail" in style.CAPPED_SURFACES
+    assert "ask" in style.CAPPED_SURFACES
 
 
 def test_word_count_is_still_the_one_counter():
@@ -105,6 +106,7 @@ def test_no_style_block_resolves_to_todays_numbers(tmp_path, monkeypatch):
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
     assert settings.style.word_cap.mail == style.MESSAGE_WORD_CAP
     assert settings.style.word_cap.encounter == style.MESSAGE_WORD_CAP
+    assert settings.style.word_cap.ask == 40
 
 
 def test_a_removed_pair_budget_key_still_loads_and_binds_nothing(tmp_path, monkeypatch):
@@ -142,7 +144,7 @@ def test_every_new_leaf_has_a_registry_entry():
     """CI fails on registry incompleteness; catch it here instead of there."""
     from fno.config.registry import FIELD_META
 
-    for path in ("style.word_cap.mail", "style.word_cap.encounter"):
+    for path in ("style.word_cap.mail", "style.word_cap.encounter", "style.word_cap.ask"):
         assert path in FIELD_META, f"{path} has no FIELD_META entry"
 
 
