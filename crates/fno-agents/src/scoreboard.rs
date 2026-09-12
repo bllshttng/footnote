@@ -55,14 +55,18 @@ fn project_of(obj: &Map<String, Value>, project: &str) -> bool {
 
 /// Parse the ISO shapes the graph and ledger carry (naive local, or
 /// Z-suffixed / offset UTC) to epoch seconds; None means "no trustworthy
-/// time", which the caller treats as unknown, never as zero.
+/// time", which the caller treats as unknown, never as zero. A naive
+/// timestamp is LOCAL wall time, like the ledger's `completed`, so it is
+/// resolved in the machine zone; a DST-ambiguous or absent local time has
+/// no trustworthy instant and reads as None.
 fn iso_secs(raw: &str) -> Option<i64> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
         return Some(dt.timestamp());
     }
-    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S")
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f")
         .ok()
-        .map(|dt| dt.and_utc().timestamp())
+        .and_then(|dt| chrono::TimeZone::from_local_datetime(&chrono::Local, &dt).single())
+        .map(|dt| dt.timestamp())
 }
 
 /// The 14-day quality cohort over the classified nodes: a delivery survives
