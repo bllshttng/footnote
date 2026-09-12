@@ -40,10 +40,8 @@ def scan(bin_dir: Path | None = None) -> dict:
 
 
 def _defect(link: Path, resolved: Path, problem: str) -> dict:
-    # Prefer the bin of the RUNNING venv: the install channels invoke through
-    # the tool venv python, so its parent is the durable bin even when uv
-    # stores tools outside the default home location (UV_TOOL_DIR,
-    # XDG_DATA_HOME). Fall back to the default location.
+    # Prefer the RUNNING venv's bin (the channels invoke through the tool venv
+    # python), so a uv store outside the default home still repairs.
     durable = Path(sys.executable).parent / link.name
     if not (durable.is_file() and os.access(durable, os.X_OK)):
         durable = UV_TOOL_FNO_BIN / link.name
@@ -91,11 +89,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"shim unrepairable: {line}")
         report = scan(bin_dir)
     if not report["healthy"]:
-        print(
-            f"shim scan: {len(report['defects'])} defect(s) in {report['bin_dir']}; "
-            f"re-run with --repair, or relink to {UV_TOOL_FNO_BIN}",
-            file=sys.stderr,
-        )
+        print(f"shim scan: {len(report['defects'])} defect(s) in {report['bin_dir']}; re-run with --repair, or relink to {UV_TOOL_FNO_BIN}", file=sys.stderr)
         return 1
     return 0
 
