@@ -166,8 +166,10 @@ def test_map_covers_current_surface_once():
     # 604 -> 605. `agents king ledger` and `agents reign-ledger`, the reign
     # ledger page and its native renderer: 605 -> 607. x-e53e renames
     # `dispatch one` to `dispatch next` under both spellings (`one` stays as
-    # a hidden deprecated alias), allocating +2 rows: 607 -> 609.
-    assert len(mapped) == 609, (
+    # a hidden deprecated alias), allocating +2 rows: 607 -> 609. `do pr
+    # publish-review` and `pr publish-review`, the bot-identity backfill
+    # door and its forwarded spelling: 609 -> 611.
+    assert len(mapped) == 611, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

@@ -72,6 +72,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "probe-run",
     "test-run",
     "promote",
+    "publish-review",
     "reap",
     "roster-reap",
     "reconcile",
