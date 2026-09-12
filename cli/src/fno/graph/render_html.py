@@ -757,10 +757,8 @@ _DASHBOARD_JS = """\
     ORDER.forEach(function (s) { var el = statusBadges[s]; if (el) el.textContent = facet[s] || 0; });
   }
   // The flow panel: one keeper-computed payload for this board's scope,
-  // rendered once here and never from the filtered row set, so no row
-  // filter can move a throughput denominator. Project selection changes the
-  // rows above; the flow numbers keep describing the scope named in their
-  // header line.
+  // rendered once here, never from the filtered row set, so no row filter
+  // can move a throughput denominator.
   function renderFlow(flow) {
     var el = document.getElementById('flow');
     if (!el || !flow) return;
@@ -773,17 +771,12 @@ _DASHBOARD_JS = """\
       return '<div class="fgroup"><div class="fk">' + title + '</div><div class="fv">' + body +
         (sub ? '</div><div class="fsub">' + sub : '') + '</div></div>';
     }
-    var w = flow.window || {};
-    var d = flow.deliveries || {};
-    var cov = flow.coverage || {};
-    var c = flow.cycle || {};
-    var op = flow.open_prs || {};
-    var wt = flow.waiting || {};
     function waitingLine(key, label) {
-      var v = wt[key] || {};
-      return label + ' ' + (v.count || 0) +
-        (v.oldest_age_days == null ? '' : ' (oldest ' + v.oldest_age_days + 'd)');
+      var v = (flow.waiting || {})[key] || {};
+      return label + ' ' + (v.count || 0) + (v.oldest_age_days == null ? '' : ' (oldest ' + v.oldest_age_days + 'd)');
     }
+    var w = flow.window || {}, d = flow.deliveries || {}, cov = flow.coverage || {};
+    var c = flow.cycle || {}, op = flow.open_prs || {};
     var weeks = (d.weeks || []).map(function (wk) {
       return esc(String(wk.week_start || '')) + ': ' + ((wk.code || 0) + (wk.doc || 0)) + (wk.partial ? '*' : '');
     }).join(' · ');
@@ -792,16 +785,14 @@ _DASHBOARD_JS = """\
     if (cov.rows != null) covNote.push(cov.rows + ' ledger rows in scope');
     el.innerHTML =
       '<div class="fhead">last ' + esc(String(w.since_days == null ? '' : w.since_days)) + ' days to ' +
-      esc(String(w.end || '')) + ' · local weeks' +
-      (w.tz_offset ? ' (' + esc(String(w.tz_offset)) + ')' : '') +
+      esc(String(w.end || '')) + ' · local weeks' + (w.tz_offset ? ' (' + esc(String(w.tz_offset)) + ')' : '') +
       ', start Monday · scope does not follow filters</div>' +
       grp('Delivered', (d.total || 0) + ' · ' + esc(String(d.code || 0)) + ' code, ' + esc(String(d.doc || 0)) + ' doc',
         (weeks ? weeks + ' (* partial week) · ' : '') + esc(covNote.join(' · '))) +
       grp('Elapsed',
         c.n ? 'open-to-merge median ' + esc(String(c.median_days)) + 'd · p85 ' + esc(String(c.p85_days)) +
           'd (n=' + esc(String(c.n)) + ')' : 'open-to-merge: ' + esc(c.reason || 'no samples'),
-        'open PRs ' + (op.count || 0) + ', oldest ' +
-          (op.oldest_age_days == null ? 'unknown' : op.oldest_age_days + 'd')) +
+        'open PRs ' + (op.count || 0) + ', oldest ' + (op.oldest_age_days == null ? 'unknown' : op.oldest_age_days + 'd')) +
       grp('Waiting',
         waitingLine('in_progress', 'WIP') + ' · ' + waitingLine('in_review', 'review') + ' · ' +
         waitingLine('blocked', 'blocked'),
@@ -1452,11 +1443,12 @@ def _board_flow(entries: list[dict], project: str | None = None, *, since_days: 
     renders on every graph mutation, keeper or no keeper."""
     try:
         from fno import paths as _paths
-        from fno.scoreboard.fold import build_flow, load_ledger_rows
+        from fno.scoreboard.fold import classify_deliveries, load_ledger_rows
 
-        return build_flow(
-            entries, load_ledger_rows(_paths.ledger_json()), project=project, since_days=since_days
-        )
+        flow = classify_deliveries(
+            entries, load_ledger_rows(_paths.ledger_json()), project, since_days=since_days
+        ).get("flow")
+        return flow if isinstance(flow, dict) else {"available": False, "reason": "classifier gave no flow"}
     except Exception as exc:  # noqa: BLE001 - degrade, never wedge the render
         return {"available": False, "reason": f"flow source unavailable ({type(exc).__name__})"}
 
@@ -1512,9 +1504,7 @@ def render_public_sections_html(
     flow: dict | None = None,
 ) -> str:
     """Render any public projection with the same canonical dashboard shape.
-    ``flow`` arrives already computed for the target's scope: the payload is
-    aggregate numbers only (no ids, titles or paths), so it can ride a
-    public page."""
+    ``flow`` is aggregate numbers only (no ids, titles or paths)."""
     entries = [entry for _label, section in sections for entry in section]
     return _dashboard_html(
         entries, title=title, local=False, projection=projection, flow=flow

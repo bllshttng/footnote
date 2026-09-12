@@ -771,8 +771,7 @@ def request_scoreboard_classify(
 ) -> dict:
     """The delivery classifier (scoreboard.rs) over client-shipped rows.
     Terminal vocabulary stays Python's (fno.terminals); ``now`` rides as ISO.
-    ``since_days`` only feeds the flow section (x-b07a); the delivery
-    decision itself is window-free."""
+    ``since_days`` only feeds the flow section; the decision is window-free."""
     from fno.terminals import DELIVERED_TERMINALS
 
     return _client_for(GRAPH_JSON).request(

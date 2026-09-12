@@ -61,24 +61,6 @@ def classify_deliveries(
     return request_scoreboard_classify(graph_nodes, rows, project, now, since_days)
 
 
-def build_flow(
-    graph_nodes: list[dict],
-    rows: list[dict],
-    *,
-    project: str | None = None,
-    now=None,
-    since_days: int = 28,
-) -> dict:
-    """The board's flow payload (x-b07a), answered by the keeper. Never
-    raises: a metrics panel must never wedge the graph-mutation render."""
-    try:
-        classified = classify_deliveries(graph_nodes, rows, project, now=now, since_days=since_days)
-    except Exception as exc:  # noqa: BLE001 - degrade, never wedge the render
-        return {"available": False, "reason": f"classifier unavailable ({type(exc).__name__})"}
-    flow = classified.get("flow")
-    return flow if isinstance(flow, dict) else {"available": False, "reason": "classifier gave no flow"}
-
-
 def emission_failures_snapshot() -> dict:
     """The mux server's human_touch emission-failure counter (instance
     lifetime, never reset by reading). Unreachable means Unknown, not zero."""
