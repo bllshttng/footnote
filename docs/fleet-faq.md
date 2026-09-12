@@ -331,6 +331,10 @@ Everything in that checkout was 342 commits old: hooks, guards and CI scripts. A
 
 **Specimen.** `spawn-gate: king <id> holds 6 of max_live 30 across 5 kings (share 6); refusing to spawn`. Two of those six rows had been silent for 3h40m and 4h24m. `stop` failed on a deleted cwd. `rm` refused because the row is present. `rm --force` can leave an orphan process. Each night every king's share fills with dead rows, dispatch stops, and no reader reports it.
 
+**Specimen, the clean case.** A worker shipped its pull request and the pull request merged. The node closed with its claim released. The loop reported the terminal reason `DonePRGreen`. Its row then read `parked` rather than disappearing, and the share stayed full. Four terminal events, and none released the lane. Nothing further is available to that worker to give the slot back.
+
+**Specimen, the stop verb.** `fno agents stop` is the lever that works, and its receipt is incomplete. It printed `stopped: <name> (<session>)` for two finished workers, and `ps` confirmed both processes dead. The share freed, and a dispatch that had refused for hours went through at once. Both registry rows still read `parked` afterwards, and the row count did not change. So the row outlives the worker while the slot returns. A king reading the roster still sees a full crown. Two readers disagree here. Trust the lane. A peer confirmed the lane read 9 of 10, with both rows absent from its holders. The roster still listed them as `parked`.
+
 *Graduates to:* a lane released on delivery, rather than on an exit event that never arrives.
 
 ## Must I rebase onto main first?
@@ -466,6 +470,16 @@ An earlier version of this entry cited a task reader here, and that citation was
 The source field cannot be fixed by hand either. `fno doctor event emit -s king-<id>` is refused, because the enum is closed and carries no king value. Its one extensible pattern is `worker:` or `stream-worker:`. So a king defaults to `test`, borrows a mechanism name like `loop`, or dresses as a worker. None of those is the truth.
 
 *Graduates to:* a check-in verb that stamps source, crown scope and session. Add a reader that lists this session's live monitors. Add a pre-compact hook that re-arms the beat, or names every arm it lost.
+
+## A stacked pull request does not stand out in `fno do pr list`
+
+**Answer.** A `fno do pr list` row names number, state, title, head ref, and URL, but not the base. The list shows every open pull request whatever its base. A stacked pull request targets its parent branch, so nothing in the row says where it targets. Read the pull request by number, or from its own branch, before you decide where a branch's pull request targets.
+
+**Specimen.** An L1 king asked the crown to open pull requests for two branches. All three were already open. PR 1651 targeted `main` from `feature/<node>`. PR 1660 targeted `feature/<node>` from `feature/<node>-wave2`. PR 1663 targeted `feature/<node>-wave2` from `feature/<node>-wave3`. Only the first targets `main`, and nothing in the list's output marked the two children as members of a stack. A caller who acts on that read opens a duplicate pull request on a branch that already carries one.
+
+The same read reported both branches as 32 commits behind `main`. That is the normal state of a stack, because each branch tracks its parent and not `main`. A behind-count is not evidence of neglect on a stacked branch.
+
+*Graduates to:* a list whose rows name their base, or a list that follows a stack to its root.
 
 ## Retired
 
