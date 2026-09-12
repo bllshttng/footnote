@@ -1476,6 +1476,10 @@ pub(crate) struct KingFireHistory {
     /// Actionable row identities recorded on the previous fire, or empty when
     /// this is the first.
     pub(crate) last_ids: Vec<String>,
+    /// The undelivered count the previous quiet fire recorded, when it was
+    /// readable. A shrinking count is the quiet board's only progress signal:
+    /// `actionable_ids` is empty there, so `king_cleared_a_row` never fires.
+    pub(crate) last_undelivered: Option<i64>,
 }
 
 /// Count how many king loop-check fires have landed with no NEW work done.
@@ -1498,12 +1502,14 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
             total: 0,
             dry: 0,
             last_ids: Vec::new(),
+            last_undelivered: None,
         };
     };
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut total: u64 = 0;
     let mut dry: u64 = 0;
     let mut last_ids: Vec<String> = Vec::new();
+    let mut last_undelivered: Option<i64> = None;
     for line in content.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -1550,6 +1556,16 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
                             .collect()
                     })
                     .unwrap_or_default();
+                // The i64::MAX sentinel means the drain read failed, so it is
+                // never a baseline: a later real count must not read as a
+                // shrink against a count nobody measured.
+                if let Some(n) = data
+                    .and_then(|d| d.get("undelivered"))
+                    .and_then(|v| v.as_i64())
+                    .filter(|n| *n != i64::MAX)
+                {
+                    last_undelivered = Some(n);
+                }
             }
             _ => {}
         }
@@ -1558,6 +1574,7 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
         total,
         dry,
         last_ids,
+        last_undelivered,
     }
 }
 

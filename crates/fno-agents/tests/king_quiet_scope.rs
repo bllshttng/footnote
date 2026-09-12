@@ -37,8 +37,12 @@ fn write_exec(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
+/// A quiet board with undelivered scope is NOT done: it never exits NoWork,
+/// and it blocks while the reign might still be delivering. Bounded, though:
+/// a count that never shrinks is a reign that cannot stop on its own, so the
+/// third unchanged fire parks NoProgress and asks the operator.
 #[test]
-fn a_quiet_board_with_undelivered_scope_stays_in_flight() {
+fn a_quiet_board_with_undelivered_scope_blocks_then_parks_at_the_dry_ceiling() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     let bin = dir.path().join("bin");
@@ -123,7 +127,7 @@ fn a_quiet_board_with_undelivered_scope_stays_in_flight() {
     .map(str::to_string)
     .collect::<Vec<_>>();
 
-    for fire in 0..3 {
+    for fire in 0..2 {
         let (code, output) = run_loop_check_capture(&args);
         let payload: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(code, 0, "fire {fire}: {output}");
@@ -139,4 +143,19 @@ fn a_quiet_board_with_undelivered_scope_stays_in_flight() {
             "fire {fire}: {output}"
         );
     }
+
+    let (code, output) = run_loop_check_capture(&args);
+    let payload: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(code, 0, "terminal fire: {output}");
+    assert_eq!(payload["decision"], "allow", "terminal fire: {output}");
+    assert_eq!(
+        payload["termination_reason"], "NoProgress",
+        "the third unchanged fire must park, not block forever: {output}"
+    );
+    assert!(
+        payload["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("nothing cleared")),
+        "the park must name why: {output}"
+    );
 }
