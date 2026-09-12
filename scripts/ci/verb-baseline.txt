@@ -96,6 +96,9 @@ inbox outstanding ask
 inbox outstanding clear !--origin
 inbox outstanding mine do
 inbox outstanding reindex
+inbox user ack
+inbox user list
+inbox user status
 king board
 king cancel
 king done

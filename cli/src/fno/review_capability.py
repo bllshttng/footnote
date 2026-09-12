@@ -38,6 +38,7 @@ from fno.harness_identity import (
     resolve_harness_identity,
     spawned_substrate,
 )
+from fno.user import display_name
 
 # Harnesses that can dispatch subagents at all, for a REGISTRY reviewer that
 # declares `requires: subagent-dispatch`. No built-in uses the value anymore
@@ -396,7 +397,7 @@ def _resolve_one(
 
     if descriptor.requires == "operator":
         if session.attended:
-            return verdict("satisfiable", f"ask the operator to run `{descriptor.invocation}`")
+            return verdict("satisfiable", f"ask {display_name()} to run `{descriptor.invocation}`")
         return verdict(
             "needs-operator",
             f"kind={descriptor.kind}, never autonomously satisfiable; this run is "

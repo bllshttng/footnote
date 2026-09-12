@@ -98,6 +98,10 @@ unclaimed_ttl = 1800
 # Seconds past which an outstanding sent message drops off the nag entirely and is never grepped again.
 landed_abandon_ttl = 21600
 
+[user]
+# What fno calls you. Empty falls back to `git config user.name`.
+name = ""
+
 [sandbox]
 # When a headless harness has no confinement backend: refuse before spawn (default) or explicitly warn and continue unconfined.
 on_unavailable = "refuse"

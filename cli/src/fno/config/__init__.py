@@ -53,10 +53,11 @@ from pydantic import (
     model_validator,
 )
 
-# Pure file-reader leaf, extracted to break the config<->graph cycle. Re-exported
-# here so every existing `from fno.config import read_config_flat` (etc.) caller
-# keeps working unchanged. The redundant `X as X` aliases are the explicit-reexport
-# idiom mypy's --no-implicit-reexport requires (these names used to be defined here).
+from fno.user import UserBlock
+
+# Pure file-reader leaf, extracted to break the config<->graph cycle and re-exported
+# here; the redundant `X as X` aliases are the explicit-reexport idiom mypy's
+# --no-implicit-reexport requires (these names used to be defined here).
 from fno.config import _watchdog
 from fno.config._auto_heal import AutoHealBlock
 from fno.config._dispatch_verbs import DEFAULT_DISPATCH_VERBS as _DEFAULT_DISPATCH_VERBS
@@ -67,9 +68,8 @@ from fno.config._king import KING_GOAL_TEXT as KING_GOAL_TEXT
 from fno.config._king import KingBlock
 from fno.config._evals import EvalsBlock
 from fno.config._graph import GraphBlock
-# The keyed settings loader lives in fno.config._loader (this file is over the
-# size budget and shrink-only); re-exported under the names every caller and
-# test already imports.
+# The keyed settings loader lives in fno.config._loader (this file is
+# shrink-only); re-exported under the names every caller and test imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
 from fno.config.source_attribution import resolve_source as resolve_source
 from fno.config._loader import _settings_key as _settings_key
@@ -4200,6 +4200,7 @@ class ConfigBlock(BaseModel):
     obsidian: ObsidianBlock = Field(default_factory=ObsidianBlock)
     project: ProjectBlock = Field(default_factory=ProjectBlock)
     inbox: InboxBlock = Field(default_factory=InboxBlock)
+    user: UserBlock = Field(default_factory=UserBlock)
     sandbox: SandboxBlock = Field(default_factory=SandboxBlock)
     blueprint: BlueprintBlock = Field(default_factory=BlueprintBlock)
     backlog: BacklogBlock = Field(default_factory=BacklogBlock)
@@ -4211,10 +4212,9 @@ class ConfigBlock(BaseModel):
     preflight: PreflightBlock = Field(default_factory=PreflightBlock)
     approvals: ApprovalsBlock = Field(default_factory=ApprovalsBlock)
     context: ContextBlock = Field(default_factory=ContextBlock)
-    # Repo-wide ship-gate probes join plan `done_probes`; both must pass.
-    # pass. A probe is an OBSERVATION. It runs `sh -c` in the session cwd, so
-    # the source must stay a gitignored, operator-authored file: a tracked
-    # probe list would make cloning a repo remote code execution.
+    # Repo-wide ship-gate probes join plan `done_probes`; both must pass. A
+    # probe is an OBSERVATION running `sh -c` in the session cwd, so the list
+    # stays gitignored and operator-authored: a tracked one runs code on clone.
     done_probes: list[str] = Field(default_factory=list)
     target: TargetConfig = Field(default_factory=TargetConfig)
     test: TestBlock = Field(default_factory=TestBlock)

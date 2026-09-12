@@ -59,6 +59,7 @@ from fno import route_resolve as _route_resolve
 from fno.agents.naming import agent_name
 from fno.harness_identity import env_marks_unattended, resolve_harness_identity
 from fno.provenance.resolver import resolve_transcript
+from fno.user import display_name
 
 _LOG = logging.getLogger(__name__)
 
@@ -1412,7 +1413,7 @@ def maybe_spawn_think(
         if not quiet:
             print(
                 f"spawn_think: OFFER PENDING (nothing spawned). "
-                f"Ask the operator whether to run `{seed.offer_line}` now, or skip.",
+                f"Ask {display_name()} whether to run `{seed.offer_line}` now, or skip.",
                 file=sys.stderr,
             )
         _emit(

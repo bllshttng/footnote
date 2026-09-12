@@ -76,6 +76,13 @@ FIELD_META: dict[str, Meta] = {
         "Seconds past which an outstanding sent message drops off the nag entirely and is never grepped again.",
         default_source="default",
     ),
+    # --- config.user.* ---
+    "user.name": Meta(
+        "always",
+        "What fno calls you. Empty falls back to `git config user.name`.",
+        question="What should fno call you?",
+        default_source="git-user-name",
+    ),
     # --- config.sandbox.* ---
     # --- config.join.* ---
     "join.sandbox": Meta(
