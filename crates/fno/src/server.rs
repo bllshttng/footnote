@@ -537,10 +537,9 @@ fn idle_shell_takeover(leaf_count: usize, cmd: Option<&str>, pristine_idle: bool
 }
 
 /// The last `n` non-empty lines of `text`, joined by `\n` - the mux-server twin
-/// of the daemon's `Region::BottomNonEmptyLines` extraction (x-c929). The crates
-/// share no code, so this is a focused copy (like `rfc3339_like_to_secs`); it
-/// must stay byte-identical to the daemon's so an answer's region fingerprint
-/// hashes the same on both sides.
+/// of the daemon's `Region::BottomNonEmptyLines` extraction (x-c929); it must
+/// stay byte-identical to the daemon's so a region fingerprint hashes the
+/// same on both sides.
 fn bottom_non_empty_lines(text: &str, n: usize) -> String {
     let nonblank: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = nonblank.len().saturating_sub(n);
@@ -2013,9 +2012,8 @@ pub(crate) struct Core {
     touch_last_emit: HashMap<u64, Instant>,
     /// (x-9454) Per-pane wheel-passthrough rate gate: bounds how many wheel
     /// ticks per window reach a mouse-owning pane's PTY, so a trackpad flood
-    /// stops scrolling when the finger stops instead of draining stale ticks.
-    /// Purged with the pane in [`Core::reap_pane`], the `touch_last_emit`
-    /// pattern.
+    /// stops scrolling when the finger stops. Purged with the pane in
+    /// [`Core::reap_pane`], the `touch_last_emit` pattern.
     wheel_gate: HashMap<u64, WheelGateState>,
     /// Failed `human_touch` emits (AC4-ERR): counted, never raised to the
     /// steering path; read by the scoreboard stats answer (v78).
@@ -2033,15 +2031,12 @@ pub(crate) struct Core {
     /// `changed()` edge as the 0->1 wakeup.
     client_count: watch::Sender<usize>,
     /// (x-4328) Pane ids the operator has focused while badged `Done`.
-    /// Inserted as a one-shot side effect of an actual focus action
-    /// (`Command::FocusPane`, via [`Core::mark_seen_if_done`]) when that
-    /// pane is currently `Done`; evicted level-triggered every layout pass
-    /// the instant a pane's badge leaves `Done` (a re-run re-arms unseen,
-    /// and never self-reinserts merely by remaining the focused pane -
-    /// AC1-EDGE/AC2-EDGE). Reattach-durable for free - `Core` survives a
-    /// client detach/reattach - but not server-restart (a cold-scrape
-    /// non-goal, Locked Decision 7). Orphan ids from reaped panes are inert
-    /// (never re-matched); no GC.
+    /// Inserted by an actual focus action (`Command::FocusPane`, via
+    /// [`Core::mark_seen_if_done`]) on a `Done` pane; evicted level-triggered
+    /// every layout pass the instant a pane's badge leaves `Done`. Reattach-
+    /// durable (`Core` survives detach/reattach) but not server-restart (a
+    /// cold-scrape non-goal, Locked Decision 7). Orphan ids from reaped
+    /// panes are inert (never re-matched); no GC.
     seen: HashSet<u64>,
     /// (x-0090) Live attach panes: `attach_id -> pane`. Lifetime = pane
     /// lifetime, never persisted (server death kills panes; the bg agent

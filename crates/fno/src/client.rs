@@ -10382,10 +10382,13 @@ async fn attach_and_run(
                 // workspace restore` control connection, never an attached
                 // client. (v71) The prune reload is the same one-shot shape.
                 // (v75) The exact-session retirement, same one-shot shape.
+                // (v60, x-7b5e) Bulk restore answers a one-shot `fno mux
+                // workspace restore` control connection, never an attached
+                // client. (v71) The prune reload is the same one-shot shape.
+                // (v75) The exact-session retirement, same one-shot shape.
+                // (v78) ServerStats, same one-shot shape.
                 | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }
                 | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
-                // (v78) ServerStats answers a one-shot `fno mux stats` control
-                // connection, never an attached client.
                 | ServerMsg::ServerStats { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
@@ -10890,9 +10893,8 @@ async fn attach_and_run(
                     // connection only. (v71) The prune reload is the same shape.
                     // (v75) The exact-session retirement, same one-shot shape.
                     | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }
+                    // (v60/v71/v75/v78) one-shot control-verb replies.
                     | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
-                    // (v78) ServerStats answers a one-shot `fno mux stats`
-                    // control connection only.
                     | ServerMsg::ServerStats { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
