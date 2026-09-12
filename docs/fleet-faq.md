@@ -305,16 +305,6 @@ Until the fix merges, confirm ownership against the worker roster. Do not trust 
 
 *Graduates to:* one ownership answer per payload, with the resolver reporting an unresolved roster as unresolved rather than free.
 
-## An arm reports one label for two causes
-
-**Answer.** A skip reason can name a cause that is false. Read the code path before you act on the label.
-
-**Specimen, one.** `fno agents status` showed `active_backlog ok skip=no_missions targets=0` while six epics carried `mission_active=true`. `resolve_drain_targets` in `cli/src/fno/active_backlog.py` returns `[]` at its first gate, `if not cfg.any_enabled()`, before any mission is read. A disabled drain and a drain with no missions print the same word. One king read a healthy but disabled arm as an arm with no lever, and filed an operator question on that basis.
-
-**Specimen, two.** `auto_continue` read `stale: true` at `age_s` 6041 against `interval_s` 1800, with `skip_reason: disabled`. Staleness is computed at `crates/fno-agents/src/tick_ledger.rs` from age alone. `skip_reason` is populated five lines above, from the same tick, and never consulted. An arm that is off by configuration reads exactly like an arm whose scheduler died. The reign skill's one sanctioned dispatch exception keys on that field.
-
-*Graduates to:* a third skip reason for a disabled drain, and staleness that excludes a configured-off arm. The Rust side already separates `env_broken` from `no_missions` in `active_backlog.rs`.
-
 ## A hook fails Permission denied and the fix is already merged
 
 **Answer.** The checkout is stale. The script is correct upstream. Look at the checkout before you file the bug.

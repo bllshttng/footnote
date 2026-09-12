@@ -974,8 +974,10 @@ def test_rank_top_names_when_no_live_dispatcher_reaches_node(tmp_graph, monkeypa
 
     monkeypatch.setattr(
         active_backlog,
-        "resolve_drain_targets",
-        lambda **_: [SimpleNamespace(mission="x-beef")],
+        "resolve_drain_reading",
+        lambda **_: active_backlog.DrainReading(
+            targets=[SimpleNamespace(mission="x-beef")], missions=1, skip_reason=None
+        ),
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -1005,8 +1007,10 @@ def test_rank_top_names_the_epic_activation_command(tmp_graph, monkeypatch):
 
     monkeypatch.setattr(
         active_backlog,
-        "resolve_drain_targets",
-        lambda **_: [SimpleNamespace(mission="x-beef")],
+        "resolve_drain_reading",
+        lambda **_: active_backlog.DrainReading(
+            targets=[SimpleNamespace(mission="x-beef")], missions=1, skip_reason=None
+        ),
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -1024,13 +1028,46 @@ def test_rank_top_names_the_epic_activation_command(tmp_graph, monkeypatch):
     assert "Activate its epic: fno backlog advance --epic x-feed" in result.output
 
 
+def test_rank_top_names_the_config_when_the_drain_is_disabled(tmp_graph, monkeypatch):
+    """x-338c: a switched-off drain is a config fact, not a mission fact.
+
+    The epic-activation lever cannot work while the drain reads nothing, so the
+    note prescribes the config fix and never tells the reader to activate an
+    epic that may already be active."""
+    import fno.active_backlog as active_backlog
+
+    monkeypatch.setattr(
+        active_backlog,
+        "resolve_drain_reading",
+        lambda **_: active_backlog.DrainReading(targets=[], missions=6, skip_reason="drain_disabled"),
+    )
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {"id": "x-beef", "title": "Mission", "type": "epic",
+             "status": "in_progress", "priority": "p1", "project": "fno"},
+            {"id": "x-0eef", "title": "Orphan", "status": "ready",
+             "priority": "p1", "project": "fno", "parent": "x-beef"},
+        ]
+    }) + "\n")
+
+    result = _invoke("backlog", "rank", "x-0eef", "--top")
+
+    assert result.exit_code == 0, result.output
+    assert "the drain is disabled in config" in result.output
+    assert "6 active missions" in result.output
+    assert "fno config set active_backlog.enabled true" in result.output
+    assert "advance --epic" not in result.output
+
+
 def test_rank_top_keeps_normal_receipt_when_mission_reaches_node(tmp_graph, monkeypatch):
     import fno.active_backlog as active_backlog
 
     monkeypatch.setattr(
         active_backlog,
-        "resolve_drain_targets",
-        lambda **_: [SimpleNamespace(mission="x-beef")],
+        "resolve_drain_reading",
+        lambda **_: active_backlog.DrainReading(
+            targets=[SimpleNamespace(mission="x-beef")], missions=1, skip_reason=None
+        ),
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -1053,10 +1090,10 @@ def test_rank_top_names_unavailable_dispatcher_scope_without_absence_claim(
 ):
     import fno.active_backlog as active_backlog
 
-    def _raise_scope_error():
+    def _raise_scope_error(*, strict=False):
         raise RuntimeError("scope read failed")
 
-    monkeypatch.setattr(active_backlog, "resolve_drain_targets", _raise_scope_error)
+    monkeypatch.setattr(active_backlog, "resolve_drain_reading", _raise_scope_error)
     tmp_graph.write_text(json.dumps({
         "entries": [{
             "id": "x-0abc", "title": "Unknown", "status": "ready",

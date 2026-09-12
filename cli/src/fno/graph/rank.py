@@ -10,15 +10,16 @@ import typer
 def _dispatch_note(task_id: str, graph_path) -> str | None:
     """Return a truthful dispatcher note for a successfully ranked node."""
     try:
-        from fno.active_backlog import resolve_drain_targets
+        from fno.active_backlog import resolve_drain_reading
         from fno.graph._intake import descendants_of
         from fno.graph.store import read_graph
 
         entries = read_graph(graph_path)
         if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
             raise ValueError("graph read returned an unreadable shape")
+        reading = resolve_drain_reading(strict=True)
         missions: list[str] = []
-        for target in resolve_drain_targets(strict=True):
+        for target in reading.targets:
             mission = getattr(target, "mission", None)
             if mission is None:
                 continue
@@ -28,6 +29,20 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
         missions = sorted(set(missions))
         if any(task_id in descendants_of(entries, m) for m in missions):
             return None
+        # A switched-off drain is a config fact, not a mission fact: prescribe
+        # the config fix, never the epic lever that cannot work (x-338c).
+        if reading.skip_reason == "drain_disabled":
+            return (
+                f"no live dispatcher will take it (the drain is disabled in config; "
+                f"{reading.missions} active missions); "
+                "Enable it: fno config set active_backlog.enabled true"
+            )
+        if reading.skip_reason == "bad_interval":
+            return (
+                f"no live dispatcher will take it (the drain interval is invalid; "
+                f"{reading.missions} active missions); "
+                "Fix it: fno config set active_backlog.interval 5m"
+            )
         # The remedy, not just the diagnosis: name the one command that makes a
         # dispatcher take the node. With no epic parent it says so, so the note
         # never prints a command that cannot work.

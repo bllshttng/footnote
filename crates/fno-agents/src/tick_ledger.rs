@@ -343,6 +343,18 @@ const FAILURE_SKIPS: &[&str] = &[
     "registry_unreadable",
 ];
 
+/// Skip reasons that mean the arm is OFF by configuration. Its silence is the
+/// config speaking, not a scheduler that died - no restart helps an arm whose
+/// switch is off (x-338c, the second half of the fleet-faq "one label for two
+/// causes" entry this ships alongside `drain_disabled`).
+const CONFIGURED_OFF_SKIPS: &[&str] = &[
+    "disabled",
+    "gate:disabled",
+    "drain_disabled",
+    "watchdog_off",
+    "wake_disabled",
+];
+
 /// What the reader holds about the daemon when it explains the rows. Computed
 /// once in the client's `run_status` from the status payload it already has.
 pub enum DaemonFacts {
@@ -613,6 +625,15 @@ fn merge_row_masked_by_tick_end(row: &ArmStatus, trace: &TickTrace) -> bool {
 /// pr_watch_merge is handled by the caller: it reads the tick trace and
 /// answers `tick_overdue` with evidence, not this table.
 fn stale_cause(row: &ArmStatus, daemon: &DaemonFacts, pm_fresh_failure: bool) -> Option<String> {
+    // Configured-off outranks every scheduler cause: a restart cannot help an
+    // arm whose switch is off, even when the daemon is also down.
+    if row
+        .skip_reason
+        .as_deref()
+        .is_some_and(|r| CONFIGURED_OFF_SKIPS.contains(&r))
+    {
+        return Some("configured_off".to_string());
+    }
     let sched = row.scheduler.as_deref();
     if sched == Some(SCHED_DAEMON) {
         if let DaemonFacts::Up { uptime_s, drifted } = *daemon {
@@ -644,6 +665,9 @@ fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
             _ => "daemon up, first window not elapsed".to_string(),
         },
         "stale_daemon" => "daemon predates the installed build; run fno agents restart".to_string(),
+        "configured_off" => {
+            "the arm is off in config; its age is the switch, not a dead scheduler".to_string()
+        }
         "daemon_down" => "daemon not running".to_string(),
         "tick_timeout" => {
             "the pr-watch tick broke before this arm ran; see pr_watch_merge".to_string()
@@ -946,6 +970,29 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).ok();
         }
+    }
+
+    #[test]
+    fn configured_off_skip_explains_as_configured_off() {
+        // A stale row whose skip_reason says the arm is off in config must
+        // explain as configured_off, not as a dead scheduler (x-338c, AC6).
+        let row = ArmStatus {
+            arm: "active_backlog".to_string(),
+            scheduler: Some("daemon".to_string()),
+            last_ts: None,
+            age_s: Some(5000),
+            acted: Some(0),
+            skip_reason: Some("drain_disabled".to_string()),
+            detail: None,
+            interval_s: 60,
+            stale: true,
+            failing: false,
+            cause: None,
+            line: String::new(),
+        };
+        let cause = stale_cause(&row, &DaemonFacts::Down, false).unwrap();
+        assert_eq!(cause, "configured_off");
+        assert!(cause_hint(&cause, &DaemonFacts::Down).contains("config"));
     }
 
     #[test]

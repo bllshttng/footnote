@@ -962,7 +962,7 @@ def _report_harness_overlays() -> None:
 @app.command("active-backlog")
 def active_backlog_cmd(
     json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit a JSON list of drain targets for the daemon."
+        False, "--json", "-J", help="Emit a JSON receipt of the drain reading for the daemon."
     ),
 ) -> None:
     """Resolve which projects the active-backlog daemon should drain.
@@ -970,18 +970,40 @@ def active_backlog_cmd(
     Reads config.active_backlog + the workspace project->path map and prints the
     enabled drain targets (project, cwd, interval, failure_limit, mission). The
     daemon shells this on entering Serving to discover its targets. Read-only and
-    best-effort: a malformed config yields an empty list, never an error.
+    best-effort: a malformed config yields an empty list, never an error. An
+    empty list names which zero hit (x-338c): a disabled drain says so instead
+    of blaming the missions.
     """
     import json as _json
 
-    from fno.active_backlog import drain_targets_as_dicts
+    from fno.active_backlog import drain_reading_as_dict
 
-    targets = drain_targets_as_dicts()
+    reading = drain_reading_as_dict()
+    targets = reading["targets"]
     if json_out:
-        typer.echo(_json.dumps(targets))
+        typer.echo(_json.dumps(reading))
         return
     if not targets:
-        typer.echo("active-backlog: no active missions to drain")
+        reason = reading["skip_reason"] or "no_missions"
+        if reason == "no_missions":
+            typer.echo("active-backlog: no active missions to drain")
+            return
+        causes = {
+            "drain_disabled": "the drain is disabled: config.active_backlog.enabled",
+            "config_unreadable": "config unreadable; the drain cannot read its own switch",
+            "bad_interval": "invalid interval: config.active_backlog.interval",
+            "project_disabled": (
+                "the most common mission drop is a disabled project: "
+                "config.active_backlog.enabled"
+            ),
+            "no_workspace_path": (
+                "the most common mission drop is a missing workspace path"
+            ),
+        }
+        typer.echo(
+            f"active-backlog: {reading['missions']} active missions, 0 drain targets "
+            f"({causes.get(reason, reason)})"
+        )
         return
     for t in targets:
         mission = f" mission={t['mission']}" if t["mission"] else ""

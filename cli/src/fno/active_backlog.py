@@ -118,23 +118,28 @@ def _active_missions(*, strict: bool = False) -> list[dict]:
         return []
 
 
-def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
-    """One drain target per ACTIVE mission, in epic-id order (x-a4dc K2).
+@dataclass(frozen=True)
+class DrainReading:
+    """What the drain resolver saw: targets, mission count, and which zero hit."""
 
-    A mission is an epic with ``mission_active=true`` (K1's activation record).
-    The daemon drains each by shelling K1's converge core (``advance --epic``),
-    which fans out the epic's ready leaf children across ALL projects; the epic id
-    rides on the target's ``mission``. The legacy per-project interval drain and
-    its opt-in escape env are deleted (epic Locked Decision 4) - merge-triggered
-    ``fno backlog advance`` is the same-project coverage, and no per-project drain
-    ever comes back.
+    targets: list[DrainTarget]
+    missions: int
+    skip_reason: Optional[str]
 
-    ``config.active_backlog`` stays the daemon's master switch: an unenabled
-    config or invalid interval yields no targets. ``config.active_backlog.mission``
-    is IGNORED (x-7f1f): missions are per-epic graph state (``mission_active``),
-    never a config value. A mission whose epic project has
-    no workspace path is skipped (cannot root the loop). Fail-safe throughout.
+
+def resolve_drain_reading(*, strict: bool = False) -> DrainReading:
+    """The reason channel beside :func:`resolve_drain_targets`' bare list.
+
+    A disabled drain and a drain with no missions are different facts with
+    different remedies, and both resolved to the same empty list before
+    (x-338c). ``skip_reason`` names the zero-path in the order checked:
+    ``config_unreadable``, ``drain_disabled``, ``bad_interval``, ``no_missions``,
+    ``project_disabled``, ``no_workspace_path``; ``None`` when targets resolved.
+    Missions are counted BEFORE the config gates so ``missions`` is the truth
+    even when the drain is off. Mixed per-mission drops report the most common
+    drop, ties to the order above. A strict mission-read fault raises.
     """
+    missions = _active_missions(strict=True) if strict else _active_missions()
     try:
         from fno.config import load_settings
 
@@ -142,26 +147,34 @@ def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
     except Exception:
         if strict:
             raise
-        return []
+        return DrainReading([], len(missions), "config_unreadable")
 
-    if not cfg.any_enabled():
-        return []
+    # The master switch, read apart from the interval: any_enabled() folds the
+    # two, which would make an off switch and a bad interval indistinguishable.
+    en = cfg.enabled
+    switch_on = any(en.values()) if isinstance(en, dict) else bool(en)
+    if not switch_on:
+        return DrainReading([], len(missions), "drain_disabled")
     interval = cfg.interval_seconds()
     if interval is None:
-        return []
+        return DrainReading([], len(missions), "bad_interval")
+    if not missions:
+        return DrainReading([], 0, "no_missions")
 
     paths = _workspace_paths(strict=True) if strict else _workspace_paths()
     targets: list[DrainTarget] = []
-    missions = _active_missions(strict=True) if strict else _active_missions()
+    disabled = missing_path = 0
     for epic in sorted(missions, key=lambda e: e["id"]):
         project = epic["project"]
         # Respect the per-project enable contract: with enabled={proj: bool} an
         # explicitly-disabled project's mission does not drain, even though
-        # any_enabled() is true for the daemon as a whole.
+        # the switch is on for the daemon as a whole.
         if not cfg.is_enabled_for(project):
+            disabled += 1
             continue
         cwd = paths.get(project)
         if not cwd:
+            missing_path += 1
             continue
         targets.append(
             DrainTarget(
@@ -173,7 +186,23 @@ def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
                 max_concurrent=cfg.max_concurrent,
             )
         )
-    return targets
+    if not targets:
+        reason = "project_disabled" if disabled >= missing_path else "no_workspace_path"
+        return DrainReading([], len(missions), reason)
+    return DrainReading(targets, len(missions), None)
+
+
+def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
+    """One drain target per ACTIVE mission, in epic-id order (x-a4dc K2).
+
+    A mission is an epic with ``mission_active=true``; the daemon drains each
+    by shelling ``advance --epic`` (the epic id rides on ``mission``).
+    ``config.active_backlog`` stays the master switch: an unenabled config or
+    invalid interval yields no targets, and a mission whose epic project has
+    no workspace path is skipped. Fail-safe throughout. Callers that must tell
+    the zero-paths apart read :func:`resolve_drain_reading` instead.
+    """
+    return resolve_drain_reading(strict=strict).targets
 
 
 @dataclass
@@ -224,20 +253,27 @@ def fanout_targets_as_dicts() -> list[dict]:
     ]
 
 
-def drain_targets_as_dicts() -> list[dict]:
-    """JSON-serializable form of :func:`resolve_drain_targets` for the daemon.
+def drain_reading_as_dict() -> dict:
+    """JSON-serializable receipt of :func:`resolve_drain_reading` for the daemon.
 
-    The mission drain shells ``advance --epic``, which resolves each child
-    project's ``batch`` / ``max_lanes`` itself - so, unlike the deleted per-project
-    arm, the target carries no per-repo dispatch config."""
-    return [
-        {
-            "project": t.project,
-            "cwd": t.cwd,
-            "interval_seconds": t.interval_seconds,
-            "failure_limit": t.failure_limit,
-            "mission": t.mission,
-            "max_concurrent": t.max_concurrent,
-        }
-        for t in resolve_drain_targets()
-    ]
+    The bare target list this replaces could not say WHY it was empty, so a
+    disabled drain printed as ``no_missions`` (x-338c). The mission drain
+    shells ``advance --epic``, which resolves each child project's ``batch`` /
+    ``max_lanes`` itself - so, unlike the deleted per-project arm, the target
+    carries no per-repo dispatch config."""
+    reading = resolve_drain_reading()
+    return {
+        "targets": [
+            {
+                "project": t.project,
+                "cwd": t.cwd,
+                "interval_seconds": t.interval_seconds,
+                "failure_limit": t.failure_limit,
+                "mission": t.mission,
+                "max_concurrent": t.max_concurrent,
+            }
+            for t in reading.targets
+        ],
+        "missions": reading.missions,
+        "skip_reason": reading.skip_reason,
+    }
