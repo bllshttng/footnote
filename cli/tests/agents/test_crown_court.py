@@ -477,7 +477,10 @@ def test_render_court_json_matches_gather_court(tmp_path: Path, monkeypatch) -> 
     assert rendered.pop("gate")["verdict"]
     assert rendered.pop("sessions_readable") is True
     assert "blind" in rendered["summary"].pop("stuck")
-    assert rendered["summary"].pop("stuck_line") == ""
+    # The line's CONTENT depends on whether a native binary is installed to
+    # fold with, so this test pins its presence and test_court_stuck.py pins
+    # what it says. `pop` raises when the key is missing, which is the check.
+    rendered["summary"].pop("stuck_line")
     assert rendered == gather_court()
 
 
