@@ -186,7 +186,7 @@ def test_attestation_emit_fires_the_bot_review_mirror(tmp_path, monkeypatch):
     """The producer hangs on the ONE call every verdict funnels through, so
     the skill script, a direct CLI emit, and a spawned worker all publish the
     same way. A spy proves the wiring; the publish contract itself
-    (refusals, readback) lives in test_publish_review.py. An unconfigured
+    (refusals, readback) lives in the Rust module's tests. An unconfigured
     lane prints one skipped receipt and the emit still exits 0."""
     global_log = _configure(tmp_path, monkeypatch, str(tmp_path / "state"))
     project = tmp_path / "project" / ".fno" / "events.jsonl"
@@ -195,21 +195,18 @@ def test_attestation_emit_fires_the_bot_review_mirror(tmp_path, monkeypatch):
 
     calls = []
 
-    def spy(**kw):
-        calls.append(kw)
-        return pub.PublishResult(
-            status="skipped",
-            reason="spy",
-            receipt="bot-review: skipped (spy)",
-        )
+    def spy(payload):
+        calls.append(payload)
+        return {"status": "skipped", "reason": "spy", "receipt": "bot-review: skipped (spy)"}
 
-    monkeypatch.setattr(pub, "publish_review", spy)
+    monkeypatch.setattr(pub, "publish_review_call", spy)
     result = _emit(project, "review_attestation", ATTESTATION)
     assert result.exit_code == 0, result.output
     assert len(calls) == 1, "the mirror must fire exactly once per attestation"
     assert calls[0]["verdict"] == "pass"
     assert calls[0]["head_sha"] == "deadbeef"
     assert calls[0]["reviewer"] == "code-review"
+    assert calls[0]["pr_number"] is None
     # The durable append still happened: the mirror never replaces the record.
     assert _types(project) == ["review_attestation"]
     assert _types(global_log) == ["review_attestation"]
@@ -223,9 +220,9 @@ def test_an_ordinary_event_skips_the_bot_review_mirror(tmp_path, monkeypatch):
 
     from fno.pr import _publish_review as pub
 
-    def spy(**kw):  # pragma: no cover - fails the test if reached
-        raise AssertionError("publish_review fired on a non-attestation event")
+    def spy(payload):  # pragma: no cover - fails the test if reached
+        raise AssertionError("publish_review_call fired on a non-attestation event")
 
-    monkeypatch.setattr(pub, "publish_review", spy)
+    monkeypatch.setattr(pub, "publish_review_call", spy)
     result = _emit(project, "daemon_started")
     assert result.exit_code == 0, result.output

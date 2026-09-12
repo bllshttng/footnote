@@ -844,34 +844,24 @@ def publish_review_cmd(
         False, "--dry-run", help="Resolve and refuse-check, but make no POST."
     ),
 ) -> None:
-    from fno.pr import _publish_review as pub
+    from fno.pr._publish_review import PublishReviewUnavailable, publish_review_call
 
-    cwd = os.getcwd()
-    attestation = pub.newest_head_attestation(cwd)
-    if verdict is None:
-        if not attestation:
-            typer.echo(
-                "publish-review: no head-pinned attestation for HEAD; "
-                "pass --verdict explicitly",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        verdict = str(attestation.get("verdict") or "")
-    if verdict not in ("pass", "fail"):
-        typer.echo(f"publish-review: --verdict must be pass|fail, got {verdict!r}", err=True)
-        raise typer.Exit(code=2)
-    reviewer = str((attestation or {}).get("reviewer") or "manual")
-    head_sha = str((attestation or {}).get("head_sha") or pub._git_head(cwd) or "")
-    result = pub.publish_review(
-        pr_number=pr_number,
-        head_sha=head_sha,
-        verdict=verdict,
-        reviewer=reviewer,
-        cwd=cwd,
-        dry_run=dry_run,
-    )
-    typer.echo(result.receipt, err=True)
-    raise typer.Exit(code=0 if result.ok or (dry_run and result.status == "skipped") else 1)
+    try:
+        result = publish_review_call(
+            {
+                "pr_number": pr_number,
+                "head_sha": "",
+                "verdict": verdict or "",
+                "reviewer": "",
+                "cwd": os.getcwd(),
+                "dry_run": dry_run,
+            }
+        )
+    except PublishReviewUnavailable as exc:
+        typer.echo(f"bot-review: failed ({exc})", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(result.get("receipt", ""), err=True)
+    raise typer.Exit(code=int(result.get("exit", 1)))
 
 
 @pr_app.command(
