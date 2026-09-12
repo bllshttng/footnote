@@ -7,9 +7,10 @@ on it. AC1-HP and AC1-ERR pin both halves here.
 """
 from __future__ import annotations
 
-from fno.config import RoutingAdmissionBlock, SettingsModel
+from fno.config import SettingsModel
 from fno.config._routing_admission import (
     DEGRADED,
+    RoutingAdmissionBlock,
     admission_config_errors,
     resolve_admission_policy,
 )

@@ -1984,15 +1984,6 @@ class AgentProviderBlock(BaseModel):
 # The routing schema block lives in routing_blocks (the hub is shrink-only).
 from fno.config.routing_blocks import RoutingBlock as RoutingBlock  # noqa: E402
 
-# The routing-admission schema block is a leaf beside it (x-1afa); re-exported
-# under the name every reader imports.
-from fno.config._routing_admission import (  # noqa: E402
-    AdmissionPolicy as AdmissionPolicy,
-    DEGRADED as _ROUTING_ADMISSION_DEGRADED,
-    RoutingAdmissionBlock as RoutingAdmissionBlock,
-    resolve_admission_policy as resolve_admission_policy,
-)
-
 
 # The spawn-defaults schema blocks live in spawn_blocks (the config hub is
 # over the file budget and shrink-only); re-exported for every reader.
