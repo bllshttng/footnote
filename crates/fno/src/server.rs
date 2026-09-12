@@ -547,16 +547,6 @@ fn bottom_non_empty_lines(text: &str, n: usize) -> String {
     nonblank[start..].join("\n")
 }
 
-/// (v78) Current time as a `YYYY-MM-DDThh:mm:ssZ` UTC stamp for the stats
-/// answer's measurement window (same shape the squad store writes).
-fn stats_now_iso() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    crate::squad_store::epoch_to_iso_public(secs)
-}
-
 /// What connected clients register with the core loop.
 enum CoreMsg {
     /// (v78) A control-connection stats request: the Core owns the
@@ -2029,12 +2019,9 @@ pub(crate) struct Core {
     /// pattern.
     wheel_gate: HashMap<u64, WheelGateState>,
     /// Failed `human_touch` emits (AC4-ERR): counted, never raised to the
-    /// steering path. An inflated autonomy rate is the dangerous silent
-    /// failure, so the count exists even before the scoreboard reads it.
+    /// steering path; read by the scoreboard stats answer (v78).
     touch_emit_failures: Arc<AtomicU64>,
-    /// (v78) When this server instance started. The stats answer carries it
-    /// beside the counter so a lifetime-scoped count never poses as an
-    /// all-time fact: a server restarted an hour ago owns an hour of history.
+    /// (v78) When this server instance started: the stats answer's window.
     started_at: String,
     /// Failed per-pane counter emits, same discipline as
     /// [`Core::touch_emit_failures`]: counted and logged, never raised to the
@@ -12882,11 +12869,10 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::ServerStats { reply } => {
-                let _ = reply.send(ServerMsg::ServerStats {
-                    touch_emit_failures: self.touch_emit_failures.load(Ordering::Relaxed),
-                    started_at: self.started_at.clone(),
-                    measured_at: stats_now_iso(),
-                });
+                let _ = reply.send(crate::server_stats::answer(
+                    self.touch_emit_failures.load(Ordering::Relaxed),
+                    &self.started_at,
+                ));
                 Flow::Continue
             }
             CoreMsg::Kill => {
@@ -13819,7 +13805,7 @@ async fn serve(
         touch_last_emit: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
-        started_at: stats_now_iso(),
+        started_at: crate::server_stats::stamp_now(),
         client_count: client_count_tx,
         seen: HashSet::new(),
         attached: HashMap::new(),
@@ -24604,7 +24590,7 @@ mod tests {
             touch_last_emit: HashMap::new(),
             wheel_gate: HashMap::new(),
             touch_emit_failures: Arc::new(AtomicU64::new(0)),
-            started_at: stats_now_iso(),
+            started_at: crate::server_stats::stamp_now(),
             client_count: watch::channel(0).0,
             seen: HashSet::new(),
             attached: HashMap::new(),
