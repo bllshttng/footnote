@@ -2701,9 +2701,8 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
     // open to a notice rather than wedging.
     let dispatch_timeout = dispatch_timeout();
     // A targeted node (a clicked work-queue card, x-a496) pins `--node`; without
-    // it the porcelain picks the board's next ready node (prefix+g). x-e53e
-    // renamed the verb `one` -> `next` (hidden alias kept); the launch itself
-    // is `fno agents spawn` inside the porcelain.
+    // it the porcelain picks the board's next ready node. x-e53e renamed the
+    // verb `one` -> `next` (hidden alias kept); the launch is the door's spawn.
     let mut args = vec!["agents", "dispatch", "next", "--server", session, "--json"];
     if let Some(n) = node {
         args.push("--node");

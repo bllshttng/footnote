@@ -660,10 +660,8 @@ def _dispatch_one(
             }
 
     # 2. Resolve every launch preference through the ONE resolver (x-e53e
-    #    change 3): harness, model, route, account, permission mode, the
-    #    worker name, and the seed render. The pane substrate and THIS mux
-    #    session are the two deliberate pins below; nothing else is pinned
-    #    by this file.
+    #    change 3). The pane substrate and THIS mux session are this file's
+    #    two deliberate pins; nothing else is pinned here.
     from fno.agents.harness_map import DispatchResolveError
     from fno.agents.node_dispatch import node_spawn_argv, resolve_node_spawn
     from fno.backlog.advance import (
@@ -703,11 +701,8 @@ def _dispatch_one(
             ),
         }
 
-    # 3. Shell the ONE launcher. The spawn door takes the family-2 guard (the
-    #    `dispatch:<id>` reservation closing the same-node race, plus the
-    #    handover `node:<id>` claim), runs the spawn gate (the ONE fleet
-    #    ceiling, queueing or refusing with its own exit code), builds the
-    #    provenance with the handover holder, and hosts the pane.
+    # 3. Shell the ONE launcher. The spawn door takes the family-2 guard, the
+    #    spawn gate, the provenance with the handover holder, and the pane.
     extra: list[str] = ["--mux-session", session, "--no-wait"]
     if account:
         extra += ["--account", account]
