@@ -366,6 +366,17 @@ def emit_session_transition(
 # Merge-triggered cleanup: the merge mints the reap order itself; the
 # ritual reuses the same helper, one request-id formula for both.
 KIND_MERGE_CLEANUP_REQUESTED = "merge_cleanup_requested"
+KIND_MERGE_CLEANUP_SKIPPED = "merge_cleanup_skipped"
+
+# The skip reasons the merge mint may speak, taken verbatim from the ritual's
+# archive leg so the two legs cannot drift into two vocabularies.
+MERGE_CLEANUP_SKIP_REASONS = (
+    "gh-unavailable",
+    "unparseable-pr-json",
+    "not-merged",
+    "no-branch",
+    "emit-failed",
+)
 
 
 def merge_cleanup_request_id(project: Any, pr: int, branch: str) -> str:
@@ -508,6 +519,41 @@ def emit_merge_cleanup_requested(
         },
     )
     return request_id
+
+
+def emit_merge_cleanup_skipped(
+    *,
+    repo: str,
+    project: str,
+    pr: int,
+    reason: str,
+    branch: Optional[str] = None,
+    detail: str = "",
+    session_id: Optional[str] = None,
+    harness: Optional[str] = None,
+) -> None:
+    """Say that a merge minted no cleanup request, and which precondition
+    was unmet. ``detail`` carries the variable part (the gh state, the
+    exception class); ``reason`` is a closed set, so an unclassifiable row
+    is refused rather than written."""
+    if reason not in MERGE_CLEANUP_SKIP_REASONS:
+        raise ValueError(
+            f"unknown merge cleanup skip reason: {reason!r}; "
+            f"expected one of {', '.join(MERGE_CLEANUP_SKIP_REASONS)}"
+        )
+    _emit_daemon_envelope(
+        KIND_MERGE_CLEANUP_SKIPPED,
+        {
+            "repo": repo,
+            "project": str(project),
+            "pr": int(pr),
+            "reason": reason,
+            "branch": branch,
+            "detail": detail,
+            "session_id": session_id,
+            "harness": harness,
+        },
+    )
 
 
 # ---------------------------------------------------------------------
