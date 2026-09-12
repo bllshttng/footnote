@@ -1440,15 +1440,9 @@ def cmd_spawn(
     uncarried = thread_uncarried(
         harness,
         {
-            "model": model,
-            "yolo": yolo,
-            "permission_mode": permission_mode,
-            "effort": effort,
-            "add_dir": add_dir,
-            "launch_role": role,
-            "agent": agent,
-            "tools": tools,
-            "deny_tools": deny_tools,
+            "model": model, "yolo": yolo, "permission_mode": permission_mode,
+            "effort": effort, "add_dir": add_dir, "launch_role": role,
+            "agent": agent, "tools": tools, "deny_tools": deny_tools,
         },
         passthrough,
     )

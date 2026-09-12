@@ -168,10 +168,8 @@ def _codex_thread_spawn(
         argv += [f"--add-dir={add_dir}"]
     if permission_mode:
         argv += [f"--permission-mode={permission_mode}"]
-    # Fenced tokens a thread lane maps ride as first-class flags. The equals
-    # form is load-bearing: a value token that itself starts with `-` would
-    # die as an unknown flag in the space form (the trap at the top of this
-    # module).
+    # Fenced tokens ride as first-class flags; the equals form is load-bearing
+    # (a hyphen-leading value dies as an unknown flag in the space form).
     for token in passthrough or ():
         argv += [f"--harness-arg={token}"]
     if node:
