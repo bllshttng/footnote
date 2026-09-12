@@ -2778,10 +2778,12 @@ fn reap_mtime_family(
             }
         };
         let path = entry.path();
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if accept.is_some_and(|keep| !keep(name)) {
-            continue;
+        if let Some(keep) = accept {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !keep(name) {
+                continue;
+            }
         }
         summary.scanned += 1;
         let display_path = state_path(shared_root, &path);
