@@ -21,7 +21,7 @@ use crate::{
 use crate::acceptance_evidence::{evaluate_done_probes, ProbeGate, PROBE_TIMEOUT};
 use crate::bounded_spawn::{kill_process_group, killpg};
 pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
-use crate::king_termination::bound_breached;
+use crate::king_termination::{bound_breached, king_quiet_body};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11680,6 +11680,14 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let bounded = |dry: u64, waiting: &str| {
         bound_breached(history.total, dry, manifest.max_iterations, waiting)
     };
+    // Shared spine of both blind-board blocks: bounded, quiet emit, block.
+    let blind_block = |message: &str, actionable: i64, dry: u64| -> (i32, String) {
+        if let Some(b) = bounded(dry, message) {
+            return terminate(b.reason, &b.message, 0, b.fires, &[]);
+        }
+        emit("king_loop_check", king_quiet_body(&session_id, actionable));
+        (0, king_output("block", None, message, actionable, dry + 1))
+    };
 
     let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
         Ok(b) => b,
@@ -11715,27 +11723,10 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         if board.operator_questions_unreadable {
             // Bounded, and each blocking fire emits its row so the counters
             // advance; the old return left both frozen and blocked forever.
-            if let Some(b) = bounded(dry, "outstanding operator questions are unreadable") {
-                return terminate(b.reason, &b.message, 0, b.fires, &[]);
-            }
-            emit(
-                "king_loop_check",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "actionable": 0,
-                    "actionable_ids": [],
-                    "cleared": false,
-                }),
-            );
-            return (
+            return blind_block(
+                "board clean but outstanding operator questions are unreadable; blocking completion",
                 0,
-                king_output(
-                    "block",
-                    None,
-                    "board clean but outstanding operator questions are unreadable; blocking completion",
-                    0,
-                    dry + 1,
-                ),
+                dry,
             );
         }
         let open_question = board
@@ -11775,12 +11766,21 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             }
         };
         if undelivered == 0 {
-            let message = if board.unreadable + board.over_budget > 0 {
-                "board clean on every readable queue; exiting NoWork"
-            } else {
-                "board clean; exiting NoWork"
-            };
-            return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
+            // x-c911: a floor count cannot see blind queues; refuse to certify.
+            if board.unreadable_sources {
+                return blind_block(
+                    "board quiet but some sources are unreadable; blocking completion",
+                    0,
+                    dry,
+                );
+            }
+            return terminate(
+                TerminationReason::NoWork,
+                "board clean; exiting NoWork",
+                0,
+                dry,
+                &[],
+            );
         }
         let message = match &drain_error {
             Some(e) => {

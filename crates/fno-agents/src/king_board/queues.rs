@@ -427,6 +427,34 @@ fn subtree_held(
     })
 }
 
+/// The aggregate the termination readers key on: a FLOOR, the rows the board
+/// can actually name. Blind actionable queues contribute nothing and are
+/// named in a warning instead (x-c911: +1 per blind queue read as one row
+/// and a king went hunting rows that never existed). A blind REPORT-ONLY
+/// queue stays loud through unreadable and uncounted.
+pub(crate) fn actionable_tally(queues: &[Queue], warnings: &mut Vec<String>) -> i64 {
+    let mut readable: i64 = 0;
+    let mut blind: Vec<&'static str> = Vec::new();
+    for q in queues {
+        if not_read_status(q.status) {
+            if q.actionable {
+                blind.push(q.name);
+            }
+        } else if q.actionable {
+            readable += q.count;
+        }
+    }
+    if !blind.is_empty() {
+        blind.sort();
+        warnings.push(format!(
+            "actionable is a floor: {} actionable queue(s) unreadable and uncounted ({})",
+            blind.len(),
+            blind.join(", ")
+        ));
+    }
+    readable
+}
+
 /// Build the board payload. Pure; does no I/O. Queue names, order, and row
 /// shapes match board.py's `build_board` exactly.
 pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
@@ -1298,7 +1326,6 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ));
     }
 
-    let mut actionable: i64 = 0;
     let mut unreadable: i64 = 0;
     let mut over_budget: i64 = 0;
     for q in &queues {
@@ -1308,16 +1335,9 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             } else {
                 unreadable += 1;
             }
-            // A blind ACTIONABLE queue is work: the king may not exit while it
-            // cannot see a queue it could have shrunk. A blind report-only
-            // queue is loud (the exit code) and still uncounted.
-            if q.actionable {
-                actionable += 1;
-            }
-        } else if q.actionable {
-            actionable += q.count;
         }
     }
+    let actionable = actionable_tally(&queues, &mut warnings);
 
     let queues_json: Vec<Value> = queues.iter().map(queue_json).collect();
     json!({

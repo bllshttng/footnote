@@ -9,6 +9,10 @@ pub(crate) struct KingBoard {
     pub(crate) top_row: Option<String>,
     pub(crate) unreadable: i64,
     pub(crate) over_budget: i64,
+    /// x-c911: any queue on this board failed to read. The quiet branch
+    /// refuses to certify a quiet board while this is true, instead of
+    /// trusting a count that cannot see the blind queues.
+    pub(crate) unreadable_sources: bool,
     pub(crate) actionable_ids: Vec<String>,
     pub(crate) operator_question_sessions: Vec<String>,
     pub(crate) operator_questions_unreadable: bool,
@@ -38,10 +42,14 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
     let mut actionable_ids: Vec<String> = Vec::new();
     let mut operator_question_sessions: Vec<String> = Vec::new();
     let mut operator_questions_unreadable = false;
+    let mut unreadable_sources = false;
     if let Some(queues) = value.get("queues").and_then(|q| q.as_array()) {
         for queue in queues {
             let name = queue.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             let status = queue.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if crate::king_board::not_read_status(status) {
+                unreadable_sources = true;
+            }
             if name == "operator_question" && crate::king_board::not_read_status(status) {
                 operator_questions_unreadable = true;
             }
@@ -88,9 +96,21 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
         top_row,
         unreadable,
         over_budget,
+        unreadable_sources,
         actionable_ids,
         operator_question_sessions,
         operator_questions_unreadable,
+    })
+}
+
+/// The quiet journal row both blind-board blocks emit: a blind board must
+/// still advance the fire counter with its row.
+pub(crate) fn king_quiet_body(session_id: &str, actionable: i64) -> Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "actionable": actionable,
+        "actionable_ids": [],
+        "cleared": false,
     })
 }
 
@@ -371,6 +391,29 @@ mod tests {
         let parsed = parse_king_board_value(&board).unwrap();
         let top = parsed.top_row.unwrap();
         assert!(top.contains("is unreadable: exit 1"), "{top}");
+    }
+
+    #[test]
+    fn a_blind_queue_sets_the_unreadable_sources_flag() {
+        // x-c911: one unreadable queue means the quiet branch must refuse to
+        // certify; the named boolean carries that, never a count sentinel.
+        let board = board_with_queues(json!([
+            {"name": "undispatched", "status": "unreadable", "error": "exit 1: flo",
+             "actionable": true, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert!(parsed.unreadable_sources);
+        assert_eq!(parsed.actionable, 0);
+    }
+
+    #[test]
+    fn a_fully_readable_board_leaves_the_flag_off() {
+        let board = board_with_queues(json!([
+            {"name": "undispatched", "status": "ok", "actionable": true,
+             "count": 2, "rows": []},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        assert!(!parsed.unreadable_sources);
     }
 
     #[test]
