@@ -823,16 +823,19 @@ def _write_workdir_settings(workdir: Path) -> None:
     (fno_dir / ".path-migration-done").touch()
 
 
-def _default_spawn(name: str, prompt: str, *, cwd: Path, timeout: int) -> "tuple[int, str, str]":
+def _default_spawn(
+    name: str, prompt: str, *, cwd: Path, timeout: int, model: str = "fable"
+) -> "tuple[int, str, str]":
     """Sanctioned headless spawn (never a bare ``claude -p``). fable-tier for
-    /blueprint per the loops-roadmap routing table (Locked Decision 6)."""
+    /blueprint per the loops-roadmap routing table (Locked Decision 6); the
+    blueprint judge passes its own tier (judge.JUDGE_MODEL)."""
     try:
         p = subprocess.run(
             [
                 "fno", "agents", "spawn", "--name", name, prompt,
                 "--harness", "claude",
                 "--substrate", "headless",
-                "--model", "fable",
+                "--model", model,
                 "--cwd", str(cwd),
                 "--timeout", str(timeout),
             ],
