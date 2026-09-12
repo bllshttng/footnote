@@ -72,6 +72,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "probe-run",
     "test-run",
     "promote",
+    "publish-review",
     "reap",
     "roster-reap",
     "reconcile",
@@ -435,6 +436,15 @@ async fn run(args: Vec<String>) -> i32 {
     // and spawn flags.
     if verb == "fallback-chain" {
         return fno_agents::fallback_chain::run_fallback_chain(&args[1..]);
+    }
+
+    // `publish-review`: the reviewer lane's second GitHub identity (see
+    // publish_review.rs doc). Direct dispatch; no daemon RPC. Python's emit
+    // chokepoint and the hidden `fno pr publish-review` verb send one JSON
+    // payload and read the answer back; the verb is binary-first, never an
+    // auto-routed `fno agents` surface.
+    if verb == "publish-review" {
+        return fno_agents::publish_review::run_publish_review(&args[1..]);
     }
 
     // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
