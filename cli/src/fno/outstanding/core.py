@@ -253,8 +253,8 @@ def ask_refusal(
     return (
         f"outstanding: refused: law {ASK_LAW}: an ask is one line plus a node pointer. "
         + "; ".join(problems)
-        + ". Put the mechanism, options and evidence on the node with "
-        'fno backlog note <node> "...", then ask one line with --node <node>.'
+        + '. Put the mechanism on the node (fno backlog note <node> "..."), '
+        "then ask one line with --node <node>."
     )
 
 

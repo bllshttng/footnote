@@ -184,11 +184,7 @@ def _live_law_hits(question: str, subject: str | None, node: str | None) -> dict
 @outstanding_app.command("ask")
 def ask(
     question: str | None = typer.Argument(
-        None,
-        help=(
-            "One line, at most config.style.word_cap.ask words (law d-59af3235); "
-            "put detail on the node."
-        ),
+        None, help="One line, at most config.style.word_cap.ask words (law d-59af3235); put detail on the node."
     ),
     question_file: Path | None = typer.Option(
         None,
