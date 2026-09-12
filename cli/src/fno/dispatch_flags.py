@@ -138,12 +138,7 @@ def configured_dispatch_harness(
             settings = load_settings()
         except Exception:  # noqa: BLE001 - a bad config must not brick resolution
             return None, None
-    profile_verb = (verb or "target").strip().lstrip("/")
-    if profile_verb.startswith("fno:"):
-        profile_verb = profile_verb[len("fno:"):] or "target"
-    agents = getattr(settings, "agents", None)
-    profiles = getattr(agents, "profiles", None) or {}
-    profile = profiles.get(profile_verb) if profile_verb else None
+    profile, profile_verb = _stage_profile(settings, verb)
     stage = (getattr(profile, "provider", "") or "").strip()
     legacy = (getattr(getattr(settings, "dispatch", None), "harness", "") or "").strip()
     if stage:
@@ -157,6 +152,18 @@ def configured_dispatch_harness(
     if legacy:
         return legacy, None
     return None, None
+
+
+def _stage_profile(settings: object, verb: str) -> tuple[object, str]:
+    """The stage-table profile row for VERB plus its normalized name (leading
+    slash, fno: namespace strip), one home for every reader. (None, "target")
+    when unset."""
+    profile_verb = (verb or "target").strip().lstrip("/")
+    if profile_verb.startswith("fno:"):
+        profile_verb = profile_verb[len("fno:"):] or "target"
+    agents = getattr(settings, "agents", None)
+    profiles = getattr(agents, "profiles", None) or {}
+    return (profiles.get(profile_verb) if profile_verb else None), profile_verb
 
 
 def configured_dispatch_route(
@@ -181,12 +188,7 @@ def configured_dispatch_route(
             settings = load_settings()
         except Exception:  # noqa: BLE001 - a bad config must not brick resolution
             return ""
-    profile_verb = (verb or "target").strip().lstrip("/")
-    if profile_verb.startswith("fno:"):
-        profile_verb = profile_verb[len("fno:"):] or "target"
-    agents = getattr(settings, "agents", None)
-    profiles = getattr(agents, "profiles", None) or {}
-    profile = profiles.get(profile_verb) if profile_verb else None
+    profile, _profile_verb = _stage_profile(settings, verb)
     return (getattr(profile, "route", "") or "").strip()
 
 
