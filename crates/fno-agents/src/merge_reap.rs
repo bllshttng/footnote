@@ -1830,12 +1830,13 @@ mod tests {
         request.candidate_row_names = vec!["ab-bp-x-1-cargo".to_string()];
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
-        let acted = run_request(
+        let (acted, _held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1860,12 +1861,13 @@ mod tests {
         request.candidate_row_names = vec!["ab-bp-x-2-cargo".to_string()];
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
-        let acted = run_request(
+        let (acted, _held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1880,21 +1882,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_events_without_candidates_keep_the_narrow_prefix_fallback() {
-        // An event minted before the candidate field exists: the legacy
-        // target-<node>- prefix fallback still selects the row.
+    fn legacy_events_without_candidates_still_select_by_name_route() {
+        // An event minted before the candidate field exists: the name leg
+        // still selects the row - the shared name_route vocabulary resolves
+        // the legacy target-<node>- spelling to the closed node.
         let home = temp_home("legacy-candidates");
         write_registry(&home, &[claude_row("target-x-1-worker", false)]);
         let mut request = settled_request("/repo/other-wt");
         request.worktree = None; // force the name path only
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let seams = RequestSeams {
+            finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
-        let acted = run_request(
+        let (acted, _held) = run_request(
             &home,
             &emitter,
             &request,
