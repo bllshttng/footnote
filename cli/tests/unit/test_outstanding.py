@@ -267,9 +267,10 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
     assert event["data"]["session_id"] == "ledger-run-id"
     assert "live" not in event["data"], "liveness is computed, never stored"
 
+    monkeypatch.setattr("fno.outstanding.core.LIVENESS_BUDGET_SECONDS", 0.1)
     monkeypatch.setattr(
-        "fno.agents.discover.resolve_reachable",
-        lambda asker: (object(), []) if asker == "01234567" else (None, []),
+        "fno.outstanding.core._quick_store_verdict",
+        lambda asker, cache: True if asker == "01234567" else None,
     )
     question = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"][0]
     assert question == {
@@ -480,13 +481,15 @@ class TestAskLawGate:
         )
 
 
-def test_live_is_computed_for_json_and_missing_asker_is_stale(
+def test_live_is_computed_for_json_and_missing_asker_is_unknown(
     root: Path,
 ):
     from fno.outstanding.core import read_open_questions
 
-    def resolve(asker: str):
-        return (object(), []) if asker == "live-ask" else (None, [])
+    def resolve(asker: str) -> "bool | None":
+        # The report protocol (D5): a unique hit reads True; a miss in the
+        # quick stores proves nothing and reads None, never False.
+        return True if asker == "live-ask" else None
 
     _write_indexed_questions(
         root,
@@ -523,9 +526,89 @@ def test_live_is_computed_for_json_and_missing_asker_is_stale(
 
     assert {row["id"]: row["live"] for row in payload} == {
         "q-live": True,
-        "q-stale": False,
-        "q-legacy": False,
+        "q-stale": None,
+        "q-legacy": None,
     }
+
+
+def test_an_asker_less_row_reads_null_in_json(root: Path):
+    """AC13: an asker-less row claims no verdict, in JSON the CLI emits."""
+    _write_indexed_questions(
+        root,
+        [
+            {
+                "ts": "2026-08-17T00:00:00Z",
+                "type": "operator_question",
+                "source": "test",
+                "data": {"question_id": "q-legacy", "question": "legacy?"},
+            }
+        ],
+    )
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
+    assert [q["live"] for q in payload["questions"]] == [None]
+
+
+def test_a_store_read_error_reads_unknown_never_false(root: Path):
+    """AC14: a resolver failure is unknown; False was a verdict nobody measured."""
+    from fno.agents.discover import StoreReadError
+    from fno.outstanding.core import read_open_questions
+
+    def boom(_asker: str):
+        raise StoreReadError(["registry"])
+
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-err", "2026-08-19T00:00:00Z", asker="any-asker", blocks=[]
+            )
+        ],
+    )
+    questions = read_open_questions(
+        root,
+        liveness_budget_seconds=1.0,
+        clock=lambda: 0.0,
+        resolver=boom,
+    )
+    assert [q.live for q in questions] == [None]
+
+
+def test_a_slow_batch_streams_the_first_verdict_inside_the_budget(root: Path):
+    """AC12 + the absorbed x-401d: the first completed verdict lands inside the
+    budget whatever the other askers do - no fork-scheduling dependence."""
+    from fno.outstanding.core import read_open_questions
+
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-1", "2026-08-19T02:00:00Z", asker="fast-asker", blocks=[]
+            ),
+            _indexed_question(
+                "q-2", "2026-08-19T01:00:00Z", asker="slow-asker-b", blocks=[]
+            ),
+            _indexed_question(
+                "q-3", "2026-08-19T00:00:00Z", asker="slow-asker-c", blocks=[]
+            ),
+        ],
+    )
+
+    def resolver(asker: str) -> "bool | None":
+        if asker == "fast-asker":
+            return True
+        time.sleep(10)  # blocks past any budget the test will use
+        return True
+
+    began = time.perf_counter()
+    questions = read_open_questions(
+        root, liveness_budget_seconds=0.5, resolver=resolver
+    )
+    elapsed = time.perf_counter() - began
+
+    by_id = {q.id: q for q in questions}
+    assert by_id["q-1"].live is True, "the newest question's verdict lands first"
+    assert by_id["q-2"].live is None and by_id["q-3"].live is None
+    assert elapsed < 1.0, f"a 0.5s budget must bound the call, took {elapsed:.2f}s"
 
 
 def test_liveness_budget_expiry_is_unknown_and_does_not_block_report(
@@ -551,7 +634,7 @@ def test_liveness_budget_expiry_is_unknown_and_does_not_block_report(
     def slow_resolver(_asker):
         started.set()
         time.sleep(1)
-        return object(), []
+        return True
 
     began = time.perf_counter()
     questions = read_open_questions(
@@ -578,7 +661,7 @@ def test_liveness_budget_expiry_is_unknown_and_does_not_block_report(
 def test_liveness_within_budget_keeps_resolver_fidelity_and_live_first(
     root: Path,
 ):
-    """AC-HP: completed reachable and stale answers retain exact semantics."""
+    """AC-HP: injected verdicts map through exactly; live ranks first."""
     from fno.outstanding.core import read_open_questions
 
     _write_indexed_questions(
@@ -593,8 +676,10 @@ def test_liveness_within_budget_keeps_resolver_fidelity_and_live_first(
         ],
     )
 
-    def resolver(asker):
-        return (object(), []) if asker == "live" else (None, [])
+    def resolver(asker: str) -> "bool | None":
+        # A hit reads True; the report cannot measure False (D5), so a miss
+        # reads None and ranks with the unknowns.
+        return True if asker == "live" else None
 
     questions = read_open_questions(
         root,
@@ -605,7 +690,7 @@ def test_liveness_within_budget_keeps_resolver_fidelity_and_live_first(
 
     assert [(q.id, q.live) for q in questions] == [
         ("q-live", True),
-        ("q-stale", False),
+        ("q-stale", None),
     ]
 
 
@@ -638,9 +723,10 @@ def _indexed_question(
 def test_question_rank_orders_live_then_blocks_then_oldest_and_id(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    monkeypatch.setattr("fno.outstanding.core.LIVENESS_BUDGET_SECONDS", 0.1)
     monkeypatch.setattr(
-        "fno.agents.discover.resolve_reachable",
-        lambda asker: (object(), []) if asker == "live" else (None, []),
+        "fno.outstanding.core._quick_store_verdict",
+        lambda asker, cache: True if asker == "live" else None,
     )
     _write_indexed_questions(
         root,
@@ -669,8 +755,9 @@ def test_question_rank_orders_live_then_blocks_then_oldest_and_id(
 def test_question_rank_uses_oldest_then_id_within_a_block_count(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    monkeypatch.setattr("fno.outstanding.core.LIVENESS_BUDGET_SECONDS", 0.1)
     monkeypatch.setattr(
-        "fno.agents.discover.resolve_reachable", lambda _asker: (object(), [])
+        "fno.outstanding.core._quick_store_verdict", lambda _asker, _cache: True
     )
     _write_indexed_questions(
         root,
@@ -696,7 +783,10 @@ def test_question_rank_uses_oldest_then_id_within_a_block_count(
 def test_question_render_cap_shows_ten_and_names_true_total(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr("fno.agents.discover.resolve_reachable", lambda _asker: (None, []))
+    monkeypatch.setattr("fno.outstanding.core.LIVENESS_BUDGET_SECONDS", 0.1)
+    monkeypatch.setattr(
+        "fno.outstanding.core._quick_store_verdict", lambda _asker, _cache: None
+    )
     rows = [
         _indexed_question(
             f"q-{i:02d}", f"2026-08-19T{i:02d}:00:00Z", asker="stale", blocks=[]

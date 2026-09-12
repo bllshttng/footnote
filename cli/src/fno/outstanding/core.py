@@ -38,10 +38,17 @@ QUESTION_CLOSED_EVENT = "operator_question_closed"
 # Both question types share this prefix, so a raw line without it cannot be
 # one of ours. See the substring prefilter in read_open_questions.
 QUESTION_MARKER = "operator_question"
-# SessionStart has a 1.5s hook budget. Reachability may scan multi-gigabyte
-# harness stores, so the report gives it one bounded slice and renders an
-# explicit unknown for anything that cannot finish in time.
-LIVENESS_BUDGET_SECONDS = 0.05
+# SessionStart has a 1.5s hook budget. The report reads only the quick stores
+# (transcript, registry, roster) and gives the resolver a 1.0s CEILING, not a
+# wait: the child streams one verdict per asker as it completes, and the parent
+# stops at the deadline or when the child closes the pipe, whichever comes
+# first. A hit proves True; a miss proves nothing (the graph and harness stores
+# went unread), so it reads unknown - never a measured False.
+LIVENESS_BUDGET_SECONDS = 1.0
+
+# The quick stores the report's liveness read consults, in confidence order.
+# Delivery reads every store; the report reads only these three.
+REPORT_SOURCES = ("transcript", "registry", "roster")
 
 # Law d-59af3235: an ask is one line plus a node pointer. ask_refusal is its gate.
 ASK_LAW = "d-59af3235"
@@ -359,55 +366,63 @@ def _resolve_question_liveness(
     *,
     budget_seconds: float,
     clock: "Callable[[], float]",
-    resolver: "Callable[[str], tuple[Any, list[str]]] | None",
-) -> "dict[str, bool]":
-    """Resolve unique askers within one wall-clock slice.
+    resolver: "Callable[[str], bool | None] | None",
+) -> "dict[str, bool | None]":
+    """Resolve unique askers within one wall-clock slice, streaming verdicts.
 
-    The resolver runs in a child process that is terminated and reaped at the
-    deadline, so a store scan cannot survive until interpreter shutdown. Only
-    answers completed by the deadline land in the result; every absent key is
-    explicitly unknown, never guessed stale.
+    The resolver runs in a forked child that sends ONE ``(asker, verdict)``
+    pair as each asker completes, then closes its end; the parent keeps
+    polling with the remaining budget and stores every pair it receives. The
+    whole-batch send this replaces returned 96 of 96 askers as unknown under
+    every budget, because no partial verdict could ever land. A resolver
+    exception reads None - unknown - never a measured False.
     """
     import multiprocessing
 
     if not askers or budget_seconds <= 0:
         return {}
-    if resolver is None:
-        from fno.agents.discover import resolve_reachable
-
-        resolver = resolve_reachable
     context = multiprocessing.get_context("fork")
     receive, send = context.Pipe(duplex=False)
-    _ = clock
+
+    def resolve_one(asker: str) -> "bool | None":
+        if resolver is not None:
+            try:
+                return resolver(asker)
+            except Exception:  # noqa: BLE001 - a failed read is unknown
+                return None
+        from fno.outstanding.core import _quick_store_verdict
+
+        return _quick_store_verdict(asker, cache)
+
+    cache: "dict" = {}
+    started = clock()
 
     def resolve_all() -> None:
-        answers: "dict[str, bool]" = {}
         try:
             for asker in dict.fromkeys(askers):
+                verdict = resolve_one(asker)
                 try:
-                    reachable, ambiguous = resolver(asker)
-                    answer = reachable is not None and not ambiguous
-                except Exception:  # noqa: BLE001 - a completed refusal is stale
-                    answer = False
-                answers[asker] = answer
+                    send.send((asker, verdict))
+                except (BrokenPipeError, OSError):
+                    return
         finally:
-            try:
-                send.send(answers)
-            except (BrokenPipeError, OSError):
-                pass
             send.close()
 
     process = context.Process(target=resolve_all, name="fno-question-liveness", daemon=True)
     process.start()
     send.close()
-    answers: "dict[str, bool]" = {}
+    answers: "dict[str, bool | None]" = {}
     try:
-        if receive.poll(budget_seconds):
-            payload = receive.recv()
-            if isinstance(payload, dict):
-                answers = payload
-    except (EOFError, OSError):
-        pass
+        remaining = budget_seconds
+        while remaining > 0:
+            if not receive.poll(remaining):
+                break
+            try:
+                asker, verdict = receive.recv()
+            except (EOFError, OSError):
+                break
+            answers[asker] = verdict
+            remaining = budget_seconds - (clock() - started)
     finally:
         receive.close()
         if process.is_alive():
@@ -419,18 +434,42 @@ def _resolve_question_liveness(
     return answers
 
 
+def _quick_store_verdict(asker: str, cache: "dict") -> "bool | None":
+    """The report's liveness read (D5): the quick stores, nothing slower.
+
+    A unique hit reads True. Ambiguous, a miss, and StoreReadError all read
+    None: a miss here proves nothing, because the graph and harness stores
+    went unread. Only delivery, which reads every store, can say an asker is
+    gone. ``cache`` is one dict per batch, so the transcript listing and the
+    registry load are paid once across every asker in the report.
+    """
+    from fno.agents.discover import resolve_reachable
+
+    try:
+        reachable, ambiguous = resolve_reachable(
+            asker, sources=REPORT_SOURCES, scan_cache=cache
+        )
+    except Exception:  # noqa: BLE001 - a failed read is unknown, never False
+        return None
+    if ambiguous:
+        return None
+    return reachable is not None
+
+
 def read_open_questions(
     root: Path,
     *,
-    liveness_budget_seconds: float = LIVENESS_BUDGET_SECONDS,
+    liveness_budget_seconds: "float | None" = None,
     clock: "Callable[[], float]" = time.monotonic,
-    resolver: "Callable[[str], tuple[Any, list[str]]] | None" = None,
+    resolver: "Callable[[str], bool | None] | None" = None,
 ) -> "list[Question]":
     """Fold ``operator_question`` minus ``operator_question_closed``.
 
     Ranked by liveness, blocked nodes, age, then id. A malformed line is SKIPPED, never raised, inheriting
     ``read_carveouts``' rule: one bad row must not cost the others. A missing
     index reads as no questions with a recovery hint; an unreadable one fails.
+    Askers resolve newest question first, so a question asked a moment ago is
+    the one whose verdict lands inside the budget.
     """
     _ = root  # The index is machine-wide; retain the argument for caller parity.
     asked: "dict[str, Question]" = {}
@@ -461,13 +500,20 @@ def read_open_questions(
                 closed.add(str(qid))
 
     open_qs = [q for qid, q in asked.items() if qid not in closed]
+    budget = LIVENESS_BUDGET_SECONDS if liveness_budget_seconds is None else liveness_budget_seconds
+    askers_newest_first = [
+        q.asker for q in sorted(open_qs, key=lambda q: q.ts or "", reverse=True) if q.asker
+    ]
     resolved = _resolve_question_liveness(
-        [q.asker for q in open_qs if q.asker],
-        budget_seconds=liveness_budget_seconds,
+        askers_newest_first,
+        budget_seconds=budget,
         clock=clock,
         resolver=resolver,
     )
-    open_qs = [replace(q, live=False if not q.asker else resolved.get(q.asker)) for q in open_qs]
+    # Unknown is the honest value for an asker nobody checked (no asker, or
+    # the budget expired before its verdict landed). False was a verdict
+    # nothing measured; the render already groups asker-less rows separately.
+    open_qs = [replace(q, live=None if not q.asker else resolved.get(q.asker)) for q in open_qs]
     # A stale asker never outranks a reachable one, even when it blocks more.
     # Within each liveness lane, unblock the most nodes first, then honor the
     # questions that have waited longest. No auto-expiry: age only ranks.
@@ -963,8 +1009,9 @@ def render(
             lines.append("  Answering a stale question records the decision but reaches nobody.")
         if has_unknown:
             lines.append(
-                "  Unknown means reachability did not finish inside the report budget; "
-                "answering still records the decision."
+                "  Unknown means the report's quick stores did not find the asker "
+                "inside its budget; answering still records the decision, and "
+                "delivery reads every store."
             )
         if len(outstanding.questions) > QUESTION_RENDER_CAP:
             lines.append(f"  Showing {len(shown)} of {len(outstanding.questions)} open questions.")

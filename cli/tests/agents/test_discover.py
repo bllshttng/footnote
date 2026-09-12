@@ -3151,14 +3151,14 @@ def test_resolve_reachable_keeps_case_distinct_opencode_sessions(tmp_path, monke
     monkeypatch.setattr(
         discover,
         "_reachable_from_transcripts",
-        lambda *_a: (
+        lambda *_a, **_k: (
             [(upper, "opencode", "/upper", True, None), (lower, "opencode", "/lower", True, None)],
             True,
         ),
     )
-    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a, **_k: ([], True))
 
     found, ambiguous = discover.resolve_reachable("SAMEtail", projects_dir=tmp_path / "projects")
 
@@ -3181,7 +3181,7 @@ def test_resolve_reachable_keeps_same_id_under_different_harnesses_distinct(tmp_
     monkeypatch.setattr(
         discover,
         "_reachable_from_transcripts",
-        lambda *_a: (
+        lambda *_a, **_k: (
             [
                 (_SHARED_SID, "claude", "/claude-cwd", True, None),
                 (_SHARED_SID, "codex", "/codex-cwd", True, None),
@@ -3189,9 +3189,9 @@ def test_resolve_reachable_keeps_same_id_under_different_harnesses_distinct(tmp_
             True,
         ),
     )
-    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a, **_k: ([], True))
 
     found, ambiguous = discover.resolve_reachable(_SHARED_SID, projects_dir=tmp_path / "projects")
 
@@ -3319,10 +3319,10 @@ def test_discovery_address_matches_skips_truth_classification(tmp_path, monkeypa
 def test_resolve_reachable_includes_complete_harness_store_hits(tmp_path, monkeypatch):
     """Codex/OpenCode stores participate below the liveness listing."""
     sid = "019fb417-1111-7222-8333-4444deadbeef"
-    monkeypatch.setattr(discover, "_reachable_from_transcripts", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_transcripts", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a, **_k: ([], True))
     monkeypatch.setattr(
         discover,
         "_reachable_from_harness_stores",
@@ -3375,9 +3375,9 @@ def test_resolve_reachable_alias_and_canonical_collision_fails_ambiguous(tmp_pat
         (project / f"{sid}.jsonl").write_text("{}\n")
     aliases = tmp_path / "aliases.json"
     aliases.write_text(json.dumps({alias_sid: "deadbeef"}))
-    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a, **_k: ([], True))
 
     found, ambiguous = discover.resolve_reachable(
         "deadbeef", projects_dir=project.parent, name_map_path=aliases
@@ -3393,9 +3393,9 @@ def test_resolve_reachable_canonical_and_legacy_collision_fails_ambiguous(tmp_pa
     project.mkdir(parents=True)
     for sid in (legacy_sid, canonical_sid):
         (project / f"{sid}.jsonl").write_text("{}\n")
-    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
-    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a, **_k: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a, **_k: ([], True))
     found, ambiguous = discover.resolve_reachable("deadbeef", projects_dir=project.parent)
     assert found is None
     assert sorted(ambiguous) == sorted([legacy_sid, canonical_sid])
@@ -3832,3 +3832,87 @@ def test_long_basename_collision_stays_inside_the_stored_cap(tmp_path, capsys):
     for value in first.values():
         assert len(value) <= _MAX_STORED_ALIAS_LEN, value
     assert capsys.readouterr().err == ""
+
+
+# --- the report's subset read: named stores only, one listing per batch ------
+
+
+def test_resolve_reachable_sources_subset_reads_only_the_named_stores(
+    tmp_path, monkeypatch
+):
+    """AC15: sources=("transcript",) consults the transcript store ONLY, so a
+    token that exists only in the registry reads (None, []) there, and the
+    default call still finds it."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    registry_only = "d655c326-1111-2222-3333-444455556666"
+    write_registry(
+        [
+            AgentEntry(
+                name="registered-only",
+                harness="claude",
+                harness_session_id=registry_only,
+                short_id="d655c326",
+                cwd="/repo/two",
+                log_path="/tmp/claude2.log",
+            )
+        ],
+        path=registry,
+    )
+
+    found, ambiguous = discover.resolve_reachable(
+        registry_only,
+        projects_dir=tmp_path / "projects",
+        registry_path=registry,
+        sources=("transcript",),
+    )
+    assert (found, ambiguous) == (None, []), (
+        "a subset that excludes the registry cannot answer for its tokens"
+    )
+    found, _ambiguous = discover.resolve_reachable(
+        registry_only,
+        projects_dir=tmp_path / "projects",
+        registry_path=registry,
+    )
+    assert found is not None, "the default call reads every store"
+
+
+def test_scan_cache_reuses_one_transcript_listing_across_tokens(
+    tmp_path, monkeypatch
+):
+    """One scan_files listing serves the whole batch; no cache rescans."""
+    use_tmpdir(monkeypatch, tmp_path)
+    session_id = "c655c326-1111-2222-3333-444455556666"
+    _write_transcript(tmp_path / "projects", cwd="/repo/one", session_id=session_id)
+
+    calls = {"n": 0}
+    real_scan = discover.scan_files
+
+    def counting_scan(*a, **k):
+        calls["n"] += 1
+        return real_scan(*a, **k)
+
+    monkeypatch.setattr(discover, "scan_files", counting_scan)
+
+    cache: dict = {}
+    for _ in range(3):
+        found, _amb = discover.resolve_reachable(
+            session_id,
+            projects_dir=tmp_path / "projects",
+            registry_path=tmp_path / "no-registry.json",
+            sources=("transcript",),
+            scan_cache=cache,
+        )
+        assert found is not None
+    assert calls["n"] == 1, "one listing per batch, not one per token"
+
+    for _ in range(2):
+        discover.resolve_reachable(
+            session_id,
+            projects_dir=tmp_path / "projects",
+            registry_path=tmp_path / "no-registry.json",
+            sources=("transcript",),
+        )
+    assert calls["n"] == 3, "a caller that passes no cache rescans, unchanged"
