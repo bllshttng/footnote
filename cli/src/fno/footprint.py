@@ -258,67 +258,34 @@ def parse_footprint(
             new_state_format = len(header) > 2 and header[2] == "STAT"
             continue
         try:
-            state = ""
-            if new_format and new_state_format:
-                fields = line.split(None, 6)
-                if len(fields) != 7:
-                    raise ValueError("wrong new-format field count")
-                pid = int(fields[0])
-                ppid = int(fields[1])
-                state = fields[2]
-                elapsed = _elapsed_seconds(fields[3])
-                cpu_percent = float(fields[4])
-                rss = int(fields[5])
-                command = fields[6].strip()
-            elif new_format:
-                fields = line.split(None, 5)
-                if len(fields) != 6:
-                    raise ValueError("wrong new-format field count")
-                pid = int(fields[0])
-                ppid = int(fields[1])
-                elapsed = _elapsed_seconds(fields[2])
-                cpu_percent = float(fields[3])
-                rss = int(fields[4])
-                command = fields[5].strip()
+            # Shapes, newest first: (maxsplit, has_state, has_ppid). The first
+            # that parses wins; a real etime carries a colon where a state
+            # never does, so the shapes cannot silently collide.
+            if new_format:
+                shapes = [(6, True, True)] if new_state_format else [(5, False, True)]
             else:
-                new_shape = False
-                fields = line.split(None, 6)
-                if len(fields) == 7:
-                    try:
-                        pid = int(fields[0])
-                        ppid = int(fields[1])
-                        state = fields[2]
-                        elapsed = _elapsed_seconds(fields[3])
-                        cpu_percent = float(fields[4])
-                        rss = int(fields[5])
-                        command = fields[6].strip()
-                        new_shape = True
-                    except (TypeError, ValueError):
-                        new_shape = False
-                        state = ""
-                if not new_shape:
-                    fields = line.split(None, 5)
-                    if len(fields) == 6:
-                        try:
-                            pid = int(fields[0])
-                            ppid = int(fields[1])
-                            elapsed = _elapsed_seconds(fields[2])
-                            cpu_percent = float(fields[3])
-                            rss = int(fields[4])
-                            command = fields[5].strip()
-                            new_shape = True
-                        except (TypeError, ValueError):
-                            new_shape = False
-                if not new_shape:
-                    fields = line.split(None, 4)
-                    if len(fields) != 5:
-                        raise ValueError("wrong field count")
+                shapes = [(6, True, True), (5, False, True), (4, False, False)]
+            state = ""
+            for maxsplit, has_state, has_ppid in shapes:
+                fields = line.split(None, maxsplit)
+                if len(fields) != maxsplit + 1:
+                    continue
+                try:
                     pid = int(fields[0])
-                    ppid = None
-                    elapsed = _elapsed_seconds(fields[1])
-                    cpu_percent = float(fields[2])
-                    rss = int(fields[3])
-                    command = fields[4].strip()
+                    ppid = int(fields[1]) if has_ppid else None
+                    cursor = 2 if has_ppid else 1
+                    if has_state:
+                        state = fields[cursor]
+                        cursor += 1
+                    elapsed = _elapsed_seconds(fields[cursor])
+                    cpu_percent = float(fields[cursor + 1])
+                    rss = int(fields[cursor + 2])
+                    command = fields[cursor + 3].strip()
+                    break
+                except (TypeError, ValueError):
+                    state = ""
+            else:
+                raise ValueError("no shape matched")
             if pid < 0 or (ppid is not None and ppid < 0) or not command or cpu_percent < 0 or rss < 0:
                 raise ValueError("invalid process fields")
         except (TypeError, ValueError):

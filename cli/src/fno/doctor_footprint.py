@@ -891,12 +891,10 @@ def cpu_admission(
 
 
 class MachinePressure(NamedTuple):
-    """The whole-machine band's verdict, computed once and read verbatim by the
-    ``machine_watch`` arm (x-d6ad LD3). ``verdict`` is ``calm`` | ``hot`` |
-    ``unreadable``; the band is whole-machine CPU against
-    ``resource_meter.thresholds.cpu_busy_fraction`` (LD4). ``load_15m`` and
-    ``runnable`` ride as context and never decide (LD2). ``reason`` is the
-    full sentence the arm prints."""
+    """The whole-machine band's verdict, computed once and read verbatim by
+    the machine_watch arm (x-d6ad LD3). The band sits on whole-machine CPU
+    against ``resource_meter.thresholds.cpu_busy_fraction``; ``load_15m`` and
+    ``runnable`` are context and never decide (LD2)."""
 
     verdict: str
     busy_fraction: float | None
@@ -919,69 +917,57 @@ def machine_pressure(
     throttle_minutes: int,
     failure: str | None = None,
 ) -> MachinePressure:
-    """The one whole-machine decider (x-d6ad LD2/LD4). The band reads
-    ``measured_cpu_cores / capacity_cores`` against ``busy_band``; load and
-    the runnable count are context in every reason and decide nothing. A
-    ``None`` reading is ``unreadable`` with the failure text as the reason -
-    an unreadable sensor never reads as calm. Pure: no clocks, no
-    subprocesses, no config."""
+    """The one whole-machine decider (x-d6ad LD2/LD4). A ``None`` reading is
+    ``unreadable`` with the failure text as the reason - an unreadable sensor
+    never reads as calm. Pure: no clocks, no subprocesses, no config."""
     if reading is None:
-        return MachinePressure(
-            verdict="unreadable",
-            busy_fraction=None,
-            band=busy_band,
-            machine_cores=None,
-            capacity_cores=capacity_cores,
-            runnable=None,
-            processes=None,
-            load_15m=load_15m,
-            throttle_minutes=throttle_minutes,
-            reason=failure or "machine reading unavailable",
+        busy = None
+        verdict, reason = "unreadable", failure or "machine reading unavailable"
+        cores = runnable = processes = None
+    else:
+        raw_busy = reading.measured_cpu_cores / capacity_cores if capacity_cores > 0 else 0.0
+        busy = round(raw_busy, 3)
+        verdict = "hot" if raw_busy > busy_band else "calm"
+        load_text = f"{load_15m:.1f}" if load_15m is not None else "unavailable"
+        reason = (
+            f"machine {raw_busy * 100:.1f}% "
+            + ("crosses" if verdict == "hot" else "of")
+            + f" band {busy_band * 100:.0f}% "
+            f"({reading.measured_cpu_cores:.3f} of {capacity_cores:.2f} cores) -> "
+            f"{verdict}; load_15m {load_text}, {reading.runnable_count} runnable of "
+            f"{reading.machine_process_count} processes"
         )
-    busy = reading.measured_cpu_cores / capacity_cores if capacity_cores > 0 else 0.0
-    verdict = "hot" if busy > busy_band else "calm"
-    load_text = f"{load_15m:.1f}" if load_15m is not None else "unavailable"
-    reason = (
-        f"machine {busy * 100:.1f}% "
-        + ("crosses" if verdict == "hot" else "of")
-        + f" band {busy_band * 100:.0f}% "
-        f"({reading.measured_cpu_cores:.3f} of {capacity_cores:.2f} cores) -> "
-        f"{verdict}; load_15m {load_text}, {reading.runnable_count} runnable of "
-        f"{reading.machine_process_count} processes"
-    )
+        cores, runnable, processes = (
+            reading.measured_cpu_cores,
+            reading.runnable_count,
+            reading.machine_process_count,
+        )
     return MachinePressure(
         verdict=verdict,
-        busy_fraction=round(busy, 3),
+        busy_fraction=busy,
         band=busy_band,
-        machine_cores=reading.measured_cpu_cores,
+        machine_cores=cores,
         capacity_cores=capacity_cores,
-        runnable=reading.runnable_count,
-        processes=reading.machine_process_count,
+        runnable=runnable,
+        processes=processes,
         load_15m=load_15m,
         throttle_minutes=throttle_minutes,
         reason=reason,
     )
 
 
-def _machine_band_config() -> tuple[float, int]:
-    """``(cpu_busy_fraction, throttle_minutes)`` from resource_meter, degraded
-    to the registry defaults."""
+def _compute_machine_pressure(reading: Footprint, load_snapshot: Any) -> MachinePressure:
+    """Feed :func:`machine_pressure` from one snapshot; the seam every reader
+    of the ``machine`` object shares. Band and throttle come from
+    ``config.resource_meter``, degraded to the registry defaults."""
     try:
         from fno.config import load_settings
 
         meter = load_settings().resource_meter
-        return (
-            float(meter.thresholds.cpu_busy_fraction),
-            int(meter.notifications.throttle_minutes),
-        )
+        band = float(meter.thresholds.cpu_busy_fraction)
+        throttle = int(meter.notifications.throttle_minutes)
     except Exception:  # noqa: BLE001 - footprint is a reading, not an enforcer
-        return 0.9, 60
-
-
-def _compute_machine_pressure(reading: Footprint, load_snapshot: Any) -> MachinePressure:
-    """Feed :func:`machine_pressure` from one snapshot; the seam the payload
-    shares with every reader of the ``machine`` object."""
-    band, throttle = _machine_band_config()
+        band, throttle = 0.9, 60
     return machine_pressure(
         reading,
         capacity_cores=_cpu_capacity_cores(),

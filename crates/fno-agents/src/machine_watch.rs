@@ -35,6 +35,24 @@ pub struct MachineWatchState {
     last_notified: Option<Instant>,
 }
 
+/// The arm as the daemon holds it: cadence stamp, one-in-flight gate, and the
+/// streak/throttle memory in one handle, so the loop declares one name.
+pub struct Arm {
+    last_tick: Mutex<Option<Instant>>,
+    in_flight: Arc<AtomicBool>,
+    state: Arc<Mutex<MachineWatchState>>,
+}
+
+impl Default for Arm {
+    fn default() -> Self {
+        Self {
+            last_tick: Mutex::new(None),
+            in_flight: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(MachineWatchState::default())),
+        }
+    }
+}
+
 /// One tick's outcome: the tick row's `acted`, `skip_reason` and `detail`.
 pub struct WatchOutcome {
     pub acted: u64,
@@ -169,19 +187,19 @@ fn short(text: &str) -> String {
 /// The daemon-facing wrapper: due-check plus one-in-flight gate, the
 /// `maybe_retirement_sweep` shape. The probe shells out (8s budget), so the
 /// whole body runs off-loop; every path ends in exactly one tick row.
-pub fn maybe_tick(
-    last_tick: &mut Instant,
-    in_flight: &Arc<AtomicBool>,
-    state: &Arc<Mutex<MachineWatchState>>,
-    home: AgentsHome,
-    interval: Duration,
-) {
-    if last_tick.elapsed() < interval || in_flight.swap(true, Ordering::SeqCst) {
-        return;
+pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
+    let interval = Duration::from_secs(MACHINE_WATCH_INTERVAL_S);
+    {
+        let mut last = arm.last_tick.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|t| t.elapsed() < interval)
+            || arm.in_flight.swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        *last = Some(Instant::now());
     }
-    *last_tick = Instant::now();
-    let flag = Arc::clone(in_flight);
-    let state = Arc::clone(state);
+    let flag = Arc::clone(&arm.in_flight);
+    let state = Arc::clone(&arm.state);
     tokio::task::spawn_blocking(move || {
         let _gate = crate::daemon::SweepGate(flag);
         let reading: Result<crate::spawn_gate::FootprintCausePayload, String> =
