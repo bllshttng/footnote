@@ -60,6 +60,20 @@ def test_temp_resolving_live_link_detected(bin_dir, tmp_path):
     assert defect["problem"] == "temp-resolving"
 
 
+def test_sibling_dir_extending_the_temp_root_name_is_not_temp(bin_dir, tmp_path, monkeypatch):
+    # A prefix test without a separator boundary reads a sibling whose name
+    # extends the temp root's basename as inside temp.
+    monkeypatch.setattr(shim_check, "_temp_root", lambda: str(tmp_path / "T"))
+    sibling = tmp_path / "Ttools" / "bin"
+    sibling.mkdir(parents=True)
+    (sibling / "fno-py").write_text("#!/bin/sh\ntrue\n")
+    os.symlink(sibling / "fno-py", bin_dir / "fno-py")
+
+    report = scan(bin_dir)
+
+    assert report["healthy"] is True, report
+
+
 def test_healthy_link_outside_temp_is_clean(bin_dir):
     os.symlink("/usr/bin/true", bin_dir / "fno-footprint-cause")
 

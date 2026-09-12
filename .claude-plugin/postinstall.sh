@@ -72,6 +72,8 @@ shim_sweep() {
   py="$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null)/fno/bin/fno-py"
   td="$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir --bin 2>/dev/null)" || td="${UV_TOOL_BIN_DIR:-$HOME/.local/bin}"
   [[ -x "$py" ]] || return 0  # no venv python: the verify gate already failed
+  # An installed fno predating the sweep module has nothing to sweep.
+  "$py" -c "import fno.setup.shim_check" 2>/dev/null || return 0
   "$py" -m fno.setup.shim_check --repair --bin-dir "$td" && return 0
   err "fno shims in $td dangle or point into a temp dir and could not be relinked to the durable copy. Inspect: $py -m fno.setup.shim_check --bin-dir $td"
   return 1

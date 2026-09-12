@@ -35,7 +35,7 @@ def scan(bin_dir: Path | None = None) -> dict:
         resolved = target.resolve()
         if not resolved.exists():
             defects.append(_defect(entry, resolved, "dangling"))
-        elif str(resolved).startswith(temp_root):
+        elif resolved.is_relative_to(Path(temp_root)):
             defects.append(_defect(entry, resolved, "temp-resolving"))
     return {"bin_dir": str(directory), "defects": defects, "healthy": not defects}
 
@@ -97,4 +97,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

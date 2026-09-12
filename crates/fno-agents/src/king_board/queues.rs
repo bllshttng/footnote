@@ -448,7 +448,6 @@ pub(crate) fn actionable_tally(queues: &[Queue], warnings: &mut Vec<String>) -> 
         return readable;
     }
     blind.sort();
-    blind.dedup();
     warnings.push(format!(
         "actionable is unknown: {} actionable queue(s) unreadable ({}) - the count is not a row count",
         blind.len(),

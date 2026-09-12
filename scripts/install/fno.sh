@@ -405,6 +405,9 @@ frontdoor_receipt() {
 # that dangles or resolves into a temp dir; fail loud when unrepairable.
 shim_sweep() {
 	[ -n "$FNO_TOOL_BIN" ] || FNO_TOOL_BIN="${HOME:-}/.local/bin"
+	# An installed fno predating the sweep module has nothing to sweep; the
+	# wheel that ships the module always sweeps.
+	"$FNO_VENV_PY" -c "import fno.setup.shim_check" 2>/dev/null || return 0
 	"$FNO_VENV_PY" -m fno.setup.shim_check --repair --bin-dir "$FNO_TOOL_BIN" && return 0
 	say "INCOMPLETE install: fno shims in $FNO_TOOL_BIN dangle or point into a temp dir and could not be relinked to the durable copy. Inspect: $FNO_VENV_PY -m fno.setup.shim_check --bin-dir $FNO_TOOL_BIN"
 	return 1
