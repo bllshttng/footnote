@@ -4318,16 +4318,32 @@ def cmd_next(
         reads stay strict: an unreadable source refuses the selection, it never
         substitutes an empty occupancy set.
         """
+        from concurrent.futures import ThreadPoolExecutor
+
         from fno.graph.statuses import live_worked_node_ids
 
-        claimed = _require_live_claimed_node_ids("backlog next")
-        try:
-            worked = live_worked_node_ids(strict=True, entries=entries)
-        except Exception as exc:  # noqa: BLE001 - unknown liveness refuses
-            typer.echo(
-                f"Error: worked overlay unreadable: {exc}; selection refused", err=True
-            )
-            raise typer.Exit(code=1) from exc
+        # Both reads are subprocess-bound (the native claim sweep, the roster
+        # probe) and independent, so they overlap instead of queueing. The
+        # claim verdict is still read first, so its refusal stays the one a
+        # caller sees when both sources are down.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claim_read = pool.submit(_live_claimed_node_ids, strict=True)
+            worked_read = pool.submit(live_worked_node_ids, strict=True, entries=entries)
+            try:
+                claimed = claim_read.result()
+            except Exception as exc:  # noqa: BLE001 - unknown claim state refuses
+                typer.echo(
+                    "Error: live claim state is unavailable; backlog next refused.",
+                    err=True,
+                )
+                raise typer.Exit(code=1) from exc
+            try:
+                worked = worked_read.result()
+            except Exception as exc:  # noqa: BLE001 - unknown liveness refuses
+                typer.echo(
+                    f"Error: worked overlay unreadable: {exc}; selection refused", err=True
+                )
+                raise typer.Exit(code=1) from exc
         try:
             observer = read_planned_unclaimed_from_entries(
                 entries,
