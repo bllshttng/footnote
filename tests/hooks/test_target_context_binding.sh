@@ -161,20 +161,58 @@ fi
 
 # ── 3. One payload-preparation entry for both substrates ──────────────────
 
-PAYLOAD_CHECK="$(REPO_ROOT="$REPO_ROOT" FNO_TASK_CONTEXT_FILE="$BOUND/.fno/artifacts/handoff/task-context-${NODE}.json" \
+# The block renders natively, so this section needs the checkout's own binary;
+# shards without it skip honestly rather than read absence as pass or fail.
+if PYTHONPATH="$REPO_ROOT/cli/src" python3 -c "from fno.rust_binary import find_dev_binary; import sys; sys.exit(0 if find_dev_binary() else 1)"; then
+MINTED_BINDING="$BOUND/.fno/artifacts/handoff/task-context-${NODE}.json"
+PYTHONPATH="$REPO_ROOT/cli/src" python3 - "$BOUND" "$MINTED_BINDING" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+from fno.rust_binary import verb_call
+
+repo, out = Path(sys.argv[1]), Path(sys.argv[2])
+plan = (repo / "PLAN.md").read_text()
+digest = hashlib.sha256(plan.encode()).hexdigest()
+request = {
+    "version": 1,
+    "node": "x-59b0",
+    "attempt": "20260912T055500Z-test99-abc123",
+    "harness": "claude",
+    "session": "sess-context-worker",
+    "worktree": str(repo),
+    "plan_path": "PLAN.md",
+    "plan_digest": digest,
+    "required_constraints": [
+        "Do not widen scope beyond the plan",
+        "Atomic commits per task",
+    ],
+    "required_sources": [{
+        "path": "PLAN.md",
+        "content_revision": "b48ba4b8c",
+        "content_digest": digest,
+        "byte_size": len(plan.encode()),
+    }],
+    "source_bytes": len(plan.encode()),
+    "payload_bytes": 512,
+    "stage": "prepared",
+}
+answer = verb_call("task-context-prepare", {"binding": request})
+assert answer.get("ok"), answer
+bound = dict(request)
+bound["binding_digest"] = answer["binding_digest"]
+out.write_text(json.dumps(bound, indent=2, sort_keys=True) + "\n")
+print("MINT_OK")
+PY
+MINT_RC=$?
+if [[ "$MINT_RC" != "0" ]]; then
+    fail "mint the payload-section binding through the real verb (rc=$MINT_RC)"
+fi
+PAYLOAD_CHECK="$(REPO_ROOT="$REPO_ROOT" FNO_TASK_CONTEXT_FILE="$MINTED_BINDING" \
 PYTHONPATH="$REPO_ROOT/cli/src" python3 - "$BOUND/PLAN.md" <<'PY'
-import json, sys
-from fno.agents.spawn_payload import (
-    BREVITY_MARKER,
-    prepare_spawn_payload,
-    task_context_block,
-    load_task_context,
-)
+import json, os
+from fno.agents.spawn_payload import BREVITY_MARKER, prepare_spawn_payload
 
 original = "Work the node; report at the boundary."
-binding = load_task_context()
-assert binding is not None, "binding failed to load from env"
-
 payload, measures = prepare_spawn_payload(original)
 assert payload.startswith(original), "original normalized message must stay the prefix"
 assert BREVITY_MARKER in payload, "brevity guidance still rides once"
@@ -188,20 +226,18 @@ payload2, measures2 = prepare_spawn_payload(original)
 assert payload2 == payload and measures2 == measures, "pane/non-pane payloads diverged"
 
 # A payload that already carries the block never grows a second one.
-again, again_measures = prepare_spawn_payload(payload)
+again, _ = prepare_spawn_payload(payload)
 assert again.count("<task-context ") == 1, "block duplicated on re-preparation"
 
 # Without a binding, the entry degrades to the historical brevity-only shape.
-sys.argv = ["x"]
-import os
 os.environ.pop("FNO_TASK_CONTEXT_FILE", None)
 plain, plain_measures = prepare_spawn_payload(original)
 assert "<task-context " not in plain and plain_measures["task_context"] is False
 
-# A corrupt file loads as UNSET (no block), never as a binding.
+# A corrupt or missing binding loads as UNSET (no block), never fabricated.
 os.environ["FNO_TASK_CONTEXT_FILE"] = "/nonexistent/task-context.json"
-broken = load_task_context()
-assert broken is None, "unreadable binding must load as unset"
+broken_payload, broken_measures = prepare_spawn_payload(original)
+assert "<task-context " not in broken_payload and broken_measures["task_context"] is False
 
 # Source contents never ride the payload.
 assert "plan bytes" not in payload and "# plan" not in payload, "source contents leaked"
@@ -212,6 +248,9 @@ if [[ "$PAYLOAD_CHECK" == *"PAYLOAD_OK"* ]]; then
     pass "one payload entry: once-only carry, prefix preserved, corrupt=unset"
 else
     fail "one payload entry contract; output: $PAYLOAD_CHECK"
+fi
+else
+    echo "  SKIP: payload entry (no dev binary; the block renders natively)"
 fi
 
 echo
