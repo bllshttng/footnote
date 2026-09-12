@@ -16,8 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from fno.king.escalate import dedupe_key, escalate, question_text
-from fno.outstanding.core import read_open_questions
+from fno.agents.stale_escalate import dedupe_key
+from fno.king.escalate import escalate, question_text
+from fno.outstanding.core import read_open_questions, read_question_events
 
 STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
 
@@ -52,13 +53,74 @@ def test_one_stalled_board_records_exactly_one_question(tmp_path: Path) -> None:
     assert len(read_open_questions(tmp_path)) == 1
 
 
-def test_a_different_stalled_set_is_a_different_question(tmp_path: Path) -> None:
-    """The board changed, so the ask changed. Dedupe must not swallow that."""
-    _run(tmp_path, STALLED)
-    outcome, _ = _run(tmp_path, ["undispatched:x-9999"])
+def test_a_changed_board_supersedes_and_asks_fresh(tmp_path: Path) -> None:
+    """The board is a SNAPSHOT of a measured set, so the newest reading
+    supersedes: the old row closes mechanically and one question stays open.
+
+    This reverses the original rule ("a different board is a different ask"):
+    379 near-identical open rows showed the board churns while the question
+    does not, so arrival-order piling was the defect, not the dedupe.
+    """
+    _first_outcome, first_id = _run(tmp_path, STALLED)
+    outcome, new_id = _run(tmp_path, ["undispatched:x-9999"])
 
     assert outcome == "recorded"
-    assert len(read_open_questions(tmp_path)) == 2
+    assert new_id != first_id
+    open_qs = read_open_questions(tmp_path)
+    assert [q.id for q in open_qs] == [new_id]
+
+    closes = [
+        rec["data"]
+        for rec in read_question_events()
+        if rec.get("type") == "operator_question_closed"
+        and rec.get("data", {}).get("question_id") == first_id
+    ]
+    assert len(closes) == 1
+    assert closes[0]["closed_by"] == "king-escalation-escalate"
+    assert "superseded by" in closes[0]["answer"]
+
+
+def test_an_identity_keyed_family_is_never_swept(tmp_path: Path) -> None:
+    """A family outside the snapshot markers (here a
+    session-transition-branch row) is a distinct question per key: a king
+    escalation supersedes king rows only, never it."""
+    from fno.events import operator_question
+    from fno.outstanding.core import append_question_event
+
+    branch_id = "q-bcc11a22"
+    append_question_event(
+        operator_question(
+            question_id=branch_id,
+            question="[session-transition-branch:k1:p0:p1] which successor holds the lane?",
+            session_id="watchdog-test",
+            cwd=str(tmp_path),
+            ask="decide",
+            source="daemon",
+        ),
+        tmp_path,
+    )
+    _run(tmp_path, STALLED)
+
+    remaining = {q.id for q in read_open_questions(tmp_path)}
+    assert branch_id in remaining
+    assert len(remaining) == 2
+
+
+def test_a_failed_supersede_close_still_records_the_new_ask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The channel appends BEFORE it closes: a store failure mid-supersede
+    costs a duplicate ask, never a dropped one."""
+    _run(tmp_path, STALLED)
+
+    def broken(*_a, **_k):
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr("fno.agents.stale_escalate._close_question", broken)
+    outcome, qid = _run(tmp_path, ["undispatched:x-9999"])
+
+    assert outcome == "recorded"
+    assert qid in [q.id for q in read_open_questions(tmp_path)]
 
 
 def test_the_key_ignores_order_and_repeats(tmp_path: Path) -> None:

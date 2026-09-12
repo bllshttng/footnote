@@ -289,6 +289,40 @@ def ask(
         f'fno inbox outstanding clear {qid} --answer "..."',
         err=True,
     )
+    # A receipt that names an id but says nothing about visibility is the shape
+    # that made two fleet blockers invisible (q-90982503, q-e6dc2881): the
+    # queue prints QUESTION_RENDER_CAP rows, so say where this one lands.
+    # liveness_budget_seconds=0.0: the receipt must not spend a liveness probe
+    # budget on a write path, and an unresolved lane reads None - the position
+    # is a lower bound on visibility, never an optimistic one.
+    position: "int | None" = None
+    total: "int | None" = None
+    try:
+        from fno.outstanding.core import QUESTION_RENDER_CAP, read_open_questions
+
+        ranked = read_open_questions(_storage_root(), liveness_budget_seconds=0.0)
+        position = next(i for i, q in enumerate(ranked) if q.id == qid) + 1
+        total = len(ranked)
+    except Exception:  # noqa: BLE001 - a receipt must never fail the recorded ask
+        position = total = None
+    if position is None:
+        typer.echo(
+            "outstanding: recorded, but its render position could not be read; "
+            "run fno inbox outstanding to check.",
+            err=True,
+        )
+    elif position <= QUESTION_RENDER_CAP:
+        typer.echo(
+            f"outstanding: {qid} renders at position {position} of {total}.",
+            err=True,
+        )
+    else:
+        typer.echo(
+            f"outstanding: {qid} does NOT render: position {position} of {total}, "
+            f"and fno inbox outstanding prints {QUESTION_RENDER_CAP}. Nothing will "
+            "show it to the operator; raise it another way or answer it yourself.",
+            err=True,
+        )
     # stdout carries the value: the new question id.
     typer.echo(qid)
 

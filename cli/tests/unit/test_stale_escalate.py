@@ -186,6 +186,59 @@ def test_mechanical_supersede_close_does_not_suppress_a_returning_set(
     assert third_id not in (first_id, second_id)
 
 
+def test_emptied_finding_set_closes_the_open_ask(tmp_path: Path) -> None:
+    """The empty branch reconciles like any other: a measured-clean sweep
+    closes the open ask instead of leaving it open and unread forever."""
+    from types import SimpleNamespace
+
+    from fno.agents.stale_escalate import escalate_unfinished
+
+    finding = SimpleNamespace(
+        kind="dirty", subject="/w/x", basis="82 files dirty",
+        clear_command="fno agents workspace worktree cleanup", node_id=None,
+        pr_number=None, cwd="/w/x", age_s=100.0,
+    )
+    _outcome, asked_id = escalate_unfinished(
+        [finding], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+    outcome, closed_id = escalate_unfinished(
+        [], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+
+    assert outcome == "closed"
+    assert closed_id == asked_id
+    assert read_open_questions(tmp_path) == []
+
+
+def test_changed_finding_set_supersedes_the_old_ask(tmp_path: Path) -> None:
+    """The unfinished-work emitter rides the shared fold: a changed finding
+    set supersedes (one open row), it never piles a second ask beside the
+    first - the same snapshot rule the stale lane already held."""
+    from types import SimpleNamespace
+
+    from fno.agents.stale_escalate import escalate_unfinished
+
+    def _finding(subject: str):
+        return SimpleNamespace(
+            kind="dirty", subject=subject, basis="82 files dirty",
+            clear_command="fno agents workspace worktree cleanup", node_id=None,
+            pr_number=None, cwd=subject, age_s=100.0,
+        )
+
+    _first_outcome, first_id = escalate_unfinished(
+        [_finding("/w/a")], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+    outcome, new_id = escalate_unfinished(
+        [_finding("/w/b")], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+
+    assert outcome == "recorded"
+    assert new_id != first_id
+    open_qs = read_open_questions(tmp_path)
+    assert [q.id for q in open_qs] == [new_id]
+    assert "/w/b" in open_qs[0].question
+
+
 def test_answered_finding_ask_suppresses_the_renag(tmp_path: Path) -> None:
     """The unfinished-work emitter rides the same fold: an answered finding
     set never re-asks while unchanged."""
