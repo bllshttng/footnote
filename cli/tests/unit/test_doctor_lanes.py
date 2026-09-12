@@ -488,6 +488,58 @@ def test_the_cpu_admission_arm_names_the_whole_vocabulary(monkeypatch) -> None:
     assert arm.value["load_5m"] == 122.3
 
 
+def _instrument_admission():
+    from fno.footprint import Admission
+
+    return Admission(
+        verdict="refuse",
+        axis="cpu_instrument",
+        reason=(
+            "spawn-gate: the CPU instrument is unreadable "
+            "(footprint unavailable: ps unavailable: timed out after 5.0s); "
+            "refusing to spawn (--force to bypass)"
+        ),
+        share_low=0.0,
+        share_high=0.0,
+        bound="exact",
+        fleet_cores=0.0,
+        machine_cores=0.0,
+        capacity_cores=0.0,
+        ceiling=0.0,
+        gap=None,
+        load_15m=None,
+        backstop=0.0,
+    )
+
+
+def test_the_cpu_admission_arm_goes_dark_when_the_instrument_never_answered(
+    monkeypatch,
+) -> None:
+    """x-5f0b: zeros the instrument never measured are not a reading. The
+    arm carries the admission's own words as its reason instead."""
+    from fno.agents import spawn_gate
+
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: _instrument_admission())
+    arm = dl._cpu_admission_arm()
+    assert arm.state == dl.DARK
+    assert arm.value is None
+    assert "ps unavailable: timed out after 5.0s" in arm.reason
+
+
+def test_a_dark_cpu_admission_arm_never_refuses_the_lane_answer(monkeypatch) -> None:
+    """read_lanes gates on the whole-machine cpu and memory arms only; the
+    admission arm going dark leaves the lane answer standing."""
+    from fno.agents import spawn_gate
+
+    _healthy_reading(monkeypatch)
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: _instrument_admission())
+    reading = dl.read_lanes()
+    assert not reading.refused
+    assert reading.lane_count is not None
+    assert reading.refusal_reason == ""
+    assert reading.arm("cpu admission").state == dl.DARK
+
+
 def test_the_census_carries_top_consumers_from_the_ps_read(monkeypatch) -> None:
     """x-aeab: name what is saturating the box, from rows a read already
     performed - never a second instrument."""

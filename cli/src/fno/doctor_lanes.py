@@ -191,6 +191,10 @@ def _cpu_admission_arm() -> ArmReading:
     from fno.agents.spawn_gate import _cpu_axis
 
     admission = _cpu_axis()
+    if admission.axis == "cpu_instrument":
+        # Zeros the instrument never measured are not a reading (x-5f0b);
+        # the admission's own words name why the arm is dark.
+        return ArmReading("cpu admission", DARK, reason=admission.reason)
     load_1m = load_5m = None
     try:
         load_1m, load_5m, _ = os.getloadavg()

@@ -234,6 +234,41 @@ def test_cpu_share_row_reports_refuse_from_the_shared_decision(monkeypatch):
     assert rows["load-backstop"].verdict == "pass"
 
 
+def test_unreadable_instrument_renders_unmeasured_never_zero(monkeypatch):
+    """x-5f0b defect 2: an admission the instrument never measured renders
+    as unmeasured, not as 0.00/0.00 - the same shape a real reading has."""
+    from fno.agents import spawn_gate
+    from fno.backlog import explain
+    from fno.footprint import Admission
+
+    admission = Admission(
+        verdict="refuse",
+        axis="cpu_instrument",
+        reason=(
+            "spawn-gate: the CPU instrument is unreadable "
+            "(ps unavailable: timed out after 5.0s); refusing to spawn "
+            "(--force to bypass)"
+        ),
+        share_low=0.0,
+        share_high=0.0,
+        bound="exact",
+        fleet_cores=0.0,
+        machine_cores=0.0,
+        capacity_cores=0.0,
+        ceiling=0.0,
+        gap=None,
+        load_15m=None,
+        backstop=0.0,
+    )
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
+    rows = {g.name: g for g in explain._machine_gates()}
+    assert rows["cpu-share"].measured == "unreadable"
+    assert rows["cpu-share"].threshold == "-"
+    assert rows["cpu-share"].verdict == "refuse"
+    assert rows["load-backstop"].measured == "-"
+    assert rows["load-backstop"].threshold == "-"
+
+
 def test_preview_stops_when_the_cpu_axis_would_refuse(monkeypatch):
     """The dry run passes no gate the real spawn would refuse on. The
     preview reads the gate's own admission."""
