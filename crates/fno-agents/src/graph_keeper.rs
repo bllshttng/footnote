@@ -1957,7 +1957,7 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
             Ok(json!({"found": found, "removed": removed}))
         }
         "session_reap_open" => {
-            let node_id = param_str(p, "node_id")?;
+            let node_id = opt_str(p, "node_id");
             let phase = param_str(p, "phase")?;
             let harness = param_str(p, "harness")?;
             let session_id = param_str(p, "session_id")?;
@@ -2467,12 +2467,19 @@ fn stamp_utc(v: &str) -> Result<String, StoreError> {
     Ok(parsed.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
-/// store.reap_open_session_record: close one exact open row with positive
-/// death evidence. `do` REMOVES; every other phase FILLS ended_at; `all`
-/// applies both to every open row carrying the identity.
+/// store.reap_open_session_record: close open rows with positive death
+/// evidence. `do` REMOVES; every other phase FILLS ended_at; `all` applies
+/// both to every open row carrying the identity.
+///
+/// With a node id the op answers about that one entry exactly as before.
+/// Without one (the death-cascade form), it walks every entry and applies
+/// the same semantics to each open row carrying the identity, so one call
+/// settles a session that worked several nodes. `found` means "the named
+/// node exists" on the exact form and "at least one node matched" on the
+/// identity form; `node_ids` names every node the write touched.
 fn session_reap_open(
     entries: &mut Vec<Value>,
-    node_id: &str,
+    node_id: Option<&str>,
     phase: &str,
     harness: &str,
     session_id: &str,
@@ -2505,65 +2512,114 @@ fn session_reap_open(
         Some(v) => stamp_utc(v)?,
         None => chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
     };
-    let Some(idx) = find_exact(entries, node_id) else {
-        return Ok(json!({
-            "found": false, "settled": false, "row_removed": false, "row_closed": false,
-            "status_before": null, "status_after": null, "remaining_open_do": 0,
-        }));
-    };
-    let status_before = entries[idx]
-        .get("status")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let obj = entries[idx].as_object_mut().unwrap();
-    let rows = obj
-        .get("sessions")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     // The crate's one openness predicate (graph_store::is_open_phase_row,
-    // mirroring the Python authority); the closure keeps the call-site shape.
-    let is_open = |r: &Value, phase: &str| graph_store::is_open_phase_row(r, phase);
-    let mut row_removed = false;
-    let mut kept: Vec<Value> = rows.clone();
-    if remove_do {
-        kept.retain(|r| {
-            let matches = is_open(r, "do")
-                && r.get("harness").and_then(Value::as_str) == Some(harness)
-                && r.get("session_id").and_then(Value::as_str) == Some(session_id);
-            if matches {
-                row_removed = true;
-            }
-            !matches
-        });
-    }
-    let mut row_closed = false;
-    for cp in &close_phases {
-        for r in kept.iter_mut() {
-            if is_open(r, cp)
-                && r.get("harness").and_then(Value::as_str) == Some(harness)
-                && r.get("session_id").and_then(Value::as_str) == Some(session_id)
-            {
-                r.as_object_mut()
-                    .unwrap()
-                    .entry("ended_at".to_string())
-                    .or_insert_with(|| Value::String(ended.clone()));
-                row_closed = true;
+    // mirroring the Python authority) applied to one entry's rows; both
+    // forms share it so they cannot drift.
+    let reap_rows = |rows: &mut Vec<Value>| -> (bool, bool) {
+        let mut row_removed = false;
+        if remove_do {
+            rows.retain(|r| {
+                let matches = graph_store::is_open_phase_row(r, "do")
+                    && r.get("harness").and_then(Value::as_str) == Some(harness)
+                    && r.get("session_id").and_then(Value::as_str) == Some(session_id);
+                if matches {
+                    row_removed = true;
+                }
+                !matches
+            });
+        }
+        let mut row_closed = false;
+        for cp in &close_phases {
+            for r in rows.iter_mut() {
+                if graph_store::is_open_phase_row(r, cp)
+                    && r.get("harness").and_then(Value::as_str) == Some(harness)
+                    && r.get("session_id").and_then(Value::as_str) == Some(session_id)
+                {
+                    r.as_object_mut()
+                        .unwrap()
+                        .entry("ended_at".to_string())
+                        .or_insert_with(|| Value::String(ended.clone()));
+                    row_closed = true;
+                }
             }
         }
+        (row_removed, row_closed)
+    };
+    match node_id {
+        Some(node_id) => {
+            let Some(idx) = find_exact(entries, node_id) else {
+                return Ok(json!({
+                    "found": false, "settled": false, "row_removed": false, "row_closed": false,
+                    "status_before": null, "status_after": null, "remaining_open_do": 0,
+                    "node_ids": [],
+                }));
+            };
+            let status_before = entries[idx]
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let obj = entries[idx].as_object_mut().unwrap();
+            let mut rows = obj
+                .get("sessions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let (row_removed, row_closed) = reap_rows(&mut rows);
+            if row_removed || row_closed {
+                obj.insert("sessions".to_string(), Value::Array(rows));
+            }
+            Ok(json!({
+                "found": true,
+                "settled": true,
+                "row_removed": row_removed,
+                "row_closed": row_closed,
+                "status_before": status_before,
+                "status_after": Value::Null,
+                "remaining_open_do": Value::Null,
+                "node_ids": [node_id],
+            }))
+        }
+        None => {
+            let mut node_ids: Vec<String> = Vec::new();
+            let mut row_removed = false;
+            let mut row_closed = false;
+            for idx in 0..entries.len() {
+                if !entries[idx]
+                    .get("sessions")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| !a.is_empty())
+                {
+                    continue;
+                }
+                let node = graph_store::entry_id(&entries[idx]).map(str::to_string);
+                let obj = entries[idx].as_object_mut().unwrap();
+                let mut rows = obj
+                    .get("sessions")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let (removed, closed) = reap_rows(&mut rows);
+                if removed || closed {
+                    if let Some(node) = node {
+                        node_ids.push(node);
+                    }
+                    obj.insert("sessions".to_string(), Value::Array(rows));
+                }
+                row_removed |= removed;
+                row_closed |= closed;
+            }
+            Ok(json!({
+                "found": !node_ids.is_empty(),
+                "settled": true,
+                "row_removed": row_removed,
+                "row_closed": row_closed,
+                "status_before": Value::Null,
+                "status_after": Value::Null,
+                "remaining_open_do": Value::Null,
+                "node_ids": node_ids,
+            }))
+        }
     }
-    if row_removed || row_closed {
-        obj.insert("sessions".to_string(), Value::Array(kept));
-    }
-    Ok(json!({
-        "found": true,
-        "settled": true,
-        "row_removed": row_removed,
-        "row_closed": row_closed,
-        "status_before": status_before,
-        "status_after": Value::Null,
-        "remaining_open_do": Value::Null,
-    }))
 }
 
 /// store.set_related + _mirror_related: symmetric edges stored on both

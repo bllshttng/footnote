@@ -572,7 +572,13 @@ def cmd_session_close(
 
 @session_app.command("reap-open")
 def cmd_session_reap_open(
-    node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
+    node: "str | None" = typer.Argument(
+        None,
+        help=(
+            "Node id / slug / bare-hex. Omit to settle EVERY node holding an "
+            "open row for the identity (the death-cascade form)."
+        ),
+    ),
     harness: str = typer.Option(..., "--harness", help="Harness owning the dead session."),
     session_id: str = typer.Option(..., "--session-id", help="Dead harness session id."),
     phase: str = typer.Option(
@@ -587,11 +593,35 @@ def cmd_session_reap_open(
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
-    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open do row on its own, so this verb is the hand path for every other case, including a node still in flight."""
+    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open do row on its own, so this verb is the hand path for every other case, including a node still in flight. Without a node the identity form settles every node holding an open row for the session."""
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import is_open_do_row, is_open_phase_row
     from fno.graph.store import reap_open_session_record, read_graph
     from fno.graph.types import SESSION_PHASES
+
+    if node is None:
+        try:
+            receipt = reap_open_session_record(
+                _graph_path(), None, phase=phase, harness=harness, session_id=session_id
+            )
+        except (ValueError, OSError, RuntimeError) as exc:
+            typer.echo(f"session reap-open: {exc}", err=True)
+            raise typer.Exit(code=2)
+        if not receipt.get("settled"):
+            typer.echo(
+                "session reap-open: no open row carries that identity on any node.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if json_out:
+            typer.echo(json.dumps(receipt, sort_keys=True))
+        else:
+            nodes = ", ".join(receipt.get("node_ids") or [])
+            typer.echo(
+                f"settled {nodes or 'nothing'}: row_removed={receipt['row_removed']} "
+                f"row_closed={receipt.get('row_closed')}"
+            )
+        return
 
     entries = read_graph(_graph_path())
     match = resolve_node(node, entries)

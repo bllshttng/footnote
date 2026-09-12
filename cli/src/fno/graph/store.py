@@ -1601,7 +1601,7 @@ def remove_open_session_record(
 
 def reap_open_session_record(
     path: Path,
-    node_id: str,
+    node_id: "str | None",
     *,
     phase: str,
     harness: str,
@@ -1615,7 +1615,9 @@ def reap_open_session_record(
     FILLS ``ended_at`` and keeps the row (a reviewer session's provenance did
     happen); ``all`` applies both semantics to every open row carrying the
     identity. The fill value defaults to the reap instant, an UPPER BOUND on
-    the true end."""
+    the true end. ``node_id=None`` is the death-cascade form: every node
+    holding an open row for the identity settles, and the receipt's
+    ``node_ids`` names them."""
     if phase != "all" and phase not in _SESSION_PHASES:
         raise ValueError(
             f"invalid phase {phase!r}; expected 'all' or one of {sorted(_SESSION_PHASES)}"
@@ -1626,7 +1628,7 @@ def reap_open_session_record(
         ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     else:
         ended_at = _utc_session_stamp("ended_at", ended_at)
-    resolved = _resolve_node_id(Path(path), node_id)
+    resolved = node_id if node_id is None else _resolve_node_id(Path(path), node_id)
     result = _run_op(Path(path), "session_reap_open", {
         "node_id": resolved,
         "phase": phase,
@@ -1637,6 +1639,12 @@ def reap_open_session_record(
     # status_after/remaining_open_do: the settlement reader wants the POST
     # state; re-read once, best-effort.
     report = dict(result)
+    if resolved is None:
+        # Identity form: no single node to re-read; node_ids carries the
+        # answer and found is the settlement signal.
+        report.setdefault("node_ids", [])
+        report["settled"] = bool(report.get("found"))
+        return report
     try:
         entries = read_graph(Path(path))
         node = next((e for e in entries if e.get("id") == resolved), None)

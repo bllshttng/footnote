@@ -104,6 +104,63 @@ def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
     assert saved["status"] == "idea"
 
 
+def test_session_reap_open_without_node_settles_every_node_holding_the_identity(tmp_graph):
+    """The death-cascade form: no node named, every node with an open row
+    for the identity settles and node_ids names them all."""
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {
+                "id": "x-reap0002",
+                "title": "First holder",
+                "sessions": [{
+                    "phase": "ship",
+                    "harness": "codex",
+                    "session_id": "dead-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+            {
+                "id": "x-reap0003",
+                "title": "Second holder",
+                "sessions": [{
+                    "phase": "review",
+                    "harness": "codex",
+                    "session_id": "dead-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+            {
+                "id": "x-reap0004",
+                "title": "Other session",
+                "sessions": [{
+                    "phase": "ship",
+                    "harness": "codex",
+                    "session_id": "alive-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+        ]
+    }) + "\n")
+
+    result = _invoke(
+        "backlog", "session", "reap-open",
+        "--harness", "codex", "--session-id", "dead-session", "--phase", "all", "--json",
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    assert receipt["settled"] is True
+    assert sorted(receipt["node_ids"]) == ["x-reap0002", "x-reap0003"]
+    assert receipt["row_closed"] is True
+    saved = {e["id"]: e for e in _read_graph(tmp_graph)}
+    assert all(
+        row.get("ended_at")
+        for node in ("x-reap0002", "x-reap0003")
+        for row in saved[node]["sessions"]
+    )
+    assert "ended_at" not in saved["x-reap0004"]["sessions"][0]
+
+
 # --- x-30f6: ambient provenance stamp at node birth ---
 
 def test_ac_hp_idea_stamps_ambient_session(tmp_graph, tmp_path, monkeypatch):
