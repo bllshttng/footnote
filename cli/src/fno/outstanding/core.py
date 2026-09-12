@@ -277,8 +277,9 @@ def append_question_event(event: dict[str, Any], root: Path, *, require_pointer:
     """Write one event to project durability first, then machine-wide recall.
 
     Every ``operator_question`` passes the law gate first; closes never do.
+    The gate sees the FULL text; truncation to QUESTION_CAP happens after it.
     """
-    from fno.events import append_event
+    from fno.events import QUESTION_CAP, append_event
 
     data = event.get("data")
     question_id = data.get("question_id") if isinstance(data, dict) else None
@@ -294,6 +295,7 @@ def append_question_event(event: dict[str, Any], root: Path, *, require_pointer:
         )
         if refusal:
             raise AskRefused(refusal)
+        data["question"] = str(data.get("question") or "")[:QUESTION_CAP]
     try:
         append_event(event, events_path=events_path(root))
     except Exception as exc:
