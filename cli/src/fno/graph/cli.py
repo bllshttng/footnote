@@ -9298,22 +9298,15 @@ def _reconcile_once(
                         err=True,
                     )
 
-    # Open-PR binding heal (): an open PR whose branch names an open,
-    # ref-less node leaves that node invisible to every graph-first reader
-    # until something fills pr_number. One bounded open-PR listing per repo
-    # BEFORE the scan, so the healed rows feed the forward scan and the status
-    # derivation below. Full and explicit-node runs only: a --pr-number call
-    # is bounded to its own PR and must not sweep unrelated repos.
+    # Open-PR binding heal (): an open PR whose branch names an open, ref-less
+    # node is invisible to every reader until something fills pr_number; one
+    # bounded open-PR listing per repo BEFORE the scan feeds the forward scan.
+    # Full and explicit-node runs only: a --pr-number call sweeps only its PR.
     open_bound: list[dict] = []
     open_binding_advisories: list[str] = []
-    # One gh listing per repo, shared by this run's scans (x-6283).
     listings = _ListingCache()
     if _full_sweep or node is not None:
-        from fno.graph._reconcile import (
-            bind_pr_rows,
-            collect_open_binding_heals,
-            node_pr_refs,
-        )
+        from fno.graph._reconcile import bind_pr_rows, collect_open_binding_heals, node_pr_refs
 
         _open_heals, open_binding_advisories = collect_open_binding_heals(
             entries, node_id=node, listings=listings
