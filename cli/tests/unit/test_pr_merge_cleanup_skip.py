@@ -145,6 +145,43 @@ def test_a_confirmed_merge_still_mints_its_request(tmp_path, monkeypatch):
     assert _rows(log, "merge_cleanup_skipped") == []
 
 
+def test_the_request_stamps_the_prs_merged_at_not_the_emission_time(
+    tmp_path, monkeypatch
+):
+    # The reaper's grace window anchors on merged_at, so a row stamped at
+    # emission starts the window late by the whole emission lag. The
+    # fixture merge time is in the past, so equality with the envelope ts
+    # would mean the bug is back, never a coincidence.
+    import fno.agents.events as E
+    import fno.pr._merge as M
+    import fno.worktree_reapable as WR
+
+    log = _patch_events_log(monkeypatch, tmp_path)
+    merged_fixture = json.dumps({
+        "state": "MERGED",
+        "headRefName": "feature/x",
+        "url": "",
+        "mergedAt": "2026-09-12T15:06:31Z",
+    })
+    _stub_gh(monkeypatch, M, ok=True, stdout=merged_fixture)
+    _stub_git_root(monkeypatch, M, tmp_path)
+    M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
+    manifest = _write_manifest(tmp_path)
+    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
+    monkeypatch.setattr(
+        E, "rows_for_cleanup", lambda worktree, node_ids, runner=None: []
+    )
+
+    M._emit_merge_cleanup_request(11, str(tmp_path), str(manifest), [])
+
+    requested = _rows(log, "merge_cleanup_requested")
+    assert len(requested) == 1
+    row = requested[0]
+    assert row["data"]["merged_at"] == "2026-09-12T15:06:31Z"
+    # ts is the emission time; the two stamps must differ in this fixture.
+    assert row["ts"] != row["data"]["merged_at"]
+
+
 def test_a_raising_mint_speaks_emit_failed_and_the_merge_stands(tmp_path, monkeypatch):
     import fno.pr._merge as M
 

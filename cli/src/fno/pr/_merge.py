@@ -1334,7 +1334,7 @@ def _emit_merge_cleanup_request(
     from fno.graph._reconcile import repo_slug_from_url
     from fno.worktree_reapable import is_linked_worktree
 
-    res = _gh(["pr", "view", str(pr_number), "--json", "state,headRefName,url"], cwd)
+    res = _gh(["pr", "view", str(pr_number), "--json", "state,headRefName,url,mergedAt"], cwd)
     if not res.ok:
         _emit_merge_cleanup_skip(
             pr_number, cwd, state_file, "gh-unavailable",
@@ -1375,6 +1375,7 @@ def _emit_merge_cleanup_request(
         repo_slug=repo_slug_from_url(meta.get("url") or ""),
         session_id=_read_state_field(state_file, "session_id") or None,
         harness=_read_state_field(state_file, "harness") or None,
+        merged_at=meta.get("mergedAt") or None,
         # x-84b2: always emit the exact candidates - name-matched rows count
         # even when the merge ran outside a linked worktree.
         candidate_row_names=rows_for_cleanup(worktree, bound_node_ids),
