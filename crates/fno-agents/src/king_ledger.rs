@@ -115,6 +115,7 @@ fn crown_section(
     titles: &BTreeMap<String, &Value>,
     entries: &[Value],
     projects: &Result<HashMap<String, String>, String>,
+    members: Option<&BTreeSet<String>>,
 ) -> String {
     let level = match crown.get("level").and_then(|l| l.as_i64()) {
         Some(l) => format!("L{l}"),
@@ -157,9 +158,9 @@ fn crown_section(
         let mut rows: Vec<String> = listed.iter().map(|n| row_tr(n, titles)).collect();
         // The omitted half of the scope renders with titles too: a count with
         // no names is a number where a fact should be.
-        if let Some(members) = members_of(crown, entries, projects) {
+        if let Some(members) = members {
             let listed_ids: BTreeSet<&str> = listed.iter().filter_map(|n| s_str(n, "id")).collect();
-            for id in &members {
+            for id in members {
                 if listed_ids.contains(id.as_str()) {
                     continue;
                 }
@@ -182,14 +183,12 @@ fn crown_section(
 /// them instead of letting their absence read as zero.
 fn uncrowned_section(
     crowns: &[Value],
+    compiled: &[Option<BTreeSet<String>>],
     entries: &[Value],
-    projects: &Result<HashMap<String, String>, String>,
 ) -> String {
     let mut covered: BTreeSet<String> = BTreeSet::new();
-    for crown in crowns {
-        if let Some(members) = members_of(crown, entries, projects) {
-            covered.extend(members);
-        }
+    for members in compiled.iter().flatten() {
+        covered.extend(members.iter().cloned());
     }
     let mut orphans: Vec<&Value> = entries
         .iter()
@@ -236,7 +235,9 @@ fn orphan_leaves_section(entries: &[Value]) -> String {
     let mut leaves: Vec<&Value> = entries
         .iter()
         .filter(|e| {
-            s_str(e, "parent").is_none()
+            // parent falsy: absent, null, or an empty string left by a
+            // hand edit or a migration.
+            matches!(s_str(e, "parent"), None | Some(""))
                 && ACTIVE_STATUSES.contains(&s_str(e, "status").unwrap_or(""))
                 && !parents.contains(s_str(e, "id").unwrap_or(""))
         })
@@ -266,11 +267,15 @@ fn orphan_leaves_section(entries: &[Value]) -> String {
             )
         })
         .collect();
+    let word = if leaves.len() == 1 {
+        "orphan leaf"
+    } else {
+        "orphan leaves"
+    };
     format!(
-        "<section class=\"crown\"><h2>orphan leaves</h2><p class=\"meta\">{} {}, {p1} at p1</p>\
+        "<section class=\"crown\"><h2>orphan leaves</h2><p class=\"meta\">{n} {word}, {p1} at p1</p>\
          <table><thead><tr><th>node</th><th>title</th><th>status</th><th>priority</th></tr></thead><tbody>{rows}</tbody></table></section>",
-        leaves.len(),
-        plural(leaves.len() as i64, "orphan leaf"),
+        n = leaves.len(),
     )
 }
 
@@ -337,11 +342,23 @@ pub fn render(court: &Value, entries: &[Value], generated: &str) -> String {
         );
     }
     if let Some(crowns) = &crowns {
-        for crown in crowns {
-            out.push_str(&crown_section(crown, &titles, entries, &projects));
+        // One compile per crown, shared by the crown sections and the
+        // uncrowned union: the page renders the join twice otherwise.
+        let compiled: Vec<Option<BTreeSet<String>>> = crowns
+            .iter()
+            .map(|c| members_of(c, entries, &projects))
+            .collect();
+        for (crown, members) in crowns.iter().zip(&compiled) {
+            out.push_str(&crown_section(
+                crown,
+                &titles,
+                entries,
+                &projects,
+                members.as_ref(),
+            ));
         }
         if !entries.is_empty() {
-            out.push_str(&uncrowned_section(crowns, entries, &projects));
+            out.push_str(&uncrowned_section(crowns, &compiled, entries));
             out.push_str(&orphan_leaves_section(entries));
         }
     }
@@ -356,7 +373,10 @@ fn write_atomic(path: &PathBuf, body: &str) -> Result<(), String> {
     }
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, body).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("cannot publish {}: {e}", path.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot publish {}: {e}", path.display()));
+    }
     Ok(())
 }
 
@@ -546,11 +566,12 @@ mod tests {
             json!({"id": "l-2", "title": "done leaf", "status": "done", "priority": "p1"}),
             json!({"id": "l-3", "title": "container", "status": "in_progress", "priority": "p2"}),
             json!({"id": "l-4", "parent": "l-3", "status": "ready"}),
+            json!({"id": "l-5", "title": "empty parent leaf", "parent": "", "status": "ready", "priority": "p2"}),
         ];
         let whole = page(base_court(json!([base_crown()])), entries);
         let at = whole.find("orphan leaves").expect("leaves section");
         let section = &whole[at..];
-        assert!(section.contains("1 orphan leaf, 1 at p1"));
+        assert!(section.contains("2 orphan leaves, 1 at p1"));
         assert!(section.contains("free leaf"));
         assert!(!section.contains("done leaf"));
         assert!(!section.contains("container"));
