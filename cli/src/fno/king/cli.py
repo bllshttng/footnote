@@ -144,7 +144,43 @@ def init_cmd(
     typer.echo(f"king: manifest written: {manifest_path}")
     typer.echo(f"fno_id: {fields['fno_id']}")
     typer.echo(f"scope:  {fields['scope']}")
+    _print_settled_children(scope)
     _warn_uncrowned_row(scope)
+
+
+def _print_settled_children(scope: str) -> None:
+    """Print the crown scope's settled children as titles, or nothing.
+
+    A crown lands on an epic whose history predates the session, and every
+    board read a king makes filters to open rows, so the done children that
+    record what the epic already established are invisible exactly when they
+    matter most (x-ada6). Titles only: no search over details, no similarity
+    score. One local graph read; nothing prints when none exist or the graph
+    cannot be read.
+    """
+    from fno.agents.crown import _graph_index, split_scope
+
+    by_id = _graph_index()
+    if by_id is None:
+        return
+    lines = []
+    for member in split_scope(scope):
+        for entry in by_id.values():
+            if entry.get("parent") != member:
+                continue
+            if entry.get("status") not in ("done", "superseded"):
+                continue
+            title = entry.get("title") or entry.get("id") or ""
+            lines.append(f"- {title} ({entry.get('id')})")
+    if not lines:
+        return
+    typer.echo()
+    typer.echo(
+        "Settled findings under this crown (done or superseded children; "
+        "read before the first check-in, never re-derive):"
+    )
+    for line in lines:
+        typer.echo(line)
 
 
 def _warn_uncrowned_row(scope: str) -> None:

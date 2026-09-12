@@ -29,7 +29,7 @@ The crown is bestowed, never inferred. Verify it before anything else:
 
 ## On crowning
 
-- `fno agents king init --scope <scope>`. Print level, scope, mail handle.
+- `fno agents king init --scope <scope>`. Print level, scope, mail handle. When the output carries a settled-findings section, those titles are what this epic already established: read them before the first check-in and never re-derive them.
 - Register as a roster citizen if absent: `/fno:fno-me`.
 - Verify the merge machinery is alive: `fno doctor`, pr-watch row.
 - Declare the shape now: `fno agents king shape pass` for a one-wave pass, and `fno agents king shape court` THE MOMENT the reign spawns its first worker. This is the field the Stop nudge reads; an undeclared court is nagged at every stop.
