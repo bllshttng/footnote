@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -56,23 +55,12 @@ class Reading:
 
 
 def _marker_lib() -> Path:
-    candidates: list[Path] = []
-    root = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.environ.get("CODEX_PLUGIN_ROOT")
-    if root:
-        candidates.append(Path(root) / "scripts" / "lib" / "canon-doc-marker.sh")
-    # A checkout run (tests, a worktree, `uv run` from a repo) carries the
-    # lib at the repo or plugin root: cli/src/fno/king/checkin.py sits four
-    # directories below it.
-    candidates.append(Path(__file__).resolve().parents[4] / "scripts" / "lib" / "canon-doc-marker.sh")
-    flag = Path.home() / ".fno" / "plugin-root"
-    if flag.exists():
-        candidates.append(
-            Path(flag.read_text(encoding="utf-8").strip()) / "scripts" / "lib" / "canon-doc-marker.sh"
-        )
-    for lib in candidates:
-        if lib.exists():
-            return lib
-    raise ReaderError(f"canon doc marker lib missing (tried {', '.join(str(c) for c in candidates)})")
+    from fno.paths import resolve_plugin_script
+
+    lib = resolve_plugin_script("scripts/lib/canon-doc-marker.sh")
+    if not lib.is_file():
+        raise ReaderError(f"canon doc marker lib missing at {lib}")
+    return lib
 
 
 def _handoff_doc(scope: str) -> Path:

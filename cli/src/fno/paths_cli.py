@@ -158,7 +158,6 @@ def handoff(
     outlives its sessions, so its rolling doc keys on the scope.
     """
     import datetime as _dt
-    import re
 
     from fno._flag_aliases import merge_deprecated_alias
     from fno.harness_identity import canonical_handle
