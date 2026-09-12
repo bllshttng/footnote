@@ -209,16 +209,33 @@ elif not crowned:
 else:
     crown = "level %s | scope %s" % (lvl if lvl is not None else "-", scp if scp is not None else "-")
 
-live = [x for x in rows
-        if x.get("spawned_by_session") == sid
-        and str(x.get("status", "")).lower() not in ("exited", "dead")]
-if not live:
+# x-1b75: the stored `status` word lies (a dead row can read `live`
+# indefinitely), so this reads the SERVED `liveness` field instead - `fno
+# agents registry-json` derives it from the freshness rule and withholds a
+# stale word as null. A row whose liveness is null (never measured, or stale
+# past the window) is unresolved, not alive: listed under its own label
+# rather than silently among the live, so a broken reader never reads as an
+# all-clear.
+alive = [x for x in rows
+         if x.get("spawned_by_session") == sid
+         and x.get("liveness") == "alive"]
+unresolved = [x for x in rows
+              if x.get("spawned_by_session") == sid
+              and x.get("liveness") is None]
+if not alive and not unresolved:
     workers = "none"
 else:
-    workers = "\n".join(
+    lines = [
         "- %s | %s | %s" % ((x.get("session_id") or "")[-8:], x.get("name", "-"), x.get("status", "-"))
-        for x in live
-    )
+        for x in alive
+    ]
+    if unresolved:
+        lines.append("- unresolved liveness:")
+        lines.extend(
+            "  - %s | %s | %s" % ((x.get("session_id") or "")[-8:], x.get("name", "-"), x.get("status", "-"))
+            for x in unresolved
+        )
+    workers = "\n".join(lines)
 
 if node or plan:
     pointers = []

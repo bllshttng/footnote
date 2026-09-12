@@ -69,11 +69,35 @@ if [ -z "$FNO_PYTHON" ]; then
   exit 1
 fi
 BINDIR="$(mktemp -d)"
-printf '#!/usr/bin/env bash\nexec "%s" -m fno.cli "$@"\n' "$FNO_PYTHON" > "$BINDIR/fno"
+# PYTHONPATH pinned INSIDE the shim, not just for the discovery probe above:
+# without it, `python -m fno.cli` resolves the `fno` package however this
+# interpreter already has it installed (a shared/editable venv can point at
+# the canonical checkout), so the hook would silently exercise a DIFFERENT
+# tree's fno.cli than the worktree fno being tested - invisible whenever the
+# two trees agree, and a false pass the moment they diverge (x-1b75: it
+# masked registry-json's Rust port entirely, taking four AC31 assertions
+# down with it before this line existed).
+printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
 # fno-py is the console script name; provide it too in case anything resolves it.
 cp "$BINDIR/fno" "$BINDIR/fno-py"
 chmod +x "$BINDIR/fno" "$BINDIR/fno-py"
 export PATH="$BINDIR:$PATH"
+
+# x-1b75: registry-json now dispatches through the Rust client (no Python leg
+# left), so `fno agents registry-json` must resolve THIS checkout's binary, not
+# a stale one elsewhere on PATH. The "auto" runtime's installed-binary search
+# (rust_binary.resolve_installed_binary) deliberately excludes the cargo dev
+# target and would otherwise pick up whatever `fno-agents` a developer machine
+# already has on PATH - possibly a build that predates this verb's port.
+# Prepending the fresh debug build wins the PATH search either way.
+AGENTS_BIN_DIR="$REPO_ROOT/crates/fno-agents/target/debug"
+if [ ! -x "$AGENTS_BIN_DIR/fno-agents" ]; then
+  echo "FAIL: $AGENTS_BIN_DIR/fno-agents not built." >&2
+  echo "      registry-json has no Python leg left (x-1b75); this suite needs the real binary." >&2
+  echo "      Fix: (cd crates/fno-agents && cargo build --bin fno-agents)" >&2
+  exit 1
+fi
+export PATH="$AGENTS_BIN_DIR:$PATH"
 
 # --- sandbox: isolated state_dir + config + HOME so nothing leaks ----------
 SBX="$(mktemp -d)"
@@ -109,12 +133,16 @@ clear_carveouts() {
 }
 
 # registry.json on disk at state_dir/agents/registry.json: {"schema_version":13,"agents":[...]}.
+# liveness_measured_at is generated HERE, at call time: SERVED_LIVENESS_MAX_AGE_SECS
+# is 120, so a hardcoded stamp would age past the window and the suite would
+# turn red on a clock, not on a defect.
 write_registry() {
   local king_crown="$1" has_children="$2" has_peer="${3:-no}"
-  local children='[]' peers='[]'
+  local ts children='[]' peers='[]'
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if [ "$has_children" = "yes" ]; then
-    children='[{"name":"kfad-a","harness":"claude","cwd":"/tmp","log_path":"/tmp/a","status":"live","short_id":"a","spawned_by_session":"'"$KING_SID"'"},
-               {"name":"kfad-b","harness":"claude","cwd":"/tmp","log_path":"/tmp/b","status":"live","short_id":"b","spawned_by_session":"'"$KING_SID"'"}]'
+    children='[{"name":"kfad-a","harness":"claude","cwd":"/tmp","log_path":"/tmp/a","status":"live","short_id":"a","spawned_by_session":"'"$KING_SID"'","liveness":"alive","liveness_measured_at":"'"$ts"'"},
+               {"name":"kfad-b","harness":"claude","cwd":"/tmp","log_path":"/tmp/b","status":"live","short_id":"b","spawned_by_session":"'"$KING_SID"'","liveness":"alive","liveness_measured_at":"'"$ts"'"}]'
   fi
   # A peer king: a DIFFERENT crowned session with a disjoint scope, for the
   # king roll-up (peers / king-above) test.
@@ -149,7 +177,9 @@ write_registry_without_self() {
 }
 
 write_registry_with_unlinked_child() {
-  jq -n '{schema_version: 13, agents: [
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -n --arg ts "$ts" '{schema_version: 13, agents: [
     {
       name:"king-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
       status:"live", short_id:"king-test-session-id",
@@ -159,12 +189,14 @@ write_registry_with_unlinked_child() {
     {
       name:"unlinked-worker", harness:"claude", cwd:"/tmp", log_path:"/tmp/u",
       status:"live", short_id:"unlinked", spawned_by_session:null,
-      crown_level:null, crown_scope:null
+      crown_level:null, crown_scope:null,
+      liveness:"alive", liveness_measured_at:$ts
     },
     {
       name:"operator-peer", harness:"claude", cwd:"/tmp", log_path:"/tmp/o",
       status:"live", short_id:"operator-peer", spawned_by_session:null,
-      crown_level:null, crown_scope:null, origin:"operator"
+      crown_level:null, crown_scope:null, origin:"operator",
+      liveness:"alive", liveness_measured_at:$ts
     }
   ]}' > "$SBX/.fno/agents/registry.json"
 }
@@ -672,8 +704,8 @@ assert_contains "hook: sweep positive control" "$HOOK_SRC" 'fno agents spawn -k'
 # on one. Reused for both trigger discrimination and the boot count.
 COUNT_BINDIR="$(mktemp -d)"
 COUNTER="$SBX/fno-invocations.txt"
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexec "%s" -m fno.cli "$@"\n' \
-  "$COUNTER" "$FNO_PYTHON" > "$COUNT_BINDIR/fno"
+printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nprintf "%%s\\n" "$*" >> "%s"\nexec "%s" -m fno.cli "$@"\n' \
+  "$FNO_SRC" "$COUNTER" "$FNO_PYTHON" > "$COUNT_BINDIR/fno"
 cp "$COUNT_BINDIR/fno" "$COUNT_BINDIR/fno-py"
 chmod +x "$COUNT_BINDIR/fno" "$COUNT_BINDIR/fno-py"
 
@@ -734,6 +766,101 @@ else
 fi
 rm -f "$FAKE_COUNTER"
 rm -rf "$COUNT_BINDIR"
+
+# === x-1b75: the liveness-primary partition, five cases each asserting the ==
+# === EXACT printed alive number - "fewer than the total" is not enough. =====
+# A synthetic registry: the king row is fixed, the children carry whatever
+# liveness shape the case needs. No case names bp-a238/bp-1939 (reaped from
+# the real registry days ago) or any other live specimen - every row here is
+# invented. Stamps are generated at call time: SERVED_LIVENESS_MAX_AGE_SECS is
+# 120, so a hardcoded stamp ages past the window and the suite turns red on a
+# clock, not on a defect.
+# events.jsonl accumulates for the whole file (no other case here truncates
+# it) - clear it once so the all-dead case below can trust a fresh read.
+rm -f "$SBX/.fno/events.jsonl" 2>/dev/null
+
+write_registry_liveness() {  # write_registry_liveness '<jq children array>'
+  jq -n --argjson children "$1" '{
+    schema_version: 13,
+    agents: ( [{
+      name:"king-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
+      status:"live", short_id:"'"$KING_SID"'",
+      harness_session_id:"'"$KING_SID"'",
+      crown_level:1, crown_scope:"'"$SCOPE"'", crown_grantor:"human"
+    }] + $children )
+  }' > "$SBX/.fno/agents/registry.json"
+}
+
+# --- Mixed: 2 alive + 2 dead, both fresh. Prints 2; neither dead name shows. -
+FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
+  {name:"live-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts},
+  {name:"live-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/b", status:"live", short_id:"b", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts},
+  {name:"dead-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/c", status:"live", short_id:"c", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts},
+  {name:"dead-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/d", status:"live", short_id:"d", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts}
+]')
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+write_registry_liveness "$CHILDREN"
+write_transcript "$SBX/low.jsonl" 300000
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_contains "x-1b75 mixed: prints the alive count (2), not the row count (4)" "$OUT" 'Linked count: 2'
+assert_absent   "x-1b75 mixed: dead-a never named" "$OUT" 'dead-a'
+assert_absent   "x-1b75 mixed: dead-b never named" "$OUT" 'dead-b'
+
+# --- All alive control: 3 alive, fresh. Prints 3 - forbids a blanket ---------
+# --- subtraction, a hardcoded cap, or an off-by-one. -------------------------
+FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
+  {name:"alive-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts},
+  {name:"alive-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/b", status:"live", short_id:"b", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts},
+  {name:"alive-c", harness:"claude", cwd:"/tmp", log_path:"/tmp/c", status:"live", short_id:"c", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts}
+]')
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+write_registry_liveness "$CHILDREN"
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_contains "x-1b75 all-alive control: prints 3, not a subtraction or a cap" "$OUT" 'Linked count: 3'
+
+# --- All dead: 3 dead, fresh. A confident negative is not an obligation, so --
+# --- no orphan block and no event - a real, decidable outcome, not a gap. ---
+FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
+  {name:"dead-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts},
+  {name:"dead-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/b", status:"live", short_id:"b", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts},
+  {name:"dead-c", harness:"claude", cwd:"/tmp", log_path:"/tmp/c", status:"live", short_id:"c", spawned_by_session:$sid, liveness:"dead", liveness_measured_at:$ts}
+]')
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+rm -f "$SBX/.fno/events.jsonl" 2>/dev/null
+write_registry_liveness "$CHILDREN"
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_absent "x-1b75 all-dead: no orphan reason when every spawned row is confidently dead" "$OUT" "cannot be a pure pass"
+events_has king_orphan_block && bad "x-1b75 all-dead: king_orphan_block fired anyway" || ok "x-1b75 all-dead: no king_orphan_block event"
+
+# --- Unresolved: no liveness field at all. Reported as unknown, excluded ----
+# --- from the alive count, and the nudge still fires (a broken reader must --
+# --- never silently clear this guard). ---------------------------------------
+CHILDREN=$(jq -nc --arg sid "$KING_SID" '[
+  {name:"unmeasured-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid},
+  {name:"unmeasured-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/b", status:"live", short_id:"b", spawned_by_session:$sid}
+]')
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+write_registry_liveness "$CHILDREN"
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_contains "x-1b75 unresolved: linked (alive) count is 0" "$OUT" 'Linked count: 0'
+assert_contains "x-1b75 unresolved: names the unknown count and both rows" "$OUT" '2 spawned worker row(s) have unresolved liveness (unmeasured-a, unmeasured-b)'
+assert_contains "x-1b75 unresolved: a broken reader never clears the guard" "$OUT" '"decision":"block"'
+
+# --- Stale stamp: liveness alive, but the measurement is older than the -----
+# --- 120s window - reads unknown, never alive. The republished-word trap. ---
+STALE_TS=$(date -u -v-200S '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+  || date -u -d '200 seconds ago' '+%Y-%m-%dT%H:%M:%SZ')
+CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$STALE_TS" '[
+  {name:"stale-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid, liveness:"alive", liveness_measured_at:$ts}
+]')
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+write_registry_liveness "$CHILDREN"
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_contains "x-1b75 stale: a stale alive word never counts as alive" "$OUT" 'Linked count: 0'
+assert_contains "x-1b75 stale: the stale row lands in unresolved, not alive" "$OUT" '1 spawned worker row(s) have unresolved liveness (stale-a)'
 
 echo ""
 echo "================================"

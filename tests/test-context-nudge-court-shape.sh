@@ -43,10 +43,24 @@ if [ -z "$FNO_PYTHON" ]; then
   exit 1
 fi
 BINDIR="$(mktemp -d)"
-printf '#!/usr/bin/env bash\nexec "%s" -m fno.cli "$@"\n' "$FNO_PYTHON" > "$BINDIR/fno"
+# PYTHONPATH pinned INSIDE the shim (see test-context-nudge.sh sibling
+# comment): without it `python -m fno.cli` can silently resolve a DIFFERENT
+# tree's fno.cli than the worktree being tested.
+printf '#!/usr/bin/env bash\nexport PYTHONPATH="%s"\nexec "%s" -m fno.cli "$@"\n' "$FNO_SRC" "$FNO_PYTHON" > "$BINDIR/fno"
 cp "$BINDIR/fno" "$BINDIR/fno-py"
 chmod +x "$BINDIR/fno" "$BINDIR/fno-py"
 export PATH="$BINDIR:$PATH"
+
+# x-1b75: registry-json has no Python leg left; resolve THIS checkout's Rust
+# binary, not a stale one elsewhere on PATH (see test-context-nudge.sh sibling
+# comment for the full reasoning).
+AGENTS_BIN_DIR="$REPO_ROOT/crates/fno-agents/target/debug"
+if [ ! -x "$AGENTS_BIN_DIR/fno-agents" ]; then
+  echo "FAIL: $AGENTS_BIN_DIR/fno-agents not built." >&2
+  echo "      Fix: (cd crates/fno-agents && cargo build --bin fno-agents)" >&2
+  exit 1
+fi
+export PATH="$AGENTS_BIN_DIR:$PATH"
 
 SBX="$(mktemp -d)"
 trap 'rm -rf "$SBX" "$BINDIR"' EXIT
@@ -62,15 +76,18 @@ export CLAUDE_CODE_SESSION_ID="$KING_SID"
 cd "$SBX"
 
 # A crowned king with two live spawned workers: the exact shape the orphan
-# check exists for.
-jq -n '{schema_version: 13, agents: ([
+# check exists for. liveness_measured_at is generated HERE, at fixture-write
+# time: SERVED_LIVENESS_MAX_AGE_SECS is 120, so a hardcoded stamp would age
+# past the window and the suite would turn red on a clock, not on a defect.
+FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -n --arg ts "$FRESH_TS" '{schema_version: 13, agents: ([
   {name:"king-court", harness:"claude", cwd:"/tmp", log_path:"/tmp/k", status:"live",
    short_id:"'"$KING_SID"'", harness_session_id:"'"$KING_SID"'",
    crown_level:1, crown_scope:"'"$SCOPE"'", crown_grantor:"human"},
   {name:"court-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live",
-   short_id:"a", spawned_by_session:"'"$KING_SID"'"},
+   short_id:"a", spawned_by_session:"'"$KING_SID"'", liveness:"alive", liveness_measured_at:$ts},
   {name:"court-b", harness:"claude", cwd:"/tmp", log_path:"/tmp/b", status:"live",
-   short_id:"b", spawned_by_session:"'"$KING_SID"'"}
+   short_id:"b", spawned_by_session:"'"$KING_SID"'", liveness:"alive", liveness_measured_at:$ts}
 ])}' > "$SBX/.fno/agents/registry.json"
 
 # Above the king trigger so the general context nudge fires: its presence is
@@ -102,7 +119,7 @@ write_shape() {  # write_shape <shape|none|garbage>
 reset_events
 write_shape pass
 run_hook "$(payload)"
-assert_contains "AC9: orphan nudge fires on shape: pass" "$OUT" "2 worker(s) you spawned are still live"
+assert_contains "AC9: orphan nudge fires on shape: pass" "$OUT" "2 worker(s) you spawned are still alive"
 assert_contains "AC9: option 1 names the shape verb" "$OUT" "fno agents king shape court"
 events_has king_orphan_block && ok "AC9: king_orphan_block event written" || bad "AC9: no king_orphan_block event"
 
@@ -110,32 +127,36 @@ events_has king_orphan_block && ok "AC9: king_orphan_block event written" || bad
 reset_events
 write_shape none
 run_hook "$(payload)"
-assert_contains "AC10: no manifest -> nudge fires" "$OUT" "still live"
+assert_contains "AC10: no manifest -> nudge fires" "$OUT" "still alive"
 events_has king_orphan_block && ok "AC10: king_orphan_block event written" || bad "AC10: no king_orphan_block event"
 
 # === AC10b: a manifest with no shape line is not a court ======================
 reset_events
 printf -- '---\nscope: %s\nharness_session_id: %s\n---\n' "$SCOPE" "$KING_SID" > "$SBX/.fno/kings/$SCOPE.md"
 run_hook "$(payload)"
-assert_contains "AC10b: shapeless manifest -> nudge fires" "$OUT" "still live"
+assert_contains "AC10b: shapeless manifest -> nudge fires" "$OUT" "still alive"
 
 # === AC8: shape court -> silent, and the hook demonstrably ran ================
 reset_events
 write_shape court
 run_hook "$(payload)"
-assert_absent "AC8: no orphan reason on shape: court" "$OUT" "you spawned are still live"
+assert_absent "AC8: no orphan reason on shape: court" "$OUT" "you spawned are still alive"
 events_has king_orphan_block && bad "AC8: king_orphan_block event written anyway" || ok "AC8: no king_orphan_block event"
 assert_contains "AC8 positive control: the hook ran (context nudge fired)" "$OUT" '"decision":"block"'
 
-# AC8 negative control for the control: with no workers at all the same crowned
-# session emits no orphan block even at shape pass - proving the court branch is
-# what silenced it above, not some earlier gate.
+# AC8 negative control for the control: with no ALIVE workers at all (both rows
+# read a confidently-dead served liveness, fresh basis - not merely unresolved,
+# which would fire the unknown-count branch instead) the same crowned session
+# emits no orphan block even at shape pass - proving the court branch is what
+# silenced it above, not some earlier gate.
 reset_events
 write_shape pass
-jq '.agents |= map(if .name == "court-a" or .name == "court-b" then .status = "exited" else . end)' \
+DEAD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq --arg ts "$DEAD_TS" \
+  '.agents |= map(if .name == "court-a" or .name == "court-b" then .liveness = "dead" | .liveness_measured_at = $ts else . end)' \
   "$SBX/.fno/agents/registry.json" > "$SBX/.fno/agents/registry.json.tmp" && mv "$SBX/.fno/agents/registry.json.tmp" "$SBX/.fno/agents/registry.json"
 run_hook "$(payload)"
-assert_absent "AC8 control: terminal workers never orphan-block" "$OUT" "you spawned are still live"
+assert_absent "AC8 control: dead workers never orphan-block" "$OUT" "you spawned are still alive"
 
 echo
 if [ "$fail" -eq 0 ]; then
