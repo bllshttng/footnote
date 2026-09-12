@@ -3333,7 +3333,7 @@ class TestFleetLegRunsAfterACutPRLeg:
     is cut mid-stall - and still writes its heartbeat.
     """
 
-    def _invoke(self, monkeypatch, tmp_path, dispatch_tick, sweep_fn):
+    def _invoke(self, monkeypatch, tmp_path, dispatch_tick, sweep_fn, king_wake_fn=None):
         import typer
         from typer.testing import CliRunner
         from unittest.mock import MagicMock
@@ -3354,7 +3354,7 @@ class TestFleetLegRunsAfterACutPRLeg:
         # recovery phase must be cheap, or a loaded runner cuts recovery too.
         monkeypatch.setattr(
             "fno.pr_watch._king_wake.run_king_wake",
-            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            king_wake_fn or (lambda _settings, emit, **_kw: {"woke": [], "crowns": 0}),
             raising=True,
         )
         monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda _roots=None: None, raising=True)
@@ -3420,6 +3420,44 @@ class TestFleetLegRunsAfterACutPRLeg:
         assert payload["candidates"] == 3
         assert payload["refused"] == 1
         assert ("worker_refused", {"short_id": "aaaa1111"}) in events
+
+    def test_recovery_runs_and_records_after_king_wake_itself_is_cut(
+        self, monkeypatch, tmp_path
+    ):
+        """The phase that failed tonight is king_wake, not the sweep: cut IT
+        at its own slice and the fleet legs after it still run and still
+        record an outcome."""
+        import json as _json
+        import time as _time
+
+        from fno.pr_watch import cli as prcli
+
+        def _stall_in_king_wake(_settings, emit, **_kw):
+            _time.sleep(2)
+            return {"woke": [], "crowns": 0}
+
+        swept: list[int] = []
+
+        def _sweep(_cfg, emit=None, **_kw):
+            swept.append(1)
+            return 0
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+        res, events, hb = self._invoke(
+            monkeypatch, tmp_path, lambda **_kw: None, _sweep,
+            king_wake_fn=_stall_in_king_wake,
+        )
+
+        assert res.exit_code == 75, res.output
+        assert swept == [1], "recovery must run on its own slice after a cut king_wake"
+        assert hb.exists(), "the fleet heartbeat must survive a cut king_wake"
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends and ends[-1].get("phase") == "king_wake", ends
+        assert "king_wake" in ends[-1].get("cut", []), ends
+        assert "recovery" in ends[-1].get("phase_s", {}), (
+            "the phases after the cut must still record an outcome"
+        )
 
     def test_ac7_edge_a_raising_fleet_leg_still_lets_the_pr_legs_run(
         self, monkeypatch, tmp_path
