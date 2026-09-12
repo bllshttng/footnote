@@ -1557,18 +1557,18 @@ def cmd_spawn(
         from fno.graph.ladder import plan_rung as _node_plan_rung
         from fno.provenance.autobrief import resolve_dispatch_brief
 
-        rec: Optional[dict] = None
+        seed_rec: Optional[dict] = None
         try:
             from fno.graph.load import load_graph
 
             for candidate in load_graph():
                 if candidate.get("id") == node or candidate.get("slug") == node:
-                    rec = candidate
+                    seed_rec = candidate
                     break
         except Exception:  # noqa: BLE001 - an unreadable graph cannot seed a spawn
-            rec = None
-        seed_node_id = (rec or {}).get("id") or node
-        if not isinstance(rec, dict) or not str(rec.get("dispatch_verb") or "").strip():
+            seed_rec = None
+        seed_node_id = (seed_rec or {}).get("id") or node
+        if not isinstance(seed_rec, dict) or not str(seed_rec.get("dispatch_verb") or "").strip():
             print(
                 f"refusing node-seeded spawn: node {seed_node_id} carries no "
                 "dispatch_verb and no message was typed; an idle worker holds "
@@ -1580,13 +1580,13 @@ def cmd_spawn(
         try:
             from fno.agents.harness_map import resolve_dispatch
 
-            node_brief, node_brief_source = resolve_dispatch_brief(rec)
+            node_brief, node_brief_source = resolve_dispatch_brief(seed_rec)
             resolved_seed = resolve_dispatch(
                 harness=harness,
                 node_id=str(seed_node_id),
-                verb=str(rec.get("dispatch_verb")).strip(),
-                difficulty=rec.get("difficulty"),
-                plan_rung=_node_plan_rung(rec).value,
+                verb=str(seed_rec.get("dispatch_verb")).strip(),
+                difficulty=seed_rec.get("difficulty"),
+                plan_rung=_node_plan_rung(seed_rec).value,
                 brief=node_brief,
                 trigger="autonomous",
             )
