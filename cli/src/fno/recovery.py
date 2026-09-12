@@ -1784,7 +1784,7 @@ def _prune_keep(key: str, live: set) -> bool:
         # here every refusal key survives forever and the counts file grows
         # unbounded.
         return key.split(":")[1] in live
-    for prefix in ("capped:", "close:"):
+    for prefix in ("capped:", "close:", "quota-locked:"):
         if key.startswith(prefix):
             return key[len(prefix):] in live
     return key in live

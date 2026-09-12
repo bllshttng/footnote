@@ -677,6 +677,14 @@ class TestRefusalHoistedAboveTheStalenessGate:
         assert recovery._prune_keep("refused:aaaa1111:provider_4xx_quota", live)
         assert not recovery._prune_keep("refused:bbbb2222:provider_4xx_quota", live)
 
+    def test_the_quota_lock_sentinel_survives_while_the_session_lives(self):
+        # Without the prefix arm the plain fall-through compares the whole
+        # key against the live set, prunes the sentinel every tick, and the
+        # lock re-fires on a worker that already locked.
+        live = {"aaaa1111"}
+        assert recovery._prune_keep("quota-locked:aaaa1111", live)
+        assert not recovery._prune_keep("quota-locked:bbbb2222", live)
+
     def test_the_dedup_key_is_scoped_to_the_error_class(self):
         # A quota refusal followed by an auth refusal is two findings; the SAME
         # refusal re-read every tick is one.
