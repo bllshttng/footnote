@@ -1,11 +1,7 @@
 """``fno agents king checkin`` - one verb runs the reign check-in body.
 
-Gathers the readings the reign skill names, prints them in a fixed order,
-diffs against the previous canonical ``reign_checkin`` row, and emits that
-row from the same dict it printed. It reads, prints, diffs and journals; it
-never decides and never acts: every lever stays the king's judgment, and the
-graph is never written.
-Contract: docs/architecture/reign.md and skills/reign/SKILL.md.
+Gathers, prints, diffs and journals; the row comes from the same dict the
+lines print. It never decides and never acts. Contract: docs/architecture/reign.md.
 """
 from __future__ import annotations
 
@@ -360,42 +356,28 @@ def _readers() -> list[tuple[str, Callable]]:
     The board and the court are each read once per beat and shared by the
     readings that consume them.
     """
-    caches: dict[str, dict] = {"board": {}, "court": {}}
+    shared: dict[str, Any] = {}
 
-    def cached(kind: str, fetch: Callable) -> Callable:
+    def once(kind: str, fetch: Callable) -> Callable:
         def read(scope: str) -> Any:
-            if kind not in caches[kind]:
-                caches[kind][kind] = fetch(scope)
-            return caches[kind][kind]
+            if kind not in shared:
+                shared[kind] = fetch(scope)
+            return shared[kind]
         return read
 
-    board_fn = cached("board", _fetch_board)
-    court_fn = cached("court", _fetch_court)
-
-    def r_board(scope: str) -> tuple[Any, str]:
-        return _r_board(scope, board_fn, court_fn)
-
-    def r_blocked_child(scope: str) -> tuple[Any, str]:
-        return _r_blocked_child(scope, board_fn)
-
-    def r_court(scope: str) -> tuple[Any, str]:
-        return _r_court(scope, court_fn)
-
-    def r_crown(scope: str) -> tuple[Any, str]:
-        return _r_crown(scope, court_fn)
-
-    fns: dict[str, Callable] = {
-        "user_notes": _r_user_notes,
-        "board": r_board,
-        "blocked_child": r_blocked_child,
-        "court": r_court,
-        "capacity": _r_capacity,
-        "workers": _r_workers,
-        "crown": r_crown,
-        "drain": _r_drain,
-        "main_ci": _r_main_ci,
-    }
-    return [(name, fns[name]) for name in READING_NAMES]
+    board_fn = once("board", _fetch_board)
+    court_fn = once("court", _fetch_court)
+    return [
+        ("user_notes", _r_user_notes),
+        ("board", lambda s: _r_board(s, board_fn, court_fn)),
+        ("blocked_child", lambda s: _r_blocked_child(s, board_fn)),
+        ("court", lambda s: _r_court(s, court_fn)),
+        ("capacity", _r_capacity),
+        ("workers", _r_workers),
+        ("crown", lambda s: _r_crown(s, court_fn)),
+        ("drain", _r_drain),
+        ("main_ci", _r_main_ci),
+    ]
 
 
 def collect_readings(scope: str, readers: list[tuple[str, Callable]] | None = None) -> list[Reading]:
@@ -413,31 +395,27 @@ def collect_readings(scope: str, readers: list[tuple[str, Callable]] | None = No
 # data, diff, change
 
 
+#: reading name -> {emit key: subkey inside the reading's value}; a None
+#: subkey stores the value whole.
+_DATA_SPEC: dict[str, dict[str, str | None]] = {
+    "board": {"open_prs": "open_prs", "free_claim_no_driver": "free_claim_no_driver", "blocked": "blocked"},
+    "blocked_child": {"blocked_children": "rows", "blocked_children_total": "total"},
+    "court": {"active_nodes": "active_nodes"},
+    "workers": {"live_workers": "live_workers", "oldest_worker_seen": "oldest_worker_seen"},
+    "capacity": {"capacity_footprint": "footprint", "capacity_gate": "gate", "capacity_disagree": "disagree"},
+    "drain": {"undelivered": None},
+    "main_ci": {"main_ci": None},
+}
+
+
 def build_data(readings: list[Reading], scope: str) -> dict[str, Any]:
     """The one dict the lines print and the journal row stores."""
     data: dict[str, Any] = {"scope": scope}
-    values = {r.name: r.value for r in readings if r.ok}
-    board = values.get("board") or {}
-    if "board" in values:
-        data["open_prs"] = board["open_prs"]
-        data["free_claim_no_driver"] = board["free_claim_no_driver"]
-        data["blocked"] = board["blocked"]
-    if "blocked_child" in values:
-        data["blocked_children"] = values["blocked_child"]["rows"]
-        data["blocked_children_total"] = values["blocked_child"]["total"]
-    if "court" in values:
-        data["active_nodes"] = values["court"]["active_nodes"]
-    if "workers" in values:
-        data["live_workers"] = values["workers"]["live_workers"]
-        data["oldest_worker_seen"] = values["workers"]["oldest_worker_seen"]
-    if "capacity" in values:
-        data["capacity_footprint"] = values["capacity"]["footprint"]
-        data["capacity_gate"] = values["capacity"]["gate"]
-        data["capacity_disagree"] = values["capacity"]["disagree"]
-    if "drain" in values:
-        data["undelivered"] = values["drain"]
-    if "main_ci" in values:
-        data["main_ci"] = values["main_ci"]
+    for reading in readings:
+        spec = _DATA_SPEC.get(reading.name)
+        if reading.ok and spec:
+            for key, sub in spec.items():
+                data[key] = reading.value.get(sub) if sub else reading.value
     failed = [r.name for r in readings if not r.ok]
     data["coverage"] = len(readings) - len(failed)
     data["readers_failed"] = failed
@@ -535,13 +513,10 @@ def render_lines(
         lines.append(f"READER FAILED user_notes: {failed['user_notes']}")
 
     board = by_name["board"]
-    if board.ok:
-        on = board.value.get("blocked_on") or []
-        emit("board",
-             f"board: open_prs {data.get('open_prs')}, free_claim_no_driver {data.get('free_claim_no_driver')}, "
-             f"blocked {data.get('blocked')}" + (f" (on: {'; '.join(on)})" if on else ""))
-    else:
-        emit("board", "")
+    on = (board.value.get("blocked_on") or []) if board.ok else []
+    emit("board",
+         f"board: open_prs {data.get('open_prs')}, free_claim_no_driver {data.get('free_claim_no_driver')}, "
+         f"blocked {data.get('blocked')}" + (f" (on: {'; '.join(on)})" if on else ""))
 
     if "blocked_child" in failed:
         lines.append(f"READER FAILED blocked_child: {failed['blocked_child']}")
