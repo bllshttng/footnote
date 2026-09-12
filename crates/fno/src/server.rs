@@ -549,8 +549,7 @@ fn bottom_non_empty_lines(text: &str, n: usize) -> String {
 
 /// What connected clients register with the core loop.
 enum CoreMsg {
-    /// (v78) A control-connection stats request: the Core owns the
-    /// emission-failure counter, so only it can answer.
+    /// (v78) A stats request; only the Core owns the counter.
     ServerStats {
         reply: oneshot::Sender<ServerMsg>,
     },
@@ -2024,8 +2023,7 @@ pub(crate) struct Core {
     /// (v78) When this server instance started: the stats answer's window.
     started_at: String,
     /// Failed per-pane counter emits, same discipline as
-    /// [`Core::touch_emit_failures`]: counted and logged, never raised to the
-    /// serving path.
+    /// [`Core::touch_emit_failures`].
     pane_stats_emit_failures: Arc<AtomicU64>,
     /// Attached-client count for the periodic readers (x-4e30). Published
     /// from choke points (tail of `handle` + the main-loop tail), never

@@ -318,6 +318,8 @@ fn default_true() -> bool {
 /// v77 : `AgentRow.liveness_age_s` (a per-second server-computed age) is
 /// replaced by `liveness_measured_at`, the measurement instant; the client
 /// derives the age at render. Same decode both ways; floor stays 58.
+/// v78 : `ControlVerb::ServerStats` + `ServerMsg::ServerStats`, the
+/// scoreboard's read-only emission-failure counter read; floor stays 58.
 pub const PROTO_VERSION: u32 = 78;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -569,8 +571,7 @@ pub struct RestoreRow {
 pub enum ControlVerb {
     /// Every pane across every squad -> [`ServerMsg::PaneList`].
     PaneLs,
-    /// (v78) Server-instance telemetry -> [`ServerMsg::ServerStats`]. Read
-    /// only; touches no steering state and never resets the counter.
+    /// (v78) Server-instance telemetry -> [`ServerMsg::ServerStats`].
     ServerStats,
     /// One pane's text -> [`ServerMsg::PaneText`]. Without `block`, `lines`
     /// selects the last N logical rows and (v6) reaches into scrollback history
@@ -2111,11 +2112,9 @@ pub enum ServerMsg {
     // -- v4 control-verb replies (one per Control connection, then close) --
     /// Answer to [`ControlVerb::PaneLs`].
     PaneList { panes: Vec<PaneInfo> },
-    /// (v78) Answer to [`ControlVerb::ServerStats`]: server-instance telemetry
-    /// the scoreboard reads. The counter is the in-memory human_touch
-    /// emission-failure count; it lives and dies with this instance, so the
-    /// answer carries its own measurement time and the instance start time
-    /// instead of posing as an all-time fact.
+    /// (v78) Answer to [`ControlVerb::ServerStats`]: the in-memory
+    /// human_touch emission-failure count with its measurement window
+    /// (instance start + measured time); never an all-time fact.
     ServerStats {
         touch_emit_failures: u64,
         started_at: String,
@@ -4114,41 +4113,11 @@ mod tests {
 
     #[test]
     fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_version_is_pinned() {
-        // The mux-crown wire lift bumped PROTO_VERSION 40 -> 41; the templates
-        // node (x-c4d4) bumped it 41 -> 42; the US9 drag faces (x-d6a8) bumped it
-        // 42 -> 43; the anchored-layout node (x-6928) bumped it 43 -> 44;
-        // clickable links (x-a2d0) bumped it 44 -> 45; pane focus (x-3e17) 45 ->
-        // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47; the
-        // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
-        // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
-        // the tab dictionary (x-1499) bumped it 50 -> 51; pane identity
-        // receipts (x-588a) bumped it 51 -> 52; the typed paneless recovery
-        // reason bumps it 52 -> 53; backend-not-live classification bumps it
-        // 53 -> 54; guarded tab close bumps it 54 -> 55; the hover-affordance
-        // message pair bumps it 55 -> 56; the LivenessUnmeasured reason (x-d401)
-        // bumps it 56 -> 57; the ThreadPane control verb (x-07c2) bumps it
-        // 57 -> 58; the classified-lineage pair bumped it 58 -> 59; the
-        // workspace-restore verb (x-7b5e) re-bumped it 59 -> 60 (second to
-        // merge); DND presence (x-7d02) bumps it 60 -> 61; the sideline lane
-        // axes (x-1b35) bump it 62 -> 63; the portals fields (x-8f9d) bump it
-        // 63 -> 64; the tab-organization pair (x-cf97) bumps it 64 -> 65; the
-        // ThreadPane placement field (x-9b60) bumps it 65 -> 66.
-        // The additive crown fields, `unmeasured`, `resumable`, and now the
-        // lineage pair, stay skew-tolerant both ways regardless of the
-        // version number.
-        //
-        // This is the ONE canonical pin, as this test's name says. Two sibling
-        // roundtrip tests used to re-assert the same literal, which caught
-        // nothing a single pin does not and turned every bump into a three-file
-        // edit; they now assert only their own wire shapes. Per-bump history
-        // lives on the PROTO_VERSION const; v74 (x-b5d1) took 74 so the
-        // version never moves backwards whichever branch lands first.
-        // v75 (x-7649) took 75; floor stays 58.
-        // v76  took 76; floor stays 58.
-        // v77  took 77: AgentRow carries liveness_measured_at (the instant)
-        // instead of a per-second age; floor stays 58.
-        // v78  took 78: ControlVerb::ServerStats + ServerMsg::ServerStats (the
-        // scoreboard's read-only emission-failure counter); floor stays 58.
+        // The per-bump history lives on the PROTO_VERSION const doc; this is
+        // the ONE canonical pin. Two sibling roundtrip tests used to
+        // re-assert the same literal, which caught nothing a single pin does
+        // not and turned every bump into a three-file edit; they now assert
+        // only their own wire shapes.
         assert_eq!(PROTO_VERSION, 78);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
