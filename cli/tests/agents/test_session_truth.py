@@ -1471,3 +1471,27 @@ def test_ac2_unknown_paths_carry_provider_refusal_none(tmp_path):
     result = resolve_session_truth("nope", resolve=miss, projects_root=tmp_path)
     assert result["provider_refusal"] is None
 
+
+def test_a_raising_refusal_classifier_never_breaks_the_liveness_read(tmp_path, monkeypatch):
+    """`resolve_session_truth` is documented never to raise, and every liveness
+    surface reads it. So the refusal classification is a reporting field that
+    must fail to None rather than take the whole read down with it - the same
+    rule `observed_model` states for itself."""
+    import fno.recovery as recovery
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-e594-0000-0000-0000000000ff"
+    _write_claude_transcript(tmp_path, cwd, sid, ["still going"])
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+
+    def boom(*_a, **_k):
+        raise RuntimeError("taxonomy blew up")
+
+    monkeypatch.setattr(recovery, "classify_worker_refusal", boom)
+
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+    assert result["provider_refusal"] is None
+    assert result["state"] != "unknown"

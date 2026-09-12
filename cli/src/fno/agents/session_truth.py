@@ -436,9 +436,15 @@ def resolve_session_truth(
     if last_actor.role == "assistant" and state != "done":
         from fno.recovery import classify_worker_refusal
 
-        verdict = classify_worker_refusal(
-            None, " ".join((last_actor.text or "").split())
-        )
+        try:
+            verdict = classify_worker_refusal(
+                None, " ".join((last_actor.text or "").split())
+            )
+        except Exception:  # noqa: BLE001 - see below
+            # This function is documented never to raise and every liveness
+            # surface reads it, so a reporting field must not break the read:
+            # the same rule `observed_model` states for itself.
+            verdict = None
         if verdict is not None:
             provider_refusal = verdict[0].error_class.value
     try:
