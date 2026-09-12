@@ -3,7 +3,8 @@
 Gathers the readings the reign skill names, prints them in a fixed order,
 diffs against the previous canonical ``reign_checkin`` row, and emits that
 row from the same dict it printed. It reads, prints, diffs and journals; it
-never decides (no spawn, no reap, no lever, no graph write).
+never decides and never acts: every lever stays the king's judgment, and the
+graph is never written.
 Contract: docs/architecture/reign.md and skills/reign/SKILL.md.
 """
 from __future__ import annotations
@@ -54,17 +55,23 @@ class Reading:
 
 
 def _marker_lib() -> Path:
+    candidates: list[Path] = []
     root = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.environ.get("CODEX_PLUGIN_ROOT")
-    if not root:
-        flag = Path.home() / ".fno" / "plugin-root"
-        if flag.exists():
-            root = flag.read_text(encoding="utf-8").strip()
-    if not root:
-        raise ReaderError("plugin root unresolvable, so the canon doc marker lib cannot be read")
-    lib = Path(root) / "scripts" / "lib" / "canon-doc-marker.sh"
-    if not lib.exists():
-        raise ReaderError(f"canon doc marker lib missing at {lib}")
-    return lib
+    if root:
+        candidates.append(Path(root) / "scripts" / "lib" / "canon-doc-marker.sh")
+    # A checkout run (tests, a worktree, `uv run` from a repo) carries the
+    # lib at the repo or plugin root: cli/src/fno/king/checkin.py sits four
+    # directories below it.
+    candidates.append(Path(__file__).resolve().parents[4] / "scripts" / "lib" / "canon-doc-marker.sh")
+    flag = Path.home() / ".fno" / "plugin-root"
+    if flag.exists():
+        candidates.append(
+            Path(flag.read_text(encoding="utf-8").strip()) / "scripts" / "lib" / "canon-doc-marker.sh"
+        )
+    for lib in candidates:
+        if lib.exists():
+            return lib
+    raise ReaderError(f"canon doc marker lib missing (tried {', '.join(str(c) for c in candidates)})")
 
 
 def _handoff_doc(scope: str) -> Path:
@@ -98,7 +105,9 @@ def _r_user_notes(scope: str) -> tuple[Any, str]:
         capture_output=True, text=True, check=False,
     )
     if proc.returncode != 0:
-        raise ReaderError("user block marker missing or doc unreadable")
+        # rc 1 is the marker lib's "no open block": the doc carries no user
+        # section yet. That is an empty block, never a failed reading.
+        return None, ""
     text = proc.stdout
     ph = subprocess.run(
         ["bash", "-c", 'source "$1" && canon_doc_is_placeholder "$(cat)"', "x", str(lib)],
@@ -216,12 +225,13 @@ def _r_court(scope: str, court_fn: Callable) -> tuple[Any, str]:
         if n.get("status") in ("done", "superseded"):
             continue
         sessions = n.get("sessions") or []
+        first = sessions[0] if sessions else None
         rows.append({
             "id": n.get("id"),
             "status": n.get("status"),
             "worker": n.get("worker"),
             "pr_number": n.get("pr_number"),
-            "session": sessions[0] if sessions else None,
+            "session": first.get("id") if isinstance(first, dict) else first,
         })
     return {"active_nodes": total - counts.get("done", 0), "total_nodes": total, "rows": rows}, ""
 
@@ -475,12 +485,18 @@ def derive_change(
     if previous_error:
         return f"previous beat unreadable: {previous_error}"
     moved = []
+    shared = 0
     if previous_data:
         for key in NUMERIC_DIFF_KEYS:
-            if key in previous_data and key in data and previous_data[key] != data[key]:
-                moved.append(f"{key} {previous_data[key]} -> {data[key]}")
+            if key in previous_data and key in data:
+                shared += 1
+                if previous_data[key] != data[key]:
+                    moved.append(f"{key} {previous_data[key]} -> {data[key]}")
     if moved:
         return "moved: " + ", ".join(moved)
+    if previous_data is not None and shared == 0:
+        # Zero shared numbers is a vacuous match, never evidence of no change.
+        return "previous beat carries no comparable numbers"
     failed = data.get("readers_failed") or []
     if failed:
         return "no numeric movement; readings failed: " + ", ".join(failed)
@@ -594,7 +610,8 @@ def render_lines(
             for key in NUMERIC_DIFF_KEYS
             if key in previous["data"] and key in data
         ]
-        lines.append(f"vs last beat ({previous.get('ts')}): " + ", ".join(parts))
+        body = ", ".join(parts) if parts else "no shared numeric keys to diff"
+        lines.append(f"vs last beat ({previous.get('ts')}): {body}")
     lines.append(f"change: {change}")
     return lines
 
