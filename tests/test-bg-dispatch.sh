@@ -293,14 +293,23 @@ if [[ ! -x "$VENV_PY" ]]; then
   CANON="$(cd "$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)"
   [[ -n "$CANON" ]] && VENV_PY="$CANON/cli/.venv/bin/python"
 fi
+# The name verb routes to the fno-agents binary; the bridge stub execs it
+# directly. The checkout's own cargo build wins, so a stale installed binary
+# can never shadow the vocabulary under test.
+REAL_AGENTS_BIN="${FNO_AGENTS_BIN:-$REPO_ROOT/crates/fno-agents/target/debug/fno-agents}"
+if [ ! -x "$REAL_AGENTS_BIN" ]; then
+  REAL_AGENTS_BIN="$(PYTHONPATH="$REPO_ROOT/cli/src" "$VENV_PY" -c 'from fno import rust_binary; b = rust_binary.resolve_binary(); print(b or "")')"
+fi
+[ -n "$REAL_AGENTS_BIN" ] && [ -x "$REAL_AGENTS_BIN" ] \
+  || { echo "FATAL: no fno-agents binary resolves (cargo build -p fno-agents)" >&2; exit 1; }
 NAME_BRIDGE="$TMP/name-bridge"
 {
   echo '#!/usr/bin/env bash'
-  echo "exec \"$VENV_PY\" -c 'import sys; sys.path.insert(0, \"$REPO_ROOT/cli/src\"); from fno.cli import app; app()' agents name \"\$@\""
+  echo "exec \"$REAL_AGENTS_BIN\" name \"\$@\""
 } > "$NAME_BRIDGE"
 chmod +x "$NAME_BRIDGE"
 "$NAME_BRIDGE" target x-1 >/dev/null 2>&1 \
-  || { echo "FATAL: canonical naming bridge unreachable at $VENV_PY" >&2; exit 1; }
+  || { echo "FATAL: canonical naming bridge unreachable at $REAL_AGENTS_BIN" >&2; exit 1; }
 export NAME_BRIDGE
 
 set_status() { echo "$2" > "$MOCKSTATE/status_$1"; }

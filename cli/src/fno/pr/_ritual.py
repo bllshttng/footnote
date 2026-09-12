@@ -47,7 +47,7 @@ from typing import Callable, Optional
 import typer
 
 from fno._subprocess_util import fno_py_cmd
-from fno.agents.naming import AgentNameError, dispatch_agent_name
+from fno.agents.naming import mint_or_none
 from fno.agents.events import (
     emit_merge_cleanup_requested,
     merge_cleanup_request_id,
@@ -607,8 +607,8 @@ class Ritual:
             session_id=None,
             harness=None,
             merged_at=self._merged_state()[2],
-            # x-84b2: always emit the exact candidates - a PR whose worktree
-            # path is gone still carries name-matched rows for the reaper.
+            # Always emit the exact candidates: name-matched rows count even
+            # when the worktree path is gone.
             candidate_row_names=rows_for_cleanup(
                 worktree, self.ctx.node_ids, runner=self._sh
             ),
@@ -838,32 +838,21 @@ class Ritual:
         """ONE headless one-shot carrying only the two judgment steps.
 
         The prompt is the sole positional; ``pm-r-<node>-pr-<n>`` rides
-        ``--name`` (x-84b2; the old ``judgment-pr-<n>`` carried neither source
-        nor node). A merged PR with no recovered node binding refuses the
-        spawn rather than substituting the PR number as a fake node. The
-        worker reads a diff and updates the backlog - routinely over a minute -
-        so spawn's own ``--timeout`` bounds it.
+        ``--name``. A merged PR with no recovered node binding refuses the
+        spawn rather than substituting the PR number as a fake node; spawn's
+        own ``--timeout`` bounds the worker.
         """
         node_ids = [str(node) for node in self.ctx.node_ids if str(node)]
         if not node_ids:
-            # The PR merged but binds no graph node: spawning a judgment under
-            # a fabricated identity would orphan its own provenance.
-            print(
-                f"post-merge judgment: skipped, PR {self.ctx.pr} binds no node; "
-                "no pm-r worker spawned (x-84b2)",
-                file=sys.stderr,
-            )
+            # Spawning under a fabricated identity would orphan its provenance.
+            print(f"post-merge judgment: skipped, PR {self.ctx.pr} binds no node; "
+                  "no pm-r worker spawned", file=sys.stderr)
             return False
-        try:
-            name = dispatch_agent_name("pm", "r", node_ids[0], qualifier=f"pr-{self.ctx.pr}")
-        except AgentNameError as exc:
-            # A stale/missing binary must fail this leg, not abort the ritual
-            # legs after it (run() has no per-leg guard).
-            print(
-                f"post-merge judgment: skipped, worker name unmintable ({exc}); "
-                "no pm-r worker spawned",
-                file=sys.stderr,
-            )
+        name = mint_or_none("pm", "r", node_ids[0], qualifier=f"pr-{self.ctx.pr}")
+        if name is None:
+            # Fail this leg, never abort the ritual legs after it.
+            print("post-merge judgment: skipped, worker name unmintable; "
+                  "no pm-r worker spawned", file=sys.stderr)
             return False
         prompt = self._judgment_prompt(deferred, files, lines)
         argv = [*fno_py_cmd(), "agents", "spawn", "--substrate", "headless",

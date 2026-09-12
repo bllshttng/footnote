@@ -156,33 +156,20 @@ def _revive_orphans(
                 err=True,
             )
             continue
-        # x-84b2: ro-<verb>-<identity>-<short>; the old name aliases the new row.
-        from fno.agents.naming import (
-            AgentNameError,
-            dispatch_agent_name,
-            legacy_verb_code,
-            parse_dispatch_agent_name,
-        )
-
+        # ro-<verb>-<identity>-<short>; the old name aliases the new row.
+        from fno.agents.naming import mint_or_none, parse_dispatch_agent_name
         parsed = parse_dispatch_agent_name(name)
-        verb = parsed.verb if parsed else (legacy_verb_code(name) or "t")
+        verb = parsed.verb if parsed else "t"
         short = str(session)[:8]
         identity, slug = (parsed.node, short) if parsed and parsed.node else (f"session-{short}", None)
-        try:
-            new_name = dispatch_agent_name("ro", verb, identity, slug=slug)
-        except AgentNameError as exc:
+        new_name = mint_or_none("ro", verb, identity, slug=slug)
+        if new_name is None:
             result["agents_revive_failed"].append(name)
-            say(
-                f"fno agents restart: worker '{name}' revive name unrepresentable "
-                f"({exc}); resume it manually: fno agents resume {name}",
-                err=True,
-            )
+            say(f"fno agents restart: worker '{name}' revive name unmintable "
+                f"(stale binary); resume it manually: fno agents resume {name}", err=True)
             continue
-        # Pin the provider explicitly: a bare spawn inherits
-        # config.agents.defaults.provider, and a non-claude default makes the
-        # spawn seam inject --provider <that>, which the --resume guard then
-        # rejects - every revive would fail in such an environment. --substrate
-        # bg is what --resume implies; naming it is belt-and-suspenders.
+        # Pin the provider explicitly: a bare spawn inherits config defaults,
+        # and a non-claude default makes the --resume guard reject the spawn.
         cmd = [
             fno, "agents", "spawn", "--name", new_name,
             "--harness", "claude", "--substrate", "bg", "--resume", str(session),
@@ -196,22 +183,15 @@ def _revive_orphans(
         if rc == 0:
             try:
                 from fno.agents.registry import append_row_alias
-
                 append_row_alias(new_name, name)
             except (OSError, ValueError):
                 pass
             result["agents_revived"].append(new_name)
-            say(
-                f"fno agents restart: revived worker '{new_name}' (was '{name}') "
-                f"onto session {session}."
-            )
+            say(f"fno agents restart: revived '{new_name}' (was '{name}') onto session {session}.")
         else:
             result["agents_revive_failed"].append(name)
-            say(
-                f"fno agents restart: could not revive worker '{name}' (spawn --resume "
-                f"exited {rc}); resume it manually: fno agents resume {name}",
-                err=True,
-            )
+            say(f"fno agents restart: could not revive '{name}' (spawn --resume exit {rc}); "
+                f"resume it manually: fno agents resume {name}", err=True)
 
 
 def _fold_keepers(keepers: dict, result: dict, failures: list) -> None:

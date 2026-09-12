@@ -57,6 +57,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "mail-inject",
     "manifest-eval",
     "manifest-for-session",
+    "name",
     "name-codes",
     "name-mint",
     "name-parse",
@@ -189,19 +190,20 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::manifest_lookup::run_manifest_for_session(&args[1..]);
     }
 
-    // `name-mint`/`name-parse`/`name-codes` are the INTERNAL machine verbs
-    // behind the x-84b2 delegation flip: Python's naming.py shells them so the
-    // vocabulary tables, mint, and parse own exactly one implementation.
-    // Matched with `matches!` like `reentry-plan` - they are not `fno agents`
-    // verbs, so the routable-verb parity sets never see them.
-    if matches!(verb, "name-mint") {
+    // `name` is the routed CLI spelling; `name-mint`/`name-parse`/`name-codes`
+    // are the INTERNAL machine verbs behind the delegation flip: Python's
+    // naming.py shells them so the vocabulary tables, mint, and parse own
+    // exactly one implementation. The machine verbs are matched with `matches!`
+    // like `reentry-plan` - they are not `fno agents` verbs, so the
+    // routable-verb parity sets never see them.
+    if verb == "name" || matches!(verb, "name-mint") {
         return fno_agents::naming::run_name_mint(&args[1..]);
     }
     if matches!(verb, "name-parse") {
         return fno_agents::naming::run_name_parse();
     }
     if matches!(verb, "name-codes") {
-        return fno_agents::naming::run_name_codes();
+        return fno_agents::naming::run_name_codes(&args[1..]);
     }
 
     // `review-summary` is the display-line author for a pre-push reviewed PR:

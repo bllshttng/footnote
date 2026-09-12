@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from fno.agents.naming import AgentNameError, dispatch_agent_name
+from fno.agents.naming import mint_or_none
 from fno.evals import history as _history
 from fno.evals.bank import TaskSpec
 from fno.evals.grading import GradeOutcome, grade
@@ -145,17 +145,13 @@ def _default_spawn(
 ) -> SpawnResult:
     """Run the worker via ``fno agents spawn --substrate headless`` in *workdir*.
     A non-zero exit, missing binary, or timeout is a graded failure, never a
-    sweep crash. A *lane* is a complete coordinate: its harness wins over *provider*.
-    The worker name is the x-84b2 ``ev-th-evals-<run>``: typed non-node identity,
-    per-invocation run token as the never-shaved discriminator."""
-    try:
-        name = dispatch_agent_name(
-            "ev", "th", "evals", discriminator=f"{os.getpid()}-{int(time.time())}"
-        )
-    except AgentNameError as exc:
-        # The mint reads the binary; its absence is the same graded failure as
-        # a missing `fno`, never a sweep crash.
-        return SpawnResult(False, f"spawn failed: worker name unmintable ({exc})")
+    sweep crash. A *lane* is a complete coordinate: its harness wins over *provider*."""
+    name = mint_or_none(
+        "ev", "th", "evals", discriminator=f"{os.getpid()}-{int(time.time())}"
+    )
+    if name is None:
+        # The mint reads the binary; its absence is a graded failure, not a crash.
+        return SpawnResult(False, "spawn failed: worker name unmintable (stale fno-agents binary)")
     cmd = [
         "fno", "agents", "spawn", "--name", name,
         "--substrate", "headless", "--cwd", str(workdir),

@@ -2639,54 +2639,9 @@ def cmd_spawn(
         place_default_view(result.name)
 
 
-#: Exit status `fno agents name` uses for a naming refusal. Deliberately not 2:
-#: Click already spends 2 on usage errors including "no such command", so a
-#: shell caller cannot distinguish a refusal from a stale `fno` at exit 2.
-NAME_REFUSED_EXIT = 3
-
-
-@agents_app.command("name", hidden=True)
-def cmd_name(
-    prefix: Optional[str] = typer.Argument(None, help="Legacy operation prefix (target|think|...); omit with --verb."),
-    node_id: Optional[str] = typer.Argument(None, help="Full backlog node id; never abbreviated."),
-    slug: str = typer.Option("", "--slug", help="Human-readable tail; the only expendable part."),
-    qualifier: str = typer.Option("", "--qualifier", help="Lifecycle reason, e.g. retro."),
-    discriminator: str = typer.Option("", "--discriminator", help="Uniqueness token; never shaved."),
-    source: str = typer.Option("", "--source", help="Dispatch source code (x-84b2); omit when attended."),
-    verb: str = typer.Option("", "--verb", help="Verb code (t|bp|r|th|f) or a work verb the bridge maps."),
-) -> None:
-    """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
-
-    Prints one name on stdout. Exit 3 (NOT 2) is the naming refusal; 2 is Click's usage
-    error, which an `fno` too old to know this verb also returns - reading 2 as a refusal
-    refuses the fleet on a stale install.
-    """
-    from fno.agents.naming import AgentNameError, BridgeUsageError, bridge_name
-
-    # One positional binds to PREFIX by Click's left-to-right rule; read it as the node.
-    if node_id is None:
-        prefix, node_id = None, prefix
-    if not node_id:
-        typer.echo("error: a node id is required: fno agents name [prefix] <node-id>", err=True)
-        raise typer.Exit(2)
-    try:
-        name = bridge_name(
-            prefix or "",
-            node_id,
-            slug=slug or None,
-            qualifier=qualifier or None,
-            discriminator=discriminator or None,
-            source=source or None,
-            verb=verb or None,
-        )
-    except (BridgeUsageError, AgentNameError) as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(NAME_REFUSED_EXIT if isinstance(exc, AgentNameError) else 2)
-    typer.echo(name)
-
-
-# `rename` moved to the Rust client (`agent.rename` over the daemon RPC; rust_runtime's router
-# entry resolves it). Python's rename_agent stays: the transaction library, not a command twin.
+# `name` and `rename` moved to the Rust client (the vocabulary owner is
+# naming.rs; rust_runtime's router entry resolves both). Python's rename_agent
+# stays: the transaction library, not a command twin.
 
 
 @agents_app.command("retask", hidden=True)

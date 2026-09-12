@@ -163,8 +163,9 @@ def test_map_covers_current_surface_once():
     # provenance`, the dispatch-source inventory read: 603 -> 604. This
     # branch allocates `backlog version`, the typed API's counter read
     # (hidden verb, 19 corpus callers): counted from the merged file,
-    # 604 -> 605.
-    assert len(mapped) == 605, (
+    # 604 -> 605. The `agents autonomy provenance` read retired behind the
+    # binary's `name-codes --check`: counted from the merged file, 605 -> 604.
+    assert len(mapped) == 604, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

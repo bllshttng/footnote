@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from fno import paths
-from fno.agents.naming import AgentNameError, parse_dispatch_agent_name
+from fno.agents.naming import parse_node_ids
 
 if TYPE_CHECKING:
     from fno.agents.context import EventContext
@@ -447,6 +447,8 @@ def rows_for_cleanup(worktree: Optional[str], node_ids, *, runner=None) -> list[
     rows = payload if isinstance(payload, list) else payload.get("agents") or []
     ids = {str(node) for node in node_ids}
     out = []
+    names = [str(row.get("name") or "") for row in rows if isinstance(row, dict)]
+    nodes = parse_node_ids(names)
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -454,15 +456,7 @@ def rows_for_cleanup(worktree: Optional[str], node_ids, *, runner=None) -> list[
         if worktree is not None and row.get("cwd") == worktree:
             out.append(name)
             continue
-        try:
-            parsed = parse_dispatch_agent_name(name)
-        except AgentNameError:
-            # Stale/missing binary: this row falls back to the legacy prefix
-            # leg, keeping the best-effort contract (never no candidates).
-            parsed = None
-        if (parsed is not None and parsed.node in ids) or any(
-            name.startswith(f"target-{node}-") for node in ids
-        ):
+        if nodes.get(name) in ids:
             out.append(name)
     return out
 

@@ -129,9 +129,9 @@ case "\$1 \$2" in
   "agents truth")
     printf '{"state":"your-move","last_message":"FNO_CAPABILITY_READY:${CAP_DIGEST}","observed_model":{"kind":"observed","model":"opus","samples":1}}\n' ;;
   "agents name")
-    # Naming is the contract under test, not a scenario input: delegate to the
-    # real bridge exactly like the capability probe delegates truth.
-    exec env PYTHONPATH="${FNO_SRC}" "${FNO_PYTHON}" -m fno.cli agents name "\${@:3}" ;;
+    # Naming is the contract under test: delegate to the binary, the surface
+    # the routed verb and every dispatcher hit in production.
+    exec "${REAL_AGENTS_BIN}" name "\${@:3}" ;;
   "agents mail")
     touch "${TMP_DIR}/child-active"
     cat > .fno/target-state.md <<'CHILD'

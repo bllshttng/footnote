@@ -643,7 +643,7 @@ elif [[ -n "$NODE" ]]; then
   # so a name is adopted only when the WHOLE capture matches the runtime contract
   # - `grep -q` would not do: it matches per line, so a warning followed by a
   # valid name would pass the guard and then be adopted in full.
-  _name_out="$(FNO_AGENTS_RUNTIME=python fno agents name "$verb" "$NODE" --slug "$_node_slug" 2>&1)"
+  _name_out="$(fno agents name "$verb" "$NODE" --slug "$_node_slug" 2>&1)"
   _name_rc=$?
   agent_name=""
   [[ "$_name_rc" -eq 0 && "$_name_out" =~ ^[A-Za-z0-9_-]{1,64}$ ]] && agent_name="$_name_out"

@@ -1614,7 +1614,7 @@ def test_worker_agent_name_carries_verb_id_and_slug():
         "t-ab-2222aaaa-" + "x" * 30
     # A sourced daemon dispatch stamps its origin first.
     assert adv._worker_agent_name(
-        "ab-2222aaaa", "cargo-bootstrapper", source="ab", verb_code="bp"
+        "ab-2222aaaa", "cargo-bootstrapper", source="ab", verb="blueprint"
     ) == "ab-bp-ab-2222aaaa-cargo-bootstrapper"
 
 
@@ -1622,7 +1622,7 @@ def test_worker_agent_name_qualifier_keeps_prefix_contract():
     # x-84b2: the verb code replaced the qualifier slot. The blueprint verb
     # lands as bp; the bare default is t.
     assert adv._worker_agent_name(
-        "x-7aa8abc1", "daily-pass", verb_code="bp"
+        "x-7aa8abc1", "daily-pass", verb="blueprint"
     ) == "bp-x-7aa8abc1-daily-pass"
     # A node declaring no verb keeps the manual t- name.
     assert adv._worker_agent_name("ab-2222aaaa", "cargo-bootstrapper") == \

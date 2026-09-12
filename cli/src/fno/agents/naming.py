@@ -1,5 +1,4 @@
-"""Thin binding to the fno-agents binary's name verbs (vocabulary owner:
-crates/fno-agents/src/naming.rs). Argv marshalling and result parsing only."""
+"""Thin argv/parsing binding to the fno-agents binary's name verbs (owner: naming.rs)."""
 
 import json
 import os
@@ -44,23 +43,18 @@ def _mint(*args):
 
 @lru_cache(maxsize=1)
 def _codes():
-    # A garbage payload (an rc-0 stub, a wrapped binary with a banner) reads as
-    # the stale-binary refusal every caller already guards.
+    # A garbage payload (an rc-0 stub, a banner) reads as the stale-binary refusal.
     try:
         raw = json.loads(_run("name-codes", ["--json"]))
     except json.JSONDecodeError as exc:
         raise AgentNameError(f"name-codes payload unparsable: the fno-agents binary is stale ({exc})")
-    return (frozenset(raw["sources"]), frozenset(raw["verbs"]), dict(raw["word_codes"]),
-            tuple((r["site"], r["source"], r["verb"]) for r in raw["provenance"]))
+    return (frozenset(raw["sources"]), frozenset(raw["verbs"]), dict(raw["word_codes"]))
 
 def dispatch_sources():
     return _codes()[0]
 
 def dispatch_verbs():
     return _codes()[1]
-
-def provenance_rows():
-    return _codes()[3]
 
 def slug_component(raw, cap=SLUG_CAP):
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]", "-", (raw or "").lower())).strip("-")[:cap].rstrip("-")
@@ -72,48 +66,27 @@ def _flags(*pairs):
             out += [flag, value or ""]
     return out
 
-def agent_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=None):
-    # The binary reads empty-everything as usage (exit 2); in-process producers
-    # keep the naming-error contract, so this one refusal stays local.
-    if not (prefix or "").strip() and not (node_id or "").strip():
-        raise AgentNameError("an agent name needs a prefix or a node id; both were empty")
-    return _mint(prefix, node_id, *_flags(("--slug", slug), ("--qualifier", qualifier),
-                                          ("--discriminator", discriminator)))
+def mint_or_none(source, verb, identity, **kwargs):
+    """The mint for degradable seams: a stale/missing binary reads as None."""
+    try:
+        return dispatch_agent_name(source, verb, identity, **kwargs)
+    except (AgentNameError, BridgeUsageError):
+        return None
 
-def verb_code_for(word):
-    v = (word or "").strip().removeprefix("/fno:").removeprefix("$fno:").lstrip("/") or "target"
-    code = _codes()[2].get(v)
-    if not code:
-        raise AgentNameError(f"unknown dispatch verb {word!r}")
-    return code
+def parse_node_ids(names):
+    """Batch node extraction: one name-parse subprocess for the whole list."""
+    keys = list(names)
+    try:
+        rows = parse_many([name or "" for name in keys]) if keys else []
+    except AgentNameError:
+        return {name: None for name in keys}
+    return {name: (row.node if row else None) for name, row in zip(keys, rows)}
 
 def dispatch_agent_name(source, verb, identity, *, slug=None, qualifier=None, discriminator=None):
-    # An identity longer than the runtime contract can never fit: refuse in
-    # process, before any subprocess is spent on a guaranteed refusal.
-    if len((identity or "").strip()) > MAX_LEN:
-        raise AgentNameError(
-            f"required agent-name identity is {len((identity or '').strip())} chars, "
-            f"over the {MAX_LEN}-char runtime limit"
-        )
-    if (verb or "").strip() not in dispatch_verbs():
-        raise AgentNameError(f"unknown dispatch verb {verb!r}")
+    # Pure argv assembly: the binary owns the vocabulary, the budget, and every
+    # refusal (exit 3 naming, exit 2 usage), including word -> verb-code mapping.
     return _mint(*(_opt_pos(source, "--source")), "--verb", verb, identity,
                  *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator)))
-
-def bridge_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=None,
-                source=None, verb=None):
-    # Usage refusals (both forms, missing verb/prefix) are the binary's texts:
-    # _mint maps its exit 2 to BridgeUsageError, exit 3 to AgentNameError. A
-    # missing --verb is forwarded as absent so the binary names the refusal.
-    if verb or source:
-        args = list(_opt_pos(source, "--source"))
-        if verb:
-            args += ["--verb", verb if verb in dispatch_verbs() else verb_code_for(verb)]
-        # A positional prefix rides too: the binary refuses the both-forms pair.
-        pos = [prefix, node_id] if (prefix or "").strip() else [node_id]
-        return _mint(*args, *pos,
-                     *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator)))
-    return agent_name(prefix, node_id, slug=slug, qualifier=qualifier, discriminator=discriminator)
 
 def _opt_pos(value, flag):
     return [flag, value] if (value or "").strip() else []
@@ -134,8 +107,3 @@ def parse_many(names):
 
 def parse_dispatch_agent_name(name):
     return parse_many([name])[0] if name else None
-
-def legacy_verb_code(name):
-    if not name:
-        return None
-    return "t" if name.startswith("target-") else ("th" if name.startswith("think-") else None)

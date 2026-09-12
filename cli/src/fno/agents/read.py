@@ -20,6 +20,7 @@ from typing import Optional
 
 from fno.agents import format as fmt
 from fno.agents import truth_status
+from fno.agents.naming import parse_node_ids
 from fno.agents.reachability import (
     UNREACHABLE,
     classify_progress,
@@ -154,7 +155,7 @@ def list_agents(
 
     rows: list[dict] = []
     # One batched name-parse for the join, never one subprocess per row.
-    node_by_name = truth_status.parse_node_ids([entry.name for entry in filtered])
+    node_by_name = parse_node_ids([entry.name for entry in filtered])
     for entry in filtered:
         from fno.agents import session_truth
 

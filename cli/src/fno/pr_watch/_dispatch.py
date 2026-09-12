@@ -306,10 +306,7 @@ def fire_skill(
     with an arbitrary command string for unit tests; when set, the command is
     built as ``["<seam>"]`` and the runner receives it like any other call.
 
-    ``node_id`` (x-84b2) names the worker ``pw-r-<node>-pr-<n>``; a PR whose
-    candidate binds no graph node REFUSES the autonomous spawn rather than
-    substituting the PR number as a fake node (the tick's retry/park machinery
-    owns the refusal).
+    ``node_id`` names the worker ``pw-r-<node>-pr-<n>``; no node refuses the spawn.
 
     This is the review (``check``) fire only. The post-merge ritual no longer
     fires here: pr-watch runs ``fno do pr ritual <n> --autonomous`` directly, and
@@ -327,10 +324,8 @@ def fire_skill(
     is a failure.
     """
     if not node_id:
-        log.warning(
-            "pr-watch: PR #%d binds no graph node; refusing the %s fire (x-84b2)",
-            pr_number, verb,
-        )
+        log.warning("pr-watch: PR #%d binds no graph node; refusing the %s fire",
+                    pr_number, verb)
         return DispatchResult(ok=False, rc=-1, is_error=False, raw="")
     worker_timeout = (
         timeout_s if timeout_s is not None else _TIMEOUT_FOR_VERB.get(verb, _DEFAULT_FIRE_TIMEOUT)

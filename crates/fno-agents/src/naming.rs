@@ -320,7 +320,8 @@ fn node_shape() -> &'static Regex {
 
 /// Parse `[<source>-]<verb>-<identity>`, else None. Positional grammar: the
 /// first token is a source only when the second is a verb, so a node prefix
-/// colliding with a code cannot misread. Pre-cutover names are not canonical.
+/// colliding with a code cannot misread. Pre-cutover `target-`/`think-`
+/// names resolve through the legacy read window.
 pub fn parse_dispatch_agent_name(name: Option<&str>) -> Option<Parsed> {
     let name = name?;
     if name.is_empty() {
@@ -338,6 +339,10 @@ pub fn parse_dispatch_agent_name(name: Option<&str>) -> Option<Parsed> {
     } else if dispatch_verbs().contains(tokens[0]) {
         source = None;
         verb = tokens[0];
+        rest = &tokens[1..];
+    } else if tokens[0] == "target" || tokens[0] == "think" {
+        source = None;
+        verb = if tokens[0] == "target" { "t" } else { "th" };
         rest = &tokens[1..];
     } else {
         return None;
@@ -495,8 +500,50 @@ pub fn run_name_parse() -> i32 {
 }
 
 /// `fno-agents name-codes --json`: the vocabulary tables for thin readers.
-pub fn run_name_codes() -> i32 {
+/// `--check` runs the CI provenance audit: rows + marker, exit 1 on a defect.
+pub fn run_name_codes(args: &[String]) -> i32 {
     let c = codes();
+    if args.iter().any(|a| a == "--check") {
+        let mut problems: Vec<String> = Vec::new();
+        if c.provenance.len() != 18 {
+            problems.push(format!(
+                "expected 18 coded paths, found {}",
+                c.provenance.len()
+            ));
+        }
+        let mut sites = c.provenance.clone();
+        sites.sort();
+        sites.dedup();
+        if sites.len() != c.provenance.len() {
+            problems.push("duplicate site labels in the inventory".to_string());
+        }
+        let row_sources: HashSet<&String> = c.provenance.iter().map(|(_, s, _)| s).collect();
+        if !row_sources.contains(&"sob".to_string()) || !row_sources.contains(&"ac".to_string()) {
+            problems.push("sob and ac must be distinct inventory rows".to_string());
+        }
+        if c.provenance.iter().filter(|(_, s, _)| s == "ab").count() != 2 {
+            problems.push("both active-backlog rows must carry ab".to_string());
+        }
+        for (site, source, verb) in &c.provenance {
+            if !c.sources.contains(source) {
+                problems.push(format!("{site}: unknown source {source:?}"));
+            }
+            if !c.verbs.contains(verb) && verb != "resolved" {
+                problems.push(format!("{site}: unknown verb {verb:?}"));
+            }
+        }
+        for (site, source, verb) in &c.provenance {
+            println!("{site}\t{source}\t{verb}");
+        }
+        for problem in &problems {
+            eprintln!("error: {problem}");
+        }
+        if !problems.is_empty() {
+            return 1;
+        }
+        println!("dispatch provenance: 18/18 coded");
+        return 0;
+    }
     let json = serde_json::json!({
         "sources": c.sources.iter().collect::<Vec<_>>(),
         "verbs": c.verbs.iter().collect::<Vec<_>>(),
@@ -578,8 +625,22 @@ mod tests {
         let p = parse_dispatch_agent_name(Some("ro-t-session-abcd1234")).unwrap();
         assert!(p.node.is_none());
         assert_eq!(p.tail, "session-abcd1234");
-        // Pre-cutover names are not canonical.
-        assert!(parse_dispatch_agent_name(Some("target-x-84b2-1")).is_none());
+        // Pre-cutover names resolve through the legacy read window.
+        let legacy = parse_dispatch_agent_name(Some("target-x-84b2-1")).unwrap();
+        assert_eq!(legacy.source.as_deref(), None);
+        assert_eq!(
+            (
+                legacy.verb.as_str(),
+                legacy.node.as_deref(),
+                legacy.tail.as_str()
+            ),
+            ("t", Some("x-84b2"), "1")
+        );
+        let legacy = parse_dispatch_agent_name(Some("think-x-84b2-retro")).unwrap();
+        assert_eq!(
+            (legacy.verb.as_str(), legacy.node.as_deref()),
+            ("th", Some("x-84b2"))
+        );
         assert!(parse_dispatch_agent_name(Some("j-x-3218-2")).is_none());
     }
 

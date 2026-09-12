@@ -146,9 +146,9 @@ Every dispatch path mints its worker name through one contract in `cli/src/fno/a
 - **Identity** is the full configured node id (`x-aaaa`, never a bare hex tail, because prefixes are per-project config). A non-node workload uses a typed identity: `backlog` (groom), `evals`, or `session-<handle>` for a nodeless resume. A PR-scoped worker carries `pr-<n>` as a qualifier.
 - **Budget**: source, verb, identity, qualifier, and discriminator are required. Only the human slug gives way to the 64-character runtime limit. An unrepresentable identity refuses before spawn.
 
-Legacy names (`target-<node>-*`, `think-<node>-*`, `reconcile-*`, `j-*`) still resolve through the read-side fallbacks in `parse_node_id` / `parse_worker_mission` and the reaper's legacy prefix path. This is the legacy-read window. Recovery and restart preserve the predecessor name as a registry alias on the new row.
+Legacy names (`target-<node>-*`, `think-<node>-*`) resolve through the legacy read window in the binary's `name-parse`; `reconcile-*` and `j-*` stay unrecognized. The reaper keeps its legacy prefix path. Recovery and restart preserve the predecessor name as a registry alias on the new row.
 
-The inventory is ratcheted. `fno agents autonomy provenance` prints every path with its codes and the positive marker `dispatch provenance: 18/18 coded`. `scripts/ci/check-autonomy-registry.sh` fails CI when a registered path loses its code.
+The inventory is ratcheted. The fno-agents binary's `name-codes --check` prints every path with its codes and the positive marker `dispatch provenance: 18/18 coded`. `scripts/ci/check-autonomy-registry.sh` runs it and fails CI when a registered path loses its code.
 
 ## Events
 

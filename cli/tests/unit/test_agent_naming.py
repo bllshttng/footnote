@@ -5,13 +5,20 @@ import pytest
 from fno.agents.naming import (
     MAX_LEN,
     AgentNameError,
-    agent_name,
     dispatch_agent_name,
     dispatch_sources,
     dispatch_verbs,
     parse_dispatch_agent_name,
     slug_component,
 )
+
+
+def _legacy_name(*argv):
+    """The legacy prefix form through the bridge (cmd_name -> binary)."""
+    res = _run_name(*argv)
+    if res.exit_code != 0:
+        raise AgentNameError(res.output)
+    return res.stdout.strip()
 
 
 def test_slug_component_matches_the_shell_sanitize_pipeline():
@@ -24,21 +31,22 @@ def test_slug_component_matches_the_shell_sanitize_pipeline():
 
 
 def test_plain_node_name():
-    assert agent_name("target", "x-3218", slug="spawn-sh-pane-name") == (
+    assert _legacy_name("target", "x-3218", "--slug", "spawn-sh-pane-name") == (
         "target-x-3218-spawn-sh-pane-name"
     )
-    assert agent_name("target", "x-3218") == "target-x-3218"
-    assert agent_name("target", "x-3218", slug="   ") == "target-x-3218"
+    assert _legacy_name("target", "x-3218") == "target-x-3218"
+    assert _legacy_name("target", "x-3218", "--slug", "   ") == "target-x-3218"
 
 
 def test_qualifier_and_discriminator_ordering():
-    assert agent_name(
-        "think", "x-3218", qualifier="worked", slug="pane-name", discriminator="ab12"
+    assert _legacy_name(
+        "think", "x-3218", "--qualifier", "worked", "--slug", "pane-name",
+        "--discriminator", "ab12",
     ) == "think-x-3218-worked-pane-name-ab12"
 
 
 def test_long_slug_is_trimmed_to_exactly_the_limit():
-    name = agent_name("target", "x-" + "0" * 20, slug="c" * 30, discriminator="d" * 12)
+    name = _legacy_name("target", "x-" + "0" * 20, "--slug", "c" * 30, "--discriminator", "d" * 12)
     assert len(name) == MAX_LEN
     assert name.startswith("target-x-" + "0" * 20)
     assert name.endswith("-" + "d" * 12)
@@ -48,31 +56,30 @@ def test_slug_is_the_only_component_that_gives_way():
     # Required components consume the whole budget: the slug disappears, the
     # load-bearing discriminator survives intact.
     node = "n-" + "9" * 42
-    name = agent_name("target", node, slug="human-readable", discriminator="e" * 12)
+    name = _legacy_name("target", node, "--slug", "human-readable", "--discriminator", "e" * 12)
     assert name == f"target-{node}-" + "e" * 12
     assert len(name) <= MAX_LEN
 
 
 def test_uniqueness_suffixes_stay_distinct_near_the_limit():
     node = "x-" + "7" * 30
-    a = agent_name("think", node, slug="s" * 30, discriminator="aaaaaaaa")
-    b = agent_name("think", node, slug="s" * 30, discriminator="bbbbbbbb")
+    a = _legacy_name("think", node, "--slug", "s" * 30, "--discriminator", "aaaaaaaa")
+    b = _legacy_name("think", node, "--slug", "s" * 30, "--discriminator", "bbbbbbbb")
     assert a != b
     assert len(a) == len(b) == MAX_LEN
     assert a.endswith("-aaaaaaaa") and b.endswith("-bbbbbbbb")
 
 
 def test_identical_components_converge_on_one_name():
-    kwargs = dict(prefix="target", node_id="x-3218", slug="dedup token")
     # Exact, not f(x) == f(x): the tautology holds for any deterministic
     # implementation, including one that returns the empty string.
-    assert agent_name(**kwargs) == "target-x-3218-dedup-token"
+    assert _legacy_name("target", "x-3218", "--slug", "dedup token") == "target-x-3218-dedup-token"
 
 
 def test_over_budget_required_identity_fails_closed():
     node = "n-" + "z" * 70
     with pytest.raises(AgentNameError) as exc:
-        agent_name("target", node, slug="anything")
+        _legacy_name("target", node, "--slug", "anything")
     assert node in str(exc.value)
     assert "64" in str(exc.value)
 
@@ -80,40 +87,40 @@ def test_over_budget_required_identity_fails_closed():
 def test_over_budget_with_discriminator_names_the_node_and_budget():
     node = "n-" + "z" * 45
     with pytest.raises(AgentNameError) as exc:
-        agent_name("target", node, discriminator="d" * 20)
+        _legacy_name("target", node, "--discriminator", "d" * 20)
     assert node in str(exc.value)
 
 
 def test_invalid_characters_in_required_components_are_refused():
     with pytest.raises(AgentNameError):
-        agent_name("target", "x 3218")
+        _legacy_name("target", "x 3218")
     with pytest.raises(AgentNameError):
-        agent_name("tar/get", "x-3218")
+        _legacy_name("tar/get", "x-3218")
 
 
 def test_empty_required_identity_is_refused():
     with pytest.raises(AgentNameError):
-        agent_name("", "")
+        _legacy_name("", "")
 
 
 def test_underscores_survive_in_required_components():
     # The daemon contract allows '_'; only the human slug is hyphen-normalized.
-    assert agent_name("target", "x_3218", slug="a_b") == "target-x_3218-a-b"
+    assert _legacy_name("target", "x_3218", "--slug", "a_b") == "target-x_3218-a-b"
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    "argv",
     [
-        dict(prefix="target", node_id="x-3218", slug="s" * 40),
-        dict(prefix="reconcile", node_id="ab-4040eee8", slug="cargo bootstrapper"),
-        dict(prefix="think", node_id="x-" + "1" * 35, qualifier="retro", slug="s" * 30),
-        dict(prefix="spawn", node_id="x-3218", discriminator="0" * 30),
+        ["target", "x-3218", "--slug", "s" * 40],
+        ["reconcile", "ab-4040eee8", "--slug", "cargo bootstrapper"],
+        ["think", "x-" + "1" * 35, "--qualifier", "retro", "--slug", "s" * 30],
+        ["spawn", "x-3218", "--discriminator", "0" * 30],
     ],
 )
-def test_every_result_satisfies_the_daemon_contract(kwargs):
+def test_every_result_satisfies_the_daemon_contract(argv):
     import re
 
-    name = agent_name(**kwargs)
+    name = _legacy_name(*argv)
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name), name
 
 
@@ -136,11 +143,12 @@ def test_dispatch_name_canonical_and_manual_forms():
     )
 
 
-def test_dispatch_name_refuses_unknown_codes():
+def test_dispatch_name_maps_words_and_refuses_unknowns():
+    # The binary maps work-verb words; only unknown words and codes refuse.
     with pytest.raises(AgentNameError, match="unknown dispatch source"):
         dispatch_agent_name("xx", "t", "x-1")
     with pytest.raises(AgentNameError, match="unknown dispatch verb"):
-        dispatch_agent_name("ab", "target", "x-1")
+        dispatch_agent_name("ab", "impeccable", "x-1")
 
 
 def test_dispatch_name_budget_keeps_source_verb_identity_whole():
@@ -185,9 +193,14 @@ def test_parse_typed_identities_are_not_nodes():
         assert parsed.node is None, name
 
 
-def test_parse_legacy_and_junk_names_return_none():
-    assert parse_dispatch_agent_name("target-x-3218-spawn") is None
-    assert parse_dispatch_agent_name("think-x-3218-retro") is None
+def test_parse_legacy_names_resolve_through_the_window():
+    legacy = parse_dispatch_agent_name("target-x-3218-spawn")
+    assert (legacy.source, legacy.verb, legacy.node, legacy.tail) == (None, "t", "x-3218", "spawn")
+    think = parse_dispatch_agent_name("think-x-3218-retro")
+    assert (think.verb, think.node) == ("th", "x-3218")
+
+
+def test_parse_junk_names_return_none():
     assert parse_dispatch_agent_name("reconcile-ab-4040eee8-cargo") is None
     assert parse_dispatch_agent_name("j-x-3218-2") is None
     assert parse_dispatch_agent_name("fno agents pane") is None
@@ -210,11 +223,25 @@ def test_source_and_verb_vocabularies_do_not_collide_within_a_slot():
 
 
 def _run_name(*args):
-    from typer.testing import CliRunner
+    """The routed verb replaces the process under CliRunner, so the bridge
+    contract runs against the binary directly (the same surface shells hit)."""
+    import subprocess
 
-    from fno.cli import app
+    from fno import rust_binary
 
-    return CliRunner().invoke(app, ["agents", "name", *args])
+    binary = rust_binary.resolve_binary()
+    assert binary is not None, "no fno-agents binary on this lane"
+    proc = subprocess.run(
+        [str(binary), "name", *args], capture_output=True, text=True, timeout=30
+    )
+
+    class _Res:
+        exit_code = proc.returncode
+        stdout = proc.stdout
+        stderr = proc.stderr
+        output = proc.stdout + proc.stderr
+
+    return _Res()
 
 
 def test_bridge_prints_the_name_and_exits_zero():
@@ -263,13 +290,7 @@ def test_bridge_refusal_exit_code_is_three_not_two():
     catches that: the downstream receipt lines are indistinguishable, because
     the degraded path has its own over-64 refusal that prints a similar message.
     """
-    from fno.agents.cli import NAME_REFUSED_EXIT
-
-    assert NAME_REFUSED_EXIT == 3
-    assert NAME_REFUSED_EXIT != 2, "2 is Click's usage/unknown-command exit"
-
     res = _run_name("target", "n-" + "z" * 70)
-    assert res.exit_code == NAME_REFUSED_EXIT
     assert res.exit_code == 3
 
 
