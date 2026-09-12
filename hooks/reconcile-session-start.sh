@@ -39,7 +39,7 @@ if [[ -f "$RESULT" ]] && command -v jq >/dev/null 2>&1; then
     # the consume-after-show mv and before reconcile_maybe_fire: every session
     # re-surfaced the same stale reminder and no reconcile ever fired again. A
     # cosmetic line must never be able to kill the trigger below it.
-    cu=$(jq -r '.sync_catchup // empty | select(.outcome | test("failed|unknown|error|marked|skipped")) | "\(.outcome)\(if .detail != "" then " (" + .detail + ")" else "" end)"' "$RESULT" 2>/dev/null || true)
+    cu=$(jq -r '.sync_catchup // empty | select((.outcome | test("failed|unknown|error|marked|skipped")) or (.stale == true and .outcome != "synced")) | "\(.outcome)\(if .detail != "" then " (" + .detail + ")" else "" end)"' "$RESULT" 2>/dev/null || true)
     [[ -n "$cu" ]] && echo "reconcile: canonical-sync catch-up ${cu}. The canonical checkout may be behind; run \`fno doctor\` for the outcome-keyed report."
     # Promise-gate held-open nodes (condition D, plus #794's probes/ship-count):
     # a node the sweep refused to close lands in .promise_unmet. Surfacing only

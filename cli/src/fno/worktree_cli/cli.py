@@ -63,8 +63,8 @@ def stranded(
     apply: bool = typer.Option(
         False,
         "--apply",
-        help="Act on the classification: push+file STRANDED rows, record UNKNOWN rows. "
-        "Default is classify-and-print only.",
+        help="Act on the classification: push STRANDED rows and record the recovery "
+        "as a sweep event, record UNKNOWN rows. Default is classify-and-print only.",
     ),
 ) -> None:
     """Classify every worktree git+graph+fleet can't otherwise tell apart.

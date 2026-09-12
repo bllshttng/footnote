@@ -293,10 +293,6 @@ _TICK_TIMEOUT_EXIT = 75
 
 _ENV_TICK_TIMEOUT = "FNO_PR_WATCH_TICK_TIMEOUT"
 
-#: Set by the tick around its catch-up leg (x-d211): a child `fno update`
-#: seeing it skips the refresh that bootouts the job owning the tick.
-_ENV_ACTIVE_TICK = "FNO_PR_WATCH_ACTIVE_TICK"
-
 #: A roster probe needs at least this much budget to be worth starting. The
 #: probe measured 3.4s on a 43-row fleet, so anything under this buys a
 #: certain timeout rather than a smaller answer.
@@ -338,10 +334,9 @@ _STRANDED_FLOOR_S = 10.0
 _RECOVERY_ROOT_FLOOR_S = 3.0
 
 #: Per-phase alarm caps (x-c79d): each phase runs under its own slice,
-#: min(cap, seconds left before the tick ceiling). watchdog and catchup
-#: are uncapped and take what the ceiling leaves, because one unit of
-#: their work is long: a wake apply needs _WAKE_APPLY_FLOOR_S, and the
-#: sync shell may run 600s. The capped slices sum to 550s against the
+#: min(cap, seconds left before the tick ceiling). watchdog is the one
+#: uncapped phase and stops itself at _WAKE_APPLY_FLOOR_S, because one
+#: unit of its work is long. The capped slices sum to 550s against the
 #: 480s ceiling, so under stress the tail is cut first.
 _PHASE_CAP_S: dict[str, float] = {
     "settings": 60,
@@ -358,7 +353,7 @@ class TickDeadlineExceeded(BaseException):
     """The tick's wall-clock deadline fired; the phase marker names where.
 
     BaseException on purpose: every broad `except Exception` seam in the tick
-    path (the sweep, recovery, catch-up) exists to degrade one leg without
+    path (the sweep, recovery) exists to degrade one leg without
     stopping the others, and the deadline is the one signal that must stop
     everything. The alarm is one-shot, so a seam that swallowed it would leave
     the rest of the tick unbounded - the exact stall class this deadline ends.
@@ -471,18 +466,13 @@ def tick() -> None:
             alarm_ok = False
             log.debug("pr-watch: SIGALRM unavailable outside main thread")
 
-        # x-d211: a bootout kills this process by signal; without a handler
-        # the tick dies with no record. While the marker is set the sync
-        # child is running, so its update's bounce is the probable killer.
+        # A bootout kills this process by signal; without a handler the tick
+        # dies with no record.
         def _on_sigterm(signum, frame) -> None:  # noqa: ARG001 - handler signature
             signal.signal(signum, signal.SIG_IGN)
-            why = "self_killed" if os.environ.get(_ENV_ACTIVE_TICK) else "killed"
-            reason = ("killed mid-sync; its own update bouncing this job is the "
-                      "probable source" if why == "self_killed" else
-                      "killed by a signal mid-tick")
             phase = current_tick_phase()
             _emit_event("pr_watch_tick_end", {
-                "outcome": "error", "why": why,
+                "outcome": "error", "why": "killed",
                 "duration_s": round(time.monotonic() - started, 3),
                 "phase": phase, "pid": os.getpid(),
             })
@@ -490,7 +480,7 @@ def tick() -> None:
                 "pr_watch_merge",
                 interval_s=int(getattr(cfg, "interval_seconds", 600)) if cfg is not None else 600,
                 skip_reason="error",
-                detail=f"{reason}; started and did not complete, phase={phase}",
+                detail=f"killed by a signal mid-tick; started and did not complete, phase={phase}",
             )
             signal.signal(signum, signal.SIG_DFL)
             os.kill(os.getpid(), signum)
@@ -586,7 +576,7 @@ def tick() -> None:
         _run_phase("settings", _phase_settings)
 
         # Phase order (x-c79d): PR legs first (sweep, king_wake, notify_watch, heal,
-        # stranded), then the fleet-health tail (recovery, watchdog, catchup) - per-phase slices removed the shared deadline that gave recovery a head-of-line pass.
+        # stranded), then the fleet-health tail (recovery, watchdog) - per-phase slices removed the shared deadline that gave recovery a head-of-line pass.
         def _phase_recovery(_slice_s: float) -> None:
             assert settings is not None and cfg is not None
             set_tick_phase("recovery")
@@ -1185,6 +1175,7 @@ def tick() -> None:
                     log.warning("pr-watch: heal phase failed: %s", exc)
 
         def _phase_stranded(slice_s: float) -> None:
+            assert settings is not None and cfg is not None
             # The watchdog def imports these for its own lanes; the stranded
             # sweep reads the same arming decisions, so it imports its own.
             from fno.agents.watchdog import lane_armed as _wd_lane_armed
@@ -1204,7 +1195,13 @@ def tick() -> None:
 
                 wake = lane_armed and _wd_wake_armed(settings)
                 changed, stranded_n, unknown_n, acted_n, failed_n, roots_done = False, 0, 0, 0, 0, 0
-                for root in _tick_roots():
+                # Rotate the starting root by interval bucket: a cap cut no
+                # longer replays the same prefix forever.
+                roots = _tick_roots()
+                if roots:
+                    k = int(time.time() // max(1, int(cfg.interval_seconds))) % len(roots)
+                    roots = roots[k:] + roots[:k]
+                for root in roots:
                     # Re-check per root, not just once before the loop: a
                     # code-review finding caught that the floor above only
                     # bounded the FIRST root - a multi-repo tick with several
@@ -1245,50 +1242,10 @@ def tick() -> None:
             except Exception as exc:  # noqa: BLE001 - never let the stranded sweep break pr-watch
                 log.warning("pr-watch: stranded sweep failed: %s", exc)
 
-        # Canonical-sync catch-up. The dispatch above is event-time-only:
-        # it acts on merges it DETECTS, so a merge that landed while the daemon was
-        # wedged is never synced by it. This leg is keyed on outcome instead - it
-        # asks whether recent merges have markers, not whether we saw them happen.
-        # Wrapped exactly like the recovery sweep: a catch-up failure logs and never
-        # breaks the tick. auto_run gating lives inside run_sync_catchup.
-        # Deferred after a quota skip: this leg's gh pr list/view calls spend the
-        # same shared GraphQL pool the skip just refused to drain, so running it
-        # would stall for each timeout against the exact budget it protected.
-        def _phase_catchup(_slice_s: float) -> None:
-            set_tick_phase("catchup")
-            quota_skipped = result is not None and bool(getattr(result, "quota_skip", False))
-            if not quota_skipped:
-                try:
-                    from fno.pr._sync_canonical import run_sync_catchup
-
-                    for root in _tick_roots():
-                        try:
-                            res = run_sync_catchup(
-                                settings=load_settings_for_repo(root), canonical_root=root
-                            )
-                        except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
-                            log.warning("pr-watch: sync catch-up failed for %s: %s", root, exc)
-                            continue
-                        if res.outcome == "disabled":
-                            continue
-                        typer.echo(
-                            f"sync catch-up [{root.name}]: {res.outcome}"
-                            + (f" ({res.detail})" if res.detail else "")
-                        )
-                        # Detected AND unresolved. Keying on a failed sync alone would alarm
-                        # on a merge from two minutes ago whose retry is seconds away, and
-                        # stay silent on a canonical proven behind with every marker present
-                        # - the state where there is nothing to sweep and the markers lie.
-                        if res.stale and res.outcome != "synced":
-                            typer.echo(
-                                f"ALARM: {root.name} canonical sync is stale and the catch-up "
-                                f"did not resolve it ({res.detail}). That checkout and its "
-                                f"installed tooling are behind; sync it by hand.",
-                                err=True,
-                            )
-                            _notify_parked(f"canonical sync stale: {root.name} ({res.outcome})")
-                except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
-                    log.warning("pr-watch: sync catch-up failed: %s", exc)
+        # Canonical-sync catch-up does NOT run on the tick: it duplicated
+        # `fno backlog reconcile`'s SessionStart leg, and its sync shell is
+        # where ticks died. Reconcile owns the outcome-keyed leg and surfaces
+        # a proven-stale canonical through its SessionStart hook.
         sweep_started = True
         _run_phase("sweep", _phase_sweep, on_end=_sweep_ended)
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
@@ -1297,16 +1254,6 @@ def tick() -> None:
         _run_phase("stranded", _phase_stranded)
         _run_phase("recovery", _phase_recovery)
         _run_phase("watchdog", _phase_watchdog, arm="watchdog")
-        # Scoped to catch-up (x-d211): its sync shell inherits the marker.
-        prior_marker = os.environ.get(_ENV_ACTIVE_TICK)
-        os.environ[_ENV_ACTIVE_TICK] = f"tick:{os.getpid()}"
-        try:
-            _run_phase("catchup", _phase_catchup)
-        finally:
-            if prior_marker is None:
-                os.environ.pop(_ENV_ACTIVE_TICK, None)
-            else:
-                os.environ[_ENV_ACTIVE_TICK] = prior_marker
     except TickDeadlineExceeded:
         # Backstop: the per-phase runner catches its own cuts. Reaching here
         # means a cut escaped between phases; phase names where.

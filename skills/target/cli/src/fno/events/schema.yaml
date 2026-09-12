@@ -5073,7 +5073,7 @@ event_types:
           description: "The HEAD sha at classification time, when known."
         acts:
           type: array
-          description: "The acts already taken for this row (push, backlog_update), in order; empty for UNKNOWN."
+          description: "The acts already taken for this row (push, event_emit), in order; empty for UNKNOWN."
         node:
           type: [string, "null"]
           description: "The resolved backlog node id for this worktree, when one resolved; null for an UNKNOWN row whose node never resolved."

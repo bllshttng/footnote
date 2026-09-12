@@ -16,7 +16,6 @@ testable with a fixture table with no filesystem or subprocess involved.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -207,9 +206,27 @@ def _unpushed_batch(
 # count is only truthful against CURRENT remote refs, so it is taken after a
 # verified `fetch --all --prune`; a refresh that cannot verify (no network,
 # dead remote) answers "might hold unique commits" - and a FAILED fetch
-# caches too, so a sweep pays one connect timeout, not one per worktree.
+# caches too, so a sweep pays one fetch, not one per worktree. The cache
+# bounds multiplicity only: git sets no connect timeout of its own, so the
+# fetch itself carries the duration bound below.
 _remote_refs_fresh = False
 _remote_refs_stale = False
+
+# The stranded phase runs under a 60s slice: every network or daemon call
+# carries a timeout, so one hung remote or contended graph write costs its
+# own seconds, not the phase. A timed-out act reports stopped_at and the row
+# is re-detected next tick.
+_FETCH_TIMEOUT_S = 15.0
+_PUSH_TIMEOUT_S = 30.0
+_DAEMON_TIMEOUT_S = 20.0
+
+
+def _run(argv: list[str], timeout: float) -> Optional[subprocess.CompletedProcess]:
+    """subprocess.run with a duration bound; a timeout reads as failure."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
 
 
 def _wt_unpushed_count(path: str) -> tuple[int, bool]:
@@ -220,10 +237,10 @@ def _wt_unpushed_count(path: str) -> tuple[int, bool]:
     if not _remote_refs_fresh:
         if _remote_refs_stale:
             return 1, False
-        fetch_p = subprocess.run(
-            ["git", "-C", path, "fetch", "--all", "--prune"], capture_output=True
+        fetch_p = _run(
+            ["git", "-C", path, "fetch", "--all", "--prune"], _FETCH_TIMEOUT_S
         )
-        if fetch_p.returncode != 0:
+        if fetch_p is None or fetch_p.returncode != 0:
             _remote_refs_stale = True
             return 1, False
         _remote_refs_fresh = True
@@ -313,52 +330,23 @@ def act_on_stranded(row: Row) -> dict:
 
     if branch:
         push_branch = branch
-        push_p = subprocess.run(
-            ["git", "-C", path, "push", "-u", "origin", branch], capture_output=True, text=True
-        )
+        push_p = _run(["git", "-C", path, "push", "-u", "origin", branch], _PUSH_TIMEOUT_S)
     else:
         push_branch = f"recovered/{node}"
-        push_p = subprocess.run(
+        push_p = _run(
             ["git", "-C", path, "push", "origin", f"HEAD:refs/heads/{push_branch}"],
-            capture_output=True,
-            text=True,
+            _PUSH_TIMEOUT_S,
         )
-    push_ok = push_p.returncode == 0
-    acts.append({"act": "push", "branch": push_branch, "ok": push_ok, "detail": (push_p.stderr or "").strip()[:500]})
+    push_ok = push_p is not None and push_p.returncode == 0
+    detail = push_p.stderr.strip()[:500] if push_p is not None else ""
+    acts.append({"act": "push", "branch": push_branch, "ok": push_ok, "detail": detail})
     if not push_ok:
         return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "push"}
 
-    detail_line = (
-        f"Recovered {row.unpushed} unpushed commit(s) at {sha[:12] or 'unknown'} "
-        f"onto {push_branch} (stranded sweep)."
-    )
-    get_p = subprocess.run(["fno", "backlog", "get", node], capture_output=True, text=True)
-    if get_p.returncode != 0:
-        acts.append(
-            {
-                "act": "backlog_get",
-                "ok": False,
-                "detail": (get_p.stderr or "backlog get failed").strip()[:500],
-            }
-        )
-        return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "backlog_get"}
-    try:
-        current = json.loads(get_p.stdout or "")
-        if not isinstance(current, dict):
-            raise ValueError("backlog get returned a non-object")
-    except (json.JSONDecodeError, ValueError) as exc:
-        acts.append({"act": "backlog_get", "ok": False, "detail": str(exc)[:500]})
-        return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "backlog_get"}
-    cur_details = current.get("details") or ""
-    new_details = f"{cur_details}\n\n{detail_line}" if cur_details else detail_line
-    upd_p = subprocess.run(
-        ["fno", "backlog", "update", node, "--details", new_details], capture_output=True, text=True
-    )
-    upd_ok = upd_p.returncode == 0
-    acts.append({"act": "backlog_update", "ok": upd_ok, "detail": (upd_p.stderr or "").strip()[:500]})
-    if not upd_ok:
-        return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "backlog_update"}
-
+    # The recovery is recorded by _emit_sweep_event below, not by a node
+    # write: a details append here shells out twice and pays lock plus a
+    # 16MB rewrite (48.9s measured) inside this 60s slice, and its
+    # read-append-writeback clobbers concurrent node writers.
     ev_ok = _emit_sweep_event(row, node=node, branch=push_branch, sha=sha, acts=[a["act"] for a in acts])
     acts.append({"act": "event_emit", "ok": ev_ok})
     return {"node": node, "class": row.klass, "acts": acts, "stopped_at": None if ev_ok else "event_emit"}

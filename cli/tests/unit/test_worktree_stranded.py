@@ -333,24 +333,15 @@ def test_act_on_stranded_stops_at_first_failure(monkeypatch):
     assert not any("backlog" in args for args in calls)
 
 
-@pytest.mark.parametrize(
-    "get_returncode,get_stdout",
-    [
-        pytest.param(1, "", id="get-command-failed"),
-        pytest.param(0, "not-json", id="get-output-malformed"),
-    ],
-)
-def test_act_on_stranded_never_updates_after_backlog_read_failure(
-    monkeypatch, get_returncode, get_stdout
-):
+def test_act_on_stranded_writes_no_node_details(monkeypatch):
+    """The recovery is recorded by the sweep event, not by a node details
+    append: the get/update pair paid lock plus a 16MB rewrite inside the
+    phase slice, and its read-append-writeback clobbered concurrent node
+    writers."""
     calls = []
 
     def fake_run(args, **kwargs):
         calls.append(args)
-        if args[:3] == ["fno", "backlog", "get"]:
-            return subprocess.CompletedProcess(
-                args, get_returncode, stdout=get_stdout, stderr="read failed"
-            )
         if args[:3] == ["git", "-C", "/wt/x-abcd"] and "rev-parse" in args:
             return subprocess.CompletedProcess(args, 0, stdout="abc123def456\n", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
@@ -366,9 +357,64 @@ def test_act_on_stranded_never_updates_after_backlog_read_failure(
     )
     outcome = act_on_stranded(row)
 
-    assert outcome["stopped_at"] == "backlog_get"
-    assert [act["act"] for act in outcome["acts"]] == ["push", "backlog_get"]
-    assert not any(args[:3] == ["fno", "backlog", "update"] for args in calls)
+    assert outcome["stopped_at"] is None
+    assert [act["act"] for act in outcome["acts"]] == ["push", "event_emit"]
+    assert not any(args[:2] == ["fno", "backlog"] for args in calls)
+
+
+def test_act_on_stranded_survives_a_timed_out_push(monkeypatch):
+    """A hung remote costs the push its own timeout, not the phase slice:
+    the act reports stopped_at=push and the row is re-detected next tick."""
+    def fake_run(args, **kwargs):
+        if "push" in args:
+            raise subprocess.TimeoutExpired(args, 30)
+        if args[:3] == ["git", "-C", "/wt/x-abcd"] and "rev-parse" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="abc123def456\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("fno.worktree_stranded.subprocess.run", fake_run)
+
+    row = Row(
+        STRANDED,
+        "x-abcd",
+        3,
+        "1 hour ago",
+        {"path": "/wt/x-abcd", "branch": "feature/x-abcd"},
+    )
+    outcome = act_on_stranded(row)
+
+    assert outcome["stopped_at"] == "push"
+    assert outcome["acts"][0]["ok"] is False
+
+
+def test_a_timed_out_fetch_reads_might_hold_unique(monkeypatch, tmp_path):
+    """git sets no connect timeout of its own, so the fetch carries the
+    module's duration bound: a timeout maps onto the failed-fetch path -
+    stale cache, might-hold-unique - and is paid once per sweep, not per
+    worktree."""
+    import fno.worktree_stranded as ws
+
+    wt_a = tmp_path / "wt-a"
+    wt_a.mkdir()
+    wt_b = tmp_path / "wt-b"
+    wt_b.mkdir()
+    monkeypatch.setattr(ws, "_remote_refs_fresh", False)
+    monkeypatch.setattr(ws, "_remote_refs_stale", False)
+    fetch_calls = []
+
+    def fake_run(args, **kwargs):
+        if "fetch" in args:
+            fetch_calls.append(args)
+            raise subprocess.TimeoutExpired(args, 15)
+        return subprocess.CompletedProcess(args, 0, stdout="3\n", stderr="")
+
+    monkeypatch.setattr("fno.worktree_stranded.subprocess.run", fake_run)
+
+    assert ws._wt_unpushed_count(str(wt_a)) == (1, False)
+    assert fetch_calls, "the fetch must have been attempted"
+    assert ws._remote_refs_stale is True
+    assert ws._wt_unpushed_count(str(wt_b)) == (1, False)  # memoized, no second fetch
+    assert len(fetch_calls) == 1
 
 
 # --- regression: the unsound name-existence probe -----------------------
