@@ -283,8 +283,12 @@ pub fn run_prepare(args: &[String]) -> i32 {
         args,
         "task-context-prepare  (one JSON request on stdin: binding)",
         |req| {
-            let parsed: BindResult<TaskContextBinding> =
-                serde_json::from_value(req).map_err(|e| format!("malformed_binding: {e}"));
+            let parsed: BindResult<TaskContextBinding> = req
+                .get("binding")
+                .ok_or_else(|| "malformed_binding: missing binding".to_string())
+                .and_then(|b| {
+                    serde_json::from_value(b.clone()).map_err(|e| format!("malformed_binding: {e}"))
+                });
             match parsed.and_then(|b| {
                 b.validate()?;
                 let digest = b.digest()?;
@@ -404,14 +408,21 @@ pub fn revalidate_request(req: &Value) -> Value {
             ("attempt", b.attempt.as_str()),
             ("session", b.session.as_str()),
         ] {
-            let got = expect.get(field).and_then(Value::as_str).unwrap_or("");
-            if got != want {
+            // A door checks the identities it KNOWS: an absent expectation key
+            // is unchecked at that door, never a silent pass (the receipt door
+            // passes attempt+session; the init gate knows node + root). A key
+            // that IS present must match exactly.
+            let expected = match expect.get(field) {
+                Some(Value::String(s)) => s.as_str(),
+                _ => continue,
+            };
+            if expected != want {
                 let reason = match field {
                     "attempt" => "wrong_attempt",
                     "session" => "foreign_session",
                     _ => "wrong_node",
                 };
-                return Err(format!("{reason}: expected {want}, got {got}"));
+                return Err(format!("{reason}: expected {want}, got {expected}"));
             }
         }
         for source in &b.required_sources {
