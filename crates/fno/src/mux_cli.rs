@@ -1659,8 +1659,7 @@ pub fn doctor(json: bool) -> i32 {
     render_doctor(&gather_checks(), json)
 }
 
-/// `fno mux stats [--json]` (v78): body lives in server_stats, beside the
-/// answer it renders.
+/// `fno mux stats` body lives in server_stats, beside its answer.
 pub fn stats(json: bool) -> i32 {
     crate::server_stats::cli(json)
 }
@@ -1684,9 +1683,8 @@ pub fn stats(json: bool) -> i32 {
 /// bumps `PROTO_VERSION` or migrates the store for a real reason.
 pub fn workspace(args: &[OsString], env_session: Option<&str>) -> i32 {
     // main.rs routes here only with a token after the family verb, so a bare
-    // `mux workspace` never reaches this function - it is the global usage
-    // arm. That leaves exactly one failure shape here, an unknown verb, and a
-    // non-UTF-8 one is simply unknown rather than a second branch.
+    // `mux workspace` is the global usage arm; one failure shape here, an
+    // unknown verb.
     let sub = args
         .first()
         .map(|a| a.to_string_lossy())
