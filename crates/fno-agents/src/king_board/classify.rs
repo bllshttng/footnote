@@ -224,11 +224,63 @@ pub(crate) fn node_has_pr(node: &Value) -> bool {
             .unwrap_or(false)
 }
 
+/// The roster's driver verdict for one node: `Some` when the roster answers,
+/// `None` when it has no candidate or every candidate positively died. The
+/// join is on the registry row's `node` field alone, so a crown's own row
+/// (which names its scope, never the leaf) cannot read as a leaf's driver.
+pub(crate) fn roster_verdict(
+    node_id: &str,
+    drivers: &crate::king_board::SourceRead,
+    activity: &HashMap<String, crate::truth_probe::TruthProbe>,
+) -> Option<&'static str> {
+    if !drivers.is_ok() {
+        // Degraded roster coverage never suppresses a row (x-a792): a board
+        // that cannot see the roster cannot say "nobody is driving".
+        return Some("unmeasured");
+    }
+    let Some(rows) = drivers.payload.as_ref().and_then(Value::as_array) else {
+        return None;
+    };
+    let mut saw_candidate = false;
+    let mut saw_inactive = false;
+    let mut saw_unmeasured = false;
+    for row in rows {
+        if !row
+            .get("node")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n.eq_ignore_ascii_case(node_id))
+        {
+            continue;
+        }
+        saw_candidate = true;
+        let token = row.get("token").and_then(Value::as_str).unwrap_or("");
+        match activity.get(token) {
+            Some(probe) => match holder_reading(Some(probe)) {
+                HolderReading::Active => return Some("active"),
+                HolderReading::Inactive => saw_inactive = true,
+                HolderReading::Unmeasured => saw_unmeasured = true,
+            },
+            None => saw_unmeasured = true,
+        }
+    }
+    // A candidate the probe could not measure stays unmeasured, never absent:
+    // a codex transcript outside ~/.claude/projects must not read as a dead
+    // driver, which is the false "dead" that invites reaping a live worker.
+    if saw_candidate && (!saw_inactive || saw_unmeasured) {
+        Some("unmeasured")
+    } else {
+        None
+    }
+}
+
 /// Who is driving this node: active, stalled, crowned, none, or unmeasured.
 /// One answer, three queues: stalled_holder selects stalled, undriven_pr and
 /// unheld_progress select none, and an unmeasured holder belongs to no queue
-/// row. `crowned` is a live crown driving the epic it
-/// reigns over: scope ids reach the build only through a king manifest, and
+/// row. The ROSTER outranks the claim (x-1a70): a registry row whose `node`
+/// field targets this node is the driver, probed for a live transcript, and
+/// the claim lockfile below it only corroborates. `crowned` is a live crown
+/// driving the epic it reigns over: scope ids reach the build only through a
+/// king manifest, and
 /// the session holding that manifest is the one building, so a scope hit is a
 /// live crown. The epic carries no claim of its own (a crown is not a claim),
 /// so without this state the reigning epic reads "none" and no verb can clear
@@ -266,6 +318,7 @@ pub(crate) fn node_driver<'a>(
     activity: &'a HashMap<String, crate::truth_probe::TruthProbe>,
     crown_ids: Option<&HashSet<String>>,
     worked: Option<&crate::king_board::SourceRead>,
+    drivers: Option<&crate::king_board::SourceRead>,
 ) -> (&'static str, Option<&'a Value>) {
     let node_id = s_str(node, "id").unwrap_or("");
     let crowned = crown_ids.is_some_and(|ids| ids.contains(node_id))
@@ -279,6 +332,18 @@ pub(crate) fn node_driver<'a>(
     }
     if contained {
         return ("active", None);
+    }
+    // Before the claim lookup too (x-1a70): the roster outranks the claim.
+    // A claim is a snapshot, a driver is a process - measured 2026-09-04,
+    // five free-claim PRs, three of them mid-edit under a live worker. A
+    // registry row targeting this node with an advancing transcript is a
+    // driver no matter what the lockfile says; a roster that cannot answer
+    // never leaves `none` on the table. The claim stays below as
+    // corroboration, never the sole signal.
+    if let Some(drivers) = drivers {
+        if let Some(verdict) = roster_verdict(node_id, drivers, activity) {
+            return (verdict, None);
+        }
     }
     let claim = claim_by_node.get(node_id);
     let Some(claim) = claim else {
@@ -392,7 +457,7 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(
-            node_driver(&epic, &claims, &activity, Some(&crown), None).0,
+            node_driver(&epic, &claims, &activity, Some(&crown), None, None).0,
             "crowned"
         );
         // an epic bound to its own PR keeps reading none: undriven_pr owns
@@ -405,14 +470,15 @@ mod tests {
                 &claims,
                 &activity,
                 Some(&crown),
-                Some(&ok_worked(&[]))
+                Some(&ok_worked(&[])),
+                None
             )
             .0,
             "none"
         );
         // without the crown the same epic is an unheld dead handoff
         assert_eq!(
-            node_driver(&epic, &claims, &activity, None, Some(&ok_worked(&[]))).0,
+            node_driver(&epic, &claims, &activity, None, Some(&ok_worked(&[])), None).0,
             "none"
         );
         // an in-scope leaf stays claim-driven
@@ -422,7 +488,8 @@ mod tests {
                 &claims,
                 &activity,
                 Some(&crown),
-                Some(&ok_worked(&[]))
+                Some(&ok_worked(&[])),
+                None
             )
             .0,
             "none"
@@ -438,7 +505,7 @@ mod tests {
         let mut answered = HashMap::new();
         answered.insert("h".to_string(), probe("unknown", 30.0));
         assert_eq!(
-            node_driver(&epic, &held, &answered, Some(&crown), None).0,
+            node_driver(&epic, &held, &answered, Some(&crown), None, None).0,
             "stalled"
         );
     }
@@ -473,7 +540,7 @@ mod tests {
         );
         let mut activity = HashMap::new();
         activity.insert("target-7471-worker".to_string(), probe("working", 30.0));
-        let (state, claim) = node_driver(&node, &claims, &activity, None, None);
+        let (state, claim) = node_driver(&node, &claims, &activity, None, None, None);
         assert_eq!(state, "active");
         assert!(claim.is_some());
     }
@@ -495,7 +562,10 @@ mod tests {
             "reaped-worker".to_string(),
             probe("unknown", STALLED_AFTER_S + 1.0),
         );
-        assert_eq!(node_driver(&node, &claims, &activity, None, None).0, "none");
+        assert_eq!(
+            node_driver(&node, &claims, &activity, None, None, None).0,
+            "none"
+        );
     }
 
     #[test]
@@ -521,7 +591,7 @@ mod tests {
         let mut claims = HashMap::new();
         claims.insert("x-silent".to_string(), handover_claim("x-silent"));
         let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
-        let (state, claim) = node_driver(&node, &claims, &activity, None, None);
+        let (state, claim) = node_driver(&node, &claims, &activity, None, None, None);
         assert_eq!(state, "unmeasured");
         assert!(claim.is_some());
     }
@@ -613,7 +683,7 @@ mod tests {
         let mut activity = HashMap::new();
         activity.insert("t-x-adv-worker".to_string(), probe("working", 30.0));
         assert_eq!(
-            node_driver(&node, &claims, &activity, None, None).0,
+            node_driver(&node, &claims, &activity, None, None, None).0,
             "active"
         );
     }
@@ -631,7 +701,7 @@ mod tests {
         let mut activity = HashMap::new();
         activity.insert("t-x-quiet-worker".to_string(), probe("unknown", 30.0));
         assert_eq!(
-            node_driver(&node, &claims, &activity, None, None).0,
+            node_driver(&node, &claims, &activity, None, None, None).0,
             "stalled"
         );
     }
@@ -652,7 +722,7 @@ mod tests {
             probe("working", STALLED_AFTER_S + 1.0),
         );
         assert_eq!(
-            node_driver(&node, &claims, &activity, None, None).0,
+            node_driver(&node, &claims, &activity, None, None, None).0,
             "stalled"
         );
     }
@@ -668,7 +738,8 @@ mod tests {
         let node = json!({"id": "x-58a5", "priority": "p1", "contained_in": "x-b7f8"});
         let claims: HashMap<String, Value> = HashMap::new();
         let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
-        let (state, claim) = node_driver(&node, &claims, &activity, None, Some(&ok_worked(&[])));
+        let (state, claim) =
+            node_driver(&node, &claims, &activity, None, Some(&ok_worked(&[])), None);
         assert_eq!(state, "active");
         assert!(claim.is_none());
     }
@@ -687,12 +758,13 @@ mod tests {
             &activity,
             None,
             Some(&ok_worked(&["x-1747"])),
+            None,
         );
         assert_eq!(state, "active");
         assert!(claim.is_none());
         // The feed answered and found nothing: this is the one positive none.
         assert_eq!(
-            node_driver(&node, &claims, &activity, None, Some(&ok_worked(&[]))).0,
+            node_driver(&node, &claims, &activity, None, Some(&ok_worked(&[])), None).0,
             "none"
         );
         // The feed could not answer: unmeasured, not none.
@@ -705,9 +777,161 @@ mod tests {
                 Some(&crate::king_board::SourceRead::err(
                     "worked: reader panicked"
                 )),
+                None,
             )
             .0,
             "unmeasured"
+        );
+    }
+
+    fn drivers_read(rows: Value) -> crate::king_board::SourceRead {
+        crate::king_board::SourceRead::ok(rows)
+    }
+
+    fn driver_row(node: &str, token: &str) -> Value {
+        json!({"name": format!("t-{node}"), "node": node, "token": token})
+    }
+
+    #[test]
+    fn a_live_roster_driver_with_a_free_claim_is_active() {
+        // x-1a70, the measured x-5baf shape: claim free, driver live mid-edit.
+        // The claim is a snapshot; the driver is a process.
+        let node = json!({"id": "x-5baf", "priority": "p1", "pr_number": 1});
+        let claims: HashMap<String, Value> = HashMap::new();
+        let mut activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        activity.insert("uuid-5baf".to_string(), probe("working", 15.0));
+        let drivers = drivers_read(json!([driver_row("x-5baf", "uuid-5baf")]));
+        let (state, claim) = node_driver(
+            &node,
+            &claims,
+            &activity,
+            None,
+            Some(&ok_worked(&[])),
+            Some(&drivers),
+        );
+        assert_eq!(state, "active");
+        assert!(claim.is_none());
+    }
+
+    #[test]
+    fn a_roster_candidate_the_probe_cannot_measure_reads_unmeasured() {
+        // The codex-transcript trap: a driver whose transcript lives outside
+        // ~/.claude/projects is unmeasurable, and unmeasurable is not absent.
+        // Unmeasured is its own verdict, so the row is spared either way.
+        let node = json!({"id": "x-cdx", "priority": "p1", "pr_number": 2});
+        let claims: HashMap<String, Value> = HashMap::new();
+        let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        let drivers = drivers_read(json!([driver_row("x-cdx", "codex-thread")]));
+        assert_eq!(
+            node_driver(
+                &node,
+                &claims,
+                &activity,
+                None,
+                Some(&ok_worked(&[])),
+                Some(&drivers)
+            )
+            .0,
+            "unmeasured"
+        );
+    }
+
+    #[test]
+    fn a_failed_roster_read_is_unmeasured_never_none() {
+        // The x-a792 suppression: degraded roster coverage must not produce a
+        // healthy-looking zero.
+        let node = json!({"id": "x-a792", "priority": "p1", "pr_number": 3});
+        let claims: HashMap<String, Value> = HashMap::new();
+        let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        let drivers = crate::king_board::SourceRead::err("registry unreadable: boom");
+        assert_eq!(
+            node_driver(
+                &node,
+                &claims,
+                &activity,
+                None,
+                Some(&ok_worked(&[])),
+                Some(&drivers)
+            )
+            .0,
+            "unmeasured"
+        );
+    }
+
+    #[test]
+    fn a_dead_roster_candidate_falls_through_to_the_claim() {
+        // Positive death evidence is the one roster answer that steps aside:
+        // the claim/worked verdict governs what the roster cannot see.
+        let node = json!({"id": "x-dead", "priority": "p1", "pr_number": 4});
+        let claims: HashMap<String, Value> = HashMap::new();
+        let mut activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        activity.insert(
+            "dead-uuid".to_string(),
+            probe("working", 3.0 * 3600.0 + 60.0),
+        );
+        let drivers = drivers_read(json!([driver_row("x-dead", "dead-uuid")]));
+        assert_eq!(
+            node_driver(
+                &node,
+                &claims,
+                &activity,
+                None,
+                Some(&ok_worked(&[])),
+                Some(&drivers)
+            )
+            .0,
+            "none"
+        );
+    }
+
+    #[test]
+    fn a_crown_scope_row_never_drives_the_scopes_leaf() {
+        // The fifth specimen: king-a792-control names scope x-a792 in its own
+        // row's node field, so the node-field join can never suppress a leaf's
+        // genuinely driverless PR.
+        let leaf = json!({"id": "x-e221", "priority": "p1", "pr_number": 1545});
+        let claims: HashMap<String, Value> = HashMap::new();
+        let mut activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        activity.insert("king-uuid".to_string(), probe("working", 5.0));
+        let drivers = drivers_read(json!([driver_row("x-a792", "king-uuid")]));
+        assert_eq!(
+            node_driver(
+                &leaf,
+                &claims,
+                &activity,
+                None,
+                Some(&ok_worked(&[])),
+                Some(&drivers)
+            )
+            .0,
+            "none"
+        );
+    }
+
+    #[test]
+    fn a_live_roster_driver_outranks_a_stale_held_claim() {
+        // A live driver outranks a stale HELD claim (a claim is a snapshot);
+        // roster first, claim corroborates.
+        let node = json!({"id": "x-held", "priority": "p1", "pr_number": 5});
+        let mut claims: HashMap<String, Value> = HashMap::new();
+        claims.insert(
+            "x-held".to_string(),
+            json!({"key": "node:x-held", "state": "live", "holder": "claude:stale-h"}),
+        );
+        let mut activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        activity.insert("new-driver".to_string(), probe("working", 10.0));
+        let drivers = drivers_read(json!([driver_row("x-held", "new-driver")]));
+        assert_eq!(
+            node_driver(
+                &node,
+                &claims,
+                &activity,
+                None,
+                Some(&ok_worked(&[])),
+                Some(&drivers)
+            )
+            .0,
+            "active"
         );
     }
 }

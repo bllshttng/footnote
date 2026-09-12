@@ -80,6 +80,9 @@ pub(crate) const SRC_UNDISPATCHED: &str = "fno backlog undispatched --json";
 pub(crate) const SRC_READY: &str = "backlog_ready::select (-A)";
 pub(crate) const SRC_WORKED: &str = "fno backlog worked --json";
 pub(crate) const SRC_CLAIMS: &str = "fno agents claim list -J --include-stale --prefix node:";
+/// The driver feed (x-1a70): registry rows that target a node. In-process,
+/// like SRC_READY; the label names the mechanism, not a command.
+pub(crate) const SRC_DRIVERS: &str = "registry::load_registry (rows with node)";
 pub(crate) const SRC_PRS: &str =
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url";
 pub(crate) const SRC_PR_NODES: &str = "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url + fno backlog get <id>";
@@ -376,7 +379,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     };
 
     // Claimed nodes: from the locks to the rows, one graph read.
-    let (claimed_nodes, holders, claimed_warnings) = match s_stalled {
+    let (claimed_nodes, mut holders, claimed_warnings) = match s_stalled {
         None => {
             spent(&mut sources, "claimed_nodes", &budget);
             (
@@ -400,6 +403,36 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         }
     };
     warnings.extend(claimed_warnings);
+
+    // The driver feed (x-1a70): registry rows that target a node, read
+    // in-place (missing file = empty roster; corrupt = loud, and every
+    // node_driver queue then reads unreadable rather than silently clean).
+    // Its tokens join the ONE batched truth probe, so the roster's drivers
+    // get the same transcript measurement the claim holders get.
+    let s_drivers = budget.start(SRC_DRIVERS);
+    let (drivers, roster_tokens) = match s_drivers {
+        None => (SourceRead::err(budget.spent_error()), Vec::new()),
+        Some(_) => {
+            let read = read_driver_rows();
+            mark(&mut sources, "drivers", &read, false);
+            let tokens = read
+                .payload
+                .as_ref()
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|r| r.get("token").and_then(Value::as_str).map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (read, tokens)
+        }
+    };
+    for t in roster_tokens {
+        if !holders.contains(&t) {
+            holders.push(t);
+        }
+    }
 
     // The reads that can take real wall time run concurrently: gh pr
     // list, `fno inbox outstanding`, the batched truth
@@ -853,6 +886,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         claims,
         worked,
         claimed_nodes,
+        drivers,
         holder_activity,
         holder_activity_error,
         prs,
@@ -873,6 +907,36 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         obj.insert("sources".to_string(), Value::Object(sources));
     }
     payload
+}
+
+/// The driver feed (x-1a70): registry rows that target a node. One in-place
+/// read of the shared registry (`state::load_registry`); a missing file is an
+/// empty roster (a store with no workers is a positive empty answer, not a
+/// fault), a corrupt one is a failed read the consuming queues render loudly.
+fn read_driver_rows() -> SourceRead {
+    let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
+        // No agents home declared (unit tests): the roster abstains, and the
+        // claim/worked verdicts stand, exactly as before this feed existed.
+        return SourceRead::ok(json!([]));
+    };
+    let path = home.registry_json();
+    match crate::state::load_registry(&path) {
+        Ok(registry) => SourceRead::ok(Value::Array(
+            registry
+                .entries
+                .iter()
+                .filter_map(|e| {
+                    let node = e.node.as_deref()?;
+                    let token = e
+                        .harness_session_id
+                        .clone()
+                        .unwrap_or_else(|| e.name.clone());
+                    Some(json!({"name": e.name, "node": node, "token": token}))
+                })
+                .collect(),
+        )),
+        Err(e) => SourceRead::err(format!("registry unreadable: {e}")),
+    }
 }
 
 /// The needs verb's default sources (needs.default_sources): project + global
@@ -905,6 +969,7 @@ mod tests {
             claims: ok_read(claims),
             worked: ok_read(Value::Array(Vec::new())),
             claimed_nodes: ok_read(claimed_nodes),
+            drivers: ok_read(Value::Array(Vec::new())),
             holder_activity: HashMap::new(),
             holder_activity_error: None,
             prs: ok_read(Value::Array(Vec::new())),
@@ -1378,7 +1443,14 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let (state, _) = node_driver(&node, &claim_by_node, &inputs.holder_activity, None, None);
+        let (state, _) = node_driver(
+            &node,
+            &claim_by_node,
+            &inputs.holder_activity,
+            None,
+            None,
+            None,
+        );
         assert_eq!(state, "active");
     }
 
