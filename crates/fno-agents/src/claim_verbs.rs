@@ -226,7 +226,7 @@ fn run_claim_list(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let (witness, witness_answer) = default_session_witness();
+    let (witness, witness_answer) = session_witness_primed_for(rows.iter());
     let witness: crate::claims::SessionWitness = &witness;
     let rows: Vec<Value> = rows
         .iter()
@@ -520,14 +520,26 @@ pub(crate) fn default_session_witness() -> (
     impl Fn(&crate::claims::ClaimRecord) -> crate::claims::SessionLiveness,
     std::rc::Rc<std::cell::RefCell<Option<&'static str>>>,
 ) {
-    let index: std::cell::RefCell<Option<SessionRegistryIndex>> = std::cell::RefCell::new(None);
-    // One answer per RESOLVED subject session per invocation: a sweep consults
-    // the witness for the same record twice (classify, then classify_for_sweep)
-    // and several records can share one session, so the memo bounds the witness
-    // traffic to one resolution per session per invocation.
-    let memo: std::cell::RefCell<
-        std::collections::HashMap<String, crate::claims::SessionLiveness>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+    memoized_session_witness(
+        std::cell::RefCell::new(None),
+        std::cell::RefCell::new(std::collections::HashMap::new()),
+    )
+}
+
+/// The lazy witness's engine: the registry index and the per-session memo the
+/// caller hands in, plus one answer per RESOLVED subject session per
+/// invocation (a sweep consults the witness for the same record twice -
+/// classify, then classify_for_sweep - and several records can share one
+/// session, so the memo bounds the witness traffic to one resolution per
+/// session per invocation). The last answer is left where the caller's
+/// per-record drain reads it.
+fn memoized_session_witness(
+    index: std::cell::RefCell<Option<SessionRegistryIndex>>,
+    memo: std::cell::RefCell<std::collections::HashMap<String, crate::claims::SessionLiveness>>,
+) -> (
+    impl Fn(&crate::claims::ClaimRecord) -> crate::claims::SessionLiveness,
+    std::rc::Rc<std::cell::RefCell<Option<&'static str>>>,
+) {
     let last_answer: std::rc::Rc<std::cell::RefCell<Option<&'static str>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let cell = last_answer.clone();
@@ -543,21 +555,97 @@ pub(crate) fn default_session_witness() -> (
     (witness, cell)
 }
 
-/// The witness's answer for one record: registry row first, then transcript.
-/// Memoized per resolved subject session for the invoking process's lifetime.
-fn session_liveness_answer(
+/// [`default_session_witness`] with the transcript leg batched before the
+/// first record is classified. The lazy witness pays one `fno agents truth`
+/// interpreter per distinct session that misses the registry; the claim sweep
+/// resolved 17 sessions that way for 21.45s while the batch wire answered the
+/// same handles in one interpreter for 3.22s (measured 2026-09-12). Seeding
+/// the memo ahead of the loop buys that difference for every multi-record
+/// reader, and the seeded answers come from the same
+/// registry-first-then-transcript reading, so the primed path and the lazy
+/// path cannot disagree about one session.
+///
+/// Only sessions the lazy path would actually probe go on the wire: a
+/// registry-live session never reaches the transcript today, so priming it
+/// would add work the reader never paid. Three fall-throughs stay lazy on
+/// purpose, each landing on the unchanged per-record path: a timed-out batch
+/// seeds NOTHING (a timeout is not a verdict, and seeding `Unresolved` from
+/// one would render live holders dead), a handle absent from an answered map
+/// seeds nothing, and a comma-carrying handle already rides its own single
+/// probe inside the batch helper.
+pub(crate) fn session_witness_primed_for<'a>(
+    records: impl IntoIterator<Item = &'a crate::claims::ClaimRecord>,
+) -> (
+    impl Fn(&crate::claims::ClaimRecord) -> crate::claims::SessionLiveness,
+    std::rc::Rc<std::cell::RefCell<Option<&'static str>>>,
+) {
+    let records: Vec<&crate::claims::ClaimRecord> = records.into_iter().collect();
+    if records.is_empty() {
+        // Nothing to classify: the lazy witness costs nothing, and skipping
+        // the registry read keeps an empty claims dir at its measured 0s.
+        // (This constructor, not default_session_witness: each fn's
+        // `impl Trait` is its own opaque type.)
+        return memoized_session_witness(
+            std::cell::RefCell::new(None),
+            std::cell::RefCell::new(std::collections::HashMap::new()),
+        );
+    }
+    let index: std::cell::RefCell<Option<SessionRegistryIndex>> = std::cell::RefCell::new(None);
+    load_session_registry_index(&index);
+    let mut subjects: std::collections::BTreeMap<String, Vec<&crate::claims::ClaimRecord>> =
+        std::collections::BTreeMap::new();
+    for rec in &records {
+        if let Some(session) = resolve_subject_session(rec, &index) {
+            subjects.entry(session).or_default().push(rec);
+        }
+    }
+    let wire: Vec<String> = {
+        let borrowed = index.borrow();
+        let registry = borrowed
+            .as_ref()
+            .expect("session registry index initialized");
+        subjects
+            .into_iter()
+            .filter(|(session, group)| {
+                !registry
+                    .by_session
+                    .get(session)
+                    .is_some_and(|&(pid, start)| crate::daemon::pid_is_ours(pid, Some(start)))
+                    && group.iter().any(|rec| may_consult_transcript(rec))
+            })
+            .map(|(session, _)| session)
+            .collect()
+    };
+    let memo = std::cell::RefCell::new(std::collections::HashMap::new());
+    if let Ok(map) = crate::truth_probe::family1_truth_probe_many_checked(&wire) {
+        let registry_known = index.borrow().as_ref().is_some_and(|r| r.known);
+        for (session, probe) in &map {
+            let answer = session_liveness_from_observations(
+                registry_known,
+                false,
+                probe.reachability.as_deref(),
+            );
+            memo.borrow_mut().insert(session.clone(), answer);
+        }
+    }
+    memoized_session_witness(index, memo)
+}
+
+/// The subject a liveness answer is keyed on: the holder the record NAMES,
+/// not the session that wrote it. A dispatcher-minted `spawn-handover:<worker>`
+/// record carries the MINTER's session_id, so answering from that field asks
+/// the dispatcher whether the worker is alive - a long-lived king then keeps
+/// every claim it ever launched reading live after the worker died (x-41f7).
+/// Join the worker name to its registry row's session; no row means None (the
+/// caller answers Unresolved, bounded grace), never a fallback to the
+/// minter's session. The primed witness asks the SAME question when it picks
+/// sessions for the batch wire - a prime that resolved subjects differently
+/// from the lazy path would seed the wrong key and buy nothing.
+fn resolve_subject_session(
     rec: &crate::claims::ClaimRecord,
     index: &std::cell::RefCell<Option<SessionRegistryIndex>>,
-    memo: &std::cell::RefCell<std::collections::HashMap<String, crate::claims::SessionLiveness>>,
-) -> crate::claims::SessionLiveness {
-    // The subject is the holder the record NAMES, not the session that wrote
-    // it. A dispatcher-minted `spawn-handover:<worker>` record carries the
-    // MINTER's session_id, so answering from that field asks the dispatcher
-    // whether the worker is alive - a long-lived king then keeps every claim
-    // it ever launched reading live after the worker died (x-41f7). Join the
-    // worker name to its registry row's session; no row means Unresolved
-    // (bounded grace), never a fallback to the minter's session.
-    let subject: Option<String> = match rec.holder.strip_prefix(HANDOVER_HOLDER_PREFIX) {
+) -> Option<String> {
+    match rec.holder.strip_prefix(HANDOVER_HOLDER_PREFIX) {
         Some(worker) => {
             load_session_registry_index(index);
             index
@@ -566,8 +654,33 @@ fn session_liveness_answer(
                 .and_then(|i| i.by_name.get(worker).cloned())
         }
         None => rec.session_id.clone().filter(|s| !s.is_empty()),
-    };
-    let Some(session) = subject else {
+    }
+}
+
+/// Whether this record's classification can still reach the transcript leg: a
+/// same-machine record whose pid is provably alive classifies live off the
+/// pid alone, so its witness answer would be seeded into the memo and never
+/// read. Conservative by construction: a session dropped here that the
+/// classifier does consult still probes lazily on its first witness call, so
+/// a policy change in the classifier costs perf, never a verdict.
+fn may_consult_transcript(rec: &crate::claims::ClaimRecord) -> bool {
+    !(crate::claims::is_same_machine(&rec.host, rec.machine_id.as_deref())
+        && rec.pid.is_some_and(|pid| {
+            matches!(
+                crate::claims::probe_pid(pid),
+                crate::claims::PidProbe::Created(_)
+            )
+        }))
+}
+
+/// The witness's answer for one record: registry row first, then transcript.
+/// Memoized per resolved subject session for the invoking process's lifetime.
+fn session_liveness_answer(
+    rec: &crate::claims::ClaimRecord,
+    index: &std::cell::RefCell<Option<SessionRegistryIndex>>,
+    memo: &std::cell::RefCell<std::collections::HashMap<String, crate::claims::SessionLiveness>>,
+) -> crate::claims::SessionLiveness {
+    let Some(session) = resolve_subject_session(rec, index) else {
         return crate::claims::SessionLiveness::Unresolved;
     };
     if let Some(answer) = memo.borrow().get(&session) {
@@ -695,21 +808,26 @@ pub(crate) fn claim_sweep_payload_from_records(
         .then(|| crate::claims::pid_exclusivity(records))
         .unwrap_or_default();
     let now = crate::claims::now_ms();
-    let (witness, witness_answer) = default_session_witness();
+    let selected: Vec<&crate::claims::ClaimRecord> = records
+        .iter()
+        .filter(|rec| {
+            if !key_set.is_empty() {
+                key_set.contains(rec.key.as_str())
+            } else if let Some(prefix) = prefix {
+                rec.key.starts_with(prefix)
+            } else if all {
+                true
+            } else {
+                rec.key.starts_with("node:") || rec.key.starts_with("dispatch:")
+            }
+        })
+        .collect();
+    // Prime on the SELECTED set only: batching the sessions of records the
+    // sweep never classifies would re-add the per-session cost this exists to
+    // delete.
+    let (witness, witness_answer) = session_witness_primed_for(selected.iter().copied());
     let mut claims: Vec<Value> = Vec::new();
-    for rec in records {
-        let selected = if !key_set.is_empty() {
-            key_set.contains(rec.key.as_str())
-        } else if let Some(prefix) = prefix {
-            rec.key.starts_with(prefix)
-        } else if all {
-            true
-        } else {
-            rec.key.starts_with("node:") || rec.key.starts_with("dispatch:")
-        };
-        if !selected {
-            continue;
-        }
+    for rec in &selected {
         let identity = rec.machine_id.clone().unwrap_or_else(|| rec.host.clone());
         let pid_exclusive = full_scan
             .then(|| {
@@ -818,94 +936,105 @@ mod tests {
 
     #[test]
     fn claim_sweep_reports_live_node_and_dispatch_claims() {
-        let td = tempfile::TempDir::new().unwrap();
-        sweep_acquire(td.path(), "node:x-ef41");
-        sweep_acquire(td.path(), "dispatch:x-ef41");
-        sweep_acquire(td.path(), "session:not-swept"); // out-of-scope prefix
-        let payload = claim_sweep_payload(&sweep_dir(td.path()));
-        let claims = payload["claims"].as_array().unwrap();
-        assert_eq!(claims.len(), 2, "session: claim must be excluded");
-        // Sorted by key: dispatch: before node:.
-        assert_eq!(claims[0]["key"], "dispatch:x-ef41");
-        assert_eq!(claims[1]["key"], "node:x-ef41");
-        for c in claims {
-            // Acquired by THIS live process => live.
-            assert_eq!(c["state"], "live");
-            assert_eq!(c["holder"], "test-holder");
-            assert_eq!(c["pid"], std::process::id());
-            assert!(c["host"].as_str().is_some_and(|h| !h.is_empty()));
-        }
+        // The primed witness reads the session registry on every sweep, so a
+        // test reaching the sweep payload declares a hermetic home (the
+        // paths guard refuses an undeclared $HOME read under test).
+        with_registry(serde_json::json!([]), || {
+            let td = tempfile::TempDir::new().unwrap();
+            sweep_acquire(td.path(), "node:x-ef41");
+            sweep_acquire(td.path(), "dispatch:x-ef41");
+            sweep_acquire(td.path(), "session:not-swept"); // out-of-scope prefix
+            let payload = claim_sweep_payload(&sweep_dir(td.path()));
+            let claims = payload["claims"].as_array().unwrap();
+            assert_eq!(claims.len(), 2, "session: claim must be excluded");
+            // Sorted by key: dispatch: before node:.
+            assert_eq!(claims[0]["key"], "dispatch:x-ef41");
+            assert_eq!(claims[1]["key"], "node:x-ef41");
+            for c in claims {
+                // Acquired by THIS live process => live.
+                assert_eq!(c["state"], "live");
+                assert_eq!(c["holder"], "test-holder");
+                assert_eq!(c["pid"], std::process::id());
+                assert!(c["host"].as_str().is_some_and(|h| !h.is_empty()));
+            }
+        });
     }
 
     #[test]
     fn claim_sweep_reports_classifier_basis_and_claim_facts() {
-        let td = tempfile::TempDir::new().unwrap();
-        sweep_acquire(td.path(), "node:x-facts");
-        let claims = claim_sweep_payload(&sweep_dir(td.path()))["claims"]
-            .as_array()
-            .unwrap()
-            .to_vec();
-        let row = claims
-            .iter()
-            .find(|claim| claim["key"] == "node:x-facts")
-            .expect("the acquired claim is present");
-        assert_eq!(row["state"], "live");
-        assert_eq!(row["basis"], "live");
-        assert_eq!(row["expired"], false);
-        assert_eq!(row["provably_dead"], false);
-        assert_eq!(row["bucket"], "live");
-        assert_eq!(row["pid_unavailable"], false);
-        assert!(row["acquired_at"].as_i64().is_some());
-        assert!(row.get("machine_id").is_some());
-        assert!(row.get("pid_provenance").is_some());
-        assert!(row.get("expires_at").is_some());
+        with_registry(serde_json::json!([]), || {
+            let td = tempfile::TempDir::new().unwrap();
+            sweep_acquire(td.path(), "node:x-facts");
+            let claims = claim_sweep_payload(&sweep_dir(td.path()))["claims"]
+                .as_array()
+                .unwrap()
+                .to_vec();
+            let row = claims
+                .iter()
+                .find(|claim| claim["key"] == "node:x-facts")
+                .expect("the acquired claim is present");
+            assert_eq!(row["state"], "live");
+            assert_eq!(row["basis"], "live");
+            assert_eq!(row["expired"], false);
+            assert_eq!(row["provably_dead"], false);
+            assert_eq!(row["bucket"], "live");
+            assert_eq!(row["pid_unavailable"], false);
+            assert!(row["acquired_at"].as_i64().is_some());
+            assert!(row.get("machine_id").is_some());
+            assert!(row.get("pid_provenance").is_some());
+            assert!(row.get("expires_at").is_some());
+        });
     }
 
     #[test]
     fn claim_sweep_filters_by_prefix_key_and_all() {
-        let td = tempfile::TempDir::new().unwrap();
-        sweep_acquire(td.path(), "node:x-filter");
-        sweep_acquire(td.path(), "dispatch:x-filter");
-        sweep_acquire(td.path(), "session:x-filter");
-        let records = claim_records_from_dir(&sweep_dir(td.path()));
+        with_registry(serde_json::json!([]), || {
+            let td = tempfile::TempDir::new().unwrap();
+            sweep_acquire(td.path(), "node:x-filter");
+            sweep_acquire(td.path(), "dispatch:x-filter");
+            sweep_acquire(td.path(), "session:x-filter");
+            let records = claim_records_from_dir(&sweep_dir(td.path()));
 
-        let prefix = claim_sweep_payload_from_records(&records, Some("session:"), &[], false);
-        assert_eq!(prefix["claims"].as_array().unwrap().len(), 1);
-        assert_eq!(prefix["claims"][0]["key"], "session:x-filter");
+            let prefix = claim_sweep_payload_from_records(&records, Some("session:"), &[], false);
+            assert_eq!(prefix["claims"].as_array().unwrap().len(), 1);
+            assert_eq!(prefix["claims"][0]["key"], "session:x-filter");
 
-        let keys = vec!["node:x-filter".to_string(), "session:x-filter".to_string()];
-        let selected = claim_sweep_payload_from_records(&records, None, &keys, false);
-        let selected_keys: Vec<_> = selected["claims"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|claim| claim["key"].as_str().unwrap())
-            .collect();
-        assert_eq!(selected_keys, vec!["node:x-filter", "session:x-filter"]);
+            let keys = vec!["node:x-filter".to_string(), "session:x-filter".to_string()];
+            let selected = claim_sweep_payload_from_records(&records, None, &keys, false);
+            let selected_keys: Vec<_> = selected["claims"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|claim| claim["key"].as_str().unwrap())
+                .collect();
+            assert_eq!(selected_keys, vec!["node:x-filter", "session:x-filter"]);
 
-        let all = claim_sweep_payload_from_records(&records, None, &[], true);
-        assert_eq!(all["claims"].as_array().unwrap().len(), 3);
+            let all = claim_sweep_payload_from_records(&records, None, &[], true);
+            assert_eq!(all["claims"].as_array().unwrap().len(), 3);
+        });
     }
 
     #[test]
     fn claim_sweep_excludes_corrupted_and_newer_schema_lockfiles() {
-        let td = tempfile::TempDir::new().unwrap();
-        sweep_acquire(td.path(), "node:x-good");
-        let dir = sweep_dir(td.path());
-        // Corrupted YAML under a sweep-prefixed name.
-        fs::write(dir.join("node%3Ax-bad.lock"), "{not yaml: [").unwrap();
-        // Newer schema writer: parse refuses, sweep excludes (does not crash).
-        fs::write(
-            dir.join("node%3Ax-newer.lock"),
-            "schema_version: 999\nkey: node:x-newer\nholder: h\nacquired_at: 1\npid: 1\nhost: x\n",
-        )
-        .unwrap();
-        // Non-lock and dot files are skipped.
-        fs::write(dir.join("node%3Ax-tmp.partial"), "x").unwrap();
-        let payload = claim_sweep_payload(&dir);
-        let claims = payload["claims"].as_array().unwrap();
-        assert_eq!(claims.len(), 1);
-        assert_eq!(claims[0]["key"], "node:x-good");
+        with_registry(serde_json::json!([]), || {
+            let td = tempfile::TempDir::new().unwrap();
+            sweep_acquire(td.path(), "node:x-good");
+            let dir = sweep_dir(td.path());
+            // Corrupted YAML under a sweep-prefixed name.
+            fs::write(dir.join("node%3Ax-bad.lock"), "{not yaml: [").unwrap();
+            // Newer schema writer: parse refuses, sweep excludes (does not crash).
+            fs::write(
+                dir.join("node%3Ax-newer.lock"),
+                "schema_version: 999\nkey: node:x-newer\nholder: h\nacquired_at: 1\npid: 1\nhost: x\n",
+            )
+            .unwrap();
+            // Non-lock and dot files are skipped.
+            fs::write(dir.join("node%3Ax-tmp.partial"), "x").unwrap();
+            let payload = claim_sweep_payload(&dir);
+            let claims = payload["claims"].as_array().unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0]["key"], "node:x-good");
+        });
     }
 
     // ---- the handover witness subject (x-41f7) ---------------------------
@@ -1077,5 +1206,145 @@ mod tests {
                 assert_eq!(verdict("plain-holder").0, crate::claims::ClaimState::Live);
             },
         );
+    }
+
+    // ---- the primed witness's batch wire ----------------------------------
+
+    /// A PATH shim named `fno` that logs its argv and answers `--handles`
+    /// with one reachable payload per handle. Unique handle names per process
+    /// keep this test's batch off every other flight record keyed on the
+    /// same handles.
+    fn write_truth_shim(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let shim_dir = dir.join("bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        let shim = shim_dir.join("fno");
+        std::fs::write(&shim, format!("#!/bin/sh\n{}", body)).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        shim_dir
+    }
+
+    fn batch_shim_body() -> String {
+        [
+            "printf '%s\\n' \"$*\" >> \"$X_A45C_SHIM_LOG\"",
+            "handles=''",
+            "prev=''",
+            "for a in \"$@\"; do",
+            "  if [ \"$prev\" = '--handles' ]; then handles=\"$a\"; fi",
+            "  prev=\"$a\"",
+            "done",
+            "first=1",
+            "printf '{'",
+            "for h in $(printf '%s' \"$handles\" | tr ',' ' '); do",
+            "  if [ \"$first\" = '1' ]; then first=0; else printf ','; fi",
+            "  printf '\"%s\":{\"state\":\"working\",\"reachability\":\"reachable\",\"basis\":\"transcript\"}' \"$h\"",
+            "done",
+            "printf '}'",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn primed_witness_batches_every_subject_into_one_interpreter() {
+        // The positive marker is the shim log, not an absence: exactly one
+        // line that names --handles AND carries every distinct subject. The
+        // one-line count alone would also pass for a run that spawned
+        // nothing, so the handle list is the load-bearing assertion.
+        // PATH and FNO_AGENTS_HOME are both process-global, so every mutation
+        // below rides with_registry's env lock; no outer guard, that lock is
+        // not reentrant.
+        let td = tempfile::TempDir::new().unwrap();
+        let shim_dir = write_truth_shim(td.path(), &batch_shim_body());
+        let log_path = td.path().join("shim.log");
+        let uniq = std::process::id();
+        let s_live = format!("xa45c-live-{uniq}");
+        let s_wire1 = format!("xa45c-wire-{uniq}");
+        let s_worker = format!("xa45c-worker-{uniq}");
+        with_registry(
+            serde_json::json!([
+                {
+                    "name": "w-live",
+                    "status": "live",
+                    "cwd": "/w",
+                    "created_at": "2026-09-12T00:00:00Z",
+                    "harness_session_id": s_live,
+                    "pid": std::process::id(),
+                    "pid_start_time": own_pid_start(),
+                },
+                {
+                    "name": "w-thread",
+                    "status": "live",
+                    "cwd": "/w",
+                    "created_at": "2026-09-12T00:00:00Z",
+                    "harness_session_id": s_worker,
+                },
+            ]),
+            || {
+                let old_path = std::env::var("PATH").unwrap_or_default();
+                std::env::set_var("X_A45C_SHIM_LOG", &log_path);
+                std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
+                let records = vec![
+                    witness_rec("holder-a", &s_live),
+                    witness_rec("holder-b", &s_wire1),
+                    witness_rec("spawn-handover:w-thread", "s-elsewhere"),
+                ];
+                let (witness, _drain) = session_witness_primed_for(&records);
+                // The verdicts agree with the lazy path: registry-live off
+                // the wire, batch-answered sessions transcript-live.
+                assert!(matches!(
+                    witness(&records[0]),
+                    crate::claims::SessionLiveness::Live(
+                        crate::claims::basis::REGISTRY_SESSION_LIVE
+                    )
+                ));
+                for rec in records.iter().skip(1) {
+                    assert!(matches!(
+                        witness(rec),
+                        crate::claims::SessionLiveness::Live(crate::claims::basis::TRANSCRIPT_LIVE)
+                    ));
+                }
+                let logged = std::fs::read_to_string(&log_path).unwrap();
+                std::env::set_var("PATH", old_path);
+                std::env::remove_var("X_A45C_SHIM_LOG");
+                // Other tests in this binary share the process PATH and can
+                // land their own probes in this log; the uniq prefix isolates
+                // THIS witness's wire from theirs.
+                let mine: Vec<&str> = logged
+                    .lines()
+                    .filter(|l| l.contains("--handles") && l.contains("xa45c-"))
+                    .collect();
+                assert_eq!(mine.len(), 1, "one batch, one interpreter: {logged:?}");
+                assert!(
+                    mine[0].contains(s_wire1.as_str()) && mine[0].contains(s_worker.as_str()),
+                    "every distinct subject on the wire: {logged:?}"
+                );
+                assert!(
+                    !logged.contains(s_live.as_str()),
+                    "the registry-live session stays off the wire: {logged:?}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn primed_witness_answers_through_a_failed_batch_without_hanging() {
+        // A shim that refuses every call: the batch crashes twice, the
+        // per-handle fallback crashes twice more, and the witness answers
+        // Unresolved on the plain record - the same answer the lazy path
+        // gives a dead probe, never a hang and never a seeded verdict from a
+        // run that measured nothing.
+        let td = tempfile::TempDir::new().unwrap();
+        let shim_dir = write_truth_shim(td.path(), "exit 1");
+        let uniq = std::process::id();
+        let s_wire = format!("xa45c-dead-{uniq}");
+        with_registry(serde_json::json!([]), || {
+            let old_path = std::env::var("PATH").unwrap_or_default();
+            std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
+            let rec = witness_rec("holder-x", &s_wire);
+            let (witness, _drain) = session_witness_primed_for(std::iter::once(&rec));
+            let answer = witness(&rec);
+            std::env::set_var("PATH", old_path);
+            assert!(matches!(answer, crate::claims::SessionLiveness::Unresolved));
+        });
     }
 }
