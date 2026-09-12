@@ -175,6 +175,64 @@ pub fn fno_bin() -> std::ffi::OsString {
     std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"))
 }
 
+/// The `fno-py` Python CLI console script, resolved without relying on PATH
+/// (x-cf15): `FNO_PY` overrides for tests and nonstandard installs, then the
+/// script packaged beside this binary (every complete install - uv tool venv,
+/// pip/uv venv, wheel scripts dir, Homebrew keg - ships `fno` and `fno-py` in
+/// one bin dir, the same sibling resolution crates/fno/src/bootstrap.rs
+/// performs for the `fno` shim), then the uv tool venv's bin under its
+/// default tools dir, for a cargo/dev build of this binary with the wheel
+/// installed elsewhere. Bare `fno-py` last, so a genuinely missing install
+/// surfaces a real NotFound instead of a silent no-op.
+pub fn fno_py() -> std::ffi::OsString {
+    if let Some(p) = std::env::var_os("FNO_PY") {
+        return p;
+    }
+    if let Some(p) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| fno_py_beside(&exe))
+    {
+        return p.into_os_string();
+    }
+    if let Some(p) = default_uv_tools_dir().and_then(|base| fno_py_in_tools_dir(&base)) {
+        return p.into_os_string();
+    }
+    std::ffi::OsString::from("fno-py")
+}
+
+/// The executable `fno-py` in `exe`'s directory, if any. `exe` is a parameter
+/// so the leg is testable (bootstrap.rs's `resolve_via_sibling` does the
+/// same); production passes `current_exe`.
+fn fno_py_beside(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let sibling = exe.parent()?.join("fno-py");
+    is_executable_file(&sibling).then_some(sibling)
+}
+
+/// The wheel venv's `fno-py` under a uv tools base dir (`<base>/fno/bin`).
+fn fno_py_in_tools_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
+    let script = base.join("fno").join("bin").join("fno-py");
+    is_executable_file(&script).then_some(script)
+}
+
+/// uv's DEFAULT tools dir: `$XDG_DATA_HOME/uv` when set, else
+/// `$HOME/.local/share/uv`. ponytail: a stat, not the `uv tool dir`
+/// subprocess bootstrap.rs runs - no PATH dependency on uv, and a customized
+/// tools dir is exactly what the `FNO_PY` override exists for.
+fn default_uv_tools_dir() -> Option<std::path::PathBuf> {
+    let base = match std::env::var_os("XDG_DATA_HOME") {
+        Some(x) if !x.is_empty() => std::path::PathBuf::from(x),
+        _ => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".local/share"),
+    };
+    Some(base.join("uv").join("tools"))
+}
+
+fn is_executable_file(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 /// `fno mux pane ls --session <s> --json` -> pane_id -> OSC title. `None`
 /// when the session is unreachable (no server, skewed binary, bad output) -
 /// the caller treats that as "no panes", which clears verdicts: panes live in
@@ -947,6 +1005,52 @@ mod tests {
                 NOW_STAMP
             ),
             Decision::Hold
+        );
+    }
+
+    fn write_script(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    // x-cf15: the fallback must resolve with the wheel bin absent from PATH.
+    // Neither leg consults PATH at all; the temp dir stands in for the uv
+    // tools bin the measured failure could not reach.
+    #[test]
+    fn fno_py_beside_resolves_executable_sibling_without_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("fno-agents");
+        write_script(&exe, 0o755);
+        let script = dir.path().join("fno-py");
+        write_script(&script, 0o755);
+        assert_eq!(fno_py_beside(&exe).as_deref(), Some(script.as_path()));
+    }
+
+    #[test]
+    fn fno_py_beside_ignores_missing_or_non_executable_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("fno-agents");
+        write_script(&exe, 0o755);
+        assert_eq!(fno_py_beside(&exe), None, "no sibling");
+        let script = dir.path().join("fno-py");
+        write_script(&script, 0o644);
+        assert_eq!(fno_py_beside(&exe), None, "sibling not executable");
+    }
+
+    #[test]
+    fn fno_py_in_tools_dir_resolves_wheel_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fno").join("bin").join("fno-py");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        write_script(&script, 0o755);
+        assert_eq!(
+            fno_py_in_tools_dir(dir.path()).as_deref(),
+            Some(script.as_path())
+        );
+        assert_eq!(
+            fno_py_in_tools_dir(tempfile::tempdir().unwrap().path()),
+            None
         );
     }
 }
