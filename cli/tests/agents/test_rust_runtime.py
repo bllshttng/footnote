@@ -705,6 +705,10 @@ def test_python_agent_verbs_match_registered_commands() -> None:
         "attach",
         "logs",
         "ask",
+        # x-1b75: ported to the Rust client beside trace (same daemon-free,
+        # client-side dispatch shape). The Python command stays registered as
+        # the FNO_AGENTS_RUNTIME=python / no-binary refusal.
+        "registry-json",
         # Task 1.2: spawn gains a Python implementation (--once / claude plain
         # spawn) but stays in RUST_CLIENT_VERBS + AUTO_ROUTE_VERBS so the
         # daemon PTY worker path (codex/gemini without --once) still auto-routes
