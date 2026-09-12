@@ -193,7 +193,14 @@ set -euo pipefail
 # session-start reach channel, so the preamble is its only legal home; the
 # corpus has no tradeable bytes left (see the refusal text), and HEAD sat 8
 # bytes under the old ceiling. Ceiling set at measured + band/2.
-CEILING_BYTES=41630
+# +109 (41630 -> 41739), measured 2026-09-12 (x-4810): the AGENTS.md file-budget
+# bullet now states the cli/src/fno tree allowance (net +100 per change) and
+# the crates-first remedy. That number decided a roughly 600-line language
+# choice (x-7b36) while living only in check-file-budget.sh, absent from every
+# loaded surface. A first draft weighed 68; the style gate split it into four
+# short sentences, and 109 is the measured residue of the version that passes.
+# The raise spends exactly its delta and leaves the x-74aa bank above intact.
+CEILING_BYTES=41739
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.

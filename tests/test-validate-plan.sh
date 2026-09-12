@@ -732,6 +732,48 @@ else
     fail "AC10k: Matching control receipt missing (exit $EXIT_CODE): $OUTPUT"
 fi
 
+# --- AC11: Python tree allowance warn ---
+echo ""
+echo "--- AC11: Python Tree Allowance ---"
+
+# Trips: plan writes cli/src/fno Python and names no size remedy. Warn only:
+# a bug fix under the allowance is legal, so the exit stays 0.
+PLAN_PYTREE="$TMPDIR_BASE/pytree_warn.md"
+cat > "$PLAN_PYTREE" <<'EOF'
+execution_mode: sequential
+
+### Task 1.1
+Files: cli/src/fno/mail/cli.py
+Acceptance Criteria: AC1
+Steps:
+Step 1: Do something
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_PYTREE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "names no size remedy" <<< "$OUTPUT" && grep -q "net +100" <<< "$OUTPUT"; then
+    pass "AC11a: cli/src/fno Python with no remedy warns naming net +100"
+else
+    fail "AC11a: expected exit 0 with the remedy warn (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# Clean: the same plan stating its expected delta and the crates/ remedy.
+PLAN_PYTREE_OK="$TMPDIR_BASE/pytree_clean.md"
+cat > "$PLAN_PYTREE_OK" <<'EOF'
+execution_mode: sequential
+
+### Task 1.1
+Files: cli/src/fno/mail/cli.py
+Acceptance Criteria: AC1
+Steps:
+Step 1: Do something
+Size: expected net +40; the verb moves to crates/
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_PYTREE_OK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && ! grep -q "names no size remedy" <<< "$OUTPUT"; then
+    pass "AC11b: a plan stating its delta and remedy prints no remedy warn"
+else
+    fail "AC11b: remedy plan should not warn (exit $EXIT_CODE): $OUTPUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="

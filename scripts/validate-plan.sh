@@ -1501,6 +1501,32 @@ elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
 fi
 
 # -------------------------------------------------------------------
+# Check 6b-quinquies: Python tree allowance (advisory backstop)
+# -------------------------------------------------------------------
+# A bug fix under the allowance is legal, so this is a warn, never an error:
+# the CI gate refuses a size violation, this reminder speaks when the
+# /blueprint gate was skipped. A plan that writes cli/src/fno Python and
+# names no size remedy is the x-7b36 shape - a feature planned in the
+# compatibility shell, discovered only at push time.
+check_python_tree_file() {
+    local file="$1"
+    grep -E 'cli/src/fno/[^[:space:]`)"]*\.py' "$file" >/dev/null || return 0
+    if grep -qE 'crates/|PY_TREE_ALLOWANCE|net \+' "$file"; then
+        return 0
+    fi
+    warn "plan writes cli/src/fno Python but names no size remedy; cli/src/fno grows net +100 per change (scripts/ci/check-file-budget.sh). State the expected net delta, or land the feature in crates/."
+}
+
+echo ""
+echo "--- Python Tree Allowance ---"
+
+if [[ -f "$PLAN_DIR" ]]; then
+    check_python_tree_file "$PLAN_DIR"
+elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    check_python_tree_file "$PLAN_DIR/00-INDEX.md"
+fi
+
+# -------------------------------------------------------------------
 # Check 6c: Wave section headers (parity with Execution Strategy YAML)
 # -------------------------------------------------------------------
 echo ""
