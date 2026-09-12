@@ -10,7 +10,6 @@ hidden verb's exit-code mapping.
 from __future__ import annotations
 
 import json
-import stat
 
 from typer.testing import CliRunner
 
@@ -27,17 +26,6 @@ ANSWER = {
     "receipt": "bot-review: posted APPROVE as fno-review-bot on #931 (reviewDecision=APPROVED)",
     "exit": 0,
 }
-
-
-def _fake_binary(tmp_path, stdout: str, exit_code: int = 0):
-    """A stand-in fno-agents binary: reads stdin, prints ``stdout``, exits."""
-    script = tmp_path / "fake-fno-agents.sh"
-    script.write_text(
-        "#!/bin/sh\ncat > /dev/null\n"
-        f"printf '%s' '{stdout}'\nexit {exit_code}\n"
-    )
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return script
 
 
 def test_publish_review_call_round_trips_the_payload(tmp_path, monkeypatch):

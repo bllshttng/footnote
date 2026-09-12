@@ -141,11 +141,11 @@ fn answer_with_event(mut a: Answer, event: &'static str) -> Answer {
 }
 
 /// Drop a trailing `[bot]` for comparison (GitHub appends it to app logins).
+/// `str::get` keeps a multibyte login from panicking on a non-boundary slice.
 fn strip_bot(login: &str) -> &str {
-    if login.len() >= 5 && login[login.len() - 5..].eq_ignore_ascii_case("[bot]") {
-        &login[..login.len() - 5]
-    } else {
-        login
+    match login.get(login.len().saturating_sub(5)..) {
+        Some(tail) if tail.eq_ignore_ascii_case("[bot]") => &login[..login.len() - 5],
+        _ => login,
     }
 }
 
@@ -674,6 +674,8 @@ mod tests {
         assert_eq!(strip_bot("fno-review-bot[bot]"), "fno-review-bot");
         assert_eq!(strip_bot("fno-review-bot"), "fno-review-bot");
         assert_eq!(strip_bot("FNO-BOT[BOT]"), "FNO-BOT");
+        // A multibyte login must not panic on a non-char-boundary slice.
+        assert_eq!(strip_bot("日本語ボット"), "日本語ボット");
         assert_eq!(strip_bot("[bot]"), "");
     }
 
