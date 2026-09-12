@@ -326,6 +326,16 @@ review_flags="$(printf '%s' "$hold_json" | jq -c '.metadata.flags // []' 2>/dev/
 if ! jq -e 'type == "array" and all(.[]; type == "string")' <<<"$review_flags" >/dev/null 2>&1; then
   review_flags='[]'
 fi
+# A declared scope stamps the round it verifies: when the invocation carried
+# --verify-fixes, the pass declares review_round so the counter reads the
+# round it verified, not a fresh one (law: a scoped fix-verification is not a
+# round). Fail closed: an unresolvable round stamps nothing and the pass
+# counts as a fresh round, exactly as an undeclared pass always has.
+review_round=""
+if jq -e 'index("--verify-fixes")' <<<"$review_flags" >/dev/null 2>&1; then
+  review_round="$("${FNO:-fno}" do pr review-hold round --branch "$branch" --head "$head_sha" 2>/dev/null || true)"
+  [[ "$review_round" =~ ^[0-9]+$ ]] || review_round=""
+fi
 review_model_family=""
 if [[ -n "$session_id" ]]; then
   review_model_family="$(jq -r '.model_family // .model // empty' \
@@ -424,9 +434,17 @@ if [[ -n "$findings_file" ]]; then
   # path, so a row can never read milder than the classified findings. The
   # verb's stderr line is the emit receipt. The typed-verdict emit below
   # stays for `declare` and for hand runs with no findings file.
-  "${FNO:-fno}" do review classify --findings-file "$findings_file" \
-    --emit-record --attest "$reviewer" --reviewer-context "$reviewer_context" \
-    --execution-context "$execution_context" --output-contract "$output_contract" >/dev/null
+  # The declared scope rides BOTH emit paths, or the stamp is half a stamp.
+  if [[ -n "$review_round" ]]; then
+    "${FNO:-fno}" do review classify --findings-file "$findings_file" \
+      --emit-record --attest "$reviewer" --reviewer-context "$reviewer_context" \
+      --execution-context "$execution_context" --output-contract "$output_contract" \
+      --review-round "$review_round" >/dev/null
+  else
+    "${FNO:-fno}" do review classify --findings-file "$findings_file" \
+      --emit-record --attest "$reviewer" --reviewer-context "$reviewer_context" \
+      --execution-context "$execution_context" --output-contract "$output_contract" >/dev/null
+  fi
 else
   data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
     --arg session_id "$session_id" --arg harness "$harness" \
@@ -439,7 +457,8 @@ else
     --argjson reviewed_line_count "$reviewed_line_count" \
     --argjson reviewed_file_count "$reviewed_file_count" \
     --argjson findings "$findings_json" \
-    '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,provider:$provider,reviewer_context:$reviewer_context,invocation_id:$invocation_id,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count} + $findings')"
+    --arg review_round "$review_round" \
+    '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,provider:$provider,reviewer_context:$reviewer_context,invocation_id:$invocation_id,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count} + $findings + (if $review_round == "" then {} else {review_round: ($review_round | tonumber)} end)')"
   # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
   # which is on PATH in the uv test env where the mux is not installed.
   "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"

@@ -154,3 +154,41 @@ class TestBuildEmitRecord:
         record = build_emit_record(deep)
         assert len(record["findings"]) < 60
         assert record["findings_truncated"] is True
+
+
+class TestClassifyReviewRoundOption:
+    """The `--review-round` flag: the declared scope reaches the record the
+    emitter (and, through `_ATTEST_RECORD_KEYS`, the attested row) reads."""
+
+    def _invoke(self, tmp_path, payload, *extra):
+        from typer.testing import CliRunner
+
+        from fno.review.cli import review_app
+
+        findings = tmp_path / "findings.json"
+        findings.write_text(json.dumps(payload), encoding="utf-8")
+        return CliRunner().invoke(
+            review_app,
+            ["classify", "--findings-file", str(findings), "--emit-record", *extra],
+        )
+
+    def test_round_stamps_the_record(self, tmp_path) -> None:
+        r = self._invoke(tmp_path, [_finding(1)], "--review-round", "1")
+        assert r.exit_code == 0, r.output
+        assert json.loads(r.output)["review_round"] == 1
+
+    def test_flag_absent_stamps_nothing(self, tmp_path) -> None:
+        r = self._invoke(tmp_path, [_finding(1)])
+        assert r.exit_code == 0, r.output
+        assert "review_round" not in json.loads(r.output)
+
+    def test_flag_overrides_the_payload_round(self, tmp_path) -> None:
+        r = self._invoke(
+            tmp_path, {"findings": [_finding(1)], "review_round": 3}, "--review-round", "1"
+        )
+        assert r.exit_code == 0, r.output
+        assert json.loads(r.output)["review_round"] == 1
+
+    def test_negative_round_refuses(self, tmp_path) -> None:
+        r = self._invoke(tmp_path, [_finding(1)], "--review-round", "-1")
+        assert r.exit_code == 2, r.output
