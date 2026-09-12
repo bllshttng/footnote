@@ -6,13 +6,13 @@ The STATUS word a roster surface renders is served activity, never liveness. `fn
 
 ## A fresh age with no inference certifies nothing
 
-A worker killed by a usage-limit 429 dies while it writes that error. So its transcript is freshest at the instant it died, and age alone reads the corpse as reachable. Measured 2026-09-12: `fno backlog requeue` refused such a worker at 13 minutes quiet and accepted the same dead worker at 23, because only the clock had moved between the two reads.
+A worker killed by a usage-limit 429 dies while it writes that error. So its transcript is freshest at the instant it died, and age alone reads the corpse as reachable. Measured 2026-09-12: `fno backlog requeue` refused such a worker at 13 minutes quiet. It accepted the same dead worker at 23. Only the clock had moved between the two reads.
 
-`observed_model` is the marker the corpse cannot fake. Only a vendor answering a turn writes the record it counts, so a process that booted and died reads `{"kind": "no-model-yet"}` while a live worker reads a real model name and a climbing `samples` count. `classify_reachability` reads it: an active state whose tail carries zero samples resolves `unknown` with basis `no-inference`, never `reachable`.
+`observed_model` is the marker the corpse cannot fake. Only a vendor answering a turn writes the record it counts. So a process that booted and died reads `{"kind": "no-model-yet"}`. A live worker reads a real model name and a climbing `samples` count. `classify_reachability` reads it: an active state whose tail carries zero samples resolves `unknown` with basis `no-inference`, never `reachable`.
 
 The verdict is `unknown` and not `unreachable` for the reason every other absence in that module is. A worker two seconds into its life reads the same zero. Only an affirmative falsifier condemns a row.
 
-Four readings are absences and lower nothing: `no-transcript`, `not-file-backed`, `unreadable`, and no reading at all from an older `fno`. `not-file-backed` is the load-bearing one. opencode keeps no per-session file, so counting it as a zero would name every opencode worker a corpse.
+Four readings are absences and lower nothing: `no-transcript`, `not-file-backed`, `unreadable`, and no reading at all from an older `fno`. `not-file-backed` is the load-bearing one. opencode keeps no per-session file. Count that as a zero and every opencode worker reads as a corpse.
 
 `fno backlog requeue` prints the count beside the state, because the state word alone cannot separate the two: `state=working samples=0` names a corpse and `state=working samples=31` names a worker. A count nothing can answer prints `?` and stays null on the wire, never `0`.
 
