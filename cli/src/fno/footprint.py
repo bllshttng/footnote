@@ -237,8 +237,7 @@ def parse_footprint(
     """Parse a file-backed ``ps -Ao pid,ppid,state,etime,%cpu,rss,command`` snapshot.
 
     The six-column shape without ``state`` and the legacy five-column shape are
-    accepted for old fixtures; the legacy shape has no parentage, and without
-    ``state`` the runnable count reads zero, never a guess.
+    accepted for old fixtures; without ``state`` the runnable count reads zero.
     """
     processes: dict[int, _Process] = {}
     unparsed_lines = 0
@@ -252,7 +251,8 @@ def parse_footprint(
         if line.startswith("PID "):
             header = line.split()
             new_format = len(header) >= 2 and header[1] == "PPID"
-            new_state_format = len(header) > 2 and header[2] == "STAT"
+            # The state header varies by platform: STAT/STATE (BSD, macOS) or S (Linux).
+            new_state_format = len(header) > 2 and header[2] in ("STAT", "STATE", "S")
             continue
         try:
             # Shapes, newest first: (maxsplit, has_state, has_ppid). The first

@@ -2179,6 +2179,20 @@ def test_parse_reads_a_headered_state_snapshot():
     assert reading.measured_cpu_cores == pytest.approx(0.95)
 
 
+def test_parse_reads_the_linux_state_header():
+    """procps names the state column `S`, macOS names it `STATE`; both route
+    to the state shape. A missed header read every row as unparsed on the
+    CI runner (172 lines, 2026-09-12)."""
+    linux = (
+        "    PID  PPID S      ELAPSED  %CPU    RSS COMMAND\n"
+        "    90     1 Ss      10:00   5.0   1024 /sbin/init-ish\n"
+        "    91     1 R+      10:00  90.0   1024 /bin/burner"
+    )
+    reading = parse_footprint(linux)
+    assert reading.machine_process_count == 2
+    assert reading.runnable_count == 1
+
+
 def _reading_with_machine(measured: float, processes: int, runnable: int) -> Footprint:
     return Footprint(
         sustained_cpu_cores=0.0,

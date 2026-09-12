@@ -961,8 +961,7 @@ def _compute_machine_pressure(reading: Footprint, load_snapshot: Any) -> Machine
 
         meter = load_settings().resource_meter
         band = float(meter.thresholds.cpu_busy_fraction)
-        # Clamp before it rides the wire: a negative or absurd value fails the
-        # Rust reader's u64 and blinds footer and arm in one stroke.
+        # Clamped: a wild value fails the Rust reader's u64 and blinds the read.
         throttle = min(max(int(meter.notifications.throttle_minutes), 0), 10_080)
     except Exception:  # noqa: BLE001 - footprint is a reading, not an enforcer
         band, throttle = 0.9, 60
