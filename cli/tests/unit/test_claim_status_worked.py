@@ -128,6 +128,56 @@ def test_ac5_err_registry_only_probe_still_answers_the_join(monkeypatch):
     assert info["worked_by"] == ["reg-worker"]
 
 
+def test_a_closed_phase_row_never_renders_as_unmeasured_noise(monkeypatch):
+    """The display field drops what the overlay's worked_by drops: a worker
+    whose own phase row closed on this node is not an occupancy candidate
+    and must not render as 'unmeasured, never live' in the verdict line
+    either."""
+    row = {
+        "name": "bp-closed",
+        "state": "working",
+        "cwd": "/worktrees/ac1-node",
+        "row_id": "session-1",
+    }
+    reading = RosterReading(True, 1, {"ac1-node": [row]}, "", {"session-1": row}, 0, ())
+    monkeypatch.setattr("fno.claims.cli.read_roster", lambda **_kw: reading)
+    entry = {
+        "id": "ac1-node",
+        "status": "ready",
+        "sessions": [
+            {
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "session-1",
+                "started_at": "2026-09-11T00:00:00Z",
+                "ended_at": "2026-09-11T01:00:00Z",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "fno.graph.store.read_nodes_by_ids",
+        lambda *_a, **_kw: {"entries": [entry]},
+    )
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids", _real_live_worked_node_ids
+    )
+    monkeypatch.setattr(
+        "fno.claims.cli._claims_core.claim_status",
+        lambda **_kw: {"key": "node:ac1-node", "state": "free"},
+    )
+
+    result = runner.invoke(cli, ["status", "node:ac1-node", "--json"])
+
+    assert result.exit_code == 0, result.output
+    info = json.loads(result.stdout)
+    # The crosscheck provably ran; the absence below is the filter, not a
+    # dead instrument.
+    assert info["roster_consulted"] is True
+    assert info["roster_workers"] == []
+    assert "worked_by" not in info
+    assert "unmeasured, never live" not in result.output
+
+
 def test_ac7_edge_unrelated_unresolved_rows_still_answer_free(monkeypatch):
     unresolved = {
         "name": "other-worker",

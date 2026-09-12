@@ -42,6 +42,10 @@ STATUS_MIGRATION: dict[str, str] = {"claimed": "in_progress"}
 # node settlement, so they cannot drift (x-94f8).
 TERMINAL_RUNGS: frozenset[str] = frozenset({"done", "superseded"})
 
+# The label prefix every unmeasured admit carries. Readers split live from
+# unmeasured admits on this literal, so the wording is a contract, not prose.
+UNMEASURABLE_LABEL_MARK = "(unmeasurable:"
+
 # Sentinel prefix used by the pre-feature workaround that overloaded
 # ``completed_at`` to encode deferral. Detected once in ``recompute_statuses``
 # and migrated to the dedicated ``deferred_at`` field, after which the prefix
@@ -336,7 +340,7 @@ def live_worked_node_ids(
                 # x-dead: unmeasured rows are listed marked, never vanished.
                 label = (
                     name if verdict == REACHABLE
-                    else f"{name} (unmeasurable: no positive liveness evidence)"
+                    else f"{name} {UNMEASURABLE_LABEL_MARK} no positive liveness evidence)"
                 )
                 if isinstance(label, str) and label and label not in workers:
                     workers.append(label)
@@ -358,7 +362,7 @@ def live_worked_node_ids(
                 if verdict in (REACHABLE, UNKNOWN):
                     _admit(extra.get("name"), verdict)
             for extra_name in reading.unmeasurable_by_node.get(node_id, ()):
-                marker = f"{extra_name} (unmeasurable: no harness session id)"
+                marker = f"{extra_name} {UNMEASURABLE_LABEL_MARK} no harness session id)"
                 if marker not in workers:
                     workers.append(marker)
             if workers:

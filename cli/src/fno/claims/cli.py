@@ -996,16 +996,27 @@ def status(
         worked_names: list[str] = []
         if entry is not None:
             try:
+                from fno.graph.statuses import closed_worker_session_ids
                 from fno.graph.statuses import live_worked_node_ids
 
                 worked = live_worked_node_ids(
                     strict=True, entries=[entry], reading=reading
                 )
+                # The display field drops the same rows the overlay's
+                # worked_by excludes: a session whose own phase row closed
+                # never renders here as an occupancy candidate.
+                closed = closed_worker_session_ids(entry)
+                info["roster_workers"] = [
+                    w for w in info.get("roster_workers") or []
+                    if str(w.get("row_id") or "") not in closed
+                ]
             except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
                 typer.echo(f"worked overlay degraded: {exc}", err=True)
                 worked = {}
             worked_names = worked.get(node_id) or []
-        reachable = [n for n in worked_names if "(unmeasurable:" not in n]
+        from fno.graph.statuses import UNMEASURABLE_LABEL_MARK
+
+        reachable = [n for n in worked_names if UNMEASURABLE_LABEL_MARK not in n]
         if reachable:
             info["worked_by"] = reachable
             # A positively-live worker on an unheld node is never `free`.
@@ -1016,7 +1027,7 @@ def status(
             info["basis"] = (
                 "live-worker-degraded-coverage"
                 if info.get("roster_rows_unresolved", 0)
-                or any("(unmeasurable:" in n for n in worked_names)
+                or any(UNMEASURABLE_LABEL_MARK in n for n in worked_names)
                 else "live-worker"
             )
         unresolved = info.get("roster_rows_unresolved", 0)
