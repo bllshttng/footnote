@@ -142,7 +142,19 @@ def classify_planned_unclaimed(
                 "facts": facts,
                 **{
                     key: entry.get(key)
-                    for key in ("title", "project", "mission_id", "roadmap_id", "parent")
+                    for key in (
+                        "title",
+                        "project",
+                        "mission_id",
+                        "roadmap_id",
+                        "parent",
+                        # Dispatch overrides ride along so a consumer cannot
+                        # read absent as null (the false zero this queue was
+                        # bitten by): set means encoded, absent means get is
+                        # authoritative and it carries none either.
+                        "dispatch_verb",
+                        "dispatch_brief",
+                    )
                     if entry.get(key) is not None
                 },
             }
