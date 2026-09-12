@@ -179,7 +179,7 @@ fn default_true() -> bool {
 /// v33 (x-c914): the account-scoped dispatch verbs carry the client's
 /// session-local active account. `ClientMsg::DispatchNext { account }` and
 /// `Command::DispatchNode { node, account }` append `--account <id>` to the
-/// server's `fno agents dispatch one` shell so a mux-initiated spawn bills the chosen
+/// server's `fno agents dispatch next` shell so a mux-initiated spawn bills the chosen
 /// claude account; `None` = today's default (no flag). `AgentRow { account }`
 /// carries the birth/roster account for the sideline glyph.
 ///
@@ -1582,7 +1582,7 @@ pub enum Command {
     },
     /// (v15) Start a targeted interactive session on a clicked work-queue card's
     /// node (id or slug), behind the client's one-keypress confirm. Reuses the
-    /// `DispatchNext` porcelain (`fno agents dispatch one`) pinned to `--node`, so the
+    /// `DispatchNext` porcelain (`fno agents dispatch next`) pinned to `--node`, so the
     /// lane cap, the same-node claim race (a node claimed between click and Enter
     /// bounces `already-dispatching`), and the "read-only observer refused"
     /// guarantee all hold exactly as prefix+g. Value over `DispatchNext`: the

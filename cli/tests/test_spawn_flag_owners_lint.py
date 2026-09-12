@@ -24,7 +24,7 @@ def _invoke_lint() -> object:
 def test_passes_on_the_live_tree() -> None:
     result = _invoke_lint()
     assert result.exit_code == 0, result.output
-    assert "44/44" in result.output
+    assert "45/45" in result.output
 
 
 def test_a_row_removal_fails_naming_the_flag(

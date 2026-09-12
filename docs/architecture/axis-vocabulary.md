@@ -154,7 +154,7 @@ A receipt that said a plan was claimed stated a fact about the first sense while
 
 `host` was rejected: `claims.rs` writes `host` as the machine into every claim record, and `registry.py` defines `host_mode` as the interactive-drive axis.
 
-The old spellings stay as deprecated aliases that work and warn: `--session`, `FNO_SESSION`, `--mux-session` on `dispatch one`, and pane-identity `--session-id`. Each prints one stderr line naming the replacement, and the alias will be removed in a future release. Env precedence is: flag, then `FNO_SERVER`, then `FNO_SESSION`, then `main`. When `FNO_SESSION` is the value that decided the server, its warning prints. A pane's writers set `FNO_SERVER` and `FNO_SESSION` to the same value, so new panes never warn and old readers keep working.
+The old spellings stay as deprecated aliases that work and warn: `--session`, `FNO_SESSION`, `--mux-session` on `dispatch next`, and pane-identity `--session-id`. Each prints one stderr line naming the replacement, and the alias will be removed in a future release. Env precedence is: flag, then `FNO_SERVER`, then `FNO_SESSION`, then `main`. When `FNO_SESSION` is the value that decided the server, its warning prints. A pane's writers set `FNO_SERVER` and `FNO_SESSION` to the same value, so new panes never warn and old readers keep working.
 
 Workspace and squad are one object under two names. The ruling lives at `workspace()` in `crates/fno/src/mux_cli.rs`. A person types `workspace`. `squad` survives in crate identifiers and on-disk data.
 

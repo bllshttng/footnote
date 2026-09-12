@@ -128,6 +128,7 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--split": FlagOwner(FNO, "mux pane placement"),
     "--at": FlagOwner(FNO, "mux exact-origin placement"),
     "--tab": FlagOwner(FNO, "mux tab placement"),
+    "--mux-session": FlagOwner(FNO, "dispatch-next porcelain pins its mux lane"),
     "--bounded-placement": FlagOwner(FNO, "serialized placement lane under the mux lease"),
     "--crown": FlagOwner(FNO, "crown ladder; no harness has the concept"),
     "--succeed": FlagOwner(FNO, "crown succession; fno validates the transfer"),
@@ -141,5 +142,6 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--prompt-file": FlagOwner(FNO, "long-prompt input file ('-' = stdin)"),
 }
 
-#: Growth ratchet, measured at merge: 44 flags (42 + --wait, --prompt-file).
-SPAWN_FLAG_CAP = 44
+#: Growth ratchet, measured at merge: 45 flags (44 + --mux-session, the
+#: dispatch-next lane pin).
+SPAWN_FLAG_CAP = 45

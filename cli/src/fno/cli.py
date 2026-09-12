@@ -294,7 +294,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     ),
     "dispatch": (
         "fno.dispatch:dispatch_app",
-        "Grab one ready node into a mux pane (mux leader+g shells `dispatch one`).",
+        "Dispatch the next ready node (mux leader+g shells `dispatch next`).",
         {"hidden": True},
     ),
 }
