@@ -196,33 +196,48 @@ fn compile_forced(
     Ok(ids)
 }
 
-/// Node id -> holder for live/suspect claims over the asked keys, through the
-/// same native verdict machinery `claim sweep` uses. Any fault degrades to an
-/// empty map: a display read never raises.
-fn live_workers(claims_dir: Option<&PathBuf>, keys: &[String]) -> BTreeMap<String, String> {
+/// Node id -> the swept claim row for that node, through the same native
+/// verdict machinery `claim sweep` uses. Every selected row is kept, not only
+/// the held ones: `free`, `stale` and "no record at all" are three different
+/// answers and one null renders them as one.
+///
+/// The bool says whether the sweep reached the store. Any fault degrades to an
+/// empty map with that bool false, so a display read never raises and a caller
+/// can still tell an absence from a broken instrument. `list_in_result` names
+/// the directories whose scan succeeded, which is the same distinction one
+/// layer down.
+fn live_workers(claims_dir: Option<&PathBuf>, keys: &[String]) -> (BTreeMap<String, Value>, bool) {
     let Some(dir) = claims_dir else {
-        return BTreeMap::new();
+        return (BTreeMap::new(), false);
     };
-    let records = crate::claims::list_in(std::slice::from_ref(dir), None, true).unwrap_or_default();
+    let Ok((records, read_dirs)) =
+        crate::claims::list_in_result(std::slice::from_ref(dir), None, true)
+    else {
+        return (BTreeMap::new(), false);
+    };
+    if read_dirs.is_empty() {
+        return (BTreeMap::new(), false);
+    }
     let payload = crate::claim_verbs::claim_sweep_payload_from_records(&records, None, keys, false);
     let mut out = BTreeMap::new();
     if let Some(rows) = payload.get("claims").and_then(|v| v.as_array()) {
         for row in rows {
             let key = s_str(row, "key").unwrap_or_default().to_string();
-            if row.get("state").and_then(|s| s.as_str()) != Some("live")
-                && row.get("state").and_then(|s| s.as_str()) != Some("suspect")
-            {
-                continue;
-            }
-            if let Some(holder) = row.get("holder").and_then(|h| h.as_str()) {
-                out.insert(
-                    key.trim_start_matches("node:").to_string(),
-                    holder.to_string(),
-                );
-            }
+            out.insert(key.trim_start_matches("node:").to_string(), row.clone());
         }
     }
-    out
+    (out, true)
+}
+
+/// Whole hours since `created_at`, to one decimal. `None` when the entry
+/// carries no parseable stamp, which a reader must not read as "brand new".
+fn age_hours(entry: &Value, now_secs: u64) -> Value {
+    let Some(created) = s_str(entry, "created_at").and_then(crate::tick_ledger::parse_rfc3339_unix)
+    else {
+        return Value::Null;
+    };
+    let hours = now_secs.saturating_sub(created) as f64 / 3600.0;
+    json!((hours * 10.0).round() / 10.0)
 }
 
 /// The fold for one crown: counts over the whole scope, rows for the active
@@ -232,7 +247,9 @@ fn fold_one(
     level: Option<i64>,
     entries: &[Value],
     projects: &Result<HashMap<String, String>, String>,
-    workers: &BTreeMap<String, String>,
+    workers: &BTreeMap<String, Value>,
+    sweep_ran: bool,
+    now_secs: u64,
 ) -> Value {
     let Some(level) = level else {
         return json!({
@@ -259,13 +276,32 @@ fn fold_one(
             continue;
         }
         let sessions = sessions_of(entry);
+        let claim = workers.get(id);
+        let state = claim.and_then(|c| s_str(c, "state"));
+        // An absence and a failed instrument must not print the same string,
+        // so the sweep's own verdict is used only when the sweep ran.
+        let claim_state = if !sweep_ran {
+            "unreadable"
+        } else {
+            state.unwrap_or("no-record")
+        };
+        let held = matches!(state, Some("live") | Some("suspect"));
         nodes.push(json!({
             "id": id,
             "slug": s_str(entry, "slug").unwrap_or(""),
             "status": status,
-            "worker": workers.get(id).cloned().map(Value::String).unwrap_or(Value::Null),
+            "worker": if held {
+                claim.and_then(|c| c.get("holder")).cloned().unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            },
+            "claim_state": claim_state,
+            "claim_basis": claim.and_then(|c| c.get("basis")).cloned().unwrap_or(Value::Null),
             "pr_number": entry.get("pr_number").cloned().unwrap_or(Value::Null),
             "sessions": sessions,
+            "age_hours": age_hours(entry, now_secs),
+            "blocked_by": entry.get("blocked_by").cloned().unwrap_or(Value::Null),
+            "blocked_reason": entry.get("blocked_reason").cloned().unwrap_or(Value::Null),
         }));
     }
     let total: i64 = counts.values().sum();
@@ -345,7 +381,7 @@ fn crown_html(crown: &Value, fold: &Value) -> String {
     ));
     out.push_str(
         "<table class=\"crown-nodes\"><thead><tr><th>node</th><th>status</th><th>worker</th>\
-         <th>pr</th><th>sessions</th></tr></thead><tbody>",
+         <th>claim</th><th>age</th><th>pr</th><th>sessions</th></tr></thead><tbody>",
     );
     if let Some(rows) = fold.get("nodes").and_then(|n| n.as_array()) {
         for r in rows {
@@ -364,11 +400,18 @@ fn crown_html(crown: &Value, fold: &Value) -> String {
                         .join(", ")
                 })
                 .unwrap_or_default();
+            let age = r
+                .get("age_hours")
+                .and_then(|a| a.as_f64())
+                .map(|h| format!("{h:.1}h"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                 esc(s_str(r, "id").unwrap_or("")),
                 esc(s_str(r, "status").unwrap_or("")),
                 esc(s_str(r, "worker").unwrap_or("-")),
+                esc(s_str(r, "claim_state").unwrap_or("-")),
+                esc(&age),
                 esc(&pr),
                 esc(&sessions),
             ));
@@ -408,6 +451,7 @@ pub fn court_fold(
     let entries: Vec<Value> = crate::graph_store::read_defaulted_opts(graph_path, false, false)
         .map_err(|e| format!("graph unreadable: {e}"))?;
     let projects = crate::king_board::project_map(cwd);
+    let now_secs = (crate::claims::now_ms() / 1000).max(0) as u64;
     // Pass 1: fold with no workers named, collecting the node ids the worker
     // sweep will ask after.
     let mut want: BTreeSet<String> = BTreeSet::new();
@@ -417,7 +461,15 @@ pub fn court_fold(
             continue;
         };
         let level = crown.get("level").and_then(|l| l.as_i64());
-        let fold = fold_one(scope, level, &entries, &projects, &BTreeMap::new());
+        let fold = fold_one(
+            scope,
+            level,
+            &entries,
+            &projects,
+            &BTreeMap::new(),
+            false,
+            now_secs,
+        );
         if let Some(nodes) = fold.get("nodes").and_then(|n| n.as_array()) {
             for n in nodes {
                 if let Some(id) = s_str(n, "id") {
@@ -431,14 +483,23 @@ pub fn court_fold(
     // the per-key read pays one native verdict each and measured 1.7 s over
     // 122 active rows. The re-fold is pure over entries, so it costs nothing.
     let keys: Vec<String> = want.into_iter().collect();
-    let workers = live_workers(claims_dir, &keys);
+    // The fold resolves its own claims dir. Every key it asks after is a
+    // `node:` key and those route to the global root on both sides, so one
+    // resolver answers and no caller has to pass the flag. `--claims-dir`
+    // stays an override for tests.
+    let resolved = claims_dir
+        .cloned()
+        .or_else(|| crate::claims::claims_dir_for(None));
+    let (workers, sweep_ran) = live_workers(resolved.as_ref(), &keys);
     let mut refolded: BTreeMap<String, Value> = BTreeMap::new();
     for crown in crowns {
         let Some(scope) = s_str(crown, "scope") else {
             continue;
         };
         let level = crown.get("level").and_then(|l| l.as_i64());
-        let fold = fold_one(scope, level, &entries, &projects, &workers);
+        let fold = fold_one(
+            scope, level, &entries, &projects, &workers, sweep_ran, now_secs,
+        );
         refolded.insert(scope.to_string(), fold);
     }
     let folds = refolded;
@@ -561,7 +622,7 @@ mod tests {
         // Ledger-derived cost sessions arrive as objects, not bare strings;
         // both shapes can coexist in one list.
         e[1]["cost_sessions"] = json!(["s4", {"session_id": "s6", "cost_usd": 0.4}]);
-        let fold = fold_one("e-1", Some(2), &e, &no_projects(), &workers);
+        let fold = fold_one("e-1", Some(2), &e, &no_projects(), &workers, true, 0);
         assert_eq!(fold["status"], "ok");
         assert_eq!(fold["total"], 4);
         // x-2 (done) and x-3 (idea) are the two inactive rows.
@@ -582,7 +643,15 @@ mod tests {
     #[test]
     fn fold_one_unresolved_names_the_scope_never_an_empty_table() {
         let workers = BTreeMap::new();
-        let fold = fold_one("ghost", Some(2), &entries(), &no_projects(), &workers);
+        let fold = fold_one(
+            "ghost",
+            Some(2),
+            &entries(),
+            &no_projects(),
+            &workers,
+            true,
+            0,
+        );
         assert_eq!(fold["status"], "unresolved");
         assert!(fold["reason"].as_str().unwrap().contains("ghost"));
         assert!(fold.get("nodes").is_none());
@@ -591,7 +660,7 @@ mod tests {
     #[test]
     fn fold_one_half_crown_is_unresolved_with_a_reason() {
         let workers = BTreeMap::new();
-        let fold = fold_one("alpha", None, &entries(), &no_projects(), &workers);
+        let fold = fold_one("alpha", None, &entries(), &no_projects(), &workers, true, 0);
         assert_eq!(fold["status"], "unresolved");
         assert!(fold["reason"].as_str().unwrap().contains("level"));
     }
@@ -606,7 +675,7 @@ mod tests {
         entries.push(serde_json::json!({"id": "a-2", "project": "alpha", "status": "done"}));
         entries.push(serde_json::json!({"id": "b-1", "project": "beta", "status": "ready"}));
         let workers = BTreeMap::new();
-        let fold = fold_one("alpha", Some(1), &entries, &projects, &workers);
+        let fold = fold_one("alpha", Some(1), &entries, &projects, &workers, true, 0);
         assert_eq!(fold["status"], "ok");
         assert_eq!(fold["total"], 2);
         assert_eq!(fold["nodes"][0]["id"], "a-1");
@@ -615,7 +684,15 @@ mod tests {
     #[test]
     fn crown_html_matches_the_dashboard_contract() {
         let workers = BTreeMap::new();
-        let fold = fold_one("e-1", Some(2), &entries(), &no_projects(), &workers);
+        let fold = fold_one(
+            "e-1",
+            Some(2),
+            &entries(),
+            &no_projects(),
+            &workers,
+            true,
+            0,
+        );
         let crown = json!({
             "scope": "e-1", "level": 2, "holder": "king-a", "agree": true,
             "reason": Value::Null
@@ -633,5 +710,158 @@ mod tests {
         let html = crown_html(&bad, &fold);
         assert!(html.contains("court-disagree"));
         assert!(html.contains("&#x27;"));
+    }
+
+    /// One swept row per node id, shaped as `claim_sweep_payload_from_records`
+    /// returns them.
+    fn swept(rows: &[(&str, &str, &str)]) -> BTreeMap<String, Value> {
+        rows.iter()
+            .map(|(id, state, holder)| {
+                (
+                    id.to_string(),
+                    json!({
+                        "key": format!("node:{id}"),
+                        "state": state,
+                        "holder": holder,
+                        "basis": "live",
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_held_node_names_its_holder_and_states_the_claim() {
+        let workers = swept(&[("x-1", "live", "worker-a")]);
+        let fold = fold_one(
+            "e-1",
+            Some(2),
+            &entries(),
+            &no_projects(),
+            &workers,
+            true,
+            0,
+        );
+        let nodes = fold["nodes"].as_array().unwrap();
+        let held = nodes.iter().find(|n| n["id"] == "x-1").unwrap();
+        assert_eq!(held["worker"], "worker-a");
+        assert_eq!(held["claim_state"], "live");
+        assert_eq!(held["claim_basis"], "live");
+    }
+
+    #[test]
+    fn free_and_no_record_are_two_answers_and_neither_names_a_worker() {
+        let workers = swept(&[("x-1", "free", "worker-a")]);
+        let fold = fold_one(
+            "e-1",
+            Some(2),
+            &entries(),
+            &no_projects(),
+            &workers,
+            true,
+            0,
+        );
+        let nodes = fold["nodes"].as_array().unwrap();
+        let freed = nodes.iter().find(|n| n["id"] == "x-1").unwrap();
+        // A holder on an unheld record is history, not an owner.
+        assert_eq!(freed["worker"], Value::Null);
+        assert_eq!(freed["claim_state"], "free");
+        let missing = nodes.iter().find(|n| n["id"] == "e-1").unwrap();
+        assert_eq!(missing["claim_state"], "no-record");
+        assert_eq!(missing["claim_basis"], Value::Null);
+    }
+
+    #[test]
+    fn a_sweep_that_did_not_run_reads_unreadable_never_no_record() {
+        let fold = fold_one(
+            "e-1",
+            Some(2),
+            &entries(),
+            &no_projects(),
+            &BTreeMap::new(),
+            false,
+            0,
+        );
+        let nodes = fold["nodes"].as_array().unwrap();
+        assert!(!nodes.is_empty());
+        for n in nodes {
+            assert_eq!(n["claim_state"], "unreadable");
+            assert_ne!(n["claim_state"], "no-record");
+        }
+    }
+
+    #[test]
+    fn live_workers_reports_a_store_it_never_reached() {
+        let missing = PathBuf::from("/nonexistent/fno-court-fold-probe/claims");
+        let (rows, ran) = live_workers(Some(&missing), &["node:x-1".to_string()]);
+        assert!(rows.is_empty());
+        assert!(
+            !ran,
+            "a directory the scan never read is not an empty store"
+        );
+        let (rows, ran) = live_workers(None, &["node:x-1".to_string()]);
+        assert!(rows.is_empty());
+        assert!(!ran);
+    }
+
+    #[test]
+    fn the_row_carries_age_and_the_blocker_it_waits_on() {
+        let mut e = entries();
+        e[1]["created_at"] = json!("2026-01-01T00:00:00Z");
+        e[1]["blocked_by"] = json!(["x-9"]);
+        e[1]["blocked_reason"] = json!("waiting on the contract");
+        // 2026-01-01T02:00:00Z, two hours after the stamp above.
+        let now = crate::tick_ledger::parse_rfc3339_unix("2026-01-01T02:00:00Z").unwrap();
+        let fold = fold_one(
+            "e-1",
+            Some(2),
+            &e,
+            &no_projects(),
+            &BTreeMap::new(),
+            true,
+            now,
+        );
+        let row = fold["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "x-1")
+            .unwrap()
+            .clone();
+        assert_eq!(row["age_hours"], json!(2.0));
+        assert_eq!(row["blocked_by"], json!(["x-9"]));
+        assert_eq!(row["blocked_reason"], "waiting on the contract");
+        // An entry with no stamp answers null, which a reader must not read as new.
+        let bare = fold["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "e-1")
+            .unwrap()
+            .clone();
+        assert_eq!(bare["age_hours"], Value::Null);
+    }
+
+    #[test]
+    fn the_board_section_shows_the_claim_and_the_age() {
+        let workers = swept(&[("x-1", "live", "worker-a")]);
+        let fold = fold_one(
+            "e-1",
+            Some(2),
+            &entries(),
+            &no_projects(),
+            &workers,
+            true,
+            0,
+        );
+        let crown = json!({
+            "scope": "e-1", "level": 2, "holder": "king-a", "agree": true,
+            "reason": Value::Null
+        });
+        let html = crown_html(&crown, &fold);
+        assert!(html.contains("<th>claim</th>"));
+        assert!(html.contains("<th>age</th>"));
+        assert!(html.contains("worker-a"));
+        assert!(html.contains("<td>live</td>"));
     }
 }

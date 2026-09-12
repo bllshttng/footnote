@@ -42,6 +42,16 @@ reads the answer back. A fold that cannot run - stale binary, unreadable
 graph, timeout - marks the crown `unresolved` with the reason rather than
 rendering an empty table.
 
+The fold resolves its own claims directory. Every key it asks after is a
+`node:` key, and those route to the global claims root on both the Rust
+and the Python side, so one resolver answers and no caller passes a path.
+`--claims-dir` stays as an override for tests. Until 2026-09-12 the one
+Python caller passed no directory and the Rust side returned an empty map
+on its `None` arm, so the worker column read null on every row of every
+surface while the help string already documented the flag. That is the
+false-zero shape AGENTS.md names: the instrument ran, it reported clean,
+and it had read nothing.
+
 The scope compile is a FORCED-level arm of the board's compiler: the
 level comes from the crown row the court already adjudicated, never
 re-resolved from config. A row reading level=2 over a project folds as
@@ -57,6 +67,30 @@ statuses a reader means by "what is being worked on": neither closed
 every status present in the whole scope and render in lifecycle order;
 `omitted` is always stated, so a crown whose active list is empty reads
 as "N nodes, none active", never as "nothing here".
+
+## What a node row carries
+
+Beside `id`, `slug`, `status`, `worker`, `pr_number` and `sessions`, an
+active row states its claim and its age.
+
+`claim_state` is the sweep's own verdict (`live`, `suspect`, `free`,
+`stale`, `corrupted`) plus two the fold itself answers. `no-record` means
+the sweep ran and found no claim file for that node. `unreadable` means
+the sweep never reached the store, so nothing was measured. Those two must
+never print the same string: an absence and a broken instrument are
+different answers, and `claim_state` is the field that separates them.
+`claims::list_in_result` names the directories whose scan succeeded, which
+is the same distinction one layer down. `worker` is filled only when
+`claim_state` is `live` or `suspect`; a holder on an unheld record is
+history, not an owner. `claim_basis` carries the sweep's own basis string.
+
+`age_hours` comes from the entry's `created_at`, to one decimal, and is
+null when no stamp parses. A reader must not read that null as "brand
+new". `blocked_by` and `blocked_reason` come straight off the graph entry,
+so a blocked row says what it waits on instead of only counting.
+
+The board's HTML section renders `claim` and `age` as their own columns,
+because the section and the JSON come from one fold.
 
 ## Session ids on a row
 
