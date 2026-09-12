@@ -437,6 +437,15 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::fallback_chain::run_fallback_chain(&args[1..]);
     }
 
+    // `publish-review`: the reviewer lane's second GitHub identity (see
+    // publish_review.rs doc). Direct dispatch; no daemon RPC. Python's emit
+    // chokepoint and the hidden `fno pr publish-review` verb send one JSON
+    // payload and read the answer back; the verb is binary-first, never an
+    // auto-routed `fno agents` surface.
+    if verb == "publish-review" {
+        return fno_agents::publish_review::run_publish_review(&args[1..]);
+    }
+
     // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
     // loop_reign.rs doc). Direct dispatch, daemon-free reads; the Python
     // `fno agents king shape` shell and escalate's client invoke the binary

@@ -156,6 +156,7 @@ pub mod pi;
 pub mod plugin_install;
 pub mod protocol;
 pub mod provider;
+pub mod publish_review;
 pub mod readiness;
 pub mod reap_release;
 pub mod reap_render;

@@ -789,9 +789,12 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # `reclaim` is `fno doctor reclaim`'s door and `plugin-install` is
     # `fno config plugin install`'s: both thin Python wrappers shell the
     # binary through resolve_binary, never auto-route.
+    # `publish-review` is the reviewer lane's bot-identity producer: the emit
+    # chokepoint and the hidden `fno pr publish-review` verb shell it through
+    # verb_call, never auto-route.
     routable = arms | (
         specials
-        - {"board", "notify-watch", "node-route", "roster-reap", "reclaim", "plugin-install"}
+        - {"board", "notify-watch", "node-route", "roster-reap", "reclaim", "plugin-install", "publish-review"}
     )
 
     assert routable == set(rr.RUST_CLIENT_VERBS), (
