@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import subprocess as _subprocess
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from fno.agents.registry import AgentEntry
+
+# The mint is a real pre-spawn subprocess (x-84b2); fakes route it here.
+_REAL_SUBPROCESS_RUN = _subprocess.run
 
 
 def _row(**overrides) -> AgentEntry:
@@ -503,6 +507,10 @@ def test_run_retask_parses_codex_clear_receipt_before_accepting_successor(monkey
     )
 
     def run(command, **_kwargs):
+        # The mint is a real pre-spawn subprocess (x-84b2); route it to the
+        # real binary so it never consumes a scripted read.
+        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in command}:
+            return _REAL_SUBPROCESS_RUN(command, **_kwargs)
         if "read" in command:
             return SimpleNamespace(returncode=0, stdout=next(reads), stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -554,6 +562,10 @@ def test_run_retask_succession_verdict_rides_the_shared_classifier(monkeypatch):
     )
 
     def run(command, **_kwargs):
+        # The mint is a real pre-spawn subprocess (x-84b2); route it to the
+        # real binary so it never consumes a scripted read.
+        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in command}:
+            return _REAL_SUBPROCESS_RUN(command, **_kwargs)
         if "read" in command:
             return SimpleNamespace(returncode=0, stdout=next(reads), stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")

@@ -68,8 +68,10 @@ def _flags(*pairs):
     return out
 
 def agent_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=None):
+    # The binary reads empty-everything as usage (exit 2); in-process producers
+    # keep the naming-error contract, so this one refusal stays local.
     if not (prefix or "").strip() and not (node_id or "").strip():
-        raise AgentNameError("agent name needs at least a prefix or a node id")
+        raise AgentNameError("an agent name needs a prefix or a node id; both were empty")
     return _mint(prefix, node_id, *_flags(("--slug", slug), ("--qualifier", qualifier),
                                           ("--discriminator", discriminator)))
 
@@ -81,6 +83,13 @@ def verb_code_for(word):
     return code
 
 def dispatch_agent_name(source, verb, identity, *, slug=None, qualifier=None, discriminator=None):
+    # An identity longer than the runtime contract can never fit: refuse in
+    # process, before any subprocess is spent on a guaranteed refusal.
+    if len((identity or "").strip()) > MAX_LEN:
+        raise AgentNameError(
+            f"required agent-name identity is {len((identity or '').strip())} chars, "
+            f"over the {MAX_LEN}-char runtime limit"
+        )
     if (verb or "").strip() not in dispatch_verbs():
         raise AgentNameError(f"unknown dispatch verb {verb!r}")
     return _mint(*(_opt_pos(source, "--source")), "--verb", verb, identity,
@@ -88,16 +97,17 @@ def dispatch_agent_name(source, verb, identity, *, slug=None, qualifier=None, di
 
 def bridge_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=None,
                 source=None, verb=None):
+    # Usage refusals (both forms, missing verb/prefix) are the binary's texts:
+    # _mint maps its exit 2 to BridgeUsageError, exit 3 to AgentNameError. A
+    # missing --verb is forwarded as absent so the binary names the refusal.
     if verb or source:
-        if prefix:
-            raise BridgeUsageError("pass the legacy prefix form or --source/--verb, not both")
-        if not verb:
-            raise BridgeUsageError("--source requires --verb")
-        return _mint(*(_opt_pos(source, "--source")), "--verb",
-                     verb if verb in dispatch_verbs() else verb_code_for(verb), node_id,
+        args = list(_opt_pos(source, "--source"))
+        if verb:
+            args += ["--verb", verb if verb in dispatch_verbs() else verb_code_for(verb)]
+        # A positional prefix rides too: the binary refuses the both-forms pair.
+        pos = [prefix, node_id] if (prefix or "").strip() else [node_id]
+        return _mint(*args, *pos,
                      *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator)))
-    if not prefix:
-        raise BridgeUsageError("a prefix or --verb is required")
     return agent_name(prefix, node_id, slug=slug, qualifier=qualifier, discriminator=discriminator)
 
 def _opt_pos(value, flag):

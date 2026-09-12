@@ -53,7 +53,14 @@ do
   fi
 done
 [ -n "$FNO_PYTHON" ] || { fail "no interpreter can import fno.cli (cd cli && uv sync)"; exit 1; }
-CHILD_NAME="$(PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c "
+# The vocabulary lives in the fno-agents binary; the sandbox stub below pins
+# FNO_AGENTS_BIN, so capture the REAL binary now for the stub to delegate the
+# naming verbs to (naming is the contract under test, not a scenario input).
+# PATH is stripped for the resolution so a stale PATH-installed binary cannot
+# shadow the repo's own cargo build.
+REAL_AGENTS_BIN="$(env PATH='/usr/bin:/bin' PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c 'from fno import rust_binary; b = rust_binary.resolve_binary(); print(b or "")')"
+[ -n "$REAL_AGENTS_BIN" ] || { fail "no fno-agents binary resolves (cargo build --release -p fno-agents)"; exit 1; }
+CHILD_NAME="$(FNO_AGENTS_BIN="$REAL_AGENTS_BIN" PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c "
 from fno.agents.naming import dispatch_agent_name
 print(dispatch_agent_name('sh', 't', '$NODE_ID', slug='work', discriminator='g2'))
 ")"
@@ -147,6 +154,10 @@ chmod +x "${BIN_DIR}/fno"
 FIN_MARKER="${TMP_DIR}/finalize_called"
 cat > "${BIN_DIR}/fno-agents" <<AGEOF
 #!/usr/bin/env bash
+case "\$1" in
+  name-mint|name-codes|name-parse)
+    exec "${REAL_AGENTS_BIN}" "\$@" ;;
+esac
 if [[ "\$1" == "finalize" ]]; then
   shift
   printf 'finalize %s\n' "\$*" >> "${FIN_MARKER}"
