@@ -420,6 +420,7 @@ mod tests {
             pristine: true,
             used_shell_only: false,
             orphaned: false,
+            release: None,
         };
         // Two pristine tabs per workspace: each folds one, its last tab stays.
         let tabs = vec![
