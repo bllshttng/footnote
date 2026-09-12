@@ -41,6 +41,10 @@ scripts/lint/no-cross-skill-runtime-calls.sh :: bundle lint
 # degrades with an actionable error when the script is unavailable.
 scripts/lint-flock-pattern.sh :: lint flock-pattern
 
+# fno agents king checkin - the check-in's user-notes read sources the marker
+# lib; a bare install has no crown and refuses at scope resolution.
+scripts/lib/canon-doc-marker.sh :: agents king checkin --no-emit
+
 # fno do pr {merge,verify,rebase} - INTERNALIZED (ab-d4c98550). The four pr-*.sh
 # were ported to in-package Python (fno/pr/_merge.py, _verify.py, _rebase.py)
 # shelling to gh/git, so these verbs run from a bare pip install with no
