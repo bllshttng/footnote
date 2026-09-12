@@ -221,7 +221,7 @@ alive = [x for x in rows
          and x.get("liveness") == "alive"]
 unresolved = [x for x in rows
               if x.get("spawned_by_session") == sid
-              and x.get("liveness") is None]
+              and x.get("liveness") not in ("alive", "dead")]
 if not alive and not unresolved:
     workers = "none"
 else:

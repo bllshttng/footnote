@@ -189,6 +189,8 @@ ORPHAN_UNKNOWN=""
 ORPHAN_UNKNOWN_COUNT=0
 UNLINKED_ORPHANS=""
 UNLINKED_ORPHAN_COUNT=0
+UNLINKED_UNKNOWN=""
+UNLINKED_UNKNOWN_COUNT=0
 if command -v fno >/dev/null 2>&1; then
     AGENTS_JSON=$(with_timeout 5 fno agents registry-json 2>/dev/null || true)
     if printf '%s' "$AGENTS_JSON" | jq -e '.agents' >/dev/null 2>&1; then
@@ -227,13 +229,13 @@ if command -v fno >/dev/null 2>&1; then
             ORPHAN_UNKNOWN=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
                 [.agents[] | select(
                     .spawned_by_session == $sid
-                    and .liveness == null
+                    and (.liveness != "alive" and .liveness != "dead")
                 )] | map(.name) | join(", ")' \
                 2>/dev/null)
             ORPHAN_UNKNOWN_COUNT=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
                 [.agents[] | select(
                     .spawned_by_session == $sid
-                    and .liveness == null
+                    and (.liveness != "alive" and .liveness != "dead")
                 )] | length' \
                 2>/dev/null)
             case "$ORPHAN_UNKNOWN_COUNT" in ''|*[!0-9]*) ORPHAN_UNKNOWN_COUNT=0 ;; esac
@@ -256,6 +258,25 @@ if command -v fno >/dev/null 2>&1; then
                 )] | length' \
                 2>/dev/null)
             case "$UNLINKED_ORPHAN_COUNT" in ''|*[!0-9]*) UNLINKED_ORPHAN_COUNT=0 ;; esac
+            UNLINKED_UNKNOWN=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+                [.agents[] | select(
+                    ((.spawned_by_session // "") == "")
+                    and ((.origin // "") != "operator")
+                    and ((.crown_level // 0) == 0)
+                    and ((.session_id // .harness_session_id // "") != $sid)
+                    and (.liveness != "alive" and .liveness != "dead")
+                )] | map(.name) | join(", ")' \
+                2>/dev/null)
+            UNLINKED_UNKNOWN_COUNT=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+                [.agents[] | select(
+                    ((.spawned_by_session // "") == "")
+                    and ((.origin // "") != "operator")
+                    and ((.crown_level // 0) == 0)
+                    and ((.session_id // .harness_session_id // "") != $sid)
+                    and (.liveness != "alive" and .liveness != "dead")
+                )] | length' \
+                2>/dev/null)
+            case "$UNLINKED_UNKNOWN_COUNT" in ''|*[!0-9]*) UNLINKED_UNKNOWN_COUNT=0 ;; esac
         fi
     fi
 fi
@@ -472,7 +493,7 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
 fi
 
 # ── 7. Check (b): orphaned live children (CROWN-ONLY; latches INDEPENDENTLY). ─
-if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt 0 || "$UNLINKED_ORPHAN_COUNT" -gt 0 ) && ! -f "$ORPHAN_LATCH" ]]; then
+if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt 0 || "$UNLINKED_ORPHAN_COUNT" -gt 0 || "$UNLINKED_UNKNOWN_COUNT" -gt 0 ) && ! -f "$ORPHAN_LATCH" ]]; then
     # Resolution 1: the crown holder DECLARED this reign a court. Choosing
     # court had no machine-visible act before `fno agents king shape` existed,
     # so this hook offered three options and could detect two - and the
@@ -519,8 +540,8 @@ if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt
     if [[ "$RESOLVED" -eq 0 ]]; then
         touch "$ORPHAN_LATCH" 2>/dev/null || true
         emit_event "king_orphan_block" \
-            "{\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"unknown_workers\":\"${ORPHAN_UNKNOWN}\",\"unknown_count\":${ORPHAN_UNKNOWN_COUNT},\"unlinked_workers\":\"${UNLINKED_ORPHANS}\",\"unlinked_count\":${UNLINKED_ORPHAN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
-        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE}. The served liveness word from 'fno agents registry-json' says ${ORPHAN_COUNT} worker(s) you spawned are still alive (${ORPHANS:-none}). Linked count: ${ORPHAN_COUNT}. ${ORPHAN_UNKNOWN_COUNT} spawned worker row(s) have unresolved liveness (${ORPHAN_UNKNOWN:-none}); a broken reader never clears this guard, so they count on their own and stay out of the linked obligation above. ${UNLINKED_ORPHAN_COUNT} active worker row(s) have no spawned_by link (${UNLINKED_ORPHANS:-none}); ownership unknown, so they cannot be excluded from this crown's obligations. A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave with 'fno agents king shape court'; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review. Check 'fno agents registry-json' for spawned_by_session null to close the ownership gap."
+            "{\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"unknown_workers\":\"${ORPHAN_UNKNOWN}\",\"unknown_count\":${ORPHAN_UNKNOWN_COUNT},\"unlinked_workers\":\"${UNLINKED_ORPHANS}\",\"unlinked_count\":${UNLINKED_ORPHAN_COUNT},\"unlinked_unknown_workers\":\"${UNLINKED_UNKNOWN}\",\"unlinked_unknown_count\":${UNLINKED_UNKNOWN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
+        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE}. The served liveness word from 'fno agents registry-json' says ${ORPHAN_COUNT} worker(s) you spawned are still alive (${ORPHANS:-none}). Linked count: ${ORPHAN_COUNT}. ${ORPHAN_UNKNOWN_COUNT} spawned worker row(s) have unresolved liveness (${ORPHAN_UNKNOWN:-none}); a broken reader never clears this guard, so they count on their own and stay out of the linked obligation above. ${UNLINKED_ORPHAN_COUNT} active worker row(s) have no spawned_by link (${UNLINKED_ORPHANS:-none}); ownership unknown, so they cannot be excluded from this crown's obligations. ${UNLINKED_UNKNOWN_COUNT} unlinked worker row(s) also have unresolved liveness (${UNLINKED_UNKNOWN:-none}); same reason, they count on their own. A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave with 'fno agents king shape court'; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review. Check 'fno agents registry-json' for spawned_by_session null to close the ownership gap."
         if [[ -n "$REASON" ]]; then
             REASON="${REASON}  ||  ${ORPHAN_REASON}"
         else

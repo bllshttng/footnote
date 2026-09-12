@@ -849,6 +849,21 @@ assert_contains "x-1b75 unresolved: linked (alive) count is 0" "$OUT" 'Linked co
 assert_contains "x-1b75 unresolved: names the unknown count and both rows" "$OUT" '2 spawned worker row(s) have unresolved liveness (unmeasured-a, unmeasured-b)'
 assert_contains "x-1b75 unresolved: a broken reader never clears the guard" "$OUT" '"decision":"block"'
 
+# --- Literal "unmeasured" word, fresh: liveness_sweep.rs writes this word ---
+# --- verbatim on probe errors or an Orphaned status, so a fresh stamp serves --
+# --- it through unchanged (not null). Must land in unresolved like the ------
+# --- null case above, never silently pass a `== null` check that only -------
+# --- catches the no-measurement case. ----------------------------------------
+FRESH_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CHILDREN=$(jq -nc --arg sid "$KING_SID" --arg ts "$FRESH_TS" '[
+  {name:"unmeasured-word-a", harness:"claude", cwd:"/tmp", log_path:"/tmp/a", status:"live", short_id:"a", spawned_by_session:$sid, liveness:"unmeasured", liveness_measured_at:$ts}
+]')
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+write_registry_liveness "$CHILDREN"
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_contains "x-1b75 unmeasured word: a fresh literal 'unmeasured' word is never alive" "$OUT" 'Linked count: 0'
+assert_contains "x-1b75 unmeasured word: lands in unresolved, not silently dropped" "$OUT" '1 spawned worker row(s) have unresolved liveness (unmeasured-word-a)'
+
 # --- Stale stamp: liveness alive, but the measurement is older than the -----
 # --- 120s window - reads unknown, never alive. The republished-word trap. ---
 STALE_TS=$(date -u -v-200S '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
