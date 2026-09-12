@@ -246,7 +246,10 @@ def ask_refusal(
     from fno.style import word_count
 
     problems: "list[str]" = []
-    if "\n" in question.strip():
+    # A bare \r is a line break to a terminal and to splitlines(), so a
+    # CR-only file must refuse like an LF one.
+    stripped = question.strip()
+    if "\n" in stripped or "\r" in stripped:
         problems.append("it spans more than one line")
     words = word_count(question)
     if words > cap:

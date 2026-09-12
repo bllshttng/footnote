@@ -463,6 +463,15 @@ class TestAskLawGate:
         assert refused.exit_code == 2, refused.output
         assert "one line" in refused.output
 
+    def test_a_cr_only_multiline_ask_names_the_one_line_rule(self, root: Path):
+        # A bare \r is a line break to a terminal and to splitlines(), so a
+        # CR-only file must refuse like an LF one (the codex P2 on 1847).
+        refused = runner.invoke(
+            outstanding_app, ["ask", "line one\rline two", "--node", "x-14c8"]
+        )
+        assert refused.exit_code == 2, refused.output
+        assert "one line" in refused.output
+
     def test_a_configured_cap_of_60_permits_a_50_word_ask(
         self, root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

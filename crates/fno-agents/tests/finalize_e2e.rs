@@ -2019,6 +2019,11 @@ fn finalize_files_outstanding_question_on_stuck_terminal() {
         note_pos.unwrap() < ask_pos.unwrap(),
         "the note must land before the ask that points at it: {c}"
     );
+    let note_line = c[note_pos.unwrap()..].lines().next().unwrap_or_default();
+    assert!(
+        note_line.contains("--quiet"),
+        "the note must append even with no bound reader: {note_line}"
+    );
     let ask_line = c[ask_pos.unwrap()..].lines().next().unwrap_or_default();
     assert!(ask_line.contains("--node ab-testnode"), "{ask_line}");
     let ask_text = ask_line

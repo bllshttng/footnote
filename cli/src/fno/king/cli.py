@@ -711,8 +711,9 @@ def escalate_cmd(
     try:
         state = reign_state(session_id=session_id)
         live, unknown_reason = state.live, state.unknown_reason
+        scope = state.scope
     except Exception as exc:  # noqa: BLE001 - escalation must still fire
-        live, unknown_reason = None, f"reign_state unreadable: {exc}"
+        live, unknown_reason, scope = None, f"reign_state unreadable: {exc}", None
     presiding = resolve_presiding_king(session_id)
     try:
         outcome, qid = escalate(
@@ -723,7 +724,7 @@ def escalate_cmd(
             cwd=Path.cwd(),
             live=live,
             unknown_reason=unknown_reason,
-            scope=state.scope,
+            scope=scope,
         )
     except Exception as exc:  # noqa: BLE001 - named, never swallowed
         typer.echo(f"king: escalation failed: {exc}", err=True)

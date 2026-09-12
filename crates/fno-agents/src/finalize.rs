@@ -2677,9 +2677,12 @@ fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
 /// note (the surface with no cap), and the ask is one line pointing at it.
 /// The note is best-effort; the ask is the part that must land.
 fn file_outstanding_question(cwd: &Path, session_id: &str, question: &str, node: &str) -> bool {
+    // --quiet: the note must APPEND even when no reader is bound to be
+    // notified; without it the verb refuses first and the ask below would
+    // point at a note that was never written.
     let note = Command::new("fno")
         .current_dir(cwd)
-        .args(["backlog", "note", node, question])
+        .args(["backlog", "note", node, question, "--quiet"])
         .status();
     if let Ok(s) = &note {
         if !s.success() {
