@@ -353,9 +353,7 @@ def build_scoreboard(
     classified = classified if classified is not None else classify_deliveries(graph_nodes, rows, now=now)
     deliveries = classified["by_node"]
     survival = classified.get("survival") or {
-        "available": False,
-        "reason": "classifier gave no survival",
-    }
+        "available": False, "reason": "classifier gave no survival"}
     window_node_ids = {r.get("graph_node_id") for r in windowed if r.get("graph_node_id")}
     delivered_nodes = {
         nid for nid in set(deliveries) | window_node_ids
@@ -380,9 +378,7 @@ def build_scoreboard(
     ship_rows = [r for r in windowed if _row_shipped(r, deliveries)]
     terminal_shipped = {r["graph_node_id"] for r in ship_rows if r.get("graph_node_id")}
     shipped_nodes = delivered_nodes
-    delivery_classes = dict(
-        Counter(deliveries[nid].get("class") for nid in delivered_nodes if nid in deliveries)
-    )
+    delivery_classes = dict(Counter(deliveries[n]["class"] for n in delivered_nodes if n in deliveries))
 
     # Spend follows the node, not the reason: a run whose PR merged is ship
     # spend regardless of how its session stopped. A row with no node keeps

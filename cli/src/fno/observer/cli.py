@@ -89,10 +89,8 @@ def _load_corpus(skill: str, since: int) -> tuple[dict, dict]:
     rows = load_ledger_rows(ledger_path)
     nodes = read_graph_nodes(graph_path)
     postmortems = _read_postmortems(_paths.postmortems_dir())
-    corpus = fold.build_corpus(
-        rows, nodes, postmortems, skill=skill, since_days=since, now=datetime.now(),
-        deliveries=classify_deliveries(nodes, rows)["by_node"],
-    )
+    corpus = fold.build_corpus(rows, nodes, postmortems, skill=skill, since_days=since,
+                               now=datetime.now(), deliveries=classify_deliveries(nodes, rows)["by_node"])
     by_id = {n.get("id"): n for n in nodes if n.get("id")}
     return corpus, by_id
 
