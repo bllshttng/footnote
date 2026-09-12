@@ -454,6 +454,9 @@ def _spawn_guard_decision(
             # block_reason wins only for the authority outage; an occupied
             # node keeps the stable machine token, evidence rides the refusal.
             block = observation.block_reason
+            # ONE reading of "the block_reason itself is the answer", used by
+            # both arms below. Spelling it twice is how they drift.
+            block_wins = bool(block) and not str(block).startswith("held:")
             # The worker ROW is the occupant whenever the claim is not. A
             # stale claim plus a worker the overlay named read `unproven-claim`
             # and named the claim's prior holder, which sent the reader after
@@ -462,7 +465,7 @@ def _spawn_guard_decision(
             # what blocked, so the receipt names it and the remedy peeks it.
             # block_reason stays first: an authority outage is not a worker.
             if (
-                not (block and not block.startswith("held:"))
+                not block_wins
                 and observation.worker
                 and observation.verdict not in ("ours", "foreign_live")
             ):
@@ -493,7 +496,7 @@ def _spawn_guard_decision(
                     ),
                 }, 0
             reason = (
-                block if block and not block.startswith("held:")
+                block if block_wins
                 else "suspect-claim" if wedged
                 else "live-claim" if common["init_reached"]
                 else "unproven-claim"
