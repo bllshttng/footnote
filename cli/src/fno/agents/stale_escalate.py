@@ -35,26 +35,19 @@ def _unique(findings):
 
 
 def question_text(findings, key: str, unknown_dimensions=()) -> str:
+    """One line: count, marker, pointer to the report. Rows live in `blocks`.
+
+    The inlined rows moved to ``blocks`` for the ask gate (law d-59af3235);
+    `fno agents watchdog` lists every finding with its clear command.
+    """
     unique = _unique(findings)
-    shown = [
-        f"{f.kind} {f.subject}: {f.basis} -> clear: {f.clear_command}"
-        for f in unique[:MAX_LISTED_ROWS]
-    ]
-    if len(unique) > MAX_LISTED_ROWS:
-        shown.append(f"and {len(unique) - MAX_LISTED_ROWS} more")
     # An incomplete scan escalates what it DID reach and names what it did
     # not. Withholding the whole ask instead made the sweep permanently mute
     # wherever a deleted worktree root can never be fetched again.
-    caveat = ""
-    if unknown_dimensions:
-        caveat = (
-            f" The scan was INCOMPLETE - {', '.join(sorted(unknown_dimensions))} "
-            f"went unread, so more findings may exist."
-        )
+    caveat = " The scan was incomplete." if unknown_dimensions else ""
     return (
-        f"[{MARKER}:{key}] The fleet watchdog found {len(unique)} "
-        f"unfinished-work finding(s). Each names the one command that clears "
-        f"it.{caveat} Findings: {'; '.join(shown)}"
+        f"[{MARKER}:{key}] The watchdog found {len(unique)} unfinished-work "
+        f"finding(s). List them with fno agents watchdog.{caveat}"
     )
 
 
@@ -183,6 +176,9 @@ def escalate_unfinished(
             cwd=str(cwd),
             ask=f"clear the top finding first: {_ask_line(unique)}",
             source="daemon",
+            # Every finding's node, so the pointer rule is met from the run's
+            # own facts and the operator can jump straight to the subject.
+            blocks=sorted({f.node_id for f in unique if getattr(f, "node_id", None)}),
         ),
         root,
     )

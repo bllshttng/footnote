@@ -4425,9 +4425,8 @@ def test_ask_line_names_the_severity_order_not_the_alphabet():
     )
     key = se.dedupe_key([f"{f.kind}:{f.subject}" for f in (started, dirty)])
     text = se.question_text([dirty, started], key)
-    # The listed order is severity order, and the ask line names the first
-    # of that order.
-    assert text.index("started_free_claim x-1") < text.index("dirty_ownerless_worktree /w/aaa")
+    # The inlined rows are gone from the one-line text; the severity order
+    # survives on the ask line, which names the FIRST of that order.
     assert se._ask_line([dirty, started]) == "/fno:target x-1"
 
 
@@ -4539,9 +4538,12 @@ def test_incomplete_question_text_names_the_unread_dimensions():
         clear_command="fno agents workspace worktree cleanup",
     )
     text = se.question_text([finding], "k1", [uw.KIND_STARTED])
-    assert "INCOMPLETE" in text and uw.KIND_STARTED in text
+    # The one-line text names THAT the scan was incomplete; the unread
+    # dimensions themselves stay in the sweep's own report (law d-59af3235
+    # caps the ask line).
+    assert "The scan was incomplete." in text
     # A complete scan says nothing about completeness.
-    assert "INCOMPLETE" not in se.question_text([finding], "k1")
+    assert "incomplete" not in se.question_text([finding], "k1")
 
 
 def test_manual_report_and_tick_share_one_fleet_scope(monkeypatch):

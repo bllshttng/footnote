@@ -723,10 +723,15 @@ def escalate_cmd(
             cwd=Path.cwd(),
             live=live,
             unknown_reason=unknown_reason,
+            scope=state.scope,
         )
     except Exception as exc:  # noqa: BLE001 - named, never swallowed
         typer.echo(f"king: escalation failed: {exc}", err=True)
         raise typer.Exit(1) from exc
+    if live is None and unknown_reason:
+        # The unknown is named off the question line: the ask gate caps the
+        # text, so the reason lives here where length is free.
+        typer.echo(f"king: liveness unreadable: {unknown_reason}", err=True)
     holder = presiding["holder"] if presiding is not None else None
     mailed = holder is not None and mail_presiding_king(holder, ids, reason)
     target = f"king:{holder}" if mailed else f"operator:{qid}"

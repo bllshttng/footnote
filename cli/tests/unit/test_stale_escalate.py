@@ -75,8 +75,10 @@ def test_stale_row_asks_and_names_the_row(tmp_path: Path) -> None:
     [question] = read_open_questions(tmp_path)
     assert question.id == qid
     assert "[watchdog-stale:" in question.question
-    assert "k1" in question.question
-    assert "wake ceiling" in question.question
+    # One line, count + age: the row list moved to `fno agents watchdog` for
+    # the ask gate (law d-59af3235).
+    assert "1 stale row(s)" in question.question
+    assert "oldest 24h" in question.question
     assert "fno agents watchdog --only stale" in question.ask
 
 
@@ -116,7 +118,7 @@ def test_changed_set_closes_the_old_ask_and_asks_fresh(tmp_path: Path) -> None:
     open_qs = read_open_questions(tmp_path)
     assert len(open_qs) == 1
     assert open_qs[0].id == new_id
-    assert "k2" in open_qs[0].question
+    assert "2 stale row(s)" in open_qs[0].question
 
 
 def test_emptied_set_closes_the_open_ask(tmp_path: Path) -> None:
@@ -487,7 +489,8 @@ def test_full_verb_asked_path_end_to_end(
     assert '"oldest_h": 1464' in result.output
     assert "Summary: 1 stale, outcome asked, oldest 1464h" in result.output
     [question] = read_open_questions(tmp_path)
-    assert "k1" in question.question
+    assert "[watchdog-stale:" in question.question
+    assert "1 stale row(s)" in question.question
 
 
 # ── x-e3cc: the reap-hold lane ───────────────────────────────────────────
@@ -518,8 +521,9 @@ def test_an_escalated_hold_asks_and_names_the_release(tmp_path: Path) -> None:
     [question] = read_open_questions(tmp_path)
     assert question.id == qid
     assert "[reap-hold:" in question.question
-    assert "bp-9c8b" in question.question
-    assert "transcript unresolved" in question.question
+    # The hold id and reason live on the ask and in `fno agents reap`; the
+    # one-line question names the count and the threshold (law d-59af3235).
+    assert "1 row(s)" in question.question
     assert "agents.hold_escalate_after_s" in question.question
     assert question.ask == "fno agents reap --release bp-9c8b"
 

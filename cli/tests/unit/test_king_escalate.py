@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.king.escalate import dedupe_key, escalate, question_text
+from fno.king.escalate import dedupe_key, escalate
 from fno.outstanding.core import read_open_questions
 
 STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
@@ -81,15 +81,19 @@ def test_an_empty_stalled_set_never_reads_as_a_clean_board(tmp_path: Path) -> No
     assert "clean" not in question.question
 
 
-def test_the_question_names_the_rows_and_carries_the_key() -> None:
+def test_the_question_names_the_rows_and_carries_the_key(tmp_path: Path) -> None:
     key = dedupe_key(STALLED)
-    text = question_text(STALLED, key, "NoProgress")
+    _run(tmp_path, STALLED)
+    (question,) = read_open_questions(tmp_path)
 
-    assert "undispatched:x-1234" in text
-    assert "undispatched:x-5678" in text
-    assert f"[king-escalation:{key}]" in text
+    assert f"[king-escalation:{key}]" in question.question
+    assert "undispatched:x-1234" in question.question
+    assert "undispatched:x-5678" in question.question
+    # The ids also land in blocks, so the pointer rule is met from the run's
+    # own facts; the one-line text names only the first three rows.
+    assert set(question.blocks) == {"x-1234", "x-5678"}
     # The operator's actual decision hinges on this: the king is GONE.
-    assert "exited" in text
+    assert "crown a new king" in question.question
 
 
 def test_an_unreadable_store_is_not_an_empty_one(tmp_path: Path) -> None:

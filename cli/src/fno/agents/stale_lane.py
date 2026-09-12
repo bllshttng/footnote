@@ -73,13 +73,15 @@ def _close_question(qid: str, answer: str, root: Path, *, lane: str = "stale") -
 def reconcile_channel(
     pairs, *, root: Path, session_id: "str | None", cwd: Path,
     marker: str, subject: str, identities: "list[str]",
-    question, ask,
+    question, ask, blocks: "list[str]" = (),
 ) -> "tuple[str, str]":
     """Reconcile ONE durable ``[<marker>:<key>]`` operator question to the
     measured ``pairs``: same set is a duplicate, a changed set supersedes,
     an empty set closes, and a set a human already answered stays answered.
     ``question``/``ask`` are callables taking the dedupe ``key``; outcome in
-    ``none | duplicate | answered | asked | closed``."""
+    ``none | duplicate | answered | asked | closed``. ``blocks`` carries the
+    node ids the question is about, so the ask gate's pointer rule is met
+    from the run's own facts."""
     key = dedupe_key(identities)
 
     if not pairs:
@@ -122,6 +124,7 @@ def reconcile_channel(
             cwd=str(cwd),
             ask=ask(key),
             source="daemon",
+            blocks=sorted(set(blocks)) or None,
         ),
         root,
     )
@@ -135,11 +138,7 @@ def reconcile_channel(
 def reconcile_stale(stale_pairs, *, root: Path, session_id: "str | None",
                     cwd: Path) -> "tuple[str, str]":
     """The stale lane's question: rows past the wake ceiling, oldest age
-    named (see :func:`reconcile_channel`)."""
-    shown = [
-        f"{v.name} [node {_row.node or 'unknown'}]: {v.basis}"
-        for v, _row in stale_pairs
-    ]
+    named (see :func:`reconcile_channel`). Rows live in ``blocks``."""
     oldest = oldest_h([v.basis or "" for v, _row in stale_pairs])
     age_clause = f", oldest {oldest}h" if oldest is not None else ""
     return reconcile_channel(
@@ -147,15 +146,14 @@ def reconcile_stale(stale_pairs, *, root: Path, session_id: "str | None",
         marker=STALE_MARKER, subject="stale",
         identities=[f"stale:{v.row_id}" for v, _row in stale_pairs],
         question=lambda key: (
-            f"[{STALE_MARKER}:{key}] The fleet watchdog holds "
-            f"{len(stale_pairs)} stale row(s) no lane will act on{age_clause}. "
-            "Nothing in the sweep clears these; each needs a human to reap "
-            "it or resume it. Rows: " + "; ".join(shown)
+            f"[{STALE_MARKER}:{key}] The watchdog holds "
+            f"{len(stale_pairs)} stale row(s) no lane will act on{age_clause}."
         ),
         ask=lambda _key: (
             f"triage {len(stale_pairs)} stale watchdog row(s){age_clause}: "
             "fno agents watchdog --only stale"
         ),
+        blocks=sorted({_row.node for _v, _row in stale_pairs if _row.node}),
     )
 
 
@@ -174,13 +172,6 @@ def reconcile_holds(holds, *, root: Path, session_id: "str | None",
             question=lambda key: "",
             ask=lambda _key: "",
         )
-    shown = []
-    for h in holds:
-        age = h.get("age_s")
-        age_text = "unmeasured" if age is None else f"{age}s"
-        shown.append(
-            f"{h['id']} held {age_text} under {h['reason']}: {h['detail']}"
-        )
     ask_cmd = f"fno agents reap --release {holds[0]['id']}"
     return reconcile_channel(
         holds, root=root, session_id=session_id, cwd=cwd,
@@ -188,9 +179,7 @@ def reconcile_holds(holds, *, root: Path, session_id: "str | None",
         identities=[f"hold:{h['id']}:{h['reason']}" for h in holds],
         question=lambda key: (
             f"[{HOLD_MARKER}:{key}] The reaper holds "
-            f"{len(holds)} row(s) past agents.hold_escalate_after_s. "
-            "Each hold is correct and none clears on its own. Rows: "
-            + "; ".join(shown) + f" -> {ask_cmd}"
+            f"{len(holds)} row(s) past agents.hold_escalate_after_s."
         ),
         ask=lambda _key: ask_cmd,
     )
