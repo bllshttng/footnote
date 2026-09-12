@@ -2647,46 +2647,46 @@ NAME_REFUSED_EXIT = 3
 
 @agents_app.command("name", hidden=True)
 def cmd_name(
-    prefix: str = typer.Argument(..., help="Operation prefix (target|spawn|handoff|...)."),
-    node_id: str = typer.Argument(..., help="Full backlog node id; never abbreviated."),
+    prefix: Optional[str] = typer.Argument(None, help="Legacy operation prefix (target|think|...); omit with --verb."),
+    node_id: Optional[str] = typer.Argument(None, help="Full backlog node id; never abbreviated."),
     slug: str = typer.Option("", "--slug", help="Human-readable tail; the only expendable part."),
     qualifier: str = typer.Option("", "--qualifier", help="Lifecycle reason, e.g. retro."),
-    discriminator: str = typer.Option(
-        "", "--discriminator", help="Per-invocation uniqueness token; never shaved."
-    ),
+    discriminator: str = typer.Option("", "--discriminator", help="Uniqueness token; never shaved."),
+    source: str = typer.Option("", "--source", help="Dispatch source code (x-84b2); omit when attended."),
+    verb: str = typer.Option("", "--verb", help="Verb code (t|bp|r|th|f) or a work verb the bridge maps."),
 ) -> None:
     """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
 
-    Prints one name on stdout. Shell callers delegate here instead of
-    reimplementing the budget: the assembled 64-char precedence rule differs
-    from a `cut -c1-64`, which shaves the uniqueness discriminator and collapses
-    two dispatches onto one dedup token.
-
-    Exit 3 (NOT 2) is the naming refusal. Exit 2 is Click's usage error, which
-    an `fno` too old to know this verb also returns for "no such command" - a
-    caller treating 2 as a refusal would read every ordinary node as
-    unrepresentable and refuse the whole fleet on a stale install.
+    Prints one name on stdout. Exit 3 (NOT 2) is the naming refusal; 2 is Click's usage
+    error, which an `fno` too old to know this verb also returns - reading 2 as a refusal
+    refuses the fleet on a stale install.
     """
-    from fno.agents.naming import AgentNameError, agent_name as _agent_name
+    from fno.agents.naming import AgentNameError, BridgeUsageError, bridge_name
 
+    # One positional binds to PREFIX by Click's left-to-right rule; read it as the node.
+    if node_id is None:
+        prefix, node_id = None, prefix
+    if not node_id:
+        typer.echo("error: a node id is required: fno agents name [prefix] <node-id>", err=True)
+        raise typer.Exit(2)
     try:
-        name = _agent_name(
-            prefix,
+        name = bridge_name(
+            prefix or "",
             node_id,
             slug=slug or None,
             qualifier=qualifier or None,
             discriminator=discriminator or None,
+            source=source or None,
+            verb=verb or None,
         )
-    except AgentNameError as exc:
+    except (BridgeUsageError, AgentNameError) as exc:
         typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(NAME_REFUSED_EXIT)
+        raise typer.Exit(NAME_REFUSED_EXIT if isinstance(exc, AgentNameError) else 2)
     typer.echo(name)
 
 
-# `rename` moved to the Rust client (`agent.rename` over the daemon RPC); the
-# router entry in rust_runtime.py is what makes `fno agents rename` resolve
-# there. Python's rename_agent in registry.py stays: it is the transaction
-# library, not a command twin.
+# `rename` moved to the Rust client (`agent.rename` over the daemon RPC; rust_runtime's router
+# entry resolves it). Python's rename_agent stays: the transaction library, not a command twin.
 
 
 @agents_app.command("retask", hidden=True)

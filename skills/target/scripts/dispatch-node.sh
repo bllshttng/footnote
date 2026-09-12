@@ -12,8 +12,15 @@
 #   dispatch-node.sh <node-id...> [--flags "<extra /target flags>"]
 #                                 [--allow-merge|--no-merge] [--max N] [--dry-run] [--here]
 #                                 [--permission-mode <mode>] [--route provider/model]
+#                                 [--source <ab|sob|...>]
 #   dispatch-node.sh --all-ready  [--flags "..."] [--allow-merge|--no-merge] [--max N] [--dry-run] [--here]
 #                                 [--permission-mode <mode>] [--route provider/model]
+#                                 [--source <ab|sob|...>]
+#
+# --source <code>: the dispatch origin stamped into every worker name (x-84b2),
+#   e.g. ab (active-backlog daemon) or sob (spawn on blueprint). Forwarded to
+#   `fno agents name --source`; the vocabulary is validated there, never here.
+#   An attended manual run omits it and the name carries no source segment.
 #
 # --allow-merge / --no-merge: per-run merge posture override (x-4391). Neither
 #   flag => posture from config.auto_merge.grant (default none = no-merge).
@@ -102,6 +109,7 @@ DRY_RUN=0
 HERE=0         # 1 => keep the worker in the dispatcher's cwd (opt out of --fresh)
 PERMISSION_MODE=""  # x-dfa4: forwarded as --permission-mode to each worker spawn
 ROUTE=""       # x-b0b4: per-dispatch explicit provider,model route (fail-closed)
+SOURCE=""      # x-84b2: dispatch origin stamped into every worker name (validated by the bridge)
 # The operator's exported refusal, captured before the loop arms/unsets the
 # carrier per node, so non-family dispatches restore it rather than a prior
 # iteration's value (round 12).
@@ -124,6 +132,7 @@ while [[ $# -gt 0 ]]; do
     --here|--in-place) HERE=1; shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
     --route)      [[ $# -ge 2 ]] || { echo "failed: --route reason=\"requires a provider/model value\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 2; }; ROUTE="$2"; shift 2 ;;
+    --source)     [[ $# -ge 2 ]] || { echo "failed: --source reason=\"requires a dispatch origin code\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 2; }; SOURCE="$2"; shift 2 ;;
     --) shift; while [[ $# -gt 0 ]]; do NODES+=("$1"); shift; done ;;
     -*) echo "failed: $1 reason=\"unknown flag\"" >&2; exit 2 ;;
     *)  NODES+=("$1"); shift ;;
@@ -307,79 +316,6 @@ for id in "${NODES[@]}"; do
   # resolved quota against a node-agnostic command, so the pair could
   # disagree; the consolidated tuple answers both from the same node read.
   cutover_args=(); route_account=""; spawn_runtime=()
-
-  # Provenance-carrying name: target-<full-node-id>-<slug> so the bg thread title
-  # reads at a glance which node a /target worker is on (e.g.
-  # target-ab-4040eee8-cargo-bootstrapper). The slug is the node's title-derived
-  # handle; a node with no slug degrades to target-<full-node-id>.
-  node_slug="$(printf '%s' "$node_json" | jq -r '.slug // .title // empty' 2>/dev/null)"
-  # x-3218: the canonical owner (`fno.agents.naming`) sanitizes the slug AND
-  # budgets the assembled name against the runtime's 64-char limit; this site
-  # used to assemble it uncapped, so a long configured node id produced a name
-  # the runtime rejects - the dispatch vanished with no session and no event.
-  # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
-  # EVERY `fno agents` verb to the binary, which has no `name` port. Exit 3 (not
-  # 2) is the naming refusal - Click spends 2 on usage errors including "no such
-  # command", so an `fno` too old to know this verb would otherwise read as
-  # "unrepresentable" and refuse the whole fleet.
-  # Streams are merged so a refusal's cause survives; the exit code disambiguates
-  # which stream it came from. Merging means a stray warning on stderr rides
-  # along, so the name is read as the LAST line of the capture and that line
-  # alone must match the runtime contract. `grep -q` would not do: it matches
-  # per line, so a warning followed by a valid name would pass the guard and
-  # then be adopted in full.
-  #
-  # Matching the WHOLE capture instead rejected any run that warned at all, and
-  # the degrade path below assembles an UNCAPPED name that a long node id then
-  # refuses outright. A live config notice on stderr reproduced exactly that on
-  # 2026-09-03: a 28-char node id dispatched no worker and said almost nothing.
-  # The last line keeps a warning unadoptable, because a warning is not it,
-  # without discarding the name the canonical owner actually returned.
-  name_out="$(FNO_AGENTS_RUNTIME=python fno agents name target "$id" --slug "$node_slug" 2>&1)"
-  name_rc=$?
-  name_last="${name_out##*$'\n'}"
-  agent_name=""
-  [[ "$name_rc" -eq 0 && "$name_last" =~ ^[A-Za-z0-9_-]{1,64}$ ]] && agent_name="$name_last"
-  if [[ "$name_rc" -eq 3 ]]; then
-    # Exit 3 covers every refusal cause (over-budget identity, invalid
-    # characters, empty identity), so relay the real message rather than
-    # asserting a length problem the operator may not actually have. Newlines
-    # and double quotes are squeezed out first: this line has a documented
-    # grammar other tools parse, and the message embeds a repr of the node id.
-    name_msg="$(printf '%s' "${name_out:-agent name cannot be represented}" | tr '\n"' '  ')"
-    echo "failed $id reason=\"$name_msg\""
-    n_failed=$((n_failed + 1))
-    continue
-  elif [[ "$name_rc" -ne 0 || -z "$agent_name" ]]; then
-    # Degraded: fno unreachable or too old for this verb. Keep the historical
-    # assembly, and say so - an invisible degrade means the whole fleet can be
-    # named by the fallback with nothing in the receipt to show it.
-    # rc=0 here means the owner ran but its output was unusable (noise on the
-    # merged stream), which is a different story from an unreachable owner - say
-    # which, or the receipt reads as "unavailable (rc=0)" and puzzles the reader.
-    if [[ "$name_rc" -eq 0 ]]; then
-      name_why="canonical naming returned an unusable name"
-    else
-      name_why="canonical naming unavailable (rc=$name_rc)"
-    fi
-    echo "degraded-name $id reason=\"$name_why; using the fallback assembly\""
-    node_slug="$(printf '%s' "$node_slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
-      | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed -E 's/-+$//')"
-    if [[ -n "$node_slug" ]]; then
-      agent_name="target-${id}-${node_slug}"
-    else
-      agent_name="target-${id}"
-    fi
-    # The fallback is uncapped, and nothing downstream enforces 64 here: this
-    # spawn passes --node, which forces the Python path (_NAME_MAX_LEN = 128),
-    # so the daemon's 64-char validator is never reached. Refuse rather than
-    # launch a worker under a name the runtime contract does not allow.
-    if [[ "${#agent_name}" -gt 64 ]]; then
-      echo "failed $id reason=\"fallback name is ${#agent_name} chars, over the 64-char runtime limit\""
-      n_failed=$((n_failed + 1))
-      continue
-    fi
-  fi
 
   # x-571f: per-node model pin. Read once from the node JSON we already hold; a
   # non-empty value is applied as `--model <m>` to every spawn branch below (and
@@ -692,6 +628,81 @@ for id in "${NODES[@]}"; do
     n_failed=$((n_failed + 1))
     continue
   fi
+  # Provenance-carrying name (x-84b2): [<source>-]<verb-code>-<node>-<slug>,
+  # minted AFTER the resolve so the verb comes from the same authoritative
+  # tuple (resolved .verb; the node's declared verb reconciles the out-of-family
+  # case; the builtin target path is the one literal default). The vocabulary
+  # (codes, budget, refusals) lives in the bridge, never here.
+  # x-3218: the canonical owner (`fno.agents.naming`) sanitizes the slug AND
+  # budgets the assembled name against the runtime's 64-char limit.
+  # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
+  # EVERY `fno agents` verb to the binary, which has no `name` port. Exit 3 (not
+  # 2) is the naming refusal - Click spends 2 on usage errors including "no such
+  # command", so an `fno` too old to know this verb would otherwise read as
+  # "unrepresentable" and refuse the whole fleet.
+  # Streams are merged so a refusal's cause survives; the name is read as the
+  # LAST line of the capture and that line alone must match the runtime
+  # contract (a live config notice on stderr reproduced a false refusal on
+  # 2026-09-03 when the WHOLE capture was matched).
+  node_slug="$(printf '%s' "$node_json" | jq -r '.slug // .title // empty' 2>/dev/null)"
+  verb_word="$(printf '%s' "$resolved_json" | jq -r '.verb | select(. != null and . != "")' 2>/dev/null)"
+  if [[ -z "$verb_word" ]]; then
+    verb_word="$(printf '%s' "$node_json" | jq -r '.dispatch_verb | select(. != null and . != "")' 2>/dev/null)"
+  fi
+  if [[ -z "$verb_word" ]]; then
+    verb_word="target"  # the builtin target path: the one default the bridge maps to t
+  fi
+  name_args=("$id" --slug "$node_slug" --verb "$verb_word")
+  [[ -n "$SOURCE" ]] && name_args+=(--source "$SOURCE")
+  name_out="$(FNO_AGENTS_RUNTIME=python fno agents name "${name_args[@]}" 2>&1)"
+  name_rc=$?
+  name_last="${name_out##*$'\n'}"
+  agent_name=""
+  [[ "$name_rc" -eq 0 && "$name_last" =~ ^[A-Za-z0-9_-]{1,64}$ ]] && agent_name="$name_last"
+  if [[ "$name_rc" -eq 3 ]]; then
+    # Exit 3 covers every refusal cause (unknown source/verb, over-budget
+    # identity, invalid characters), so relay the real message. Newlines and
+    # double quotes are squeezed out first: this line has a documented grammar
+    # other tools parse, and the message embeds a repr of the node id.
+    name_msg="$(printf '%s' "${name_out:-agent name cannot be represented}" | tr '\n"' '  ')"
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    echo "failed $id reason=\"$name_msg\""
+    n_failed=$((n_failed + 1))
+    continue
+  elif [[ "$name_rc" -ne 0 || -z "$agent_name" ]]; then
+    # Degraded: fno unreachable or too old for this verb. Keep the historical
+    # assembly, and say so - an invisible degrade means the whole fleet can be
+    # named by the fallback with nothing in the receipt to show it. The legacy
+    # shape stays legible to rollout readers (AC3-EDGE); the vocabulary is never
+    # re-implemented here.
+    # rc=0 here means the owner ran but its output was unusable (noise on the
+    # merged stream), which is a different story from an unreachable owner - say
+    # which, or the receipt reads as "unavailable (rc=0)" and puzzles the reader.
+    if [[ "$name_rc" -eq 0 ]]; then
+      name_why="canonical naming returned an unusable name"
+    else
+      name_why="canonical naming unavailable (rc=$name_rc)"
+    fi
+    echo "degraded-name $id reason=\"$name_why; using the fallback assembly\""
+    node_slug="$(printf '%s' "$node_slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
+      | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed -E 's/-+$//')"
+    if [[ -n "$node_slug" ]]; then
+      agent_name="target-${id}-${node_slug}"
+    else
+      agent_name="target-${id}"
+    fi
+    # The fallback is uncapped, and nothing downstream enforces 64 here: this
+    # spawn passes --node, which forces the Python path (_NAME_MAX_LEN = 128),
+    # so the daemon's 64-char validator is never reached. Refuse rather than
+    # launch a worker under a name the runtime contract does not allow.
+    if [[ "${#agent_name}" -gt 64 ]]; then
+      fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+      echo "failed $id reason=\"fallback name is ${#agent_name} chars, over the 64-char runtime limit\""
+      n_failed=$((n_failed + 1))
+      continue
+    fi
+  fi
+
   # Auto-brief (x-d1f4): the SAME resolve auto-resolves the node's brief chain
   # (explicit dispatch_brief > sidecar > details > transcript tail) whenever
   # --node is passed with no --brief, so a plain node cold-starts with context.

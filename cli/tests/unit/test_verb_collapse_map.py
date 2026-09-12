@@ -159,8 +159,9 @@ def test_map_covers_current_surface_once():
     # writes outside the checkout): 604 -> 602. The
     # one install verb for every harness allocates `config plugin` and
     # `doctor reclaim` while retiring the `setup codex-plugin` row: counted
-    # from the merged file, 602 -> 603.
-    assert len(mapped) == 603, (
+    # from the merged file, 602 -> 603. `agents autonomy
+    # provenance`, the dispatch-source inventory read: 603 -> 604.
+    assert len(mapped) == 604, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -257,7 +258,9 @@ def test_live_baseline_matches_the_projected_allocation():
     # +1 for `workspace reap`, the explicit state-retention operator control.
     # +3 for the inbox user queue leaves (ack/list/status under the renamed
     # verb); the pre-rename operator spelling stays as a hidden alias the
-    # ratchet still counts, so the rename nets +3, not 0.
+    # ratchet still counts, so the rename nets +3, not 0. Counted from the
+    # merged file, not taken from either side: 133, with `agents autonomy
+    # provenance` (x-84b2) among them - the group row split into leaves.
     assert len(leaves) <= 133
     assert "fno-agents" in leaves
 

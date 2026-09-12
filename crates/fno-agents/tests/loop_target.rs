@@ -1306,7 +1306,9 @@ fn pin_clean_board(dir: &Path, scope: &str) {
         bin_dir.join("fno"),
         &format!(
             "#!/bin/sh\nif [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; \
-             then echo '{{\"scope\":\"{scope}\",\"undelivered\":0}}'; exit 0; fi\necho '{{}}'\n"
+             then echo '{{\"scope\":\"{scope}\",\"undelivered\":0}}'; exit 0; fi\n\
+             if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"name\" ]; then echo 'k-9331-w0'; exit 0; fi\n\
+             echo '{{}}'\n"
         ),
     )
     .unwrap();
@@ -1329,6 +1331,7 @@ fn write_stub_fno_board(dir: &Path, actionable: u64) {
         &format!(
             "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; then \
              echo '{{\"scope\":\"epic-x\",\"undelivered\": {actionable}}}'; exit 0; fi\n\
+             if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"name\" ]; then echo 'k-9331-w0'; exit 0; fi\n\
              if [ \"$1\" = \"inbox\" ]; then echo '{{\"actionable\": {actionable}, \"unreadable\": 0, \"queues\": []}}'; exit 0; fi\nexit 1"
         ),
     );
@@ -1358,6 +1361,7 @@ fn king_walk_proceeds_past_driver_validation_into_preflight() {
     write_stub_driver(&lib_dir, "claude-code", 2, "exit 0");
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
+    write_stub_fno_board(&bin_dir, 0);
     pin_clean_board(dir.path(), "epic-x");
     write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
 
@@ -1409,6 +1413,7 @@ fn king_walk_terminates_budget_at_the_respawn_ceiling() {
     write_stub_driver(&lib_dir, "claude-code", 2, "exit 0");
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
+    write_stub_fno_board(&bin_dir, 0);
     write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
 
     let (stdout, stderr, code) = run_verb(

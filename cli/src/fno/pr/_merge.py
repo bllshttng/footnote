@@ -1332,7 +1332,9 @@ def _emit_merge_cleanup_request(
         repo_slug=repo_slug_from_url(meta.get("url") or ""),
         session_id=_read_state_field(state_file, "session_id") or None,
         harness=_read_state_field(state_file, "harness") or None,
-        candidate_row_names=rows_for_cleanup(worktree, bound_node_ids) if worktree else [],
+        # x-84b2: always emit the exact candidates - name-matched rows count
+        # even when the merge ran outside a linked worktree.
+        candidate_row_names=rows_for_cleanup(worktree, bound_node_ids),
     )
 
 

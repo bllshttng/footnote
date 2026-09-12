@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from fno import paths
+from fno.agents.naming import AgentNameError, parse_dispatch_agent_name
 
 if TYPE_CHECKING:
     from fno.agents.context import EventContext
@@ -422,7 +423,7 @@ def pr_node_ids(pr: int, slug: Optional[str]) -> list[str]:
     return scan_pr_nodes(rows, pr, slug)
 
 
-def rows_for_cleanup(worktree: str, node_ids, *, runner=None) -> list[str]:
+def rows_for_cleanup(worktree: Optional[str], node_ids, *, runner=None) -> list[str]:
     """Row names whose cwd IS the merged worktree or whose name targets one
     of the closed nodes (``target-<node>-*``). Best-effort: any failure
     reads as no candidates (the daemon's registry scan is the second net).
@@ -444,13 +445,22 @@ def rows_for_cleanup(worktree: str, node_ids, *, runner=None) -> list[str]:
     except json.JSONDecodeError:
         return []
     rows = payload if isinstance(payload, list) else payload.get("agents") or []
-    ids = [str(node) for node in node_ids]
+    ids = {str(node) for node in node_ids}
     out = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         name = str(row.get("name") or "")
-        if row.get("cwd") == worktree or any(
+        if worktree is not None and row.get("cwd") == worktree:
+            out.append(name)
+            continue
+        try:
+            parsed = parse_dispatch_agent_name(name)
+        except AgentNameError:
+            # Stale/missing binary: this row falls back to the legacy prefix
+            # leg, keeping the best-effort contract (never no candidates).
+            parsed = None
+        if (parsed is not None and parsed.node in ids) or any(
             name.startswith(f"target-{node}-") for node in ids
         ):
             out.append(name)

@@ -309,3 +309,33 @@ def test_missing_signals_degrade_to_unknown(tmp_path):  # AC5-ERR
     )
     assert r["state"] == "unknown"
     assert ts.render_truth_status(r) is None
+
+
+# ---------------------------------------------------------------------------
+# x-84b2: the canonical dispatch-name family resolves; legacy rows keep reading
+# ---------------------------------------------------------------------------
+
+
+def test_parse_node_id_resolves_canonical_names():
+    assert ts.parse_node_id("t-x-84b2-name") == "x-84b2"
+    assert ts.parse_node_id("ab-bp-x-84b2-cargo") == "x-84b2"
+    assert ts.parse_node_id("rd-t-ab-4040eee8-cargo") == "ab-4040eee8"
+    # Typed identities are not nodes.
+    assert ts.parse_node_id("gr-th-backlog-20260910") is None
+
+
+def test_parse_worker_mission_maps_verb_codes_to_kinds():
+    # t/f are target-class; bp/r/th are the plan-artifact branch.
+    assert ts.parse_worker_mission("t-x-1-build") == ("x-1", "target")
+    assert ts.parse_worker_mission("f-x-1-mend") == ("x-1", "target")
+    assert ts.parse_worker_mission("bp-x-1-design") == ("x-1", "think")
+    assert ts.parse_worker_mission("th-th-x-1-slug") == ("x-1", "think")
+    assert ts.parse_worker_mission("ac-bp-x-1-design") == ("x-1", "think")
+    assert ts.parse_worker_mission("rd-t-x-1-destub") == ("x-1", "target")
+
+
+def test_parse_worker_mission_legacy_fixtures_still_resolve():
+    assert ts.parse_worker_mission("target-x-3218-spawn") == ("x-3218", "target")
+    assert ts.parse_worker_mission("think-x-3218-retro") == ("x-3218", "think")
+    # Pre-cutover freeform names stay unrecognized (fail closed).
+    assert ts.parse_worker_mission("tgt-x-4175-liveness") is None

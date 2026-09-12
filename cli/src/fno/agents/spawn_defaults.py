@@ -377,15 +377,16 @@ def _mint_node_name(
 ) -> Optional[str]:
     """The ``t-<node>-<slug>-<model>`` mint for a node-driven spawn (x-b80d).
 
-    Routes through :func:`fno.agents.naming.agent_name` - the single owner of
-    the 64-char budget - with the model tag as discriminator. The mint is
+    Routes through :func:`fno.agents.naming.dispatch_agent_name` - the single
+    owner of the 64-char budget - with no source (a manual launch) and the
+    model tag as discriminator. The mint is
     deterministic, so a name already taken by a live worker gets a ``-2``,
     ``-3``... suffix (the same collision-avoidance the adjective-noun mint
     retries for): a re-spawn on one node must not turn into a refusal. Any
     failure (graph read, budget, contract) returns ``None`` so pass 3 falls
     back to the adjective-noun mint: a spawn must never die on a naming lookup.
     """
-    from fno.agents.naming import AgentNameError, agent_name
+    from fno.agents.naming import AgentNameError, dispatch_agent_name
 
     try:
         node_id, slug = _node_slug_from_graph(node)
@@ -394,8 +395,8 @@ def _mint_node_name(
     if slug_flag:
         slug = slug_flag
     try:
-        name = agent_name(
-            "t", node_id or node, slug=slug, discriminator=_model_tag(model)
+        name = dispatch_agent_name(
+            None, "t", node_id or node, slug=slug, discriminator=_model_tag(model)
         )
     except AgentNameError:
         return None

@@ -111,10 +111,12 @@ fn dispatch_records_pending_and_forwards_epic_seam() {
         "both dispatched children tracked for reconcile"
     );
 
-    // The converge core is invoked as `advance --epic <mission> --continuation --json`.
+    // The converge core is invoked as
+    // `advance --epic <mission> --continuation --source ab --json` (x-84b2:
+    // the daemon origin rides every worker name).
     let args = fs::read_to_string(&args_file).expect("advance argv recorded");
     assert!(
-        args.contains("advance --epic x-epic --continuation --json"),
+        args.contains("advance --epic x-epic --continuation --source ab --json"),
         "epic seam not forwarded: {args}"
     );
 

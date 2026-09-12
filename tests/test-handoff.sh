@@ -197,7 +197,13 @@ TEST_NODE_SLUG="test-node"
 TEST_CHILD_SESSION="00000000-0000-0000-0000-000000abc123"
 TEST_CAPABILITY_NONCE="capability-nonce-for-tests"
 expected_child_name() {
-  printf 'target-%s-%s-g2' "$NODE_ID" "$TEST_NODE_SLUG"
+  # The successor name contract IS the x-84b2 vocabulary, so the expectation
+  # is computed by the same bridge handoff.sh mints with - a stub answer here
+  # would test a second copy of the shape.
+  PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c "
+from fno.agents.naming import dispatch_agent_name
+print(dispatch_agent_name('sh', 't', '$NODE_ID', slug='$TEST_NODE_SLUG', discriminator='g2'))
+"
 }
 capability_digest() {
   local sbx="$1"
@@ -323,6 +329,12 @@ fi
 if [ "$subcmd1 $subcmd2" = "plan rung" ]; then
   echo "deprecated plan root reached" >&2
   exit 2
+fi
+
+if [ "$subcmd1 $subcmd2" = "agents name" ]; then
+  # Name minting is the contract under test, not a scenario input: delegate
+  # to the real implementation exactly like `do plan rung` above.
+  exec env PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -m fno.cli agents name "${@:3}"
 fi
 
 case "$subcmd1 $subcmd2" in

@@ -11,6 +11,19 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+def _naming_real(cmd, **kw):
+    """The name verbs execute in the fno-agents binary: a blanket stub would
+    answer the mint with a spawn-shaped SimpleNamespace lacking .stdout. Ride
+    the real binary for them; _REAL_RUN is captured at module import, before
+    any test patches the subprocess module."""
+    parts = [str(part) for part in cmd]
+    if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+        return _REAL_RUN(cmd, **kw)
+    return None
+
+_REAL_RUN = __import__("subprocess").run
+
+
 from fno import recovery
 from fno.events import validate
 
@@ -1634,6 +1647,9 @@ class TestRedispatch:
         calls = []
 
         def fake_run(cmd, **kw):
+            passthrough = _naming_real(cmd, **kw)
+            if passthrough is not None:
+                return passthrough
             calls.append(cmd)
             if cmd[:3] == ["fno-py", "agents", "stop"]:
                 return SimpleNamespace(returncode=stop_rc, stdout=stop_out, stderr=b"")
@@ -1785,7 +1801,8 @@ class TestRedispatch:
         stamp = self._index_of(calls, ["backlog", "update", "--locked-by"])
         assert spawn is not None and stamp is not None and spawn < stamp
         assert calls[stamp][3] == "x-370f"
-        assert calls[stamp][-2:] == ["--locked-by", "failover-aaaa1111"]
+        # x-84b2: the replacement is rec-t-<node>-<short>, the recovery source.
+        assert calls[stamp][-2:] == ["--locked-by", "rec-t-x-370f-aaaa1111"]
 
     def test_post_launch_stamp_failure_clears_corpse_and_returns_partial(
         self, monkeypatch
@@ -1796,7 +1813,7 @@ class TestRedispatch:
         assert recovery._redispatch(self._cand()) == "partial"
 
         owner_updates = [c for c in calls if "backlog" in c and "--locked-by" in c]
-        assert [c[-1] for c in owner_updates] == ["failover-aaaa1111", "null"]
+        assert [c[-1] for c in owner_updates] == ["rec-t-x-370f-aaaa1111", "null"]
 
     def test_spawn_failure_releases_lane_slot(self, monkeypatch):
         # Parallel G4: no replacement worker → the dead lane's dispatch-time
@@ -1960,6 +1977,9 @@ class TestRespawnBgResume:
         calls = []
 
         def fake_run(cmd, **kw):
+            passthrough = _naming_real(cmd, **kw)
+            if passthrough is not None:
+                return passthrough
             calls.append(cmd)
             if cmd[:3] == ["fno-py", "agents", "stop"]:
                 return SimpleNamespace(returncode=stop_rc)
@@ -2397,6 +2417,9 @@ class TestRedispatchAxisBundle:
             returncode = 0
 
         def _run(cmd, **kw):
+            passthrough = _naming_real(cmd, **kw)
+            if passthrough is not None:
+                return passthrough
             calls.append(cmd)
             return _Ok()
 
@@ -2421,7 +2444,10 @@ class TestRedispatchAxisBundle:
 
         import subprocess as _sp
         monkeypatch.setattr(
-            _sp, "run", lambda cmd, **kw: calls.append(cmd) or _Ok(), raising=True,
+            _sp, "run",
+            lambda cmd, **kw: calls.append(cmd)
+            or (_naming_real(cmd, **kw) or _Ok()),
+            raising=True,
         )
 
         c = _stale_candidate(tmp_path)

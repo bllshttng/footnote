@@ -26,7 +26,7 @@ from typing import Any, Callable, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
-from fno.agents.naming import agent_name, slug_component
+from fno.agents.naming import AgentNameError, dispatch_agent_name, verb_code_for
 from fno.agents import spawn_gate as _spawn_gate
 from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
 from fno.control_plane import emit_tick, scheduler_from_env
@@ -1113,23 +1113,6 @@ def schedule_shadow(
     }
 
 
-def _verb_qualifier(verb: Optional[str]) -> Optional[str]:
-    """Lifecycle-reason qualifier for the worker name: the bare declared verb.
-
-    ``/fno:blueprint`` becomes ``blueprint`` (the codex ``$fno:`` spelling
-    slugifies to ``fno-blueprint``), so the row name states which verb ran
-    while every ``target-<node>-`` consumer match keeps holding. A node
-    declaring no verb yields ``None``: the builtin target path keeps its
-    exact current name.
-    """
-    v = (verb or "").strip()
-    if not v:
-        return None
-    if v.startswith("/fno:"):
-        v = v[len("/fno:"):]
-    return slug_component(v.lstrip("/")) or None
-
-
 def _node_effective_verb(node: dict) -> Optional[str]:
     """The effective workflow verb for a node dict, or None when the
     lifecycle table abstains. One wrapper so every advance door derives ONE
@@ -1147,28 +1130,27 @@ def _node_effective_verb(node: dict) -> Optional[str]:
     return verb
 
 
+def refuse_unknown_source(verb_name: str, source):
+    """An unknown --source refuses at the door (exit 2), never defaults."""
+    import typer
+    from fno.agents.naming import dispatch_sources
+
+    if source is not None and source not in dispatch_sources():
+        known = ", ".join(sorted(dispatch_sources()))
+        typer.echo(f"{verb_name}: unknown --source {source!r}; known: {known}", err=True)
+        raise typer.Exit(code=2)
+
+
 def _worker_agent_name(
     node_id: str,
     node_slug: Optional[str],
-    prefix: str = "target",
-    qualifier: Optional[str] = None,
+    *,
+    source: Optional[str] = None,
+    verb_code: str = "t",
 ) -> str:
-    """Provenance-carrying bg worker name: ``<prefix>-<full-node-id>-<slug>``.
-
-    Thin adapter over the canonical owner (``fno.agents.naming``), which also
-    enforces the runtime's 64-char limit this call site used to skip - a long
-    configured node id assembled a name ``fno agents spawn`` rejected, losing
-    the dispatch with no session and no event (x-3218). ``prefix`` is
-    ``reconcile`` for the G4 de-stub pass so its worker name never collides
-    with the (ended) first pass's ``target-<id>-<slug>``. ``qualifier`` names
-    the declared dispatch verb when the node declares one (see
-    :func:`_verb_qualifier`).
-
-    Raises :class:`~fno.agents.naming.AgentNameError` when the required
-    identity cannot be represented; the dispatch path projects that as a
-    node-identifying failure event rather than a launched lane.
-    """
-    return agent_name(prefix, node_id, slug=node_slug, qualifier=qualifier)
+    """Provenance-carrying bg worker name ``[<source>-]<verb>-<node>-<slug>``;
+    raises AgentNameError when the identity cannot be represented."""
+    return dispatch_agent_name(source, verb_code, node_id, slug=node_slug)
 
 
 def _refuse_repeated_dead_dispatch(
@@ -1308,6 +1290,7 @@ def _spawn_worker(
     node: Optional[dict] = None,
     dispatch_reservation: Optional[tuple] = None,
     caller: str = "unknown",
+    source: Optional[str] = None,
     events_path: Optional[Path] = None,
     grid_reason: Optional[str] = None,
     receipt: Optional[dict] = None,
@@ -1315,11 +1298,18 @@ def _spawn_worker(
     """Dispatch a fire-and-forget autonomous worker.
 
     The workflow verb is DERIVED from the node's plan rung and difficulty
-    (x-ebd2, law d-834b6ff1); the node's ``dispatch_verb`` reconciles through
-    the same conditional and the receipt names both. Full contract:
-    docs/architecture/backlog-graph-verb-contracts.md
+    (x-ebd2, law d-834b6ff1). ``source`` (x-84b2) stamps the worker name;
+    the reconcile pass is always ``rd`` (an impossible pair refuses).
     """
     is_reconcile = bool(reconcile_manifest)
+    if is_reconcile:
+        if source is not None and source != "rd":
+            raise SpawnError(
+                f"refusing to dispatch {node_id}: source {source!r} with a "
+                "reconcile manifest is an impossible pair; the de-stub pass "
+                "is always rd (x-84b2)."
+            )
+        source = "rd"
     node_verb = (verb or "").strip() or None
     # x-0961/x-ebd2: classify the RAW declaration from the DICT alone (a
     # caller whose verb param diverges surfaces as verb=builtin beside
@@ -1348,11 +1338,14 @@ def _spawn_worker(
     effective_verb: Optional[str] = None
     if isinstance(node, dict) and not is_reconcile:
         effective_verb = _node_effective_verb(node)
+    # x-84b2: the verb code resolves (and refuses) BEFORE the resolver, and
+    # the name mints ONCE here, before spawn, riding the receipt.
+    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
     agent_name = _worker_agent_name(
         node_id,
         node_slug,
-        prefix="reconcile" if is_reconcile else "target",
-        qualifier=_verb_qualifier(effective_verb or node_verb),
+        source=source,
+        verb_code=verb_code,
     )
     # --provider selects the account/record (or a bare kind like "claude"); a
     # per-node or dispatch-time pin overrides the claude default. Layer-separate
@@ -1654,7 +1647,9 @@ def _spawn_worker(
     if receipt is not None:
         # Filled from the same values the EVENT_SPAWNED row carries, so the
         # row and the receipt cannot disagree (the row has no harness-
-        # independent form; prov is what it records).
+        # independent form; prov is what it records). agent_name (x-84b2) is
+        # the exact registered name: callers copy it into their dispatched
+        # events instead of re-minting a lookalike.
         receipt.update(
             {
                 "short_id": launch_identity,
@@ -1662,6 +1657,7 @@ def _spawn_worker(
                 "harness": prov,
                 "verb": receipt_verb,
                 "verb_source": verb_source,
+                "agent_name": agent_name,
             }
         )
     return launch_identity
@@ -1946,11 +1942,14 @@ def dispatch_lanes(
     harness: Optional[str] = None,
     vendor: Optional[str] = None,
     report: Optional[dict] = None,
+    source: Optional[str] = None,
 ) -> list[dict]:
     """Select and spawn up to ``max_lanes`` isolated background lanes.
 
     Dispatch-time ``model``/``harness``/``vendor`` values apply to every lane
     spawned this run and outrank each node's own annotation (Locked Decision 1).
+    ``source`` (x-84b2) stamps the workers' names: the active-backlog daemon
+    passes ``ab``; an attended manual run passes nothing.
 
     The parallel-mode dispatcher (epic x-42d5, group 3). Selects collision-clean
     ready nodes via :func:`select_lane_fill` (which atomically holds a lane slot
@@ -2128,6 +2127,7 @@ def dispatch_lanes(
                     node=node,
                     dispatch_reservation=(dispatch_key, dispatch_holder, dispatch_root),
                     caller="dispatch_lanes",
+                    source=source,
                     events_path=ev_path,
                     receipt=lane_receipt,
                     # The door resolved the grid, so the seam's own consult never
@@ -2148,7 +2148,9 @@ def dispatch_lanes(
                 {
                     "node_id": node_id,
                     "short_id": short_id,
-                    "agent_name": _worker_agent_name(node_id, slug),
+                    # The exact registered name from the spawn receipt (x-84b2);
+                    # never a re-mint that can disagree with the registry.
+                    "agent_name": lane_receipt.get("agent_name", ""),
                     "lane": True,
                     "worktree": str(worktree),
                     "verb": lane_receipt.get("verb", "builtin"),
@@ -2197,7 +2199,7 @@ class JoinRefuse(Exception):
 
     2 = no live node claim (nothing to join), 3 = width 1 (a second worker
     has nothing to pull), 4 = no usable bound plan, 5 = already joined
-    (live ``j-<node>-*`` workers exist).
+    (live ``j-<node>-*`` workers exist), 6 = joiner name unmintable.
     """
 
     def __init__(self, code: int, message: str) -> None:
@@ -2542,7 +2544,7 @@ def _transcript_recently_active(session_id: str) -> bool:
 
 
 def _live_joiner_names(node_id: str) -> list[str]:
-    """Live roster names ``j-<node>-*``, probed - not the stored field.
+    """Live roster joiner names (``jn-t-<node>-*``, legacy ``j-<node>-*``), probed - not the stored field.
 
     A second join into the same node rewrites the join brief (dropping the
     first join's band table) and then dies on the already-taken lead name -
@@ -2561,11 +2563,13 @@ def _live_joiner_names(node_id: str) -> list[str]:
         reg = json.loads(Path(agents_registry_path()).read_text())
     except Exception:  # noqa: BLE001 - an unreadable registry must not block a join
         return []
-    prefix = f"j-{node_id}-"
+    legacy_prefix = f"j-{node_id}-"
+    canonical_prefix = f"jn-t-{node_id}-"
     candidates = [
         (str(row.get("name")), str(row.get("harness_session_id") or ""))
         for row in reg.get("agents", [])
-        if str(row.get("name", "")).startswith(prefix) and row.get("status") == "live"
+        if str(row.get("name", "")).startswith((legacy_prefix, canonical_prefix))
+        and row.get("status") == "live"
     ]
     if not candidates:
         return []
@@ -2603,13 +2607,13 @@ def _sandbox_brief_section(
         if pol is not None and pol.verdict == "enforced":
             any_policy = True
             lines.append(
-                f"- j-{node_id}-{k} (band {band}) may write: "
+                f"- jn-t-{node_id}-{k} (band {band}) may write: "
                 f"{', '.join(pol.allow_write or ())}. A write outside it is "
                 f"refused at the Edit/Write layer and by the OS sandbox."
             )
         else:
             lines.append(
-                f"- j-{node_id}-{k} (band {band or 'unbanded'}) is NOT "
+                f"- jn-t-{node_id}-{k} (band {band or 'unbanded'}) is NOT "
                 f"narrowed ({verdict}); the sandbox layer is off for it."
             )
     return "\n".join(lines) if any_policy else ""
@@ -2787,7 +2791,7 @@ def _join_node(
         worker_bands = [""] * count
     policies = render_join_write_policy(graph, worker_bands) if sandbox_on else {}
 
-    lead = f"j-{node_id}-1"
+    lead = f"jn-t-{node_id}-1"
     # The joiner brief rides a FILE, not only TARGET_BRIEF: a daemon-forked
     # worker inherits the claude daemon's env (x-6de8), so the env export in
     # the spawn below reaches panes but not this lane's serving sessions.
@@ -2795,11 +2799,21 @@ def _join_node(
     # table is the band's durable channel for the same reason.
     brief_dir = Path(worktree) / ".fno" / "join-briefs"
     try:
+        # x-84b2: joiner names are minted once through the canonical bridge -
+        # jn-t-<node>-<ordinal>, the operator-verb source stamped so a joiner
+        # is distinguishable from an autonomous dispatch.
+        try:
+            joiner_names = {
+                k: dispatch_agent_name("jn", "t", node_id, slug=str(k))
+                for k in range(1, len(worker_bands) + 1)
+            }
+        except AgentNameError as exc:
+            raise JoinRefuse(6, f"joiner name unmintable: {exc}") from exc
         brief_dir.mkdir(parents=True, exist_ok=True)
         band_table = ""
         if bands:
             rows = "\n".join(
-                f"| j-{node_id}-{k} | {band} |"
+                f"| {joiner_names[k]} | {band} |"
                 for k, band in enumerate(worker_bands, start=1)
             )
             band_table = (
@@ -2862,7 +2876,7 @@ def _join_node(
             pol = policies.get(band)
             if pol is None or pol.verdict != "enforced":
                 continue
-            name = f"j-{node_id}-{k}"
+            name = joiner_names[k]
             policy_dir.mkdir(parents=True, exist_ok=True)
             (policy_dir / f"{name}.json").write_text(
                 json.dumps(
@@ -2881,9 +2895,10 @@ def _join_node(
     spawned: list[str] = []
     lanes: dict[str, dict] = {}
     for k, band in enumerate(worker_bands, start=1):
-        name = f"j-{node_id}-{k}"
+        name = joiner_names[k]
         brief = (
-            f"lead joiner of {node_id}: you are the mail hub for j-{node_id}-*"
+            f"lead joiner of {node_id}: you are the mail hub for the {node_id} "
+            f"joiners (jn-t-{node_id}-*)"
             if k == 1
             else f"joiner of {node_id}: mail hub is {lead}"
         ) + (
@@ -3283,12 +3298,17 @@ def advance(
     verbose: bool = False,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> AdvanceResult:
     """Dispatch the next now-unblocked node, if armed and unclaimed.
 
     A dispatch-time ``model``/``provider`` (from ``fno backlog advance -m/-p``)
     is the operator's in-the-moment word and outranks the node's own annotation
     (Locked Decision 1); absent, the node's ``model``/``provider`` keys are used.
+
+    ``source`` (x-84b2) stamps the worker's name: the merge-triggered
+    continuation passes ``ac``, the blueprint terminal ``sob``; a bare
+    attended call passes nothing and the name carries no source segment.
 
     Invoked ONLY after the node-close write commits (keyed by ``closed_node_id``,
     AC1-RACE), so within one reconcile/post-merge run the closed node is already
@@ -3496,6 +3516,7 @@ def advance(
             brief=_brief,
             dispatch_reservation=(dispatch_key, holder, dispatch_root),
             caller="advance",
+            source=source,
             events_path=ev_path,
             receipt=next_receipt,
         )
@@ -3539,7 +3560,8 @@ def advance(
         {
             "node_id": node_id,
             "short_id": short_id,
-            "agent_name": _worker_agent_name(node_id, node.get("slug") or node.get("title")),
+            # The exact registered name from the spawn receipt (x-84b2).
+            "agent_name": next_receipt.get("agent_name", ""),
             "verb": next_receipt.get("verb", "builtin"),
             "verb_source": next_receipt.get("verb_source", "field-absent"),
             "brief": _brief_tag,
@@ -3740,6 +3762,7 @@ def _converge_one(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     rank: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> AdvanceResult:
     """The one shared converge-dispatch core: dedup, reserve, spawn, one receipt.
 
@@ -3847,6 +3870,7 @@ def _converge_one(
                 node=node_meta,
                 dispatch_reservation=(dispatch_key, holder, dispatch_root),
                 caller="_converge_one",
+                source=source,
                 events_path=ev_path,
                 receipt=spawn_receipt,
             )
@@ -3868,7 +3892,8 @@ def _converge_one(
                 {
                     "node_id": node_id,
                     "short_id": short_id,
-                    "agent_name": _worker_agent_name(node_id, slug),
+                    # The exact registered name from the spawn receipt (x-84b2).
+                    "agent_name": spawn_receipt.get("agent_name", ""),
                     "cross_project": cross_project,
                     "verb": spawn_receipt.get("verb", "builtin"),
                     "verb_source": spawn_receipt.get("verb_source", "field-absent"),
@@ -3905,7 +3930,7 @@ def _converge_one(
 def _dispatch_one_dependent(
     dep: dict, closed_node_id: str, ev_path: Path, verbose: bool,
     *, model: Optional[str] = None, provider: Optional[str] = None,
-    rank: Optional[str] = None,
+    rank: Optional[str] = None, source: Optional[str] = None,
 ) -> AdvanceResult:
     """Resolve one dependent's own project root, then converge-dispatch it.
 
@@ -3957,7 +3982,7 @@ def _dispatch_one_dependent(
     return _converge_one(
         dep, root, ev_path, verbose,
         cross_project=cross_project, closed_node_id=closed_node_id,
-        model=model, provider=provider, rank=rank,
+        model=model, provider=provider, rank=rank, source=source,
     )
 
 
@@ -3970,6 +3995,7 @@ def advance_dependents(
     verbose: bool = False,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> list[AdvanceResult]:
     """Dispatch the closed node's now-unblocked direct dependents (G1 + RC1).
 
@@ -4030,7 +4056,8 @@ def advance_dependents(
 
     return [
         _dispatch_one_dependent(
-            dep, closed_node_id, ev_path, verbose, model=model, provider=provider, rank=rank
+            dep, closed_node_id, ev_path, verbose, model=model, provider=provider,
+            rank=rank, source=source,
         )
         for dep in deps
     ]
@@ -4249,6 +4276,7 @@ def advance_epic(
     provider: Optional[str] = None,
     stop: bool = False,
     continuation: bool = False,
+    source: Optional[str] = None,
 ) -> AdvanceEpicResult:
     """Advance (or stop) an epic mission: mark active + converge pass 1.
 
@@ -4412,7 +4440,8 @@ def advance_epic(
             continue
         res = _converge_one(
             child, root, ev_path, verbose,
-            cross_project=True, mission=canon, model=model, provider=provider, rank=rank,
+            cross_project=True, mission=canon, model=model, provider=provider,
+            rank=rank, source=source,
         )
         results.append(res)
         if res.decision == "dispatched":
@@ -4462,6 +4491,7 @@ def run_advance_epic(
     model: Optional[str],
     provider: Optional[str],
     continuation: bool = False,
+    source: Optional[str] = None,
 ) -> None:
     """Run the epic advance and render its receipt.
 
@@ -4483,6 +4513,7 @@ def run_advance_epic(
             model=model,
             provider=provider,
             continuation=continuation,
+            source=source,
         )
     except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
         typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)

@@ -19,9 +19,17 @@ def _fake_daemon_binary(monkeypatch, path: str = "/cargo/bin/fno-agents") -> Non
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path(path))
 
 
+_REAL_RUN = __import__("subprocess").run
+
+
 def _record_run(calls: list) -> object:
     def _run(cmd, **kwargs):
         calls.append(list(cmd))
+        # The name verbs execute in the binary; a blanket empty stub would
+        # answer the mint with an empty stdout.
+        parts = [str(part) for part in cmd]
+        if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+            return _REAL_RUN(cmd, **kwargs)
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     return _run
@@ -281,13 +289,15 @@ def test_restart_mux_revives_orphaned_claude_workers(monkeypatch) -> None:
     result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
     assert result.exit_code == 0
     assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
+    # x-84b2: the revived worker is ro-t-session-<short> (the orphan row name
+    # is not a canonical dispatch name, so the identity is the typed session).
     assert [
-        "/cargo/bin/fno", "agents", "spawn", "--name", "worker1",
+        "/cargo/bin/fno", "agents", "spawn", "--name", "ro-t-session-uuid-1",
         "--harness", "claude", "--substrate", "bg", "--resume", "uuid-1", "--cwd", "/w1",
     ] in calls
     assert not any("spawn" in c and "bgw" in c for c in calls), "survivor must not be respawned"
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
-    assert payload["agents_revived"] == ["worker1"]
+    assert payload["agents_revived"] == ["ro-t-session-uuid-1"]
 
 
 def test_restart_no_revive_flag_skips_revival(monkeypatch) -> None:
@@ -362,6 +372,9 @@ def test_restart_revive_failure_reported_not_fatal(monkeypatch) -> None:
 
     def _run(cmd, **kwargs):
         calls.append(list(cmd))
+        parts = [str(part) for part in cmd]
+        if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+            return _REAL_RUN(cmd, **kwargs)
         rc = 1 if "spawn" in cmd else 0
         return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
 

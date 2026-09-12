@@ -107,6 +107,24 @@ REMOVED="$(comm -13 "$FOUND" "$BASE" || true)"
 
 if [[ -z "$ADDED" && -z "$REMOVED" ]]; then
   echo "check-autonomy-registry: ok ($(wc -l < "$BASE" | tr -d ' ') site(s) match the baseline)"
+  # x-84b2: the dispatch-provenance audit. Positive completeness marker for
+  # the source/verb vocabulary - every registered path must carry a code, and
+  # the marker line (not an empty grep) is the evidence. Prefer the repo venv
+  # python: the audit imports the CLI's own deps (typer), which a bare
+  # system python3 may lack. The audit reads the vocabulary through the
+  # fno-agents binary; a lane with no binary names the SKIP instead of
+  # failing, and provisioning the binary there is what makes it run again.
+  PY="$REPO_ROOT/cli/.venv/bin/python"
+  [[ -x "$PY" ]] || PY=python3
+  if ! PYTHONPATH="$REPO_ROOT/cli/src" "$PY" -c 'import sys; from fno import rust_binary; sys.exit(0 if rust_binary.resolve_binary() else 7)' 2>/dev/null; then
+    echo "check-autonomy-registry: provenance audit SKIPPED (no fno-agents binary on this lane; build one to run it)" >&2
+    exit 0
+  fi
+  PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" "$PY" -c '
+from fno.autonomy_cli import audit_dispatch_provenance
+
+audit_dispatch_provenance()
+'
   exit 0
 fi
 

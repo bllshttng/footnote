@@ -208,8 +208,11 @@ impl KingQueue {
                 )));
             }
         }
+        // x-84b2: the walk identity is minted through the canonical bridge; a
+        // failed mint refuses the walk before anything dispatches.
+        let walk_key = mint_walk_key(&fno_bin, repo_root, &scope)?;
         Ok(Self {
-            walk_key: mint_walk_key(&manifest.fno_id),
+            walk_key,
             fno_id: manifest.fno_id,
             respawn_count: manifest.respawn_count,
             respawn_ceiling: manifest.respawn_ceiling,
@@ -372,10 +375,13 @@ fn scope_undelivered_count_with_timeout(
         })
 }
 
-/// `{fno_id}-w{nanos}`: unique per invocation by the nanosecond clock, and
-/// names the crown it belongs to so a journal read by a human says which
-/// reign spawned the unit.
-pub(crate) fn mint_walk_key(fno_id: &str) -> String {
+/// The per-invocation uniqueness carrier of a king-walk identity: a
+/// nanosecond clock truncated to 48 bits (sortable, wraps ~3.25 days) plus a
+/// 32-bit random suffix (the "never repeats" half). macOS reports
+/// `SystemTime` at microsecond granularity, so the random suffix is what
+/// makes "never repeats" true; the counter fallback keeps two mints in one
+/// tick unique in-process when getrandom fails.
+fn mint_walk_discriminator() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -384,8 +390,8 @@ pub(crate) fn mint_walk_key(fno_id: &str) -> String {
     // microsecond granularity, so two walks minted in the same tick -- in one
     // process or in two started together -- got the SAME key, and the resume
     // guard would then close a unit on a prior reign's verdict. The random
-    // suffix is what makes "never repeats" true; the timestamp stays because it
-    // makes the key sortable and readable.
+    // suffix is what makes "never repeats" true; the truncated clock stays
+    // because it makes the key sortable and readable.
     let mut entropy = [0u8; 4];
     let suffix = if getrandom::fill(&mut entropy).is_ok() {
         u32::from_le_bytes(entropy)
@@ -396,7 +402,54 @@ pub(crate) fn mint_walk_key(fno_id: &str) -> String {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         std::process::id() ^ SEQ.fetch_add(1, Ordering::Relaxed)
     };
-    format!("{fno_id}-w{nanos}-{suffix:08x}")
+    format!("w{:012x}{:08x}", nanos % (1u128 << 48), suffix)
+}
+
+/// `kl-th-<scope>-<walk-discriminator>`, minted through the canonical
+/// `fno agents name` bridge (x-84b2): the kl source names the king loop as the
+/// spawner, th the think-class walk verb, and the scope the crown it belongs
+/// to so a journal read by a human says which reign spawned the unit. A failed
+/// mint REFUSES the walk (Err) rather than falling back to an uncoded key.
+pub(crate) fn mint_walk_key(fno_bin: &str, cwd: &Path, scope: &str) -> Result<String, LoopError> {
+    let discriminator = mint_walk_discriminator();
+    // `agents name` is a Python-only verb: an ambient FNO_AGENTS_RUNTIME=rust
+    // routes the whole group to this binary, which has no name port.
+    let out = std::process::Command::new(fno_bin)
+        .args([
+            "agents",
+            "name",
+            "--source",
+            "kl",
+            "--verb",
+            "th",
+            scope,
+            "--discriminator",
+            &discriminator,
+        ])
+        .current_dir(cwd)
+        .env("FNO_AGENTS_RUNTIME", "python")
+        .output()
+        .map_err(|error| {
+            LoopError::Queue(format!("walk-name mint failed to spawn fno: {error}"))
+        })?;
+    if !out.status.success() {
+        return Err(LoopError::Queue(format!(
+            "walk-name mint refused ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+                .trim()
+                .chars()
+                .take(200)
+                .collect::<String>()
+        )));
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() {
+        return Err(LoopError::Queue(
+            "walk-name mint produced no name".to_string(),
+        ));
+    }
+    Ok(name)
 }
 
 /// The env var carrying [`KingQueue::walk_key`] into the dispatched session.
@@ -818,18 +871,44 @@ mod tests {
     }
 
     #[test]
-    fn mints_a_key_that_names_the_crown_and_never_repeats() {
-        let a = mint_walk_key("k-1");
-        let b = mint_walk_key("k-1");
-        assert!(a.starts_with("k-1-w"), "the key names its crown: {a}");
-        assert_ne!(a, b, "two invocations must never share a key");
-
+    fn mints_a_discriminator_that_never_repeats() {
         // Two mints only catch a timestamp-only key when the clock happens to
         // tick between them, which is how this test passed for a build that
         // could collide. A tight batch cannot get that luck.
         let batch: std::collections::BTreeSet<String> =
-            (0..1000).map(|_| mint_walk_key("k-1")).collect();
+            (0..1000).map(|_| mint_walk_discriminator()).collect();
         assert_eq!(batch.len(), 1000, "1000 mints must produce 1000 keys");
+        for d in &batch {
+            assert!(d.starts_with('w'), "discriminator shape: {d}");
+        }
+    }
+
+    #[test]
+    fn mints_the_walk_key_through_the_canonical_bridge() {
+        // The bridge carries source kl, verb th, the crown scope, and the
+        // discriminator; a stub fno stands in for the canonical owner and the
+        // walk adopts its name verbatim.
+        let dir = tempfile::tempdir().unwrap();
+        let fno = write_fno_stub(dir.path(), "kl-th-epic-x-w00ff");
+        let key =
+            mint_walk_key(fno.to_str().unwrap(), dir.path(), "epic-x").expect("stub mint succeeds");
+        assert!(key.starts_with("kl-th-epic-x-"), "coded key: {key}");
+    }
+
+    #[test]
+    fn a_failed_mint_refuses_the_walk() {
+        // A stub that exits 1 stands in for a stale fno / naming refusal: the
+        // walk refuses (Err) instead of dispatching under an uncoded key.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("fno");
+        std::fs::write(&p, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = mint_walk_key(p.to_str().unwrap(), dir.path(), "epic-x");
+        assert!(out.is_err(), "a failed mint must refuse the walk");
     }
 
     #[test]
@@ -837,7 +916,9 @@ mod tests {
         // The original defect, pinned at the seam it lived at: the unit key is
         // not the manifest fno_id, so a termination written under fno_id by
         // either king arm matches no walk unit's session_key.
-        let key = mint_walk_key("k-1");
+        let dir = tempfile::tempdir().unwrap();
+        let fno = write_fno_stub(dir.path(), "kl-th-epic-x-w00ff");
+        let key = mint_walk_key(fno.to_str().unwrap(), dir.path(), "epic-x").expect("stub mint");
         assert_ne!(key, "k-1");
         assert!(!key.contains('\n'));
     }
@@ -894,8 +975,10 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_ceiling: 0\n---\n",
         )
         .unwrap();
-        let q = KingQueue::from_manifest_full(&dir, "k", "fno".to_string(), false, None, false)
-            .unwrap();
+        let fno_bin = write_fno_stub(&dir, "kl-th-epic-x-w00ff")
+            .to_string_lossy()
+            .into_owned();
+        let q = KingQueue::from_manifest_full(&dir, "k", fno_bin, false, None, false).unwrap();
         assert_eq!(q.respawn_ceiling(), 0);
         assert!(!q.at_respawn_ceiling());
         fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
@@ -1051,6 +1134,11 @@ mod tests {
         fs::create_dir_all(&kings).unwrap();
         fs::write(kings.join("k.md"), "---\nfno_id: k-1\nscope: epic-x\n---\n").unwrap();
         let registry = write_registry(&dir, "busy", Some("epic-x"));
+        // x-84b2: the mint runs `fno agents name` at construction; the stub
+        // answers it so the guard assertions stay the test's subject.
+        let fno_bin = write_fno_stub(&dir, "kl-th-epic-x-w00ff")
+            .to_string_lossy()
+            .into_owned();
 
         assert_eq!(
             live_crown_holder_in(&registry, "epic-x", &dir),
@@ -1065,7 +1153,7 @@ mod tests {
         let plain = KingQueue::from_manifest_with_registry(
             &dir,
             "k",
-            "fno".to_string(),
+            fno_bin.clone(),
             false,
             None,
             false,
@@ -1075,7 +1163,7 @@ mod tests {
         let unnamed = KingQueue::from_manifest_with_registry(
             &dir,
             "k",
-            "fno".to_string(),
+            fno_bin.clone(),
             true,
             None,
             false,
@@ -1088,7 +1176,7 @@ mod tests {
         let named = KingQueue::from_manifest_with_registry(
             &dir,
             "k",
-            "fno".to_string(),
+            fno_bin.clone(),
             true,
             Some("reigning-king"),
             false,
@@ -1101,7 +1189,7 @@ mod tests {
         let wrong_row = KingQueue::from_manifest_with_registry(
             &dir,
             "k",
-            "fno".to_string(),
+            fno_bin.clone(),
             true,
             Some("someone-else"),
             false,
@@ -1329,15 +1417,12 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 4\nrespawn_ceiling: 4\n---\n",
         )
         .unwrap();
-        let mut q = KingQueue::from_manifest_full(
-            &dir,
-            "k",
-            "fno".to_string(),
-            true,
-            Some("reigning-king"),
-            true,
-        )
-        .unwrap();
+        let fno_bin = write_fno_stub(&dir, "kl-th-epic-x-w00ff")
+            .to_string_lossy()
+            .into_owned();
+        let mut q =
+            KingQueue::from_manifest_full(&dir, "k", fno_bin, true, Some("reigning-king"), true)
+                .unwrap();
         assert!(q.at_respawn_ceiling());
         assert!(
             q.next().is_ok_and(|unit| unit.is_none()),
@@ -1363,8 +1448,10 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 3\nrespawn_ceiling: 4\n---\n",
         )
         .unwrap();
-        let mut q = KingQueue::from_manifest_full(&dir, "k", "fno".to_string(), false, None, false)
-            .unwrap();
+        let fno_bin = write_fno_stub(&dir, "kl-th-epic-x-w00ff")
+            .to_string_lossy()
+            .into_owned();
+        let mut q = KingQueue::from_manifest_full(&dir, "k", fno_bin, false, None, false).unwrap();
         assert!(!q.at_respawn_ceiling(), "3 of 4 is under the ceiling");
         // The concurrent winner bills the ceiling first...
         assert_eq!(bump_respawn_count(&path).unwrap(), 4);

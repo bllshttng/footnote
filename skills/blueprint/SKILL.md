@@ -556,10 +556,10 @@ Finalize validates the proposed ready + `compiled-v1` contract and atomically st
 
 ## Ordered auto-launch nudge (advance, never a direct spawn)
 
-After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), nudge the ordered drain as the LAST action. Resolve the adopted node's parent first (`fno backlog get <node>` prints `parent`):
+After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), nudge the ordered drain as the LAST action. Resolve the adopted node's parent first (`fno backlog get <node>` prints `parent`). `--source sob` (x-84b2) stamps spawn-on-blueprint into the dispatched worker's name, so an operator can tell it apart from a merge-triggered `ac-` dispatch:
 
-- **live epic parent** → `fno backlog advance --epic <parent>`
-- **no parent** → `fno backlog advance`
+- **live epic parent** → `fno backlog advance --epic <parent> --source sob`
+- **no parent** → `fno backlog advance --source sob`
 - **plan stamped `source: claude-plan-mode`** → skip the nudge entirely
 
 When the plan is stamped `source: claude-plan-mode`, the front door owns the dispatch decision: its "Execute autonomously?" confirm may still be pending, and nudging then can start a worker the human is about to decline. The stamp is read from the plan frontmatter only, never the body.

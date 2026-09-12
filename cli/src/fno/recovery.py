@@ -1025,7 +1025,15 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
             # predate the worker and prove nothing about THIS invocation. Claiming
             # completion from them would re-open the very suppression this fixes,
             # so they read unverifiable until an ownership lease can date them.
-            tail = (candidate.name or "")[len(f"think-{node_id}-"):]
+            name_str = candidate.name or ""
+            if name_str.startswith(f"think-{node_id}-"):
+                tail = name_str[len(f"think-{node_id}-"):]
+            else:
+                # x-84b2 canonical shape: the reason opens the parsed tail.
+                from fno.agents.naming import parse_dispatch_agent_name
+
+                dname = parse_dispatch_agent_name(name_str)
+                tail = dname.tail if dname and dname.node == node_id else ""
             if any(tail == r or tail.startswith(f"{r}-")
                    for r in _NON_BIRTH_THINK_REASONS):
                 return None
@@ -1093,6 +1101,30 @@ def _clear_dead_owner(node: str, cwd: str) -> bool:
     return False
 
 
+def _alias_predecessor(new_name: Optional[str], old_name: Optional[str]) -> None:
+    """Best-effort: keep the predecessor name addressable on the successor row."""
+    if not (new_name and old_name):
+        return
+    try:
+        from fno.agents.registry import append_row_alias
+
+        append_row_alias(new_name, old_name)
+    except Exception:  # noqa: BLE001 - aliasing is best-effort
+        pass
+
+
+def _recovery_agent_name(
+    predecessor: Optional[str], node_or_session: str, short: str
+) -> str:
+    """The ``rec-<verb>-<node-or-session>-<short>`` recovery name; the verb
+    parses from the predecessor (legacy spellings still resolve, else t)."""
+    from fno.agents.naming import dispatch_agent_name, legacy_verb_code, parse_dispatch_agent_name
+
+    parsed = parse_dispatch_agent_name(predecessor or "")
+    verb = parsed.verb if parsed else (legacy_verb_code(predecessor) or "t")
+    return dispatch_agent_name("rec", verb, node_or_session, slug=short)
+
+
 def _redispatch(
     candidate: "Candidate",
     *,
@@ -1148,7 +1180,14 @@ def _redispatch(
         # Raced to completion: nothing to continue, so do not re-dispatch.
         return _Failed("node-done")
     name = getattr(candidate, "name", None)
-    agent = f"failover-{candidate.short_id}"
+    from fno.agents.naming import AgentNameError
+
+    try:
+        agent = _recovery_agent_name(name, node, candidate.short_id)
+    except AgentNameError as exc:
+        # A stale/missing binary unmints this candidate; report it as the
+        # candidate's failure, never crash the sweep.
+        return _Failed(f"name-unmintable: {exc}")
     old_worker_stopped = False
     try:
         if name:
@@ -1251,6 +1290,7 @@ def _redispatch(
             # invite another failover spawn onto the same branch.
             _clear_dead_owner(node, cwd)
             return REDISPATCH_PARTIAL
+        _alias_predecessor(agent, name)
         return True
     except (OSError, subprocess.SubprocessError):
         # Non-fatal: the swap already landed; never let a respawn miss crash the
@@ -1508,7 +1548,14 @@ def _respawn_bg_resume(
 
     cwd = getattr(candidate, "cwd", None)
     name = getattr(candidate, "name", None)
-    agent = f"revive-{candidate.short_id}"
+    # Nodeless resume: a typed session identity, never a fabricated node.
+    from fno.agents.naming import AgentNameError
+
+    try:
+        agent = _recovery_agent_name(name, f"session-{candidate.short_id}", candidate.short_id)
+    except AgentNameError:
+        # A stale/missing binary unmints the resume; the caller notifies.
+        return False
     if not name:
         # No name to stop the dead thread by. The node-less path has no claim +
         # `target init` backstop against a double (unlike _redispatch), so a blind
@@ -1532,6 +1579,8 @@ def _respawn_bg_resume(
             argv += ["--cwd", cwd]
         argv += ["--name", agent, CONTINUE_MESSAGE]
         proc = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=60, check=False)
+        if proc.returncode == 0:
+            _alias_predecessor(agent, name)
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False

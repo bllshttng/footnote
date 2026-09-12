@@ -39,6 +39,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -46,6 +47,7 @@ from typing import Callable, Optional
 import typer
 
 from fno._subprocess_util import fno_py_cmd
+from fno.agents.naming import AgentNameError, dispatch_agent_name
 from fno.agents.events import (
     emit_merge_cleanup_requested,
     merge_cleanup_request_id,
@@ -500,7 +502,8 @@ class Ritual:
 
     def leg_advance(self) -> None:
         """Step 3b: merge-triggered next dispatch, bounded + progress (x-0d66)."""
-        argv = ["backlog", "advance", "-J", "--verbose"]
+        # --source ac (x-84b2): the merge continuation origin rides the name.
+        argv = ["backlog", "advance", "-J", "--verbose", "--source", "ac"]
         # x-59a6: no --closed here. `leg_stamp`'s reconcile call already ran
         # `_advance`/`advance_dependents` per CLOSED RECORD for every node this
         # PR's trailer bound, not only the first - `--closed` takes a SINGLE
@@ -604,10 +607,10 @@ class Ritual:
             session_id=None,
             harness=None,
             merged_at=self._merged_state()[2],
-            candidate_row_names=(
-                rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh)
-                if worktree
-                else []
+            # x-84b2: always emit the exact candidates - a PR whose worktree
+            # path is gone still carries name-matched rows for the reaper.
+            candidate_row_names=rows_for_cleanup(
+                worktree, self.ctx.node_ids, runner=self._sh
             ),
         )
         # Minting makes the next idle tick the request's first payment window.
@@ -834,17 +837,34 @@ class Ritual:
     def _spawn_judgment(self, deferred: int, files: int, lines: int) -> bool:
         """ONE headless one-shot carrying only the two judgment steps.
 
-        ``agents spawn`` takes ONE positional - the MESSAGE - and the agent name
-        rides ``--name``; a second positional is refused ("takes one positional;
-        the agent name moved to --name"). So the prompt is the sole positional
-        and ``judgment-pr-<n>`` is passed via ``--name``. (Before the axis
-        redesign the grammar was ``[name] [message]`` and the two were swapped
-        positionals; a stale two-positional call fails closed here, which is
-        exactly how the redesign's refusal caught this leg.) The headless worker
-        reads a diff and updates the backlog, which routinely exceeds a minute,
-        so it gets spawn's own ``--timeout`` and the outer bound matches it
-        rather than killing the worker early.
+        The prompt is the sole positional; ``pm-r-<node>-pr-<n>`` rides
+        ``--name`` (x-84b2; the old ``judgment-pr-<n>`` carried neither source
+        nor node). A merged PR with no recovered node binding refuses the
+        spawn rather than substituting the PR number as a fake node. The
+        worker reads a diff and updates the backlog - routinely over a minute -
+        so spawn's own ``--timeout`` bounds it.
         """
+        node_ids = [str(node) for node in self.ctx.node_ids if str(node)]
+        if not node_ids:
+            # The PR merged but binds no graph node: spawning a judgment under
+            # a fabricated identity would orphan its own provenance.
+            print(
+                f"post-merge judgment: skipped, PR {self.ctx.pr} binds no node; "
+                "no pm-r worker spawned (x-84b2)",
+                file=sys.stderr,
+            )
+            return False
+        try:
+            name = dispatch_agent_name("pm", "r", node_ids[0], qualifier=f"pr-{self.ctx.pr}")
+        except AgentNameError as exc:
+            # A stale/missing binary must fail this leg, not abort the ritual
+            # legs after it (run() has no per-leg guard).
+            print(
+                f"post-merge judgment: skipped, worker name unmintable ({exc}); "
+                "no pm-r worker spawned",
+                file=sys.stderr,
+            )
+            return False
         prompt = self._judgment_prompt(deferred, files, lines)
         argv = [*fno_py_cmd(), "agents", "spawn", "--substrate", "headless",
                 "--timeout", str(int(_JUDGMENT_TIMEOUT_S)),
@@ -861,7 +881,7 @@ class Ritual:
             argv += ["--harness", "claude", "--model", model]
         # Behind `--` (fno's own click parser honors it, verified both
         # directions): a leading-flag seed must be the prompt positional.
-        argv += ["--name", f"judgment-pr-{self.ctx.pr}", "--", prompt]
+        argv += ["--name", name, "--", prompt]
         try:
             r = self.runner(argv, timeout=_JUDGMENT_TIMEOUT_S + 60.0)
         except (ToolMissing, subprocess.SubprocessError):
@@ -981,7 +1001,11 @@ class Ritual:
         self._emit("reap-rows", _OK, f"reaped {removed}/{len(rows)}")
 
     def _dead_target_rows(self) -> list[str]:
-        ids = {str(n) for n in self.ctx.node_ids}
+        """Non-live rows for the nodes this ritual closed, by canonical parse
+        (x-84b2) with the legacy ``target-<node>-`` fallback. Delegates to
+        rows_for_cleanup, then keeps only non-live rows."""
+        ids = [str(n) for n in self.ctx.node_ids]
+        candidates = set(rows_for_cleanup(None, ids, runner=self._sh))
         try:
             r = self._sh(["agents", "list", "--json"])
         except (ToolMissing, subprocess.SubprocessError):
@@ -997,12 +1021,9 @@ class Ritual:
             if not isinstance(a, dict):
                 continue
             name = a.get("name") or ""
-            if not name.startswith("target-"):
+            if name not in candidates:
                 continue
             if a.get("status") == "live":
-                continue
-            # target-<node>-<slug>: reap only rows for nodes this ritual closed.
-            if not any(name.startswith(f"target-{nid}-") for nid in ids):
                 continue
             out.append(name)
         return out

@@ -333,8 +333,13 @@ def _fake_settings(mode: str):
 def _capture_spawn(monkeypatch, module):
     """Mock the spawn subprocess at ``module.subprocess.run``; return the cmd."""
     captured: dict = {}
+    real_run = module.subprocess.run
 
     def fake_run(cmd, **kwargs):
+        # The mint is a real pre-spawn subprocess (x-84b2): serve it with the
+        # real binary and keep it out of the capture, which pins the SPAWN argv.
+        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in cmd}:
+            return real_run(cmd, **kwargs)
         captured["cmd"] = cmd
         return SimpleNamespace(
             returncode=0, stdout='{"name":"w","short_id":"abcd1234"}', stderr=""

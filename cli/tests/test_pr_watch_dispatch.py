@@ -359,7 +359,7 @@ class TestFireSkill:
         def stub_runner(cmd, **kw):
             return _claude_ok_response()
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is True
         assert result.is_error is False
         assert result.rc == 0
@@ -371,7 +371,7 @@ class TestFireSkill:
         def stub_runner(cmd, **kw):
             return _claude_is_error_response()
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.is_error is True
         assert result.rc == 0
@@ -383,7 +383,7 @@ class TestFireSkill:
         def stub_runner(cmd, **kw):
             return _claude_nonzero_response(rc=2)
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.rc == 2
 
@@ -394,7 +394,7 @@ class TestFireSkill:
         def stub_runner(cmd, **kw):
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr="")
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
 
     def test_env_seam_overrides_command(self, tmp_path, monkeypatch):
@@ -408,7 +408,7 @@ class TestFireSkill:
             return _claude_ok_response()
 
         monkeypatch.setenv("PR_WATCH_FIRE_CMD", "true")
-        result = fire_skill("check", 5, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 5, tmp_path, runner=stub_runner, node_id="x-5")
         # When seam is set, the command prefix should change (stub runner sees it)
         assert result.ok is True
 
@@ -422,7 +422,7 @@ class TestFireSkill:
             captured["cmd"] = cmd
             return _claude_ok_response()
 
-        fire_skill("check", 7, tmp_path, runner=stub_runner)
+        fire_skill("check", 7, tmp_path, runner=stub_runner, node_id="x-7")
         cmd_str = " ".join(str(c) for c in captured["cmd"])
         assert captured["cmd"][:3] != ["claude", "--print", "--output-format"]
         assert "agents" in captured["cmd"] and "spawn" in captured["cmd"]
@@ -445,7 +445,7 @@ class TestFireSkill:
             captured.update(kw)
             return _claude_ok_response()
 
-        fire_skill("check", 7, tmp_path, runner=stub_runner)
+        fire_skill("check", 7, tmp_path, runner=stub_runner, node_id="x-7")
         assert captured.get("timeout") is not None
         assert captured["timeout"] > 0
 
@@ -460,7 +460,7 @@ class TestFireSkill:
             captured.update(kw)
             return _claude_ok_response()
 
-        fire_skill("check", 1, tmp_path, runner=stub_runner, timeout_s=12.0)
+        fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1", timeout_s=12.0)
         child_timeout = float(
             captured["cmd"][captured["cmd"].index("--timeout") + 1]
         )
@@ -475,7 +475,7 @@ class TestFireSkill:
         def stub_runner(cmd, **kw):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout", 0))
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.is_error is True
 
@@ -526,7 +526,7 @@ def _make_tick_deps(
             opened_at="2026-06-01T00:00:00Z",
         )
 
-    def fake_fire_skill(verb, pr_number, repo_dir, *, runner=None, model=None, env_seam=None):
+    def fake_fire_skill(verb, pr_number, repo_dir, *, node_id=None, runner=None, model=None, env_seam=None):
         from fno.pr_watch._dispatch import DispatchResult
 
         fired.append({"verb": verb, "pr": pr_number, "model": model})
@@ -1705,7 +1705,7 @@ class TestJsonLoadsGuards:
                 args=[], returncode=0, stdout="null", stderr=""
             )
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.is_error is True
 
@@ -1718,7 +1718,7 @@ class TestJsonLoadsGuards:
                 args=[], returncode=0, stdout="[1, 2, 3]", stderr=""
             )
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.is_error is True
 
