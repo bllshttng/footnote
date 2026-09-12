@@ -282,25 +282,25 @@ def test_keepgo_name_preserves_the_full_node_id():
     the spawn dedup token - the exact collision class x-3218 exists to remove.
     The canonical owner keeps the full identity and refuses when it cannot.
     """
-    from fno.agents.naming import AgentNameError, agent_name
+    from fno.agents.naming import AgentNameError, dispatch_agent_name
 
     long_id = "regready-pipeline-2c4f9a1b3d4e5f"
     assert len(long_id) > 30
-    name = agent_name("keepgo", long_id)
-    assert name == f"keepgo-{long_id}"
+    name = dispatch_agent_name("kg", "t", long_id)
+    assert name == f"kg-t-{long_id}"
     assert len(name) <= 64
 
     # Two ids sharing a 30-char prefix stay distinct (they used to collide).
-    a = agent_name("keepgo", long_id + "aa")
-    b = agent_name("keepgo", long_id + "bb")
+    a = dispatch_agent_name("kg", "t", long_id + "aa")
+    b = dispatch_agent_name("kg", "t", long_id + "bb")
     assert a != b
 
-    # Ordinary ids are unchanged from the old form.
-    assert agent_name("keepgo", "x-3218") == "keepgo-x-3218"
+    # Ordinary ids are unchanged from the current form.
+    assert dispatch_agent_name("kg", "t", "x-3218") == "kg-t-x-3218"
 
     # An id that cannot fit refuses rather than being shaved to a colliding stub.
     with pytest.raises(AgentNameError):
-        agent_name("keepgo", "n-" + "z" * 70)
+        dispatch_agent_name("kg", "t", "n-" + "z" * 70)
 
 
 def test_keepgo_spawn_refuses_an_unrepresentable_node(monkeypatch, caplog):
@@ -315,9 +315,16 @@ def test_keepgo_spawn_refuses_an_unrepresentable_node(monkeypatch, caplog):
     from fno.retro import keep_going as kg
 
     node_id = "n-" + "z" * 70
-    monkeypatch.setattr(
-        kg.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn")
-    )
+    # The mint executes in the binary and may ride the real subprocess; only
+    # the SPAWN itself must never run.
+    real_run = kg.subprocess.run
+
+    def _no_spawn(cmd, *a, **k):
+        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in cmd}:
+            return real_run(cmd, **k)
+        pytest.fail("must not spawn")
+
+    monkeypatch.setattr(kg.subprocess, "run", _no_spawn)
     with caplog.at_level(logging.WARNING, logger="fno.retro.keep_going"):
         assert kg._spawn_target_worker(node_id, None) is False
 

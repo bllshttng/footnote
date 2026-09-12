@@ -581,17 +581,20 @@ REAL_FNO_DIR="$TMP/real-fno"; mkdir -p "$REAL_FNO_DIR"
 } > "$REAL_FNO_DIR/fno"
 chmod +x "$REAL_FNO_DIR/fno"
 
-if "$REAL_FNO_DIR/fno" agents name target x-1 >/dev/null 2>&1; then
+# The reachability probe targets the binary the routed verb resolves to: the
+# checkout's own cargo build first, then the resolver's answer.
+REAL_AGENTS_BIN="${FNO_AGENTS_BIN:-$REPO_ROOT/crates/fno-agents/target/debug/fno-agents}"
+if [[ ! -x "$REAL_AGENTS_BIN" ]]; then
+  REAL_AGENTS_BIN="$(PYTHONPATH="$REPO_ROOT/cli/src" "${VENV_PY:-python3}" -c 'from fno import rust_binary; b = rust_binary.resolve_binary(); print(b or "")' 2>/dev/null)"
+fi
+if [[ -n "$REAL_AGENTS_BIN" ]] && [[ -x "$REAL_AGENTS_BIN" ]] && "$REAL_AGENTS_BIN" name target x-1 >/dev/null 2>&1; then
   LONGSLUG="$TMP/stub-longslug.sh"
   printf '#!/usr/bin/env bash\necho "path consolidation wave 0 delegate handoff"\n' > "$LONGSLUG"
   chmod +x "$LONGSLUG"
   OUT="$(NODE_SLUG_RESOLVER="$LONGSLUG" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
          PATH="$REAL_FNO_DIR:$PATH" bash "$NORM" --input "ab-deadbeef")"
   SHELL_NAME="$(field "$OUT" name)"
-  PY_NAME="$("$VENV_PY" -c "
-import sys; sys.path.insert(0, '$REPO_ROOT/cli/src')
-from fno.agents.naming import agent_name
-print(agent_name('spawn', 'ab-deadbeef', slug='path consolidation wave 0 delegate handoff'))")"
+  PY_NAME="$("$REAL_AGENTS_BIN" name spawn ab-deadbeef --slug "path consolidation wave 0 delegate handoff")"
   [[ -n "$SHELL_NAME" && "$SHELL_NAME" == "$PY_NAME" ]] \
     && pass "x-3218 shell bridge is byte-identical to direct Python generation" \
     || fail "x-3218 parity: shell=$SHELL_NAME python=$PY_NAME"
@@ -627,7 +630,7 @@ print(agent_name('spawn', 'ab-deadbeef', slug='path consolidation wave 0 delegat
     && pass "x-3218 slugless node still degrades to <verb>-<node>" \
     || fail "x-3218 slugless: $OUT"
 else
-  fail "x-3218 bridge unreachable: no cli venv at $VENV_PY"
+  fail "x-3218 bridge unreachable: no fno-agents binary resolves (cargo build -p fno-agents)"
 fi
 
 # --- x-0413: the handoff SEED carries the every-lane decisions check ---
