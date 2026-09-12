@@ -9,7 +9,7 @@
 //! Keys on the row's mux ref, never the harness, so it covers claude, codex,
 //! opencode, and agy pane rows in one branch.
 //!
-//! x-3448: the refusal used to key on the stored mux ref alone and advise
+//! The refusal used to key on the stored mux ref alone and advise
 //! `fno mux pane kill` even when the pane was already gone - the operator did
 //! the named thing and the row still would not clear. When a probe proves the
 //! pane absent, this builder runs the shared pane-stop precheck (the one rm
