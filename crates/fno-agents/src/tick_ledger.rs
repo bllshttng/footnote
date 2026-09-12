@@ -327,12 +327,16 @@ fn str_field(data: &Value, field: &str) -> Option<String> {
 
 /// Skip reasons that mean the arm ran and its run failed - not that it chose
 /// to skip. Sources: the pr-watch tick's outcome tokens (disabled, lock_held,
-/// quota_skip pass through; timeout/error fail) and the king-wake and notify
-/// emitters' failure tokens. `degraded` is deliberately absent: one transient
-/// gh read failure must not turn a fresh row red.
+/// quota_skip pass through; timeout/error fail), the king-wake and notify
+/// emitters' failure tokens, and auto_continue's `next-error`, which covers a
+/// non-zero, malformed or timed-out `backlog next`: an arm that could not
+/// compute its input has not skipped, it has failed. `degraded` is
+/// deliberately absent: one transient gh read failure must not turn a fresh
+/// row red.
 const FAILURE_SKIPS: &[&str] = &[
     "timeout",
     "error",
+    "next-error",
     "wake_failed",
     "sweep_failed",
     "notify_failed",
@@ -1053,6 +1057,61 @@ mod tests {
         assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
         assert!(kw.line.contains("STALE"), "line: {}", kw.line);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_fresh_next_error_fails_the_auto_continue_arm() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:58:20Z",
+                "auto_continue",
+                "session",
+                0,
+                json!("next-error"),
+                1800,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(!ac.stale, "the tick is 100s into a 1800s interval");
+        assert!(ac.failing, "an unreadable selection is a failed run");
+        assert!(ac.line.contains("FAIL"), "line: {}", ac.line);
+        assert!(ac.line.contains("skip=next-error"), "line: {}", ac.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fresh_benign_auto_continue_skips_stay_ok() {
+        for skip in ["disabled", "no-work"] {
+            let dir = temp_dir();
+            let journal = dir.join("global.jsonl");
+            write_rows(
+                &journal,
+                &[tick_envelope(
+                    "2026-09-04T11:58:20Z",
+                    "auto_continue",
+                    "session",
+                    0,
+                    json!(skip),
+                    1800,
+                )],
+            );
+            let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+            let mut rows = read_arms(&[journal], now);
+            explain(&mut rows, &DaemonFacts::Unknown);
+            let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+            assert!(!ac.failing, "{skip} is a choice, not a failure");
+            assert!(!ac.line.contains("FAIL"), "line: {}", ac.line);
+            assert!(ac.line.contains("ok"), "line: {}", ac.line);
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 
     #[test]
