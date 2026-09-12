@@ -3631,12 +3631,26 @@ def cmd_update(
                 raise typer.Exit(code=2)
             else:
                 node["orphan_ok"] = orphan_ok
-        # Dispatch overrides (US3). Stored permissively; the resolver is the trust
-        # boundary (allowlist + 8 KB cap at dispatch time, not write time).
+        # Dispatch overrides (US3). Stored permissively; the resolver stays the
+        # trust boundary (allowlist + hard 8 KB cap at dispatch time). The brief
+        # additionally warns at write (x-c837): the author is present here and
+        # absent at spawn, so surface the size now, in the spawn path's wording.
         if dispatch_verb is not None:
             node["dispatch_verb"] = None if dispatch_verb.lower() == "null" else dispatch_verb
         if dispatch_brief is not None:
-            node["dispatch_brief"] = None if dispatch_brief.lower() == "null" else dispatch_brief
+            from fno.agents.harness_map import _BRIEF_MAX_BYTES
+
+            brief_val = None if dispatch_brief.lower() == "null" else dispatch_brief
+            node["dispatch_brief"] = brief_val
+            if brief_val is not None:
+                n_bytes = len(brief_val.encode("utf-8"))
+                if n_bytes > _BRIEF_MAX_BYTES:
+                    typer.echo(
+                        f"warning: dispatch brief is {n_bytes} bytes, over the "
+                        f"{_BRIEF_MAX_BYTES}-byte (8 KB) env budget; shorten it "
+                        f"(no silent truncation) - spawn will refuse it",
+                        err=True,
+                    )
         if priority is not None:
             node["priority"] = priority
         # --blocks-everything acknowledges p0. Standalone, it acknowledges an
