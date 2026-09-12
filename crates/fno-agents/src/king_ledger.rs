@@ -373,6 +373,18 @@ fn write_atomic(path: &PathBuf, body: &str) -> Result<(), String> {
     }
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, body).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    // The page travels over tailscale via `fno mux serve --web`'s `/crown`
+    // route, so it must match graph.html's 600 regardless of umask - unlike
+    // graph.html's Python writer, `std::fs::write` takes the umask-default
+    // mode (644 under a typical 022 umask).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("cannot chmod {}: {e}", tmp.display()));
+        }
+    }
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("cannot publish {}: {e}", path.display()));
@@ -608,6 +620,37 @@ mod tests {
             .filter_map(Result::ok)
             .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!leftovers);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn publishes_reign_html_at_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("reign-ledger-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let court_path = dir.join("court.json");
+        let graph_path = dir.join("graph.json");
+        let out_path = dir.join("reign.html");
+        std::fs::write(&court_path, base_court(json!([base_crown()])).to_string()).unwrap();
+        std::fs::write(&graph_path, json!({"entries": []}).to_string()).unwrap();
+        let args: Vec<String> = [
+            "--court-json",
+            court_path.to_str().unwrap(),
+            "--graph",
+            graph_path.to_str().unwrap(),
+            "--generated",
+            "2026-09-12T00:00:00Z",
+            "--out",
+            out_path.to_str().unwrap(),
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(run_reign_ledger(&args), 0);
+        let mode = std::fs::metadata(&out_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "reign.html must match graph.html's 600 mode");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
