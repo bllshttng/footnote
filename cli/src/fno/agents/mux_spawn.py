@@ -51,6 +51,7 @@ from fno.agents.dispatch import (
     validate_spawn_name,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command, render_seed
+from fno.agents.spawn_defaults import is_verb_seed
 from fno.agents.writable_dirs import (
     ADD_DIR_PROVIDERS,
     add_dir_tokens,
@@ -1314,8 +1315,7 @@ def build_pane_argv(
     :func:`dispatch_spawn_pane` - so they inherit the same guards fno's own
     flags pass through, rather than appending past them. Absent/empty composes
     a byte-identical argv."""
-    if message.strip().startswith(("/", "$fno:")):
-        message = normalize_command(message, provider)
+    message = normalize_command(message, provider) if is_verb_seed(message) else message
 
     from fno.agents.harness_map import is_declared, render_session_argv
 
@@ -3847,7 +3847,7 @@ def dispatch_spawn_pane(
         launch_role = None
 
     effective_message: Optional[str] = None
-    if message.strip().startswith(("/", "$fno:")):
+    if is_verb_seed(message):
         try:
             message = render_seed(message, provider)
         except DispatchResolveError as exc:

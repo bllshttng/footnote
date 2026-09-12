@@ -655,6 +655,11 @@ def normalize_command(command: str, harness: str) -> str:
         if verb not in footnote_verbs():
             return cmd
         return "$fno:" + verb + cmd[len(first_word):]
+    if surface == _SLASH and cmd.startswith("$fno:"):
+        # Reverse rewrite (x-413d): the sigil says who WROTE the seed, never
+        # which harness runs it. Swap the sigil, keep the namespace, and let
+        # the /fno: handling below render it per surface.
+        cmd = "/fno:" + cmd[len("$fno:"):]
     if surface == _SLASH and cmd.startswith("/"):
         # Plugin-namespace prefix swap only (never re-tokenize): claude/agy inject
         # the skill natively (""), opencode's fno plugin exposes it as `/fno:verb`.
@@ -755,8 +760,11 @@ def verb_fired_marker(message: str) -> Optional[str]:
 
 
 def render_seed(message: str, harness: str) -> str:
-    """Prose verbatim; a verb-shaped seed gate-checked then normalized."""
-    if not message.strip().startswith(("/", "$fno:")):
+    """Prose verbatim; a verb-shaped seed gate-checked then normalized by the
+    one shared fire-test predicate (``is_verb_seed``, x-413d)."""
+    from fno.agents.spawn_defaults import is_verb_seed
+
+    if not is_verb_seed(message):
         return message
     refusal = cannot_fire_refusal(message, harness)
     if refusal:
