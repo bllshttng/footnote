@@ -188,9 +188,8 @@ def keeper_thread_spawn(
         raise DispatchAskError(arm["once_refusal"], exit_code=2)
 
     carries = tuple(arm.get("carries") or ())
-    # The spawn front door demoted every axis this lane cannot carry to the
-    # pane, so whatever reaches here has a carrier; the row's `carries` only
-    # decides which kwargs the lane builder takes.
+    # The front door demoted every uncarried axis to the pane, so `carries`
+    # only decides which kwargs the lane builder takes.
     resume_session_id = options.get("resume_session_id")
     if resume_session_id and arm.get("resume_refusal"):
         raise DispatchAskError(

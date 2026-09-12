@@ -545,13 +545,9 @@ def normalize_spawn_args(
             toks = toks[:cut] + ["--substrate", "bg"] + toks[cut:]
             print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
 
-    # A bare `--` fence carries provider passthrough. A thread lane carries
-    # only the spellings its contract row maps, so a spawn pinning thread/bg
-    # with an unmapped fenced token demotes to the pane here - the lane
-    # refuses nothing for the substrate's sake. Runs on operator argv and
-    # again after config injection, so a substrate that arrived by config
-    # default - which reroutes to the Rust lane before the Python CLI's own
-    # resolver can run - demotes here too.
+    # A thread lane carries only what its contract row maps: a spawn pinning
+    # thread/bg with an unmapped fenced token demotes to the pane here, on
+    # both runtimes (the Rust-routed lane never reaches the CLI's resolver).
     fence = next((i for i, t in enumerate(toks) if t == "--"), None)
     if fence is not None:
         _demote_thread_uncarried_passthrough(toks, err)
