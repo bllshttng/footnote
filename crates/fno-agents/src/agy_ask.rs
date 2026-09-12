@@ -128,12 +128,13 @@ pub fn build_argv_once_with_effort(
             argv.push(m.to_string());
         }
     }
+    // Fenced tokens ride before -p so agy's own parser reads them as flags,
+    // not prompt text.
+    argv.extend(harness_args.iter().cloned());
     // -p LAST, prompt as its value.
     argv.push("-p".to_string());
     // argv-fence: exempt (probed 2026-08-15: agy folds flag-shaped text into
-    // the prompt; no clean end-of-options to fence with). Fenced tokens ride
-    // before -p so agy's own parser reads them as flags, not prompt text.
-    argv.extend(harness_args.iter().cloned());
+    // the prompt; no clean end-of-options to fence with).
     argv.push(full_prompt.to_string());
     argv
 }

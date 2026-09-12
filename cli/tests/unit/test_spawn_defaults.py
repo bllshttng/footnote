@@ -576,15 +576,19 @@ def test_do_shim_seed_uses_execute_profile():
     assert out[out.index("--model") + 1] == "execute-model"
 
 
-def test_config_default_substrate_refuses_passthrough_after_injection():
+def test_config_default_substrate_demotes_uncarried_passthrough_after_injection():
     # x-1caa AC7: a substrate that arrives by CONFIG default reroutes to the
-    # Rust lane before the Python CLI's own refusal can run, so the gate
-    # re-runs on the post-injection argv at the seam.
+    # Rust lane before the seam's own gate runs, so the gate re-runs on the
+    # post-injection argv at the seam. The codex thread lane cannot carry
+    # --verbose, so the seam demotes the spawn to the pane, loudly.
     err = io.StringIO()
-    with pytest.raises(SystemExit) as exc:
-        _inject(["spawn", "hi", "--", "--verbose"], substrate="headless", err=err)
-    assert exc.value.code == 2
-    assert "pane-only" in err.getvalue()
+    out = _inject(
+        ["spawn", "-H", "codex", "hi", "--", "--verbose"],
+        substrate="thread",
+        err=err,
+    )
+    assert "--substrate" in out and "pane" in out
+    assert "has no carrier for --verbose" in err.getvalue()
 
 
 def test_value_flag_value_not_misread_as_our_flag():

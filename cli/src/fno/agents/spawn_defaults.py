@@ -1703,8 +1703,11 @@ def inject_spawn_defaults(
         # x-1caa: injection can pin the substrate the operator left open, and
         # the Rust-routed lane never reaches the Python CLI's own refusal - so
         # the off-pane passthrough gate re-runs on the final argv, not just the
-        # operator's.
-        _demote_thread_uncarried_passthrough(out[1:], err)
+        # operator's. The helper rewrites in place; hand it a view of `out`
+        # whose mutation survives.
+        final = out[1:]
+        _demote_thread_uncarried_passthrough(final, err)
+        out[1:] = final
     # `from_config` is the record of what was actually INJECTED, so it is the
     # only honest answer to "did anyone choose this model?". Reading the config
     # value instead would refuse a typed model that merely happens to sit
