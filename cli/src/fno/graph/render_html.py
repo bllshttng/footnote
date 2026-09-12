@@ -439,6 +439,14 @@ h1 { font-size:29px; line-height:1.15; margin:0; font-weight:600; letter-spacing
 .stat.is-prog { border-color:var(--prog); background:var(--prog-bg) }
 .stat.is-prog .n, .stat.is-prog .k { color:var(--prog) }
 .stat.is-blocked .n { color:var(--blocked) }
+.flow { display:flex; flex-wrap:wrap; gap:10px 26px; align-items:baseline;
+  background:var(--surface); border:1px solid var(--line); border-radius:9px;
+  padding:11px 15px; margin-top:10px; box-shadow:var(--shadow) }
+.flow .fhead { flex-basis:100%; font-size:11px; letter-spacing:.06em; color:var(--muted) }
+.flow .fgroup { min-width:230px }
+.flow .fk { font-size:11px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); font-weight:500 }
+.flow .fv { font-size:13px; margin-top:3px; font-variant-numeric:tabular-nums }
+.flow .fsub { font-size:11px; color:var(--muted); margin-top:3px }
 .controls { display:flex; flex-wrap:wrap; gap:9px; align-items:center;
   background:var(--surface); border:1px solid var(--line); border-radius:9px;
   padding:11px 13px; box-shadow:var(--shadow); position:sticky; top:0; z-index:20 }
@@ -634,7 +642,7 @@ _DASHBOARD_JS = """\
   var statRows = [['Total', 'total', ''], ['In progress', 'in_progress', 'is-prog'],
     ['In review', 'in_review', ''], ['Ready', 'ready', 'is-ready'], ['Blocked', 'blocked', 'is-blocked'],
     ['Design', 'design', ''], ['Idea', 'idea', ''], ['Deferred', 'deferred', ''],
-    ['Done', 'done', 'is-done'], ['Shipped', 'shipped', 'is-done']];
+    ['Done', 'done', 'is-done'], ['Done % of shown', 'shipped', 'is-done']];
   var statNums = [];
   statRows.forEach(function (s) { var d = document.createElement('div'); d.className = 'stat' + (s[2] ? ' ' + s[2] : '');
     d.innerHTML = '<div class=\"n\"></div><div class=\"k\">' + s[0] + '</div>'; statsEl.appendChild(d); statNums.push(d.querySelector('.n')); });
@@ -748,6 +756,51 @@ _DASHBOARD_JS = """\
     state.status = saved;
     ORDER.forEach(function (s) { var el = statusBadges[s]; if (el) el.textContent = facet[s] || 0; });
   }
+  // The flow panel: one keeper-computed payload for this board's scope,
+  // rendered once here, never from the filtered row set, so no row filter
+  // can move a throughput denominator.
+  function renderFlow(flow) {
+    var el = document.getElementById('flow');
+    if (!el) return;
+    if (!flow) { el.style.display = 'none'; return; }
+    if (!flow.available) {
+      el.innerHTML = '<div class="fgroup"><div class="fk">Delivery flow</div>' +
+        '<div class="fv">unavailable: ' + esc(flow.reason || 'unknown reason') + '</div></div>';
+      return;
+    }
+    function grp(title, body, sub) {
+      return '<div class="fgroup"><div class="fk">' + title + '</div><div class="fv">' + body +
+        (sub ? '</div><div class="fsub">' + sub : '') + '</div></div>';
+    }
+    function waitingLine(key, label) {
+      var v = (flow.waiting || {})[key] || {};
+      return label + ' ' + (v.count || 0) + (v.oldest_age_days == null ? '' : ' (oldest ' + v.oldest_age_days + 'd)');
+    }
+    var w = flow.window || {}, d = flow.deliveries || {}, cov = flow.coverage || {};
+    var c = flow.cycle || {}, op = flow.open_prs || {};
+    var weeks = (d.weeks || []).map(function (wk) {
+      return esc(String(wk.week_start || '')) + ': ' + ((wk.code || 0) + (wk.doc || 0)) + (wk.partial ? '*' : '');
+    }).join(' · ');
+    var covNote = [];
+    if (cov.unlinked) covNote.push('plus ' + cov.unlinked + ' unlinked delivery(s) not on this board');
+    if (cov.rows != null) covNote.push(cov.rows + ' ledger rows in scope');
+    if (weeks) covNote.unshift(weeks + ' (* partial week)');
+    el.innerHTML =
+      '<div class="fhead">last ' + esc(String(w.since_days == null ? '' : w.since_days)) + ' days to ' +
+      esc(String(w.end || '')) + ' · local weeks' + (w.tz_offset ? ' (' + esc(String(w.tz_offset)) + ')' : '') +
+      ', start Monday · scope does not follow filters</div>' +
+      grp('Delivered', (d.total || 0) + ' · ' + esc(String(d.code || 0)) + ' code, ' + esc(String(d.doc || 0)) + ' doc',
+        esc(covNote.join(' · '))) +
+      grp('Elapsed',
+        c.n ? 'open-to-merge median ' + esc(String(c.median_days)) + 'd · p85 ' + esc(String(c.p85_days)) +
+          'd (n=' + esc(String(c.n)) + ')' : 'open-to-merge: ' + esc(c.reason || 'no samples'),
+        'open PRs ' + (op.count || 0) + ', oldest ' + (op.oldest_age_days == null ? 'unknown' : op.oldest_age_days + 'd')) +
+      grp('Waiting',
+        waitingLine('in_progress', 'WIP') + ' · ' + waitingLine('in_review', 'review') + ' · ' +
+        waitingLine('blocked', 'blocked'),
+        'ages from node created_at · accumulated blocked time unmeasured');
+  }
+  renderFlow(DATA.flow);
   // Copy, with the execCommand fallback the canonical template carried. This
   // board is opened from disk as often as over http, and file:// is not a
   // secure context, so navigator.clipboard is frequently absent exactly where
@@ -1261,6 +1314,7 @@ def _dashboard_html(
     vault: str | None = None,
     context_entries: list[dict] | None = None,
     projection: str = "backlog",
+    flow: dict | None = None,
 ) -> str:
     rows = _dashboard_rows(
         entries, local=local, vault=vault, context_entries=context_entries
@@ -1278,6 +1332,10 @@ def _dashboard_html(
             # A roadmap's whole point is the shipped column, so it opens with
             # done pressed. Every other surface opens on open work.
             "initial_done": projection == "roadmap",
+            # The flow panel's whole payload, keeper-computed for this
+            # board's scope. The JS presents these numbers and never
+            # re-derives them from the rows.
+            "flow": flow,
         },
         separators=(",", ":"),
     ).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
@@ -1374,12 +1432,27 @@ def _dashboard_html(
             if local
             else ""
         )
-        + f'</div><main id="board">{static_board}</main>'
+        + f'</div><div class="flow" id="flow"></div><main id="board">{static_board}</main>'
         f'<footer><span id="shown"></span><span>rendered {generated}</span>'
         f"<span>statuses: {status_legend}</span></footer>"
         f'</div><script id="data" type="application/json">{payload}</script>'
         f"<script>{dashboard_js}</script></body></html>\n"
     )
+
+
+def _board_flow(entries: list[dict], project: str | None = None, *, since_days: int = 28) -> dict:
+    """Flow payload for one board scope. Never raises (AC2-EDGE): the board
+    renders on every graph mutation, keeper or no keeper."""
+    try:
+        from fno import paths as _paths
+        from fno.scoreboard.fold import classify_deliveries, load_ledger_rows
+
+        flow = classify_deliveries(
+            entries, load_ledger_rows(_paths.ledger_json()), project, since_days=since_days
+        ).get("flow")
+        return flow if isinstance(flow, dict) else {"available": False, "reason": "classifier gave no flow"}
+    except Exception as exc:  # noqa: BLE001 - degrade, never wedge the render
+        return {"available": False, "reason": f"flow source unavailable ({type(exc).__name__})"}
 
 
 def render_graph_html(
@@ -1407,6 +1480,9 @@ def render_graph_html(
         local=True,
         vault=vault,
         context_entries=all_entries,
+        flow=_board_flow(
+            scoped, None if all_projects or not project else project
+        ),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
@@ -1423,8 +1499,15 @@ def render_graph_html(
 
 
 def render_public_sections_html(
-    sections: list[tuple[str, list[dict]]], *, title: str, projection: str
+    sections: list[tuple[str, list[dict]]],
+    *,
+    title: str,
+    projection: str,
+    flow: dict | None = None,
 ) -> str:
-    """Render any public projection with the same canonical dashboard shape."""
+    """Render any public projection with the same canonical dashboard shape.
+    ``flow`` is aggregate numbers only (no ids, titles or paths)."""
     entries = [entry for _label, section in sections for entry in section]
-    return _dashboard_html(entries, title=title, local=False, projection=projection)
+    return _dashboard_html(
+        entries, title=title, local=False, projection=projection, flow=flow
+    )

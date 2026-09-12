@@ -52,12 +52,13 @@ def classify_deliveries(
     rows: list[dict],
     project: str | None = None,
     now=None,
+    since_days: int | None = None,
 ) -> dict:
     """The one delivery classification (Rust keeper): by_node, coverage,
-    survival, and with a project the scoped entries/rows/node_ids."""
+    survival, flow, and with a project the scoped entries/rows/node_ids."""
     from fno.graph.store import request_scoreboard_classify
 
-    return request_scoreboard_classify(graph_nodes, rows, project, now)
+    return request_scoreboard_classify(graph_nodes, rows, project, now, since_days)
 
 
 def emission_failures_snapshot() -> dict:

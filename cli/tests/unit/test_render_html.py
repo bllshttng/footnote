@@ -2,16 +2,43 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 from pathlib import Path
 
+import pytest
+
 from fno.graph.render_html import (
+    LEAK_PATTERNS,
     UNSCOPED_LABEL,
     _dashboard_rows,
     _obsidian_url,
     render_graph_html,
     render_public_sections_html,
 )
+
+
+@pytest.fixture(autouse=True)
+def hermetic_flow(monkeypatch):
+    """No test in this file talks to the ledger or the keeper: the board
+    render now computes a flow payload, and an autouse stub keeps all fifty
+    pre-existing render tests off the real sources. Flow-specific tests
+    re-patch with the payload they assert on."""
+    monkeypatch.setattr(
+        "fno.graph.render_html._board_flow",
+        lambda entries, project=None, **kw: {
+            "available": False,
+            "reason": "hermetic test stub",
+        },
+    )
+
+
+def _payload_flow(text: str) -> dict:
+    match = re.search(
+        r'<script id="data" type="application/json">(.*?)</script>', text, re.S
+    )
+    assert match, "dashboard payload script tag missing"
+    return json.loads(match.group(1))["flow"]
 
 
 def _entry(eid: str, **kwargs) -> dict:
@@ -1238,5 +1265,102 @@ def test_ac3_hp_origin_filter_does_not_reorder_rows():
     ]
     rows = _dashboard_rows(entries, local=True, context_entries=entries)
     assert [r["id"] for r in rows] == ["p3-000001", "p1-000002"]
+
+
+_FLOW = {
+    "available": True,
+    "window": {
+        "since_days": 28,
+        "start": "2026-08-12",
+        "end": "2026-09-09",
+        "week_start": "monday",
+        "tz_offset": "-07:00",
+    },
+    "deliveries": {
+        "total": 4,
+        "code": 3,
+        "doc": 1,
+        "weeks": [
+            {"week_start": "2026-08-17", "code": 0, "doc": 0, "partial": False},
+            {"week_start": "2026-08-31", "code": 2, "doc": 1, "partial": False},
+            {"week_start": "2026-09-07", "code": 1, "doc": 0, "partial": True},
+        ],
+    },
+    "cycle": {"median_days": 2.5, "p85_days": 6.0, "n": 4},
+    "open_prs": {"count": 1, "oldest_age_days": 12},
+    "waiting": {
+        "in_progress": {"count": 9, "oldest_age_days": 34},
+        "in_review": {"count": 2, "oldest_age_days": 6},
+        "blocked": {"count": 3, "oldest_age_days": 21},
+    },
+    "coverage": {"nodes": 40, "rows": 60, "unlinked": 1, "age_basis": "node created_at"},
+}
+
+
+def test_flow_panel_embeds_scoped_payload_and_shows_all_groups(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_flow(entries, project=None, **kw):
+        seen["project"] = project
+        seen["entries"] = entries
+        return _FLOW
+
+    monkeypatch.setattr("fno.graph.render_html._board_flow", fake_flow)
+    out = tmp_path / "graph.html"
+
+    render_graph_html([_entry("x-1", project="alpha")], out, project="alpha")
+
+    text = out.read_text()
+    assert seen["project"] == "alpha"
+    assert seen["entries"] == [_entry("x-1", project="alpha")]
+    assert _payload_flow(text) == _FLOW
+    assert 'id="flow"' in text
+    assert "renderFlow" in text
+    # AC2-HP: the panel renders ONCE from the embedded payload at setup,
+    # never from the filtered row set, so no filter can move a denominator.
+    js = text.split('<script id="data"')[1]
+    assert js.count("renderFlow(DATA.flow);") == 1
+    refresh_body = js.split("function refreshCounts")[1].split("function renderFlow")[0]
+    assert "renderFlow" not in refresh_body
+
+
+def test_flow_panel_unavailable_names_reason_without_fabricated_numbers(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "fno.graph.render_html._board_flow",
+        lambda entries, project=None, **kw: {
+            "available": False,
+            "reason": "classifier unavailable (StoreUnavailable)",
+        },
+    )
+    out = tmp_path / "graph.html"
+
+    render_graph_html([_entry("x-1")], out)
+
+    flow = _payload_flow(out.read_text())
+    assert flow["available"] is False
+    assert "StoreUnavailable" in flow["reason"]
+    # AC2-EDGE: no weeks array at all when the source is unavailable, so the
+    # panel cannot show a fabricated zero series.
+    assert "weeks" not in flow
+    # The reason names the class, never a local path.
+    assert "/Users/" not in flow["reason"]
+
+
+def test_public_backlog_flow_is_aggregate_and_leak_clean():
+    from fno.graph.roadmap_public import render_public_backlog_html
+
+    content = render_public_backlog_html(
+        [_entry("pub-00001", project="alpha", title="Public title")],
+        "alpha",
+        flow=_FLOW,
+    )
+    assert _payload_flow(content) == _FLOW
+    # The flow payload is aggregates only: every leak class comes up empty
+    # when scanned against it directly.
+    flow_json = json.dumps(_FLOW)
+    for name, pattern in LEAK_PATTERNS:
+        assert not pattern.search(flow_json), f"flow leaks {name}"
 
 
