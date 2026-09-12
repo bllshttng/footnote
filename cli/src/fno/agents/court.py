@@ -375,9 +375,7 @@ def _annotate_sessions(crowns: list[dict[str, Any]]) -> bool:
         rows, readable = load_registry(), True
     except Exception:  # noqa: BLE001 - an unreadable registry judges nothing
         rows, readable = [], False
-    status = {
-        sid: r.status for r in rows if (sid := getattr(r, "harness_session_id", None))
-    }
+    status = {s: r.status for r in rows if (s := getattr(r, "harness_session_id", None))}
     for crown in crowns:
         fold = crown.get("scope_nodes")
         if not isinstance(fold, dict):
