@@ -44,7 +44,12 @@ def _mint(*args):
 
 @lru_cache(maxsize=1)
 def _codes():
-    raw = json.loads(_run("name-codes", ["--json"]))
+    # A garbage payload (an rc-0 stub, a wrapped binary with a banner) reads as
+    # the stale-binary refusal every caller already guards.
+    try:
+        raw = json.loads(_run("name-codes", ["--json"]))
+    except json.JSONDecodeError as exc:
+        raise AgentNameError(f"name-codes payload unparsable: the fno-agents binary is stale ({exc})")
     return (frozenset(raw["sources"]), frozenset(raw["verbs"]), dict(raw["word_codes"]),
             tuple((r["site"], r["source"], r["verb"]) for r in raw["provenance"]))
 
@@ -118,7 +123,11 @@ def parse_many(names):
         return []
     out = []
     for line in _run("name-parse", [], "\n".join(names)).splitlines():
-        row = json.loads(line)
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            # A garbage row reads as the stale-binary refusal callers guard.
+            raise AgentNameError("name-parse produced an unparsable row: the fno-agents binary is stale")
         out.append(None if row.get("verb") is None else DispatchName(
             row["name"], row.get("source"), row["verb"], row.get("node"), row.get("tail") or ""))
     return out
