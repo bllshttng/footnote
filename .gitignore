@@ -151,6 +151,9 @@ peer-review.diff
 # Generated code-intelligence indexes. Checkout-local and rebuildable, never
 # a commit candidate. graphify-out/ is unanchored: nested runs land under
 # cli/, crates/, docs/ and skills/ too. No trailing slash on .codegraph:
-# older installs link it as a symlink, which git treats as a file.
+# older installs link it as a symlink, which git treats as a file. Untracked
+# it is not merely junk: one such directory under crates/ makes the rust
+# build report every component as "built from a dirty crates/ tree", which
+# blocks the verified deploy.
 graphify-out/
 .codegraph
