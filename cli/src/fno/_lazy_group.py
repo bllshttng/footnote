@@ -206,15 +206,17 @@ class _LazyStub(click.Group):
         try:
             module = importlib.import_module(module_path)
         except ImportError as exc:
-            # Imports here happen at INVOCATION time, so `uv tool install
-            # --reinstall` (what `fno doctor update` runs) can delete and rewrite this
+            # Imports here happen at INVOCATION time, so `uv tool install`
+            # (what `fno doctor update` runs) can delete and rewrite this
             # package between process start and this line. On a box with several
             # launchd agents and live sessions, some `fno` process is nearly
             # always mid-flight during that window, so this is routine rather
             # than exotic.
             #
-            # Retry ONCE, and only after confirming on disk that what was
-            # missing is present now. That check is the whole difference between
+            # Retry ONCE, and only after the shared on-disk check says what was
+            # missing is present now -- a check that includes a bounded wait,
+            # since the rewriting installer can still be mid-flight when the
+            # first look lands. That check is the whole difference between
             # this and a hopeful sleep-retry: a genuinely stale or broken
             # install still answers "absent" and still fails below with the same
             # message, so nothing is masked. A second failure is reported
