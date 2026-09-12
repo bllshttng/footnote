@@ -49,6 +49,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "host",
     "kill-check",
     "king-history",
+    "reign-ledger",
     "route-slot",
     "list",
     "logs",
@@ -472,6 +473,13 @@ async fn run(args: Vec<String>) -> i32 {
     // owns the scan so the file-budget Python-tree ratchet holds.
     if verb == "king-history" {
         return fno_agents::king_history::run_king_history(&args[1..]);
+    }
+    // `reign-ledger`: the reign ledger page for `fno agents king ledger`.
+    // Same split as king-history: Python resolves the court and the paths,
+    // the native side owns the page assembly, and the fold's scope_nodes ride
+    // in the court JSON, so the page cannot disagree with the court.
+    if verb == "reign-ledger" {
+        return fno_agents::king_ledger::run_reign_ledger(&args[1..]);
     }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);

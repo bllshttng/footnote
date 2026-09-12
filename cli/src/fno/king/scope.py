@@ -11,23 +11,12 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 
-def compile_scope_ids(
-    scope: str, entries: list[dict], *, resolve=None, level: Optional[int] = None
-) -> set[str]:
-    """Compile a canonical crown scope into the graph node ids it contains.
-
-    ``level`` forces the rung instead of resolving it (the court-fold rule:
-    a crown row folds at its OWN level and never re-resolves from config).
-    Forced mode trusts the caller's scope to be canonical, as the native
-    ``compile_forced`` does.
-    """
+def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[str]:
+    """Compile a canonical crown scope into the graph node ids it contains."""
     from fno.agents.crown import _canonical_project, resolve_crown, split_scope
 
-    if level is None:
-        resolver = resolve or resolve_crown
-        level, canonical = resolver(split_scope(scope))
-    else:
-        canonical = scope
+    resolver = resolve or resolve_crown
+    level, canonical = resolver(split_scope(scope))
     if level == 2:
         from fno.graph._intake import descendants_of
 

@@ -534,12 +534,15 @@ def ledger_cmd(
 ) -> None:
     """Render the reign ledger page: every crown, its territory, its nodes.
 
-    Reads the court's adjudicated fold (``fno agents court -n`` data path);
-    it never re-derives the scope join. Contract: docs/architecture/reign.md.
+    The page assembly is the native ``reign-ledger`` verb; this shell resolves
+    the court and the paths. Contract: docs/architecture/reign.md.
     """
     from fno.king.ledger import build_ledger_data, write_ledger
 
-    path = write_ledger(build_ledger_data(), out)
+    try:
+        path = write_ledger(build_ledger_data(), out)
+    except RuntimeError as exc:
+        _refuse(f"king: {exc}")
     typer.echo(f"reign ledger: {path}")
 
 
