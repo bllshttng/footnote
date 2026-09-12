@@ -38,6 +38,20 @@ def test_set_int_coercion(tmp_path):
     assert _read(tmp_path)["agents"]["a2a"]["turn_ceiling"] == 10
 
 
+def test_set_repairs_stored_quoted_bool_in_union_field(tmp_path):
+    # `enabled: bool | dict[str, bool]` stored a hand-quoted "true"; setting
+    # the same logical value must rewrite it as a bare bool, not no-op on
+    # the unchanged literal while printing success.
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir()
+    (fno_dir / "config.toml").write_text('[active_backlog]\nenabled = "true"\n')
+    res = set_config_value(
+        "active_backlog.enabled", "true", scope="project", repo_root=tmp_path
+    )
+    assert res.value is True
+    assert _read(tmp_path)["active_backlog"]["enabled"] is True
+
+
 @pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
 def test_config_set_rejects_nonterminating_lock_timeout(tmp_path, timeout):
     with pytest.raises(ValueError, match="finite and non-negative"):
