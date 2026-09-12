@@ -288,9 +288,14 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     }
 
 
-def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
+def fold_scope_nodes(crowns: list[dict[str, Any]]) -> dict[str, Any]:
     """Fold each crown's scope onto its row via `fno-agents court-fold`; any
-    fault marks the crown unresolved (design: docs/architecture/court-scope-fold.md)."""
+    fault marks the crown unresolved (design: docs/architecture/court-scope-fold.md).
+
+    Returns the fold's own stuck verdict, computed beside the rows it judges
+    so no second reader can disagree about what a row means. A fault answers
+    ``{}``, and the unresolved crowns above carry the reason.
+    """
     import json as _json
     import subprocess
 
@@ -298,7 +303,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
     from fno.rust_binary import resolve_binary
 
     if not crowns:
-        return
+        return {}
     for crown in crowns:
         scope = crown.get("scope")
         if not (isinstance(scope, str) and scope.strip()) or crown.get("level") is None:
@@ -312,7 +317,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
         if "scope_nodes" not in c
     ]
     if not payload:
-        return
+        return {}
     try:
         binary = resolve_binary()
         if binary is None:
@@ -320,24 +325,92 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
         proc = subprocess.run(
             [str(binary), "court-fold", "--graph", str(graph_json()),
              "--crowns-json", _json.dumps(payload), "--format", "json"],
-            capture_output=True, text=True, check=False, timeout=30,
+            capture_output=True, text=True, check=False, timeout=120,
         )
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip() or f"exit {proc.returncode}")
-        scope_nodes = _json.loads(proc.stdout)["scope_nodes"]
+        folded = _json.loads(proc.stdout)
+        scope_nodes = folded["scope_nodes"]
     except Exception as exc:  # noqa: BLE001 - a failed fold is stated, never a crash
+        # A TimeoutExpired stringifies to its whole argv, which buries the fault
+        # it reports. Name that one and its bound instead.
+        reason = (
+            "the fold timed out after 120s"
+            if isinstance(exc, subprocess.TimeoutExpired)
+            else f"the fold could not run: {exc}"
+        )
         for crown in crowns:
-            crown.setdefault(
-                "scope_nodes",
-                {"status": "unresolved", "reason": f"the fold could not run: {exc}"},
-            )
-        return
+            crown.setdefault("scope_nodes", {"status": "unresolved", "reason": reason})
+        return {}
     for crown in crowns:
         scope = crown.get("scope")
         crown["scope_nodes"] = scope_nodes.get(
             scope,
             {"status": "unresolved", "reason": "the fold answered no row for this scope"},
         )
+    return folded
+
+
+def _gate_read() -> dict[str, Any]:
+    """The spawn gate's verdict: `unknown` with a reason, never a healthy default."""
+    try:
+        from fno.agents.spawn_gate import probe_capacity
+
+        verdict = probe_capacity()
+    except Exception as exc:  # noqa: BLE001 - a display read never raises
+        return {"verdict": "unknown", "reason": f"the gate could not be read: {exc}"}
+    if not isinstance(verdict, dict) or not verdict.get("verdict"):
+        return {"verdict": "unknown", "reason": "the gate answered no verdict"}
+    return verdict
+
+
+def _annotate_sessions(crowns: list[dict[str, Any]]) -> bool:
+    """Judge each node row's session ids against the registry; returns whether it read.
+
+    A uuid a reader cannot judge invites a confident wrong inference in both
+    directions. Absent from the registry answers ``live: None``, never ``False``.
+    """
+    from fno.agents.registry import TERMINAL_STATUSES, load_registry
+
+    try:
+        rows, readable = load_registry(), True
+    except Exception:  # noqa: BLE001 - an unreadable registry judges nothing
+        rows, readable = [], False
+    status = {s: r.status for r in rows if (s := getattr(r, "harness_session_id", None))}
+    for crown in crowns:
+        fold = crown.get("scope_nodes")
+        if not isinstance(fold, dict):
+            continue
+        for node in fold.get("nodes") or []:
+            node["sessions"] = [
+                {
+                    "id": sid,
+                    "live": None if sid not in status else status[sid] not in TERMINAL_STATUSES,
+                    "status": status.get(sid),
+                }
+                for sid in (node.get("sessions") or [])
+                if isinstance(sid, str)
+            ]
+    return readable
+
+
+def _blind_stuck(reason: str) -> dict[str, Any]:
+    """The verdict when the fold itself could not answer, with the reason."""
+    return {"unclaimed": [], "blocked": [], "unproven_claim": [], "in_review": [],
+            "blind": [reason], "threshold_minutes": None}
+
+
+def _stuck_render(summary: dict[str, Any], gate: dict[str, Any]) -> str:
+    """One line. A clean read and a blind read must never look the same."""
+    line = summary.get("stuck_line") or ""
+    parts = [line] if line else []
+    if gate.get("verdict") == "refused":
+        parts.append(f"gate refused {gate.get('reason')}")
+    # The fold already rendered its own blind reasons into `line`; only the
+    # ones this caller added still need a clause.
+    blind = summary["stuck"].get("blind") or []  # a cross-process payload, so read it soft
+    parts += [f"could not answer: {r}" for r in blind if r not in line]
+    return "stuck: " + (", ".join(parts) if parts else "nothing")
 
 
 def crowned_sessions(rows: list) -> set[str]:
@@ -380,8 +453,32 @@ def render_court(as_json: bool, nodes: bool = False) -> str:
     import json
 
     court = gather_court()
-    if nodes and court["crowns"]:
-        fold_scope_nodes(court["crowns"])
+    if court["crowns"]:
+        # Fold for EVERY render shape. The plain table is what an operator
+        # types, and a stuck line it cannot compute is the gap this read
+        # exists to close. The rows are dropped again below unless -n asked
+        # for them, so a bare --json keeps the contract its callers pin.
+        folded = fold_scope_nodes(court["crowns"])
+        court["sessions_readable"] = _annotate_sessions(court["crowns"])
+        court["gate"] = _gate_read()
+        # The fold judges its own rows; only the gate half is the caller's. A
+        # fold that answered rows but no verdict is a binary older than this
+        # court, a different fault from one that never ran.
+        stuck = folded.get("stuck") or _blind_stuck(
+            "the scope fold did not run"
+            if not folded
+            else "the fno-agents binary predates this court and returned no "
+            "stuck verdict; run fno doctor --fix"
+        )
+        if court["gate"].get("verdict") == "unknown":
+            stuck["blind"].append(
+                f"the spawn gate answered unknown: {court['gate'].get('reason')}"
+            )
+        court["summary"]["stuck"] = stuck
+        court["summary"]["stuck_line"] = folded.get("stuck_line", "")
+        if not nodes:
+            for crown in court["crowns"]:
+                crown.pop("scope_nodes", None)
     if as_json or nodes:
         return json.dumps(court, indent=2, sort_keys=True)
 
@@ -406,6 +503,8 @@ def render_court(as_json: bool, nodes: bool = False) -> str:
     )
     if s.get("sweep_ran") is False:
         lines.append("orphan sweep did not run (stale or missing binary): zero manifest-only entries is an absence, not a finding")
+    if isinstance(s.get("stuck"), dict):
+        lines.append(_stuck_render(s, court.get("gate") or {}))
     return "\n".join(lines)
 
 
