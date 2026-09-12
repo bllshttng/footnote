@@ -69,19 +69,14 @@ def build_flow(
     now=None,
     since_days: int = 28,
 ) -> dict:
-    """The board's flow panel payload (x-b07a): the keeper's weekly
-    delivery/cycle/waiting aggregates for one scope. Never raises - the board
-    render runs on every graph mutation and a metrics panel must never wedge
-    a write - so any classifier or transport failure degrades to an
-    unavailable payload naming the reason."""
+    """The board's flow payload (x-b07a), answered by the keeper. Never
+    raises: a metrics panel must never wedge the graph-mutation render."""
     try:
         classified = classify_deliveries(graph_nodes, rows, project, now=now, since_days=since_days)
     except Exception as exc:  # noqa: BLE001 - degrade, never wedge the render
         return {"available": False, "reason": f"classifier unavailable ({type(exc).__name__})"}
     flow = classified.get("flow")
-    if not isinstance(flow, dict):
-        return {"available": False, "reason": "classifier gave no flow"}
-    return flow
+    return flow if isinstance(flow, dict) else {"available": False, "reason": "classifier gave no flow"}
 
 
 def emission_failures_snapshot() -> dict:

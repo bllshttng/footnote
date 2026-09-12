@@ -481,11 +481,8 @@ def render_configured_targets(
                     cols=cols,
                     all_projects=all_projects,
                     # Flow covers the whole scoped population, never just the
-                    # displayed columns: throughput counts shipped work, and
-                    # a roadmap hides done rows by design.
-                    flow=_board_flow(
-                        scoped_entries, None if all_projects else scope
-                    ),
+                    # displayed rows: throughput counts shipped work.
+                    flow=_board_flow(scoped_entries, None if all_projects else scope),
                 )
             else:
                 render_set = public_backlog_entries(
@@ -496,9 +493,7 @@ def render_configured_targets(
                     scope,
                     backlog_entries=render_set,
                     all_projects=all_projects,
-                    flow=_board_flow(
-                        scoped_entries, None if all_projects else scope
-                    ),
+                    flow=_board_flow(scoped_entries, None if all_projects else scope),
                 )
             offenders = public_title_leaks(render_set)
             if offenders:

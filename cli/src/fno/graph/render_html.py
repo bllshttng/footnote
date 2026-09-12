@@ -769,45 +769,43 @@ _DASHBOARD_JS = """\
         '<div class="fv">unavailable: ' + esc(flow.reason || 'unknown reason') + '</div></div>';
       return;
     }
+    function grp(title, body, sub) {
+      return '<div class="fgroup"><div class="fk">' + title + '</div><div class="fv">' + body +
+        (sub ? '</div><div class="fsub">' + sub : '') + '</div></div>';
+    }
     var w = flow.window || {};
-    var head = 'last ' + esc(String(w.since_days == null ? '' : w.since_days)) + ' days to ' +
-      esc(String(w.end || '')) +
-      (w.tz_offset ? ' · local weeks (' + esc(String(w.tz_offset)) + '), start Monday' : ' · local weeks, start Monday') +
-      ' · scope does not follow filters';
     var d = flow.deliveries || {};
-    var weeks = (d.weeks || []).map(function (wk) {
-      return esc(String(wk.week_start || '')) + ': ' + ((wk.code || 0) + (wk.doc || 0)) + (wk.partial ? '*' : '');
-    }).join(' · ');
-    var unlinked = (flow.coverage && flow.coverage.unlinked) || 0;
     var cov = flow.coverage || {};
-    var covNote = [];
-    if (unlinked) covNote.push('plus ' + unlinked + ' unlinked delivery(s) not on this board');
-    if (cov.rows != null) covNote.push(cov.rows + ' ledger rows in scope');
     var c = flow.cycle || {};
-    var cycleLine = (c.n ? 'open-to-merge median ' + esc(String(c.median_days)) + 'd · p85 ' +
-      esc(String(c.p85_days)) + 'd (n=' + esc(String(c.n)) + ')' : 'open-to-merge: ' + esc(c.reason || 'no samples'));
     var op = flow.open_prs || {};
-    var openLine = 'open PRs ' + (op.count || 0) + ', oldest ' +
-      (op.oldest_age_days == null ? 'unknown' : op.oldest_age_days + 'd');
     var wt = flow.waiting || {};
     function waitingLine(key, label) {
       var v = wt[key] || {};
       return label + ' ' + (v.count || 0) +
         (v.oldest_age_days == null ? '' : ' (oldest ' + v.oldest_age_days + 'd)');
     }
+    var weeks = (d.weeks || []).map(function (wk) {
+      return esc(String(wk.week_start || '')) + ': ' + ((wk.code || 0) + (wk.doc || 0)) + (wk.partial ? '*' : '');
+    }).join(' · ');
+    var covNote = [];
+    if (cov.unlinked) covNote.push('plus ' + cov.unlinked + ' unlinked delivery(s) not on this board');
+    if (cov.rows != null) covNote.push(cov.rows + ' ledger rows in scope');
     el.innerHTML =
-      '<div class="fhead">' + head + '</div>' +
-      '<div class="fgroup"><div class="fk">Delivered</div><div class="fv">' +
-      (d.total || 0) + ' · ' + esc(String(d.code || 0)) + ' code, ' + esc(String(d.doc || 0)) + ' doc' +
-      (weeks ? '<div class="fsub">' + weeks + ' (* partial week)</div>' : '') +
-      (covNote.length ? '<div class="fsub">' + esc(covNote.join(' · ')) + '</div>' : '') +
-      '</div></div>' +
-      '<div class="fgroup"><div class="fk">Elapsed</div><div class="fv">' + cycleLine +
-      '</div><div class="fsub">' + openLine + '</div></div>' +
-      '<div class="fgroup"><div class="fk">Waiting</div><div class="fv">' +
-      waitingLine('in_progress', 'WIP') + ' · ' + waitingLine('in_review', 'review') + ' · ' +
-      waitingLine('blocked', 'blocked') +
-      '</div><div class="fsub">ages from node created_at · accumulated blocked time unmeasured</div></div>';
+      '<div class="fhead">last ' + esc(String(w.since_days == null ? '' : w.since_days)) + ' days to ' +
+      esc(String(w.end || '')) + ' · local weeks' +
+      (w.tz_offset ? ' (' + esc(String(w.tz_offset)) + ')' : '') +
+      ', start Monday · scope does not follow filters</div>' +
+      grp('Delivered', (d.total || 0) + ' · ' + esc(String(d.code || 0)) + ' code, ' + esc(String(d.doc || 0)) + ' doc',
+        (weeks ? weeks + ' (* partial week) · ' : '') + esc(covNote.join(' · '))) +
+      grp('Elapsed',
+        c.n ? 'open-to-merge median ' + esc(String(c.median_days)) + 'd · p85 ' + esc(String(c.p85_days)) +
+          'd (n=' + esc(String(c.n)) + ')' : 'open-to-merge: ' + esc(c.reason || 'no samples'),
+        'open PRs ' + (op.count || 0) + ', oldest ' +
+          (op.oldest_age_days == null ? 'unknown' : op.oldest_age_days + 'd')) +
+      grp('Waiting',
+        waitingLine('in_progress', 'WIP') + ' · ' + waitingLine('in_review', 'review') + ' · ' +
+        waitingLine('blocked', 'blocked'),
+        'ages from node created_at · accumulated blocked time unmeasured');
   }
   renderFlow(DATA.flow);
   // Copy, with the execCommand fallback the canonical template carried. This
@@ -1341,10 +1339,9 @@ def _dashboard_html(
             # A roadmap's whole point is the shipped column, so it opens with
             # done pressed. Every other surface opens on open work.
             "initial_done": projection == "roadmap",
-            # The flow panel's whole payload, computed once by the keeper's
-            # classifier for this board's scope. The JS presents these
-            # numbers and never re-derives them from the rows, so row
-            # filters cannot move a throughput denominator.
+            # The flow panel's whole payload, keeper-computed for this
+            # board's scope. The JS presents these numbers and never
+            # re-derives them from the rows.
             "flow": flow,
         },
         separators=(",", ":"),
@@ -1451,15 +1448,15 @@ def _dashboard_html(
 
 
 def _board_flow(entries: list[dict], project: str | None = None, *, since_days: int = 28) -> dict:
-    """The flow payload for one board scope. Never raises: the board renders
-    on every graph mutation and on machines without a keeper, so any failure
-    degrades to an unavailable payload that names the reason (AC2-EDGE)."""
+    """Flow payload for one board scope. Never raises (AC2-EDGE): the board
+    renders on every graph mutation, keeper or no keeper."""
     try:
         from fno import paths as _paths
         from fno.scoreboard.fold import build_flow, load_ledger_rows
 
-        rows = load_ledger_rows(_paths.ledger_json())
-        return build_flow(entries, rows, project=project, since_days=since_days)
+        return build_flow(
+            entries, load_ledger_rows(_paths.ledger_json()), project=project, since_days=since_days
+        )
     except Exception as exc:  # noqa: BLE001 - degrade, never wedge the render
         return {"available": False, "reason": f"flow source unavailable ({type(exc).__name__})"}
 
