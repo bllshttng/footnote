@@ -1548,11 +1548,9 @@ def cmd_spawn(
             file=sys.stderr,
         )
 
-    # x-e53e change 1: `--node` with no typed message resolves the seed from the
-    # node itself, so the front door can carry what a dispatch would have. The
-    # verb renders through resolve_dispatch for THIS spawn's harness (the same
-    # effective-verb read `_spawn_worker` runs); the brief rides the node's own
-    # chain into TARGET_BRIEF. A typed message wins over both.
+    # x-e53e change 1: `--node` with no typed message resolves the seed from
+    # the node - the verb rendered through resolve_dispatch for THIS spawn's
+    # harness, the brief through the node's own chain. A typed message wins.
     node_seed_env: dict = {}
     node_seed_receipt: dict = {}
     if node is not None and not (message or "").strip():
@@ -2041,9 +2039,8 @@ def cmd_spawn(
     if node_seed_env and prov_env is not None:
         prov_env.update(node_seed_env)
     # (x-c914) The pane's birth account rides the provenance env (FNO_ACCOUNT)
-    # so the mux server reads it back for the sideline account glyph - the
-    # account this launch actually bills, not the session's ambient one. The
-    # glyph is a claude-account axis, the same gate the minted row applies.
+    # for the sideline glyph: the account this launch bills, claude-gated like
+    # the minted row's axis.
     if prov_env is not None and harness == "claude":
         launch_account_label = dispatch_account or account
         if launch_account_label:
@@ -2414,9 +2411,9 @@ def cmd_spawn(
             }
             if pane_result.seed_source is not None:
                 receipt_obj["seed_source"] = pane_result.seed_source
-            # Where the seed came from when the node supplied it (x-e53e
-            # change 1): the `_spawn_worker` verb_source vocabulary beside the
-            # brief chain's own source tag. A typed message receipts neither.
+            # Where the seed came from when the node supplied it (x-e53e):
+            # the `_spawn_worker` verb_source vocabulary beside the brief
+            # chain's source tag. A typed message receipts neither.
             if node_seed_receipt:
                 receipt_obj.update(node_seed_receipt)
             # The other half of the same question, and the discriminator for the

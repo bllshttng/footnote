@@ -684,15 +684,11 @@ def _dispatch_one(
     except (SpawnError, DispatchResolveError) as exc:
         return {"outcome": "failed", "node": node_id, "slug": slug or "", "detail": str(exc)[:200]}
 
-    # The launch cwd is NOT the node's recorded cwd: for every organically
-    # filed node that is the canonical checkout on the protected branch
-    # (x-3f84 W5). Route through the worktree resolver; an empty answer is a
-    # policy refusal or a misconfig, so HOLD - falling back to canonical main
-    # is the exact launch this replaces. A result equal to the repo root is
-    # the legal `worktree.policy = "never"` case and launches in place.
-    # setup-worktree.sh stays caller-side (the shellout-drift gate bars
-    # package code from repo-root scripts); the worker's own
-    # `fno do target start` heals .fno state in the worktree.
+    # The launch cwd is NOT the node's recorded cwd (for organically filed
+    # nodes that is canonical main); route through the worktree resolver and
+    # HOLD on an empty answer. A repo-root answer is the legal
+    # `worktree.policy = "never"` case; the worker's own `fno do target start`
+    # heals .fno state in the worktree.
     ensured = _worktree_ensure_for_launch(
         Path(cwd) if cwd else Path.cwd(), args.agent_name, args.harness
     )
