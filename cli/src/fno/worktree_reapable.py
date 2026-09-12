@@ -305,11 +305,16 @@ def classify(porcelain: str, discount: Optional[Callable[[str], bool]] = None) -
     return Verdict(True, "clean", "", deletions)
 
 
-def reapable(path: Union[str, Path]) -> Verdict:
+def reapable(path: Union[str, Path], allow_unborn: bool = False) -> Verdict:
     """Classify a worktree on disk. Fails CLOSED on any probe it cannot trust.
 
     A probe that cannot answer must not read as "safe to remove": an absence of
     reported dirt has two explanations, and only one of them is a clean tree.
+
+    `allow_unborn` lifts the setup-window refusal for one tree a human NAMED -
+    the orphan-recovery path `target init` advertises when a worktree outlives
+    its session. Automatic callers (the bulk sweeps, the daemon probes) never
+    pass it: for them an unborn tree stays a refusal.
     """
     target = Path(path)
     if not target.is_dir():
@@ -344,6 +349,12 @@ def reapable(path: Union[str, Path]) -> Verdict:
 
     verdict = classify(r.stdout, _discount)
     # Cheapest reads first: an aged tree pays one stat and no git subprocess.
-    if verdict.reapable and is_linked_worktree(target) and _inside_setup_window(target) and branch_unborn(target):
+    if (
+        not allow_unborn
+        and verdict.reapable
+        and is_linked_worktree(target)
+        and _inside_setup_window(target)
+        and branch_unborn(target)
+    ):
         return Verdict(False, "unborn", "branch has no commit of its own and the tree is inside the setup window")
     return verdict

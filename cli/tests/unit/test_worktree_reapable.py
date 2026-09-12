@@ -302,7 +302,7 @@ def test_setup_links_only_is_reapable_and_names_what_it_discounted(
 ) -> None:
     wt = _linked_wt(tmp_path, canonical, "setup", "feature/setup")
     # An aged tree: this test pins the setup-link discount, not the unborn
-    # refusal, and a fresh worktree is refused by that gate first (x-d135).
+    # refusal, and a fresh worktree is refused by that gate first.
     _age_wt(wt)
     _setup_links(wt, canonical)
 
@@ -471,7 +471,7 @@ def test_a_setup_target_linked_from_the_wrong_place_still_blocks(
     assert "vault" in v.detail
 
 
-# -- x-d135: an unborn worktree is not a finished tree ------------------------
+# -- an unborn worktree is not a finished tree --------------------------------
 #
 # A fresh `git worktree add -b <name> <base>` branch has zero commits of its
 # own, so it is a literal ancestor of main and the gate read it clean plus
@@ -553,6 +553,21 @@ def test_an_unreadable_reflog_never_authorizes_removal(
 
     assert v.reapable is False
     assert v.reason == "unborn"
+
+
+def test_a_named_tree_may_skip_the_setup_window_refusal(
+    repo: Path, tmp_path: Path
+) -> None:
+    # The orphan-recovery carve-out: `target init` advertises `worktree
+    # archive` when a worktree outlives its session, and that command names
+    # ONE tree a human decided about. The refusal is for automatic reapers,
+    # so the flag lifts it and nothing else; the default stays refused.
+    wt = _linked_wt(tmp_path, repo, "named", "feature/named")
+
+    assert reapable(wt).reapable is False
+    v = reapable(wt, allow_unborn=True)
+    assert v.reapable is True
+    assert v.reason == "clean"
 
 
 def test_a_detached_head_is_not_judged_by_the_branch_reflog(

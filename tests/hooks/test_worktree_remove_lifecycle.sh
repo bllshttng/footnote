@@ -166,6 +166,27 @@ fi
 kill "$HOLD" 2>/dev/null
 rm -rf "$S"
 
+echo "== 3b. archive: an unborn tree named by a human goes, named by a sweep it stays =="
+
+# Orphan recovery: `target init` advertises a plain `worktree archive` for a
+# tree that outlived its session, and that tree is often still unborn. A
+# manual archive names ONE tree a human decided about, so the setup-window
+# refusal must not stand in front of it; an automatic leg (the sweep or the
+# ritual passes FNO_WT_REMOVE_CALLER) keeps the refusal.
+S=$(new_sandbox)
+( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
+WT="$S/wt"
+out=$(bash "$ARCHIVE" "$WT" --yes 2>&1); rc=$?
+if [[ $rc -eq 0 && ! -d "$WT" ]]; then pass "manual archive removes an unborn tree"; else fail "manual unborn archive" "rc=$rc exists=$([[ -d "$WT" ]] && echo y || echo n) out=$out"; fi
+rm -rf "$S"
+
+S=$(new_sandbox)
+( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
+WT="$S/wt"
+out=$(FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$WT" --yes 2>&1); rc=$?
+if [[ $rc -eq 2 && -d "$WT" ]] && echo "$out" | grep -q 'reason=unborn'; then pass "sweep-caller archive still refuses an unborn tree"; else fail "sweep unborn refuse" "rc=$rc exists=$([[ -d "$WT" ]] && echo y || echo n) out=$out"; fi
+rm -rf "$S"
+
 echo "== 4. sweep reaps dead bg-job records =="
 
 eval "$(sed -n '/^_reap_job_candidates()/,/^}/p; /^_reap_jobs()/,/^}/p' "$LIFECYCLE")"

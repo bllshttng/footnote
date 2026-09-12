@@ -1249,7 +1249,7 @@ def test_a_real_untracked_file_beside_setup_symlinks_keeps_the_tree(repo: Path):
     assert (wt / "cli" / "scratch.py").exists(), diag
 
 
-# ── x-d135: an unborn worktree is not a merged worktree ─────────────────────
+# ── an unborn worktree is not a merged worktree ─────────────────────────────
 #
 # A fresh `git worktree add -b <name> main` branch has zero commits of its
 # own, so it is a literal ancestor of origin/main: the exact clean-and-merged

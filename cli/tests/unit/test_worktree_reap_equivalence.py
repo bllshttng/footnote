@@ -55,7 +55,7 @@ def _make_repo(root: Path) -> Path:
     _git(parent, "worktree", "add", "-q", str(root), "-b", "feature/fixture")
     # Backdate past the setup window: every corpus row but `unborn` describes
     # an ESTABLISHED tree, and a fresh linked worktree is refused by the
-    # unborn gate before its dirt is ever classified (x-d135).
+    # unborn gate before its dirt is ever classified.
     old = time.time() - 7200
     os.utime(root / ".git", (old, old))
     return root
@@ -87,7 +87,7 @@ def _mixed(p: Path) -> None:
 def _unborn(p: Path) -> None:
     # A tree git created moments ago, branch never moved: `_make_repo` aged the
     # `.git` file so the other rows describe established trees; this row makes
-    # it fresh again, which is the shape of every worker mid-setup (x-d135).
+    # it fresh again, which is the shape of every worker mid-setup.
     os.utime(p / ".git", None)
 
 
@@ -166,7 +166,13 @@ def test_archive_script_agrees(tmp_path: Path, name: str, mutate, expected: bool
     repo = _make_repo(tmp_path / name)
     mutate(repo)
 
-    assert _archive_script_verdict(repo) == expected
+    # The archive script is the MANUAL path: a human named this one tree, so
+    # the setup-window refusal does not stand in front of it (the sweeps and
+    # daemon probes are the strict callers, and the bash-helper row above
+    # pins those). `unborn` is the one corpus row where that diverges.
+    expected_archive = True if name == "unborn" else expected
+
+    assert _archive_script_verdict(repo) == expected_archive
 
 
 def test_deletions_only_worktree_is_actually_removed(tmp_path: Path) -> None:
