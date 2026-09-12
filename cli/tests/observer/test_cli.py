@@ -55,7 +55,7 @@ def _events(path):
 def _good_plan(tmp_path, name):
     p = tmp_path / name
     p.write_text(
-        "# Plan\n\n## Failure Modes\n\nboundaries\n\n"
+        "---\ntitle: t\n---\n\n# Plan\n\n## Failure Modes\n\nboundaries\n\n"
         "## Execution Strategy\n\n```yaml\ntasks:\n- id: '1'\n  surface: ['a.py']\n```\n"
     )
     return p
@@ -405,7 +405,7 @@ def _wire_replay(monkeypatch, tmp_path, item):
 def test_replay_happy_path_emits_tagged_finding(monkeypatch, tmp_path):
     item = _item("s-rep", "x-rep", None)
     events_path = _wire_replay(monkeypatch, tmp_path, item)
-    fresh = "## Failure Modes\nx\n\n## Execution Strategy\n```yaml\ntasks:\n- id: '1'\n  surface: ['a.py']\n```\n"
+    fresh = "---\ntitle: t\n---\n\n## Failure Modes\nx\n\n## Execution Strategy\n```yaml\ntasks:\n- id: '1'\n  surface: ['a.py']\n```\n"
     cli._replay(
         skill="blueprint", corpus_item="s-rep", skill_ref="cand-branch",
         run_id="obs-fno:blueprint-test", since=90,
@@ -501,7 +501,7 @@ def test_replay_isolation_violation_hard_fails(monkeypatch, tmp_path):
             violations=[isolation.Violation(path=tmp_path / "ledger.json", session_id="leak", line_number=1, detail="x")],
         ),
     )
-    fresh = "## Failure Modes\nx\n\n## Execution Strategy\n```yaml\ntasks:\n- id: '1'\n  surface: ['a.py']\n```\n"
+    fresh = "---\ntitle: t\n---\n\n## Failure Modes\nx\n\n## Execution Strategy\n```yaml\ntasks:\n- id: '1'\n  surface: ['a.py']\n```\n"
     with pytest.raises(typer.Exit) as exc:
         cli._replay(
             skill="blueprint", corpus_item="s-rep", skill_ref=None,

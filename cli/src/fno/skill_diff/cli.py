@@ -481,11 +481,15 @@ def reconcile(
 
 
 # Dimensions a /blueprint replay can re-score structurally (Review Amendment A1:
-# replay sets include_shipped_outcome=False, so shipped_outcome is never emitted).
-# If the top failure dimension is not one of these, there is no structural
-# before/after to compute - the deferred outcome horizon owns it (Locked
-# Decision 1), so reconcile closes it as outcome-pending rather than replaying.
-_REPLAYABLE_DIMS = {"structural_validity", "collision_free"}
+# replay sets include_shipped_outcome=False, so shipped_outcome is never emitted;
+# the failure-modes-heading dimension was retired 2026-09-12, leaving
+# collision_free as the last code dimension). Judge dimensions are never
+# replayable: a replay spawns blueprint headless, and a missing judge answer
+# there would read as a regression. If the top failure dimension is not one of
+# these, there is no structural before/after to compute - the deferred outcome
+# horizon owns it (Locked Decision 1), so reconcile closes it as
+# outcome-pending rather than replaying.
+_REPLAYABLE_DIMS = {"collision_free"}
 
 
 def _emit_receipt(pr: int, skill_id: str, run_id_before: str,

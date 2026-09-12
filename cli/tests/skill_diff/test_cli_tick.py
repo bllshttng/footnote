@@ -30,7 +30,7 @@ def _events(path):
     return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
 
 
-def _rc(run_id, top="structural_validity"):
+def _rc(run_id, top="collision_free"):
     return {"type": "skill_eval_run_complete",
             "data": {"run_id": run_id, "skill_id": "fno:blueprint",
                      "skill_version": "abc", "failure_ranking": [{"dimension": top, "fail_count": 2}]}}
@@ -39,7 +39,7 @@ def _rc(run_id, top="structural_validity"):
 def _finding(run_id, verdict="fail"):
     return {"type": "skill_eval_finding",
             "data": {"run_id": run_id, "skill_id": "fno:blueprint",
-                     "dimension": "structural_validity", "verdict": verdict}}
+                     "dimension": "collision_free", "verdict": verdict}}
 
 
 def test_architectural_followup_filing_declares_difficulty(monkeypatch):
@@ -280,7 +280,7 @@ def test_registered_in_top_level_cli():
 # reconcile: detect-and-run (x-ed13)
 # --------------------------------------------------------------------------- #
 
-def _find(run_id, corpus_item, verdict="fail", dim="structural_validity", tool_fault=False):
+def _find(run_id, corpus_item, verdict="fail", dim="collision_free", tool_fault=False):
     d = {"run_id": run_id, "skill_id": "fno:blueprint", "corpus_item_id": corpus_item,
          "dimension": dim, "verdict": verdict}
     if tool_fault:
@@ -402,7 +402,7 @@ def test_reconcile_concurrent_close_is_noop(monkeypatch, tmp_path):  # codex P1 
 
 def test_reconcile_ac5_edge_zero_failure_null_after(monkeypatch, tmp_path):  # AC5-EDGE
     # A merged proposer PR whose before run has no failing items on the top dim.
-    events = [_rc("r1", top="structural_validity"), _find("r1", "sid-a", verdict="pass"),
+    events = [_rc("r1", top="collision_free"), _find("r1", "sid-a", verdict="pass"),
               _proposed(201)]
     # Blank the ranking so top_dimension() is None (no failing dimension).
     events[0]["data"]["failure_ranking"] = []

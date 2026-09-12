@@ -218,7 +218,7 @@ def _score_item(item: dict, skill: str, by_id: dict, gh_runner) -> dict[str, Opt
         return fold.score_review_item(**ids)
     except Exception as exc:  # any unforeseen I/O fault -> coverage gap, not crash
         print(f"observer: scoring item {item.get('session_id')} failed: {exc}", file=sys.stderr)
-        dims = ("structural_validity", "collision_free", "shipped_outcome") if skill == "blueprint" else ("finding_precision",)
+        dims = fold.BLUEPRINT_DIMENSIONS if skill == "blueprint" else ("finding_precision",)
         return {d: None for d in dims}
 
 
@@ -944,7 +944,7 @@ def _replay(
     plan_text = _read_plan_text(item, by_id.get(item.get("graph_node_id")), _default_gh)
     if not plan_text:
         _emit_finding(
-            run_id=run_id, item=item, dimension="structural_validity", verdict="fail",
+            run_id=run_id, item=item, dimension="collision_free", verdict="fail",
             evidence=f"replay tool-fault: recorded input for {corpus_item} unresolvable",
             cost_usd=0.0, skill_ref=skill_ref, events_paths=events_paths,
         )
@@ -1033,7 +1033,7 @@ def _replay(
             # tool_fault=True so downstream never counts it as a skill-quality
             # structural fail (AC2-ERR: never conflated).
             _emit_finding(
-                run_id=run_id, item=item, dimension="structural_validity", verdict="fail",
+                run_id=run_id, item=item, dimension="collision_free", verdict="fail",
                 evidence=f"replay spawn tool-fault rc={rc}: {(err or '')[:200]}",
                 cost_usd=cost_usd, skill_ref=skill_ref, events_paths=events_paths,
                 tool_fault=True,
