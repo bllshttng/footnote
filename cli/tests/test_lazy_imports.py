@@ -1060,6 +1060,63 @@ def test_import_hook_stays_reachable_from_other_threads_during_a_wait(monkeypatc
     assert a_result == ["SPEC"]
 
 
+def test_namespace_refuser_blocks_the_poison_before_it_caches(monkeypatch, tmp_path):
+    """End-to-end through the real import machinery: a subpackage directory
+    without its __init__.py mid-swap must NOT cache an empty namespace module.
+    PathFinder answers namespace specs BEFORE the last-resort guard is ever
+    consulted, so a finder ahead of PathFinder has to refuse the shape; the
+    same import retried after the swap lands on the real package."""
+    import sys as _sys
+
+    import fno
+
+    # The refuser gates on the fno prefix; aim it at a synthetic top name so
+    # the test drives the real meta_path ordering without touching real fno.
+    monkeypatch.setattr(fno, "_is_fno_module", lambda n: n.startswith("zzns."))
+    refuser = fno._FnoNamespaceRefuser()
+    path_finder_at = next(
+        i for i, f in enumerate(_sys.meta_path) if getattr(f, "__name__", "") == "PathFinder"
+    )
+    _sys.meta_path.insert(path_finder_at, refuser)
+    pkg = tmp_path / "zzns"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "claims").mkdir()  # the mid-swap shape: dir sans __init__.py
+    _sys.path.insert(0, str(tmp_path))
+    try:
+        import zzns  # the real parent imports fine
+
+        assert zzns.x == 1
+        with pytest.raises(ModuleNotFoundError) as excinfo:
+            import zzns.claims
+
+        assert "part of fno itself" in str(excinfo.value), str(excinfo.value)
+        assert "zzns.claims" not in _sys.modules, "the empty namespace must not cache"
+
+        (pkg / "claims" / "__init__.py").write_text("y = 2\n", encoding="utf-8")
+        import zzns.claims  # the retry after the swap lands
+
+        assert zzns.claims.y == 2
+    finally:
+        _sys.path.remove(str(tmp_path))
+        _sys.meta_path.remove(refuser)
+        for name in [m for m in list(_sys.modules) if m.startswith("zzns")]:
+            _sys.modules.pop(name, None)
+
+
+def test_namespace_refuser_sits_before_path_finder_and_installs_once():
+    """One refuser, ahead of PathFinder: behind it, PathFinder's namespace
+    answer would cache the poison before anyone refused it."""
+    import fno
+
+    found = [f for f in sys.meta_path if getattr(f, "_fno_namespace_refuser", False)]
+    assert len(found) == 1, f"expected exactly one refuser, got {len(found)}"
+    path_finder_at = max(
+        i for i, f in enumerate(sys.meta_path) if getattr(f, "__name__", "") == "PathFinder"
+    )
+    assert sys.meta_path.index(found[0]) < path_finder_at
+
+
 def test_import_hook_ignores_third_party_modules(monkeypatch):
     """A missing dependency is a broken install: no re-check, no retry, no hint,
     and no wait -- the shared helper now polls its budget for any name it is
@@ -1152,8 +1209,11 @@ def test_fromlist_submodule_keeps_the_retry_and_loses_only_the_message():
         "print('SEEN', seen)\n"
     )
     assert proc.returncode == 0, proc.stderr
-    # The retry ran, for the fully-qualified submodule name.
-    assert "SEEN ['fno.agents.no_such_submodule']" in proc.stdout, proc.stdout
+    # The retry ran, for the fully-qualified submodule name. Consulted once by
+    # the namespace refuser and once more past the guard, so the spy list is
+    # no longer a single exact entry; the member is what the retry pins.
+    assert "fno.agents.no_such_submodule" in proc.stdout, proc.stdout
+    assert "SEEN [" in proc.stdout, proc.stdout
     # And CPython, not us, wrote the message the reader sees.
     assert "cannot import name 'no_such_submodule'" in proc.stdout, proc.stdout
     assert "is part of fno itself" not in proc.stdout, proc.stdout
