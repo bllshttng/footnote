@@ -41,7 +41,10 @@ _WT_REMOTE_REFS_STALE="${_WT_REMOTE_REFS_STALE:-0}"
 wt_refresh_remote_refs() {
     [[ "$_WT_REMOTE_REFS_FRESH" == 1 ]] && return 0
     [[ "$_WT_REMOTE_REFS_STALE" == 1 ]] && return 1
-    if git -C "${1:-.}" fetch --all --prune >/dev/null 2>&1; then
+    # http.lowSpeed* is git's own connect budget: a transfer slower than
+    # 1KB/s for 20s aborts, so a hung remote costs seconds and maps onto
+    # the failed-fetch path below. No other layer sets any bound.
+    if git -C "${1:-.}" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 fetch --all --prune >/dev/null 2>&1; then
         _WT_REMOTE_REFS_FRESH=1
         export _WT_REMOTE_REFS_FRESH
         return 0
