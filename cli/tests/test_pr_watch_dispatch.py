@@ -2463,11 +2463,9 @@ class TestTickRecordsAndDeadline:
         assert ends[0]["why"] == "deadline_exceeded"
 
     def test_sigterm_during_a_tick_writes_its_death_record(self, monkeypatch):
-        """x-d211: the bootout's SIGTERM cannot unwind the tick, so the
-        handler writes the end record itself. The why is self_killed exactly
-        when the active-tick marker is set: that marker proves an update was
-        running under this tick, and its bounce is what delivered the signal.
-        The process still dies BY the signal."""
+        """A bootout's SIGTERM cannot unwind the tick, so the handler writes
+        the end record itself: why=killed (an external kill), and the process
+        still dies BY the signal."""
         import signal as signal_mod
 
         from fno.pr_watch import cli as prcli
@@ -2488,28 +2486,19 @@ class TestTickRecordsAndDeadline:
         handler = installed.get(signal_mod.SIGTERM)
         assert handler is not None, "tick installed no SIGTERM handler"
 
-        # Marker set: the tick's own sync child did the bounce.
-        monkeypatch.setenv("FNO_PR_WATCH_ACTIVE_TICK", "tick:4242")
         handler(signal_mod.SIGTERM, None)
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         death = ends[-1]
         assert death["outcome"] == "error"
-        assert death["why"] == "self_killed"
+        assert death["why"] == "killed"
         assert death["phase"]
         rows = [d for t, d in events if t == "control_plane_tick"
                 and d.get("arm") == "pr_watch_merge"]
-        assert rows and "mid-sync" in rows[-1]["detail"]
-        assert "probable" in rows[-1]["detail"]
+        assert rows and "killed by a signal mid-tick" in rows[-1]["detail"]
         assert "started and did not complete" in rows[-1]["detail"]
         assert rows[-1]["detail"].count("phase=") == 1
         assert killed == [signal_mod.SIGTERM]
         assert installed[signal_mod.SIGTERM] == signal_mod.SIG_DFL
-
-        # No marker: an external kill (operator bootout), not a self-kill.
-        monkeypatch.delenv("FNO_PR_WATCH_ACTIVE_TICK", raising=False)
-        handler(signal_mod.SIGTERM, None)
-        death = [d for t, d in events if t == "pr_watch_tick_end"][-1]
-        assert death["why"] == "killed"
 
     def test_a_cut_phase_does_not_stop_the_phases_after_it(self, monkeypatch, tmp_path):
         """AC3-HP (x-c79d): the sweep burning its slice cannot take the arms
@@ -2603,8 +2592,9 @@ class TestTickRecordsAndDeadline:
         assert ends[-1].get("cut") == ["king_wake"]
 
     def test_one_roots_scan_feeds_every_phase_that_sweeps(self, monkeypatch, tmp_path):
-        """AC3-HP: notify_watch, heal, stranded and catchup share the
-        tick's one sidecar scan - four consumers, one call, the same list."""
+        """AC3-HP: notify_watch, heal and stranded share the tick's one
+        sidecar scan - three consumers, one call, the same list. The catchup
+        leg is gone from the tick; its sync must never be called."""
         from types import SimpleNamespace as _NS
 
         from fno.pr_watch import cli as prcli
@@ -2657,7 +2647,92 @@ class TestTickRecordsAndDeadline:
         assert calls == [1], f"the sidecar scan ran {len(calls)} times"
         assert healed and healed[0] is roots, "heal got the memoized list"
         assert stranded_seen == [tmp_path], "stranded swept the shared roots"
-        assert catchup_seen == [tmp_path], "catchup swept the shared roots"
+        assert catchup_seen == [], "the tick no longer runs the catchup leg"
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert "catchup" not in ends[-1].get("phase_s", {})
+
+    def test_stranded_rotates_its_starting_root_each_interval(
+        self, monkeypatch, tmp_path
+    ):
+        """AC3-HP: the stranded sweep's starting root advances one bucket per
+        interval, so a cap cut moves to the next root next tick instead of
+        replaying the same prefix forever."""
+        from fno.pr_watch import cli as prcli
+
+        roots = []
+        for name in ("a", "b", "c"):
+            d = tmp_path / name
+            d.mkdir()
+            roots.append(d)
+        stranded_seen: list = []
+        clock = {"t": 0.0}
+
+        monkeypatch.setattr("time.time", lambda: clock["t"])
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: list(roots), raising=True)
+        monkeypatch.setattr(
+            "fno.rust_binary.resolve_binary", lambda: None, raising=True,
+        )
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 0.0, raising=True)
+        monkeypatch.setattr(
+            "fno.agents.watchdog.lane_armed", lambda _s: False, raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.worktree_stranded.sweep", lambda repo: stranded_seen.append(repo) or [],
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.worktree_stranded.apply_sweep", lambda rows, wake: [], raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.branch_provenance_cache.write_cache", lambda root, rows: False,
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+
+        firsts = []
+        for _ in range(3):
+            stranded_seen.clear()
+            res, _events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+            assert res.exit_code == 0, res.output
+            firsts.append(stranded_seen[0])
+            # The harness's MagicMock interval int()s to 1, so one clock
+            # tick per run is one interval bucket per run.
+            clock["t"] += 1.0
+        assert firsts == roots, f"each root led exactly once: {firsts}"
+
+    def test_stranded_with_no_roots_sweeps_nothing(self, monkeypatch):
+        """AC3-ERR: an empty root list sweeps nothing and raises nothing."""
+        from fno.pr_watch import cli as prcli
+
+        stranded_seen: list = []
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
+        monkeypatch.setattr(
+            "fno.rust_binary.resolve_binary", lambda: None, raising=True,
+        )
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 0.0, raising=True)
+        monkeypatch.setattr(
+            "fno.agents.watchdog.lane_armed", lambda _s: False, raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.worktree_stranded.sweep", lambda repo: stranded_seen.append(repo) or [],
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+
+        res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+
+        assert res.exit_code == 0, res.output
+        assert stranded_seen == []
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends[-1]["phase_s"]["stranded"] >= 0.0
 
     def test_empty_roots_still_scan_once_and_spawn_with_no_root_flag(
         self, monkeypatch, tmp_path
