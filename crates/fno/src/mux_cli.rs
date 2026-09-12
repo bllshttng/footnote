@@ -1659,7 +1659,7 @@ pub fn doctor(json: bool) -> i32 {
     render_doctor(&gather_checks(), json)
 }
 
-/// `fno mux stats [--json]` (v78): the body lives in server_stats, beside the
+/// `fno mux stats [--json]` (v78): body lives in server_stats, beside the
 /// answer it renders.
 pub fn stats(json: bool) -> i32 {
     crate::server_stats::cli(json)
@@ -1669,23 +1669,19 @@ pub fn stats(json: bool) -> i32 {
 // `fno mux workspace prune` - reap dead-origin residue (x-a572)
 // ---------------------------------------------------------------------------
 
-/// `fno mux workspace <verb> ...`: the workspace-store maintenance family. Only
-/// `prune` exists today; a bare verb or an unknown verb is usage. Carries the
-/// tokens after the verb family verbatim, like `pane`/`block`.
+/// `fno mux workspace <verb> ...`: the workspace-store maintenance family.
+/// Only `prune` and `restore` exist; a bare or unknown verb is usage. Tokens
+/// after the family verb carry verbatim, like `pane`/`block`.
 ///
-/// The retired `fno mux squad` spelling is GONE: it was an unadvertised alias
-/// of this family, named by nothing outside its own test, and a second spelling
-/// of one verb is a leaf the surface pays for twice. `--squad` stays a
-/// hidden-deprecated flag alias alongside the canonical `--workspace`. The
-/// user-facing/internal vocabulary split that leaves behind - `workspace`
-/// everywhere a person types, `squad` throughout this crate's identifiers - is
-/// a decision, not an unfinished rename: renaming ~2900 internal sites buys no
-/// user-visible change and collides with every in-flight mux branch. The two
-/// remaining user-adjacent
-/// spellings, the `squad` key in the `--json` placement receipt and
-/// `~/.fno/squads.json`, ride the next change that bumps `PROTO_VERSION` or
-/// migrates the store for a real reason, where the compatibility window and
-/// the migration already exist.
+/// The retired `fno mux squad` spelling is GONE: an unadvertised alias named
+/// by nothing outside its own test. `--squad` stays a hidden-deprecated flag
+/// alias beside the canonical `--workspace`. The user-facing/internal
+/// vocabulary split that leaves behind - `workspace` where a person types,
+/// `squad` in this crate's identifiers - is a decision, not an unfinished
+/// rename: renaming ~2900 internal sites buys no user-visible change. The
+/// remaining user-adjacent `squad` spellings, the key in the `--json`
+/// placement receipt and `~/.fno/squads.json`, ride the next change that
+/// bumps `PROTO_VERSION` or migrates the store for a real reason.
 pub fn workspace(args: &[OsString], env_session: Option<&str>) -> i32 {
     // main.rs routes here only with a token after the family verb, so a bare
     // `mux workspace` never reaches this function - it is the global usage

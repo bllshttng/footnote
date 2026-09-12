@@ -1999,11 +1999,9 @@ pub(crate) struct Core {
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
-    /// Held writer claims: pane -> holder pid. Enforced on `Input` as an
-    /// in-memory lookup + a `kill(pid, 0)` liveness probe (one syscall, never
-    /// a subprocess - the origin freeze class); a dead holder releases lazily
-    /// on the next contested keystroke, so typing resumes without a server
-    /// restart (AC3-FR) and no sweep timer exists to tune.
+    /// Held writer claims: pane -> holder pid. In-memory lookup + a
+    /// `kill(pid, 0)` liveness probe (one syscall, never a subprocess); a
+    /// dead holder releases lazily on the next contested keystroke (AC3-FR).
     claims: HashMap<u64, u32>,
     /// Per-pane last `human_touch(inject)` emit time (W4 touch telemetry):
     /// at most one emit per pane per [`TOUCH_COALESCE_WINDOW`], so a typing
@@ -2024,11 +2022,10 @@ pub(crate) struct Core {
     /// [`Core::touch_emit_failures`].
     pane_stats_emit_failures: Arc<AtomicU64>,
     /// Attached-client count for the periodic readers (x-4e30). Published
-    /// from choke points (tail of `handle` + the main-loop tail), never
-    /// per mutation site: `clients` mutates in six places and per-site
-    /// stores drift on the next refactor. A `watch`, not an atomic,
-    /// because the readers park in `tick().await` and need the
-    /// `changed()` edge as the 0->1 wakeup.
+    /// from choke points (tail of `handle` + the main-loop tail), never per
+    /// mutation site: `clients` mutates in six places and per-site stores
+    /// drift on the next refactor. A `watch`, not an atomic: the readers
+    /// park in `tick().await` and need the `changed()` edge.
     client_count: watch::Sender<usize>,
     /// (x-4328) Pane ids the operator has focused while badged `Done`.
     /// Inserted by an actual focus action (`Command::FocusPane`, via
