@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from fno.events import _utc_timestamp
+from fno.events.log import normalize_event
+
 HEALTHY = frozenset({
     "pass", "found", "stamped", "graduated", "idempotent_noop", "allow",
     "DonePRGreen", "DoneAdvisory", "DoneDelivery", "DoneUnreviewed",
@@ -21,7 +24,7 @@ def load_events(paths: list[Path], since: datetime | None = None) -> tuple[list[
     result = read_jsonl_events_with_coverage(paths, kinds=None)
     if since is None:
         return result["events"], result["coverage"]
-    cutoff = _as_utc(since)
+    cutoff = since if since.tzinfo is not None else since.replace(tzinfo=timezone.utc)
     rows = []
     for row in result["events"]:
         timestamp = _timestamp(row)
@@ -31,9 +34,7 @@ def load_events(paths: list[Path], since: datetime | None = None) -> tuple[list[
 
 
 def label_of(row: dict) -> str | None:
-    data = row.get("data")
-    if not isinstance(data, dict):
-        return None
+    data = _view(row)["data"]
     for key in _LABEL_KEYS:
         value = data.get(key)
         if value is not None and str(value):
@@ -41,47 +42,31 @@ def label_of(row: dict) -> str | None:
     return None
 
 
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
 def _timestamp(row: dict) -> datetime | None:
-    raw = row.get("ts") or row.get("timestamp")
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        return _as_utc(datetime.fromisoformat(raw.strip().replace("Z", "+00:00")))
-    except ValueError:
-        return None
+    return _utc_timestamp(row.get("ts") or row.get("timestamp"))
+
+
+def _view(row: dict) -> dict[str, Any]:
+    view = normalize_event(row)
+    data = view["data"]
+    if not view.get("session_id") and isinstance(data, dict):
+        view["session_id"] = data.get("attester_session_id")
+    return view
 
 
 def _event_type(row: dict) -> str | None:
-    value = row.get("type") or row.get("kind")
+    value = _view(row).get("type")
     return str(value) if value is not None else None
 
 
 def _session_id(row: dict) -> str | None:
-    data = row.get("data")
-    if not isinstance(data, dict):
-        return None
-    for key in ("session_id", "attester_session_id"):
-        value = data.get(key)
-        if value:
-            return str(value)
-    return None
+    value = _view(row).get("session_id")
+    return str(value) if value else None
 
 
 def _node_id(row: dict) -> str | None:
-    data = row.get("data")
-    if not isinstance(data, dict):
-        return None
-    for key in ("node_id", "graph_node_id"):
-        value = data.get(key)
-        if value:
-            return str(value)
-    return None
+    value = _view(row).get("node_id")
+    return str(value) if value else None
 
 
 def _pattern(row: dict, *, include_all: bool = False) -> str | None:
