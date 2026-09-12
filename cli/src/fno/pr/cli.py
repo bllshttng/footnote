@@ -825,6 +825,55 @@ def sync_canonical(
 
 
 @pr_app.command(
+    "publish-review",
+    hidden=True,
+    help=(
+        "Post a review verdict to GitHub as config.review.bot_identity "
+        "(--pr-number N; --verdict defaults to the newest head-pinned "
+        "attestation for HEAD). One bot-review: receipt line; exit 0 posted,"
+        " 1 skipped|refused|failed, 2 no attestation to default from."
+    ),
+)
+def publish_review_cmd(
+    pr_number: Optional[int] = typer.Option(None, "--pr-number", help="GitHub PR number"),
+    pr_legacy: Optional[int] = typer.Option(
+        None, "--pr", hidden=True, help="[DEPRECATED] alias for --pr-number."
+    ),
+    verdict: Optional[str] = typer.Option(
+        None, "--verdict", help="pass | fail; default: newest head-pinned attestation for HEAD."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", "-N", help="Resolve and refuse-check, but make no POST."
+    ),
+) -> None:
+    from fno._flag_aliases import merge_deprecated_alias
+    from fno.pr._publish_review import PublishReviewUnavailable, publish_review_call
+
+    pr_number = merge_deprecated_alias(
+        pr_number, pr_legacy, canonical_flag="--pr-number", legacy_flag="--pr"
+    )
+    if pr_number is None:
+        typer.echo("publish-review: missing option --pr-number", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = publish_review_call(
+            {
+                "pr_number": pr_number,
+                "head_sha": "",
+                "verdict": verdict or "",
+                "reviewer": "",
+                "cwd": os.getcwd(),
+                "dry_run": dry_run,
+            }
+        )
+    except PublishReviewUnavailable as exc:
+        typer.echo(f"bot-review: failed ({exc})", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(result.get("receipt", ""), err=True)
+    raise typer.Exit(code=int(result.get("exit", 1)))
+
+
+@pr_app.command(
     "rebase",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(

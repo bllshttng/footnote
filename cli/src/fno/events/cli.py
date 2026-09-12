@@ -39,6 +39,12 @@ _PROTOCOL_DATA_STR_CAP = 500
 # same-file emit from doubling.
 GLOBAL_MIRROR_TYPES = frozenset({"review_attestation", "review_coverage", "worktree_removed"})
 
+# Event types whose emit ALSO mirrors the verdict to GitHub as the reviewer
+# lane's bot identity. A SEPARATE set from GLOBAL_MIRROR_TYPES on purpose:
+# global-log membership drifts for its own reasons and must not silently
+# gain a GitHub posting call.
+PUBLISH_REVIEW_TYPES = frozenset({"review_attestation"})
+
 
 @cli.callback()
 def _event_callback(
@@ -602,6 +608,32 @@ def emit(
     # failure here must not fail the emit and lose that record.
     if type_ in GLOBAL_MIRROR_TYPES:
         mirror_to_global_log(event, resolved_events, repo_root)
+
+    # BOT-REVIEW MIRROR: a review_attestation also posts to GitHub as the
+    # reviewer lane's bot identity. This emit is the ONE call every verdict
+    # already funnels through, so the producer has exactly one reachable
+    # path. Best-effort like the global-log mirror above: the durable append
+    # already succeeded, so a network failure must never fail the emit.
+    if type_ in PUBLISH_REVIEW_TYPES:
+        try:
+            import os
+
+            from fno.pr._publish_review import publish_review_call
+
+            _data = event.get("data", {})
+            result = publish_review_call(
+                {
+                    "pr_number": None,
+                    "head_sha": str(_data.get("head_sha") or ""),
+                    "verdict": str(_data.get("verdict") or ""),
+                    "reviewer": str(_data.get("reviewer") or ""),
+                    "cwd": str(repo_root) if repo_root else os.getcwd(),
+                    "dry_run": False,
+                }
+            )
+            typer.echo(result.get("receipt", "bot-review: skipped (no receipt)"), err=True)
+        except Exception as exc:  # noqa: BLE001 - never fail the emit
+            typer.echo(f"bot-review: skipped (mirror error: {exc})", err=True)
 
     # Push leg (x-dbaf): blocked + run_summary notify the parent when spawn
     # lineage exists. Fired AFTER the durable append so the events.jsonl record

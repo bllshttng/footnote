@@ -164,8 +164,10 @@ def test_map_covers_current_surface_once():
     # branch allocates `backlog version`, the typed API's counter read
     # (hidden verb, 19 corpus callers): counted from the merged file,
     # 604 -> 605. `agents king ledger` and `agents reign-ledger`, the reign
-    # ledger page and its native renderer: 605 -> 607.
-    assert len(mapped) == 607, (
+    # ledger page and its native renderer: 605 -> 607. `do pr
+    # publish-review` and `pr publish-review`, the bot-identity backfill
+    # door and its forwarded spelling: 607 -> 609.
+    assert len(mapped) == 609, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
