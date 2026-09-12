@@ -1210,7 +1210,7 @@ def _create_node_impl(
 
             resolution = _rollup.resolve(node, entries)
             link_to: Optional[str] = None
-            if resolution.kind == "linked":
+            if resolution.kind in ("linked", "crown"):
                 target = _find_node(entries, resolution.epic_id or "")
                 # A brand-new leaf can neither cycle nor deepen epic nesting,
                 # but honor the same guards the update path applies rather than

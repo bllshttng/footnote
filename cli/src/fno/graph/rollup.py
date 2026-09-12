@@ -39,9 +39,11 @@ AUTO_LINK_MARGIN = 0.20
 class Resolution(NamedTuple):
     """Outcome of the rollup ladder for one node.
 
-    ``kind`` is ``exempt`` | ``linked`` | ``suggest`` | ``orphan``. ``epic_id``
-    and ``score`` are set only for ``linked``; ``candidates`` carries the
-    scored top-K for ``suggest``.
+    ``kind`` is ``exempt`` | ``linked`` | ``suggest`` | ``orphan`` | ``crown``.
+    ``epic_id`` and ``score`` are set only for ``linked``; ``candidates``
+    carries the scored top-K for ``suggest``. ``crown`` carries ``epic_id``
+    with no score: the filing session's own crown named the epic, so the
+    scorer never ranked it.
     """
 
     kind: str
@@ -111,11 +113,17 @@ def orphan_ids(entries: list[Entry]) -> frozenset[str]:
     )
 
 
-def resolve(node: Entry, entries: list[Entry]) -> Resolution:
+def resolve(node: Entry, entries: list[Entry], crown: Any = None) -> Resolution:
     """Run the rollup ladder for a node that already exists in ``entries``.
 
     Pure: scores and decides, never mutates. The caller applies a ``linked``
     result and prints the receipt, so the mutation stays on the locked path.
+
+    ``crown`` is the filing session's crown reading, when it holds one. On
+    a ``suggest``/``orphan`` outcome it gets one override: parent the node
+    to the crown's own single live epic, so the filing lands on the board
+    that session reigns by instead of nowhere. The scorer's own link keeps
+    precedence, and the guess is named in the receipt either way.
     """
     if node.get("type") not in ROLLUP_TYPES or node.get("orphan_ok"):
         return Resolution("exempt")
@@ -140,13 +148,69 @@ def resolve(node: Entry, entries: list[Entry]) -> Resolution:
             for e in entries
         ):
             return Resolution("exempt", reason="no epics in graph")
-        return Resolution("orphan")
+        return _crown_or_orphan(node, entries, crown)
 
     top_id, top_score, top_reason = candidates[0]
     runner_up = candidates[1][1] if len(candidates) > 1 else 0.0
     if top_score >= AUTO_LINK_MIN and (top_score - runner_up) >= AUTO_LINK_MARGIN:
         return Resolution("linked", top_id, top_score, candidates, top_reason)
-    return Resolution("suggest", candidates=candidates)
+    return _crown_or_orphan(node, entries, crown, candidates=candidates)
+
+
+def _crown_or_orphan(
+    node: Entry, entries: list[Entry], crown: Any, *, candidates: tuple = ()
+) -> Resolution:
+    """The tail of the ladder: a crown override if one applies, else today."""
+    if crown is None:
+        from fno.agents.crown import current_crown
+
+        crown = current_crown()
+    if crown is not None:
+        crowned = crown_resolution(node, entries, crown)
+        if crowned is not None:
+            return crowned
+    return Resolution("orphan") if not candidates else Resolution("suggest", candidates=candidates)
+
+
+def crown_epic_from_scope(scope: Optional[str], entries: list[Entry]) -> Optional[str]:
+    """The one epic a crown scope names, or ``None``.
+
+    A crowned session's own board is the scope it was crowned over, so a
+    parentless filing from that session has its mission edge already
+    asserted - by the crown, not the scorer. Only a scope that IS one live
+    epic can parent: a project portfolio names no node, and a multi-member
+    epic set names several.
+    """
+    members = [s.strip() for s in (scope or "").split(",") if s.strip()]
+    if len(members) != 1:
+        return None
+    for e in entries:
+        if not isinstance(e, dict) or e.get("id") != members[0]:
+            continue
+        if e.get("type") != "epic" or e.get("status") in _RETIRED_EPIC_STATUSES:
+            return None
+        return members[0]
+    return None
+
+
+def crown_resolution(node: Entry, entries: list[Entry], crown: Any) -> Optional[Resolution]:
+    """The ``crown`` outcome for a crowned filer's unlinked node, or ``None``.
+
+    The guess rides ``reason`` and the caller prints its receipt, so the
+    edge is never silent. Nesting and cycle guards match the auto-link
+    path: a refusal degrades to the unlinked receipt, never a bad edge.
+    """
+    from fno.graph._intake import _find_node, _would_create_cycle, _would_exceed_epic_depth
+
+    epic_id = crown_epic_from_scope((crown or {}).get("scope"), entries)
+    if epic_id is None:
+        return None
+    target = _find_node(entries, epic_id)
+    if target is None or _would_exceed_epic_depth(entries, node, target):
+        return None
+    if _would_create_cycle(entries, node.get("id") or "", target["id"]):
+        return None
+    return Resolution("crown", epic_id=target["id"], reason="filing session crown scope")
 
 
 def receipt_lines(
@@ -163,6 +227,13 @@ def receipt_lines(
         return [
             f'rollup: auto-linked {node_id} -> {eid} "{_title(eid)}" '
             f"(score {resolution.score:.2f}); "
+            f"undo: fno backlog update {node_id} --parent null",
+        ]
+    if resolution.kind == "crown":
+        eid = resolution.epic_id or ""
+        return [
+            f'rollup: crown-linked {node_id} -> {eid} "{_title(eid)}" '
+            f"(filing session crown scope); "
             f"undo: fno backlog update {node_id} --parent null",
         ]
     if resolution.kind == "suggest":
