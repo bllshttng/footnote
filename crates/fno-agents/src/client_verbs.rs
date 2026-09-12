@@ -30,7 +30,7 @@ use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
 use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -80,7 +80,7 @@ impl serde_json::ser::Formatter for PythonDefaultFormatter {
 /// Serialize `value` with Python's default `json.dumps` spacing. Field order is
 /// the struct's declaration order (serde serializes struct fields in order), so
 /// callers control key order by field order rather than relying on map ordering.
-fn to_python_json<T: Serialize>(value: &T) -> String {
+pub(crate) fn to_python_json<T: Serialize>(value: &T) -> String {
     let mut buf = Vec::new();
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, PythonDefaultFormatter);
     value
@@ -404,7 +404,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// Raw `Value` access (not the strict typed `RegistryEntry`) mirrors Python's
 /// duck-typed `getattr`/`row.get` so extra/missing optional fields behave the
 /// same across the two implementations.
-fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
+pub(crate) fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     let bytes = match fs::read(registry_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1051,7 +1051,7 @@ fn session_id_field(harness: &str) -> Option<&'static str> {
 /// Falling back keeps the two rosters from disagreeing for any harness, added
 /// today or later, and it also keeps a claude PANE row resumable: such a row
 /// carries `harness_session_id` and no `short_id` by design.
-fn resume_session_id<'a>(entry: &'a Value, harness: &str) -> &'a str {
+pub(crate) fn resume_session_id<'a>(entry: &'a Value, harness: &str) -> &'a str {
     session_id_field(harness)
         .and_then(|field| entry.get(field))
         .and_then(Value::as_str)

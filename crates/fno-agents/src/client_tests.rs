@@ -27,6 +27,7 @@ fn print_help_lists_every_routable_verb() {
         "reconcile",
         "drive-authority",
         "trace",
+        "registry-json",
         "ping",
         "resume",
         "adopt",
