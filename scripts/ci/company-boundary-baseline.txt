@@ -24,8 +24,8 @@
 # spellings of one vocabulary start drifting. (Lines refreshed 2026-09-11 for
 # same-statement shifts only; no dependency moved.)
 # See docs/architecture/company-boundaries.md.
-cli/src/fno/events/cli.py:136: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
-cli/src/fno/events/cli.py:168: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
+cli/src/fno/events/cli.py:143: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
+cli/src/fno/events/cli.py:175: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
 cli/src/fno/claims/cli.py:1165: L1 core -> L5 runtime / from fno.agents.watchdog import harness_for_session, tail_facts
 cli/src/fno/claims/cli.py:1433: L1 core -> L5 runtime / from fno.agents.watchdog import (
 cli/src/fno/claims/cli.py:1456: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
