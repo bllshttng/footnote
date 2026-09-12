@@ -108,11 +108,19 @@ def _module_appears_on_disk(name: str) -> bool:
     def look():
         importlib.invalidate_caches()
         try:
-            return importlib.util.find_spec(name) is not None
+            spec = importlib.util.find_spec(name)
         except (ImportError, AttributeError, ValueError):
             # A parent package that is itself mid-replacement cannot answer the
             # question; treat "cannot tell" as "no" so we never retry on a guess.
             return None
+        if spec is not None and spec.loader is None:
+            # A namespace portion: the directory exists but the package's own
+            # __init__.py does not, which mid-swap means the installer has not
+            # written (or has already deleted) the real package. Importing it
+            # "succeeds" as an empty module and every submodule lookup after
+            # it fails, so answer "absent" and let the wait keep going.
+            return False
+        return spec is not None
 
     answer = look()
     if answer is None or answer or _recheck_budget_spent:

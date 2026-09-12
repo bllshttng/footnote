@@ -637,7 +637,7 @@ def test_third_party_import_failure_has_no_reinstall_hint():
 # AC8-WIN: verify-then-retry across a tree that changed mid-run
 # ---------------------------------------------------------------------------
 
-def test_module_is_now_on_disk_sees_a_file_written_after_the_dir_was_listed(tmp_path):
+def test_module_appears_on_disk_sees_a_file_written_after_the_dir_was_listed(tmp_path, monkeypatch):
     """The retry gate must read the PRESENT, not a cached past: a module written
     into an already-imported package must be visible, because that is exactly what
     a reinstall does to a running process.
@@ -647,7 +647,14 @@ def test_module_is_now_on_disk_sees_a_file_written_after_the_dir_was_listed(tmp_
     mtime changed and APFS mtimes are fine-grained enough to notice. What it pins is
     the BEHAVIOR the retry depends on, not that one implementation detail."""
     import sys as _sys
-    from fno._lazy_group import _module_is_now_on_disk
+    import time as _time
+
+    from fno._lazy_group import _module_appears_on_disk
+
+    # The first absence now spends the wait budget; flatten the sleeps and
+    # reset the once-per-process cap so this test stays fast and honest.
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+    monkeypatch.setattr("fno._recheck_budget_spent", False)
 
     pkg = tmp_path / "winpkg"
     pkg.mkdir()
@@ -656,14 +663,112 @@ def test_module_is_now_on_disk_sees_a_file_written_after_the_dir_was_listed(tmp_
     try:
         import winpkg  # noqa: F401  (populates the finder cache for pkg/)
 
-        assert _module_is_now_on_disk("winpkg.late") is False
+        assert _module_appears_on_disk("winpkg.late") is False
         # Write the module AFTER the directory has been listed and cached.
         (pkg / "late.py").write_text("x = 1\n", encoding="utf-8")
-        assert _module_is_now_on_disk("winpkg.late") is True
+        assert _module_appears_on_disk("winpkg.late") is True
     finally:
         _sys.path.remove(str(tmp_path))
         _sys.modules.pop("winpkg", None)
         _sys.modules.pop("winpkg.late", None)
+
+
+# ---------------------------------------------------------------------------
+# The bounded wait: absent-then-present, the budget cap, the spent cap
+# ---------------------------------------------------------------------------
+
+# A parent whose import costs nothing: find_spec on a dotted name imports the
+# parent first, so every fake-absent name below hangs directly off `fno`.
+
+
+def test_appears_on_disk_succeeds_once_the_module_lands_within_the_budget(monkeypatch):
+    """Absent on the first look, present on the third: the import wins the race
+    the single-look guard used to lose. This is the reinstall window, shrunk
+    but still real, being closed instead of conceded."""
+    import importlib.util
+    import time as time_mod
+    from types import SimpleNamespace
+
+    import fno
+
+    monkeypatch.setattr("fno._recheck_budget_spent", False)
+    monkeypatch.setattr(time_mod, "sleep", lambda s: None)
+    looks = {"n": 0}
+    real_find_spec = importlib.util.find_spec
+
+    def flaky(name):
+        if name == "fno._mid_reinstall":
+            looks["n"] += 1
+            if looks["n"] >= 3:
+                return SimpleNamespace(loader=object())
+            return None
+        return real_find_spec(name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", flaky)
+
+    assert fno._module_appears_on_disk("fno._mid_reinstall") is True
+    assert looks["n"] == 3, "answered the moment the module appeared, not at budget end"
+
+
+def test_appears_on_disk_spends_the_full_budget_before_answering_absent(monkeypatch):
+    """Absent for longer than the budget: False after exactly the budget's
+    polls, and the once-per-process cap marked spent."""
+    import time as time_mod
+
+    import fno
+
+    monkeypatch.setattr("fno._recheck_budget_spent", False)
+    slept: list[float] = []
+    monkeypatch.setattr(time_mod, "sleep", slept.append)
+
+    assert fno._module_appears_on_disk("fno._never_shipped") is False
+    assert len(slept) == fno._VERIFY_ATTEMPTS, slept
+    assert fno._recheck_budget_spent is True, "exhaustion must arm the spent cap"
+
+
+def test_spent_budget_answers_later_absences_after_a_single_look(monkeypatch):
+    """One exhausted budget per process: a stale install pays the wait on its
+    first absent module, not once per import."""
+    import time as time_mod
+
+    import fno
+
+    monkeypatch.setattr("fno._recheck_budget_spent", True)
+    slept: list[float] = []
+    monkeypatch.setattr(time_mod, "sleep", slept.append)
+
+    assert fno._module_appears_on_disk("fno._never_shipped") is False
+    assert slept == [], "an already-spent budget must not wait again"
+
+
+def test_namespace_portion_is_absent_not_present(monkeypatch):
+    """A directory without its __init__.py mid-swap answers a namespace spec,
+    which imports 'successfully' as an empty module and breaks every submodule
+    lookup after it. The re-check must read that as ABSENT and keep waiting
+    for the real package."""
+    import time as time_mod
+    from types import SimpleNamespace
+
+    import importlib.util
+    import fno
+
+    monkeypatch.setattr("fno._recheck_budget_spent", False)
+    monkeypatch.setattr(time_mod, "sleep", lambda s: None)
+    looks = {"n": 0}
+    real_find_spec = importlib.util.find_spec
+
+    def namespace_then_real(name):
+        if name == "fno._mid_write":
+            looks["n"] += 1
+            if looks["n"] == 1:
+                return SimpleNamespace(loader=None)  # namespace portion
+            return SimpleNamespace(loader=object())  # the real package lands
+        return real_find_spec(name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", namespace_then_real)
+
+    assert fno._module_appears_on_disk("fno._mid_write") is True
+    assert looks["n"] == 2, "namespace portion waited, real package answered"
 
 
 def _counting_import(monkeypatch, target: str, results: list):
@@ -702,7 +807,7 @@ def test_lazy_import_retries_once_when_the_tree_changed_underneath(monkeypatch):
         "fno.state.cli",
         [ModuleNotFoundError("gone", name="fno.state._mid_reinstall"), real_target],
     )
-    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+    monkeypatch.setattr(lg, "_module_appears_on_disk", lambda name: True)
 
     app = typer.Typer(
         cls=make_lazy_group_cls({"state": "fno.state.cli:cli"}),
@@ -734,7 +839,7 @@ def test_lazy_import_does_not_retry_when_the_module_is_really_missing(monkeypatc
         "fno.state.cli",
         [ModuleNotFoundError("gone", name="fno.state._really_gone")],
     )
-    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: False)
+    monkeypatch.setattr(lg, "_module_appears_on_disk", lambda name: False)
 
     app = typer.Typer(
         cls=make_lazy_group_cls({"state": "fno.state.cli:cli"}),
@@ -784,7 +889,7 @@ def test_plain_import_error_is_never_retried(monkeypatch):
     from fno import _lazy_group as lg
 
     # on_disk deliberately True: the guard must be the exception TYPE, not this.
-    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+    monkeypatch.setattr(lg, "_module_appears_on_disk", lambda name: True)
     boom = ImportError("cannot import name 'gone' from 'fno.config'", name="fno.config")
     calls, result = _run_one_lazy_command(monkeypatch, [boom])
 
@@ -799,7 +904,7 @@ def test_retry_failure_is_reported_instead_of_the_stale_first_error(monkeypatch)
     something `fno doctor update` cannot fix."""
     from fno import _lazy_group as lg
 
-    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+    monkeypatch.setattr(lg, "_module_appears_on_disk", lambda name: True)
     first = ModuleNotFoundError("gone", name="fno.state._mid_reinstall")
     second = ModuleNotFoundError("No module named 'some_third_party'", name="some_third_party")
     calls, result = _run_one_lazy_command(monkeypatch, [first, second])
@@ -870,9 +975,9 @@ def test_import_hook_retries_a_module_that_is_on_disk_now(monkeypatch):
     # function by VALUE at import time, so monkeypatching `fno` reaches the
     # finder only. An inlined second copy of the on-disk check in `_load_real`
     # would sail past the patch, and this line is what refuses it.
-    assert fno._lazy_group._module_is_now_on_disk is fno._module_is_now_on_disk
+    assert fno._lazy_group._module_appears_on_disk is fno._module_appears_on_disk
     checked: list[str] = []
-    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: checked.append(name) or True)
+    monkeypatch.setattr(fno, "_module_appears_on_disk", lambda name: checked.append(name) or True)
     _spy_path_finder(monkeypatch, seen)
 
     spec = finder.find_spec("fno.agents.session_truth", None, None)
@@ -894,7 +999,7 @@ def test_import_hook_does_not_retry_a_module_that_is_absent(monkeypatch):
 
     seen: list[str] = []
     finder = _installed_finder()
-    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: False)
+    monkeypatch.setattr(fno, "_module_appears_on_disk", lambda name: False)
     _spy_path_finder(monkeypatch, seen, spec=None)
 
     with pytest.raises(ModuleNotFoundError) as excinfo:
@@ -908,9 +1013,18 @@ def test_import_hook_does_not_retry_a_module_that_is_absent(monkeypatch):
 
 
 def test_import_hook_ignores_third_party_modules(monkeypatch):
-    """A missing dependency is a broken install: no re-check, no retry, no hint."""
+    """A missing dependency is a broken install: no re-check, no retry, no hint,
+    and no wait -- the shared helper now polls its budget for any name it is
+    handed, so the fno-only gate has to sit in the finder, in front of it."""
+    import fno
+
     seen: list[str] = []
     finder = _installed_finder()
+
+    def _bomb(name):
+        raise AssertionError(f"third-party module {name!r} reached the re-check helper")
+
+    monkeypatch.setattr(fno, "_module_appears_on_disk", _bomb)
     _spy_path_finder(monkeypatch, seen)
 
     assert finder.find_spec("rich.console", None, None) is None
@@ -981,7 +1095,7 @@ def test_fromlist_submodule_keeps_the_retry_and_loses_only_the_message():
         "    def find_spec(name, path=None, target=None):\n"
         "        seen.append(name)\n"
         "        return None\n"
-        "fno._module_is_now_on_disk = lambda name: True\n"
+        "fno._module_appears_on_disk = lambda name: True\n"
         "importlib.machinery.PathFinder = Spy\n"
         "try:\n"
         "    from fno.agents import no_such_submodule\n"
