@@ -1150,7 +1150,6 @@ impl ConvergeGate {
 #[serde(untagged)]
 enum DrainReceipt {
     Report {
-        #[serde(default)]
         targets: Vec<ResolvedTarget>,
         #[serde(default)]
         missions: u64,
@@ -1721,6 +1720,17 @@ mod tests {
             }
             DrainReceipt::Report { .. } => panic!("bare list must read as Legacy"),
         }
+    }
+
+    #[test]
+    fn object_receipt_without_targets_is_not_a_reading() {
+        // An object that carries no targets (an error envelope, a foreign
+        // shape) must FAIL to parse, not default into an empty Report: a
+        // masked fault reads as no_missions and the missing-click class of
+        // silence comes back. The shell-level failure (env_broken) is the
+        // honest row for an unparseable receipt.
+        let receipt: Result<DrainReceipt, _> = serde_json::from_str(r#"{"error":"boom"}"#);
+        assert!(receipt.is_err(), "a targets-less object must not decode");
     }
 
     #[test]

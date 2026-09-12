@@ -993,9 +993,12 @@ def active_backlog_cmd(
             "config_unreadable": "config unreadable; the drain cannot read its own switch",
             "bad_interval": "invalid interval: config.active_backlog.interval",
             "project_disabled": (
-                "every active mission's project is disabled: config.active_backlog.enabled"
+                "the most common mission drop is a disabled project: "
+                "config.active_backlog.enabled"
             ),
-            "no_workspace_path": "no workspace path resolves for any active mission's project",
+            "no_workspace_path": (
+                "the most common mission drop is a missing workspace path"
+            ),
         }
         typer.echo(
             f"active-backlog: {reading['missions']} active missions, 0 drain targets "
