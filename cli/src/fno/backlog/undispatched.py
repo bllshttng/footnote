@@ -233,8 +233,7 @@ def read_planned_unclaimed_from_entries(
     """Classify planned-but-unclaimed rows over an already-read entry list.
 
     ``worked`` hands in an already-paid strict roster read (``backlog next``
-    pays one for its whole selection). Absent, this reads the roster itself,
-    which is what `backlog undispatched` wants.
+    pays one per selection). Absent, this reads the roster itself.
     """
     from fno.graph.statuses import live_worked_node_ids
 

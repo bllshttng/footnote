@@ -851,9 +851,8 @@ def ready(
     refuses, it never falls back to a locally recomputed answer.
 
     ``occupancy`` hands in an already-paid strict read of live claims plus
-    roster-worked nodes (``backlog next`` pays it once for its whole
-    selection). Absent, this reads both itself, which is what every other
-    caller wants.
+    roster-worked nodes (``backlog next`` pays one per selection). Absent, this
+    reads both itself, which is what every other caller wants.
     """
     params: "dict" = {
         "project": project,

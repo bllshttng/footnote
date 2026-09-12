@@ -1,11 +1,10 @@
 """The evidence one `backlog next` selection reads.
 
-Who holds a live `node:` claim, and which nodes a live worker is already on:
-two questions the selector, the independent observer, and the starvation
-receipts each used to ask for themselves, paying a subprocess-bound read every
-time and getting the same answer. They are asked once here. The receipts that
-explain an unselected node live beside them because they read the same
-occupancy. Homed out of graph/cli.py: that file is over the source budget.
+Who holds a live `node:` claim, and which nodes a live worker is on: two
+questions the selector, the observer, and the starvation receipts each used to
+ask for themselves, paying a subprocess-bound read every time for the same
+answer. Asked once here, beside the receipts that consume them. Homed out of
+graph/cli.py: that file is over the source budget.
 """
 from __future__ import annotations
 
@@ -19,11 +18,10 @@ class OccupancyUnavailable(RuntimeError):
 def read_occupancy(entries: list[dict], claimed_reader) -> tuple[set, dict]:
     """Live `node:` claims and roster-worked node ids, read once, together.
 
-    Both reads are subprocess-bound (the native claim sweep, the roster probe)
-    and independent, so they overlap instead of queueing. Both stay strict: an
-    unreadable source raises, and the caller refuses the selection rather than
-    selecting against an empty occupancy set. The claim verdict is read first,
-    so its refusal is the one a caller sees when both sources are down.
+    Both reads are subprocess-bound and independent, so they overlap instead of
+    queueing. Both stay strict: an unreadable source raises, and the caller
+    refuses rather than select against an empty occupancy set. The claim
+    verdict is read first, so its refusal wins when both sources are down.
     """
     from concurrent.futures import ThreadPoolExecutor
 

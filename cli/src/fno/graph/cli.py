@@ -4127,9 +4127,9 @@ def cmd_next(
     def _read_entries() -> list[dict]:
         """The graph, strictly: corruption refuses instead of answering [].
 
-        `read_graph` swallows a corrupt file and returns no rows, and a
-        selection over no rows prints `null` - which `advance` reads as the
-        benign `no-work` skip. An unreadable graph is not an empty backlog.
+        `read_graph` swallows a corrupt file and answers no rows; a selection
+        over no rows prints `null`, which `advance` reads as the benign
+        `no-work` skip. An unreadable graph is not an empty backlog.
         """
         try:
             return read_graph_strict(_graph_path())
@@ -4173,8 +4173,8 @@ def cmd_next(
         keeper verb's (backlog_ready::select); `next` takes rows[0] of the
         same answer its sibling verb serves, so the two surfaces cannot
         drift. `entries` rides IN so a `--claim` mutation and its selection
-        read the same instant under the graph lock, and `occupancy` rides IN
-        so the keeper is not asked to re-read claims this command already has.
+        read the same instant under the graph lock; `occupancy` rides IN so the
+        keeper never re-reads claims this command already has.
         """
         from fno.graph._intake import repo_root
         from fno.graph.store import (
@@ -4220,12 +4220,9 @@ def cmd_next(
     def _prepare(entries: list[dict]) -> tuple[set, dict]:
         """Dispatch occupancy plus the observer receipt, read ONCE per selection.
 
-        The live claim verdict and the roster-backed worked read are what this
-        command costs; selector, observer recovery and the starvation receipts
-        each used to pay for them and got the same answer every time. Both
-        reads stay strict: an unreadable source refuses the selection, it never
-        substitutes an empty occupancy set. A `--claim` transaction that loses
-        to an interleaved writer pays this again on its retry, deliberately:
+        The claim verdict and the roster read are what this command costs, and
+        three layers each used to pay for them. A `--claim` transaction that
+        loses to an interleaved writer pays again on its retry, deliberately:
         the entries it selects from are new, so its occupancy must be too.
         """
         try:
@@ -4369,9 +4366,8 @@ def cmd_next(
             assert pre_entries is not None
             entries = pre_entries
         else:
-            # The prelude may already have read this graph for project
-            # detection or parent resolution, and nothing mutates it on the
-            # read-only path: a second read buys the same rows.
+            # The prelude may already hold this graph, and nothing mutates it
+            # on the read-only path: a second read buys the same rows.
             entries = pre_entries if pre_entries is not None else _read_entries()
         occupied, observer = _prepare(entries)
         candidates = _with_observer(_select(entries, occupied), entries, occupied, observer)
