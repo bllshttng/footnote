@@ -146,6 +146,28 @@ def test_next_refuses_when_worked_evidence_is_unreadable(tmp_graph, monkeypatch)
     assert json.loads(tmp_graph.read_text())["entries"] == entries
 
 
+def test_next_refuses_when_the_graph_is_unreadable(tmp_graph, monkeypatch):
+    """A corrupt graph refuses selection; it never selects over zero rows.
+
+    `read_graph` swallows corruption and answers no rows, and a selection over
+    no rows prints `null`, which `advance` reads as the benign `no-work` skip.
+    """
+    entries = _two_ready_entries()
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    def unreadable(*_args, **_kwargs):
+        raise RuntimeError("graph.json is corrupt")
+
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", unreadable)
+
+    result = _invoke("backlog", "next", "--all")
+
+    assert result.exit_code == 1, result.output
+    assert "graph unreadable" in result.output
+    assert "graph.json is corrupt" in result.output
+    assert '"id"' not in result.output
+
+
 def test_ready_excludes_live_claimed_node(tmp_graph, tmp_path):
     """`graph ready` omits a live-claimed node from the listing."""
     tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")

@@ -2559,7 +2559,7 @@ def _intake_impl(
     `_intake.py` helpers can be exercised by tests without going through Typer.
     """
     from fno.graph._constants import PRIORITY_ORDER
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import (
         _prepare_intake,
         _build_intake_node,
@@ -4112,7 +4112,7 @@ def cmd_next(
         ),
     ),
 ) -> None:
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import locked_mutate_graph, read_graph, read_graph_strict
     from fno.graph._intake import (
         detect_project,
         descendants_of,
@@ -4123,6 +4123,19 @@ def cmd_next(
     result: list = [None]
     project_filter = project
     _external = active_backend_name() != "graph"
+
+    def _read_entries() -> list[dict]:
+        """The graph, strictly: corruption refuses instead of answering [].
+
+        `read_graph` swallows a corrupt file and returns no rows, and a
+        selection over no rows prints `null` - which `advance` reads as the
+        benign `no-work` skip. An unreadable graph is not an empty backlog.
+        """
+        try:
+            return read_graph_strict(_graph_path())
+        except Exception as exc:  # noqa: BLE001 - unknown graph state refuses
+            typer.echo(f"Error: graph unreadable: {exc}; selection refused", err=True)
+            raise typer.Exit(code=1) from exc
     # One read for the prelude AND selection: under an external backend the
     # transient joined model (list_open + sidecar join, fail-closed); under
     # the default backend the working graph, read at most once for project
@@ -4133,7 +4146,7 @@ def cmd_next(
         else:
             pre_entries = None
             if (not project_filter and not all_) or parent:
-                pre_entries = read_graph(_graph_path())
+                pre_entries = _read_entries()
     except _ExternalSelectionError as exc:
         typer.echo(f"Error: {exc}; selection refused", err=True)
         raise typer.Exit(code=1)
@@ -4204,7 +4217,7 @@ def cmd_next(
     # The claim set of the selection that actually ran, for the receipts below.
     selection_claimed: list = [set()]
 
-    def _prepare(entries: list[dict]) -> tuple[set, dict, dict]:
+    def _prepare(entries: list[dict]) -> tuple[set, dict]:
         """Dispatch occupancy plus the observer receipt, read ONCE per selection.
 
         The live claim verdict and the roster-backed worked read are what this
@@ -4232,8 +4245,11 @@ def cmd_next(
         except ObserverReadError as exc:
             typer.echo(f"Error: {exc}; selection refused", err=True)
             raise typer.Exit(code=1) from exc
+        except Exception as exc:  # noqa: BLE001 - unknown state refuses recovery
+            typer.echo(f"Error: observer revalidation failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         selection_claimed[0] = claimed
-        return claimed, worked, observer
+        return claimed | set(worked), observer
 
     def _with_observer(
         candidates: list[dict],
@@ -4303,8 +4319,7 @@ def cmd_next(
             from fno.claims.io import claims_root_for
 
             assert pre_entries is not None
-            claimed, worked, observer = _prepare(pre_entries)
-            occupied = claimed | set(worked)
+            occupied, observer = _prepare(pre_entries)
             candidates = _with_observer(
                 _select(pre_entries, occupied), pre_entries, occupied, observer
             )
@@ -4325,8 +4340,7 @@ def cmd_next(
         else:
 
             def mutator(entries):
-                claimed, worked, observer = _prepare(entries)
-                occupied = claimed | set(worked)
+                occupied, observer = _prepare(entries)
                 candidates = _with_observer(
                     _select(entries, occupied), entries, occupied, observer
                 )
@@ -4358,9 +4372,8 @@ def cmd_next(
             # The prelude may already have read this graph for project
             # detection or parent resolution, and nothing mutates it on the
             # read-only path: a second read buys the same rows.
-            entries = pre_entries if pre_entries is not None else read_graph(_graph_path())
-        claimed, worked, observer = _prepare(entries)
-        occupied = claimed | set(worked)
+            entries = pre_entries if pre_entries is not None else _read_entries()
+        occupied, observer = _prepare(entries)
         candidates = _with_observer(_select(entries, occupied), entries, occupied, observer)
         if candidates:
             result[0] = _dispatch_node_summary(candidates[0])
