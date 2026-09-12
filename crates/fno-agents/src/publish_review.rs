@@ -321,13 +321,11 @@ pub fn publish(payload: &Value, gh: &dyn Gh, env: &dyn Fn(&str) -> Option<String
         } else {
             head_sha.clone()
         };
-        let toplevel_journals = vec![
-            crate::paths::events_path(cwd),
-            crate::paths::worktree_repo_root(cwd)
-                .join(".fno")
-                .join("events.jsonl"),
-        ];
-        match newest_head_attestation(&toplevel_journals, &head) {
+        // One resolver, one read: events_path subsumes the legacy checkout
+        // journal by migrating it on first resolve, so no hand-built path
+        // may sit beside it (the state-roots lint refuses exactly that).
+        let journals = [crate::paths::events_path(cwd)];
+        match newest_head_attestation(&journals, &head) {
             Some(att) => {
                 verdict = att
                     .get("verdict")
