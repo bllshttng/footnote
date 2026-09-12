@@ -120,3 +120,20 @@ def reap_rooted(
     for row in report:
         row["terminal"] = bool(terminal_now.get(row["pid"], False))
     return report
+
+
+def census_rooted(roots, *, reaper: int = 1) -> list[dict]:
+    """The rows ``reap_rooted`` would signal, WITHOUT signalling: the count a
+    teardown polls while a bounded keeper is still inside its idle window.
+
+    Same enumeration and same match as ``reap_rooted`` (one probe, no drift),
+    minus the signals, so a caller can wait out a self-exit bound and reap
+    only what is genuinely stuck.
+    """
+    from fno.agents.orphans import iter_processes
+
+    normalized = [os.path.abspath(str(r)) for r in roots]
+    return [
+        row for row in iter_processes(reaper)
+        if _matches(row.get("cwd"), normalized, None)
+    ]
