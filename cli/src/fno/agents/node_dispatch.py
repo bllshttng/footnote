@@ -1,14 +1,11 @@
 """One resolver for node-dispatch spawn preferences (x-e53e change 2).
 
-Everything `backlog.advance._spawn_worker` used to compute ABOVE its argv
-build - the verb derivation and its lossy-projection refusal, the capacity-grid
-consult, the settings and auto-merge-grant read, ``harness_map.resolve_dispatch``,
-the permission-mode cascade, and the state-root env refusal - lives here as
-:func:`resolve_node_spawn`, so every node-dispatching caller reads ONE answer
-and the front door (`fno agents spawn`) stays the only launcher. The callers
-build argv from the returned :class:`NodeSpawnArgs` through
-:func:`node_spawn_argv` and shell ``fno agents spawn``; none of them launches a
-peer itself.
+Everything `backlog.advance._spawn_worker` computed above its argv build - the
+verb derivation and its lossy-projection refusal, the grid consult, the
+settings/grant read, ``resolve_dispatch``, the permission cascade, and the
+state-root env refusal - is :func:`resolve_node_spawn`, so every node-dispatching
+caller reads ONE answer and `fno agents spawn` stays the only launcher. Callers
+build argv via :func:`node_spawn_argv` and shell the door; none launches a peer.
 """
 
 from __future__ import annotations
@@ -23,13 +20,11 @@ from typing import Optional
 class NodeSpawnArgs:
     """The resolved launch preferences one node dispatch needs.
 
-    ``harness`` is the launch spelling that rides ``--harness`` (an account
-    record alias included); ``resolved_harness`` is the resolver's harness
-    answer, the one the claude-only argv gates read. ``route`` is the grid
-    lane's answer, ``resolved_route`` the stage table's verb lane (the claude
-    fallback when the grid did not pick). ``env`` is the subprocess env:
-    base environment minus a stale ``TARGET_NO_MERGE``, plus the resolver's
-    own answer and any caller ``extra_env``.
+    ``harness`` rides ``--harness`` (account record aliases included);
+    ``resolved_harness`` is the resolver's answer, the one the claude-only argv
+    gates read. ``route`` is the grid lane's pick, ``resolved_route`` the stage
+    table's verb lane. ``env`` is the subprocess env: base minus a stale
+    ``TARGET_NO_MERGE``, plus the resolver's answer and caller ``extra_env``.
     """
 
     node_id: str
@@ -105,10 +100,9 @@ def resolve_node_spawn(
             )
         source = "rd"
     node_verb = (verb or "").strip() or None
-    # x-0961/x-ebd2: classify the RAW declaration from the DICT alone (a
-    # caller whose verb param diverges surfaces as verb=builtin beside
-    # verb_source=declared). A dict without the key is a lossy projection:
-    # REFUSE before anything is spent. A None node keeps its warning + path.
+    # x-0961/x-ebd2: classify the RAW declaration from the DICT alone. A dict
+    # without the key is a lossy projection: REFUSE before anything is spent.
+    # A None node keeps its warning + path.
     if isinstance(node, dict) and "dispatch_verb" not in node:
         raise SpawnError(
             f"refusing to dispatch {node_id}: the node dict {caller} passed "
@@ -141,19 +135,15 @@ def resolve_node_spawn(
         source=source,
         verb_code=verb_code,
     )
-    # --provider selects the account/record (or a bare kind like "claude"); a
-    # per-node or dispatch-time pin overrides the claude default. Layer-separate
-    # from `harness` (the record's cli, which drives the resolver's substrate).
-    # NOT the launch harness: defaulting it here, a rung before the resolver,
-    # launched claude carrying codex syntax.
+    # --provider selects the account/record (or a bare kind like "claude"),
+    # layer-separate from `harness` (the record's cli). NOT the launch harness:
+    # defaulting it here once launched claude carrying codex syntax.
     launch = (provider or "").strip()
 
-    # Capacity-grid deferral receiving end: difficulty picks the lane HERE, at
-    # the seam that can read live capacity (the spawned argv always carries an
-    # explicit --harness, so the spawn-CLI grid can never fire on this path).
-    # An explicit harness skips the consult: under it the grid could pick a
-    # harness the caller's placement did not key for. grid_reason=None on a
-    # grid PICK; a caller that resolved the grid hands its answer in.
+    # Capacity-grid deferral: the lane is picked HERE, at the seam that can
+    # read live capacity (the spawned argv always carries --harness, so the
+    # spawn-CLI grid can never fire on this path). An explicit harness skips
+    # the consult; a caller that resolved the grid hands its answer in.
     grid_why: Optional[str] = grid_reason
     grid_lane_route: Optional[str] = grid_route
     grid_lane_account: Optional[str] = grid_account
@@ -169,10 +159,9 @@ def resolve_node_spawn(
             grid_lane_route = grid_route_resolved
             grid_lane_account = grid_account_resolved
 
-    # x-4391/x-4be1: the grant reads with node_cwd precedence so a
-    # cross-project dispatch reads the DEPENDENT node's config; the same
-    # settings object feeds the resolver and the permission-mode read, so all
-    # config reads are node-consistent. Any read failure -> no-merge.
+    # x-4391/x-4be1: node_cwd precedence, so a cross-project dispatch reads
+    # the DEPENDENT node's config; the same settings object feeds the resolver
+    # and the permission-mode read. Any read failure -> no-merge.
     settings_obj = None
     try:
         from pathlib import Path as _Path
@@ -190,12 +179,10 @@ def resolve_node_spawn(
     # literal "dispatch" grants (a typo or a stub settings object never does).
     allow_merge = auto_merge_grant(settings_obj)
 
-    # x-0676: resolve substrate + normalized command. A node dispatch_verb takes the
-    # verb path (never a merge); reconcile stays explicit and spells its own posture.
-    # With neither, the builtin rung reads config.auto_merge.grant itself (x-8e59),
-    # so this caller no longer routes a merge grant through the verb path to work
-    # around a builtin that ignored the key. A DispatchResolveError propagates to the
-    # caller's non-fatal spawn-failure path.
+    # x-0676/x-8e59: a node dispatch_verb takes the verb path (never a
+    # merge); reconcile spells its own posture; with neither, the builtin rung
+    # reads config.auto_merge.grant itself. DispatchResolveError propagates to
+    # the caller's non-fatal spawn-failure path.
     from fno.agents import harness_map
 
     # One axis: `provider` is the harness under an older spelling, so it must
@@ -243,9 +230,8 @@ def resolve_node_spawn(
             f"{resolved['harness']!r} ({target_cmd!r}). Pass one axis."
         )
 
-    # x-dfa4: an explicit permission_mode wins; else the operator's spawn
-    # default (config.agents.defaults.permission_mode); else the built-in
-    # unattended answer (x-7198). Never unset for a claude dispatch below.
+    # x-dfa4/x-7198: explicit permission_mode > the operator's spawn default >
+    # the built-in unattended answer. Never unset for a claude dispatch below.
     mode = (permission_mode or "").strip()
     if not mode and settings_obj is not None:
         try:
@@ -269,12 +255,9 @@ def resolve_node_spawn(
             "the overlay where the harness is exec'd."
         )
     merged_env = {**spawn_env, **(extra_env or {})}
-    # x-9d11: the resolver's env is AUTHORITATIVE for the merge posture, so the
-    # inherited TARGET_NO_MERGE never survives into a successor the resolver just
-    # granted allow-merge (this verb runs as a subprocess of the prior no-merge
-    # worker, whose exported carrier would otherwise silently kill the config's
-    # auto-merge posture - review round 5). Dropped from the base BEFORE the
-    # merge so the resolver's own value (either way) is the only one that lands.
+    # x-9d11: the resolver's env is AUTHORITATIVE for the merge posture, so a
+    # stale inherited TARGET_NO_MERGE never survives into a successor the
+    # resolver just granted allow-merge (review round 5).
     base_env = {k: v for k, v in os.environ.items() if k != "TARGET_NO_MERGE"}
     run_env = {**base_env, **merged_env} if merged_env else (base_env or None)
 
@@ -310,12 +293,10 @@ def node_spawn_argv(
     cwd: Optional[str] = None,
     extra: tuple = (),
 ) -> list[str]:
-    """The ``fno agents spawn`` flags for resolved args, one builder for every
-    node-dispatching caller (x-e53e): the claude-only gates here are the ONE
-    copy, so the advance and dispatch-next argvs cannot drift. Callers prepend
-    ``fno agents spawn`` and pass their own placement flags via ``extra``
-    (a lane pin, a tab parent, no-wait); ``cwd`` rides before the model axis,
-    the order the advance suite pins.
+    """The ``fno agents spawn`` flags for resolved args: ONE builder for every
+    node-dispatching caller (x-e53e), so the claude-only gates cannot drift.
+    Callers prepend the binary + verb and pass placement flags via ``extra``;
+    ``cwd`` rides before the model axis, the order the advance suite pins.
     """
     cmd = [
         "--harness", args.harness,
@@ -328,11 +309,9 @@ def node_spawn_argv(
         # dispatch-time vendor pin outranks it and is never replaced.
         cmd += ["--route", args.route]
     elif args.resolved_route and args.resolved_harness == "claude":
-        # No grid pick: fall back to the stage table's verb lane route (the
-        # same resolve that named the harness). A claude spawn carrying only
-        # --harness sends a routed model to the default endpoint, where it
-        # dies on first inference. Claude-gated: --route is a claude-only
-        # axis at the spawn seam, the same gate the shell dispatcher applies.
+        # No grid pick: the stage table's verb lane route, or a routed claude
+        # model dies on the default endpoint at first inference. Claude-gated:
+        # --route is a claude-only axis at the spawn seam.
         cmd += ["--route", args.resolved_route]
     if args.account and args.resolved_harness == "claude":
         # The capacity pick read THIS account's quota; claude-only at the CLI.
@@ -351,31 +330,21 @@ def node_spawn_argv(
     # default, byte-identical to today.
     if args.model:
         cmd += ["--model", args.model]
-    # CLAUDE-ONLY, mirroring dispatch-node.sh: the spawn seam exit-2 rejects a
-    # mapped --permission-mode for a non-claude harness on a non-pane substrate.
-    # Gate on the RESOLVED harness, not the raw launch spelling: `provider` may
-    # carry a claude ACCOUNT record (e.g. ccm/ccr) that resolves to
-    # harness=claude and MUST still get the flag, else the account-pinned
-    # worker keeps hanging - the exact bug that fix addressed. A failover leg
-    # landing on codex/gemini gets its bypass from its own resolved caps, not
-    # this claude-native value. Silent skip (parity); the receipt omits
-    # permission_mode, so the posture stays inspectable.
+    # CLAUDE-ONLY (mirrors dispatch-node.sh): gate on the RESOLVED harness, so
+    # a claude ACCOUNT record (ccm/ccr) still gets the flag - without it the
+    # account-pinned worker hangs on a prompt (the bug the gate fixed).
     if args.permission_mode and args.resolved_harness == "claude":
         cmd += ["--permission-mode", args.permission_mode]
-    # A quota cutover's destination account rides argv as a RECORD ID, never as
-    # env: the spawn front door resolves it inside cmd_spawn and applies the
-    # overlay where the harness is exec'd. A codex record's overlay is
-    # {HOME: <account_dir>/home}, and footnote resolves its own state root off
-    # HOME too, so putting it on this wrapper would move the registry, the claim
-    # and the events into the account's home where nothing looks (x-c33e).
+    # A cutover's destination account rides argv as a RECORD ID, never env:
+    # the front door applies the overlay where the harness is exec'd, and a
+    # HOME-carrying overlay would move the state root where nothing looks
+    # (x-c33e).
     if args.dispatch_account:
         cmd += ["--dispatch-account", args.dispatch_account]
     if extra:
         cmd += list(extra)
-    # x-0961: the worker-to-node join. Without --node the registry row carries
-    # node: null, so no instrument can answer which worker is on which node;
-    # every manual spawn passes it, which is why manual dispatches joined and
-    # advance dispatches did not.
+    # x-0961: the worker-to-node join; without --node the registry row names
+    # no node and no instrument can answer which worker is on which node.
     cmd += ["--node", args.node_id]
     if args.node_slug:
         cmd += ["--slug", args.node_slug]
