@@ -119,7 +119,10 @@ def write_cmd(
     try:
         binding = None
         if task_context:
-            binding = json.loads(Path(task_context).read_text(encoding="utf-8"))
+            try:
+                binding = json.loads(Path(task_context).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise MalformedReceiptError(f"task_context file unreadable: {exc}") from exc
         receipt = build_receipt(
             node=node,
             session=session or "",

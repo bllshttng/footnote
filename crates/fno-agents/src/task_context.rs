@@ -163,6 +163,14 @@ impl TaskContextBinding {
                     source.path
                 ));
             }
+            // Sources are worktree-relative by contract: an absolute path or a
+            // `..` segment would make revalidation read outside the worktree.
+            if source.path.starts_with('/') || source.path.split('/').any(|seg| seg == "..") {
+                return Err(format!(
+                    "malformed_binding: source path must be worktree-relative ({})",
+                    source.path
+                ));
+            }
             total = total.saturating_add(source.byte_size);
         }
         if total != self.source_bytes {
@@ -597,6 +605,23 @@ mod tests {
     }
 
     #[test]
+    fn source_paths_must_stay_inside_the_worktree() {
+        for path in ["/etc/passwd", "../outside/PLAN.md", "docs/../../escape"] {
+            let mut b = binding(vec![source(path, "x\n")]);
+            b.source_bytes = 2;
+            let err = b.validate().unwrap_err();
+            assert!(
+                err.starts_with("malformed_binding: source path must be worktree-relative"),
+                "{path}: {err}"
+            );
+        }
+        // A relative path inside the worktree still validates.
+        binding(vec![source("docs/PLAN.md", "plan bytes\n")])
+            .validate()
+            .expect("relative path ok");
+    }
+
+    #[test]
     fn stage_moves_forward_only_and_restamps() {
         let b = binding(vec![]);
         let submitted = b.advance_stage(&Stage::Submitted).expect("advance");
@@ -717,6 +742,7 @@ mod tests {
     #[test]
     fn payload_block_is_bounded_and_names_identity() {
         let mut b = binding(vec![]);
+        b.required_constraints = vec![];
         for i in 0..14 {
             b.required_constraints.push(format!("constraint {i}"));
         }
