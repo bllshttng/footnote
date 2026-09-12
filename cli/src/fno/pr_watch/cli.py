@@ -454,8 +454,7 @@ def tick() -> None:
     arm_interval: dict[str, int] = {"king_wake": 900, "notify_watch": 300, "watchdog": 600}
     roots_box: dict[str, Optional[list]] = {"v": None}
 
-    # One sidecar scan per tick: notify_watch, heal, stranded and catchup
-    # each swept the same roots, four scans a tick.
+    # One sidecar scan per tick: four phases each swept the same roots.
     def _tick_roots() -> list:
         roots = roots_box["v"]
         if roots is None:

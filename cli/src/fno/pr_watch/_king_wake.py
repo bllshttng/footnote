@@ -430,9 +430,8 @@ def _dispatch_walk(
         )
 
 
-#: A pass stops before a step it cannot finish: one truth read measured up to
-#: 10.4s, so under 15s left the crown is left for the next tick instead of
-#: being cut mid-read by the phase alarm and losing every crown before it.
+#: A pass stops under 15s left (one truth read measured 10.4s) rather than
+#: being cut mid-read and losing every crown before it.
 _KING_STEP_FLOOR_S = 15.0
 
 
