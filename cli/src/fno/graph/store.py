@@ -769,10 +769,7 @@ def request_scoreboard_classify(
     now=None,
 ) -> dict:
     """The delivery classifier (scoreboard.rs) over client-shipped rows.
-
-    The terminal vocabulary stays owned by ``fno.terminals`` on this side; the
-    keeper owns the decision, the project scope and the survival cohort.
-    ``now`` rides as ISO text for the survival window."""
+    Terminal vocabulary stays Python's (fno.terminals); ``now`` rides as ISO."""
     from fno.terminals import DELIVERED_TERMINALS
 
     return _client_for(GRAPH_JSON).request(

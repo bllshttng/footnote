@@ -53,9 +53,8 @@ def classify_deliveries(
     project: str | None = None,
     now=None,
 ) -> dict:
-    """The one delivery classification (Rust keeper): ``by_node``,
-    ``coverage``, ``survival``, and with a project the scoped
-    ``entries``/``rows``/``node_ids``. Test seam for hermetic fold tests."""
+    """The one delivery classification (Rust keeper): by_node, coverage,
+    survival, and with a project the scoped entries/rows/node_ids."""
     from fno.graph.store import request_scoreboard_classify
 
     return request_scoreboard_classify(graph_nodes, rows, project, now)
@@ -306,10 +305,7 @@ def _pct(n: int, d: int) -> int:
 
 def _num(v) -> float:
     """Coerce a possibly-malformed ledger cost to float; junk -> 0.0.
-
-    NaN and the infinities parse as float but are junk: they would ride into
-    the -J stream and break strict JSON, so they read as 0.0 like any other
-    malformed value."""
+    NaN/inf parse as float but break strict -J, so they read as 0.0 too."""
     try:
         value = float(v or 0.0)
     except (TypeError, ValueError):
@@ -341,12 +337,10 @@ def build_scoreboard(
     classified: dict | None = None,
 ) -> dict:
     """Fold the three sources into a render-ready dict. Pure when
-    ``classified`` is passed; otherwise the keeper answers one classifier call.
-
-    Delivery is the one classifier's answer (``classified["by_node"]``), not a
-    union: a merge delivers with no ledger row, and a session terminal on a
-    known unmerged node records evidence without shipping anything. Survival
-    (the 14-day quality cohort) rides the same payload."""
+    ``classified`` is passed; otherwise one keeper classifier call answers.
+    Delivery is that one answer, never a union: a merge delivers with no
+    ledger row, a terminal never overrides a known unmerged node, and the
+    14-day survival cohort rides the same payload."""
     cutoff = now - timedelta(days=since_days)
 
     def _in_window(ts_raw) -> bool:
@@ -364,11 +358,8 @@ def build_scoreboard(
     }
     window_node_ids = {r.get("graph_node_id") for r in windowed if r.get("graph_node_id")}
     delivered_nodes = {
-        nid
-        for nid in set(deliveries) | window_node_ids
-        if (c := deliveries.get(nid))
-        and c.get("delivered")
-        and _in_window(c.get("ship_ts"))
+        nid for nid in set(deliveries) | window_node_ids
+        if (c := deliveries.get(nid)) and c.get("delivered") and _in_window(c.get("ship_ts"))
     }
 
     if total == 0 and not delivered_nodes:
@@ -430,8 +421,7 @@ def build_scoreboard(
         "shipped_nodes": len(shipped_nodes),
         "shipped_by_terminal": len(terminal_shipped),
         "merged_nodes_without_ledger_row": sum(
-            1
-            for nid in delivered_nodes
+            1 for nid in delivered_nodes
             if deliveries.get(nid, {}).get("class") == "merged" and nid not in window_node_ids
         ),
         "delivery_classes": delivery_classes,
@@ -464,8 +454,8 @@ def _event_in_window(e: dict, cutoff, now) -> bool:
         data = e.get("data")
         ts_raw = data.get("ts") if isinstance(data, dict) else None
     dt = _parse_ts(ts_raw)
-    # x-e159: an undated event has no window to belong to. Counting it in every
-    # window inflated each timed numerator; it stays out until it carries a ts.
+    # An undated event has no window to belong to; counting it in every
+    # window inflated each timed numerator, so it stays out until it has a ts.
     return dt is not None and cutoff <= dt <= now
 
 
@@ -534,8 +524,7 @@ def build_calibration(
         origin = g.get("caused_by")
         if origin:
             fixes.setdefault(origin, []).append(g)
-    # Ship times come from the one classifier, so a merged node carries its
-    # merged_at even with no delivered-terminal row.
+    # Ship times come from the classifier: a merged node carries merged_at with no row.
     deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
     ship_ts: dict[str, datetime] = {}
     for nid, c in deliveries.items():
@@ -1077,9 +1066,7 @@ def build_provider_scoreboard(
             if it is not None:
                 b["iterations"].append(it)
             if nid:
-                # Delivered nodes count ONCE per bucket no matter how many
-                # retries ran; credit is shared, never copied, across the
-                # buckets that worked the same node.
+                # Delivered nodes count ONCE per bucket; retries never stack credit.
                 b["delivered_nids"].add(nid)
                 node_buckets.setdefault(nid, set()).add((provider, _key(r.get("model"), "unknown")))
             if nid and w4_available and nid in by_id:

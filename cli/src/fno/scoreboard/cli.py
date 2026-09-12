@@ -118,10 +118,8 @@ def scoreboard_command(
         None,
         "--project",
         help=(
-            "Scope every denominator to one project: rows and graph nodes "
-            "carry the project, events ride their node id. Rows with no "
-            "project stay unattributed - counted in the scope line, never "
-            "copied into the project."
+            "Scope every denominator to one project. Rows with no project stay "
+            "unattributed - counted in the scope line, never copied in."
         ),
     ),
 ) -> None:
@@ -131,15 +129,9 @@ def scoreboard_command(
         raise typer.BadParameter("--since must be at least 1 (days).")
     # The view flags are mutually exclusive: each renders a different fold.
     _views = [
-        f
-        for f, on in (
-            ("--calibration", calibration),
-            ("--by-skill", by_skill),
-            ("--efficiency", efficiency),
-            ("--plan-fidelity", plan_fidelity),
-            ("--by-provider", by_provider),
-            ("--lanes", lanes),
-        )
+        f for f, on in (("--calibration", calibration), ("--by-skill", by_skill),
+                        ("--efficiency", efficiency), ("--plan-fidelity", plan_fidelity),
+                        ("--by-provider", by_provider), ("--lanes", lanes))
         if on
     ]
     if len(_views) > 1:
@@ -147,11 +139,8 @@ def scoreboard_command(
     ledger_path = _paths.ledger_json()
     from fno.events import EPHEMERAL_SUFFIX  # lazy: keeps schema load off the help path
 
-    events_paths = [
+    events_paths = [  # ephemeral rows (human_touch) live in the sibling journal (x-add3)
         ledger_path.parent / "events.jsonl",
-        # Ephemeral-class rows (human_touch among them) live in the sibling
-        # journal since retention routing landed (x-add3); the reader takes
-        # both and dedups, so pre- and post-routing rows are both visible.
         ledger_path.parent / ("events.jsonl" + EPHEMERAL_SUFFIX),
     ]
     graph_path = _paths.graph_json()
@@ -170,12 +159,13 @@ def scoreboard_command(
         classified = classify_deliveries(read_graph_nodes(graph_path), rows, project)
         if "scoped" not in classified:
             raise RuntimeError(f"classifier returned no scope; keys={sorted(classified)}")
-        pnodes = set((classified.get("scoped") or {}).get("node_ids") or [])
-        rows = (classified.get("scoped") or {}).get("rows") or rows
+        scoped = classified["scoped"]
+        pnodes = set(scoped.get("node_ids") or [])
+        rows = scoped.get("rows") or rows
         scope = (classified.get("coverage") or {}).get("project_scope")
 
         def _nodes():
-            return (classified or {}).get("scoped", {}).get("entries") or []
+            return scoped.get("entries") or []
 
         def _events(kinds):
             read = read_jsonl_events_with_coverage(events_paths, set(kinds))
@@ -243,9 +233,7 @@ def scoreboard_command(
 
     if lanes:
         from fno.agents.registry import load_registry
-        from fno.config import load_settings
-
-        from fno.config import provider_limits_table
+        from fno.config import load_settings, provider_limits_table
 
         settings = load_settings()
         rate_read = _events({"provider_rate_limited"})
@@ -264,10 +252,7 @@ def scoreboard_command(
     if plan_fidelity:
         trace_paths = [*events_paths, _paths.project_log("events.jsonl")]
         project_root = _paths.resolve_repo_root()
-        canonical_root = (
-            _paths.resolve_canonical_worktree(project_root, timeout=2)
-            or project_root
-        )
+        canonical_root = _paths.resolve_canonical_worktree(project_root, timeout=2) or project_root
         trace_paths.extend(_delivery_event_paths(rows, canonical_root))
         trace_read = read_jsonl_events_with_coverage(
             trace_paths, CONTEXT_TRACE_EVENT_KINDS
@@ -558,53 +543,41 @@ def _render(sb: dict) -> None:
     # lean on termination_reason; autonomy/survival lean on node linkage - a gap in
     # either can bias a rate, so both gate the caveat. Never a bare rate.
     if cov["termination_reason_pct"] < 100 or cov["node_linkage_pct"] < 100:
-        out(
-            f"  ! rates below reflect {cov['termination_reason_pct']}% termination / "
-            f"{cov['node_linkage_pct']}% node-linkage coverage - a partial window is not a trend.\n"
-        )
+        out(f"  ! rates below reflect {cov['termination_reason_pct']}% termination /"
+            f" {cov['node_linkage_pct']}% node-linkage: a partial window is not a trend.\n")
 
-    # Journal integrity rides the same screen as any rate it could bias: a
-    # malformed or missing journal is an omission to state, never a zero.
+    # Journal integrity rides the same screen as any rate it could bias.
     ec = sb.get("event_coverage")
     if ec and not ec.get("complete", True):
-        out(
-            f"  ! event journals incomplete: {ec.get('malformed_lines', 0)} malformed "
-            f"line(s), {ec.get('unreadable_paths', 0)} unreadable file(s); "
-            "affected counts are omissions, not zeros.\n"
-        )
+        out(f"  ! event journals incomplete: {ec.get('malformed_lines', 0)} malformed line(s),"
+            f" {ec.get('unreadable_paths', 0)} unreadable file(s); omissions, not zeros.\n")
     emit = sb.get("emission_failures")
     if emit and emit.get("available"):
-        out(
-            f"  ! touch emission failures: {emit.get('count')} since "
-            f"{emit.get('measured_since') or '?'} (measured "
-            f"{emit.get('measured_at') or '?'}; server instance lifetime).\n"
-        )
+        out(f"  ! touch emission failures: {emit.get('count')} since {emit.get('measured_since')}"
+            f" (measured {emit.get('measured_at')}; server instance lifetime).\n")
     elif emit:
-        out(
-            f"  ! touch emission failures: unknown ({emit.get('reason') or 'server unreachable'}).\n"
-        )
+        out(f"  ! touch emission failures: unknown ({emit.get('reason') or 'server unreachable'}).\n")
 
-    # x-b6bd: shipped is the merge; the terminal count rides beside it for one
-    # release so the correction stays visible, then it drops.
+    # x-b6bd: shipped is the merge; the terminal count rides beside it for one release.
     shipped = sb.get("shipped_nodes")
     if shipped is not None:
         by_term = sb.get("shipped_by_terminal", 0)
         classes = sb.get("delivery_classes") or {}
-        class_bits = " ".join(f"{n} {name}" for name, n in sorted(classes.items()))
-        out(f"\nShipped       {shipped} nodes (confirmed merge, doc or delivery "
-            f"evidence); by session terminal alone: {by_term}\n")
-        if class_bits:
-            out(f"              by evidence: {class_bits}\n")
-        if sb.get("merged_nodes_without_ledger_row"):
-            out(f"              merged nodes with no ledger row: "
-                f"{sb['merged_nodes_without_ledger_row']}\n")
+        bits = " ".join(f"{n} {name}" for name, n in sorted(classes.items()))
+        no_row = sb.get("merged_nodes_without_ledger_row") or 0
+        out(f"\nShipped       {shipped} nodes (confirmed merge, doc or delivery evidence);"
+            f" by session terminal alone: {by_term}\n")
+        if bits:
+            out(f"              by evidence: {bits}\n")
+        if no_row:
+            out(f"              merged nodes with no ledger row: {no_row}\n")
         if shipped and by_term < 0.9 * shipped:
-            out("  ! terminal-only undercounts nodes whose PR merged after the "
-                "session stopped; the merge is the count.\n")
+            out("  ! terminal-only undercounts nodes whose PR merged after the session stopped;"
+                " the merge is the count.\n")
     scope = sb.get("project_scope")
     if scope:
         out(f"\nProject scope {scope['project']}: {scope['nodes']} nodes; "
-            f"{scope['unattributed_rows']} unattributed row(s) and "
+            f"{scope['unattributed_rows']} unattributed, "
             f"{scope['other_project_rows']} other-project row(s) kept out.\n")
 
     out("\nStop-cause distribution\n")
