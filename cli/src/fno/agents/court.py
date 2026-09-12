@@ -325,7 +325,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> dict[str, Any]:
         proc = subprocess.run(
             [str(binary), "court-fold", "--graph", str(graph_json()),
              "--crowns-json", _json.dumps(payload), "--format", "json"],
-            capture_output=True, text=True, check=False, timeout=30,
+            capture_output=True, text=True, check=False, timeout=120,
         )
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip() or f"exit {proc.returncode}")
@@ -335,7 +335,7 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> dict[str, Any]:
         # A TimeoutExpired stringifies to its whole argv, which buries the fault
         # it reports. Name that one and its bound instead.
         reason = (
-            "the fold timed out after 30s"
+            "the fold timed out after 120s"
             if isinstance(exc, subprocess.TimeoutExpired)
             else f"the fold could not run: {exc}"
         )

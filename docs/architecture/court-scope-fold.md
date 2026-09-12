@@ -62,6 +62,8 @@ every status present in the whole scope and render in lifecycle order;
 `omitted` is always stated, so a crown whose active list is empty reads
 as "N nodes, none active", never as "nothing here".
 
+The fold pays one whole-graph read and one claim sweep per call. Over 2037 nodes it measured 8.5 s of CPU, and a busy fleet stretches that past 30 s of wall clock. The caller waits 120 s. A court that reads blind whenever the fleet is busy is blind at the one moment anybody asks it.
+
 ## What a node row carries
 
 Beside `id`, `slug`, `status`, `worker`, `pr_number` and `sessions`, an active row states its claim and its age.
