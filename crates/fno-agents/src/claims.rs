@@ -784,7 +784,7 @@ fn is_live(rec: &ClaimRecord) -> bool {
     liveness_reading(rec, &|pid| probe_pid(pid)).0
 }
 
-fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
+pub(crate) fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
     match rec.expires_at {
         Some(exp) => now >= exp,
         None => false,
