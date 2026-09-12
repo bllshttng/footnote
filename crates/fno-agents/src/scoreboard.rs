@@ -169,7 +169,7 @@ fn flow(
         None => return json!({"available": false, "reason": "no usable now"}),
     };
     let mut buckets: BTreeMap<String, (i64, i64)> = BTreeMap::new();
-    let mut week_rows: Vec<(String, i64, bool)> = Vec::new();
+    let mut week_rows: Vec<(String, bool)> = Vec::new();
     let (Some(week_start_d), Some(current_monday_d)) = (
         local_dt(first_week).map(|dt| dt.date_naive()),
         local_dt(current_week).map(|dt| dt.date_naive()),
@@ -187,13 +187,16 @@ fn flow(
             None => break,
         };
         let partial = window_start > wsecs || now_secs < wsecs + 7 * 86400;
-        week_rows.push((label.clone(), 0, partial));
+        week_rows.push((label.clone(), partial));
         buckets.insert(label, (0, 0));
         wd += chrono::Duration::weeks(1);
     }
 
     // Weekly buckets count CONFIRMED deliveries only: merged, explicit
     // delivery, and doc. Class decides the column, ship_ts decides the week.
+    // The window owns the totals too: a delivery older than the window is
+    // real history, not this window's throughput, and a future-dated one is
+    // junk. Totals and weekly sums always reconcile.
     let mut code = 0i64;
     let mut doc = 0i64;
     let mut cycle_days: Vec<f64> = Vec::new();
@@ -204,6 +207,9 @@ fn flow(
         let Some(ts) = c["ship_ts"].as_str().and_then(iso_secs) else {
             continue;
         };
+        if ts < window_start || ts > now_secs {
+            continue;
+        }
         let is_doc = c["class"] == "delivered_doc";
         if let Some(bucket) = week_start_of(ts).and_then(|w| buckets.get_mut(&w)) {
             if is_doc {
@@ -270,8 +276,12 @@ fn flow(
         if !vocab_terms.contains(&tr) {
             continue;
         }
-        if str_field(obj, "completed").and_then(iso_secs).is_some() {
-            unlinked_rows += 1;
+        // Window-bound like the confirmed totals: old unlinked history is
+        // not this window's coverage either.
+        if let Some(ts) = str_field(obj, "completed").and_then(iso_secs) {
+            if ts >= window_start && ts <= now_secs {
+                unlinked_rows += 1;
+            }
         }
     }
 
@@ -308,7 +318,7 @@ fn flow(
 
     let weeks: Vec<Value> = week_rows
         .iter()
-        .map(|(label, _idx, partial)| {
+        .map(|(label, partial)| {
             let (c, d) = buckets.get(label).copied().unwrap_or((0, 0));
             json!({"week_start": label, "code": c, "doc": d, "partial": partial})
         })
@@ -1028,6 +1038,34 @@ mod tests {
         assert_eq!(flow["open_prs"]["count"], 1);
         assert_eq!(flow["open_prs"]["oldest_age_days"], 12);
         assert_eq!(flow["coverage"]["age_basis"], "node created_at");
+    }
+
+    #[test]
+    fn flow_ignores_deliveries_outside_the_window() {
+        let params = json!({
+            "entries": [
+                {"id": "x-old", "merge_status": "merged", "merged_at": "2026-06-11T12:00:00",
+                 "created_at": "2026-06-20T12:00:00"}
+            ],
+            "rows": [
+                {"completed": "2026-06-16T12:00:00", "termination_reason": "DonePRGreen",
+                 "pr_number": 400}
+            ],
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DonePRGreen", "DoneBatched"],
+            "now": "2026-09-09T12:00:00",
+            "since_days": 28
+        });
+        let out = classify(&params).unwrap();
+        let flow = &out["flow"];
+        // The old merge and the old unlinked PR row are real history, not
+        // this window's throughput or coverage.
+        assert_eq!(flow["deliveries"]["code"], 0);
+        let weeks = flow["deliveries"]["weeks"].as_array().unwrap();
+        assert!(weeks.iter().all(|w| w["code"] == 0 && w["doc"] == 0));
+        assert_eq!(flow["cycle"]["available"], false);
+        assert_eq!(flow["coverage"]["unlinked"], 0);
     }
 
     #[test]

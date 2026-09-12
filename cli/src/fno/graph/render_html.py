@@ -761,7 +761,8 @@ _DASHBOARD_JS = """\
   // can move a throughput denominator.
   function renderFlow(flow) {
     var el = document.getElementById('flow');
-    if (!el || !flow) return;
+    if (!el) return;
+    if (!flow) { el.style.display = 'none'; return; }
     if (!flow.available) {
       el.innerHTML = '<div class="fgroup"><div class="fk">Delivery flow</div>' +
         '<div class="fv">unavailable: ' + esc(flow.reason || 'unknown reason') + '</div></div>';
@@ -783,12 +784,13 @@ _DASHBOARD_JS = """\
     var covNote = [];
     if (cov.unlinked) covNote.push('plus ' + cov.unlinked + ' unlinked delivery(s) not on this board');
     if (cov.rows != null) covNote.push(cov.rows + ' ledger rows in scope');
+    if (weeks) covNote.unshift(weeks + ' (* partial week)');
     el.innerHTML =
       '<div class="fhead">last ' + esc(String(w.since_days == null ? '' : w.since_days)) + ' days to ' +
       esc(String(w.end || '')) + ' · local weeks' + (w.tz_offset ? ' (' + esc(String(w.tz_offset)) + ')' : '') +
       ', start Monday · scope does not follow filters</div>' +
       grp('Delivered', (d.total || 0) + ' · ' + esc(String(d.code || 0)) + ' code, ' + esc(String(d.doc || 0)) + ' doc',
-        (weeks ? weeks + ' (* partial week) · ' : '') + esc(covNote.join(' · '))) +
+        esc(covNote.join(' · '))) +
       grp('Elapsed',
         c.n ? 'open-to-merge median ' + esc(String(c.median_days)) + 'd · p85 ' + esc(String(c.p85_days)) +
           'd (n=' + esc(String(c.n)) + ')' : 'open-to-merge: ' + esc(c.reason || 'no samples'),

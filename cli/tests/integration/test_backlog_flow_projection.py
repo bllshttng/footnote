@@ -67,6 +67,9 @@ def _entries() -> list[dict]:
               completed_at=_iso(2)),
         _node("ab-b8r1s2t3", "beta", "Beta side rollout", status="done",
               merge_status="merged", merged_at=_iso(10), pr_number=409, created_at=_iso(12)),
+        # Real history, not this window's throughput: merged 45 days ago.
+        _node("ab-m9oldaa4", "alpha", "Ancient import path", status="done",
+              merge_status="merged", merged_at=_iso(45), pr_number=400, created_at=_iso(70)),
     ]
 
 
@@ -86,6 +89,9 @@ def _rows() -> list[dict]:
         # Unlinked PR: delivered, carries a PR, and no graph node anywhere.
         {"type": "execution", "termination_reason": "DonePRGreen", "pr_number": 405,
          "completed": _iso(5)},
+        # The 45-day-old merge's row: outside the window with it.
+        {"type": "execution", "graph_node_id": "ab-m9oldaa4", "termination_reason": "DonePRGreen",
+         "completed": _iso(45), "cost_usd": 3.0, "project": "alpha"},
     ]
 
 
@@ -145,14 +151,16 @@ def test_ac3_hp_refresh_emits_matching_flow_and_public_stays_private(hermetic: P
     assert flow["waiting"]["blocked"]["count"] == 1
     # The unlinked PR rides repository coverage, never the weekly series.
     assert flow["coverage"]["unlinked"] == 1
-    assert flow["coverage"]["rows"] == 6
+    assert flow["coverage"]["rows"] == 7
     assert flow["coverage"]["age_basis"] == "node created_at"
 
     # Project scoping: beta's merge is out of the alpha denominator, and the
-    # unlinked PR (no project) stays a repository-measure row.
+    # unlinked PR (no project) stays a repository-measure row. The 45-day-old
+    # alpha merge is real history, not this window's throughput.
     alpha = (hermetic / "alpha-backlog.html").read_text()
     aflow = _payload_flow(alpha)
     assert aflow["deliveries"]["code"] == 3
+    assert sum(w["code"] for w in aflow["deliveries"]["weeks"]) == 3
     # Alpha's own cycle: 30, 6, 22 days elapsed.
     assert aflow["cycle"] == {"median_days": 22.0, "p85_days": 30.0, "n": 3}
     assert aflow["coverage"]["unlinked"] == 0
