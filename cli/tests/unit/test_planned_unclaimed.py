@@ -37,6 +37,18 @@ def test_ac1_hp_known_undispatched_node_is_named():
     assert any(row["id"] == "x-known-undispatched" for row in receipt["rows"])
 
 
+def test_dispatch_fields_carry_when_set_and_stay_absent_when_not():
+    encoded = _node("x-encoded", dispatch_verb="/fno:target", dispatch_brief="do X")
+    plain = _node("x-plain")
+    receipt = classify_planned_unclaimed([encoded, plain], [])
+
+    rows = {row["id"]: row for row in receipt["rows"]}
+    assert rows["x-encoded"]["dispatch_verb"] == "/fno:target"
+    assert rows["x-encoded"]["dispatch_brief"] == "do X"
+    assert "dispatch_verb" not in rows["x-plain"]
+    assert "dispatch_brief" not in rows["x-plain"]
+
+
 def test_ac2_err_malformed_graph_is_unknown_not_empty():
     with pytest.raises(ValueError, match="graph"):
         classify_planned_unclaimed({"nodes": []}, [])
