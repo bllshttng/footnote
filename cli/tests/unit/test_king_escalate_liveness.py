@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from fno.king.escalate import MARKER, dedupe_key, question_text
+from fno.agents.stale_escalate import dedupe_key
+from fno.king.escalate import MARKER, question_text
 
 IDS = ["x-1111", "x-2222"]
 KEY = dedupe_key(IDS)

@@ -1,10 +1,14 @@
-"""Escalate the watchdog's unfinished-work findings to one durable operator question.
+"""The shared question fold for every durable ``[<marker>:<key>]`` emitter.
 
-Replaces the stale-session question: a session row no verb can clear is
-noise, and a durable question made of noise trains its reader to ignore the
-channel. The ask now names each finding identity and the one command that
-clears it, deduped on outcome identity so a finding that only aged does not
-re-ask.
+``already_asked`` / ``answered_question`` / ``reset_answered`` and the
+``reconcile_channel`` fold (moved here from ``stale_lane.py``) live in this
+one module; the stale, friction, reap-hold, unfinished-work and
+king-escalation lanes all ride them rather than growing private copies.
+This module's own emitter is the unfinished-work escalation: a session row
+no verb can clear is noise, and a durable question made of noise trains its
+reader to ignore the channel. The ask names each finding identity and the
+one command that clears it, deduped on outcome identity so a finding that
+only aged does not re-ask.
 """
 from __future__ import annotations
 
@@ -79,7 +83,24 @@ def already_asked(root: Path, key: str, *, marker: str = MARKER) -> "str | None"
 
 
 #: Closers reconcile_channel mints. Mechanical, never a human verdict.
-_MECHANICAL_CLOSERS = frozenset({"stale-escalate", "friction-escalate", "reap-hold-escalate"})
+_MECHANICAL_CLOSERS = frozenset({
+    "stale-escalate",
+    "friction-escalate",
+    "reap-hold-escalate",
+    "unfinished-work-escalate",
+    "king-escalation-escalate",
+})
+
+#: Families whose key is a SNAPSHOT of a measured set, so the newest reading
+#: supersedes every older one. A family whose key is an IDENTITY is not here:
+#: session-transition-branch keys on name:predecessor:successor and king-wake
+#: keys on the crown scope, where two open rows are two different questions.
+SNAPSHOT_MARKERS = frozenset({
+    "king-escalation",
+    "watchdog-unfinished-work",
+    "watchdog-stale",
+    "reap-hold",
+})
 
 
 def _is_answer_close(rec: dict, qids: "set[str]") -> bool:
@@ -148,6 +169,122 @@ def reset_answered(root: Path, *, marker: str) -> None:
     )
 
 
+def _open_questions(root: Path, marker: str):
+    from fno.outstanding.core import read_open_questions
+
+    return [
+        q for q in read_open_questions(root)
+        if f"[{marker}:" in q.question
+    ]
+
+
+def _close_question(qid: str, answer: str, root: Path, *, lane: str = "stale") -> None:
+    """Close one ask AND record the decision the close made (the stop gate
+    holds a closed-with-answer question with no ``operator_decision``
+    record): a mechanical supersede, never an operator ruling. ``lane`` is
+    the channel short name, so closes record channel provenance."""
+    import secrets
+
+    from fno.events import operator_decision, operator_question_closed
+    from fno.outstanding.core import append_question_event
+
+    append_question_event(
+        operator_question_closed(
+            question_id=qid,
+            answer=answer,
+            closed_by=f"{lane}-escalate",
+            source="daemon",
+        ),
+        root,
+    )
+    append_question_event(
+        operator_decision(
+            decision_id=f"d-{secrets.token_hex(4)}",
+            decision=answer,
+            subject=f"watchdog-{lane}:{qid}",
+            question_id=qid,
+            decided_by=f"fno agents {lane}-escalate",
+            origin="scheduler",
+            authority_source="agent",
+            rationale="mechanical supersede by reconcile; not an operator ruling",
+            source="daemon",
+        ),
+        root,
+    )
+
+
+def _try_close_supersede(q, reason: str, root: Path, subject: str) -> None:
+    """Best-effort supersede close: the new ask is already durable, so a
+    failing close must cost a duplicate ask, never the recorded one (AC3)."""
+    try:
+        _close_question(q.id, reason, root, lane=subject)
+    except Exception:  # noqa: BLE001 - see docstring; supersede closes are cleanup
+        pass
+
+
+def reconcile_channel(
+    pairs, *, root: Path, session_id: "str | None", cwd: Path,
+    marker: str, subject: str, identities: "list[str]",
+    question, ask, asker: "str | None" = None,
+) -> "tuple[str, str]":
+    """Reconcile ONE durable ``[<marker>:<key>]`` operator question to the
+    measured ``pairs``: same set is a duplicate, a changed set supersedes,
+    an empty set closes, and a set a human already answered stays answered.
+    ``question``/``ask`` are callables taking the dedupe ``key``; outcome in
+    ``none | duplicate | answered | asked | closed``."""
+    key = dedupe_key(identities)
+
+    if not pairs:
+        open_qs = _open_questions(root, marker)
+        for q in open_qs:
+            _close_question(
+                q.id, f"no {subject} rows remain at reconcile time", root,
+                lane=subject,
+            )
+        reset_answered(root, marker=marker)
+        return ("closed", open_qs[0].id) if open_qs else ("none", "")
+
+    existing = already_asked(root, key, marker=marker)
+    if existing:
+        for q in _open_questions(root, marker):
+            if q.id != existing:
+                _try_close_supersede(q, f"{subject} set changed; superseded by {existing}",
+                                     root, subject)
+        return ("duplicate", existing)
+    answered = answered_question(root, key, marker=marker)
+    if answered:
+        for q in _open_questions(root, marker):
+            if q.id != answered:
+                _try_close_supersede(q, f"{subject} set changed; superseded by {answered}",
+                                     root, subject)
+        return ("answered", answered)
+
+    import secrets
+
+    from fno.events import operator_question
+    from fno.outstanding.core import append_question_event
+
+    qid = f"q-{secrets.token_hex(4)}"
+    # Append BEFORE closing superseded asks: a failed close must cost a duplicate ask, never an empty channel.
+    append_question_event(
+        operator_question(
+            question_id=qid,
+            question=question(key),
+            session_id=session_id,
+            cwd=str(cwd),
+            asker=asker,
+            ask=ask(key),
+            source="daemon",
+        ),
+        root,
+    )
+    for q in _open_questions(root, marker):
+        if q.id != qid:
+            _try_close_supersede(q, f"{subject} set changed; superseded by {qid}",
+                                 root, subject)
+    return ("asked", qid)
+
+
 def escalate_unfinished(
     findings,
     *,
@@ -160,30 +297,16 @@ def escalate_unfinished(
         reset_answered(root, marker=MARKER)
         return ("none", "")
 
-    import secrets
-
-    from fno.events import operator_question
-    from fno.outstanding.core import append_question_event
-
     unique = _unique(findings)
-    key = dedupe_key([f"{f.kind}:{f.subject}" for f in unique])
-    existing = already_asked(root, key)
-    if existing:
-        return ("duplicate", existing)
-    answered = answered_question(root, key)
-    if answered:
-        return ("answered", answered)
-
-    qid = f"q-{secrets.token_hex(4)}"
-    append_question_event(
-        operator_question(
-            question_id=qid,
-            question=question_text(unique, key, unknown_dimensions),
-            session_id=session_id,
-            cwd=str(cwd),
-            ask=f"clear the top finding first: {_ask_line(unique)}",
-            source="daemon",
-        ),
-        root,
+    outcome, qid = reconcile_channel(
+        unique,
+        root=root,
+        session_id=session_id,
+        cwd=cwd,
+        marker=MARKER,
+        subject="unfinished-work",
+        identities=[f"{f.kind}:{f.subject}" for f in unique],
+        question=lambda key: question_text(unique, key, unknown_dimensions),
+        ask=lambda _key: f"clear the top finding first: {_ask_line(unique)}",
     )
-    return ("recorded", qid)
+    return ("recorded", qid) if outcome == "asked" else (outcome, qid)
