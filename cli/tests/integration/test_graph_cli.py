@@ -2090,7 +2090,7 @@ def test_note_with_an_unmeasured_claim_appends_and_warns(tmp_graph, monkeypatch)
         lambda payload: {"ok": True, "rows": None, "claims": ["167 lines"]},
     )
 
-    r = _invoke("backlog", "note", node_id, "the drain loop is 167 lines")
+    r = _invoke("backlog", "note", node_id, "the drain loop is 167 lines", "-q")
 
     assert r.exit_code == 0, r.output
     assert "unmeasured code fact" in r.stderr, r.stderr
@@ -2116,8 +2116,7 @@ def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph, monkeypat
 
     r = _invoke(
         "backlog", "note", node_id, "advance.py is 200 lines",
-        "--read", "echo measured",
-        "--json",
+        "--read", "echo measured", "--json", "-q",
     )
 
     assert r.exit_code == 0, r.output

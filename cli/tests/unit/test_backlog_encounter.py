@@ -453,11 +453,11 @@ def test_the_board_does_not_move(probe):
 def test_a_graph_with_no_encounters_serializes_byte_identical(probe):
     """The field is sparse. A null on every node would break every board digest."""
     _seed(probe, _node("zz-0001"), _node("zz-0002"))
-    assert probe("backlog", "note", "zz-0001", "a note.").returncode == 0
+    assert probe("backlog", "note", "zz-0001", "a note.", "-q").returncode == 0
     baseline = probe.graph.read_bytes()
     assert b"encounters" not in baseline
 
-    assert probe("backlog", "note", "zz-0002", "another note.").returncode == 0
+    assert probe("backlog", "note", "zz-0002", "another note.", "-q").returncode == 0
     assert b"encounters" not in probe.graph.read_bytes()
 
 
@@ -587,7 +587,7 @@ def test_encounters_live_only_in_the_graph_store_and_export(probe):
 def test_a_long_note_warns_and_still_lands(probe):
     """AC10. A refusal that destroys evidence is the wrong instrument here."""
     _seed(probe, _node())
-    result = probe("backlog", "note", "zz-0001", _words(400))
+    result = probe("backlog", "note", "zz-0001", _words(400), "-q")
     assert result.returncode == 0, result.stderr
     assert "400" in result.stderr
     notes = [e for e in _entries(probe) if e["id"] == "zz-0001"][0]["progress_notes"]
@@ -596,7 +596,7 @@ def test_a_long_note_warns_and_still_lands(probe):
 
 def test_an_ordinary_note_says_nothing(probe):
     _seed(probe, _node())
-    result = probe("backlog", "note", "zz-0001", _words(50))
+    result = probe("backlog", "note", "zz-0001", _words(50), "-q")
     assert result.returncode == 0, result.stderr
     assert result.stderr.strip() == ""
 
