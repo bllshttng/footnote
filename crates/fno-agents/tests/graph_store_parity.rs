@@ -528,6 +528,13 @@ fn characterization_session_lifecycle_matches() {
             {"name": "session_reap_open", "node_id": "ab-00aa", "phase": "review",
              "harness": "codex", "session_id": "0123abcd-0000-0000-0000-00000000bbbb",
              "ended_at": "2026-08-02T07:00:00Z"},
+            {"name": "session_append", "node_id": "ab-00aa", "phase": "review", "harness": "codex",
+             "session_id": "0123abcd-0000-0000-0000-00000000cccc",
+             "started_at": "2026-08-02T08:00:00Z",
+             "observed": {"kind": "not-file-backed"}},
+            {"name": "session_reap_open", "phase": "all",
+             "harness": "codex", "session_id": "0123abcd-0000-0000-0000-00000000cccc",
+             "ended_at": "2026-08-02T09:00:00Z"},
             {"name": "read_after"}
         ]),
     );
