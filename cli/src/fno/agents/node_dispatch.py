@@ -74,7 +74,7 @@ def resolve_node_spawn(
 
     Lifted verbatim from ``backlog.advance._spawn_worker``'s preference half
     (x-e53e); helpers are imported at CALL time from advance so the suite's
-    monkeypatches on those names keep firing. Raises the same ``SpawnError``s;
+    monkeypatches keep firing. Raises the same ``SpawnError``s;
     ``DispatchResolveError`` propagates to the caller's spawn-failure path.
     """
     from fno.backlog.advance import (

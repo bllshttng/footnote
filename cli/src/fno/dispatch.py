@@ -612,9 +612,6 @@ def _dispatch_one(
     # 1b. Quota-aware defer (x-5d3e). Only the ambient/autonomous default
     #     selection defers; an explicit --node dispatch always fires (LD#5).
     #     Fail-open: defer_dispatch off, p0, or UNKNOWN headroom -> proceed.
-    #     The route decision is the SAME one `backlog advance` reads,
-    #     so identical node + config + quota fixtures resolve to the identical
-    #     destination tuple on both autonomous launchers.
     cutover = None
     if not explicit:
         from fno.agents.autonomous_route import (
