@@ -3494,6 +3494,8 @@ def cmd_update(
         except Exception:
             linked_size = None
 
+    brief_warning_box = [None]
+
     def mutator(entries):
         node = _find_node(entries, task_id)
         if node is None:
@@ -3632,9 +3634,7 @@ def cmd_update(
                 raise typer.Exit(code=2)
             else:
                 node["orphan_ok"] = orphan_ok
-        # Dispatch overrides (US3): write-time handling (permissive store,
-        # over-budget brief warn) lives in fno.backlog.dispatch_overrides.
-        _dispatch_overrides.apply(node, dispatch_verb, dispatch_brief)
+        brief_warning_box[0] = _dispatch_overrides.apply(node, dispatch_verb, dispatch_brief)
         if priority is not None:
             node["priority"] = priority
         # --blocks-everything acknowledges p0. Standalone, it acknowledges an
@@ -3839,6 +3839,7 @@ def cmd_update(
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+    _dispatch_overrides.emit(brief_warning_box[0])
 
     # Mutation receipts read the committed, recomputed row. Flags express the
     # caller's intent; only the reread can say whether ownership and dispatch
