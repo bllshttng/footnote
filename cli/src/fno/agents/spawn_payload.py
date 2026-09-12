@@ -55,7 +55,7 @@ def prepare_spawn_payload(message: str) -> tuple[str, dict]:
             block = verb_call(_TASK_CONTEXT_VERB, {"path": path}).get("block")
         except VerbUnavailable:
             block = None
-        if block:
+        if block and TASK_CONTEXT_TAG not in payload:
             payload = f"{payload}\n\n{block}"
             measures = {"task_context": True, "payload_bytes": len(payload.encode("utf-8"))}
     return payload, measures
