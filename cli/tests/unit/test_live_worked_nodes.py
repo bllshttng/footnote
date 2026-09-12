@@ -39,6 +39,21 @@ def test_ac1_hp_names_a_live_worker(monkeypatch):
     assert live_worked_node_ids() == {"ac1-node": ["bp-worker"]}
 
 
+def test_an_injected_reading_is_the_one_used(monkeypatch):
+    """The shared read is proven, not assumed (x-a8b5): a caller that read
+    the roster passes it in and the resolver never probes the fleet again.
+    The claim reader joins through this parameter, so a second harness
+    fan-out per status call would be the defect this pins shut."""
+    def _boom(**_kw):
+        raise AssertionError("roster re-probed despite an injected reading")
+
+    monkeypatch.setattr("fno.claims.roster.read_roster", _boom)
+
+    assert live_worked_node_ids(
+        strict=True, entries=[_entry("ac1-node")], reading=_reading("working")
+    ) == {"ac1-node": ["bp-worker"]}
+
+
 def test_ac5_edge_flips_when_worker_stops_without_waiting(monkeypatch):
     state = ["working"]
     monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [_entry("ac1-node")])
