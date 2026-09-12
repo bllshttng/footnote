@@ -132,6 +132,19 @@ def test_hold_with_empty_top_names_no_holder(monkeypatch):
     assert ";;" not in admission.reason and " ;" not in admission.reason
 
 
+def test_holder_names_a_partial_tree_only_when_it_owns_the_load(monkeypatch):
+    """The totals span worktrees; the tree is named only when every proc in
+    the cluster ran there. A mixed cluster names no place at all."""
+    _pin_load15(monkeypatch, 45.0)
+    mixed = [(32.0625, "yes > .fno/worktrees/x-b1ee/out")] * 2 + [
+        (32.0625, "yes > .fno/worktrees/other/out")
+    ]
+    admission = spawn_gate._cpu_axis((_reading(7.5, 7.5, top=mixed), None))
+    assert admission.verdict == "hold"
+    assert admission.top_holder == "yes 3 procs 0.96 cores"
+    assert " in " not in admission.reason
+
+
 def test_admit_reason_stays_holder_free(monkeypatch):
     """An admission needs no action, so it needs no holder; the field may
     still carry what the rows said."""

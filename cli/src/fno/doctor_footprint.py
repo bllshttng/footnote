@@ -823,7 +823,14 @@ def _top_holder(reading: Footprint) -> str | None:
     if not ranked:
         return None
     c = ranked[0]
-    where = f" in {c['worktree']}" if c["worktree_procs"] >= 2 and c["worktree"] else ""
+    # The tree is named only when it accounts for every proc in the cluster:
+    # the totals span worktrees, so naming a partial tree would point the
+    # reader at a place that does not own the stated load.
+    where = (
+        f" in {c['worktree']}"
+        if c["worktree"] and c["worktree_procs"] == c["procs"] >= 2
+        else ""
+    )
     return f"{c['name']} {c['procs']} procs {c['cpu_pct'] / 100:.2f} cores{where}"
 
 
