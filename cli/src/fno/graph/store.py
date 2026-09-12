@@ -1628,7 +1628,13 @@ def reap_open_session_record(
         ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     else:
         ended_at = _utc_session_stamp("ended_at", ended_at)
-    resolved = node_id if node_id is None else _resolve_node_id(Path(path), node_id)
+    resolved = None
+    if node_id is not None:
+        # A named node that resolves to nothing must fail loud: None means
+        # the death-cascade form, never a silently widened sweep.
+        resolved = _resolve_node_id(Path(path), node_id)
+        if resolved is None:
+            raise ValueError(f"no node resolves to {node_id!r}")
     result = _run_op(Path(path), "session_reap_open", {
         "node_id": resolved,
         "phase": phase,
