@@ -179,6 +179,13 @@ esac
 ABIEOF
   chmod +x "$sbx/stub-bin/fno"
 
+  # A real `fno-agents` on the ambient PATH resolves STATE_FILE into the
+  # space regime, and every legacy-path assertion below goes dark while the
+  # manifest silently lands in ~/.fno/spaces/. The sandbox is the world
+  # here, so fno-agents is pinned absent.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$sbx/stub-bin/fno-agents"
+  chmod +x "$sbx/stub-bin/fno-agents"
+
   echo "$sbx"
 }
 
