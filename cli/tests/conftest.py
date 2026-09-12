@@ -9,6 +9,13 @@ from pathlib import Path
 
 import pytest
 
+# Registration binds `update_command` at FIRST import of fno.doctor_cli, and
+# the test_doctor.py tests patch `fno.update.update_command` - a patch that
+# lands before that first import registers the fake permanently. Importing
+# doctor_cli here, at collection, makes the real registration the only order
+# any test process can see (both orders pinned in test_doctor_cli_registration.py).
+import fno.doctor_cli  # noqa: F401
+
 
 @pytest.fixture(autouse=True)
 def _quiet_gh_budget(monkeypatch):
