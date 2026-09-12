@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 from fno import _subprocess_util
+from fno.adapters.providers.error_taxonomy import ErrorClass
 from fno.agents.harnesses.claude import ProviderSocketError
 from fno.rust_binary import VerbUnavailable
 
@@ -214,6 +215,9 @@ class Candidate:
     cwd: Optional[str] = None
     name: Optional[str] = None
     session_id: Optional[str] = None
+    # The CALLER's attributed account for the quota-lock write. Never the
+    # process-global active one: a refusal belongs to the launch account.
+    launch_account: Optional[str] = None
     agent: str = "claude"
 
 
@@ -264,6 +268,7 @@ def iter_candidates(registry_entries: Iterable, locate_fn: Callable) -> list[Can
             cwd=getattr(entry, "cwd", None), name=getattr(entry, "name", None),
             session_id=(getattr(entry, "harness_session_id", None)
                         or getattr(entry, "cc_session_id", None) or short_id),
+            launch_account=getattr(entry, "launch_account", None),
         ))
     return out
 
@@ -295,6 +300,12 @@ def _refused_key(short_id: str, error_class: str) -> str:
     (a capped worker's last turn does not change) stays one.
     """
     return f"refused:{short_id}:{error_class}"
+
+
+def _quota_key(short_id: str) -> str:
+    """Sentinel: the sweep-time quota lock was decided once for this id.
+    Same flat counts dict, same collision-free prefix rule."""
+    return f"quota-locked:{short_id}"
 
 
 def recovery_sweep(
@@ -382,6 +393,27 @@ def recovery_sweep(
                     "reset_is_derived": _err.reset_is_derived,
                     "reset_stamp_unparsed": _err.reset_stamp_unparsed,
                     "excerpt": _err.body_excerpt,
+                })
+
+            # Guards: corroboration, the quota class, the once-per-worker
+            # sentinel, and record_quota_lock refusing an unattributed
+            # account. The event fires even when nothing was written.
+            if (refusal_acts
+                    and _err.error_class is ErrorClass.PROVIDER_4XX_QUOTA
+                    and not counts.get(_quota_key(c.short_id))):
+                from fno.agents.quota_lock import record_quota_lock
+
+                counts[_quota_key(c.short_id)] = True
+                _wrote = record_quota_lock(
+                    c.launch_account, _err.body_excerpt, resets_at=_err.resets_at,
+                )
+                emit("provider_quota_locked", {
+                    "short_id": c.short_id,
+                    "account": _wrote,
+                    "attributed": _wrote is not None,
+                    "source": _source,
+                    "resets_at": _err.resets_at,
+                    "reset_is_derived": _err.reset_is_derived,
                 })
 
         truth_state = str(truth.get("state") or "unknown")
@@ -1746,7 +1778,7 @@ def _prune_keep(key: str, live: set) -> bool:
         # here every refusal key survives forever and the counts file grows
         # unbounded.
         return key.split(":")[1] in live
-    for prefix in ("capped:", "close:"):
+    for prefix in ("capped:", "close:", "quota-locked:"):
         if key.startswith(prefix):
             return key[len(prefix):] in live
     return key in live

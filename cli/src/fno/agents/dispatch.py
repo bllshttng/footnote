@@ -2296,38 +2296,17 @@ def note_quota_death(account_env: Optional[Mapping[str, str]], tail: str | None)
 
     The reactive half of quota survival: a snapshot can be up to
     ``probe_ttl_seconds`` stale, so without this the next pick would hand the
-    successor the account that just died. Reuses the existing error taxonomy and
-    health writer rather than adding a second classifier. Best-effort - a
-    telemetry write must never turn a worker's death into a dispatch failure.
-    """
+    successor the account that just died. Thin caller over the one
+    lock-decision site; launch-time attribution stays here. Best-effort."""
     if not tail:
         return
     try:
-        from fno.adapters.providers.error_taxonomy import (
-            classify_error,
-            reset_epoch_from,
-        )
         from fno.adapters.providers.loader import effective_active
-        from fno.adapters.providers.runtime_state import (
-            record_reset_timezone,
-            update_provider_health,
-        )
+        from fno.agents.quota_lock import record_quota_lock
 
-        rule = classify_error(None, tail)
-        if rule is None:
-            return
         provider_id = _account_id_for_env(account_env) or effective_active()
         if provider_id:
-            # The tail that proves the death usually also names when the window
-            # reopens. Without it this wrote a seconds-scale backoff over a
-            # multi-hour cap, and the next pick handed the successor the account
-            # that had just refused.
-            update_provider_health(
-                provider_id, rule,
-                resets_at=reset_epoch_from(
-                    tail, record_reset_timezone(provider_id),
-                ),
-            )
+            record_quota_lock(provider_id, tail)
     except Exception:  # noqa: BLE001 - never let a health write break teardown
         pass
 
@@ -6802,8 +6781,15 @@ def wake_and_deliver(
     gate = None
     revived_reservation = False
     if route_provider is not None:
+        # The revival launches work on the account the row pinned at mint, so
+        # the gate reads that account's quota lock; an unattributed row skips.
+        from fno.agents.launch_provenance import launch_account_for_session
+
         try:
-            gate = run_gate(spawn_name, "bg", route_provider=route_provider)
+            gate = run_gate(
+                spawn_name, "bg", route_provider=route_provider,
+                account=launch_account_for_session(session_uuid),
+            )
         except GateRefused as exc:
             return False, f"spawn-exit-{exc.code}"
 

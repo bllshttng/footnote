@@ -1119,6 +1119,28 @@ def _refuse_gate_fault(
     _refuse(EXIT_PROVIDER_CAP, receipt)
 
 
+def _refuse_quota_lock(account: str, resets_at: Optional[float]) -> NoReturn:
+    """A vendor quota window on the caller-named account. NOT machine
+    busy-ness, so --force does not buy past it. Keeps EXIT_PROVIDER_CAP
+    for exit-code consumers, like _refuse_gate_fault."""
+    from datetime import datetime, timezone
+
+    when = (
+        datetime.fromtimestamp(resets_at, tz=timezone.utc).isoformat()
+        if resets_at else "unknown (no reset was readable)"
+    )
+    _warn(
+        f"spawn-gate: account {account} is rate-limited until {when}; "
+        "refusing; no worker launched"
+    )
+    _refuse(EXIT_PROVIDER_CAP, {
+        "status": "refused",
+        "reason": "provider_quota_lock",
+        "account": account,
+        "resets_at": resets_at,
+    })
+
+
 def _emit_gate_event(kind: str, **data: Any) -> None:
     """Best-effort agents-log event. Never raises, never blocks a spawn."""
     try:
@@ -1516,6 +1538,7 @@ def run_gate(
     force: bool = False,
     no_wait: bool = False,
     route_provider: Optional[str] = None,
+    account: Optional[str] = None,
 ) -> GateGuard:
     """Run the full gate. Returns a :class:`GateGuard` to hold across dispatch
     on pass; raises :class:`GateRefused` (a SystemExit) on refusal/timeout.
@@ -1574,6 +1597,15 @@ def run_gate(
     # RAM floor does, because the queue window is long enough for the shared
     # schema to move underneath a waiting spawn.
     _check_registry_schema()
+
+    # Ahead of the force branch too: a vendor quota window is not machine
+    # busy-ness, and forcing past it buys another corpse. An unnamed account
+    # is covered anyway: the accounts.quota picker reads the same lock.
+    if account and account != "default":
+        from fno.adapters.providers.runtime_state import is_in_cooldown, read_state
+        if is_in_cooldown(account):
+            health = read_state().provider_health.get(account)
+            _refuse_quota_lock(account, getattr(health, "rate_limited_until", None))
 
     if force and provider_cap is None:
         # Byte-twin with the Rust gate (check-reachable-paths); force also

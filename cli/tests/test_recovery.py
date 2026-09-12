@@ -174,6 +174,22 @@ class TestCandidateJoin:
         cands = recovery.iter_candidates(entries, locate_fn=lambda sid: live.get(sid))
         assert cands == []
 
+    def test_launch_account_is_carried_from_the_registry_row(self, tmp_path):
+        # x-bbc0: the quota lock is written against the account the worker
+        # was LAUNCHED on, so the join carries it off the registry row.
+        entry = _Entry("claude", "dddd4444")
+        entry.launch_account = "readyrule"
+        live = {"dddd4444": _Locator("dddd4444", "/tmp/d.sock", tmp_path)}
+        (cand,) = recovery.iter_candidates([entry], locate_fn=lambda sid: live.get(sid))
+        assert cand.launch_account == "readyrule"
+
+    def test_a_legacy_row_without_launch_account_yields_none(self, tmp_path):
+        # Older rows predate the column; getattr keeps the join from raising.
+        entry = _Entry("claude", "eeee5555")
+        live = {"eeee5555": _Locator("eeee5555", "/tmp/e.sock", tmp_path)}
+        (cand,) = recovery.iter_candidates([entry], locate_fn=lambda sid: live.get(sid))
+        assert cand.launch_account is None
+
 
 # ---------------------------------------------------------------------------
 # recovery_sweep — nudge, cap (AC4), one-event-per-decision (invariant)
@@ -661,6 +677,14 @@ class TestRefusalHoistedAboveTheStalenessGate:
         assert recovery._prune_keep("refused:aaaa1111:provider_4xx_quota", live)
         assert not recovery._prune_keep("refused:bbbb2222:provider_4xx_quota", live)
 
+    def test_the_quota_lock_sentinel_survives_while_the_session_lives(self):
+        # Without the prefix arm the plain fall-through compares the whole
+        # key against the live set, prunes the sentinel every tick, and the
+        # lock re-fires on a worker that already locked.
+        live = {"aaaa1111"}
+        assert recovery._prune_keep("quota-locked:aaaa1111", live)
+        assert not recovery._prune_keep("quota-locked:bbbb2222", live)
+
     def test_the_dedup_key_is_scoped_to_the_error_class(self):
         # A quota refusal followed by an auth refusal is two findings; the SAME
         # refusal re-read every tick is one.
@@ -824,13 +848,15 @@ class TestFailoverSweep:
         assert h.sends == []                       # NOT nudged
         # worker_refused first: the swap-class error is now announced as a
         # positive finding before anything acts on it.
-        assert h.event_types() == ["worker_refused", "failover_swapped"]
-        assert h.events[1][1]["redispatched"] is True   # honest: worker started
+        assert h.event_types() == [
+            "worker_refused", "provider_quota_locked", "failover_swapped",
+        ]
+        assert h.events[2][1]["redispatched"] is True   # honest: worker started
         validate({
             "ts": "2026-06-29T20:00:00Z",
             "type": "failover_swapped",
             "source": "daemon",
-            "data": h.events[1][1],
+            "data": h.events[2][1],
         })
 
     def test_rotated_no_worker_emits_swapped_then_held(self, tmp_path):
@@ -841,10 +867,11 @@ class TestFailoverSweep:
         h = _FailoverHarness(output_result="rate limit", outcome="rotated-no-worker")
         self._run(h, tmp_path)
         assert h.event_types() == [
-            "worker_refused", "failover_swapped", "recovery_skipped",
+            "worker_refused", "provider_quota_locked", "failover_swapped",
+            "recovery_skipped",
         ]
-        assert h.events[1][1]["redispatched"] is False
-        assert h.events[2][1]["reason"] == "held-by-design"
+        assert h.events[2][1]["redispatched"] is False
+        assert h.events[3][1]["reason"] == "held-by-design"
         assert h.sends == []
 
     def test_launched_with_owner_stamp_failure_surfaces_partial_once(self, tmp_path):
@@ -855,10 +882,11 @@ class TestFailoverSweep:
         assert len(h.failover_calls) == 1
         assert h.sends == []
         assert h.event_types() == [
-            "worker_refused", "failover_swapped", "failover_blocked",
+            "worker_refused", "provider_quota_locked", "failover_swapped",
+            "failover_blocked",
         ]
-        assert h.events[1][1]["redispatched"] is True
-        assert h.events[2][1]["reason"] == "partial-owner-stamp"
+        assert h.events[2][1]["redispatched"] is True
+        assert h.events[3][1]["reason"] == "partial-owner-stamp"
 
     def test_one_swap_per_tick(self, tmp_path):
         # codex P2: a swap mutates the GLOBAL active provider, so only one
@@ -882,10 +910,10 @@ class TestFailoverSweep:
         # Two candidates, so two refusal notices: the once-only guard is per
         # short_id, and the one-swap-per-tick guard is separate from it.
         assert h.event_types() == [
-            "worker_refused", "failover_swapped",
-            "worker_refused", "recovery_skipped",
+            "worker_refused", "provider_quota_locked", "failover_swapped",
+            "worker_refused", "provider_quota_locked", "recovery_skipped",
         ]
-        assert h.events[3][1]["short_id"] == "bbbb2222"   # the second surfaced
+        assert h.events[5][1]["short_id"] == "bbbb2222"   # the second surfaced
 
     def test_connection_drop_surfaces_held(self, tmp_path):
         # AC2-FR: a clean connection-drop never triggers failover; the stuck
@@ -911,8 +939,10 @@ class TestFailoverSweep:
         h = _FailoverHarness(output_result="rate limit", outcome="blocked-thrash")
         self._run(h, tmp_path)
         assert h.sends == []
-        assert h.event_types() == ["worker_refused", "failover_blocked"]
-        assert h.events[1][1]["reason"] == "blocked-thrash"
+        assert h.event_types() == [
+            "worker_refused", "provider_quota_locked", "failover_blocked",
+        ]
+        assert h.events[2][1]["reason"] == "blocked-thrash"
 
     def test_notified_emits_swapped_and_does_not_nudge(self, tmp_path):
         # US4/US5 (AC3-FR + AC4-FR "dead one not also nudged"): a revival that
@@ -922,8 +952,10 @@ class TestFailoverSweep:
         h = _FailoverHarness(output_result="usage limit reached", outcome="notified")
         self._run(h, tmp_path)
         assert h.sends == []                           # NOT nudged
-        assert h.event_types() == ["worker_refused", "failover_swapped"]
-        assert h.events[1][1]["redispatched"] is False
+        assert h.event_types() == [
+            "worker_refused", "provider_quota_locked", "failover_swapped",
+        ]
+        assert h.events[2][1]["redispatched"] is False
 
     def test_queue_exhausted_falls_through_to_held(self, tmp_path):
         # AC1-EDGE (watchdog reading): no eligible alternate -> nothing to swap
@@ -933,15 +965,19 @@ class TestFailoverSweep:
         h = _FailoverHarness(output_result="quota exceeded", outcome="queue-exhausted")
         self._run(h, tmp_path)
         assert h.sends == []
-        assert h.event_types() == ["worker_refused", "recovery_skipped"]
-        assert h.events[1][1]["reason"] == "held-by-design"
+        assert h.event_types() == [
+            "worker_refused", "provider_quota_locked", "recovery_skipped",
+        ]
+        assert h.events[2][1]["reason"] == "held-by-design"
 
     def test_no_swap_outcome_falls_through_to_held(self, tmp_path):
         # Controller declined (NO_SWAP_NEEDED): defensive fall-through to held.
         h = _FailoverHarness(output_result="rate limit", outcome="no-swap")
         self._run(h, tmp_path)
-        assert h.event_types() == ["worker_refused", "recovery_skipped"]
-        assert h.events[1][1]["reason"] == "held-by-design"
+        assert h.event_types() == [
+            "worker_refused", "provider_quota_locked", "recovery_skipped",
+        ]
+        assert h.events[2][1]["reason"] == "held-by-design"
 
     def test_failover_disabled_when_fn_absent(self, tmp_path):
         # Backward compat: no failover_fn -> swap-class error surfaces held-by-design.
@@ -957,8 +993,10 @@ class TestFailoverSweep:
         assert h.failover_calls == []
         # The refusal notice is independent of failover_fn: reporting that a
         # worker cannot think must not depend on having somewhere to move it.
-        assert h.event_types() == ["worker_refused", "recovery_skipped"]
-        assert h.events[1][1]["reason"] == "held-by-design"
+        assert h.event_types() == [
+            "worker_refused", "provider_quota_locked", "recovery_skipped",
+        ]
+        assert h.events[2][1]["reason"] == "held-by-design"
 
 
 class TestDefaultFailover:
@@ -1476,7 +1514,9 @@ class TestMissionAwareTerminalGate:
             failover_fn=lambda c, err: seen.append(err) or "swapped",
         )
         assert len(seen) == 1
-        assert h.event_types() == ["worker_refused", "failover_swapped"]
+        assert h.event_types() == [
+            "worker_refused", "provider_quota_locked", "failover_swapped",
+        ]
         assert h.sends == []
 
     def test_cap_bounds_the_restored_path(self, tmp_path):
@@ -2535,3 +2575,131 @@ class TestOutageQuorumFloor:
         assert OutagePolicy(quorum=1).quorum == 1
         with pytest.raises(ValueError):
             OutagePolicy(quorum=0)
+
+
+class TestSweepWritesTheQuotaLock:
+    """x-bbc0 change 2: a corroborated quota refusal cools the account the
+    worker was LAUNCHED on. The event fires even when nothing was written -
+    an unattributable refusal is the finding, not silence."""
+
+    _QUOTA = (
+        "Claude usage limit reached. Your limit will reset at "
+        "2026-08-18T07:19:38+08:00"
+    )
+
+    def _cand(self, tmp_path, account):
+        c = _stale_candidate(tmp_path)
+        c.launch_account = account
+        return c
+
+    def _sweep(self, h, tmp_path, counts, account):
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[self._cand(tmp_path, account)],
+            counts=counts,
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness,
+        )
+
+    def _lock_calls(self, monkeypatch):
+        import fno.agents.quota_lock as ql
+
+        calls: list[tuple] = []
+
+        def _rec(acct, text, resets_at=None):
+            calls.append((acct, resets_at))
+            return acct
+
+        monkeypatch.setattr(ql, "record_quota_lock", _rec)
+        return calls
+
+    def test_second_corroborated_tick_locks_the_launch_account_once(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
+        )
+        calls = self._lock_calls(monkeypatch)
+        counts: dict = {}
+
+        h1 = self._harness()
+        self._sweep(h1, tmp_path, counts, "readyrule")  # tick 1
+        assert calls == []  # corroboration not yet met
+        assert "provider_quota_locked" not in h1.event_types()
+
+        h2 = self._harness()
+        self._sweep(h2, tmp_path, counts, "readyrule")  # tick 2: same refusal
+        assert len(calls) == 1
+        assert calls[0][0] == "readyrule"
+        payload = dict(
+            h2.events[h2.event_types().index("provider_quota_locked")][1]
+        )
+        assert payload["attributed"] is True
+        assert payload["account"] == "readyrule"
+        assert payload["source"] == "transcript"
+        assert payload["resets_at"] is not None
+
+        h3 = self._harness()
+        self._sweep(h3, tmp_path, counts, "readyrule")  # tick 3: once per worker
+        assert len(calls) == 1
+        assert "provider_quota_locked" not in h3.event_types()
+
+    def _harness(self):
+        return _RefusalHarness(self._QUOTA)
+
+    def test_an_unattributed_refusal_emits_and_writes_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        # The REAL record_quota_lock runs: launch_account None must write
+        # nothing, and the event must still say so.
+        monkeypatch.setenv(
+            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
+        )
+        counts: dict = {}
+        h1 = self._harness()
+        self._sweep(h1, tmp_path, counts, None)
+        h2 = self._harness()
+        self._sweep(h2, tmp_path, counts, None)  # corroboration met
+
+        payload = dict(
+            h2.events[h2.event_types().index("provider_quota_locked")][1]
+        )
+        assert payload["attributed"] is False
+        assert payload["account"] is None
+        from fno.adapters.providers.runtime_state import read_state
+
+        assert read_state().provider_health == {}
+
+    def test_a_non_quota_refusal_writes_no_lock(self, tmp_path, monkeypatch):
+        # A hand-built auth refusal: classify_session_error cannot produce
+        # one from text, so build the NormalizedError directly.
+        from fno.adapters.providers.error_taxonomy import (
+            ErrorClass,
+            NormalizedError,
+        )
+
+        auth = NormalizedError(
+            error_class=ErrorClass.PROVIDER_4XX_AUTH,
+            raw_status=401, raw_exit_code=None,
+            body_excerpt="not authenticated",
+            triggers_swap=True,
+        )
+        monkeypatch.setattr(
+            recovery,
+            "classify_worker_refusal",
+            lambda *a, **k: (auth, "output_result"),
+        )
+        monkeypatch.setenv(
+            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
+        )
+        calls = self._lock_calls(monkeypatch)
+        h = _Harness(updated_age_s=600)
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[self._cand(tmp_path, "readyrule")],
+            counts={},
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness,
+        )
+        assert calls == []
+        assert "provider_quota_locked" not in h.event_types()
