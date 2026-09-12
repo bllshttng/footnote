@@ -582,7 +582,7 @@ fn run_request(
             home,
             emitter,
             request,
-            &format!("rows-kept:{}", held_rows[0]),
+            &format!("rows-kept:{}", held_rows.join(",")),
             now,
         );
         return (report.retired_names.len() as u64, true);

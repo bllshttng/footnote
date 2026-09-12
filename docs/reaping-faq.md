@@ -36,7 +36,7 @@ Three programs share the word reap. A reader who watches one and concludes the o
 
 The manual verb and the registry arm run the same sweep body (`client.rs:2386`, `gc.rs:833`). The registry arm runs one sweep at a time behind a one-in-flight gate (`gc.rs:821`). A slow sweep holds the next request, so the effective cadence is not the interval. Run `fno-agents status` to read the arms table.
 
-The merge-request arm is a different program (`merge_reap.rs:556-658`). It loops only over pending merge cleanup requests (`merge_reap.rs:578`). With no pending request it does nothing. Its floor is 60 seconds (`merge_reap.rs:36`), and a request older than 86400 seconds expires unacted (`merge_reap.rs:42`). Its skip reasons are `no_requests`, `all_in_grace`, and `held` (`merge_reap.rs:636-644`). So its `acted=0 skip=held` line says nothing about the registry sweep.
+The merge-request arm is a different program (`merge_reap.rs:669-775`). It loops only over pending merge cleanup requests (`merge_reap.rs:703`). With no pending request it does nothing. Its floor is 60 seconds (`merge_reap.rs:36`), and a request older than 86400 seconds expires unacted (`merge_reap.rs:42`). Its skip reasons are `no_requests`, `all_in_grace`, and `held` (`merge_reap.rs:761-769`), and its detail line carries the held count beside the request count. So its `acted=0 skip=held` line says nothing about the registry sweep.
 
 The mux sideline sweep rides the manual verb only (`client.rs:2408-2415`). It shells out to `fno mux workspace prune` (`client.rs:2432-2444`). Neither daemon arm runs it. Pass `--no-mux` to skip it. So only a person typing the verb runs the sweep for ghost mux panes.
 

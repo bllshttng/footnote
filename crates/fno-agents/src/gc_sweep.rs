@@ -1759,6 +1759,9 @@ pub(crate) fn run_with_release(
             // ponytail: a write inside the same whole second as a
             // classification that already read age 0 is not seen.
             let still_quiet = worker_finished(e, fresh_age, grace_secs, None)
+                // The release lift (x-e3cc): a missing age reads quiet for
+                // this row only. An ANSWERED fresh age still keeps -
+                // activity is activity even under a ruling.
                 || (release_quiet_row && fresh_age.is_none())
                 || (row.session_terminal.is_some()
                     && matches!((fresh_age, age), (Some(now_a), Some(then_a)) if now_a >= then_a));
