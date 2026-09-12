@@ -23,7 +23,7 @@ The arms:
 
 The row shape is owned by `crates/fno-agents/src/tick_ledger.rs`. Python arms emit through `cli/src/fno/control_plane.py`. `cli/src/fno/events/schema.yaml` pins both validators on the shape.
 
-The readout: `fno agents status` prints one row per arm. When a row's newest tick is older than twice the row's own `interval_s`, the row is red. An arm that never ticked reads red with `skip_reason: never`. A fresh row whose skip reason is a failure token (`timeout`, `error`, `wake_failed`, `sweep_failed`, `notify_failed`) reads `FAIL`. `fno doctor` prints the row's rendered `line` for every red (stale or failing) arm. A row without a `line` (older binary) falls back to the skip-reason sentence. `stop_hook` is event-driven (`interval_s: 0`) and never reads stale from quiet. An unreadable readout reports unknown, never green.
+The readout: `fno agents status` prints one row per arm. When a row's newest tick is older than twice the row's own `interval_s`, the row is red. An arm that never ticked reads red with `skip_reason: never`. A fresh row whose skip reason is a failure token (`timeout`, `error`, `wake_failed`, `sweep_failed`, `notify_failed`) reads `FAIL`. A scheduler does not stop one arm at a time. When every interval-bearing arm on it misses a run and no arm ticks within twice the shortest interval, the readout reads them all red. The job stopped, not the arm. `fno doctor` prints the row's rendered `line` for every red (stale or failing) arm. A row without a `line` (older binary) falls back to the skip-reason sentence. `stop_hook` is event-driven (`interval_s: 0`) and never reads stale from quiet. An unreadable readout reports unknown, never green.
 
 Every red row names its cause as the first rule that holds. If no rule fires, the row reads `unexplained`, so a reader can see the rules ran:
 
@@ -32,6 +32,7 @@ Every red row names its cause as the first rule that holds. If no rule fires, th
 - `daemon_down`: The daemon is not running.
 - `tick_timeout`: The pr-watch tick broke (timeout or error) before this arm ran. See `pr_watch_merge`.
 - `tick_overdue`: No completed pr-watch tick stamp inside 2x interval. When the tick's attempt/end records show a tick started and did not complete, the cause names the phase. Run `fno do pr watch status`.
+- `scheduler_down`: Every arm on the scheduler is silent together. The job is not running, and the arm is fine.
 - `unexplained`: The scheduler looks healthy. The arm itself did not tick.
 
 ## What was deleted
