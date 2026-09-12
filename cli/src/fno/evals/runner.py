@@ -45,7 +45,7 @@ def _observe_worker(name: str) -> Optional[dict]:
                 return {"harness": entry.harness, "model": entry.model,
                         "model_basis": entry.model_basis, "effort": entry.effort,
                         "harness_session_id": entry.harness_session_id}
-    except Exception:  # noqa: BLE001
+    except (AttributeError, KeyError):
         return None
     return None
 
