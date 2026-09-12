@@ -430,8 +430,8 @@ mod tests {
     }
 
     /// The refusal predicate is claude-only by construction: a codex worker
-    /// answering as glm is its normal lane, not a refusal (x-5cf0; Python
-    /// twin `test_non_claude_harness_is_never_refused`).
+    /// answering as glm is its normal lane, not a refusal (Python twin
+    /// `test_non_claude_harness_is_never_refused`).
     #[test]
     fn a_non_claude_harness_is_never_refused() {
         let refused_model = json!({"kind": "observed", "model": "glm-5.2[1m]"});
