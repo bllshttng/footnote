@@ -1354,15 +1354,22 @@ exit 2
 /// A pane-hosted row must never be answered by `agent.stop` with a success:
 /// stop reaches no pane (the row's one live ref is the mux ref), so a success
 /// receipt would report work it did not perform over a live pane. The refusal
-/// names the pane-kill one-liner with the row's own session and pane id, and
-/// the registry row stays live. Keys on `entry.mux`, never the harness, so it
-/// covers claude, codex, opencode, and agy pane rows in one branch.
+/// names the row's own session:pane and the clearing verb, and the registry
+/// row stays live. Keys on `entry.mux`, never the harness, so it covers
+/// claude, codex, opencode, and agy pane rows in one branch.
 #[tokio::test]
-async fn stop_refuses_a_pane_row_and_names_the_pane_kill() {
+async fn stop_refuses_a_pane_row_and_names_the_row_ref() {
     let home = short_home();
     home.ensure_root().unwrap();
     seed_pane_row(&home, "pane-worker-stop");
-    let _daemon = start_daemon(&home);
+    // An empty FNO_MUX_DIR strands the probe's `fno mux pane read`: it cannot
+    // reach the session there, which mux_pane_is_absent reads as Absent, so
+    // this test never probes a developer's live `main` mux server. Whether
+    // `fno` resolves decides the probe's verdict (not on PATH -> Unknown ->
+    // today's text), so assert only markers both outcomes print; the
+    // pane-kill wording is pinned on the builder's unit tests.
+    let mux_dir = home.root().join("empty-mux");
+    let _daemon = start_daemon_env(&home, &[("FNO_MUX_DIR", mux_dir.to_str().unwrap())]);
 
     let daemon_bin = PathBuf::from(DAEMON_BIN);
     let resp = call(
@@ -1378,12 +1385,11 @@ async fn stop_refuses_a_pane_row_and_names_the_pane_kill() {
         resp.result()
     );
     let msg = resp.error().unwrap().message.clone();
+    assert!(msg.contains("main:10"), "refusal names session:pane: {msg}");
     assert!(
-        msg.contains("fno mux pane kill"),
-        "refusal names the working verb: {msg}"
+        msg.contains("fno agents rm pane-worker-stop"),
+        "refusal names the clearing verb: {msg}"
     );
-    assert!(msg.contains("main"), "refusal names the session: {msg}");
-    assert!(msg.contains("10"), "refusal names the pane id: {msg}");
 
     let registry = state::load_registry(&home.registry_json()).unwrap();
     assert_eq!(
