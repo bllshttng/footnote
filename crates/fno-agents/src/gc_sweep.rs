@@ -956,6 +956,28 @@ pub(crate) fn claude_death_reason(
     None
 }
 
+/// The three witnesses that say a worker finished. Any one suffices: a
+/// transcript older than the grace window, a held pid that answers ESRCH,
+/// or a terminal state on the harness roster. Liveness alone never vetoes:
+/// a terminal state outranks a fresh transcript. The merge reaper passes
+/// the roster's death evidence as `terminal`; the sweep passes `None` and
+/// keeps its own classify-to-apply gap clause on top, because only the
+/// sweep holds a classification age to compare against.
+pub(crate) fn worker_finished(
+    e: &state::RegistryEntry,
+    age_s: Option<i64>,
+    grace_secs: i64,
+    terminal: Option<&str>,
+) -> bool {
+    if matches!(age_s, Some(a) if a > grace_secs) {
+        return true;
+    }
+    if e.pid.is_some_and(crate::daemon::pid_is_gone) {
+        return true;
+    }
+    terminal.is_some()
+}
+
 /// Stop a claude row's session before the row drops. The roster is the exited
 /// proof: a session the live roster no longer lists is already gone, and
 /// running `claude stop` on it would fail on every future sweep, wedging the
@@ -1725,11 +1747,10 @@ pub(crate) fn run_with_release(
             // x-2774 change 8: activity without a living writer is not
             // activity. A pid that answered ESRCH at the re-check keeps its
             // retirement even if the transcript mtime moved - the write came
-            // from something else.
-            let pid_gone_now = e.pid.is_some_and(crate::daemon::pid_is_gone);
-            // The release lift (x-e3cc): a missing age reads quiet for this
-            // row only. An ANSWERED fresh age still keeps - activity is
-            // activity even under a ruling.
+            // from something else. The age and pid witnesses live in
+            // `worker_finished`; the roster witness stays here as the
+            // x-b7f8 gap clause, because only this sweep compares the fresh
+            // read against its classification age.
             // x-b7f8: for a terminal row the re-check asks one question -
             // did the session write since classification. A smaller fresh
             // age IS a new write (the session came back, perhaps through a
@@ -1737,8 +1758,10 @@ pub(crate) fn run_with_release(
             // re-read keeps: absence is not quiet.
             // ponytail: a write inside the same whole second as a
             // classification that already read age 0 is not seen.
-            let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs)
-                || pid_gone_now
+            let still_quiet = worker_finished(e, fresh_age, grace_secs, None)
+                // The release lift (x-e3cc): a missing age reads quiet for
+                // this row only. An ANSWERED fresh age still keeps -
+                // activity is activity even under a ruling.
                 || (release_quiet_row && fresh_age.is_none())
                 || (row.session_terminal.is_some()
                     && matches!((fresh_age, age), (Some(now_a), Some(then_a)) if now_a >= then_a));
@@ -3210,6 +3233,31 @@ mod tests {
             SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << 20),
             SETTLE_BACKOFF_CAP_MS
         );
+    }
+
+    #[test]
+    fn worker_finished_reads_three_witnesses() {
+        let grace = 900i64;
+        let mut e = state::RegistryEntry::default();
+        // Witness 1: a transcript older than the grace window.
+        assert!(worker_finished(&e, Some(901), grace, None));
+        // Witness 2: a held pid that answers ESRCH.
+        e.pid = Some(2_000_000_000);
+        assert!(worker_finished(&e, Some(10), grace, None));
+        // Witness 3: a terminal state on the roster outranks a fresh
+        // transcript.
+        assert!(worker_finished(
+            &e,
+            Some(5),
+            grace,
+            Some("row p present, state done")
+        ));
+        // Nothing decisive: not finished, liveness alone never vetoes a
+        // retirement but never proves one either.
+        e.pid = None;
+        assert!(!worker_finished(&e, Some(20), grace, None));
+        // An unresolved transcript is not a quiet one.
+        assert!(!worker_finished(&e, None, grace, None));
     }
 
     // x-9485 change 1: the non-pane stop arms name the arm and the process

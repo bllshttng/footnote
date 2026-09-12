@@ -253,7 +253,9 @@ fn transcript_last(paths: Option<&[PathBuf]>, ids: &HashSet<String>) -> Option<S
 /// 2 are consulted, so a hex-looking slug word in a later position, such as
 /// `feed` in `t-d15a-feed-timeout`, is never read as an id. A bare hex that
 /// matches two graph ids is ambiguous and answers nothing.
-fn name_route(name: &str, ids: &HashSet<String>) -> Option<String> {
+/// `pub(crate)`: the merge reaper's row join reads the same vocabulary,
+/// not a second prefix parser.
+pub(crate) fn name_route(name: &str, ids: &HashSet<String>) -> Option<String> {
     let tokens: Vec<&str> = name.split('-').collect();
     if tokens.len() < 2 {
         return None;
