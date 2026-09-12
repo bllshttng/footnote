@@ -245,7 +245,7 @@ def cmd_resolve(
     if json_output:
         typer.echo(json.dumps(out))
     else:
-        for key in ("harness", "substrate", "command", "command_surface"):
+        for key in ("harness", "substrate", "route", "command", "command_surface"):
             typer.echo(f"{key}={out[key]}")
         for key in (
             "route_action",
