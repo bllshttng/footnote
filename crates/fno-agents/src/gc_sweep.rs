@@ -307,7 +307,7 @@ pub struct StateReapFamilySummary {
     pub would_delete_entries: Vec<StateReapEntry>,
 }
 
-/// Totals are derived only from the four named families.
+/// Totals are derived only from the five named families.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct StateReapTotals {
     pub scanned: usize,
@@ -327,6 +327,7 @@ pub struct StateFilesReapSummary {
     pub plan_locks: StateReapFamilySummary,
     pub agent_locks: StateReapFamilySummary,
     pub pr_status_cache: StateReapFamilySummary,
+    pub claim_tmp: StateReapFamilySummary,
     pub totals: StateReapTotals,
     pub applied: bool,
     pub dry_run: bool,
@@ -340,6 +341,7 @@ impl Default for StateFilesReapSummary {
             plan_locks: StateReapFamilySummary::default(),
             agent_locks: StateReapFamilySummary::default(),
             pr_status_cache: StateReapFamilySummary::default(),
+            claim_tmp: StateReapFamilySummary::default(),
             totals: StateReapTotals::default(),
             applied: false,
             dry_run: true,
@@ -2754,7 +2756,7 @@ fn reap_mtime_family(
     shared_root: &std::path::Path,
     dir: &std::path::Path,
     retain_days: u64,
-    extension: Option<&str>,
+    accept: Option<&dyn Fn(&str) -> bool>,
     apply: bool,
     summary: &mut StateReapFamilySummary,
 ) {
@@ -2776,8 +2778,9 @@ fn reap_mtime_family(
             }
         };
         let path = entry.path();
-        if extension.is_some_and(|wanted| path.extension().and_then(|e| e.to_str()) != Some(wanted))
-        {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if accept.is_some_and(|keep| !keep(name)) {
             continue;
         }
         summary.scanned += 1;
@@ -2804,6 +2807,20 @@ fn reap_mtime_family(
         }
         record_state_file_action(&path, display_path, metadata.len(), age_s, apply, summary);
     }
+}
+
+/// A claim temp file lives microseconds in the happy path: created,
+/// hardlinked onto the .lock, unlinked. One that outlives a day is residue
+/// from a holder killed in that gap. Deliberately not a config leaf - the
+/// margin is five orders of magnitude and a knob would need six mirrors.
+const CLAIM_TMP_RETAIN_DAYS: u64 = 1;
+
+/// Both temp shapes the claim writers mint: `.claim-tmp-*` from the exclusive
+/// create (claims.rs create_via_link, io.py atomic_create_exclusive) and
+/// `<key>.lock.tmp.<pid>.<seq>` from claims.rs atomic_replace. Neither is ever
+/// a live lock, so neither belongs to any other family.
+fn is_claim_tmp(name: &str) -> bool {
+    name.starts_with(".claim-tmp-") || name.contains(".lock.tmp.")
 }
 
 fn reap_pr_status_rows(
@@ -3002,6 +3019,7 @@ fn state_reap_totals(summary: &StateFilesReapSummary) -> StateReapTotals {
         &summary.plan_locks,
         &summary.agent_locks,
         &summary.pr_status_cache,
+        &summary.claim_tmp,
     ];
     StateReapTotals {
         scanned: families.iter().map(|family| family.scanned).sum(),
@@ -3047,6 +3065,14 @@ fn reap_state_files_with_roots(
         None,
         apply,
         &mut summary.expired_claims,
+    );
+    reap_mtime_family(
+        &roots.claims_root,
+        &roots.claims_dir,
+        CLAIM_TMP_RETAIN_DAYS,
+        Some(&is_claim_tmp),
+        apply,
+        &mut summary.claim_tmp,
     );
     reap_lock_family(
         &roots.locks_root,
@@ -3368,6 +3394,107 @@ mod tests {
         assert!(fresh.exists());
         assert!(future.exists(), "future mtimes saturate to age zero");
         assert_eq!(summary, GcSummary::default());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_reap_removes_claim_tmp_residue() {
+        let (base, home) = stale_state_home("claim-tmp");
+        let claims = base.join("claims");
+        std::fs::create_dir_all(&claims).unwrap();
+        let create_tmp = claims.join(".claim-tmp-9-9-0");
+        let replace_tmp = claims.join("node%3Ax-1.lock.tmp.9.0");
+        std::fs::write(&create_tmp, b"").unwrap();
+        std::fs::write(&replace_tmp, b"").unwrap();
+        age_file(&create_tmp, 2);
+        age_file(&replace_tmp, 2);
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(!create_tmp.exists());
+        assert!(!replace_tmp.exists());
+        assert_eq!(summary.claim_tmp.deleted, 2);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_reap_keeps_claim_tmp_within_retention_window() {
+        let (base, home) = stale_state_home("claim-tmp-fresh");
+        let claims = base.join("claims");
+        std::fs::create_dir_all(&claims).unwrap();
+        let tmp = claims.join(".claim-tmp-1-1-0");
+        std::fs::write(&tmp, b"").unwrap();
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(tmp.exists());
+        assert_eq!(summary.claim_tmp.kept.len(), 1);
+        assert_eq!(summary.claim_tmp.kept[0].reason, "within retention window");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_reap_claim_tmp_sweep_ignores_locks_and_expired() {
+        let (base, _home) = stale_state_home("claim-tmp-lock-expired");
+        let claims = base.join("claims");
+        std::fs::create_dir_all(&claims).unwrap();
+        let lock = claims.join("node%3Ax-1.lock");
+        std::fs::write(&lock, b"").unwrap();
+        age_file(&lock, 40);
+        let expired_dir = claims.join(".expired");
+        std::fs::create_dir_all(&expired_dir).unwrap();
+        let expired_entry = expired_dir.join("old-claim");
+        std::fs::write(&expired_entry, b"{}").unwrap();
+        age_file(&expired_entry, 40);
+        let tmp = claims.join(".claim-tmp-2-2-0");
+        std::fs::write(&tmp, b"").unwrap();
+        age_file(&tmp, 2);
+
+        let mut summary = StateReapFamilySummary::default();
+        reap_mtime_family(
+            &base,
+            &claims,
+            CLAIM_TMP_RETAIN_DAYS,
+            Some(&is_claim_tmp),
+            true,
+            &mut summary,
+        );
+
+        assert!(lock.exists());
+        assert!(expired_entry.exists());
+        assert!(!tmp.exists());
+        assert_eq!(summary.scanned, 1, "only the temp file is scanned");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_reap_claim_tmp_sweep_ignores_recovery_dir() {
+        let (base, _home) = stale_state_home("claim-tmp-recovery");
+        let claims = base.join("claims");
+        std::fs::create_dir_all(&claims).unwrap();
+        let recovery_dir = claims.join("reconcile%3Apr-1.lock.recovery.d");
+        std::fs::create_dir_all(&recovery_dir).unwrap();
+
+        let mut summary = StateReapFamilySummary::default();
+        reap_mtime_family(
+            &base,
+            &claims,
+            CLAIM_TMP_RETAIN_DAYS,
+            Some(&is_claim_tmp),
+            true,
+            &mut summary,
+        );
+
+        assert!(recovery_dir.exists());
+        assert_eq!(summary.scanned, 0);
         std::fs::remove_dir_all(&base).ok();
     }
 

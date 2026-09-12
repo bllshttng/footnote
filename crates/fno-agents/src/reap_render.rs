@@ -19,6 +19,7 @@ pub fn render_state_files_reap(summary: &StateFilesReapSummary, json_out: bool) 
                     "plan_locks": summary.plan_locks,
                     "agent_locks": summary.agent_locks,
                     "pr_status_cache": summary.pr_status_cache,
+                    "claim_tmp": summary.claim_tmp,
                 },
                 "totals": summary.totals,
                 "applied": summary.applied,
@@ -54,6 +55,7 @@ pub fn render_state_files_reap(summary: &StateFilesReapSummary, json_out: bool) 
         ("plan_locks", &summary.plan_locks),
         ("agent_locks", &summary.agent_locks),
         ("pr_status_cache", &summary.pr_status_cache),
+        ("claim_tmp", &summary.claim_tmp),
     ] {
         out.push_str(&family_line(name, family));
     }
@@ -921,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn state_file_reap_json_keeps_all_four_zero_count_families() {
+    fn state_file_reap_json_keeps_all_five_zero_count_families() {
         let summary = crate::gc_sweep::StateFilesReapSummary::default();
         let out = render_state_files_reap(&summary, true);
         let value: Value = serde_json::from_str(out.trim()).expect("valid json");
@@ -931,6 +933,7 @@ mod tests {
             "plan_locks",
             "agent_locks",
             "pr_status_cache",
+            "claim_tmp",
         ] {
             assert_eq!(value["families"][family]["scanned"], json!(0));
             assert_eq!(value["families"][family]["deleted"], json!(0));
@@ -961,7 +964,7 @@ mod tests {
         let out = render_state_files_reap(&summary, false);
 
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 6, "four families, total, and dry-run marker");
+        assert_eq!(lines.len(), 7, "five families, total, and dry-run marker");
         assert!(
             out.len() < 1_024,
             "text output grew with kept paths: {}B",
@@ -972,8 +975,9 @@ mod tests {
         assert!(lines[1].contains("within retention window=10000"));
         assert!(lines[2].starts_with("agent_locks:"));
         assert!(lines[3].starts_with("pr_status_cache:"));
-        assert!(lines[4].starts_with("total:"));
-        assert_eq!(lines[5], "(dry-run: no changes made)");
+        assert!(lines[4].starts_with("claim_tmp:"));
+        assert!(lines[5].starts_with("total:"));
+        assert_eq!(lines[6], "(dry-run: no changes made)");
     }
 
     /// (x-1b90 change 3) AC3-HP: a 17h hold on done work names its age and

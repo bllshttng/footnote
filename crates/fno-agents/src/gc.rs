@@ -802,6 +802,7 @@ fn state_reap_event_payload(summary: &gc_sweep::StateFilesReapSummary) -> serde_
             "plan_locks": state_reap_family_tuple(&summary.plan_locks),
             "agent_locks": state_reap_family_tuple(&summary.agent_locks),
             "pr_status_cache": state_reap_family_tuple(&summary.pr_status_cache),
+            "claim_tmp": state_reap_family_tuple(&summary.claim_tmp),
         },
         "totals": [
             summary.totals.deleted,
