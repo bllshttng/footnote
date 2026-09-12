@@ -99,6 +99,7 @@ struct AppState {
     snap: Arc<Mutex<Snapshot>>,
     token: Arc<str>,
     graph_html: PathBuf,
+    reign_html: PathBuf,
     /// Fires on Ctrl-C so every ws loop ends and axum's graceful shutdown can
     /// complete: an open browser tab holds a connection that never closes on
     /// its own, so without this arm the bridge hangs past the signal and the
@@ -119,6 +120,22 @@ fn graph_html_path() -> PathBuf {
     {
         let graph = crate::backlog_view::graph_path();
         graph_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")))
+    }
+}
+
+fn reign_html_path_from_state_root(state_root: &Path) -> PathBuf {
+    state_root.join("reign.html")
+}
+
+fn reign_html_path() -> PathBuf {
+    #[cfg(not(test))]
+    {
+        reign_html_path_from_state_root(&crate::proto::mux_sidecar_root())
+    }
+    #[cfg(test)]
+    {
+        let graph = crate::backlog_view::graph_path();
+        reign_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")))
     }
 }
 
@@ -275,11 +292,13 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         snap,
         token,
         graph_html: graph_html_path(),
+        reign_html: reign_html_path(),
         shutdown: shutdown_rx,
     };
     let app = Router::new()
         .route("/", get(page))
         .route("/backlog", get(backlog))
+        .route("/crown", get(crown))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -501,10 +520,31 @@ struct WsQuery {
 }
 
 async fn backlog(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
-    backlog_response(&st.graph_html, q.t.as_deref(), &st.token).await
+    backlog_response(
+        &st.graph_html,
+        q.t.as_deref(),
+        &st.token,
+        "FNO_NO_OPEN=1 fno backlog view",
+    )
+    .await
 }
 
-async fn backlog_response(path: &Path, supplied: Option<&str>, expected: &str) -> Response {
+async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
+    backlog_response(
+        &st.reign_html,
+        q.t.as_deref(),
+        &st.token,
+        "fno agents king ledger",
+    )
+    .await
+}
+
+async fn backlog_response(
+    path: &Path,
+    supplied: Option<&str>,
+    expected: &str,
+    render_hint: &str,
+) -> Response {
     let authorized =
         supplied.is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()));
     if !authorized {
@@ -528,7 +568,7 @@ async fn backlog_response(path: &Path, supplied: Option<&str>, expected: &str) -
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "backlog not rendered; run FNO_NO_OPEN=1 fno backlog view".to_string(),
+            format!("backlog not rendered; run {render_hint}"),
         )
             .into_response(),
         Err(err) => (
@@ -924,7 +964,7 @@ console.log("evictedRowCount: 18 cases ok");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("graph.html");
         std::fs::write(&path, "PRIVATE-BACKLOG-MARKER").unwrap();
-        let response = backlog_response(&path, Some("right"), "right").await;
+        let response = backlog_response(&path, Some("right"), "right", "fno backlog view").await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
@@ -935,7 +975,7 @@ console.log("evictedRowCount: 18 cases ok");
             .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("PRIVATE-BACKLOG-MARKER"));
 
-        let denied = backlog_response(&path, Some("wrong"), "right").await;
+        let denied = backlog_response(&path, Some("wrong"), "right", "fno backlog view").await;
         assert_eq!(denied.status(), axum::http::StatusCode::UNAUTHORIZED);
         let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
             .await
@@ -950,7 +990,13 @@ console.log("evictedRowCount: 18 cases ok");
             std::env::temp_dir().join(format!("fno-web-backlog-{}-missing", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let response = backlog_response(&dir.join("graph.html"), Some("right"), "right").await;
+        let response = backlog_response(
+            &dir.join("graph.html"),
+            Some("right"),
+            "right",
+            "FNO_NO_OPEN=1 fno backlog view",
+        )
+        .await;
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -972,6 +1018,71 @@ console.log("evictedRowCount: 18 cases ok");
         assert_eq!(
             graph_html_path_from_state_root(state),
             PathBuf::from("/configured/state/graph.html")
+        );
+    }
+
+    #[tokio::test]
+    async fn crown_requires_token_and_serves_private_file_without_cache() {
+        let dir = std::env::temp_dir().join(format!("fno-web-crown-{}-serve", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("reign.html");
+        std::fs::write(&path, "PRIVATE-CROWN-MARKER").unwrap();
+        let response =
+            backlog_response(&path, Some("right"), "right", "fno agents king ledger").await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("PRIVATE-CROWN-MARKER"));
+
+        let denied =
+            backlog_response(&path, Some("wrong"), "right", "fno agents king ledger").await;
+        assert_eq!(denied.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("PRIVATE-CROWN-MARKER"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn missing_crown_names_the_render_action() {
+        let dir =
+            std::env::temp_dir().join(format!("fno-web-crown-{}-missing", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let response = backlog_response(
+            &dir.join("reign.html"),
+            Some("right"),
+            "right",
+            "fno agents king ledger",
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("fno agents king ledger"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn page_preserves_the_token_in_the_crown_link() {
+        assert!(PAGE.contains("id=\"crown-link\""));
+        assert!(PAGE.contains("/crown?t=${encodeURIComponent(token)}"));
+    }
+
+    #[test]
+    fn reign_html_follows_state_root_beside_graph_json() {
+        let state = Path::new("/configured/state");
+        assert_eq!(
+            reign_html_path_from_state_root(state),
+            PathBuf::from("/configured/state/reign.html")
         );
     }
 
