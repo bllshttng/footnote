@@ -3821,6 +3821,98 @@ fn the_commit_gate_drops_an_order_whose_obligation_opened() {
     );
 }
 
+/// The reap receipt joins its node (x-cbfa): a row the dispatch grammar
+/// cannot read (`t-fa8b-codexloop`, the incident's real shape) resolves
+/// through the node_route cascade to the node holding an open row for its
+/// session, and the event names WHICH source answered. The second row in
+/// the same commit is the control of absence: a name no route reads and a
+/// session no graph row carries answers node_id null, node_resolution
+/// "none" - "no node", never "we did not look". The grammar rows keep
+/// their join through gc_sweep_turns_unterminated_node_reap_into_durable_failure,
+/// which must stay green unmodified.
+#[test]
+fn the_reap_receipt_joins_its_node_through_the_route_cascade() {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-fa8b",
+            "status": "in_review",
+            "sessions": [{
+                "phase": "ship",
+                "harness": "codex",
+                "session_id": "codex-fa8b-uuid",
+                "started_at": "2026-09-03T20:00:00Z",
+            }],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut looped = state::RegistryEntry::default();
+        looped.name = "t-fa8b-codexloop".into();
+        looped.short_id = "fa8b0001".into();
+        looped.origin = Some("spawn".into());
+        looped.harness = Some("codex".into());
+        looped.harness_session_id = Some("codex-fa8b-uuid".into());
+        looped.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(looped);
+
+        let mut unheard = state::RegistryEntry::default();
+        unheard.name = "golden-summit".into();
+        unheard.short_id = "golden001".into();
+        unheard.origin = Some("spawn".into());
+        unheard.harness = Some("codex".into());
+        unheard.harness_session_id = Some("unheard-uuid".into());
+        unheard.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(unheard);
+    })
+    .unwrap();
+    let entries = state::load_registry(&home.registry_json()).unwrap();
+    let mut receipts = std::collections::BTreeMap::new();
+    let mut to_retire = std::collections::BTreeMap::new();
+    for entry in &entries.entries {
+        let mut receipt = crate::receipt::build_reap_receipt(entry, None).unwrap();
+        receipt.effects = vec![crate::gc_native::stop_outcome_effect(true, None)];
+        receipts.insert(entry.name.clone(), receipt);
+        to_retire.insert(
+            entry.name.clone(),
+            gc_sweep::RetireOrder {
+                via_release: false,
+                id: entry.short_id.clone(),
+                basis: "test".into(),
+                created_at: entry.created_at.clone(),
+                tree: crate::gc::TreeAction::None,
+                worktree: None,
+                released: false,
+            },
+        );
+    }
+    let report = gc_sweep::commit_retirements(
+        &home,
+        &emitter,
+        "test",
+        &entries.entries,
+        &mut to_retire,
+        &receipts,
+        &|_| None,
+    );
+    assert_eq!(report.retired.len(), 2, "{:?}", report.retired);
+
+    let reaps = read_events(&home);
+    let looped = reaps
+        .iter()
+        .find(|e| e["type"] == "agent_row_reaped" && e["data"]["short_id"] == "fa8b0001")
+        .expect("the incident-shaped reap event");
+    assert_eq!(looped["data"]["node_id"], "x-fa8b");
+    assert_eq!(looped["data"]["node_resolution"], "sessions");
+    let unheard = reaps
+        .iter()
+        .find(|e| e["type"] == "agent_row_reaped" && e["data"]["short_id"] == "golden001")
+        .expect("the control-of-absence reap event");
+    assert!(unheard["data"]["node_id"].is_null());
+    assert_eq!(unheard["data"]["node_resolution"], "none");
+}
+
 /// x-5aef AC6-HP, the archived-session RECORD journey. The receipt is
 /// built through the real capability table and persisted to the store;
 /// the session's original cwd is then DELETED; resolution by exact

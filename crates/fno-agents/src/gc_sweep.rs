@@ -2412,6 +2412,14 @@ pub(crate) fn commit_retirements(
     });
     match write {
         Ok(()) => {
+            // The receipt's node join (x-cbfa): the dispatch grammar answers
+            // first and unchanged; everything it misses resolves through the
+            // one cascade the sweep already trusts (node_route: the sessions
+            // witness, the registry field, then the name route) instead of a
+            // second name parser. The source that answered rides the event as
+            // node_resolution, so a null receipt names its reason: a graph
+            // that cannot be read answers "none", the same null as before.
+            let graph_join = read_graph_entries(home);
             for e in entries {
                 let Some(order) = to_retire.get(&e.name) else {
                     continue;
@@ -2473,11 +2481,28 @@ pub(crate) fn commit_retirements(
                     report.retired_names.remove(&e.name);
                     continue;
                 }
+                let (receipt_node, node_resolution) = match node_id.as_deref() {
+                    Some(node) => (Some(node.to_string()), "name"),
+                    None => graph_join
+                        .as_ref()
+                        .map(|g| {
+                            let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
+                            node_route::resolve(e, sid, g, None)
+                        })
+                        .and_then(|route| {
+                            route.node.map(|node| {
+                                let source = route.source.map(|s| s.as_str()).unwrap_or("none");
+                                (Some(node), source)
+                            })
+                        })
+                        .unwrap_or((None, "none")),
+                };
                 let _ = emitter.emit("agent_row_reaped", &{
                     let mut event = json!({
                         "short_id": e.short_id,
                         "name": e.name,
-                        "node_id": node_id,
+                        "node_id": receipt_node,
+                        "node_resolution": node_resolution,
                         "session_id": target_session_id,
                         "termination_event": termination_event,
                         "harness": e.harness_name(),
