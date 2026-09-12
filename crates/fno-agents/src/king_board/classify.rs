@@ -264,8 +264,9 @@ pub(crate) fn roster_verdict(
         }
     }
     // A candidate the probe could not measure stays unmeasured, never absent:
-    // a codex transcript outside ~/.claude/projects must not read as a dead
-    // driver, which is the false "dead" that invites reaping a live worker.
+    // a codex transcript outside the claude project store must not read as a
+    // dead driver, which is the false "dead" that invites reaping a live
+    // worker.
     if saw_candidate && (!saw_inactive || saw_unmeasured) {
         Some("unmeasured")
     } else {
@@ -816,7 +817,8 @@ mod tests {
     #[test]
     fn a_roster_candidate_the_probe_cannot_measure_reads_unmeasured() {
         // The codex-transcript trap: a driver whose transcript lives outside
-        // ~/.claude/projects is unmeasurable, and unmeasurable is not absent.
+        // the claude project store is unmeasurable, and unmeasurable is not
+        // absent.
         // Unmeasured is its own verdict, so the row is spared either way.
         let node = json!({"id": "x-cdx", "priority": "p1", "pr_number": 2});
         let claims: HashMap<String, Value> = HashMap::new();
