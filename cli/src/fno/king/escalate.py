@@ -3,21 +3,16 @@
 A king terminating ``NoProgress`` exits quietly: work pending, nothing moving,
 nobody told. The escalation is the telling, a question in the operator queue
 because the queue survives the next turn. Idempotence keys on the stalled id
-SET - a respawned king meeting the same board records no second question, while
-a different board is a different ask.
+SET - a respawned king meeting the same board records no second question,
+while a different board is the SAME ask, re-measured: the channel supersedes
+the stale row and asks once on the new reading. The board churns; the
+question does not change.
 """
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 MARKER = "king-escalation"
-
-
-def dedupe_key(stalled_ids: "list[str]") -> str:
-    """A stable short key for one stalled set, order-independent."""
-    joined = "\n".join(sorted(set(stalled_ids)))
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
 
 
 # How many stalled rows the question names before it says "and N more". The
@@ -79,66 +74,47 @@ def question_text(
     )
 
 
-def already_asked(root: Path, key: str) -> "str | None":
-    """The id of an open question already carrying this key, if there is one.
-
-    A read failure is NOT treated as "nothing asked yet". It raises, and the
-    caller reports the escalation as failed, because a reader that cannot tell
-    "no prior question" from "cannot see prior questions" would file a fresh
-    question on every fire.
-    """
-    from fno.outstanding.core import read_open_questions
-
-    needle = f"[{MARKER}:{key}]"
-    for question in read_open_questions(root):
-        if needle in question.question:
-            return question.id
-    return None
-
-
 def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str | None",
              cwd: Path, *, live: "bool | None" = None,
              unknown_reason: "str | None" = None) -> "tuple[str, str]":
     """Record one operator question for this stalled set.
 
-    Returns ``(outcome, question_id)`` where outcome is ``recorded`` or
-    ``duplicate``. Raises on a store failure; a quiet failure here would put the
-    king back in the silence this verb exists to break. ``live`` and
-    ``unknown_reason`` come from :func:`fno.king.state.reign_state`; the dedupe
-    key is unchanged either way.
+    Returns ``(outcome, question_id)`` where outcome is ``recorded``,
+    ``duplicate``, ``answered`` or ``closed``. Raises on a store failure; a
+    quiet failure here would put the king back in the silence this verb exists
+    to break. ``live`` and ``unknown_reason`` come from
+    :func:`fno.king.state.reign_state`; the dedupe key is unchanged either way.
     """
-    import secrets
-
-    from fno.events import operator_question
+    from fno.agents.stale_escalate import reconcile_channel
     from fno.harness_identity import canonical_handle
-    from fno.outstanding.core import append_question_event
-
-    key = dedupe_key(stalled_ids)
-    existing = already_asked(root, key)
-    if existing:
-        return ("duplicate", existing)
 
     ids = sorted(set(stalled_ids))
-    qid = f"q-{secrets.token_hex(4)}"
-    append_question_event(
-        operator_question(
-            question_id=qid,
-            question=question_text(
-                ids, key, reason, live=live, unknown_reason=unknown_reason
-            ),
-            session_id=session_id,
-            cwd=str(cwd),
-            # The delivery address for the eventual answer. The king that asked
-            # is dead by then, but the durable mail tier reaches its successor;
-            # an asker-less row can only ever be answered into the void.
-            asker=canonical_handle(session_id) if session_id else None,
-            # No node. A stalled row is queue-qualified (`undispatched:x-1234`)
-            # and not every queue holds backlog nodes, so any value here would
-            # be a guess. The question text names the rows instead.
+    # An empty stalled list is an UNREADABLE board, never a clean one - the
+    # question must say so (test_an_empty_stalled_set_never_reads_as_a_clean_board).
+    # The channel's empty branch closes, which would read as clean, so hand it
+    # a stable sentinel identity to ask under instead.
+    pairs = ids or ["unreadable"]
+    outcome, qid = reconcile_channel(
+        pairs,
+        root=root,
+        session_id=session_id,
+        cwd=cwd,
+        marker=MARKER,
+        subject="king-escalation",
+        identities=ids if ids else ["king-board-unreadable"],
+        question=lambda key: question_text(
+            ids, key, reason, live=live, unknown_reason=unknown_reason
         ),
-        root,
+        # No ask line. A stalled row is queue-qualified (`undispatched:x-1234`)
+        # and not every queue holds backlog nodes, so any single clearing
+        # command here would be a guess. The question text names the rows.
+        ask=lambda _key: "",
+        # The delivery address for the eventual answer. The king that asked
+        # is dead by then, but the durable mail tier reaches its successor;
+        # an asker-less row can only ever be answered into the void.
+        asker=canonical_handle(session_id) if session_id else None,
     )
-    return ("recorded", qid)
+    return ("recorded", qid) if outcome == "asked" else (outcome, qid)
 
 
 def resolve_presiding_king(session_id: "str | None") -> "dict | None":

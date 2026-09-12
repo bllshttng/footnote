@@ -323,6 +323,66 @@ def _question_rows(root: Path) -> list[dict]:
     ]
 
 
+class TestAskReceiptNamesVisibility:
+    """The receipt must say whether the ask renders (x-0dc5): a bare
+    `recorded q-...` shipped two fleet blockers into the invisible 98 percent.
+    CliRunner merges streams here, so the stream guarantee is asserted as
+    ORDER: the stdout qid is the final line of the invocation."""
+
+    def _seed(self, root: Path, count: int, *, ts: str = "2026-08-19T00:00:00Z") -> None:
+        _write_indexed_questions(
+            root,
+            [
+                _indexed_question(
+                    f"q-{i:02d}", ts, asker="gone", blocks=[]
+                )
+                for i in range(count)
+            ],
+        )
+
+    def test_the_tenth_ask_renders_at_position_one_of_ten(self, root: Path):
+        """AC8-HP (x-0dc5): 9 open + this one = 10; the fresh ask ranks first."""
+        self._seed(root, 9)
+        result = runner.invoke(outstanding_app, ["ask", "verify the render window"])
+
+        assert result.exit_code == 0, result.output
+        (qid,) = [row["data"]["question_id"] for row in _question_rows(root)
+                  if row["data"]["question_id"].startswith("q-")
+                  and row["data"]["question_id"] not in {f"q-{i:02d}" for i in range(9)}]
+        assert "renders at position 1 of 10" in result.output
+        assert result.output.rstrip().endswith(qid)
+
+    def test_an_ask_below_the_window_says_so_and_names_its_position(self, root: Path):
+        """AC9-ERR (x-0dc5): the honest branch - queued behind a full window,
+        nothing will show it, and the receipt says exactly that."""
+        # ts far in the future: every seeded row outranks the fresh ask, so it
+        # sorts last regardless of the id the receipt mints.
+        self._seed(root, 10, ts="2099-01-01T00:00:00Z")
+        result = runner.invoke(outstanding_app, ["ask", "buried on arrival"])
+
+        assert result.exit_code == 0, result.output
+        rows = [row["data"]["question_id"] for row in _question_rows(root)]
+        qid = next(q for q in rows if q not in {f"q-{i:02d}" for i in range(10)})
+        assert f"{qid} does NOT render: position 11 of 11" in result.output
+        assert "Nothing will show it to the operator" in result.output
+
+    def test_a_failed_position_read_still_records_and_says_so(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """AC10-EDGE (x-0dc5): the receipt is best-effort side work; a broken
+        read never fails the durable write."""
+
+        def broken(*_a, **_k):
+            raise RuntimeError("index unreadable")
+
+        monkeypatch.setattr("fno.outstanding.core.read_open_questions", broken)
+        result = runner.invoke(outstanding_app, ["ask", "record me anyway"])
+
+        assert result.exit_code == 0, result.output
+        assert len(_question_rows(root)) == 1
+        assert "render position could not be read" in result.output
+
+
 class TestAskRefusedWhenLiveLawRules:
     def test_the_pr1717_question_exits_2_and_records_nothing(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
@@ -548,9 +608,13 @@ def _indexed_question(
     }
 
 
-def test_question_rank_orders_live_then_blocks_then_oldest_and_id(
+def test_question_rank_orders_newest_first_within_a_liveness_lane(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """Rewrites the old blocks-then-oldest rank (x-0dc5): the 19 rows carrying
+    blocks were all filed before 09-08 and held the whole 10-row window against
+    every ask filed since, so recency outranks blocks. Liveness still lanes
+    first; blocks breaks same-second ties."""
     monkeypatch.setattr(
         "fno.agents.discover.resolve_reachable",
         lambda asker: (object(), []) if asker == "live" else (None, []),
@@ -575,13 +639,62 @@ def test_question_rank_orders_live_then_blocks_then_oldest_and_id(
 
     payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
 
-    assert [row["id"] for row in payload] == ["q-two", "q-one", "q-zero", "q-stale"]
+    assert [row["id"] for row in payload] == ["q-zero", "q-two", "q-one", "q-stale"]
     assert [row["rank"] for row in payload] == [1, 2, 3, 4]
 
 
-def test_question_rank_uses_oldest_then_id_within_a_block_count(
+def test_a_fresh_ask_outranks_an_older_blocking_one(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """AC4-HP (x-0dc5): within one lane, recency beats blocks outright."""
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable", lambda _asker: (None, [])
+    )
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-blocked", "2026-08-12T03:00:00Z", asker="stale", blocks=["x-a", "x-b"]
+            ),
+            _indexed_question(
+                "q-fresh", "2026-08-19T03:00:00Z", asker="stale", blocks=[]
+            ),
+        ],
+    )
+
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+
+    assert [row["id"] for row in payload] == ["q-fresh", "q-blocked"]
+
+
+def test_an_empty_ts_lands_last_not_first(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC5-EDGE (x-0dc5): under the newest-first reverse sort, an empty ts is
+    the smallest key and sorts last inside its lane, never first."""
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable", lambda _asker: (None, [])
+    )
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question("q-none", "", asker="stale", blocks=[]),
+            _indexed_question(
+                "q-real", "2026-08-19T03:00:00Z", asker="stale", blocks=[]
+            ),
+        ],
+    )
+
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+
+    assert [row["id"] for row in payload] == ["q-real", "q-none"]
+
+
+def test_question_rank_uses_id_desc_within_a_same_timestamp_tie(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The rank stays total: same ts and same block count falls to the id, and
+    `needs --json` diff-stability survives the reorder."""
     monkeypatch.setattr(
         "fno.agents.discover.resolve_reachable", lambda _asker: (object(), [])
     )
@@ -602,7 +715,7 @@ def test_question_rank_uses_oldest_then_id_within_a_block_count(
 
     payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
 
-    assert [row["id"] for row in payload] == ["q-a", "q-z", "q-new"]
+    assert [row["id"] for row in payload] == ["q-new", "q-z", "q-a"]
     assert [row["rank"] for row in payload] == [1, 2, 3]
 
 
@@ -622,6 +735,69 @@ def test_question_render_cap_shows_ten_and_names_true_total(
 
     assert sum(row["data"]["question_id"] in out for row in rows) == 10
     assert "Showing 10 of 11 open questions" in out
+
+
+def test_a_long_body_renders_bounded_with_the_trim_footer():
+    """AC6-HP (x-0dc5): a 2000-character body prints as one bounded line that
+    ends in the ellipsis, and the footer names the way to the full text."""
+    from fno.outstanding.core import QUESTION_BODY_CAP
+
+    body = "x" * 2000
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[Question("q-long", "2026-08-19T00:00:00Z", body, live=False)],
+        captures=[],
+    )
+
+    output = render(report)
+
+    body_line = next(line for line in output.splitlines() if "q-long" in line)
+    printed_body = body_line.split("  ", 2)[2].split("  (")[0]
+    assert len(printed_body) == QUESTION_BODY_CAP
+    assert printed_body.endswith("…")
+    assert "Rows are trimmed to one line" in output
+    assert "fno inbox outstanding -J" in output
+
+
+def test_a_multiline_body_renders_first_line_with_the_trim_footer():
+    """The trim says itself: a multi-line body collapses to its first line and
+    the footer appears even though nothing was character-truncated."""
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[
+            Question("q-multi", "2026-08-19T00:00:00Z", "first line\nsecond line", live=False)
+        ],
+        captures=[],
+    )
+
+    output = render(report)
+
+    assert "first line" in output
+    assert "second line" not in output
+    assert "Rows are trimmed to one line" in output
+
+
+def test_short_single_line_bodies_render_no_trim_footer():
+    """AC7-EDGE (x-0dc5): every body one line and short - the footer would be
+    a lie, so it must not appear."""
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[
+            Question("q-short", "2026-08-19T00:00:00Z", "short ask?", live=False),
+            Question("q-short2", "2026-08-19T01:00:00Z", "another short ask?", live=False),
+        ],
+        captures=[],
+    )
+
+    output = render(report)
+
+    assert "Rows are trimmed" not in output
 
 
 def test_stale_questions_render_under_visible_heading_with_age(
@@ -1619,7 +1795,12 @@ def test_json_mode_emits_one_object_carrying_both_legs(root: Path):
 # --- 5.2 the asking session's own questions lead -----------------------------
 
 
-def test_own_first(root: Path, monkeypatch: pytest.MonkeyPatch):
+def test_own_rows_are_labelled_and_rank_is_newest_first(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Rewrites the old own-first order assert (x-0dc5): rank is newest-first
+    inside a lane, so the newer row outranks this session's. Ownership shows
+    as the [this session] label, never as rank."""
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-mine")
     runner.invoke(outstanding_app, ["ask", "MINE: do we ship the fold arm?"])
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-other")
@@ -1629,7 +1810,7 @@ def test_own_first(root: Path, monkeypatch: pytest.MonkeyPatch):
     out = runner.invoke(outstanding_app, []).stdout
     assert "MINE:" in out
     assert "THEIRS:" in out
-    assert out.index("MINE:") < out.index("THEIRS:")
+    assert out.index("THEIRS:") < out.index("MINE:")
     # Labelled as this session's, so the agent that asked is the one prompted.
     assert "this session" in out.lower()
 
@@ -1946,12 +2127,12 @@ def test_render_names_the_carveout_root_it_read(root: Path):
 # --- BREAK 4 read-side pin: render paths never slice --------------------------
 
 
-def test_a_long_question_renders_whole_never_sliced(root: Path):
-    """The write side caps at QUESTION_CAP; the read side must not cut too.
-
-    A king escalation cut mid-node-id read as 'nothing is clearing: stalled',
-    which is a different sentence about a different board. The full id list
-    must survive the render.
+def test_a_long_question_renders_bounded_and_names_the_full_read(root: Path):
+    """Rewrites the old read-side never-slice rule (x-0dc5): each rendered row
+    is now bounded at QUESTION_BODY_CAP, because ten 2000-character rows were
+    exactly how the short asks got buried. The bound says itself - the row
+    ends in the ellipsis and the footer names -J - so a cut can never
+    masquerade as the whole text the way the old mid-id slice did.
     """
     ids = "stalled_holder:x-5c59, " * 30
     long_q = f"nothing is clearing: {ids}decide"
@@ -1959,7 +2140,10 @@ def test_a_long_question_renders_whole_never_sliced(root: Path):
 
     out = runner.invoke(outstanding_app, []).stdout
 
-    assert ids.strip() in out, "the whole id list must be on screen; wrap, never truncate"
+    row = next(line for line in out.splitlines() if "nothing is clearing" in line)
+    assert "…" in row, "the bounded body must say it truncated"
+    assert len(row) <= 300, "the rendered row must be bounded, not the old full body"
+    assert "fno inbox outstanding -J" in out
 
 
 def test_ask_and_clear_state_when_the_cap_truncated_the_text(root: Path):

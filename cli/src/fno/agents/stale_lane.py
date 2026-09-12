@@ -1,8 +1,9 @@
 """The stale-row question lane: reconcile one ``[watchdog-stale:*]`` operator
 question to the set the sweep actually measured. A row past the wake ceiling
 is the needs-human bucket - no action lane may take it, so the only honest
-surface is a human's. The generic ``reconcile_channel`` below serves every
-report-only question lane (the friction lane rides it too). Deliberately NOT
+surface is a human's. The generic ``reconcile_channel`` (in
+``stale_escalate.py``, the shared fold) serves every report-only question
+lane (the friction lane rides it too). Deliberately NOT
 the report path: the AC9 census guards ``stale_escalate.py`` against
 session-bookkeeping vocabulary (PR 1227 measured the stale ask as noise).
 """
@@ -11,7 +12,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fno.agents.stale_escalate import already_asked, answered_question, dedupe_key, reset_answered
+from fno.agents.stale_escalate import reconcile_channel
 
 STALE_MARKER = "watchdog-stale"
 #: The reaper-hold lane (x-e3cc): escalated holds ask on the same durable
@@ -24,112 +25,6 @@ _AGE_H_RE = re.compile(r"(\d+)h old")
 def oldest_h(bases: "list[str]") -> "int | None":
     ages = [int(m.group(1)) for b in bases for m in (_AGE_H_RE.search(b),) if m]
     return max(ages) if ages else None
-
-
-def _open_questions(root: Path, marker: str):
-    from fno.outstanding.core import read_open_questions
-
-    return [
-        q for q in read_open_questions(root)
-        if f"[{marker}:" in q.question
-    ]
-
-
-def _close_question(qid: str, answer: str, root: Path, *, lane: str = "stale") -> None:
-    """Close one ask AND record the decision the close made (the stop gate
-    holds a closed-with-answer question with no ``operator_decision``
-    record): a mechanical supersede, never an operator ruling. ``lane`` is
-    the channel short name, so friction closes record friction provenance."""
-    import secrets
-
-    from fno.events import operator_decision, operator_question_closed
-    from fno.outstanding.core import append_question_event
-
-    append_question_event(
-        operator_question_closed(
-            question_id=qid,
-            answer=answer,
-            closed_by=f"{lane}-escalate",
-            source="daemon",
-        ),
-        root,
-    )
-    append_question_event(
-        operator_decision(
-            decision_id=f"d-{secrets.token_hex(4)}",
-            decision=answer,
-            subject=f"watchdog-{lane}:{qid}",
-            question_id=qid,
-            decided_by=f"fno agents {lane}-escalate",
-            origin="scheduler",
-            authority_source="agent",
-            rationale="mechanical supersede by reconcile; not an operator ruling",
-            source="daemon",
-        ),
-        root,
-    )
-
-
-def reconcile_channel(
-    pairs, *, root: Path, session_id: "str | None", cwd: Path,
-    marker: str, subject: str, identities: "list[str]",
-    question, ask,
-) -> "tuple[str, str]":
-    """Reconcile ONE durable ``[<marker>:<key>]`` operator question to the
-    measured ``pairs``: same set is a duplicate, a changed set supersedes,
-    an empty set closes, and a set a human already answered stays answered.
-    ``question``/``ask`` are callables taking the dedupe ``key``; outcome in
-    ``none | duplicate | answered | asked | closed``."""
-    key = dedupe_key(identities)
-
-    if not pairs:
-        open_qs = _open_questions(root, marker)
-        for q in open_qs:
-            _close_question(
-                q.id, f"no {subject} rows remain at reconcile time", root,
-                lane=subject,
-            )
-        reset_answered(root, marker=marker)
-        return ("closed", open_qs[0].id) if open_qs else ("none", "")
-
-    existing = already_asked(root, key, marker=marker)
-    if existing:
-        for q in _open_questions(root, marker):
-            if q.id != existing:
-                _close_question(q.id, f"{subject} set changed; superseded by {existing}",
-                                root, lane=subject)
-        return ("duplicate", existing)
-    answered = answered_question(root, key, marker=marker)
-    if answered:
-        for q in _open_questions(root, marker):
-            if q.id != answered:
-                _close_question(q.id, f"{subject} set changed; superseded by {answered}",
-                                root, lane=subject)
-        return ("answered", answered)
-
-    import secrets
-
-    from fno.events import operator_question
-    from fno.outstanding.core import append_question_event
-
-    qid = f"q-{secrets.token_hex(4)}"
-    # Append BEFORE closing superseded asks: a failed close must cost a duplicate ask, never an empty channel.
-    append_question_event(
-        operator_question(
-            question_id=qid,
-            question=question(key),
-            session_id=session_id,
-            cwd=str(cwd),
-            ask=ask(key),
-            source="daemon",
-        ),
-        root,
-    )
-    for q in _open_questions(root, marker):
-        if q.id != qid:
-            _close_question(q.id, f"{subject} set changed; superseded by {qid}",
-                            root, lane=subject)
-    return ("asked", qid)
 
 
 def reconcile_stale(stale_pairs, *, root: Path, session_id: "str | None",

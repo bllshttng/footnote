@@ -29,6 +29,11 @@ from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lan
 # skipped, which is the failure this verb exists to fix.
 RENDER_CAP = 3
 QUESTION_RENDER_CAP = 10
+# A rendered entry is a pointer, not the evidence. The full body is one `-J`
+# away; a 2000-character row in a 10-row budget is how the short asks got
+# buried (law d-59af3235's own rationale). Measured 2026-09-12: human-authored
+# bodies run a 929-character median, so this cap binds on most rows by design.
+QUESTION_BODY_CAP = 240
 
 EVENTS_NAME = "events.jsonl"
 # `retro sweep-carveouts` skips this kind; /fno:pr merged owns it.
@@ -350,7 +355,8 @@ def read_open_questions(
 ) -> "list[Question]":
     """Fold ``operator_question`` minus ``operator_question_closed``.
 
-    Ranked by liveness, blocked nodes, age, then id. A malformed line is SKIPPED, never raised, inheriting
+    Ranked by liveness lane, then newest first (blocked nodes break same-second
+    ties). A malformed line is SKIPPED, never raised, inheriting
     ``read_carveouts``' rule: one bad row must not cost the others. A missing
     index reads as no questions with a recovery hint; an unreadable one fails.
     """
@@ -390,18 +396,13 @@ def read_open_questions(
         resolver=resolver,
     )
     open_qs = [replace(q, live=False if not q.asker else resolved.get(q.asker)) for q in open_qs]
-    # A stale asker never outranks a reachable one, even when it blocks more.
-    # Within each liveness lane, unblock the most nodes first, then honor the
-    # questions that have waited longest. No auto-expiry: age only ranks.
-    open_qs.sort(
-        key=lambda q: (
-            q.live is not True,
-            -len(q.blocks),
-            not bool(q.ts),
-            q.ts,
-            q.id,
-        )
-    )
+    # Newest first inside a lane. An ask filed minutes ago is the one a human
+    # can still act on, and blocks drops below recency because the 19 rows
+    # carrying it were all filed before 09-08 and held the whole 10-row window
+    # against every ask filed since. An empty ts sorts last: "" loses under
+    # reverse.
+    open_qs.sort(key=lambda q: (q.ts, -len(q.blocks), q.id), reverse=True)
+    open_qs.sort(key=lambda q: q.live is not True)
     return open_qs
 
 
@@ -844,8 +845,19 @@ def render(
         lines.append(f"{_plural(len(outstanding.questions), 'open question')} awaiting you.")
 
         shown = outstanding.questions[:QUESTION_RENDER_CAP]
+        body_trimmed = False
+
+        def _one_line(text: str) -> "tuple[str, bool]":
+            """First line only, truncated at QUESTION_BODY_CAP with an ellipsis
+            that says it truncated. Returns (line, was_trimmed)."""
+            line = text.split("\n", 1)[0].strip()
+            cut = len(line) > QUESTION_BODY_CAP
+            if cut:
+                line = line[: QUESTION_BODY_CAP - 1] + "…"
+            return line, cut
 
         def append_question(q: Question, *, stale_row: bool = False) -> None:
+            nonlocal body_trimmed
             label = "[this session] " if q in mine else ""
             where = q.node or (Path(q.cwd).name if q.cwd else None)
             details = [where] if where else []
@@ -853,9 +865,13 @@ def render(
                 age = _age_days(q.ts)
                 details.append(f"{_plural(age, 'day')} old" if age is not None else "age unknown")
             suffix = f"  ({'; '.join(details)})" if details else ""
-            lines.append(f"  {label}{q.id}  {q.question}{suffix}")
-            if q.ask:
-                lines.append(f"    Action: {q.ask}")
+            body, cut = _one_line(q.question)
+            action, action_cut = _one_line(q.ask) if q.ask else (None, False)
+            if cut or action_cut or "\n" in q.question or (q.ask and "\n" in q.ask):
+                body_trimmed = True
+            lines.append(f"  {label}{q.id}  {body}{suffix}")
+            if action:
+                lines.append(f"    Action: {action}")
 
         group_order: "list[str | bool | None]" = []
         grouped: "dict[str | bool | None, list[Question]]" = {}
@@ -891,6 +907,10 @@ def render(
         if len(outstanding.questions) > QUESTION_RENDER_CAP:
             lines.append(f"  Showing {len(shown)} of {len(outstanding.questions)} open questions.")
         lines.append('  Answer with: fno inbox outstanding clear <id> --answer "..."')
+        if body_trimmed:
+            lines.append(
+                "  Rows are trimmed to one line; read a full question with: fno inbox outstanding -J"
+            )
         lines.append("")
 
     if outstanding.captures:
