@@ -44,7 +44,7 @@ import typer.main
 
 # One implementation of the reinstall-window vocabulary, shared with the
 # meta-path finder that covers the function-level imports this group cannot see.
-from fno import _is_fno_module, _module_is_now_on_disk, _reinstall_hint
+from fno import _is_fno_module, _module_appears_on_disk, _reinstall_hint
 
 if TYPE_CHECKING:
     pass
@@ -232,7 +232,7 @@ class _LazyStub(click.Group):
             if (
                 isinstance(exc, ModuleNotFoundError)
                 and _is_fno_module(name)
-                and _module_is_now_on_disk(name)
+                and _module_appears_on_disk(name)
             ):
                 try:
                     module = importlib.import_module(module_path)

@@ -13,6 +13,7 @@ per-callsite edit could ever keep up with.
 """
 
 import sys
+import time
 
 # No `from __future__ import annotations` here on purpose: it costs a measured
 # ~154us of `__future__` import on EVERY `fno` process, and nothing below needs
@@ -36,14 +37,38 @@ def _is_fno_module(name: str) -> bool:
     return name == "fno" or name.startswith("fno.")
 
 
-def _module_is_now_on_disk(name: str) -> bool:
-    """True when ``name`` resolves RIGHT NOW, after dropping the finder caches.
+# Mirror of the front door's VERIFY_ATTEMPTS / VERIFY_POLL in
+# crates/fno/src/bootstrap.rs, for the reason that file names: the
+# implementations cannot cross the language boundary, so the budget is shared
+# as numbers. 15 * 200ms = 3s, the same total every other provisioning path
+# spends on the same question. Change one budget and change all of them.
+_VERIFY_ATTEMPTS = 15
+_VERIFY_POLL_SECONDS = 0.2
+
+# Once one import has exhausted the wait budget in this process, every later
+# absence answers after a single look. The persistent case is one stale
+# install: all of a process's absent modules are that install answering
+# again, and re-paying 3s per import would turn one legible failure into a
+# process-wide stall.
+_recheck_budget_spent = False
+
+
+def _module_appears_on_disk(name: str) -> bool:
+    """True when ``name`` resolves within a bounded re-check budget.
 
     The import that just failed proves nothing about the present: a reinstall
     replaces the package tree between two statements, so a module absent one
-    moment is present the next.  Re-checking is what keeps the retry
-    falsifiable rather than a hopeful sleep -- a genuinely missing module
-    answers False here and fails exactly as it does today.
+    moment is present the next.  A single immediate re-check loses races it
+    could win -- the installer's rewrite spans a measurable interval, and a
+    look that lands inside it answers "absent" about a package that is whole
+    again microseconds later.  So the re-check runs on a poll until the budget
+    (``_VERIFY_ATTEMPTS`` x ``_VERIFY_POLL_SECONDS``, mirroring
+    ``install_verified_within`` in ``crates/fno/src/bootstrap.rs``) is spent,
+    and returns the moment the module appears.  Every pass re-runs the real
+    predicate, which is what keeps this falsifiable rather than a hopeful
+    sleep: a genuinely missing module stays absent through every pass and
+    fails exactly as it did before the wait existed, just within a bounded,
+    once-per-process delay.
 
     ``invalidate_caches()`` is belt-and-braces, and the honest scope is small:
     ``FileFinder`` memoizes a directory listing but re-lists when the directory
@@ -60,7 +85,8 @@ def _module_is_now_on_disk(name: str) -> bool:
     ``importlib.metadata``, ``email`` and ``zipfile``.  Measured on a bare
     interpreter: 17.9ms and 84 modules for that first call, 0.003ms for every
     call after it.  The exact figure moves with what the process has already
-    imported, so treat it as "tens of milliseconds, once".
+    imported, so treat it as "tens of milliseconds, once" (per pass; the wait
+    repeats it only while the module is still absent).
 
     It is TRIGGERED only by an import that has already failed, but it is not
     free for the imports that follow: ``invalidate_caches()`` is process-global
@@ -68,26 +94,48 @@ def _module_is_now_on_disk(name: str) -> bool:
     next import of anything re-lists its directory.  That is the honest cost,
     and it is still the right trade -- the alternative is answering the retry
     question from a cache that a reinstall just made a lie.
+
+    The budget is spent at most ONCE per process (``_recheck_budget_spent``):
+    after one exhausted wait, later absences answer after a single look.  The
+    persistent case is one stale install; every absent module in that process
+    is the same install answering again, and a full 3s per import would turn
+    one legible failure into a process-wide stall.
     """
+    global _recheck_budget_spent
+
     import importlib.util
 
-    importlib.invalidate_caches()
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, AttributeError, ValueError):
-        # A parent package that is itself mid-replacement cannot answer the
-        # question; treat "cannot tell" as "no" so we never retry on a guess.
-        return False
+    def look():
+        importlib.invalidate_caches()
+        try:
+            return importlib.util.find_spec(name) is not None
+        except (ImportError, AttributeError, ValueError):
+            # A parent package that is itself mid-replacement cannot answer the
+            # question; treat "cannot tell" as "no" so we never retry on a guess.
+            return None
+
+    answer = look()
+    if answer is None or answer or _recheck_budget_spent:
+        return bool(answer)
+    for _ in range(_VERIFY_ATTEMPTS):
+        time.sleep(_VERIFY_POLL_SECONDS)
+        answer = look()
+        if answer:
+            return True
+        if answer is None:
+            return False
+    _recheck_budget_spent = True
+    return False
 
 
 def _reinstall_hint(name: str) -> str:
     """Suffix explaining a missing ``fno`` submodule, or "" for anything else.
 
     Because imports here happen at INVOCATION time, a subcommand's module is
-    read off disk long after startup -- so ``uv tool install --reinstall``
-    (which ``fno doctor update`` runs) replaces the package underneath a running
-    process and every not-yet-imported subcommand fails for the length of the
-    install.  Two very different things produce that same ModuleNotFoundError
+    read off disk long after startup -- so the ``uv tool install`` that
+    ``fno doctor update`` runs replaces the package underneath a running
+    process and every not-yet-imported subcommand can fail for the length of
+    the swap.  Two very different things produce that same ModuleNotFoundError
     and they need opposite responses: a reinstall in flight (transient, retry)
     or a stale/incomplete install (persistent, reinstall properly).  Naming only
     the flattering transient one would assert a cause we have not established,
@@ -108,7 +156,7 @@ def _reinstall_hint(name: str) -> str:
 class _ReinstallWindowFinder:
     """Last-resort meta-path finder: re-check the disk before conceding.
 
-    ``uv tool install --reinstall`` deletes and rewrites this package under
+    ``uv tool install`` deletes and rewrites this package under
     running processes, so an ``fno.*`` import can fail against a tree that is
     whole again microseconds later.  ``_LazyStub._load_real`` already retries
     the lazy command-group import that way, but that is one of two import paths:
@@ -119,16 +167,19 @@ class _ReinstallWindowFinder:
     reader of the window.  A guard on only one of the two paths is decorative.
 
     Appended to the END of ``sys.meta_path``, so it is consulted only once every
-    normal finder has already said "no such module".  At that point it drops the
-    finder caches and asks the path finder ONE more time:
+    normal finder has already said "no such module".  At that point it re-asks
+    the disk on a bounded poll (``_VERIFY_ATTEMPTS`` x ``_VERIFY_POLL_SECONDS``,
+    the ``install_verified_within`` shape from ``crates/fno/src/bootstrap.rs``):
 
-    - present now -> hand back the spec and the import proceeds;
-    - still absent -> a stale or broken install, which is neither waited on nor
-      masked.  It raises the same dual-cause message the lazy group raises, in
-      place of the bare ``ModuleNotFoundError`` those ~2000 sites produce today.
+    - present within the budget -> hand back the spec and the import proceeds;
+    - still absent after it -> a stale or broken install, which is not masked.
+      It raises the same dual-cause message the lazy group raises, in place of
+      the bare ``ModuleNotFoundError`` those ~2000 sites produce today.
 
-    The disk re-check is the whole difference between this and a hopeful
-    sleep-retry, and it is why an absent module is still a hard, legible failure.
+    Every pass re-runs the real on-disk predicate, which is the whole
+    difference between this and a hopeful sleep-retry, and why an absent
+    module is still a hard, legible failure -- now by at most one budget
+    later.
 
     Two limits, both deliberate.
 
@@ -167,13 +218,14 @@ class _ReinstallWindowFinder:
             return None
         cls._rechecking = True
         try:
-            # `_module_is_now_on_disk` rather than an inlined PathFinder probe,
-            # even though inlining would save this second lookup: `_load_real`
-            # asks the same question, and two implementations of "is it on disk
-            # now" is the one-of-N-paths trap this guard exists to close. The
-            # duplicate lookup costs microseconds and only ever runs on an
-            # import that has already failed.
-            if not _module_is_now_on_disk(fullname):
+            # `_module_appears_on_disk` rather than an inlined PathFinder
+            # probe, even though inlining would save this second lookup:
+            # `_load_real` asks the same question, and two implementations of
+            # "is it on disk now" is the one-of-N-paths trap this guard exists
+            # to close. The duplicate lookup costs microseconds and only ever
+            # runs on an import that has already failed; its bounded wait is
+            # the helper's, not a second one here.
+            if not _module_appears_on_disk(fullname):
                 raise ModuleNotFoundError(
                     f"No module named {fullname!r}{_reinstall_hint(fullname)}",
                     name=fullname,

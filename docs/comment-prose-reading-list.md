@@ -47,7 +47,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 7.25x | 29 | 4 | `cli/src/fno/claims/hostid.py:136` | `is_same_machine` |
 | 6.12x | 49 | 8 | `cli/src/fno/graph/maintain.py:513` | `is_stale_ready` |
 | 5.25x | 21 | 4 | `cli/src/fno/graph/_intake.py:1167` | `resolve_git_roots` |
-| 5.0x | 20 | 4 | `cli/src/fno/_lazy_group.py:58` | `_module_is_now_on_disk` |
+| 5.0x | 20 | 4 | `cli/src/fno/__init__.py:46` | `_module_appears_on_disk` |
 | 4.8x | 24 | 5 | `cli/src/fno/agents/events.py:78` | `emit_with_context` |
 | 4.4x | 22 | 5 | `cli/src/fno/retro/cli.py:72` | `_resolve_pr_session_ids` |
 | 4.2x | 21 | 5 | `cli/src/fno/agents/harnesses/codex.py:266` | `_effective_yolo` |
