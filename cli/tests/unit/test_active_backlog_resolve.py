@@ -60,6 +60,11 @@ def test_disabled_yields_no_targets(monkeypatch):
         paths={"footnote": "/repo/footnote"},
     )
     assert ab.resolve_drain_targets() == []
+    reading = ab.resolve_drain_reading()
+    assert reading.skip_reason == "drain_disabled"
+    # The acceptance: the disabled drain still counts the missions it is not
+    # draining, so a reader cannot conclude the queue is empty (x-338c).
+    assert reading.missions == 1
 
 
 def test_no_active_missions_yields_no_targets(monkeypatch):
@@ -67,6 +72,69 @@ def test_no_active_missions_yields_no_targets(monkeypatch):
     # missions resolves to no targets (the mission is the unit of work now).
     _patch(monkeypatch, missions=[], paths={"footnote": "/repo/footnote"})
     assert ab.resolve_drain_targets() == []
+    reading = ab.resolve_drain_reading()
+    # The old word keeps its old meaning: no_missions only ever means an empty
+    # queue, never a switched-off drain (AC7).
+    assert reading.skip_reason == "no_missions"
+    assert reading.missions == 0
+
+
+def test_per_project_disabled_only_reports_project_disabled(monkeypatch):
+    # The switch is on for the daemon (some project is enabled) but every
+    # active mission lives in an explicitly-disabled project.
+    _patch(
+        monkeypatch,
+        enabled={"third": True, "footnote": False, "readyrule": False},
+        missions=[_mission("x-fno", "footnote"), _mission("x-rr", "readyrule")],
+        paths={"footnote": "/repo/footnote", "readyrule": "/repo/readyrule"},
+    )
+    reading = ab.resolve_drain_reading()
+    assert reading.targets == []
+    assert reading.skip_reason == "project_disabled"
+    assert reading.missions == 2
+
+
+def test_missing_path_only_reports_no_workspace_path(monkeypatch):
+    _patch(
+        monkeypatch,
+        missions=[_mission("x-ghost", "unmapped")],
+        paths={},
+    )
+    reading = ab.resolve_drain_reading()
+    assert reading.targets == []
+    assert reading.skip_reason == "no_workspace_path"
+    assert reading.missions == 1
+
+
+def test_mixed_mission_drops_report_the_most_common(monkeypatch):
+    _patch(
+        monkeypatch,
+        enabled={"third": True, "footnote": False, "readyrule": False},
+        missions=[
+            _mission("x-a", "footnote"),
+            _mission("x-b", "readyrule"),
+            _mission("x-c", "unmapped"),
+        ],
+        paths={"unmapped": None},
+    )
+    reading = ab.resolve_drain_reading()
+    assert reading.targets == []
+    # Two project_disabled drops against one missing path; the majority names
+    # the reason (ties would fall to project_disabled by table order).
+    assert reading.skip_reason == "project_disabled"
+    assert reading.missions == 3
+
+
+def test_invalid_interval_reports_bad_interval(monkeypatch):
+    _patch(
+        monkeypatch,
+        interval="0s",
+        missions=[_mission("x-epic", "footnote")],
+        paths={"footnote": "/repo/footnote"},
+    )
+    reading = ab.resolve_drain_reading()
+    assert reading.skip_reason == "bad_interval"
+    assert reading.missions == 1
 
 
 def test_one_target_per_active_mission_in_id_order(monkeypatch):
@@ -142,6 +210,24 @@ def test_load_settings_fault_yields_empty(monkeypatch):
     monkeypatch.setattr(ab, "_active_missions", lambda: [_mission("x-epic", "footnote")])
     monkeypatch.setattr(ab, "_workspace_paths", lambda: {"footnote": "/repo/footnote"})
     assert ab.resolve_drain_targets() == []
+    reading = ab.resolve_drain_reading()
+    assert reading.skip_reason == "config_unreadable"
+    # The mission count survives the config fault: the graph is not the
+    # config's to silence.
+    assert reading.missions == 1
+
+
+def test_quoted_boolean_enabled_warns_at_load():
+    # "false" and false read identically in a readout and only one is a
+    # boolean (x-338c): the load warns, then honors the value as written.
+    from fno.config import ActiveBacklogConfig
+
+    with pytest.warns(UserWarning, match="quoted string"):
+        b = ActiveBacklogConfig(enabled="false")
+    assert b.enabled is False
+    with pytest.warns(UserWarning, match="quoted string"):
+        b = ActiveBacklogConfig(enabled="true")
+    assert b.enabled is True
 
 
 def test_active_missions_read_fault_yields_empty(monkeypatch):
@@ -182,17 +268,35 @@ def test_as_dicts_shape(monkeypatch):
         missions=[_mission("x-epic", "footnote")],
         paths={"footnote": "/repo/footnote"},
     )
-    dicts = ab.drain_targets_as_dicts()
-    assert dicts == [
-        {
-            "project": "footnote",
-            "cwd": "/repo/footnote",
-            "interval_seconds": 300,
-            "failure_limit": 3,
-            "mission": "x-epic",
-            "max_concurrent": 1,
-        }
-    ]
+    receipt = ab.drain_reading_as_dict()
+    assert receipt == {
+        "targets": [
+            {
+                "project": "footnote",
+                "cwd": "/repo/footnote",
+                "interval_seconds": 300,
+                "failure_limit": 3,
+                "mission": "x-epic",
+                "max_concurrent": 1,
+            }
+        ],
+        "missions": 1,
+        "skip_reason": None,
+    }
+
+
+def test_as_dicts_receipt_names_a_disabled_drain(monkeypatch):
+    """The JSON receipt the daemon reads carries the why beside the what."""
+    _patch(
+        monkeypatch,
+        enabled=False,
+        missions=[_mission("x-epic", "footnote")],
+        paths={"footnote": "/repo/footnote"},
+    )
+    receipt = ab.drain_reading_as_dict()
+    assert receipt["targets"] == []
+    assert receipt["missions"] == 1
+    assert receipt["skip_reason"] == "drain_disabled"
 
 
 def test_max_concurrent_rides_on_every_target(monkeypatch):

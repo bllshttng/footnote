@@ -37,6 +37,7 @@ import math
 import os
 import re
 import tempfile
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional, cast
@@ -3464,6 +3465,14 @@ class ActiveBacklogConfig(BaseModel):
             return v
         if isinstance(v, dict):
             return {str(k): _coerce_affirmative(val, False) for k, val in v.items()}
+        if isinstance(v, str):
+            # A quoted boolean is honored here but reads identically to a bare
+            # one in a readout, and only one is a boolean (x-338c).
+            warnings.warn(
+                f"config active_backlog.enabled is the quoted string {v!r}; "
+                "write a bare true/false so a readout cannot mislead",
+                stacklevel=2,
+            )
         return _coerce_affirmative(v, False)
 
     @field_validator("interval", mode="before")
