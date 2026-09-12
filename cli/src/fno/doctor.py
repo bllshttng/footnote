@@ -539,16 +539,11 @@ def _binary_crates_rev(binary: Optional[str]) -> Optional[str]:
 
 
 def _human_age(seconds: int) -> str:
-    """Compact process-age label: 45s, 37m, 9h2m. Presentation only."""
-    if seconds < 60:
-        return f"{seconds}s"
-    hours, remainder = divmod(seconds, 3600)
-    minutes = remainder // 60
-    if hours == 0:
-        return f"{minutes}m"
-    if minutes == 0:
-        return f"{hours}h"
-    return f"{hours}h{minutes}m"
+    """Compact process-age label. Reuses the fleet's formatter (the same
+    cross-module import `mail/receipts.py` makes) rather than a 4th copy."""
+    from fno.agents.top import _fmt_age
+
+    return _fmt_age(seconds)
 
 
 def _daemon_drift_warning() -> Optional[str]:
@@ -605,7 +600,10 @@ def _daemon_drift_warning() -> Optional[str]:
     daemon = payload.get("daemon")
     uptime = daemon.get("uptime_secs") if isinstance(daemon, dict) else None
     if isinstance(uptime, int) and 0 <= uptime < 10 * 365 * 24 * 3600:
-        return f"{warning} (daemon up {_human_age(uptime)}; the binary postdates its start)"
+        # Process age stated as what drift proves: the daemon still runs the
+        # build it started with. "Predates the binary" is only provable for
+        # same-path content drift, not for a path-drifted daemon.
+        return f"{warning} (daemon up {_human_age(uptime)}; running its startup build, not this one)"
     return warning
 
 

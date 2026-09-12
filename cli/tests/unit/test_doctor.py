@@ -701,7 +701,7 @@ def test_daemon_drift_probe_appends_measured_process_age(
     result = doctor._daemon_drift_warning()
     assert result is not None
     assert result.startswith(warning)
-    assert "(daemon up 37m; the binary postdates its start)" in result
+    assert "(daemon up 37m; running its startup build, not this one)" in result
 
 
 def test_daemon_drift_probe_gates_on_structured_drift_field(
