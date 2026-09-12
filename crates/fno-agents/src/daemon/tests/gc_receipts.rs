@@ -3845,6 +3845,9 @@ fn the_reap_receipt_joins_its_node_through_the_route_cascade() {
                 "session_id": "codex-fa8b-uuid",
                 "started_at": "2026-09-03T20:00:00Z",
             }],
+        }, {
+            "id": "x-77db",
+            "status": "ready",
         }]),
     );
     crate::state::update_registry(&home.registry_json(), |r| {
@@ -3856,6 +3859,15 @@ fn the_reap_receipt_joins_its_node_through_the_route_cascade() {
         looped.harness_session_id = Some("codex-fa8b-uuid".into());
         looped.created_at = "2026-09-01T00:00:00Z".into();
         r.entries.push(looped);
+
+        let mut rebase = state::RegistryEntry::default();
+        rebase.name = "t-77db-rebase-glm".into();
+        rebase.short_id = "db00002".into();
+        rebase.origin = Some("spawn".into());
+        rebase.harness = Some("codex".into());
+        rebase.harness_session_id = Some("unheard-rebase-uuid".into());
+        rebase.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(rebase);
 
         let mut unheard = state::RegistryEntry::default();
         unheard.name = "golden-summit".into();
@@ -3896,7 +3908,7 @@ fn the_reap_receipt_joins_its_node_through_the_route_cascade() {
         &receipts,
         &|_| None,
     );
-    assert_eq!(report.retired.len(), 2, "{:?}", report.retired);
+    assert_eq!(report.retired.len(), 3, "{:?}", report.retired);
 
     let reaps = read_events(&home);
     let looped = reaps
@@ -3905,6 +3917,12 @@ fn the_reap_receipt_joins_its_node_through_the_route_cascade() {
         .expect("the incident-shaped reap event");
     assert_eq!(looped["data"]["node_id"], "x-fa8b");
     assert_eq!(looped["data"]["node_resolution"], "sessions");
+    let rebase = reaps
+        .iter()
+        .find(|e| e["type"] == "agent_row_reaped" && e["data"]["short_id"] == "db00002")
+        .expect("the t-named, session-silent reap event");
+    assert_eq!(rebase["data"]["node_id"], "x-77db");
+    assert_eq!(rebase["data"]["node_resolution"], "name");
     let unheard = reaps
         .iter()
         .find(|e| e["type"] == "agent_row_reaped" && e["data"]["short_id"] == "golden001")
