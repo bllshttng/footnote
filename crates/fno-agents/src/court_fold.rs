@@ -299,7 +299,7 @@ fn fold_one(
         } else {
             state.unwrap_or("no-record")
         };
-        let held = matches!(state, Some("live") | Some("suspect"));
+        let held = state.is_some_and(|s| HELD_CLAIMS.contains(&s));
         nodes.push(json!({
             "id": id,
             "slug": s_str(entry, "slug").unwrap_or(""),
