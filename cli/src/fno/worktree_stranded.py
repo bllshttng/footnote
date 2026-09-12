@@ -338,7 +338,8 @@ def act_on_stranded(row: Row) -> dict:
             _PUSH_TIMEOUT_S,
         )
     push_ok = push_p is not None and push_p.returncode == 0
-    acts.append({"act": "push", "branch": push_branch, "ok": push_ok, "detail": ((push_p.stderr if push_p is not None else "") or "").strip()[:500]})
+    detail = push_p.stderr.strip()[:500] if push_p is not None else ""
+    acts.append({"act": "push", "branch": push_branch, "ok": push_ok, "detail": detail})
     if not push_ok:
         return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "push"}
 

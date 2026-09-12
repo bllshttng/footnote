@@ -1175,6 +1175,7 @@ def tick() -> None:
                     log.warning("pr-watch: heal phase failed: %s", exc)
 
         def _phase_stranded(slice_s: float) -> None:
+            assert settings is not None and cfg is not None
             # The watchdog def imports these for its own lanes; the stranded
             # sweep reads the same arming decisions, so it imports its own.
             from fno.agents.watchdog import lane_armed as _wd_lane_armed

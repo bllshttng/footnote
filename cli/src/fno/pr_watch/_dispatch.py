@@ -440,7 +440,7 @@ _MAX_RETRIES = 3
 _TICK_CLAIM_KEY = "pr-watch:tick"
 
 # The stage a live tick is in ("entry" -> "settings" -> "lock" -> "discover"
-# -> "sweep" -> "dispatch" -> "recovery" -> "catchup"). The CLI's deadline
+# -> "sweep" -> "dispatch" -> "recovery"). The CLI's deadline
 # record reads this so a hang names WHERE it hung - the difference between
 # "the tick hung" and "the tick hung waiting on the graph flock" - without
 # threading a callback through every injectable seam.
