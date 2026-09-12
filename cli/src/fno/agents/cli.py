@@ -1573,8 +1573,7 @@ def cmd_spawn(
                 f"refusing node-seeded spawn: node {seed_node_id} carries no "
                 "dispatch_verb and no message was typed; an idle worker holds "
                 "a fleet slot and reads as alive. Encode one with `fno backlog "
-                f"update {seed_node_id} --dispatch-verb <verb>` or type a "
-                "message.",
+                f"update {seed_node_id} --dispatch-verb <verb>`.",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
