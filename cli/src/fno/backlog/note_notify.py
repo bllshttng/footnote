@@ -63,8 +63,7 @@ def own_session() -> Optional[str]:
 
 
 def send_pointer(address: str, body: str) -> str:
-    """Mail one pointer; the sender is this session's own handle (provenance
-    is looked up by from_name, never a literal)."""
+    """Mail one pointer; the sender handle is this session's own (provenance by from_name)."""
     from fno.agents.dispatch import dispatch_send
     from fno.harness_identity import canonical_handle
 
@@ -97,7 +96,7 @@ def note_readers(
 ) -> NoteReaders:
     """Every bound reader for one note; the author is named, never mailed. The
     worker chain runs per subject (node, then owner), first arm wins; the crown
-    walk goes outward, first live crown wins. ``rows=None`` reads the machine's."""
+    walk goes outward and stops at the first live crown."""
     from fno.agents.registry import live_row_holding_session_id, load_registry
     from fno.claims.core import holder_agent_name
     from fno.harness_identity import OWNERSHIP_LIVE_STATUSES, session_identity_key
@@ -268,9 +267,8 @@ def deliver(readers: NoteReaders, text: str, *, json_output: bool) -> int:
 
 
 def _one_receipt(address: str, why: str, body: str) -> str:
-    """One receipt line from a wall-clock-bounded send: a live inject waits on
-    the recipient's flock and one run wedged past 150s, so the daemon thread
-    dies with the process and the OS drops that lock."""
+    """One receipt line from a wall-clock-bounded send (a live inject waits on
+    the recipient's flock; the daemon thread dies with the process)."""
     out: list[tuple[str, Any]] = []
 
     def run() -> None:
