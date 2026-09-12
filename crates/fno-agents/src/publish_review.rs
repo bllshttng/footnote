@@ -1,4 +1,4 @@
-//! The reviewer lane's second GitHub identity (x-93ea): post a review verdict
+//! The reviewer lane's second GitHub identity: post a review verdict
 //! to GitHub as `config.review.bot_identity` so a clean pass can carry APPROVE
 //! and `reviewDecision` a real value. GitHub refuses an approving review from
 //! the PR's author - the API accepts the call and silently records COMMENTED -
@@ -196,24 +196,23 @@ fn home_config() -> Option<PathBuf> {
     Some(Path::new(&home).join(".fno").join("config.toml"))
 }
 
-/// `bot_identity` and `bot_token_env`, project-local config first, global
-/// fallback per key. `load_settings_for_repo` reads `<root>/.fno/` with no
-/// upward walk, so a publish invoked from a subdirectory must resolve the git
-/// toplevel first or it would silently see only the global layer and report
-/// the lane unconfigured.
+/// `bot_identity` and `bot_token_env`, resolved through the same worktree ->
+/// canonical -> global candidate chain the config layer uses. A publish that
+/// runs inside a linked feature worktree must find keys that live only in the
+/// canonical checkout's project config, or the lane reports unconfigured and
+/// silently never posts from exactly the checkouts all the work happens in.
 fn review_config(cwd: &Path) -> (Option<String>, Option<String>) {
-    let toplevel = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .output();
-    let root = match toplevel {
-        Ok(out) if out.status.success() && !out.stdout.is_empty() => {
-            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
-        }
-        _ => cwd.to_path_buf(),
-    };
+    let mut roots: Vec<PathBuf> = vec![crate::paths::worktree_repo_root(cwd)];
+    if let Some(canonical) = crate::paths::canonical_repo_root(cwd) {
+        roots.push(canonical);
+    }
+    let mut candidates: Vec<Option<PathBuf>> = roots
+        .into_iter()
+        .map(|root| Some(root.join(".fno").join("config.toml")))
+        .collect();
+    candidates.push(home_config());
     let mut merged = (None, None);
-    for path in [Some(root.join(".fno").join("config.toml")), home_config()] {
+    for path in candidates {
         let Some(path) = path else { continue };
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
@@ -512,22 +511,32 @@ pub fn publish(payload: &Value, gh: &dyn Gh, env: &dyn Fn(&str) -> Option<String
     .map(|s| s.to_string())
     .collect();
     let out = gh.run(&readback, None, cwd);
-    let decision = out.stdout.trim();
-    let decision = if out.ok && !decision.is_empty() && decision != "null" {
-        Some(decision.to_string())
+    let raw = out.stdout.trim();
+    let decision = if out.ok && !raw.is_empty() && raw != "null" {
+        Some(raw.to_string())
     } else {
+        // The POST receipt is not a positive marker: an approval nobody can
+        // read back (transient gh failure, or a token GitHub silently
+        // demoted) must read as failed, never as a clean posted.
         None
+    };
+    let Some(decision) = decision else {
+        let mut a = Answer::done(
+            "failed",
+            format!(
+                "posted {event} on #{number} but the reviewDecision readback was unreadable; re-run fno do pr publish-review --pr {number}"
+            ),
+        );
+        a.event = Some(event);
+        return a;
     };
     let mut a = Answer {
         status: "posted",
-        review_decision: decision.clone(),
+        review_decision: Some(decision.clone()),
         event: Some(event),
         stderr: None,
         receipt: String::new(),
-        reason: format!(
-            "posted {event} as {identity} on #{number} (reviewDecision={})",
-            decision.unwrap_or_default()
-        ),
+        reason: format!("posted {event} as {identity} on #{number} (reviewDecision={decision})"),
     };
     a.receipt = receipt("posted", &a.reason);
     a
@@ -797,7 +806,11 @@ mod tests {
     fn fail_verdict_posts_request_changes() {
         let dir = temp_repo("fail");
         write_config(&dir, "fno-review-bot", "GH_REVIEW_BOT_TOKEN");
-        let fake = GhFake::new(vec![view_answer(), post_ok(), readback("")]);
+        let fake = GhFake::new(vec![
+            view_answer(),
+            post_ok(),
+            readback("CHANGES_REQUESTED"),
+        ]);
         let answer = publish(
             &json!({"pr_number": 931, "head_sha": "abc123", "verdict": "fail",
                     "reviewer": "r", "cwd": dir.to_string_lossy(), "dry_run": false}),
@@ -806,8 +819,84 @@ mod tests {
         );
         assert_eq!(answer.status, "posted");
         assert_eq!(answer.event, Some("REQUEST_CHANGES"));
+        assert_eq!(answer.review_decision.as_deref(), Some("CHANGES_REQUESTED"));
+        assert!(answer
+            .receipt
+            .ends_with("(reviewDecision=CHANGES_REQUESTED)"));
+    }
+
+    #[test]
+    fn unreadable_readback_fails_instead_of_claiming_a_clean_post() {
+        // The POST receipt is not a positive marker: a verdict nobody can
+        // read back must read as failed, never as a clean posted with an
+        // empty decision. This is the exact "token GitHub silently demoted"
+        // shape - the POST lands, the approval does not exist.
+        let dir = temp_repo("unreadable-readback");
+        write_config(&dir, "fno-review-bot", "GH_REVIEW_BOT_TOKEN");
+        let fake = GhFake::new(vec![view_answer(), post_ok(), readback("")]);
+        let answer = publish(
+            &json!({"pr_number": 931, "head_sha": "abc123", "verdict": "pass",
+                    "reviewer": "r", "cwd": dir.to_string_lossy(), "dry_run": false}),
+            &fake,
+            &|_| Some("tok-123".to_string()),
+        );
+        assert_eq!(answer.status, "failed");
         assert_eq!(answer.review_decision, None);
-        assert!(answer.receipt.ends_with("(reviewDecision=)"));
+        assert!(answer.reason.contains("readback was unreadable"));
+        assert!(answer.reason.contains("re-run fno do pr publish-review"));
+        assert_eq!(answer.exit(), 1);
+    }
+
+    #[test]
+    fn config_keys_in_the_canonical_root_are_found_from_a_linked_worktree() {
+        // A real linked worktree: keys live ONLY in the canonical checkout's
+        // project config; a publish running from the worktree must still see
+        // them, or the lane reads unconfigured where all the work happens.
+        let base = temp_repo("wt-base");
+        write_config(&base, "fno-review-bot", "GH_REVIEW_BOT_TOKEN");
+        let setups: &[&[&str]] = &[
+            &["init", "-q", "-b", "main"],
+            &["config", "user.email", "t@t"],
+            &["config", "user.name", "t"],
+        ];
+        for args in setups {
+            let status = std::process::Command::new("git")
+                .args(*args)
+                .current_dir(&base)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        std::fs::write(base.join("f.txt"), "x").unwrap();
+        let commits: &[&[&str]] = &[&["add", "f.txt"], &["commit", "-qm", "x"]];
+        for args in commits {
+            let status = std::process::Command::new("git")
+                .args(*args)
+                .current_dir(&base)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let wt = temp_repo("wt-linked");
+        let out = std::process::Command::new("git")
+            .args(["-C", base.to_str().unwrap(), "worktree", "add", "-q"])
+            .arg(&wt)
+            .status()
+            .unwrap();
+        assert!(out.success());
+        let fake = GhFake::new(vec![]);
+        let answer = publish(
+            &json!({"pr_number": 931, "head_sha": "abc123", "verdict": "pass",
+                    "reviewer": "r", "cwd": wt.to_string_lossy(), "dry_run": false}),
+            &fake,
+            &|_| None,
+        );
+        // The canonical leg answered: the env-var name came through the
+        // config chain, and the missing token then skipped before any gh call.
+        assert_eq!(answer.status, "skipped");
+        assert!(answer.reason.contains("GH_REVIEW_BOT_TOKEN unset or empty"));
+        assert!(fake.calls().is_empty());
+        let _ = std::fs::remove_dir_all(&wt);
     }
 
     #[test]
