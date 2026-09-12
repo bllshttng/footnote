@@ -18,6 +18,15 @@
 # bare `fno ...` verb needs no carveout: the Bash branch keys on shell write
 # operators, and a verb that writes state internally binds no redirect.
 #
+# Two shapes are not implementation writes. First, a redirect token may carry
+# glued statement boundaries (`shlex.split` never splits `2>&1;`), so the
+# redirect body is stripped of trailing `;|&` before the fd-dup check; a real
+# target outside the plans dir still refuses. Second, a Task subagent of the
+# crowned session is a limb, not the king: its payload carries the parent's
+# session id, but its transcript alone lives under that session id's
+# subagents/ directory, the one positive signature the carve-out reads. Any
+# other transcript shape fail-closes.
+#
 # NEVER blocks by accident. Any failure to read the payload, the registry,
 # the manifest, or the config exits 0 and allows - the compact-hook contract
 # (a guard that refuses because it could not read something is a king that
@@ -49,7 +58,8 @@ _deny_text() {
 "king-delegation-guard: a crowned court session does not implement (directive point 5).
 Delegate it: fno agents spawn '/fno:target <id>' --node <id> --substrate thread
 Or hand the whole scope out: fno backlog advance --epic <scope>
-Unblock authority is yours and is allowed: claim release, mail, backlog levers, notes, plan writes."
+Unblock authority is yours and is allowed: claim release, mail, backlog levers, notes, plan writes.
+A subagent of this session is exempt: its transcript under this session id's subagents/ directory. An empty or main-thread transcript is not."
 }
 _block() {
     _guard_mark king-delegation-guard block 2>/dev/null || true
@@ -218,6 +228,21 @@ sys.exit(0 if os.path.realpath(p) == os.path.realpath(h) else 1)
 ' "$p" "$CWD" "$HANDOFF_PATH" 2>/dev/null
 }
 
+# ── 6c. Limb carve-out: a Task subagent of this very court is a limb, not the
+#      king. Its payload carries the parent's session_id, so sections 2-4 see
+#      the crown; its transcript alone lives under the session's own
+#      subagents/ directory - a mechanical, on-disk signature. A limb doing
+#      what its king told it to do is delegation working, not a king
+#      implementing. Any other transcript shape (empty, main-thread, a foreign
+#      session's subagents dir) keeps the court treatment: fail closed.
+if [[ -n "$TRANSCRIPT" ]]; then
+    TDIR="$(dirname "$TRANSCRIPT")"
+    if [[ "$(basename "$TDIR")" == "subagents" && "$(basename "$(dirname "$TDIR")")" == "$SID" ]]; then
+        echo "king-delegation-guard: limb of crowned session $SID; allowing" >&2
+        _approve
+    fi
+fi
+
 # ── 7. Decision ───────────────────────────────────────────────────────────────
 case "$TOOL" in
   Edit|Write|NotebookEdit)
@@ -273,7 +298,7 @@ def out_redirect(tok):
         return ("nxt", None) if rest == "&>" else ("tgt", rest[2:])
     if rest == ">&":
         return ("nxt", None)
-    body = rest.lstrip("&").lstrip(">")
+    body = re.sub(r"[;|&]+$", "", rest.lstrip("&").lstrip(">"))
     if rest.lstrip("&") in (">", ">>", ">|", ">!", ">", ">>"):
         return ("nxt", None)
     if body and not fd_dup.fullmatch(body):

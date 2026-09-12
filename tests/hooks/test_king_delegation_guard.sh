@@ -82,6 +82,7 @@ UNCROWNED='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","crown_
 
 edit_payload() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$TMP/repo" "$1"; }
 bash_payload() { printf '{"tool_name":"Bash","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"command":"%s"}}' "$SID" "$TMP/repo" "$1"; }
+edit_payload_t() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"%s","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$2" "$TMP/repo" "$1"; }
 
 # ── AC1-HP: crowned court + Edit on a source file -> deny naming both verbs ──
 registry_fixture "$CROWNED"
@@ -230,6 +231,65 @@ OUT="$(run_guard "$(bash_payload "sed -i s/a/b/ $TMP/repo/src/x.py")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
   && pass "Bash floor: in-place sed on source denied" \
   || fail "Bash floor: sed -i rc=$RC out=${OUT:0:300}"
+
+# ── Glued boundary: shlex glues `;` onto a redirect token when unspaced ──────
+# `2>&1;` must still classify as the fd dup, not a write to a file named `&1;`.
+registry_fixture "$CROWNED"
+manifest_fixture court
+OUT="$(run_guard "$(bash_payload "echo probe-d 2>&1; echo probe-e")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "glue: chained 2>&1; allows" \
+  || fail "glue chained rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "echo probe-i 2>&1 ; echo probe-j")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "glue: spaced control allows" \
+  || fail "glue spaced rc=$RC out=$OUT"
+
+# A real target outside plans still denies, semicolon glued or not.
+OUT="$(run_guard "$(bash_payload "echo x > $TMP/repo/src/evil.py; echo done")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "glue: real source target glued to ; denied" \
+  || fail "glue real target rc=$RC out=${OUT:0:300}"
+
+# A quoted semicolon inside the filename is data: plans-dir write still allows.
+OUT="$(run_guard "$(bash_payload "cat > \"$KGD_PLANS/plan;.md\"")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "glue: quoted plan;.md in plans allows" \
+  || fail "glue quoted rc=$RC out=$OUT"
+
+# The node's live specimen shape: a read verb with a thrown-away dup chain.
+OUT="$(run_guard "$(bash_payload "fno backlog session close x-1 --launch '/fno:target x-1' 2>&1; echo done")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "glue: session close with 2>&1; chain allows" \
+  || fail "glue session close rc=$RC out=$OUT"
+
+# ── Limb carve-out: a Task subagent of this very court is a limb, not the king.
+# Its payload carries the parent's session_id, so sections 2-4 see the crown;
+# its transcript lives under the session's own subagents/ directory.
+SUBTRANS="$TMP/transcripts/$SID/subagents/agent-x.jsonl"
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$SUBTRANS")")"; RC=$?
+ERR="$(cat "$TMP/stderr.txt")"
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"limb of crowned session $SID"* ]] \
+  && pass "limb: subagent transcript Write allowed, stderr names the limb" \
+  || fail "limb allow rc=$RC out=$OUT err=$ERR"
+
+# A foreign session's subagents dir is not this court's limb: fail closed.
+FOREIGNTRANS="$TMP/transcripts/sess-other/subagents/agent-y.jsonl"
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$FOREIGNTRANS")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "limb: foreign session's subagents transcript denied" \
+  || fail "limb foreign rc=$RC out=${OUT:0:300}"
+
+# A main-thread transcript (parent dir is not subagents/) keeps court treatment.
+MAINTRANS="$TMP/transcripts/$SID/main.jsonl"
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$MAINTRANS")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "limb: main-thread transcript denied" \
+  || fail "limb main-thread rc=$RC out=${OUT:0:300}"
+
+# Empty transcript (non-claude harness) keeps court treatment: AC1 already pins
+# it, re-asserted here next to the carve-out cases.
+OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "limb: empty transcript denied" \
+  || fail "limb empty rc=$RC out=${OUT:0:300}"
 
 # Positive control on the harness itself: the stub fno must be reachable and
 # the crown read live, else every "allow" above is a silent stub failure.
