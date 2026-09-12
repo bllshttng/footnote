@@ -982,7 +982,29 @@ if [[ ! -f "$STATE_FILE" ]]; then
       # `--field` prints a literal "null" for an unset field, which ${x:+ #$x}
       # reads as present and renders as "open PR #null".
       [[ "$_GUARD_PR" == "null" ]] && _GUARD_PR=""
-      cat >&2 <<EOF
+      # Adopt branch: a caller standing in the open PR's own worktree, on the
+      # PR's own head branch, is the author asking to be re-bound, not a fresh
+      # dispatch - refusing here is what strands a live worker whose manifest
+      # is gone. Every proof must READ; an unreadable one refuses exactly as
+      # below, matching the fail-closed stance of every check in this guard.
+      _ADOPT=0
+      if [[ "$_GUARD_PR" =~ ^[0-9]+$ ]]; then
+        _GITDIR="$(git rev-parse --git-dir 2>/dev/null || true)"
+        _COMMONDIR="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+        _BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+        if [[ -n "$_GITDIR" && -n "$_COMMONDIR" && "$_GITDIR" != "$_COMMONDIR" && -n "$_BRANCH" ]]; then
+          _PR_INFO="$(fno do pr info "$_GUARD_PR" 2>/dev/null || true)"
+          _PR_HEAD_BRANCH="$(printf '%s' "$_PR_INFO" | sed -n 's/.*"head_ref":"\([^"]*\)".*/\1/p')"
+          if [[ -n "$_PR_HEAD_BRANCH" && "$_PR_HEAD_BRANCH" == "$_BRANCH" ]]; then
+            _ADOPT=1
+          fi
+        fi
+      fi
+      if [[ "$_ADOPT" -eq 1 ]]; then
+        TARGET_ADOPTED_PR="$_GUARD_PR"
+        echo "[init-target-state] ADOPTED: re-binding this session to node $_GUARD_NODE on the open PR #$_GUARD_PR (branch $_BRANCH is that PR's head). No new PR: drive this one with /fno:pr check." >&2
+      else
+        cat >&2 <<EOF
 [init-target-state] REFUSED: node $_GUARD_NODE is in_review (open PR${_GUARD_PR:+ #$_GUARD_PR}).
 
 A fresh /target would redo shipped work and race a second PR against the open one.
@@ -994,7 +1016,8 @@ Pick ONE:
 
 Refusing to write state file.
 EOF
-      exit 1
+        exit 1
+      fi
     fi
   fi
   unset TARGET_ALLOW_IN_REVIEW
@@ -1884,6 +1907,14 @@ PYEOF
     fi
   else
     echo "graph_node_id: null" >> "$STATE_FILE"
+  fi
+
+  # Adopt receipt: record which open PR this session was re-bound to, so a
+  # later reader can tell an adopted session from a fresh dispatch that
+  # raced a second PR onto the same node. Lands beside graph_node_id in
+  # whichever arm ran - the re-bind fact does not depend on the claim layer.
+  if [[ -n "${TARGET_ADOPTED_PR:-}" ]]; then
+    echo "target_adopted_pr: $TARGET_ADOPTED_PR" >> "$STATE_FILE"
   fi
 
   echo "target: session manifest written: $STATE_FILE"

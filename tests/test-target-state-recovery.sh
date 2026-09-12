@@ -36,9 +36,37 @@ if [[ "${1:-} ${2:-}" == "target resolve-owned-identity" ]]; then
     "${FNO_TEST_HARNESS:-}"
   exit 0
 fi
+# in_review adopt guard: one live node, in_review, open PR. The head_ref
+# the fake reports is what the proof has to match against the real git
+# branch of the fixture worktree, so cases flip the outcome with git only.
+if [[ "${1:-} ${2:-}" == "backlog get" ]]; then
+  case " $* " in
+    *" --field _archived"*) printf 'null\n'; exit 0 ;;
+    *" --field status"*)    printf 'in_review\n'; exit 0 ;;
+    *" --field pr_number"*) printf '4242\n'; exit 0 ;;
+  esac
+  exit 1
+fi
+if [[ "${1:-} ${2:-}" == "do pr" && "${3:-}" == "info" ]]; then
+  printf '{"pr":%s,"state":"OPEN","head_ref":"%s","base_ref":"main"}\n' \
+    "${4:-}" "${FNO_TEST_PR_BRANCH:-feature/adopt-holds}"
+  exit 0
+fi
 exit 1
 EOF
 chmod +x "$FAKE_BIN/fno"
+
+# Same pin for the state-path resolver: a real `fno-agents` on the
+# developer's PATH resolves STATE_FILE into the space regime, and every
+# fixture's legacy-path assertion goes dark while the test still passes
+# its earlier greps against stale files. Recovery here IS the legacy
+# degrade path, so fno-agents is pinned absent like every other ambient
+# input above.
+cat > "$FAKE_BIN/fno-agents" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$FAKE_BIN/fno-agents"
 
 run_recovery_case() {
   local case_name="$1"
@@ -91,5 +119,50 @@ grep -q '^harness: gemini' "$GEMINI_CASE_DIR/.fno/target-state.md"
 grep -q '^provider: gemini' "$GEMINI_CASE_DIR/.fno/target-state.md"
 grep -q '^harness_mode: standard' "$GEMINI_CASE_DIR/.fno/target-state.md"
 grep -q '^provider_mode: standard' "$GEMINI_CASE_DIR/.fno/target-state.md"
+
+# ── in_review adopt branch ─────────────────────────────────────────────
+# A caller standing in the open PR's own worktree, on the PR's own head
+# branch, is the author asking to be re-bound, not a fresh dispatch. Proof
+# holds -> init proceeds, stamps target_adopted_pr, prints the ADOPTED
+# receipt, and never needs TARGET_ALLOW_IN_REVIEW. Proof fails -> the
+# refusal is unchanged and no state file is written.
+ADOPT_NODE="x-b424242"
+ADOPT_MAIN="$TMP_DIR/adopt-main"
+ADOPT_HOLDS_WT="$TMP_DIR/adopt-holds-wt"
+git init -q "$ADOPT_MAIN"
+git -C "$ADOPT_MAIN" -c user.email=fno@test -c user.name=fno commit -q --allow-empty -m init
+git -C "$ADOPT_MAIN" worktree add -q -b feature/adopt-holds "$ADOPT_HOLDS_WT"
+mkdir -p "$ADOPT_HOLDS_WT/.fno"
+
+(
+  cd "$ADOPT_HOLDS_WT"
+  PATH="$FAKE_BIN:$PATH" FNO_TEST_HARNESS=codex FNO_TARGET_INIT_GATED=1 \
+    TARGET_START=1 TARGET_INPUT="$ADOPT_NODE" \
+    bash "$ROOT_DIR/hooks/helpers/init-target-state.sh"
+) >"$TMP_DIR/adopt-holds.out" 2>"$TMP_DIR/adopt-holds.err"
+
+grep -qF 'ADOPTED: re-binding this session to node x-b424242 on the open PR #4242' \
+  "$TMP_DIR/adopt-holds.err"
+grep -q '^target_adopted_pr: 4242' "$ADOPT_HOLDS_WT/.fno/target-state.md"
+grep -q '^session_id: ' "$ADOPT_HOLDS_WT/.fno/target-state.md"
+
+# Proof fails: same in_review node, but this worktree's branch is not the
+# PR's head. Refuses exactly as before the adopt branch existed.
+ADOPT_FAILS_WT="$TMP_DIR/adopt-fails-wt"
+git -C "$ADOPT_MAIN" worktree add -q -b feature/adopt-other "$ADOPT_FAILS_WT"
+mkdir -p "$ADOPT_FAILS_WT/.fno"
+
+adopt_rc=0
+(
+  cd "$ADOPT_FAILS_WT"
+  PATH="$FAKE_BIN:$PATH" FNO_TEST_HARNESS=codex FNO_TARGET_INIT_GATED=1 \
+    TARGET_START=1 TARGET_INPUT="$ADOPT_NODE" \
+    bash "$ROOT_DIR/hooks/helpers/init-target-state.sh"
+) >"$TMP_DIR/adopt-fails.out" 2>"$TMP_DIR/adopt-fails.err" || adopt_rc=$?
+
+[[ "$adopt_rc" -eq 1 ]]
+grep -qF "REFUSED: node $ADOPT_NODE is in_review (open PR #4242)" "$TMP_DIR/adopt-fails.err"
+grep -qF 'TARGET_ALLOW_IN_REVIEW=1' "$TMP_DIR/adopt-fails.err"
+[[ ! -f "$ADOPT_FAILS_WT/.fno/target-state.md" ]]
 
 echo "Target state recovery validation passed"

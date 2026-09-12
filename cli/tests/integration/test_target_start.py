@@ -872,18 +872,133 @@ def test_native_codex_free_text_resume_refuses_malformed_manifest(
 
 
 # ------------------------------- no-op branch ----------------------------- #
-def test_already_isolated_is_noop(monkeypatch):
+def test_already_isolated_is_noop(monkeypatch, tmp_path):
+    """Own live claim in the isolated tree: bind classifies ours and the run
+    stays a no-op - nothing created, init never runs (AC1's own-claim arm)."""
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda nid: None)
+    monkeypatch.setattr(target_cli, "_remote_base_ref", lambda cwd: "origin/main")
+    (tmp_path / ".fno").mkdir()
+    (tmp_path / ".fno" / "target-state.md").write_text("session_id: x\n")
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim",
+        lambda node: ("ours", {"holder": "s1", "state": "live"}),
+    )
+    monkeypatch.setattr(target_cli, "_truthful_base", lambda cwd, b, **k: b)
+    spawned = []
+    monkeypatch.setattr(
+        target_cli.subprocess, "run", lambda *a, **k: spawned.append(a) or None
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0
+    assert "already isolated" in result.stdout
+    assert "node=already-claimed" in result.stdout
+    assert spawned == []  # nothing created
+
+
+def test_already_isolated_degrades_base_when_remote_unreadable(monkeypatch, tmp_path):
+    """The base label is receipt-only on the isolated path: a tree whose
+    remote does not resolve still binds, printing the unmeasured spelling."""
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda nid: None)
+
+    def _no_remote(cwd):
+        raise typer.Exit(code=1)
+
+    monkeypatch.setattr(target_cli, "_remote_base_ref", _no_remote)
+    (tmp_path / ".fno").mkdir()
+    (tmp_path / ".fno" / "target-state.md").write_text("session_id: x\n")
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim",
+        lambda node: ("ours", {"holder": "s1", "state": "live"}),
+    )
+    spawned = []
+    monkeypatch.setattr(
+        target_cli.subprocess, "run", lambda *a, **k: spawned.append(a) or None
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0
+    assert "base=in-place" in result.stdout
+    assert "node=already-claimed" in result.stdout
+    assert spawned == []
+
+
+def test_already_isolated_parks_on_foreign_holder(monkeypatch):
+    """AC1-ERR: a DIFFERENT live session holds the claim -> park, exit 1,
+    nothing acquired."""
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
+    monkeypatch.setattr(
+        target_cli, "_foreign_live_holder",
+        lambda nid: {"holder": "other-session", "state": "live"},
+    )
     spawned = []
     monkeypatch.setattr(
         target_cli.subprocess, "run", lambda *a, **k: spawned.append(a) or None
     )
     result = runner.invoke(target_app, ["start", "x-d91b"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert spawned == []
+
+
+def test_already_isolated_refuses_foreign_node_manifest(monkeypatch, tmp_path):
+    """A manifest naming a DIFFERENT node means this tree belongs to another
+    node's session; the isolated bind refuses instead of re-acquiring under
+    its roof."""
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda nid: None)
+    monkeypatch.setattr(target_cli, "_remote_base_ref", lambda cwd: "origin/main")
+    (tmp_path / ".fno").mkdir()
+    (tmp_path / ".fno" / "target-state.md").write_text("graph_node_id: x-other1\n")
+    spawned = []
+    monkeypatch.setattr(
+        target_cli.subprocess, "run", lambda *a, **k: spawned.append(a) or None
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 1
+    assert "belongs to node x-other1" in result.stderr
+    assert spawned == []
+
+
+def test_already_isolated_binds_unclaimed_tree(monkeypatch, tmp_path):
+    """AC1-HP: linked worktree, no manifest, claim free -> init runs against
+    the EXISTING tree (owner_cwd = cwd) and no worktree or branch is created."""
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda nid: None)
+    monkeypatch.setattr(target_cli, "_remote_base_ref", lambda cwd: "origin/main")
+    monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
+    monkeypatch.setattr(target_cli, "_truthful_base", lambda cwd, b, **k: b)
+    monkeypatch.setattr(
+        target_cli, "_resolve_node_model",
+        lambda node, explicit=None, provider=None, include_difficulty=False: (None, ""),
+    )
+    init_cwd = []
+    stage_calls = []
+
+    def fake_run(args, **kwargs):
+        stage_calls.append(list(args))
+        if "init" in args:
+            init_cwd.append(kwargs.get("cwd"))
+            return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(target_cli, "run_bounded", fake_run)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0, result.stdout
     assert "already isolated" in result.stdout
-    assert spawned == []  # nothing created
+    assert "node=claimed" in result.stdout
+    # init ran from inside the existing tree; no ensure stage ran.
+    assert init_cwd == [str(tmp_path)]
+    assert not any("ensure" in a for a in stage_calls)
 
 
 def test_start_refuses_dispatch_hold_before_worktree_ensure(monkeypatch):
