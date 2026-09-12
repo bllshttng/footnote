@@ -1724,6 +1724,56 @@ fn cap_the_agreement_chain_names_the_key_on_both_gates() {
 }
 
 #[test]
+fn cap_the_mixed_declared_chain_reads_two_on_both_mirrors() {
+    use fno_agents::loopcheck::rounds_since_last_pass;
+    // The parity corpus row: an undeclared fail at head A, a declared
+    // verify pass (review_round 1) at head B, an undeclared fail at head C.
+    // The declared verify does not double-count the fail it verifies; the
+    // trailing undeclared round still counts. The Python half
+    // (test_cap_verdict_mixed_declared_chain_reads_two) asserts the same 2
+    // on the same chain.
+    let row = |i: usize, verdict: &str, review_round: Option<i64>| {
+        let mut data = serde_json::json!({
+            "reviewer": "code-review",
+            "head_sha": format!("{i:040x}"),
+            "verdict": verdict,
+            "session_id": "s-cap",
+            "branch": CAP_BRANCH,
+            "reviewed_base_sha": "a".repeat(40),
+            "reviewed_head_sha": format!("{i:040x}"),
+            "findings_blocking": if verdict == "fail" { 1 } else { 0 },
+            "findings": if verdict == "fail" {
+                serde_json::json!([{
+                    "category": "correctness",
+                    "verdict": "CONFIRMED",
+                    "blocking": true,
+                    "has_required_fields": true,
+                    "finding_key": CAP_KEY,
+                }])
+            } else { serde_json::json!([]) },
+        });
+        if let Some(n) = review_round {
+            data["review_round"] = serde_json::json!(n);
+        }
+        serde_json::json!({
+            "ts": format!("2026-08-31T2{i:02}:00:00Z"),
+            "type": "review_attestation",
+            "source": "hook",
+            "data": data,
+        })
+        .to_string()
+    };
+    let events = [
+        row(0, "fail", None),
+        row(1, "pass", Some(1)),
+        row(2, "fail", None),
+    ]
+    .join("\n");
+    let head = format!("{:040x}", 2);
+    assert_eq!(rounds_since_last_pass(&events, CAP_BRANCH, &head, None), 2);
+}
+
+#[test]
 fn cap_range_tiling_seeds_the_events_axis_off_the_events_count() {
     use fno_agents::loopcheck::rounds_since_last_pass;
     // compute_range_tiling holds no review objects, so its budget starts as
