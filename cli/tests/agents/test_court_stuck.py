@@ -237,6 +237,70 @@ def test_a_fold_that_did_not_run_says_so_rather_than_nothing(
     assert line != "stuck: nothing"
 
 
+def test_a_node_two_crowns_both_cover_is_counted_once(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.court import render_court
+
+    # An L1 crown contains the nodes its L2 epics also fold, so the same node
+    # reaches the verdict once per crown that covers it.
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_king("king-a", "alpha"), _king("king-b", "beta")],
+        graph_entries=[],
+    )
+    _fold(monkeypatch, [_node("x-1", age_hours=3.0)])
+    _accepted(monkeypatch)
+
+    court = json.loads(render_court(as_json=True))
+    table = render_court(as_json=False)
+
+    assert court["summary"]["stuck"]["unclaimed"] == ["x-1"]
+    assert table.count("x-1") == 1
+
+
+def test_one_fault_across_every_crown_prints_one_line(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.court import render_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_king("king-a", "alpha"), _king("king-b", "beta")],
+        graph_entries=[],
+    )
+    _fold(monkeypatch, [], status="unresolved")
+    _accepted(monkeypatch)
+
+    court = json.loads(render_court(as_json=True))
+
+    # Two crowns failing the same way is one fault. Repeating it buries the
+    # verdict the line exists to carry.
+    assert len(court["summary"]["stuck"]["blind"]) == 1
+
+
+def test_a_fold_timeout_names_the_fault_not_the_argv(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+
+    from fno.agents.court import render_court
+
+    _prepare(monkeypatch, tmp_path, [_king()], graph_entries=[])
+    _accepted(monkeypatch)
+
+    def timeout(*a, **kw):
+        raise subprocess.TimeoutExpired(
+            cmd=["fno-agents", "court-fold", "--graph", "/g"], timeout=30
+        )
+
+    # court.py imports subprocess inside the function, so the stdlib module is
+    # the only handle a test has on it.
+    monkeypatch.setattr(subprocess, "run", timeout)
+
+    table = render_court(as_json=False)
+
+    line = next(ln for ln in table.splitlines() if ln.startswith("stuck:"))
+    assert "timed out after 30s" in line
+    assert "--graph" not in line
+
+
 def test_a_bare_json_render_carries_no_scope_nodes(tmp_path: Path, monkeypatch) -> None:
     from fno.agents.court import render_court
 

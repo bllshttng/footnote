@@ -339,6 +339,13 @@ def fold_scope_nodes(crowns: list[dict[str, Any]]) -> None:
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip() or f"exit {proc.returncode}")
         scope_nodes = _json.loads(proc.stdout)["scope_nodes"]
+    except subprocess.TimeoutExpired:
+        # str() on this exception is the whole argv, which buries the fault it
+        # is reporting. Name the fault and its bound instead.
+        reason = "the fold timed out after 30s"
+        for crown in crowns:
+            crown.setdefault("scope_nodes", {"status": "unresolved", "reason": reason})
+        return
     except Exception as exc:  # noqa: BLE001 - a failed fold is stated, never a crash
         for crown in crowns:
             crown.setdefault(
@@ -435,15 +442,27 @@ def _stuck_verdict(crowns: list[dict[str, Any]], gate: dict[str, Any]) -> dict[s
     unproven: list[str] = []
     in_review: list[str] = []
     blind: list[str] = []
+    # An L1 crown contains the nodes its L2 epics also fold, so one node
+    # reaches this loop once per crown that covers it. Counting it twice would
+    # report more stuck work than exists.
+    seen: set[str] = set()
     for crown in crowns:
         fold = crown.get("scope_nodes")
         if not isinstance(fold, dict):
             continue
         if fold.get("status") != "ok":
-            blind.append(str(fold.get("reason") or "a crown's scope fold did not run"))
+            reason = str(fold.get("reason") or "a crown's scope fold did not run")
+            # One cause, one line: five crowns failing the same way is one
+            # fault, and repeating it five times buries the verdict.
+            reason = reason[:160]
+            if reason not in blind:
+                blind.append(reason)
             continue
         for node in fold.get("nodes") or []:
             nid = str(node.get("id"))
+            if nid in seen:
+                continue
+            seen.add(nid)
             claim = node.get("claim_state")
             age = node.get("age_hours")
             old = isinstance(age, (int, float)) and age > threshold
