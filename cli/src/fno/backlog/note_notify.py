@@ -1,8 +1,7 @@
 """Deliver a `fno backlog note` to the people bound to the node.
 
 Resolution runs BEFORE the append: nobody bound, or a fault, refuses and writes
-nothing. Contract: docs/architecture/backlog-graph-verb-contracts.md. Beside
-``advance`` because it reads the graph AND the agent runtime.
+nothing. Contract: docs/architecture/backlog-graph-verb-contracts.md.
 """
 from __future__ import annotations
 
@@ -64,8 +63,8 @@ def own_session() -> Optional[str]:
 
 
 def send_pointer(address: str, body: str) -> str:
-    """Mail one pointer; the sender is this session's own handle, never a
-    literal, because provenance is looked up by from_name."""
+    """Mail one pointer; the sender is this session's own handle (provenance
+    is looked up by from_name, never a literal)."""
     from fno.agents.dispatch import dispatch_send
     from fno.harness_identity import canonical_handle
 
@@ -165,13 +164,13 @@ def note_readers(
              and getattr(r, "status", None) in OWNERSHIP_LIVE_STATUSES),
             key=lambda r: r.name,
         )
-        if named:
-            readings.append("registry: " + ", ".join(r.name for r in named))
-            for r in named:
-                if add(r.name, f"worker on {subject} (registry node)"):
-                    return
-        else:
-            readings.append(f"registry: no live row names {subject_id}")
+        readings.append(
+            "registry: "
+            + (", ".join(r.name for r in named) or f"no live row names {subject_id}")
+        )
+        for r in named:
+            if add(r.name, f"worker on {subject} (registry node)"):
+                return
 
     contained_in = entry.get("contained_in")
     owner = index.get(contained_in) if isinstance(contained_in, str) else None
@@ -180,8 +179,7 @@ def note_readers(
     if isinstance(owner_id, str) and owner_id:
         worker_readers(owner_id, f"owner {owner_id}", index.get(owner_id))
 
-    # Crown walk, nearest first: this epic when type==epic, then the epic, then
-    # the project; the walk stops at the first scope with a live crown.
+    # Crown walk, nearest first; the walk stops at the first scope with a live crown.
     epic = (owner.get("parent") if owner else None) or entry.get("parent")
     project = entry.get("project")
     scopes: list[tuple[str, str, str]] = []
@@ -213,8 +211,7 @@ def _refused(head: str, readings: list[str] = ()) -> Refused:
 
 
 def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refused:
-    """Resolve the readers BEFORE the append; a Refused must be surfaced. A
-    fault refuses as a vacancy does: neither proves anyone would be told."""
+    """Resolve the readers BEFORE the append; surface any Refused verbatim."""
     from fno.agents.registry import load_registry
     from fno.graph._intake import _find_node
     from fno.graph.store import read_graph
@@ -272,18 +269,9 @@ def deliver(readers: NoteReaders, text: str, *, json_output: bool) -> int:
 
 
 def _one_receipt(address: str, why: str, body: str) -> str:
-    state, value = _bounded_send(address, body)
-    if state == "ok":
-        return f"notified {address} ({why}): {value}"
-    if state == "timeout":
-        return f"notify UNCONFIRMED {address} ({why}): no answer in {_SEND_TIMEOUT_SECONDS:.0f}s"
-    return f"notify FAILED {address} ({why}): {value}"
-
-
-def _bounded_send(address: str, body: str) -> tuple[str, Any]:
-    """One send, bounded by a wall clock: ``(ok|err|timeout, value)``. A live
-    inject waits on the recipient's flock; one run wedged past 150s, so the
-    daemon thread dies with the process and the OS drops that lock."""
+    """One receipt line from a wall-clock-bounded send: a live inject waits on
+    the recipient's flock and one run wedged past 150s, so the daemon thread
+    dies with the process and the OS drops that lock."""
     out: list[tuple[str, Any]] = []
 
     def run() -> None:
@@ -295,4 +283,9 @@ def _bounded_send(address: str, body: str) -> tuple[str, Any]:
     worker = threading.Thread(target=run, daemon=True)
     worker.start()
     worker.join(_SEND_TIMEOUT_SECONDS)
-    return out[0] if out else ("timeout", None)
+    state, value = out[0] if out else ("timeout", None)
+    if state == "ok":
+        return f"notified {address} ({why}): {value}"
+    if state == "timeout":
+        return f"notify UNCONFIRMED {address} ({why}): no answer in {_SEND_TIMEOUT_SECONDS:.0f}s"
+    return f"notify FAILED {address} ({why}): {value}"
