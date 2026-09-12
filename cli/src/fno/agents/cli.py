@@ -1553,6 +1553,8 @@ def cmd_spawn(
     # node's chain. A typed message wins.
     node_seed_env: dict = {}
     node_seed_receipt: dict = {}
+    seed_slug: Optional[str] = None
+    seed_plan: Optional[str] = None
     if node is not None and not (message or "").strip():
         from fno.graph.ladder import plan_rung as _node_plan_rung
         from fno.provenance.autobrief import resolve_dispatch_brief
@@ -1597,6 +1599,9 @@ def cmd_spawn(
             print(str(exc), file=sys.stderr)
             raise typer.Exit(code=2) from exc
         message = resolved_seed["command"]
+        # The provenance pass below reuses this read instead of a second one.
+        seed_slug = seed_rec.get("slug")
+        seed_plan = seed_rec.get("plan_path")
         node_seed_env = resolved_seed.get("env") or {}
         node_seed_receipt = {
             "verb_source": "declared",
@@ -2015,7 +2020,11 @@ def cmd_spawn(
     # dispatch reservation as advance, reconcile, and the shell entry points.
     from fno.agents.mux_spawn import resolve_provenance
 
-    prov_env = resolve_provenance(node, slug, plan)
+    prov_env = resolve_provenance(
+        node,
+        slug if slug is not None else seed_slug,
+        plan if plan is not None else seed_plan,
+    )
     # x-9d11 refusal carrier: a direct `fno agents spawn` message never passes
     # through resolve_dispatch, so the SAME vocabulary the resolver judges is
     # applied here. The legacy bare token in a /target-family message is

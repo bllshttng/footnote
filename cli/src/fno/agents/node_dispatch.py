@@ -73,11 +73,9 @@ def resolve_node_spawn(
     """Resolve every node-dispatch preference except the launch itself.
 
     Lifted verbatim from ``backlog.advance._spawn_worker``'s preference half
-    (x-e53e change 2); the helpers it reads are imported at CALL time from
-    advance so the suite's monkeypatches on those names keep firing.
-    Raises the same ``SpawnError``s on a lossy projection, an axis mismatch,
-    or a state-root env key; ``harness_map.DispatchResolveError`` propagates
-    to the caller's non-fatal spawn-failure path unchanged.
+    (x-e53e); helpers are imported at CALL time from advance so the suite's
+    monkeypatches on those names keep firing. Raises the same ``SpawnError``s;
+    ``DispatchResolveError`` propagates to the caller's spawn-failure path.
     """
     from fno.backlog.advance import (
         SpawnError,

@@ -753,9 +753,8 @@ def _dispatch_one(
                 "detail": stderr[:200] or None,
             }
         # A gate refusal keeps its own contract: the door prints the gate
-        # receipt JSON to stdout and exits with the gate's code. Re-emit it
-        # verbatim and keep the exit code - the pre-port GateRefused (a
-        # SystemExit) propagated the same way.
+        # receipt JSON to stdout and exits with the gate's code; re-emit
+        # verbatim and keep the exit code (pre-port GateRefused did the same).
         stdout_head = (proc.stdout or "").strip()
         if stdout_head.startswith("{") and stdout_head.endswith("}") and '"outcome"' not in stdout_head:
             typer.echo(stdout_head)
