@@ -158,6 +158,24 @@ def test_claude_grid_lane_renders_the_claude_surface(monkeypatch, tmp_path):
     assert calls[0]["cmd"][-1] == "/target --no-merge x-1"
 
 
+def test_declared_out_of_family_verb_keeps_declared_precedence(monkeypatch, tmp_path):
+    """The command this verb ships is the TYPED message, which wins over the
+    node at the door - so its render must carry the declared verb, exactly as
+    the door's own node-seed render would (review round 1, x-e53e)."""
+    calls = _wire(
+        monkeypatch,
+        tmp_path,
+        next_node={
+            "id": "x-9", "slug": "think", "cwd": str(tmp_path),
+            "dispatch_verb": "/fno:think", "difficulty": "high",
+        },
+    )
+    _grid(monkeypatch, "claude")
+    v = dispatch._dispatch_one(session="work", node=None, project=None)
+    assert v["outcome"] == "launched"
+    assert calls[0]["cmd"][-1] == "/think x-9"
+
+
 def test_parented_child_uses_parent_as_pane_group(monkeypatch, tmp_path):
     calls = _wire(
         monkeypatch,

@@ -669,12 +669,21 @@ def _dispatch_one(
         _gate_refusal_detail,
     )
 
+    # The declared verb rides so this render matches the door's own node-seed
+    # render: the command below ships as the typed message, which wins over
+    # the node.
+    declared_verb = (
+        str(rec.get("dispatch_verb") or "").strip() or None
+        if isinstance(rec, dict)
+        else None
+    )
     try:
         args = resolve_node_spawn(
             node_id,
             cwd,
             slug,
             node=rec,
+            verb=declared_verb,
             harness=(cutover.harness if cutover is not None else None),
             dispatch_account=(cutover.record_id if cutover is not None else None),
             caller="dispatch-next",
