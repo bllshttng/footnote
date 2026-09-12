@@ -2941,7 +2941,7 @@ def test_update_dispatch_verb_and_brief_write(tmp_graph):
 
 
 def test_update_over_budget_dispatch_brief_warns_at_write(tmp_graph):
-    """x-c837: a brief over the 8 KB env budget says so at write time, in the
+    """A brief over the 8 KB env budget says so at write time, in the
     spawn path's wording, and still lands (warn, not refuse)."""
     over = "x" * 8193
     r = _invoke("backlog", "add", "Over-budget node")
