@@ -211,3 +211,65 @@ def test_stdout_stays_pure_json_for_machine_callers(graph):
     assert payload["title"] == "mux pane layout polish resize"
     assert payload["id"]
     assert "rollup" in res.stderr, "the receipt must still be surfaced, on stderr"
+
+
+# -- crowned filer: the parent comes from the crown scope, not the scorer --
+
+
+def _crown(scope):
+    return {"level": 1, "scope": scope, "grantor": "human",
+            "label": f"L1 {scope}", "text": f"L1 {scope} (by human)"}
+
+
+def test_crowned_filing_parents_to_the_crown_scope(graph, monkeypatch):
+    """A crowned king's parentless filing lands on the board it reigns by."""
+    g = graph([
+        _epic("x-aaa00001", "billing invoice export pipeline"),
+        _epic("x-bbb00002", "billing invoice export workflow"),
+        _epic("x-crown001", "the crown territory"),
+    ])
+    monkeypatch.setattr("fno.agents.crown.current_crown", lambda: _crown("x-crown001"))
+    title = "billing invoice export"
+
+    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
+
+    assert res.exit_code == 0
+    assert _created(g, title)["parent"] == "x-crown001"
+    assert "rollup: crown-linked" in res.stderr
+    assert "x-crown001" in res.stderr
+    assert "--parent null" in res.stderr
+
+
+def test_uncrowned_filing_stays_parentless(graph, monkeypatch):
+    """No crown, today's behavior: suggestions, no parent, nothing linked."""
+    g = graph([
+        _epic("x-aaa00001", "billing invoice export pipeline"),
+        _epic("x-bbb00002", "billing invoice export workflow"),
+        _epic("x-crown001", "the crown territory"),
+    ])
+    monkeypatch.setattr("fno.agents.crown.current_crown", lambda: None)
+    title = "billing invoice export"
+
+    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
+
+    assert res.exit_code == 0
+    assert _created(g, title).get("parent") is None
+    assert "crown-linked" not in res.stderr
+    assert "--parent x-aaa00001" in res.stderr
+    assert "--parent x-bbb00002" in res.stderr
+
+
+def test_project_scoped_crown_names_no_parent(graph, monkeypatch):
+    """A portfolio crown names no node, so nothing links and nothing lies."""
+    g = graph([
+        _epic("x-aaa00001", "billing invoice export pipeline"),
+        _epic("x-bbb00002", "billing invoice export workflow"),
+    ])
+    monkeypatch.setattr("fno.agents.crown.current_crown", lambda: _crown("fno"))
+    title = "billing invoice export"
+
+    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
+
+    assert res.exit_code == 0
+    assert _created(g, title).get("parent") is None
+    assert "crown-linked" not in res.stderr
