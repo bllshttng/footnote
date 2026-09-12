@@ -38,17 +38,16 @@ def enrich_spawn_payload(message: str) -> str:
     return f"{message}\n\n{BREVITY_BLOCK}"
 
 
-def prepare_spawn_payload(message: str, env: Optional[dict] = None) -> tuple[str, dict]:
+def prepare_spawn_payload(message: str) -> tuple[str, dict]:
     """ONE payload-preparation entry for both launch substrates (x-59b0).
 
     Preserves the original message as the prefix, appends the brevity guidance
-    once, then the natively rendered task-context pointer once. Returns
-    (payload, measures); payload_bytes measures THIS payload, never the
-    sources' bytes.
+    once, then the natively rendered task-context pointer once. payload_bytes
+    measures THIS payload, never the sources' bytes.
     """
     payload = enrich_spawn_payload(message)
     measures: dict = {"task_context": False, "payload_bytes": len(payload.encode("utf-8"))}
-    path = (env if env is not None else os.environ).get(TASK_CONTEXT_ENV) or ""
+    path = os.environ.get(TASK_CONTEXT_ENV) or ""
     if path.strip():
         from fno.rust_binary import VerbUnavailable, verb_call
 
