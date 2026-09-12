@@ -3106,29 +3106,16 @@ def cmd_discovered_json(
 
 @agents_app.command("registry-json", hidden=True)
 def cmd_registry_json() -> None:
-    """Internal: emit registry rows DAEMON-FREE.
+    """Internal: emit registry rows DAEMON-FREE, with the served liveness pair.
 
-    Hooks need stored crown, spawn-edge, and origin fields without live-status
-    enrichment. Output is ``{"agents": [...]}`` via a daemon-free registry read.
+    Hooks need stored crown, spawn-edge, and origin fields plus the served
+    liveness verdict, derived by the freshness rule. Output is
+    ``{"agents": [...]}`` via a client-side registry read. There is no Python
+    registry-json left: a missing binary is refused here.
     """
-    import json as _json
+    from fno.agents.rust_runtime import refuse_without_binary
 
-    from fno.agents.registry import load_registry
-
-    rows = [
-        {
-            "name": e.name,
-            "session_id": e.session_id,
-            "harness_session_id": e.harness_session_id,
-            "status": e.status,
-            "crown_level": e.crown_level,
-            "crown_scope": e.crown_scope,
-            "spawned_by_session": e.spawned_by_session,
-            "origin": e.origin,
-        }
-        for e in load_registry()
-    ]
-    sys.stdout.write(_json.dumps({"agents": rows}))
+    refuse_without_binary("registry-json")
 
 
 @agents_app.command("registry-repair", hidden=True)

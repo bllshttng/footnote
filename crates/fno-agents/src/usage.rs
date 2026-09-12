@@ -38,6 +38,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     "reconcile",
     "drive-authority [--json]",
     "trace [options]",
+    "registry-json",
     "ping",
     "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>]",
     "adopt <session-id> [--cross-project]",

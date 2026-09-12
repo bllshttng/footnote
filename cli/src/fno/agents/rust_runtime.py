@@ -127,6 +127,12 @@ RUST_CLIENT_VERBS = frozenset(
         "adopt",
         "attach",
         "logs",
+        # x-1b75: the daemon-free registry projection the hooks read. Reads the
+        # registry file client-side (load_registry_entries) and derives the
+        # served liveness pair with the vendored freshness rule. A client-side
+        # dispatch starts nothing, so the Stop hook's never-lazy-start promise
+        # still holds (the reason this verb once sat in the never-route set).
+        "registry-json",
         # `host`/`promote` (interactive daemon PTY hosting) were retired at G4
         # (x-f54c); spawn a mux-hosted pane with `spawn --substrate pane`.
         # Stop-hook decision verb (control-plane collapse wedge, ab-d0337fbc).
@@ -373,11 +379,6 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Read-only, pure Python (fno.agents.session_truth reads the transcript via
     # peek); no Rust client port, so it must never auto-route to the daemon.
     "truth",
-    # x-7685: daemon-free registry read for hooks (`fno agents registry-json`).
-    # Pure Python (load_registry, a file read) - deliberately NOT the Rust-routed
-    # `fno agents list`, which lazy-starts the daemon a Stop hook must never wait
-    # on. No Rust client port, so it must never auto-route to the daemon.
-    "registry-json",
     # x-665d: the poisoned-registry repair verb (`fno agents registry-repair`).
     # Pure Python (fno.agents.registry holds the lock, asserts no row carries a
     # newer-schema field, backs up, and replaces atomically). No Rust client

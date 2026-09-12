@@ -77,6 +77,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "reclaim",
     "plugin-install",
     "recover",
+    "registry-json",
     "reentry-plan",
     "rename",
     "reign-shape",
@@ -535,6 +536,13 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if verb == "trace" {
         return fno_agents::client_verbs::run_trace(&args[1..], &AgentsHome::from_env());
+    }
+    // registry-json (x-1b75): the daemon-free registry projection the hooks
+    // read. Reads the registry file client-side and derives the served
+    // liveness pair with the vendored freshness rule; starts nothing, so the
+    // Stop hook's never-lazy-start promise still holds.
+    if verb == "registry-json" {
+        return fno_agents::client_verbs::run_registry_json(&args[1..], &AgentsHome::from_env());
     }
     if verb == "ping" {
         return fno_agents::client_verbs::run_ping(&args[1..]);
