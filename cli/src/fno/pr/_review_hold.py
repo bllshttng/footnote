@@ -284,11 +284,17 @@ def verify_fixes_advisory(branch: str, head: str, cwd: Optional[str] = None) -> 
         for f in (last.get("findings") or [])
         if isinstance(f, dict) and f.get("blocking") is True
     )
-    if blocking <= 0:
+    if blocking > 0:
+        detail = f"raised {blocking} blocking finding(s)"
+    elif last.get("findings_truncated") is True:
+        # The findings array was shed to fit the record: the blockers are real
+        # but unnamed, and a silenced advisory here is exactly the driver who
+        # most needs it. Advise without a count rather than staying quiet.
+        detail = "raised blocking finding(s) the record could not carry"
+    else:
         return ""
     return (
-        f"review-hold: the last round at {last_head[:8]} raised {blocking} blocking "
-        "finding(s) and the head has moved.\n"
+        f"review-hold: the last round at {last_head[:8]} {detail} and the head has moved.\n"
         f"If this pass verifies those fixes, invoke it with {VERIFY_FIXES_FLAG}: a scoped "
         "fix-verification declares the round it verifies and does not spend a new one."
     )

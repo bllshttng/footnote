@@ -779,6 +779,21 @@ def test_advisory_stays_silent_without_blocking_findings(
     assert _review_hold.verify_fixes_advisory("feature/x", "c" * 40, cwd=str(tmp_path)) == ""
 
 
+def test_advisory_names_truncated_blockers_without_a_count(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A shed findings array hides the blockers it carried: the advisory says
+    so instead of going silent on exactly the row a driver most needs."""
+    import fno.pr._coverage_gate as gate
+
+    event = _fail_event("a" * 40, "b" * 40)
+    event["findings_truncated"] = True
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: [event])
+    adv = _review_hold.verify_fixes_advisory("feature/x", "c" * 40, cwd=str(tmp_path))
+    assert "--verify-fixes" in adv
+    assert "could not carry" in adv
+
+
 def test_acquire_below_the_cap_advises_and_still_acquires(
     monkeypatch, tmp_path: Path
 ) -> None:
