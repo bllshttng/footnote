@@ -2562,7 +2562,7 @@ class TestTickRecordsAndDeadline:
         assert "king_wake" in ends[-1].get("phase_s", {})
 
     def test_a_cut_inside_a_step_names_the_step_in_the_row_detail(self, monkeypatch, tmp_path):
-        """AC2-ERR (x-16e9): the alarm catching the pass mid-truth-read names
+        """AC2-ERR: the alarm catching the pass mid-truth-read names
         the sub-step, and the end record still blames the phase."""
         import time as _time
 
@@ -2603,7 +2603,7 @@ class TestTickRecordsAndDeadline:
         assert ends[-1].get("cut") == ["king_wake"]
 
     def test_one_roots_scan_feeds_every_phase_that_sweeps(self, monkeypatch, tmp_path):
-        """AC3-HP (x-16e9): notify_watch, heal, stranded and catchup share the
+        """AC3-HP: notify_watch, heal, stranded and catchup share the
         tick's one sidecar scan - four consumers, one call, the same list."""
         from types import SimpleNamespace as _NS
 
@@ -2662,7 +2662,7 @@ class TestTickRecordsAndDeadline:
     def test_empty_roots_still_scan_once_and_spawn_with_no_root_flag(
         self, monkeypatch, tmp_path
     ):
-        """AC3-ERR (x-16e9): no roots is a memoized answer, not four scans,
+        """AC3-ERR: no roots is a memoized answer, not four scans,
         and notify_watch spawns a bare argv without a --root flag."""
         import json as _json
         from types import SimpleNamespace as _NS

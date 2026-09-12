@@ -535,6 +535,9 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
             let phase = t.end_phase.as_deref().unwrap_or("unknown");
             let pm = &mut rows[i];
             pm.failing = true;
+            // The synthesized failure is not an absence: the row itself was
+            // the newest healthy run, so it anchors the duration too.
+            pm.failing_for_s = pm.age_s;
             pm.cause = Some("tick_timeout".to_string());
             pm_tick_hint = Some(format!(
                 "the tick containing this phase ended {outcome} in phase {phase}; \
@@ -1401,6 +1404,15 @@ mod tests {
         assert!(pm.line.contains("FAIL"), "line: {}", pm.line);
         assert!(
             pm.line.contains("ended timeout in phase catchup"),
+            "line: {}",
+            pm.line
+        );
+        // The synthesized failure is not an absence: the corrected row itself
+        // was the newest healthy run, so the duration anchors to it instead
+        // of claiming the journal held no healthy run.
+        assert_eq!(pm.failing_for_s, Some(100));
+        assert!(
+            pm.line.contains("failing_for=100s") && !pm.line.contains("no_ok_in_journal"),
             "line: {}",
             pm.line
         );

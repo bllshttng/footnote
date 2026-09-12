@@ -457,9 +457,11 @@ def tick() -> None:
     # One sidecar scan per tick: notify_watch, heal, stranded and catchup
     # each swept the same roots, four scans a tick.
     def _tick_roots() -> list:
-        if roots_box["v"] is None:
-            roots_box["v"] = _catchup_roots()
-        return roots_box["v"]
+        roots = roots_box["v"]
+        if roots is None:
+            roots = _catchup_roots()
+            roots_box["v"] = roots
+        return roots
 
     try:
         try:

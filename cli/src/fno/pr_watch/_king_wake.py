@@ -545,8 +545,8 @@ def run_king_wake(
 
     # Start where the last pass stopped: rotation by debounce window gives
     # every crown a turn at the front when the pass keeps running out of
-    # slice. ponytail: the ceiling is fairness per debounce window, not per
-    # crown - a crown can wait two windows when every pass overruns.
+    # slice. The ceiling is fairness per debounce window, not per crown: a
+    # crown can wait two windows when every pass overruns.
     offset = int(now.timestamp() // max(1, debounce_s)) % len(targets) if targets else 0
     for target in targets[offset:] + targets[:offset]:
         sidecar = _read_sidecar(target)
@@ -631,7 +631,7 @@ def run_king_wake(
             # Seed at birth, never the journal max: a max seed swallows an
             # answer closed before the first armed tick saw it.
             _update_sidecar(target, answered_cursor=_birth_cursor(target.manifest))
-        if first_observation:
+        if first_observation and fresh_board_hash is not None:
             _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
         if reason is None:
             # A first observation is a seed, never a trigger: nothing to wake.
