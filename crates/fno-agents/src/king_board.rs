@@ -1034,6 +1034,7 @@ mod tests {
             "h".to_string(),
             crate::truth_probe::TruthProbe {
                 state: "unknown".to_string(),
+                provider_refusal: None,
                 harness_title: None,
                 reachability: None,
                 basis: None,
@@ -1204,6 +1205,7 @@ mod tests {
             "target-7471-worker".to_string(),
             crate::truth_probe::TruthProbe {
                 state: "working".to_string(),
+                provider_refusal: None,
                 harness_title: None,
                 reachability: None,
                 basis: None,
@@ -1347,6 +1349,7 @@ mod tests {
             "t-w".to_string(),
             crate::truth_probe::TruthProbe {
                 state: "working".to_string(),
+                provider_refusal: None,
                 harness_title: None,
                 reachability: None,
                 basis: None,
@@ -1391,6 +1394,7 @@ mod tests {
         inputs.entries = Some(vec![node]);
         let working_probe = |age_s: f64| crate::truth_probe::TruthProbe {
             state: "working".to_string(),
+            provider_refusal: None,
             harness_title: None,
             reachability: None,
             basis: None,

@@ -5191,13 +5191,13 @@ where
     if let Some(ref st) = filter_status {
         if !matches!(
             st.as_str(),
-            "writing" | "quiet" | "parked" | "orphaned" | "unknown"
+            "writing" | "quiet" | "parked" | "orphaned" | "refused" | "unknown"
         ) {
             return Response::err(
                 req.id,
                 ErrorCode::InvalidStatus,
                 format!(
-                    "invalid --status '{st}' (status is served activity: writing | quiet | parked | orphaned | unknown; process liveness is the liveness field on fno agents list --json)"
+                    "invalid --status '{st}' (status is served activity: writing | quiet | parked | orphaned | refused | unknown; process liveness is the liveness field on fno agents list --json)"
                 ),
             );
         }
@@ -11878,7 +11878,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     /// `rendered_status_from_truth` (a `fno` too old to emit the verdict), which
     /// is what keeps these pre-existing state-mapping assertions meaningful.
     /// `probe_reachable` below covers the current wire.
-    fn probe(state: &str) -> Option<crate::truth_probe::TruthProbe> {
+    pub(super) fn probe(state: &str) -> Option<crate::truth_probe::TruthProbe> {
         Some(crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: None,
@@ -11887,6 +11887,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             last_event_at: None,
             last_message: None,
             observed_model: Value::Null,
+            provider_refusal: None,
             harness_title: None,
         })
     }
@@ -12425,7 +12426,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     /// A probe carrying the shared verdict, as a current `fno` emits it.
-    fn probe_with_verdict(
+    pub(super) fn probe_with_verdict(
         state: &str,
         reachability: &str,
     ) -> Option<crate::truth_probe::TruthProbe> {
@@ -12439,11 +12440,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 "Still growing (101 lines, 26 percent through the pytest run)".into(),
             ),
             observed_model: Value::Null,
+            provider_refusal: None,
             harness_title: None,
         })
     }
 
-    fn probe_with_age(
+    pub(super) fn probe_with_age(
         state: &str,
         reachability: &str,
         age_s: Option<f64>,
@@ -12451,201 +12453,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let mut probe = probe_with_verdict(state, reachability).unwrap();
         probe.last_activity_age_s = age_s;
         Some(probe)
-    }
-
-    /// The verdict OUTRANKS the transcript state, which is the whole point of
-    /// putting it on the wire: a session whose process died forty minutes ago
-    /// still reads `working` from its transcript, and mapping that state is how
-    /// `list` reported a dead worker live. Same input state, opposite render.
-    #[test]
-    fn the_reachability_verdict_outranks_the_transcript_state() {
-        assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref()),
-            "orphaned",
-            "a falsified row must not render writing merely because its transcript is recent"
-        );
-        // A verdict that did not resolve falls through to the ACTIVITY read:
-        // a 12s-old transcript is writing whatever the state word says.
-        assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref()),
-            "writing"
-        );
-        assert_eq!(
-            rendered_status_from_truth(probe("stalled").as_ref()),
-            "unknown",
-            "a probe that answered nothing reads unknown, never orphaned (x-c672)"
-        );
-    }
-
-    #[test]
-    fn no_probe_at_all_reads_unknown_even_for_a_live_row() {
-        // A live pid is a fact about the PROCESS, not about served activity,
-        // so it is not an input to the STATUS word (x-c672): the Python list
-        // lane has no pid census, and an unanswered activity age must read
-        // the same word on both lanes.
-        assert_eq!(
-            rendered_status_from_truth(None),
-            "unknown",
-            "no probe at all reads unknown, never quiet"
-        );
-    }
-
-    /// A verdict-carrying probe with an explicit `observed_model`, for the
-    /// progress-axis tests below (`probe_with_verdict` above always carries
-    /// `Value::Null`, which is `no-transcript` and can never refuse).
-    fn probe_observed(
-        state: &str,
-        reachability: &str,
-        observed_model: Value,
-    ) -> Option<crate::truth_probe::TruthProbe> {
-        Some(crate::truth_probe::TruthProbe {
-            state: state.into(),
-            reachability: Some(reachability.into()),
-            basis: Some("transcript".into()),
-            last_activity_age_s: Some(12.0),
-            last_event_at: None,
-            last_message: None,
-            observed_model,
-            harness_title: None,
-        })
-    }
-
-    #[test]
-    fn progress_ac1_ac2_done_is_parked_working_is_advancing() {
-        assert_eq!(
-            progress_from_truth(
-                probe_with_verdict("done", "reachable").as_ref(),
-                "claude",
-                None
-            ),
-            ("parked", "promise")
-        );
-        assert_eq!(
-            progress_from_truth(
-                probe_with_verdict("working", "reachable").as_ref(),
-                "claude",
-                None
-            ),
-            ("advancing", "transcript-turn")
-        );
-        assert_eq!(
-            progress_from_truth(
-                probe_with_verdict("your-move", "reachable").as_ref(),
-                "claude",
-                None
-            ),
-            ("awaiting-operator", "operator-turn")
-        );
-    }
-
-    #[test]
-    fn progress_ac3_ac4_refusal_outranks_working_but_never_a_routed_worker() {
-        let refused_model = json!({"kind": "observed", "model": "glm-5.2[1m]"});
-        assert_eq!(
-            progress_from_truth(
-                probe_observed("working", "reachable", refused_model.clone()).as_ref(),
-                "claude",
-                None
-            ),
-            ("refused", "model-refused"),
-            "the refusal must outrank the active working truth state"
-        );
-        assert_eq!(
-            progress_from_truth(
-                probe_observed("working", "reachable", refused_model).as_ref(),
-                "claude",
-                Some("/x/route-settings/ab12.json")
-            ),
-            ("advancing", "transcript-turn"),
-            "a deliberately routed worker must never be condemned"
-        );
-    }
-
-    #[test]
-    fn progress_ac5_unmeasured_observed_model_kinds_never_refuse() {
-        for kind in [
-            "no-transcript",
-            "not-file-backed",
-            "no-model-yet",
-            "unreadable",
-        ] {
-            let (verdict, _) = progress_from_truth(
-                probe_observed("working", "reachable", json!({"kind": kind})).as_ref(),
-                "claude",
-                None,
-            );
-            assert_ne!(verdict, "refused", "kind={kind} must never refuse");
-        }
-    }
-
-    #[test]
-    fn progress_ac6_stalled_is_unknown_silent_never_parked() {
-        assert_eq!(
-            progress_from_truth(
-                probe_with_verdict("stalled", "reachable").as_ref(),
-                "claude",
-                None
-            ),
-            ("unknown", "silent")
-        );
-    }
-
-    #[test]
-    fn progress_deliberately_wedged_open_turn_is_quiet_but_not_advancing() {
-        let probe = probe_with_age("working", "reachable", Some(STALE_ATTENTION_S + 1.0));
-        assert_eq!(
-            rendered_status_from_truth(probe.as_ref()),
-            "quiet",
-            "the process and reachability axes still say present; the transcript has not moved"
-        );
-        assert_eq!(
-            progress_from_truth(probe.as_ref(), "claude", None),
-            ("unknown", "silent"),
-            "an open turn with no transcript advance past the window is not progressing"
-        );
-    }
-
-    #[test]
-    fn progress_unreadable_activity_age_is_unknown_never_advancing() {
-        assert_eq!(
-            progress_from_truth(
-                probe_with_age("working", "reachable", None).as_ref(),
-                "claude",
-                None,
-            ),
-            ("unknown", "no-evidence")
-        );
-    }
-
-    #[test]
-    fn progress_ac7_unreachable_is_unknown_no_evidence_regardless_of_state() {
-        for state in ["working", "done", "your-move", "stalled"] {
-            assert_eq!(
-                progress_from_truth(
-                    probe_with_verdict(state, "unreachable").as_ref(),
-                    "claude",
-                    None
-                ),
-                ("unknown", "no-evidence"),
-                "state={state}"
-            );
-        }
-    }
-
-    #[test]
-    fn progress_ac12_fr_a_probe_with_no_reachability_verdict_is_unknown_no_evidence() {
-        // The compatibility fallback (a `fno` too old to emit the verdict):
-        // `probe()` carries `reachability: None`. An unmeasured row has no
-        // progress state to report, so this must never panic and must never
-        // read a stale `state` as an active truth-state arm.
-        assert_eq!(
-            progress_from_truth(probe("working").as_ref(), "claude", None),
-            ("unknown", "no-evidence")
-        );
-        assert_eq!(
-            progress_from_truth(None, "claude", None),
-            ("unknown", "no-evidence")
-        );
     }
 
     fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
@@ -13325,6 +13132,7 @@ done
                     observed_model: json!({
                         "kind": "observed", "model": "glm-5.2", "samples": 300
                     }),
+                    provider_refusal: None,
                     harness_title: None,
                 })
             }),

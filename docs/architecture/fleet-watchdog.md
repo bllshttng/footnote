@@ -2,7 +2,19 @@
 
 `fno agents watchdog` runs outside every session. Per fleet row it decides one of three things: wake it, reroute it, or leave it. It also reports friction it never acts on: contention and settled-PR polling. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet. Row retirement is NOT this module's question. When a row's work is done and its transcript is quiet, the Rust daemon's sweep retires it. `fno agents reap` runs that same sweep by hand.
 
-The STATUS word a roster surface renders is served activity, never liveness. `fno agents list` and `fno agents top` both use it. `writing` means the transcript moved inside ten minutes. `quiet` means it is older. `parked` means the tail closed a promise. `orphaned` means a falsifier fired. `unknown` means no probe answered. The measured age rides beside the word. The old `live` token is gone. No decision keys on this word. Retirement reads the reverse join and the quiet grace. The lanes read their own probes.
+The STATUS word a roster surface renders is served activity, never liveness. `fno agents list` and `fno agents top` both use it. `writing` means the transcript moved inside ten minutes. `quiet` means it is older. `parked` means the tail closed a promise. `refused` means the last assistant turn is a provider refusal the error taxonomy classifies, and it wins over `writing`, `quiet` and `parked`. `orphaned` means a falsifier fired. `unknown` means no probe answered. The measured age rides beside the word. The old `live` token is gone. No decision keys on this word. Retirement reads the reverse join and the quiet grace. The lanes read their own probes.
+
+## A fresh age with no inference certifies nothing
+
+A worker killed by a usage-limit 429 dies while it writes that error. So its transcript is freshest at the instant it died, and age alone reads the corpse as reachable. Measured 2026-09-12: `fno backlog requeue` refused such a worker at 13 minutes quiet and accepted the same dead worker at 23, because only the clock had moved between the two reads.
+
+`observed_model` is the marker the corpse cannot fake. Only a vendor answering a turn writes the record it counts, so a process that booted and died reads `{"kind": "no-model-yet"}` while a live worker reads a real model name and a climbing `samples` count. `classify_reachability` reads it: an active state whose tail carries zero samples resolves `unknown` with basis `no-inference`, never `reachable`.
+
+The verdict is `unknown` and not `unreachable` for the reason every other absence in that module is. A worker two seconds into its life reads the same zero. Only an affirmative falsifier condemns a row.
+
+Four readings are absences and lower nothing: `no-transcript`, `not-file-backed`, `unreadable`, and no reading at all from an older `fno`. `not-file-backed` is the load-bearing one. opencode keeps no per-session file, so counting it as a zero would name every opencode worker a corpse.
+
+`fno backlog requeue` prints the count beside the state, because the state word alone cannot separate the two: `state=working samples=0` names a corpse and `state=working samples=31` names a worker. A count nothing can answer prints `?` and stays null on the wire, never `0`.
 
 ## Why the transcript is the truth source
 

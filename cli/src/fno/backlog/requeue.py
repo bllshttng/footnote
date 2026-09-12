@@ -236,9 +236,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
             truth_state=truth.get("state"),
             age_s=truth.get("last_activity_age_s"),
             falsifier=None,
-            # A 429 corpse dies writing its error, so its age is freshest at
-            # death: without the sample marker requeue refused one at 13
-            # minutes and accepted the same worker at 23 (x-e594).
+            # A 429 corpse dies writing its error, so its age is freshest at death.
             observed_model=truth.get("observed_model"),
         )
         if reach.verdict == REACHABLE:
@@ -262,10 +260,8 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         typer.echo(f"requeue: {node_id} still reads in_progress after settling ({remaining} open do row(s) remain).", err=True)
         raise typer.Exit(code=1)
 
-    # `samples` rides beside `state` because the state word alone cannot tell
-    # them apart: `working, 0 samples` names a corpse and `working, 31 samples`
-    # names a worker. None means this harness keeps no per-session transcript to
-    # count, which must never render as a zero.
+    # `working, 0 samples` names a corpse and `working, 31 samples` names a
+    # worker. None is a harness that keeps no transcript, never a zero.
     settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "samples": inference_samples(truth.get("observed_model")), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s"))} for r, truth in pairs]
     receipt = {"node_id": node_id, "status_before": status_before, "status_after": status_after, "settled": settled}
     if json_out:

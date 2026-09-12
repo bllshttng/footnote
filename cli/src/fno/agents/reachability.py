@@ -105,21 +105,17 @@ TRANSCRIPT_EVIDENCE_S = 20 * 60
 STALE_TRANSCRIPT = "stale-transcript"
 
 #: Basis when the transcript moved but no vendor ever answered a turn on it.
-#: UNKNOWN, never UNREACHABLE, for the same reason STALE_TRANSCRIPT is: zero
-#: inference samples is absence of evidence about the process.
+#: UNKNOWN, never UNREACHABLE, the same way STALE_TRANSCRIPT is.
 NO_INFERENCE = "no-inference"
 
 
 def inference_samples(observed_model: Optional[dict]) -> Optional[int]:
-    """Model-bearing records the transcript tail actually carried, or None.
+    """Model-bearing records the transcript tail carried, or None for absence.
 
-    The one marker in this module a booted-and-died process cannot fake, because
-    only a vendor answering a turn writes the record it counts (x-e594, measured
-    2026-09-12). ``observed`` carries its count; ``no-model-yet`` is a resolved
-    transcript that never carried one, which is a real zero. Every other variant
-    -- ``no-transcript``, ``not-file-backed`` (opencode keeps no per-session
-    file), ``unreadable``, and an absent reading from an older fno -- is an
-    absence and returns None, so it can never lower a verdict.
+    The marker a booted-and-died process cannot fake: only a vendor answering a
+    turn writes the record it counts. ``no-model-yet`` is a real zero; every
+    other variant is an absence and returns None, so it lowers nothing.
+    docs/architecture/fleet-watchdog.md carries the measurement.
     """
     if not isinstance(observed_model, dict):
         return None
@@ -181,14 +177,9 @@ def classify_reachability(
         if last_activity_basis == "mtime":
             # Never positive: an mtime is a file stamp, not activity.
             return Reachability(UNKNOWN, MTIME_ONLY, age_s)
-        # A transcript with zero inference samples measures WRITES and no
-        # conversation, so its age certifies nothing. A worker killed by a
-        # provider 429 dies WRITING that error, which leaves the freshest
-        # possible age on a session that never took a turn: requeue refused
-        # such a corpse at 13 minutes and accepted the same one at 23, because
-        # age was the only term. Checked before the staleness arm because it
-        # holds at every age, and UNKNOWN not UNREACHABLE because a just-booted
-        # live worker reads the same zero (x-e594, measured 2026-09-12).
+        # Zero samples measures WRITES and no conversation, so the age
+        # certifies nothing. Before the staleness arm because it holds at every
+        # age; UNKNOWN because a just-booted live worker reads the same zero.
         if inference_samples(observed_model) == 0:
             return Reachability(UNKNOWN, NO_INFERENCE, age_s)
         # An unknowable age stays REACHABLE. Only POSITIVE evidence of staleness

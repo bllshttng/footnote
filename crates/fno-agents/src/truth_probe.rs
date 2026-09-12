@@ -57,6 +57,17 @@ pub struct TruthProbe {
     pub last_event_at: Option<String>,
     pub last_message: Option<String>,
     pub observed_model: serde_json::Value,
+    /// The error taxonomy's class for a last assistant turn that is a provider
+    /// refusal (`provider_4xx_quota` and its siblings), classified Python-side
+    /// by the one classifier recovery already trusts. `None` on a healthy row
+    /// AND on a truth build that predates the field, so an older `fno` renders
+    /// exactly as it did before.
+    ///
+    /// Needed because the refusal record is the NEWEST transcript entry: a
+    /// worker killed by a usage-limit 429 dies writing that error, so
+    /// [`Self::last_activity_age_s`] reads freshest at the moment it died and
+    /// the row renders `writing` (measured 2026-09-11: 469 s, status writing).
+    pub provider_refusal: Option<String>,
     /// The title the HARNESS carries for this session (claude's Ctrl+R
     /// agent-name record; codex/opencode's index title), read Python-side by
     /// the same probe so the list emitter never grows a second title reader.
@@ -555,6 +566,9 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
         observed_model: parsed
             .and_then(|value| value.get("observed_model").cloned())
             .unwrap_or(serde_json::Value::Null),
+        // Absent on an older `fno`: None, so the row renders as it does today.
+        provider_refusal: parsed
+            .and_then(|value| value.get("provider_refusal")?.as_str().map(str::to_owned)),
         harness_title: parsed
             .and_then(|value| value.get("harness_title")?.as_str().map(str::to_owned)),
     }
@@ -914,6 +928,37 @@ fn family1_truth_batch_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC1/AC4 on the wire: the field arrives when Python sends it, and an older
+    /// `fno` that sends no such key parses `None` rather than a fabricated
+    /// value, so its rows render exactly as they did before.
+    #[test]
+    fn the_provider_refusal_parses_from_the_wire_and_absence_stays_none() {
+        let refused = serde_json::json!({
+            "state": "working",
+            "reachability": "reachable",
+            "last_activity_age_s": 469.0,
+            "provider_refusal": "provider_4xx_quota",
+        });
+        assert_eq!(
+            parse_truth_payload(&refused)
+                .unwrap()
+                .provider_refusal
+                .as_deref(),
+            Some("provider_4xx_quota")
+        );
+        let older = serde_json::json!({"state": "working", "reachability": "reachable"});
+        assert!(parse_truth_payload(&older)
+            .unwrap()
+            .provider_refusal
+            .is_none());
+        // A non-string value is not a class name: absence, never a coerced one.
+        let junk = serde_json::json!({"state": "working", "provider_refusal": 7});
+        assert!(parse_truth_payload(&junk)
+            .unwrap()
+            .provider_refusal
+            .is_none());
+    }
 
     /// A shell command, built fresh per attempt so the retry path can spawn it
     /// twice. `-c` body only; the probe supplies nothing else.
