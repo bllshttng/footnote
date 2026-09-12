@@ -25,17 +25,18 @@ def cmd_note(
         help="Read the note text from a file ('-' = stdin). Same length guidance applies.",
     ),
     quiet: bool = typer.Option(
-        False, "--quiet", "-q", help="Annotate silently: write it, mail nobody."
+        False, "--quiet", "-q",
+        help="Write it, mail nobody: the acknowledgment when the verb would refuse.",
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
     read: list[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Append a timestamped progress note to a backlog node, and DELIVER it.
 
-    Delivery is the DEFAULT: a worker reads its node once, at dispatch, so the
-    verb mails a pointer to the node's holder, the owner's holder and the epic's
-    king. ``--quiet`` is the deliberate silent annotation. Contract, and why the
-    fanout's own stamps never mail: docs/architecture/backlog-graph-verb-contracts.md.
+    Delivery is the DEFAULT. Nobody bound (or unreadable bindings) refuses
+    BEFORE the append: exit 3, nothing written. No send confirmed: exit 4,
+    note written. ``--quiet`` writes it anyway. Contract:
+    docs/architecture/backlog-graph-verb-contracts.md.
     """
     from fno.decide import (
         UnmeasuredClaimError,
@@ -73,8 +74,17 @@ def cmd_note(
         note["source_session_id"] = identity.session_id
     if identity is not None and identity.harness:
         note["source_harness"] = identity.harness
-    entries: list[dict] = []
-    found, _ = append_progress_note(graph_cli._graph_path(), task_id, note, entries_out=entries)
+    from fno.backlog.note_notify import Refused, deliver, readers_before_append
+
+    # Refuse BEFORE the append: an unread note is a silent drop wearing a receipt.
+    resolved = None if quiet else readers_before_append(task_id, graph_cli._graph_path())
+    if isinstance(resolved, Refused):
+        typer.echo(resolved.message, err=True)
+        raise typer.Exit(code=resolved.exit_code)
+    readers = resolved
+    found, _ = append_progress_note(
+        graph_cli._graph_path(), readers.node_id if readers is not None else task_id, note
+    )
     if not found:
         typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
         raise typer.Exit(code=1)
@@ -85,12 +95,5 @@ def cmd_note(
         typer.echo(json.dumps({"id": task_id, "note": note}, separators=(",", ":")))
     else:
         typer.echo(f"noted {task_id}: {text}")
-    if not quiet:
-        try:
-            from fno.backlog.note_notify import deliver_note
-
-            receipts = deliver_note(task_id, text, graph_cli._graph_path(), entries or None)
-        except Exception as exc:  # noqa: BLE001 - the note is written, delivery is not
-            receipts = [(f"notify FAILED {task_id}: {exc}", True)]
-        for line, undelivered in receipts:
-            typer.echo(line, err=undelivered or json_output)
+    if readers is not None:
+        raise typer.Exit(code=deliver(readers, text, json_output=json_output))

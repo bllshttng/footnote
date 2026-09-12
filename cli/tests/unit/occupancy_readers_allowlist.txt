@@ -35,6 +35,8 @@ cli/src/fno/decide/cli.py:key = f"node:{node_id}"
 # control: core routing
 cli/src/fno/graph/cli.py:key = f"node:{node_id}"
 # control: core routing
+cli/src/fno/graph/_session.py:claim_key = f"node:{node_id}"
+# control: core routing (the session verb moved here from graph/cli.py)
 cli/src/fno/mail/job_address.py:key = f"node:{node_id}"
 # control: core routing
 cli/src/fno/resume/cli.py:return claim_status(f"node:{node}", root=claims_root)

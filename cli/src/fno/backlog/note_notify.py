@@ -1,23 +1,35 @@
-"""Deliver a `fno backlog note` to the people building the node.
+"""Deliver a `fno backlog note` to the people bound to the node.
 
-A worker reads its node once, at dispatch, so a note appended after that reaches
-nobody on its own. Nothing here raises: the note is already written, so a fault
-becomes a printed receipt. Contract, and every "why", in
-docs/architecture/backlog-graph-verb-contracts.md.
-
-It lives beside ``advance`` rather than under ``fno.graph`` because it reads the
-graph AND reaches the agent runtime for the claim, the crown and the send. That
-pair is what ``fno.backlog`` already holds; the core layer may not import it.
+Resolution runs BEFORE the append: nobody bound, or a fault, refuses and writes
+nothing. Contract: docs/architecture/backlog-graph-verb-contracts.md.
 """
 from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, NamedTuple, Optional
+
+import typer
 
 _POINTER_WORDS = 20
 _SEND_TIMEOUT_SECONDS = 30.0
 _UNDELIVERED = ("notify FAILED", "notify UNCONFIRMED")
+_GRAPH_FIELDS = ("locked_by_harness_session", "session_id", "locked_by")
+_QUIET_HINT = (
+    "Write it anyway with --quiet, or find a reader with fno agents court and mail them by name."
+)
+
+
+class NoteReaders(NamedTuple):
+    node_id: str
+    recipients: list[tuple[str, str]]
+    author_bound: Optional[str]
+    readings: list[str]
+
+
+class Refused(NamedTuple):
+    message: str
+    exit_code: int
 
 
 def claim_holder(node_id: str) -> Optional[str]:
@@ -51,13 +63,7 @@ def own_session() -> Optional[str]:
 
 
 def send_pointer(address: str, body: str) -> str:
-    """Mail one pointer. Short lock timeout: a contended recipient takes the
-    durable envelope now rather than blocking the writer.
-
-    The sender is this session's own handle, not a literal: provenance is
-    looked up by from_name, so an unregistered literal ships harness=unknown
-    with no from_session. No ambient identity keeps the default; the
-    dispatch-side miss is loud."""
+    """Mail one pointer; the sender handle is this session's own (provenance by from_name)."""
     from fno.agents.dispatch import dispatch_send
     from fno.harness_identity import canonical_handle
 
@@ -79,110 +85,188 @@ def pointer(node_id: str, text: str) -> str:
     return f"note on {node_id}: {head} Read: fno backlog get {node_id}"
 
 
-def note_recipients(
+def note_readers(
     entry: dict,
     *,
     index: dict[str, dict],
+    rows: Optional[Iterable[Any]] = None,
     holder_of: Callable[[str], Optional[str]] = claim_holder,
     kings_of: Callable[[str], Iterable[str]] = crowned_over,
     self_session: Optional[str] = None,
-) -> list[tuple[str, str]]:
-    """Ordered, de-duplicated ``(address, why)`` pairs for one note."""
-    from fno.agents.registry import load_registry
+) -> NoteReaders:
+    """Every bound reader for one note; the author is named, never mailed."""
+    from fno.agents.registry import live_row_holding_session_id, load_registry
     from fno.claims.core import holder_agent_name
+    from fno.harness_identity import OWNERSHIP_LIVE_STATUSES, session_identity_key
 
-    registry_rows = load_registry()
+    registry_rows: list[Any] = list(rows) if rows is not None else list(load_registry())
     node_id = str(entry.get("id") or "")
-    out: list[tuple[str, str]] = []
+    recipients: list[tuple[str, str]] = []
+    readings: list[str] = []
+    author_bound: Optional[str] = None
     seen: set[str] = set()
+    self_key = session_identity_key(self_session) if self_session else None
+    self_sid = self_session or ""
 
-    def add(address: Optional[str], why: str) -> None:
+    def add(address: Optional[str], why: str) -> bool:
+        """True only when a live RECIPIENT joined; an author hit is never mailed."""
+        nonlocal author_bound
         if not address or address in seen:
-            return
+            return False
         # A role holder is a marker, not an address; None: nobody behind it.
         resolved = holder_agent_name(address, registry_rows)
         if not resolved or resolved in seen:
-            return
-        if self_session and (resolved.endswith(self_session) or address.endswith(self_session)):
-            return
+            return False
+        row = next((r for r in registry_rows if r.name == resolved), None)
+        if self_key is not None:
+            sid = getattr(row, "harness_session_id", None) if row else None
+            # A row-backed address decides by identity key; endswith stands
+            # only when no row is behind the name.
+            if isinstance(sid, str) and sid:
+                author = session_identity_key(sid) == self_key
+            else:
+                author = resolved.endswith(self_sid) or address.endswith(self_sid)
+            if author:
+                author_bound = author_bound or why
+                return False
         seen.add(resolved)
-        out.append((resolved, why))
+        recipients.append((resolved, why))
+        return True
 
-    add(holder_of(node_id), f"holder of {node_id}")
+    def bound_row(value: str) -> Optional[Any]:
+        """The ownership-live row behind a graph binding, by name or identity."""
+        name = holder_agent_name(value, registry_rows)
+        return next(
+            (r for r in registry_rows
+             if getattr(r, "status", None) in OWNERSHIP_LIVE_STATUSES and r.name == name),
+            None,
+        ) or live_row_holding_session_id(value, rows=registry_rows)
+
+    def worker_readers(subject_id: str, subject: str, source: Optional[dict]) -> None:
+        holder = holder_of(subject_id)
+        readings.append(f"claim node:{subject_id}: {holder or 'free'}")
+        if holder and add(holder, f"holder of {subject}"):
+            return
+        for field in _GRAPH_FIELDS:
+            value = (source or {}).get(field)
+            if not isinstance(value, str) or not value:
+                readings.append(f"graph {field}: none")
+                continue
+            row = bound_row(value)
+            suffix = f"-> {row.name}" if row else "names no live row"
+            readings.append(f"graph {field}: {value} {suffix}")
+            if row and add(row.name, f"session bound to {subject} (graph {field})"):
+                return
+        named = sorted(
+            (r for r in registry_rows if getattr(r, "node", None) == subject_id
+             and getattr(r, "status", None) in OWNERSHIP_LIVE_STATUSES),
+            key=lambda r: r.name,
+        )
+        readings.append(
+            "registry: "
+            + (", ".join(r.name for r in named) or f"no live row names {subject_id}")
+        )
+        for r in named:
+            add(r.name, f"worker on {subject} (registry node)")
 
     contained_in = entry.get("contained_in")
+    owner = index.get(contained_in) if isinstance(contained_in, str) else None
+    worker_readers(node_id, node_id, entry)
     owner_id = contained_in or entry.get("parent")
     if isinstance(owner_id, str) and owner_id:
-        add(holder_of(owner_id), f"holder of owner {owner_id}")
+        worker_readers(owner_id, f"owner {owner_id}", index.get(owner_id))
 
-    # The crown sits on the epic: this node's own parent, or the owner's parent
-    # when another node's PR carries this one.
-    owner = index.get(contained_in) if isinstance(contained_in, str) else None
-    scope = (owner.get("parent") if owner else None) or entry.get("parent")
-    if isinstance(scope, str) and scope:
+    # Crown walk, nearest first; the walk stops at the first scope with a live crown.
+    epic = (owner.get("parent") if owner else None) or entry.get("parent")
+    scopes: list[tuple[str, str, str]] = []
+    if entry.get("type") == "epic":
+        scopes.append((node_id, f"king of {node_id}", f"crown {node_id}"))
+    if isinstance(epic, str) and epic:
+        scopes.append((epic, f"king of {epic}", f"crown {epic}"))
+    if isinstance(project := entry.get("project"), str) and project:
+        scopes.append((project, f"king of {project} (project)", f"crown {project} (project)"))
+    for scope, why, label in scopes:
         try:
             kings = list(kings_of(scope))
-        except Exception:  # noqa: BLE001 - a vacant or unreadable crown is not a failure
-            kings = []
+        except Exception as exc:  # noqa: BLE001 - one unreadable scope costs it
+            readings.append(f"{label}: unreadable ({exc})")
+            continue
+        if not kings:
+            readings.append(f"{label}: vacant")
+            continue
+        readings.append(label + ": " + ", ".join(kings))
         for king in kings:
-            add(king, f"king of {scope}")
-    return out
+            add(king, why)
+        break
+    return NoteReaders(node_id, recipients, author_bound, readings)
 
 
-def deliver_note(
-    node_id: str,
-    text: str,
-    graph_path: Path,
-    entries: Optional[list[dict]] = None,
-) -> list[tuple[str, bool]]:
-    """Receipt lines for one delivery, each flagged when it is not a delivery.
+def _refused(head: str, readings: Iterable[str] = ()) -> Refused:
+    trail = "".join(f"\n  {reading}" for reading in readings)
+    return Refused(f"{head}so nothing was written.{trail}\n{_QUIET_HINT}", 3)
 
-    Every outcome returns a line, "nobody to reach" included: silence reads the
-    same as delivery, which is the defect this closes.
-    """
+
+def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refused:
+    """Resolve the readers BEFORE the append; surface any Refused verbatim."""
+    from fno.agents.registry import load_registry
     from fno.graph._intake import _find_node
     from fno.graph.store import read_graph
 
     try:
-        # The write already read the graph; a second read measured 19.2s here.
-        rows = read_graph(graph_path) if entries is None else entries
-        entry = _find_node(rows, node_id)
-        if entry is None:
-            return [(f"notify FAILED {node_id}: no node resolves to it", True)]
-        recipients = note_recipients(
-            entry,
-            index={str(e.get("id")): e for e in rows if isinstance(e.get("id"), str)},
-            holder_of=claim_holder,
-            kings_of=crowned_over,
-            self_session=own_session(),
+        rows = read_graph(graph_path)
+        entry = _find_node(rows, task_id) or next(  # the write path takes slugs too
+            (e for e in rows if str(e.get("slug") or "").lower() == task_id.strip().lower()),
+            None,
         )
-        if not recipients:
-            return [(f"notify: no holder, owner or king to reach for {node_id}", False)]
-        body = pointer(str(entry.get("id") or node_id), text)
-        lines = [_one_receipt(address, why, body) for address, why in recipients]
-    except Exception as exc:  # noqa: BLE001 - the note is already written
-        return [(f"notify FAILED {node_id}: {exc}", True)]
+        if entry is None:
+            return Refused(f"Error: no node resolves to '{task_id}'", 1)
+        index = {str(e.get("id")): e for e in rows if isinstance(e.get("id"), str)}
+        readers = note_readers(
+            entry, index=index, rows=load_registry(), holder_of=claim_holder,
+            kings_of=crowned_over, self_session=own_session(),
+        )
+    except Exception as exc:  # noqa: BLE001 - cannot prove a reader, so refuse
+        return _refused(f"note refused: could not read who is bound to {task_id} ({exc}), ")
+    if not readers.recipients and not readers.author_bound:
+        return _refused(f"note refused: nobody bound to {readers.node_id} would be told, ", readers.readings)
+    return readers
+
+
+def send_note(readers: NoteReaders, text: str) -> list[tuple[str, bool]]:
+    """Receipt lines for one delivery, each flagged when it is not a delivery."""
+    body = pointer(readers.node_id, text)
+    lines = [_one_receipt(address, why, body) for address, why in readers.recipients]
     return [(line, line.startswith(_UNDELIVERED)) for line in lines]
 
 
-def _one_receipt(address: str, why: str, body: str) -> str:
-    state, value = _bounded_send(address, body)
-    if state == "ok":
-        return f"notified {address} ({why}): {value}"
-    if state == "timeout":
-        return (
-            f"notify UNCONFIRMED {address} ({why}): no answer in "
-            f"{_SEND_TIMEOUT_SECONDS:.0f}s"
+def deliver(readers: NoteReaders, text: str, *, json_output: bool) -> int:
+    """Send to every bound reader; the exit code reports confirmed delivery."""
+    if not readers.recipients:
+        typer.echo(
+            f"notify: you are the only reader bound to {readers.node_id} "
+            f"({readers.author_bound}); nobody else to tell",
+            err=json_output,
         )
-    return f"notify FAILED {address} ({why}): {value}"
+        return 0
+    receipts = send_note(readers, text)
+    for line, undelivered in receipts:
+        typer.echo(line, err=undelivered or json_output)
+    if any(line.startswith("notified ") for line, _ in receipts):
+        return 0
+    unconfirmed = sum(line.startswith("notify UNCONFIRMED") for line, _ in receipts)
+    failed = sum(line.startswith("notify FAILED") for line, _ in receipts)
+    typer.echo(
+        f"notify: {readers.node_id} is noted, but no reader confirmed delivery "
+        f"({unconfirmed} UNCONFIRMED, {failed} FAILED). An UNCONFIRMED send may still "
+        "land, so check before you re-send.",
+        err=True,
+    )
+    return 4
 
 
-def _bounded_send(address: str, body: str) -> tuple[str, Any]:
-    """One send, bounded by a wall clock: ``(ok|err|timeout, value)``.
-
-    A live inject waits on the recipient's flock; one run wedged past 150s. The
-    thread is a daemon, so the process exits without it and the OS drops that lock.
-    """
+def _one_receipt(address: str, why: str, body: str) -> str:
+    """One receipt line from a wall-clock-bounded send (a live inject waits on
+    the recipient's flock; the daemon thread dies with the process)."""
     out: list[tuple[str, Any]] = []
 
     def run() -> None:
@@ -194,4 +278,9 @@ def _bounded_send(address: str, body: str) -> tuple[str, Any]:
     worker = threading.Thread(target=run, daemon=True)
     worker.start()
     worker.join(_SEND_TIMEOUT_SECONDS)
-    return out[0] if out else ("timeout", None)
+    state, value = out[0] if out else ("timeout", None)
+    if state == "ok":
+        return f"notified {address} ({why}): {value}"
+    if state == "timeout":
+        return f"notify UNCONFIRMED {address} ({why}): no answer in {_SEND_TIMEOUT_SECONDS:.0f}s"
+    return f"notify FAILED {address} ({why}): {value}"

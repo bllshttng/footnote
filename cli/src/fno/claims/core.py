@@ -1002,6 +1002,10 @@ HANDOVER_HOLDER_PREFIX = "spawn-handover:"
 #: node, not an agent. `holder_agent_name` is the one resolver.
 TARGET_SESSION_HOLDER_PREFIX = "target-session:"
 
+#: A subagent planner holds node:<id> under this prefix between `session open`
+#: and `session close`, mirroring target-session. Resolved in the same branch.
+BLUEPRINT_HOLDER_PREFIX = "blueprint-session:"
+
 
 def holder_agent_name(holder: Optional[str], rows: Any) -> Optional[str]:
     """Resolve a claim holder to the agent behind it, or None.
@@ -1015,8 +1019,8 @@ def holder_agent_name(holder: Optional[str], rows: Any) -> Optional[str]:
     if holder.startswith(HANDOVER_HOLDER_PREFIX):
         name = holder[len(HANDOVER_HOLDER_PREFIX):]
         return name if any(row.name == name for row in rows) else None
-    if holder.startswith(TARGET_SESSION_HOLDER_PREFIX):
-        sid = holder[len(TARGET_SESSION_HOLDER_PREFIX):]
+    if holder.startswith((TARGET_SESSION_HOLDER_PREFIX, BLUEPRINT_HOLDER_PREFIX)):
+        sid = holder.split(":", 1)[1]
         row = next(
             (
                 r

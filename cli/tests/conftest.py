@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import warnings
 from pathlib import Path
 
@@ -334,6 +335,19 @@ def _reap_session_processes(tmp_path_factory):
     # This session's own pid, not the default: a leak still parented by THIS
     # worker has a readable cwd only when the worker is the named reaper, and
     # a worker-parented child is exactly the leak that never reaches ppid 1.
+    # A rust-front keeper reparents to ppid 1 when its short-lived spawner
+    # exits, so the census takes the reaper set the sweep already uses - but
+    # it WAITS first: the fixture itself bounds every keeper to a 5s idle
+    # self-exit, and a keeper still inside that window is not a leak. Measured
+    # 2026-09-12: the changed-subset job co-scheduled the note suites with
+    # this guard and tore down inside the idle window, counting a keeper the
+    # bound was about to retire.
+    from tests._leak_census import census_rooted
+
+    idle_grace = float(os.environ.get("FNO_STORE_KEEPER_IDLE_SECS", "5")) + 3.0
+    grace_end = time.monotonic() + idle_grace
+    while census_rooted([str(basetemp)]) and time.monotonic() < grace_end:
+        time.sleep(0.5)
     rooted = reap_rooted([str(basetemp)], reaper=os.getpid())
     assert not survivors and not rooted, (
         f"{len(survivors)} store keeper(s) outlived the test session "
