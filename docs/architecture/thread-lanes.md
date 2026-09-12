@@ -76,7 +76,7 @@ A row's status comes from what drives it, never from a pane that is not there. A
 
 ## What a thread lane carries
 
-A spawn never refuses a flag because of the substrate. The carrier facts live in the capability contract beside the lane tables: a `[harness.<name>.thread]` row for the daemon/argv lanes (claude, codex, opencode), and the `passthrough` field on a keeper row. `carries` names the launch axes the lane takes in its native form; `passthrough` names the fenced `--` token spellings it maps, or `["*"]` when the lane appends every token to its argv. One predicate (`harness_map.thread_uncarried`) reads the row, and the spawn front door demotes a spawn carrying an unmapped flag to the pane - loudly, never a refusal on the substrate and never a silent drop.
+A spawn never refuses a flag because of the substrate. The carrier facts live in the capability contract beside the lane tables. A `[harness.<name>.thread]` row covers the daemon/argv lanes (claude, codex, opencode). A keeper row answers through its `passthrough` field. `carries` names the launch axes the lane takes in its native form. `passthrough` names the fenced `--` token spellings it maps. `["*"]` means the lane appends every token to its argv. One predicate (`harness_map.thread_uncarried`) reads the row. The spawn front door demotes a spawn carrying an unmapped flag to the pane. The demotion is loud: never a refusal on the substrate, never a silent drop.
 
 | Flag | codex thread (app-server) | claude thread (`claude --bg`) | keeper threads (agy, cursor-agent, grok, pi) | opencode thread (serve) | headless |
 |---|---|---|---|---|---|
@@ -87,9 +87,9 @@ A spawn never refuses a flag because of the substrate. The carrier facts live in
 | `--agent`, `--tools`, `--deny-tools` | pane, which refuses (codex has no spelling) | argv | pane | pane | claude only |
 | `-- <tokens>` | `-c`/`--config key=value` to `thread/start.config`, `--add-dir dir` to `state_dirs`, any other token to pane | appended to the argv | appended to the keeper launch argv | pane | appended to the one-shot argv |
 
-A flag the harness itself cannot spell on any substrate (codex `--agent`) is not a harness CLI flag: the pane refuses it on every substrate, and the text names the `--` fence as the way to pass the harness's own flag. On codex, `-c` is `--cwd` on `fno agents spawn`; the codex config spelling rides the fence, `-- -c key=value`, and the daemon parses it into `thread/start.config` with TOML-typed values. The raw tokens are stored on the registry row, so a daemon restart re-parses them onto `thread/resume` instead of silently dropping the operator's per-thread config.
+Some flags are not harness CLI flags at all: codex `--agent` has no spelling on any substrate. The pane refuses those on every substrate. The text names the `--` fence as the way to pass the harness's own flag. On codex, `-c` is `--cwd` on `fno agents spawn`. The codex config spelling rides the fence instead: `-- -c key=value`. The daemon parses it into `thread/start.config` with TOML-typed values. The raw tokens are stored on the registry row. A daemon restart re-parses them onto `thread/resume`, so the operator's per-thread config is not silently dropped.
 
-Seat and honesty are different answers. `thread_seatable` measured True on 2026-09-11 for claude, codex, opencode, agy, cursor-agent, grok and pi, which is why the table above gives opencode a `thread` row that carries `model` only: every other opencode flag demotes to the pane until the serve lane maps it. Whether the opencode thread lane is HONEST is a separate open question that keeps its own verdict; this row records only what the lane carries today.
+Seat and honesty are different answers. `thread_seatable` measured True on 2026-09-11 for claude, codex, opencode, agy, cursor-agent, grok and pi. That is why the table gives opencode a `thread` row carrying `model` only. Every other opencode flag demotes to the pane until the serve lane maps it. Whether the opencode thread lane is HONEST is a separate open question with its own verdict. This row records only what the lane carries today.
 
 ## The gate rule
 
