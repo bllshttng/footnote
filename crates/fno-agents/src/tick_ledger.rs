@@ -1022,6 +1022,7 @@ mod tests {
             interval_s: 60,
             stale: true,
             failing: false,
+            failing_for_s: None,
             cause: None,
             line: String::new(),
         };
