@@ -818,13 +818,20 @@ def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) ->
     candidates = [
         row["name"] for row in reading.unresolved_rows if Path(row.get("cwd") or "").name == node_id
     ]
-    return {
+    payload = {
         "roster_consulted": True,
         "roster_rows_scanned": reading.rows_scanned,
         "roster_rows_unresolved": reading.rows_unresolved,
         "roster_unresolved_candidates": candidates,
+        # Additive display only: occupancy itself is decided by the overlay
+        # join below, which also sees rows this node-attributed fold misses.
         "roster_workers": reading.workers_on(node_id),
     }
+    if reading.reason:
+        # The live probe degraded to the registry-only view and was tolerated:
+        # name it, so the payload never reads as a full-fleet answer.
+        payload["roster_probe"] = reading.reason
+    return payload
 
 
 def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> str:
@@ -849,6 +856,20 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
         return f"{state}, roster not consulted ({info.get('roster_skip_reason', 'unknown')})"
     workers = info.get("roster_workers") or []
 
+    # The overlay join is the occupancy authority, and its answer arrives as
+    # `worked_by`: rows it resolved through the graph's own session ids, a set
+    # the node-attributed `roster_workers` fold cannot see.
+    worked_by = info.get("worked_by") or []
+    if worked_by:
+        line = f"UNCLAIMED but a live worker is on this node: {', '.join(worked_by)}"
+        unresolved = info.get("roster_rows_unresolved", 0)
+        if unresolved:
+            # x-dead task 2.1: the verdict is only as good as its coverage,
+            # so the engaged line names the fraction too.
+            scanned = info.get("roster_rows_scanned", 0)
+            line += f"; coverage degraded: {unresolved} of {scanned} rows unresolved"
+        return line
+
     if worker_verdicts is None:
         engaged, unmeasurable, worker_verdicts = classify_workers(workers)
     else:
@@ -863,8 +884,6 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
         line = f"UNCLAIMED but a live worker is on this node: {rendered}"
         unresolved = info.get("roster_rows_unresolved", 0)
         if unresolved or unmeasurable:
-            # x-dead task 2.1: the verdict is only as good as its coverage,
-            # so the engaged line names the fraction too.
             scanned = info.get("roster_rows_scanned", 0)
             line += (
                 f"; coverage degraded: {unresolved} of {scanned} rows unresolved"
@@ -934,7 +953,7 @@ def status(
         ),
     ),
 ) -> None:
-    """Inspect a single claim. Exit code reflects state for scripting.
+    """Inspect a single claim.
 
     On a ``node:<id>`` key that nobody holds, the roster is cross-checked
     before the answer is rendered. ``free`` had two explanations the output
@@ -959,28 +978,56 @@ def status(
     node_id = key[len("node:"):] if key.startswith("node:") else ""
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
-        info.update(_roster_crosscheck(node_id))
-        workers = info.get("roster_workers") or []
+        # ONE fleet read, shared with the overlay below. require_live_probe
+        # matches the overlay so the registry-only view still carries
+        # attribution, and a tolerated degraded probe surfaces as
+        # `roster_probe` instead of reading as a full answer.
+        reading = read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S, require_live_probe=False)
+        info.update(_roster_crosscheck(node_id, reading))
+    if crosschecked and info.get("roster_consulted"):
         try:
-            from fno.graph.statuses import closed_worker_session_ids
             from fno.graph.store import read_nodes_by_ids
             from fno.paths import graph_json
 
             reply = read_nodes_by_ids(graph_json(), [node_id]) or {}
             entry = next(iter(reply.get("entries") or []), None)
-            closed = closed_worker_session_ids(entry) if entry else set()
         except Exception:  # noqa: BLE001 - a graph read failure never fakes a skip
-            closed = set()
-        workers = [w for w in workers if str(w.get("row_id") or "") not in closed]
-        engaged, undated, worker_verdicts = classify_workers(workers)
-        if engaged:
-            info["worked_by"] = [worker["name"] for worker in engaged]
+            entry = None
+        worked_names: list[str] = []
+        if entry is not None:
+            try:
+                from fno.graph.statuses import closed_worker_session_ids
+                from fno.graph.statuses import live_worked_node_ids
+
+                worked = live_worked_node_ids(
+                    strict=True, entries=[entry], reading=reading
+                )
+                # The display field drops the same rows the overlay's
+                # worked_by excludes: a session whose own phase row closed
+                # never renders here as an occupancy candidate.
+                closed = closed_worker_session_ids(entry)
+                info["roster_workers"] = [
+                    w for w in info.get("roster_workers") or []
+                    if str(w.get("row_id") or "") not in closed
+                ]
+            except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
+                typer.echo(f"worked overlay degraded: {exc}", err=True)
+                worked = {}
+            worked_names = worked.get(node_id) or []
+        from fno.graph.statuses import UNMEASURABLE_LABEL_MARK
+
+        reachable = [n for n in worked_names if UNMEASURABLE_LABEL_MARK not in n]
+        if reachable:
+            info["worked_by"] = reachable
+            # A positively-live worker on an unheld node is never `free`.
             # x-dead task 2.1: degraded coverage enters the verdict, not a
             # field beside it (31 of 53 rows went unresolved under a flat
             # `live-worker`).
+            info["state"] = "unknown"
             info["basis"] = (
                 "live-worker-degraded-coverage"
-                if info.get("roster_rows_unresolved", 0) or undated
+                if info.get("roster_rows_unresolved", 0)
+                or any(UNMEASURABLE_LABEL_MARK in n for n in worked_names)
                 else "live-worker"
             )
         unresolved = info.get("roster_rows_unresolved", 0)
@@ -990,6 +1037,16 @@ def status(
             # closed for dispatch consumers. A patchy roster that names
             # nobody here used to fail closed fleet-wide: one unresolved row
             # anywhere read every node in the fleet as unknown.
+            # 483b08dd6 (2026-09-06) shipped the general form of that -
+            # any unresolved row anywhere set state=unknown - and 144685877
+            # (2026-09-08) reverted it: at the measured wedge the fleet sat
+            # at 68 unresolved of 133 scanned, a majority, and a warm worker
+            # sat unimplementing because ownership was unprovable. A
+            # coverage-ratio arm was proposed for this exact reader,
+            # measured against those numbers, and refused by the crown on
+            # 2026-09-11: a verdict about node N turns on evidence about
+            # node N, never on a count of rows that implicate no node at
+            # all. This per-node candidate check is the arm that survived.
             info["state"] = "unknown"
             info["basis"] = "unresolved-roster-row"
         elif unresolved:
@@ -1003,7 +1060,9 @@ def status(
         # this command straight into jq without --json, and a trailing prose
         # line makes that read fail exactly when the claim has lapsed, which is
         # the case the operator most needs a truthful answer for.
-        line = _roster_verdict_line(info, worker_verdicts)
+        line = _roster_verdict_line(info)
+        if info.get("roster_probe"):
+            line += f"; roster probe degraded: {info['roster_probe']}"
         # Witness named when one answered: a verdict from a failing probe
         # stays auditable on the loud line.
         if info.get("session_basis"):

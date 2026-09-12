@@ -565,3 +565,23 @@ def test_a_worked_authority_outage_names_itself_not_a_running_worker(
     obj = json.loads(res.output)
     assert obj["verdict"] == "already-running"
     assert obj["reason"] == "worked-authority-unavailable"
+
+
+def test_a_worked_overlay_block_with_no_claim_names_the_worker(
+    claims_tmp, monkeypatch: pytest.MonkeyPatch
+):
+    """x-a8b5 AC4, producer side: no claim holder, the worked overlay names a
+    worker. The block is real but the claim is not, so the reason is its own
+    token and `worker` rides the payload - `unproven-claim` asserted a claim
+    that does not exist and dropped the only actionable field."""
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda **_kw: {"x-8888": ["king-a792-control"]},
+    )
+    res = _invoke("x-8888", "--holder", "probe:1", "--no-reserve", "--json")
+    assert res.exit_code == 0
+    obj = json.loads(res.output)
+    assert obj["verdict"] == "already-running"
+    assert obj["reason"] == "worked-overlay"
+    assert obj["worker"] == "king-a792-control"
+    assert obj["holder"] == "unknown"

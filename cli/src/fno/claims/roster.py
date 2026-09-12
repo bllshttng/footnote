@@ -43,12 +43,17 @@ def read_roster(
     registry_only_mark = "falling back to registry-only view"
     unmeasurable: dict = {}
     blocking = []
+    degraded_reason = ""
     for w in warnings:
         idx = w.find(UNMEASURABLE_ROW_PREFIX)
         if idx == -1:
             degraded_probe = (not require_live_probe) and (registry_only_mark in w)
             if not w.startswith(ADVISORY_WARNING_PREFIX) and not degraded_probe:
                 blocking.append(w)
+            elif degraded_probe and not degraded_reason:
+                # Tolerated, not silent: the caller learns the probe degraded,
+                # so a registry-only answer never masquerades as a full one.
+                degraded_reason = w
             continue
         fields = dict(
             tok.split("=", 1)
@@ -82,7 +87,7 @@ def read_roster(
             unresolved.append(entry)
         if r.row_id:
             by_session[str(r.row_id)] = entry
-    return RosterReading(True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved), unmeasurable)
+    return RosterReading(True, len(rows), index, degraded_reason, by_session, len(unresolved), tuple(unresolved), unmeasurable)
 
 
 def _finished_row_states() -> frozenset:

@@ -332,6 +332,12 @@ def _spawn_guard_decision(
         # live worker.
         "init_reached": _init_reached(node_id, observation.holder, cwd),
     }
+    if observation.worker:
+        # The overlay's answer, named beside `holder`: when the block came
+        # from the worked overlay rather than the claim, `holder` reads the
+        # literal "unknown" and the worker name is the only actionable field
+        # on the payload.
+        common["worker"] = observation.worker
     if observation.action in ("auto-deferred", "defer-failed"):
         return _claim_refused(observation.action, common), 0
     if observation.blocks_dispatch:
@@ -391,6 +397,8 @@ def _spawn_guard_decision(
                         node_id, observation.holder, cwd
                     ),
                 }
+                if observation.worker:
+                    common["worker"] = observation.worker
                 # The cleared claim makes this the first reading with the node
                 # free, so the failure-limit arm can fire here for the first
                 # time. Report what it decided. Falling through would label an
@@ -438,6 +446,14 @@ def _spawn_guard_decision(
                 block if block and not block.startswith("held:")
                 else "suspect-claim" if wedged
                 else "live-claim" if common["init_reached"]
+                # No claim holder (the literal "unknown") and the worked
+                # overlay named a worker: the block is REAL but the claim is
+                # not. Borrowing unproven-claim here asserted a claim that
+                # does not exist and hid the worker name, which sent the
+                # reader looking for a release remedy for a block that needs
+                # none.
+                else "worked-overlay" if observation.worker
+                and observation.holder == "unknown"
                 else "unproven-claim"
             )
             return {
@@ -1985,11 +2001,12 @@ def cmd_spawn(
                 guard.get("reason") or guard.get("verdict") or "unknown"
             )
             prior = f" prior_holder={guard['holder']}" if guard.get("holder") else ""
+            worker = f" worker={guard['worker']}" if guard.get("worker") else ""
             detail = f" detail={guard['detail']!r}" if guard.get("detail") else ""
             print(
                 f"node dispatch refused: node={guarded_node} "
-                f"verdict={guard.get('verdict')} reason={guard_reason}{prior}; "
-                f"no worker launched{detail}",
+                f"verdict={guard.get('verdict')} reason={guard_reason}{prior}"
+                f"{worker}; no worker launched{detail}",
                 file=sys.stderr,
             )
             # This is the launch path, so a remedy here HAS earned itself:

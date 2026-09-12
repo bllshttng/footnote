@@ -26,10 +26,10 @@
 # See docs/architecture/company-boundaries.md.
 cli/src/fno/events/cli.py:136: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
 cli/src/fno/events/cli.py:168: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
-cli/src/fno/claims/cli.py:855: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
-cli/src/fno/claims/cli.py:1088: L1 core -> L5 runtime / from fno.agents.watchdog import harness_for_session, tail_facts
-cli/src/fno/claims/cli.py:1356: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1379: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
+cli/src/fno/claims/cli.py:876: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
+cli/src/fno/claims/cli.py:1147: L1 core -> L5 runtime / from fno.agents.watchdog import harness_for_session, tail_facts
+cli/src/fno/claims/cli.py:1415: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1438: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
 #
 # Added 2026-09-03 (x-1182). `fno agents claim list --silent-after` reads a
 # claim's own transcript tail to answer "has this worker gone quiet", the
@@ -40,10 +40,10 @@ cli/src/fno/claims/cli.py:1379: L1 core -> L5 runtime / from fno.agents.truth_st
 # above it.
 cli/src/fno/claims/roster.py:34: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
 cli/src/fno/claims/roster.py:40: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
-cli/src/fno/claims/roster.py:89: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
-cli/src/fno/claims/roster.py:96: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
-cli/src/fno/claims/roster.py:114: L1 core -> L5 runtime / from fno.agents.reachability import (
-cli/src/fno/claims/roster.py:125: L1 core -> L5 runtime / from fno.agents.watchdog import classify_tail, harness_for_session, tail_facts
+cli/src/fno/claims/roster.py:94: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
+cli/src/fno/claims/roster.py:101: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
+cli/src/fno/claims/roster.py:119: L1 core -> L5 runtime / from fno.agents.reachability import (
+cli/src/fno/claims/roster.py:130: L1 core -> L5 runtime / from fno.agents.watchdog import classify_tail, harness_for_session, tail_facts
 #
 # Added 2026-09-11 (the liveness-readers node). Every roster row, the status
 # crosscheck and the graph's worked overlay now classify through the ONE
@@ -54,7 +54,7 @@ cli/src/fno/claims/roster.py:125: L1 core -> L5 runtime / from fno.agents.watchd
 # shape as the entries above. The retirement path is descending the pure core
 # (the verdict constants and classify_reachability) into L1 claims; the
 # instruments cannot follow it down, so the roster's watchdog edges stay.
-cli/src/fno/graph/statuses.py:301: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
+cli/src/fno/graph/statuses.py:314: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
 
 # Added 2026-09-10. The maintain abandoned-do-row leg's prover answers "is
 # this do row's session gone" from transcript truth: finished_with_the_tree

@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fno.claims.roster import RosterReading
 
 from fno.graph._constants import LOCK_TTL_HOURS
 
@@ -37,6 +41,10 @@ STATUS_MIGRATION: dict[str, str] = {"claimed": "in_progress"}
 # closure-release hook, the tracker backends' closed set, and the reaper's
 # node settlement, so they cannot drift (x-94f8).
 TERMINAL_RUNGS: frozenset[str] = frozenset({"done", "superseded"})
+
+# The label prefix every unmeasured admit carries. Readers split live from
+# unmeasured admits on this literal, so the wording is a contract, not prose.
+UNMEASURABLE_LABEL_MARK = "(unmeasurable:"
 
 # Sentinel prefix used by the pre-feature workaround that overloaded
 # ``completed_at`` to encode deferral. Detected once in ``recompute_statuses``
@@ -289,13 +297,18 @@ def closed_worker_session_ids(entry: dict) -> set[str]:
 
 
 def live_worked_node_ids(
-    *, strict: bool = False, entries: list[dict] | None = None
+    *, strict: bool = False, entries: list[dict] | None = None,
+    reading: RosterReading | None = None,
 ) -> dict[str, list[str]]:
     """Return open-phase nodes whose roster workers are live.
 
     Sources: the session-row join, the node-attributed fold (registry worker,
     no graph session row), the unmeasurable fold (no session id, attributed
     by fleet_rows). Unattributable liveness still refuses.
+
+    ``reading`` hands in an already-paid fleet read; a caller that read the
+    roster itself must pass it here rather than pay a second probe, which is
+    why this is the ONE resolver other readers join through.
     """
     try:
         from fno.agents.reachability import REACHABLE, UNKNOWN
@@ -308,7 +321,8 @@ def live_worked_node_ids(
         if not any(isinstance(entry, dict) and entry.get("status") not in TERMINAL_RUNGS
                    for entry in entries):
             return {}
-        reading = read_roster(require_live_probe=False)
+        if reading is None:
+            reading = read_roster(require_live_probe=False)
         if not reading.consulted:
             raise RuntimeError(reading.reason or "roster not consulted")
 
@@ -326,7 +340,7 @@ def live_worked_node_ids(
                 # x-dead: unmeasured rows are listed marked, never vanished.
                 label = (
                     name if verdict == REACHABLE
-                    else f"{name} (unmeasurable: no positive liveness evidence)"
+                    else f"{name} {UNMEASURABLE_LABEL_MARK} no positive liveness evidence)"
                 )
                 if isinstance(label, str) and label and label not in workers:
                     workers.append(label)
@@ -348,7 +362,7 @@ def live_worked_node_ids(
                 if verdict in (REACHABLE, UNKNOWN):
                     _admit(extra.get("name"), verdict)
             for extra_name in reading.unmeasurable_by_node.get(node_id, ()):
-                marker = f"{extra_name} (unmeasurable: no harness session id)"
+                marker = f"{extra_name} {UNMEASURABLE_LABEL_MARK} no harness session id)"
                 if marker not in workers:
                     workers.append(marker)
             if workers:
