@@ -381,6 +381,7 @@ fn subtree_held(
     activity: &HashMap<String, crate::truth_probe::TruthProbe>,
     crown_ids: Option<&HashSet<String>>,
     worked: Option<&SourceRead>,
+    drivers: Option<&SourceRead>,
     seen: &mut HashSet<String>,
 ) -> bool {
     if parent_id.is_empty() || !seen.insert(parent_id.to_string()) {
@@ -396,7 +397,8 @@ fn subtree_held(
             if done {
                 return false;
             }
-            let (state, claim) = node_driver(child, claim_by_node, activity, crown_ids, worked);
+            let (state, claim) =
+                node_driver(child, claim_by_node, activity, crown_ids, worked, drivers);
             let live_claim = claim.is_some_and(|c| !claim_is_dead(c, activity));
             if live_claim || state == "crowned" {
                 return true;
@@ -415,6 +417,7 @@ fn subtree_held(
                     activity,
                     crown_ids,
                     worked,
+                    drivers,
                     seen,
                 ),
                 None => false,
@@ -703,6 +706,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 &inputs.holder_activity,
                 inputs.scope_ids.as_ref(),
                 Some(&inputs.worked),
+                Some(&inputs.drivers),
                 &mut seen,
             ) {
                 continue;
