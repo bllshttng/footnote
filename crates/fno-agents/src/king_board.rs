@@ -1081,20 +1081,19 @@ mod tests {
     }
 
     #[test]
-    fn a_blind_actionable_queue_makes_the_count_unknown_not_a_number() {
-        // x-c911: +1 per blind actionable queue read as one row; a king went
-        // hunting rows that never existed. Unknown means -1 with the failure
-        // named, never a count.
+    fn a_blind_actionable_queue_makes_the_count_a_named_floor() {
+        // x-c911: the aggregate is a FLOOR (readable rows only); the blind
+        // queues are named in a warning, never counted as rows.
         let mut inputs = inputs_with(json!([]), json!([]), json!([]));
         inputs.entries = Some(Vec::new());
-        inputs.undispatched = SourceRead::err("exit 1: fno backlog undispatched failed");
+        inputs.undispatched = SourceRead::err("exit 1: flo failed");
         let board = build_board(&inputs);
-        assert_eq!(board["actionable"], -1);
+        assert_eq!(board["actionable"], 0);
         let warnings = board["warnings"].as_array().unwrap();
         assert!(
             warnings.iter().any(|w| {
                 w.as_str().unwrap().contains("undispatched")
-                    && w.as_str().unwrap().contains("actionable is unknown")
+                    && w.as_str().unwrap().contains("actionable is a floor")
             }),
             "warnings must name the blind queue: {warnings:?}"
         );

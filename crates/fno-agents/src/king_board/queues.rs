@@ -427,11 +427,11 @@ fn subtree_held(
     })
 }
 
-/// The aggregate the termination readers key on. A blind ACTIONABLE queue
-/// makes the count UNKNOWN (-1), never a number: +1 per blind queue read as
-/// one row and a king went hunting rows that never existed (x-c911), so the
-/// count collapses and king_decide's blind branch carries the block instead.
-/// A blind REPORT-ONLY queue stays loud through unreadable and uncounted.
+/// The aggregate the termination readers key on: a FLOOR, the rows the board
+/// can actually name. Blind actionable queues contribute nothing and are
+/// named in a warning instead (x-c911: +1 per blind queue read as one row
+/// and a king went hunting rows that never existed). A blind REPORT-ONLY
+/// queue stays loud through unreadable and uncounted.
 pub(crate) fn actionable_tally(queues: &[Queue], warnings: &mut Vec<String>) -> i64 {
     let mut readable: i64 = 0;
     let mut blind: Vec<&'static str> = Vec::new();
@@ -444,16 +444,15 @@ pub(crate) fn actionable_tally(queues: &[Queue], warnings: &mut Vec<String>) -> 
             readable += q.count;
         }
     }
-    if blind.is_empty() {
-        return readable;
+    if !blind.is_empty() {
+        blind.sort();
+        warnings.push(format!(
+            "actionable is a floor: {} actionable queue(s) unreadable and uncounted ({})",
+            blind.len(),
+            blind.join(", ")
+        ));
     }
-    blind.sort();
-    warnings.push(format!(
-        "actionable is unknown: {} actionable queue(s) unreadable ({}) - the count is not a row count",
-        blind.len(),
-        blind.join(", ")
-    ));
-    -1
+    readable
 }
 
 /// Build the board payload. Pure; does no I/O. Queue names, order, and row

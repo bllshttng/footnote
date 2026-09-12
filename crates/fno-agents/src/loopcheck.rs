@@ -21,7 +21,7 @@ use crate::{
 use crate::acceptance_evidence::{evaluate_done_probes, ProbeGate, PROBE_TIMEOUT};
 use crate::bounded_spawn::{kill_process_group, killpg};
 pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
-use crate::king_termination::{blind_count_message, bound_breached, king_quiet_body};
+use crate::king_termination::{bound_breached, king_quiet_body};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11719,11 +11719,6 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         }
     };
 
-    if board.actionable < 0 {
-        // x-c911: -1 is "unknown", never a row count; the message names the blind queue.
-        return blind_block(&blind_count_message(&board), -1, dry);
-    }
-
     if board.actionable == 0 {
         if board.operator_questions_unreadable {
             // Bounded, and each blocking fire emits its row so the counters
@@ -11771,12 +11766,21 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             }
         };
         if undelivered == 0 {
-            let message = if board.unreadable + board.over_budget > 0 {
-                "board clean on every readable queue; exiting NoWork"
-            } else {
-                "board clean; exiting NoWork"
-            };
-            return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
+            // x-c911: a floor count cannot see blind queues; refuse to certify.
+            if board.unreadable_sources {
+                return blind_block(
+                    "board quiet but some sources are unreadable; blocking completion",
+                    0,
+                    dry,
+                );
+            }
+            return terminate(
+                TerminationReason::NoWork,
+                "board clean; exiting NoWork",
+                0,
+                dry,
+                &[],
+            );
         }
         let message = match &drain_error {
             Some(e) => {
