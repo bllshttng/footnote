@@ -342,6 +342,10 @@ def test_two_live_rows_holding_the_same_territory_is_a_conflict(
     court = gather_court()
 
     assert court["conflicts"] == [{"scope": "alpha", "holders": ["king-a", "king-b"]}]
+    # `agree` answers a different question than `conflicts`, so both rivals read
+    # true here by design. `conflicts` is the only field that detects the rivalry.
+    assert [c["agree"] for c in court["crowns"]] == [True, True]
+    assert court["summary"]["disagreements"] == 0
 
 
 def test_aliases_and_ordered_scopes_share_one_conflict_group(

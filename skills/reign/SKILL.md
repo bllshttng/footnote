@@ -23,8 +23,8 @@ The crown is bestowed, never inferred. Verify it before anything else:
 
 1. Run `fno agents court --json`.
 2. If a row carries a crown-source field, use it. If it does not, call the reader directly: resolve `reign_state(scope)` (`fno agents king manifest-path` resolves the same file) and print `CROWN-SOURCE: reign_state (court field absent)`.
-3. This session's handle must appear crowned over `<scope>` (rung 0, 1 or 2) AND the manifest-versus-registry answer must read `split: false`.
-4. A split, or an unknown, STOPS the skill and prints both session ids. A king cannot reign through a crown two readers disagree about, and it cannot re-crown itself.
+3. This session's handle must appear crowned over `<scope>` (rung 0, 1 or 2), the manifest-versus-registry answer must read `split: false`, AND `conflicts` must carry no entry whose scope is `<scope>`. The two fields answer different questions. `split` is one crown that two readers describe differently. `conflicts` is two crowns over one territory. `agree` answers neither: two rival rows both read `agree: true` by design, because `agree` only says the graph was read and the scope resolved.
+4. A split, a conflict, or an unknown STOPS the skill and prints both session ids. For a conflict, print the two holders the entry names. A `conflicts` of null means the reader could not answer. That is an unknown and it stops the skill, because an absent answer is not the same as no rival. A king cannot reign through a crown two readers disagree about, it cannot reign beside a rival, and it cannot re-crown itself.
 5. Otherwise print `not crowned over <scope>; from an attended shell: fno agents crown <handle> --scope <scope>` and stop.
 
 ## On crowning
