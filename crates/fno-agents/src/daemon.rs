@@ -40,7 +40,10 @@ use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
 mod list_rows;
-use self::list_rows::{attention_sort_key, handle_list, rendered_status_from_truth};
+use self::list_rows::{
+    activity_basis_from_truth, apply_row_contradiction, attention_sort_key, basis_word_from_truth,
+    handle_list, rendered_status_from_truth,
+};
 pub(crate) use self::list_rows::{progress_from_truth, registry_truth_handle};
 mod prune_outcome;
 pub(crate) use self::prune_outcome::PruneOutcome;
@@ -4945,199 +4948,6 @@ async fn read_worker_snapshot(sock: &std::path::Path) -> Option<String> {
         .and_then(|r| r.get("text").and_then(|t| t.as_str()).map(String::from))
 }
 
-/// Map a truth probe onto the wire value `list` renders.
-///
-/// Prefers the shared reachability verdict, which is derived once (Python-side,
-/// `fno/agents/reachability.py`) with the falsifiers applied. The `state` arm
-/// below is a COMPATIBILITY FALLBACK for a `fno` too old to emit the verdict,
-/// not a second opinion: it maps transcript activity alone, so a session whose
-/// process died forty minutes ago still reads `working` there and renders live.
-///
-/// Note the fallback and the verdict disagree deliberately on quiet rows. The
-/// fallback calls a silent row `orphaned`; the verdict calls it `unknown`,
-/// because silence is absence of evidence and this registry lists REACHABLE
-/// agents rather than live processes -- a row is never condemned for being
-/// quiet, only for an affirmative falsification.
-///
-/// STATUS is served ACTIVITY, so a confirmed-live pid is not an input here
-/// (x-c672): a process being up says nothing about when its transcript last
-/// moved, and the Python list lane has no pid census, so a pid lift here would
-/// read the same row as two different words on the two lanes. An unanswered
-/// activity age is `unknown` on both.
-fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
-    let value = value?;
-    if let Some(raw) = value.as_str() {
-        return chrono::DateTime::parse_from_rfc3339(raw)
-            .ok()
-            .map(|parsed| parsed.with_timezone(&chrono::Utc));
-    }
-    let micros = value.as_u64()?;
-    if micros <= 1_000_000_000_000 {
-        return None;
-    }
-    chrono::DateTime::from_timestamp_micros(micros as i64)
-}
-
-/// Refuse a row-level verdict when the same emitted row carries fresher
-/// evidence against it. This is deliberately pure and shared by the fixture
-/// test with Python; the caller supplies all fields before the row is written.
-/// `now` is injected so the fixture's fixed clock and production's wall clock
-/// assert the same rules.
-fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<chrono::Utc>) {
-    // The falsifier as it ARRIVED, snapshotted before any rule below rewrites
-    // `basis`. Python's `_supervisor_contradicted` reads the input mapping, so
-    // reading the mutated map here would name a different falsifier than the
-    // twin for the same row, and the shared fixture has no case where two
-    // rules fire together to catch it.
-    let incoming_basis = row
-        .get("basis")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    // `status` for the same reason, and the reason generalises: Python reads
-    // the input `row` and writes a SEPARATE `projected` dict, so every rule
-    // there sees the original. This twin mutates `row` in place, so any rule
-    // reading `status` after an earlier one rewrote it diverges from Python
-    // for that row. Today the two rules are mutually exclusive - `terminal`
-    // is `orphaned`/`exited` and this one needs `spawning` - so nothing
-    // changes; snapshot anyway, because relying on that exclusion is a rule
-    // no test states and the next rule added here will not know it.
-    let incoming_status = row
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let event_at = row_timestamp(row.get("last_event_at"));
-    let reconciled_at = row_timestamp(row.get("last_reconciled_at"));
-    let terminal = matches!(
-        row.get("status").and_then(Value::as_str),
-        Some("orphaned" | "exited")
-    );
-    if terminal && event_at.is_some() && reconciled_at.is_some() && event_at > reconciled_at {
-        row.insert("status".into(), json!("unknown"));
-        row.insert("basis".into(), json!("stale-verdict-fresher-event"));
-    }
-
-    let message_at = row_timestamp(row.get("last_message_at"));
-    let message_is_too_new = match (message_at, event_at) {
-        (Some(message), Some(event)) => message - event > chrono::Duration::seconds(2),
-        _ => false,
-    };
-    if message_is_too_new {
-        row.insert("last_message_at".into(), Value::Null);
-        row.insert(
-            "last_message_at_basis".into(),
-            json!("refused-newer-than-transcript"),
-        );
-    }
-
-    // (x-d401) A stored `spawning` token a live pid has outlived: the token
-    // stopped being a measurement. Fires only on POSITIVE liveness (the
-    // caller measured a live pid and injected `pid_alive: true`); unknown
-    // keeps the token, and a missing `created_at` is absent age evidence,
-    // not staleness. Mirrors `_spawning_outlived_by_a_live_pid` in Python;
-    // rows read `spawning` for 3-16 hours while alive (x-0248).
-    if incoming_status == "spawning"
-        && row.get("pid_alive") == Some(&Value::Bool(true))
-        // `> Duration::seconds(600)`, not `num_seconds() > 600`: num_seconds
-        // truncates, so a 600.5s-old row read `spawning` here and `live` in
-        // Python, whose timedelta compare keeps the fraction.
-        && row_timestamp(row.get("created_at"))
-            .is_some_and(|created_at| now - created_at > chrono::Duration::seconds(600))
-    {
-        row.insert("status".into(), json!("quiet"));
-        row.insert("basis".into(), json!("stale-spawning-live-pid"));
-    }
-    row.remove("pid_alive");
-
-    // Both keys ALWAYS ride the row, as `reachability`/`basis` and
-    // `progress`/`progress_basis` already do on this same row. A conditional
-    // key cannot be told apart from a producer that forgot to set one, and the
-    // list-row contract in schemas/agents-list-row.json is an exact key set.
-    let (origin, origin_basis) = liveness_origin(row);
-    row.insert("liveness_origin".into(), origin);
-    row.insert(
-        "liveness_origin_basis".into(),
-        origin_basis.map_or(Value::Null, |basis| json!(basis)),
-    );
-    // (x-d401, x-d4a6) A superseded supervisor claim beside the falsifier
-    // that beat it: `superseded_live_status` is a caller-injected input (like
-    // `pid`), popped here; only the basis key survives, null when no
-    // supersession happened. PRESENCE is the caller's assertion that a
-    // supersession happened; which words claim nothing lives in the gate
-    // that stamps this input (read.py's {idle, done} admission set) - a
-    // second word list here once denied a supersession the gate had stamped.
-    // Mirrors `_supervisor_contradicted` in Python.
-    let superseded = row
-        .get("superseded_live_status")
-        .and_then(Value::as_str)
-        .is_some_and(|word| !word.is_empty());
-    let contradicted = superseded
-        && row.get("reachability").and_then(Value::as_str) == Some("unreachable")
-        && !incoming_basis.is_empty();
-    row.insert(
-        "live_status_basis".into(),
-        if contradicted {
-            json!(format!("contradicted-by-{incoming_basis}"))
-        } else {
-            // (x-6d16) This projection never runs the claude live-status
-            // probe, so null here would read as "measured, nothing found".
-            // The lane that did not ask says so (d-d6cb1827: a blank is the
-            // one thing this pair may not be); the Python list surface, which
-            // does run it, keeps its own words.
-            json!("not-probed")
-        },
-    );
-    row.remove("superseded_live_status");
-}
-
-/// Parse one row timestamp into `(value, basis)`, separating absent from
-/// unreadable. Mirrors `_read_field` in cli/src/fno/agents/row_contradiction.py.
-///
-/// Folding the two together is what let `liveness_origin: null` mean five
-/// different things at once, so a reader holding one null could not tell
-/// "nothing was recorded" from "something this parser cannot read".
-fn row_field_with_basis(
-    row: &Map<String, Value>,
-    key: &str,
-    label: &str,
-) -> (Option<chrono::DateTime<chrono::Utc>>, Option<String>) {
-    match row.get(key) {
-        None | Some(Value::Null) => (None, Some(format!("{label}-absent"))),
-        raw => match row_timestamp(raw) {
-            Some(parsed) => (Some(parsed), None),
-            None => (None, Some(format!("{label}-unreadable"))),
-        },
-    }
-}
-
-/// Return `(liveness_origin, basis)` for one row. Mirrors `_liveness_origin`
-/// in cli/src/fno/agents/row_contradiction.py, and the shared fixture at
-/// schemas/agents-row-contradiction.json drives both.
-///
-/// THE PID GATE COMES FIRST. This producer already checked it and the Python
-/// one did not, so a pidless row read `survivor` there and null here: one
-/// field, two reachable implementations, one guard. A non-null origin carries
-/// no basis, because the value is its own evidence.
-fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
-    if !row.get("pid").is_some_and(|value| !value.is_null()) {
-        return (Value::Null, Some("pid-absent".to_string()));
-    }
-    let (created_at, basis) = row_field_with_basis(row, "created_at", "created-at");
-    let Some(created_at) = created_at else {
-        return (Value::Null, basis);
-    };
-    let (pid_started_at, basis) = row_field_with_basis(row, "pid_start_time", "pid-start");
-    let Some(pid_started_at) = pid_started_at else {
-        return (Value::Null, basis);
-    };
-    if (pid_started_at - created_at).num_seconds() > 600 {
-        (json!("resumed"), None)
-    } else {
-        (json!("survivor"), None)
-    }
-}
-
 /// The attention window this surface orders by. Session-truth's stall window
 /// is 7200s and correct FOR REAPING; for display it is exactly the gap a
 /// dead-under-two-hours worker hides in, so the ordering window is ten
@@ -5308,48 +5118,19 @@ where
             // unanswered row that way.
             let truth = truths.get(&registry_truth_handle(e)).cloned();
             let rendered_status = rendered_status_from_truth(truth.as_ref());
-            // (x-6d16) The basis leg is worded by the batch outcome when the
-            // probe is absent: a handle the batch never measured reads
-            // `unmeasured`, a handle a clean batch resolved nothing for keeps
-            // the null an absent reading has always rendered (the
-            // `no-evidence` verdict lives on `progress_basis`, where
-            // `progress_from_truth` words it the same way). A probe that
-            // answered carries its own basis. `reachability` stays null on an
-            // unanswered probe - a verdict is never rendered from a run that
-            // did not run.
-            let basis_word = match truth.as_ref().and_then(|t| t.basis.clone()) {
-                Some(basis) => json!(basis),
-                None if truth.is_none()
-                    && batch_outcome == crate::truth_probe::BatchOutcome::NotMeasured =>
-                {
-                    json!("unmeasured")
-                }
-                None => Value::Null,
-            };
             // The whole reachability triple, not just the verdict that
             // `rendered_status` above was picked from. That rendered word says
             // WHAT the row is; the triple says which question was answered and
             // off what evidence, and only the triple separates a positive
             // transcript reading from a fired falsifier. Null on a `fno` too old
             // to emit them: a stale probe that did not answer must read as
-            // absent, never as no-evidence.
-            // (x-6d16) The age's instrument rides the same tuple:
-            // `last-entry` | `mtime` | `opencode-db` when the probe answered,
-            // the resolver's reason word (`not-found` | `no-records` |
-            // `resolver-error`) when it could not resolve the handle, and
-            // `unmeasured` when the batch never ran for this page. The three
-            // unknown-reason words are the difference between "this worker
-            // has no transcript" and "the resolver crashed"; both rendered as
-            // the same blank before (d-d6cb1827: a null stays alone no more).
-            let activity_basis = match truth.as_ref().and_then(|t| t.last_activity_basis.clone()) {
-                Some(basis) => json!(basis),
-                None if truth.is_none()
-                    && batch_outcome == crate::truth_probe::BatchOutcome::NotMeasured =>
-                {
-                    json!("unmeasured")
-                }
-                None => Value::Null,
-            };
+            // absent, never as no-evidence. Both basis legs are worded, never
+            // blank-on-a-guess: `basis_word_from_truth` decides between an
+            // absent reading and a page the batch never measured, and
+            // `activity_basis_from_truth` names the age's instrument beside it
+            // (x-6d16, d-d6cb1827).
+            let basis_word = basis_word_from_truth(truth.as_ref(), batch_outcome);
+            let activity_basis = activity_basis_from_truth(truth.as_ref(), batch_outcome);
             let evidence = (
                 json!(truth.as_ref().and_then(|t| t.reachability.as_deref())),
                 basis_word,
@@ -12521,7 +12302,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         Some(probe)
     }
 
-    fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
+    pub(super) fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
         Ctx {
             home,
             emitter: EventEmitter::new(std::path::PathBuf::from("/dev/null"), "daemon"),
@@ -12586,7 +12367,7 @@ done
     /// dir): a worker's `<root>/<short_id>/worker.sock` must fit in SUN_LEN
     /// (~104 chars on macOS), so switchboard tests that bind real worker sockets
     /// need a short root. Mirrors the stream_worker test harness.
-    fn short_home(tag: &str) -> AgentsHome {
+    pub(super) fn short_home(tag: &str) -> AgentsHome {
         use std::sync::atomic::{AtomicU32, Ordering};
         static C: AtomicU32 = AtomicU32::new(0);
         let n = C.fetch_add(1, Ordering::Relaxed);
@@ -12597,7 +12378,7 @@ done
     }
 
     /// Seed a held-stream-thread registry row (claude + full UUID + Live).
-    fn seed_stream_row(home: &AgentsHome, name: &str, short_id: &str) {
+    pub(super) fn seed_stream_row(home: &AgentsHome, name: &str, short_id: &str) {
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
                 substrate: None,
@@ -13006,37 +12787,6 @@ done
         );
 
         std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[test]
-    fn row_contradiction_fixture_matches_python_projection() {
-        const FIXTURE: &str = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../schemas/agents-row-contradiction.json"
-        ));
-        let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture is valid JSON");
-        let now = chrono::DateTime::parse_from_rfc3339(
-            fixture["now"].as_str().expect("fixture now is a string"),
-        )
-        .expect("fixture now is a timestamp")
-        .with_timezone(&chrono::Utc);
-        for case in fixture["cases"].as_array().expect("cases is an array") {
-            let mut row = case["row"].as_object().expect("row is an object").clone();
-            apply_row_contradiction(&mut row, now);
-            // x-6d16: where the two lanes legitimately differ - the Rust
-            // projection never runs the claude live-status probe, so its
-            // no-contradiction basis reads `not-probed` where Python renders
-            // null - the case carries an `expected_rust` override. Absent,
-            // the lanes agree and `expected` binds both.
-            let expected = case
-                .get("expected_rust")
-                .unwrap_or(&case["expected"])
-                .as_object()
-                .expect("expected is an object");
-            for (key, expected) in expected {
-                assert_eq!(row.get(key), Some(expected), "case={}", case["name"]);
-            }
-        }
     }
 
     /// The reachability EVIDENCE reaches the row, not just the verdict the
@@ -13595,51 +13345,6 @@ done
         assert!(missing["basis"].is_null());
         assert!(missing["last_activity_age_s"].is_null());
         assert_eq!(missing["observed_model"]["kind"], "no-transcript");
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    /// x-6d16, end to end through the row projection: when the batch seam
-    /// reports the page was never measured, every row words it (`unmeasured`)
-    /// instead of rendering the `no-evidence` verdict the old lossy seam
-    /// published for a run that did not run. The measured-path twin is
-    /// `list_row_the_batch_did_not_answer_renders_exactly_as_an_unanswered_row`
-    /// above: same missing handle, clean batch, verdict unchanged.
-    #[test]
-    fn list_rows_word_a_page_the_batch_never_measured() {
-        let home = short_home("listbatchunmeasured");
-        seed_stream_row(&home, "never-probed", "aaaaaaaa");
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(1, "agent.list", json!({"all": true}));
-
-        let response = handle_list_with_truth(&ctx, &req, |_handles: &[String]| {
-            // The timeout shape: the page comes back with NO answers
-            // (truth_probe.rs BoundedRun::NoOutput -> an empty map), not with
-            // answers plus a flag.
-            (
-                std::collections::HashMap::new(),
-                crate::truth_probe::BatchOutcome::NotMeasured,
-            )
-        });
-
-        let rows = response.result().unwrap()["agents"].as_array().unwrap();
-        assert!(!rows.is_empty(), "the seeded row must render");
-        for row in rows {
-            assert_eq!(row["basis"], "unmeasured", "row {}", row["name"]);
-            assert_eq!(row["progress_basis"], "unmeasured", "row {}", row["name"]);
-            assert_eq!(
-                row["last_activity_basis"], "unmeasured",
-                "row {}",
-                row["name"]
-            );
-            assert!(row["reachability"].is_null(), "row {}", row["name"]);
-            assert!(row["last_activity_age_s"].is_null(), "row {}", row["name"]);
-            assert_eq!(
-                row["live_status_basis"], "not-probed",
-                "row {}",
-                row["name"]
-            );
-            assert_eq!(row["status"], "unknown", "row {}", row["name"]);
-        }
         std::fs::remove_dir_all(home.root()).ok();
     }
 

@@ -181,13 +181,234 @@ pub(crate) fn registry_truth_handle(entry: &RegistryEntry) -> String {
     }
 }
 
+/// The `basis` leg beside `reachability` (x-6d16), worded by the batch
+/// outcome when the probe is absent: a handle the batch never measured reads
+/// `unmeasured`, a handle a clean batch resolved nothing for keeps the null
+/// an absent reading has always rendered (the `no-evidence` verdict lives on
+/// `progress_basis`, where [`progress_from_truth`] words it the same way). A
+/// probe that answered carries its own basis.
+pub(super) fn basis_word_from_truth(
+    probe: Option<&crate::truth_probe::TruthProbe>,
+    batch: crate::truth_probe::BatchOutcome,
+) -> Value {
+    match probe.and_then(|t| t.basis.clone()) {
+        Some(basis) => json!(basis),
+        None if probe.is_none() && batch == crate::truth_probe::BatchOutcome::NotMeasured => {
+            json!("unmeasured")
+        }
+        None => Value::Null,
+    }
+}
+
+/// The instrument the activity age came from, lifted off the same probe:
+/// `last-entry` | `mtime` | `opencode-db` when the probe answered, the
+/// resolver's reason word (`not-found` | `no-records` | `resolver-error`)
+/// when it could not resolve the handle, and `unmeasured` when the batch
+/// never ran for this page. The three unknown-reason words are the
+/// difference between "this worker has no transcript" and "the resolver
+/// crashed"; both rendered as the same blank before (d-d6cb1827: a null
+/// never stands alone).
+pub(super) fn activity_basis_from_truth(
+    probe: Option<&crate::truth_probe::TruthProbe>,
+    batch: crate::truth_probe::BatchOutcome,
+) -> Value {
+    match probe.and_then(|t| t.last_activity_basis.clone()) {
+        Some(basis) => json!(basis),
+        None if probe.is_none() && batch == crate::truth_probe::BatchOutcome::NotMeasured => {
+            json!("unmeasured")
+        }
+        None => Value::Null,
+    }
+}
+
+/// Parse one row timestamp into `(value, basis)`-compatible `Option`s for the
+/// contradiction rules: absent and unreadable both read `None`.
+fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
+    let value = value?;
+    if let Some(raw) = value.as_str() {
+        return chrono::DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|parsed| parsed.with_timezone(&chrono::Utc));
+    }
+    let micros = value.as_u64()?;
+    if micros <= 1_000_000_000_000 {
+        return None;
+    }
+    chrono::DateTime::from_timestamp_micros(micros as i64)
+}
+
+/// Refuse a row-level verdict when the same emitted row carries fresher
+/// evidence against it. This is deliberately pure and shared by the fixture
+/// test with Python; the caller supplies all fields before the row is written.
+/// `now` is injected so the fixture's fixed clock and production's wall clock
+/// assert the same rules.
+pub(super) fn apply_row_contradiction(
+    row: &mut Map<String, Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    // The falsifier as it ARRIVED, snapshotted before any rule below rewrites
+    // `basis`. Python's `_supervisor_contradicted` reads the input mapping, so
+    // reading the mutated map here would name a different falsifier than the
+    // twin for the same row, and the shared fixture has no case where two
+    // rules fire together to catch it.
+    let incoming_basis = row
+        .get("basis")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    // `status` for the same reason, and the reason generalises: Python reads
+    // the input `row` and writes a SEPARATE `projected` dict, so every rule
+    // there sees the original. This twin mutates `row` in place, so any rule
+    // reading `status` after an earlier one rewrote it diverges from Python
+    // for that row. Today the two rules are mutually exclusive - `terminal`
+    // is `orphaned`/`exited` and this one needs `spawning` - so nothing
+    // changes; snapshot anyway, because relying on that exclusion is a rule
+    // no test states and the next rule added here will not know it.
+    let incoming_status = row
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let event_at = row_timestamp(row.get("last_event_at"));
+    let reconciled_at = row_timestamp(row.get("last_reconciled_at"));
+    let terminal = matches!(
+        row.get("status").and_then(Value::as_str),
+        Some("orphaned" | "exited")
+    );
+    if terminal && event_at.is_some() && reconciled_at.is_some() && event_at > reconciled_at {
+        row.insert("status".into(), json!("unknown"));
+        row.insert("basis".into(), json!("stale-verdict-fresher-event"));
+    }
+
+    let message_at = row_timestamp(row.get("last_message_at"));
+    let message_is_too_new = match (message_at, event_at) {
+        (Some(message), Some(event)) => message - event > chrono::Duration::seconds(2),
+        _ => false,
+    };
+    if message_is_too_new {
+        row.insert("last_message_at".into(), Value::Null);
+        row.insert(
+            "last_message_at_basis".into(),
+            json!("refused-newer-than-transcript"),
+        );
+    }
+
+    // (x-d401) A stored `spawning` token a live pid has outlived: the token
+    // stopped being a measurement. Fires only on POSITIVE liveness (the
+    // caller measured a live pid and injected `pid_alive: true`); unknown
+    // keeps the token, and a missing `created_at` is absent age evidence,
+    // not staleness. Mirrors `_spawning_outlived_by_a_live_pid` in Python;
+    // rows read `spawning` for 3-16 hours while alive (x-0248).
+    if incoming_status == "spawning"
+        && row.get("pid_alive") == Some(&Value::Bool(true))
+        // `> Duration::seconds(600)`, not `num_seconds() > 600`: num_seconds
+        // truncates, so a 600.5s-old row read `spawning` here and `live` in
+        // Python, whose timedelta compare keeps the fraction.
+        && row_timestamp(row.get("created_at"))
+            .is_some_and(|created_at| now - created_at > chrono::Duration::seconds(600))
+    {
+        row.insert("status".into(), json!("quiet"));
+        row.insert("basis".into(), json!("stale-spawning-live-pid"));
+    }
+    row.remove("pid_alive");
+
+    // Both keys ALWAYS ride the row, as `reachability`/`basis` and
+    // `progress`/`progress_basis` already do on this same row. A conditional
+    // key cannot be told apart from a producer that forgot to set one, and the
+    // list-row contract in schemas/agents-list-row.json is an exact key set.
+    let (origin, origin_basis) = liveness_origin(row);
+    row.insert("liveness_origin".into(), origin);
+    row.insert(
+        "liveness_origin_basis".into(),
+        origin_basis.map_or(Value::Null, |basis| json!(basis)),
+    );
+    // (x-d401, x-d4a6) A superseded supervisor claim beside the falsifier
+    // that beat it: `superseded_live_status` is a caller-injected input (like
+    // `pid`), popped here; only the basis key survives. PRESENCE is the
+    // caller's assertion that a supersession happened; which words claim
+    // nothing lives in the gate that stamps this input (read.py's {idle,
+    // done} admission set) - a second word list here once denied a
+    // supersession the gate had stamped. Mirrors `_supervisor_contradicted`
+    // in Python.
+    let superseded = row
+        .get("superseded_live_status")
+        .and_then(Value::as_str)
+        .is_some_and(|word| !word.is_empty());
+    let contradicted = superseded
+        && row.get("reachability").and_then(Value::as_str) == Some("unreachable")
+        && !incoming_basis.is_empty();
+    row.insert(
+        "live_status_basis".into(),
+        if contradicted {
+            json!(format!("contradicted-by-{incoming_basis}"))
+        } else {
+            // (x-6d16) This projection never runs the claude live-status
+            // probe, so null here would read as "measured, nothing found".
+            // The lane that did not ask says so (d-d6cb1827: a blank is the
+            // one thing this pair may not be); the Python list surface, which
+            // does run it, keeps its own words.
+            json!("not-probed")
+        },
+    );
+    row.remove("superseded_live_status");
+}
+
+/// Parse one row timestamp into `(value, basis)`, separating absent from
+/// unreadable. Mirrors `_read_field` in cli/src/fno/agents/row_contradiction.py.
+///
+/// Folding the two together is what let `liveness_origin: null` mean five
+/// different things at once, so a reader holding one null could not tell
+/// "nothing was recorded" from "something this parser cannot read".
+fn row_field_with_basis(
+    row: &Map<String, Value>,
+    key: &str,
+    label: &str,
+) -> (Option<chrono::DateTime<chrono::Utc>>, Option<String>) {
+    match row.get(key) {
+        None | Some(Value::Null) => (None, Some(format!("{label}-absent"))),
+        raw => match row_timestamp(raw) {
+            Some(parsed) => (Some(parsed), None),
+            None => (None, Some(format!("{label}-unreadable"))),
+        },
+    }
+}
+
+/// Return `(liveness_origin, basis)` for one row. Mirrors `_liveness_origin`
+/// in cli/src/fno/agents/row_contradiction.py, and the shared fixture at
+/// schemas/agents-row-contradiction.json drives both.
+///
+/// THE PID GATE COMES FIRST. This producer already checked it and the Python
+/// one did not, so a pidless row read `survivor` there and null here: one
+/// field, two reachable implementations, one guard. A non-null origin carries
+/// no basis, because the value is its own evidence.
+fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
+    if !row.get("pid").is_some_and(|value| !value.is_null()) {
+        return (Value::Null, Some("pid-absent".to_string()));
+    }
+    let (created_at, basis) = row_field_with_basis(row, "created_at", "created-at");
+    let Some(created_at) = created_at else {
+        return (Value::Null, basis);
+    };
+    let (pid_started_at, basis) = row_field_with_basis(row, "pid_start_time", "pid-start");
+    let Some(pid_started_at) = pid_started_at else {
+        return (Value::Null, basis);
+    };
+    if (pid_started_at - created_at).num_seconds() > 600 {
+        (json!("resumed"), None)
+    } else {
+        (json!("survivor"), None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     // The SAME probe fixtures the parent's tests read: these assertions moved
     // here to sit beside the functions they test, and a second copy of the
     // fixture is how two case tables start disagreeing.
-    use crate::daemon::tests::{probe, probe_with_age, probe_with_verdict};
+    use crate::daemon::tests::{
+        probe, probe_with_age, probe_with_verdict, seed_stream_row, short_home, test_ctx,
+    };
     use crate::truth_probe::BatchOutcome::{self, Measured};
     use serde_json::json;
 
@@ -507,5 +728,85 @@ mod tests {
                 "harness={harness}"
             );
         }
+    }
+
+    /// The shared row-contradiction truth table (schemas/agents-row-
+    /// contradiction.json), asserted against the Rust projection here; the
+    /// Python twin asserts the same cases against `project_row`. Moved beside
+    /// `apply_row_contradiction` under the file-budget gate.
+    #[test]
+    fn row_contradiction_fixture_matches_python_projection() {
+        const FIXTURE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/agents-row-contradiction.json"
+        ));
+        let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture is valid JSON");
+        let now = chrono::DateTime::parse_from_rfc3339(
+            fixture["now"].as_str().expect("fixture now is a string"),
+        )
+        .expect("fixture now is a timestamp")
+        .with_timezone(&chrono::Utc);
+        for case in fixture["cases"].as_array().expect("cases is an array") {
+            let mut row = case["row"].as_object().expect("row is an object").clone();
+            apply_row_contradiction(&mut row, now);
+            // x-6d16: where the two lanes legitimately differ - the Rust
+            // projection never runs the claude live-status probe, so its
+            // no-contradiction basis reads `not-probed` where Python renders
+            // null - the case carries an `expected_rust` override. Absent,
+            // `expected` binds both lanes.
+            let expected = case
+                .get("expected_rust")
+                .unwrap_or(&case["expected"])
+                .as_object()
+                .expect("expected is an object");
+            for (key, expected) in expected {
+                assert_eq!(row.get(key), Some(expected), "case={}", case["name"]);
+            }
+        }
+    }
+
+    /// x-6d16, end to end through the row projection: when the batch seam
+    /// reports the page was never measured, every row words it (`unmeasured`)
+    /// instead of rendering the `no-evidence` verdict the old lossy seam
+    /// published for a run that did not run. The measured-path twin is the
+    /// daemon test `list_row_the_batch_did_not_answer_renders_exactly_as_an_
+    /// unanswered_row`: same missing handle, clean batch, verdict unchanged.
+    #[test]
+    fn list_rows_word_a_page_the_batch_never_measured() {
+        let home = short_home("listbatchunmeasured");
+        seed_stream_row(&home, "never-probed", "aaaaaaaa");
+        let ctx = test_ctx(home.clone(), std::path::PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"all": true}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handles: &[String]| {
+            // The timeout shape: the page comes back with NO answers
+            // (truth_probe.rs BoundedRun::NoOutput -> an empty map), not with
+            // answers plus a flag.
+            (
+                std::collections::HashMap::new(),
+                crate::truth_probe::BatchOutcome::NotMeasured,
+            )
+        });
+
+        let rows = response.result().unwrap()["agents"].as_array().unwrap();
+        assert!(!rows.is_empty(), "the seeded row must render");
+        for row in rows {
+            assert_eq!(row["basis"], "unmeasured", "row {}", row["name"]);
+            assert_eq!(row["progress_basis"], "unmeasured", "row {}", row["name"]);
+            assert_eq!(
+                row["last_activity_basis"], "unmeasured",
+                "row {}",
+                row["name"]
+            );
+            assert!(row["reachability"].is_null(), "row {}", row["name"]);
+            assert!(row["last_activity_age_s"].is_null(), "row {}", row["name"]);
+            assert_eq!(
+                row["live_status_basis"], "not-probed",
+                "row {}",
+                row["name"]
+            );
+            assert_eq!(row["status"], "unknown", "row {}", row["name"]);
+        }
+        std::fs::remove_dir_all(home.root()).ok();
     }
 }
