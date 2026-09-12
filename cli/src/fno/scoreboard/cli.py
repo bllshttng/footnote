@@ -303,18 +303,13 @@ def _render_calibration(cal: dict) -> None:
     excl_line = f" (excluded: {', '.join(excl_bits)})" if excl_bits else ""
 
     if cal["state"] == "insufficient":
-        out(
-            f"  {cal['n']} verdicts so far, need >={cal['need']} for "
-            f"calibration.{excl_line}\n"
-        )
+        out(f"  {cal['n']} verdicts so far, need >={cal['need']} for calibration.{excl_line}\n")
         return
 
     out(f"  N={cal['n']} verdicts{excl_line}\n")
     if cal.get("untimed_outcomes"):
-        out(
-            f"  ! {cal['untimed_outcomes']} node(s) lack a timestamped ship row; "
-            f"their outcomes are conservative (any caused_by fix counts as bounced).\n"
-        )
+        out(f"  ! {cal['untimed_outcomes']} node(s) lack a timestamped ship row; their"
+            " outcomes are conservative (any caused_by fix counts as bounced).\n")
     out("\n")
     outcomes = ("merged_clean", "bounced", "reverted")
     out(f"  {'':<10}" + "".join(f"{o:>14}" for o in outcomes) + "\n")
@@ -322,10 +317,8 @@ def _render_calibration(cal: dict) -> None:
         row = cal["table"][verdict]
         out(f"  {verdict:<10}" + "".join(f"{row[o]:>14}" for o in outcomes) + "\n")
     fp = cal["false_positive"]
-    out(
-        f"\n  false-positive (pass -> bounced/reverted): "
-        f"{fp['count']}/{fp['of_pass']} ({fp['rate_pct']}%)\n"
-    )
+    out(f"\n  false-positive (pass -> bounced/reverted): {fp['count']}/{fp['of_pass']}"
+        f" ({fp['rate_pct']}%)\n")
 
 
 def _fmt(v) -> str:
@@ -355,15 +348,11 @@ def _render_efficiency(eff: dict) -> None:
     out(f"    node linkage:  {cov['node_linkage_pct']}%\n")
     out(f"  outcome tracked:     {cov['outcome_tracked_pct']}% of shipped rows\n")
     if cov["loop_join_pct"] < 100 or cov["node_linkage_pct"] < 100:
-        out(
-            f"  ! metrics below reflect {cov['loop_join_pct']}% loop-join / "
-            f"{cov['node_linkage_pct']}% node-linkage coverage - a partial window is not a trend.\n"
-        )
+        out(f"  ! metrics below reflect {cov['loop_join_pct']}% loop-join /"
+            f" {cov['node_linkage_pct']}% node-linkage: a partial window is not a trend.\n")
     if cov["ci_unparsed"]:
-        out(
-            f"  ! {cov['ci_unparsed']} loop_check fire(s) carried an unrecognized ci shape "
-            "(emitter drift); their sessions' ci_reds are n/a, not counted as green.\n"
-        )
+        out(f"  ! {cov['ci_unparsed']} loop_check fire(s) carried an unrecognized ci shape"
+            " (emitter drift); their sessions' ci_reds are n/a, not counted as green.\n")
 
     out("\nPer-outcome-class cost\n")
     out(f"  {'class':<20}{'n':>4}{'spend$':>10}{'med tok':>10}{'med fires':>11}{'med min':>9}\n")
@@ -407,20 +396,14 @@ def _render_plan_fidelity(pf: dict) -> None:
         pr = r.get("probes")
         probes_s = f"{pr['passed']}/{pr['declared']}" if pr else "n/a"
         context = (r.get("context_outcome_trace") or {}).get("context")
-        context_s = (
-            f"{context['bytes']}B" if context and context.get("bytes") is not None else "n/a"
-        )
-        out(
-            f"  {r.get('session_id') or '?':<24} PR#{r.get('pr_number') or '?'} "
+        ctx_s = f"{context['bytes']}B" if context and context.get("bytes") is not None else "n/a"
+        out(f"  {r.get('session_id') or '?':<24} PR#{r.get('pr_number') or '?'} "
             f"AC {ac_s} | drift {drift} | data-model-surprise {dm} | "
             f"deviations {_fmt(r['deviation_load'])} | probes {probes_s} | "
-            f"context {context_s} | outcome {r.get('outcome') or 'n/a'}\n"
-        )
+            f"context {ctx_s} | outcome {r.get('outcome') or 'n/a'}\n")
     comparison = pf.get("context_comparison") or {}
-    out(
-        f"\n  context comparison: {comparison.get('label', 'rejected')}"
-        f" ({comparison.get('reason', comparison.get('claim', 'no contract'))})\n"
-    )
+    out(f"\n  context comparison: {comparison.get('label', 'rejected')}"
+        f" ({comparison.get('reason', comparison.get('claim', 'no contract'))})\n")
 
 
 def _render_by_skill(sb: dict) -> None:
@@ -436,10 +419,8 @@ def _render_by_skill(sb: dict) -> None:
     out(f"  rows in window:      {cov['rows']}\n")
     out(f"  attributed:          {cov['attributed_pct']}%\n")
     if cov["attributed_pct"] < 100:
-        out(
-            f"  ! rows below reflect {cov['attributed_pct']}% attribution coverage - "
-            "unattributed rows are listed, never dropped.\n"
-        )
+        out(f"  ! rows below reflect {cov['attributed_pct']}% attribution coverage -"
+            " unattributed rows are listed, never dropped.\n")
     out("\n")
     out(f"  {'skill':<32}{'version':<10}{'runs':>6}{'ship%':>7}{'revert%':>9}{'touch/run':>11}{'cost/run':>10}  method\n")
     for row in sb["rows"]:
@@ -464,10 +445,8 @@ def _render_by_provider(pb: dict) -> None:
     out(f"  rows in window:      {cov['rows']} execution rows\n")
     out(f"  attributed:          {cov['attributed_pct']}%\n")
     if cov["attributed_pct"] < 100:
-        out(
-            f"  ! rows below reflect {cov['attributed_pct']}% provider attribution - "
-            "unattributed rows are a visible bucket, never dropped.\n"
-        )
+        out(f"  ! rows below reflect {cov['attributed_pct']}% provider attribution -"
+            " unattributed rows are a visible bucket, never dropped.\n")
     out("\n")
     out(f"  {'provider':<16}{'model':<22}{'runs':>6}{'ships':>7}{'nodes':>7}{'shared':>8}{'spend$':>10}{'$/ship':>9}{'bounce%':>13}{'med iter':>10}{'retries':>9}\n")
     prev = None
@@ -503,11 +482,9 @@ def _render_lanes(view: dict) -> None:
     else:
         out("  provider          model                    effort size runs ok% wall-min carveouts sample\n")
         for row in view["retrospective"]:
-            out(
-                f"  {row['provider']:<16} {row['model']:<24} {row['effort']:<6} "
+            out(f"  {row['provider']:<16} {row['model']:<24} {row['effort']:<6} "
                 f"{row['size']:<4} {row['runs']:>4} {row['ok_pct']:>3}% "
-                f"{row['wall_minutes']:>8.1f} {row['carveouts_filed']:>9} {row['sample_state']}\n"
-            )
+                f"{row['wall_minutes']:>8.1f} {row['carveouts_filed']:>9} {row['sample_state']}\n")
 
     out("\nLive\n")
     if not view["live"]:
@@ -517,10 +494,8 @@ def _render_lanes(view: dict) -> None:
         for row in view["live"]:
             cap = row["cap"] if row["cap"] is not None else "n/a"
             headroom = row["headroom"] if row["headroom"] is not None else "n/a"
-            out(
-                f"  {row['provider']:<16} {row['model']:<24} {row['effort']:<6} "
-                f"{row['occupancy']:>9} {cap:>3} {headroom:>8}\n"
-            )
+            out(f"  {row['provider']:<16} {row['model']:<24} {row['effort']:<6} "
+                f"{row['occupancy']:>9} {cap:>3} {headroom:>8}\n")
     out(f"\n  provider_rate_limited events: {view['rate_limited']}\n")
 
 
@@ -538,10 +513,8 @@ def _render(sb: dict) -> None:
     out(f"  rows in window:      {cov['rows']}\n")
     out(f"  termination_reason:  {cov['termination_reason_pct']}%")
     out(f"    node linkage:  {cov['node_linkage_pct']}%\n")
-    # Silent-failure guard: whenever coverage is partial on EITHER axis, the
-    # caveat rides on the same screen as any rate below (AC5-UI). Stop-cause/spend
-    # lean on termination_reason; autonomy/survival lean on node linkage - a gap in
-    # either can bias a rate, so both gate the caveat. Never a bare rate.
+    # Silent-failure guard: whenever coverage is partial on EITHER axis, the caveat
+    # rides on the same screen as any rate below (AC5-UI). Never a bare rate.
     if cov["termination_reason_pct"] < 100 or cov["node_linkage_pct"] < 100:
         out(f"  ! rates below reflect {cov['termination_reason_pct']}% termination /"
             f" {cov['node_linkage_pct']}% node-linkage: a partial window is not a trend.\n")
