@@ -205,6 +205,19 @@ def test_the_fold_renders_with_the_dedupe_key_of_its_ids(
     assert seen["reason"] == "NoProgress"
 
 
+def test_the_question_names_the_rows_and_carries_the_key(tmp_path: Path) -> None:
+    key = dedupe_key(STALLED)
+    _run(tmp_path, STALLED)
+    (question,) = read_open_questions(tmp_path)
+
+    assert f"[king-escalation:{key}]" in question.question
+    assert "undispatched:x-1234" in question.question
+    assert "undispatched:x-5678" in question.question
+    # The ids also land in blocks, so the pointer rule is met from the run's
+    # own facts; the one-line text names only the first three rows.
+    assert set(question.blocks) == {"x-1234", "x-5678"}
+
+
 def test_an_unreadable_store_is_not_an_empty_one(tmp_path: Path) -> None:
     """A read failure must raise, never look like "nothing asked yet".
 
