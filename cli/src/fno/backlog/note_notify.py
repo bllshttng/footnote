@@ -13,6 +13,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple, Optional
 
+import typer
+
 _POINTER_WORDS = 20
 _SEND_TIMEOUT_SECONDS = 30.0
 _UNDELIVERED = ("notify FAILED", "notify UNCONFIRMED")
@@ -99,29 +101,7 @@ def _is_author(row: Any, resolved: str, address: str, self_session: str) -> bool
     row_sid = getattr(row, "harness_session_id", None)
     if not isinstance(row_sid, str) or not row_sid:
         return False
-    try:
-        return session_identity_key(row_sid) == session_identity_key(self_session)
-    except Exception:  # noqa: BLE001 - an unreadable key cannot prove authorship
-        return False
-
-
-def _live_row_for_value(value: str, registry_rows: list[Any]) -> Optional[Any]:
-    """The ownership-live row behind a graph binding: by resolved name, else by
-    harness_session_id under the identity key."""
-    from fno.claims.core import holder_agent_name
-    from fno.harness_identity import OWNERSHIP_LIVE_STATUSES, session_identity_key
-
-    name = holder_agent_name(value, registry_rows)
-    needle = session_identity_key(value)
-    for row in registry_rows:
-        if getattr(row, "status", None) not in OWNERSHIP_LIVE_STATUSES:
-            continue
-        if name and row.name == name:
-            return row
-        sid = getattr(row, "harness_session_id", None)
-        if isinstance(sid, str) and sid and session_identity_key(sid) == needle:
-            return row
-    return None
+    return session_identity_key(row_sid) == session_identity_key(self_session)
 
 
 def note_readers(
@@ -140,7 +120,7 @@ def note_readers(
     is the caller's registry read; ``None`` reads the machine's once (tests
     always pass ``rows``, so no test reads this machine's registry).
     """
-    from fno.agents.registry import load_registry
+    from fno.agents.registry import live_row_holding_session_id, load_registry
     from fno.claims.core import holder_agent_name
     from fno.harness_identity import OWNERSHIP_LIVE_STATUSES
 
@@ -148,12 +128,13 @@ def note_readers(
     node_id = str(entry.get("id") or "")
     recipients: list[tuple[str, str]] = []
     readings: list[str] = []
-    author_box: list[str] = []
+    author_bound: Optional[str] = None
     seen: set[str] = set()
 
     def add(address: Optional[str], why: str) -> bool:
         """Bind one address; True only when a live RECIPIENT joined - an author
         hit names itself in author_bound and never stops the chain."""
+        nonlocal author_bound
         if not address or address in seen:
             return False
         # A role holder is a marker, not an address; None: nobody behind it.
@@ -162,12 +143,24 @@ def note_readers(
             return False
         row = next((r for r in registry_rows if r.name == resolved), None)
         if self_session and _is_author(row, resolved, address, self_session):
-            if not author_box:
-                author_box.append(why)
+            author_bound = author_bound or why
             return False
         seen.add(resolved)
         recipients.append((resolved, why))
         return True
+
+    def bound_row(value: str) -> Optional[Any]:
+        """The ownership-live row behind a graph binding: the row named by the
+        resolved holder, else the row owning the value's session identity."""
+        name = holder_agent_name(value, registry_rows)
+        return next(
+            (
+                r
+                for r in registry_rows
+                if getattr(r, "status", None) in OWNERSHIP_LIVE_STATUSES and r.name == name
+            ),
+            None,
+        ) or live_row_holding_session_id(value, rows=registry_rows)
 
     def worker_readers(subject_id: str, subject: str, source: Optional[dict]) -> None:
         holder = holder_of(subject_id)
@@ -179,11 +172,7 @@ def note_readers(
             if not isinstance(value, str) or not value:
                 readings.append(f"graph {field}: none")
                 continue
-            try:
-                row = _live_row_for_value(value, registry_rows)
-            except Exception as exc:  # noqa: BLE001 - one unreadable field costs it
-                readings.append(f"graph {field}: unreadable ({exc})")
-                continue
+            row = bound_row(value)
             if row is None:
                 readings.append(f"graph {field}: {value} names no live row")
                 continue
@@ -225,11 +214,7 @@ def note_readers(
         scopes.append((epic, f"king of {epic}", f"crown {epic}"))
     if isinstance(project, str) and project:
         scopes.append((project, f"king of {project} (project)", f"crown {project} (project)"))
-    walked: set[str] = set()
     for scope, why, label in scopes:
-        if scope in walked:
-            continue
-        walked.add(scope)
         try:
             kings = list(kings_of(scope))
         except Exception as exc:  # noqa: BLE001 - one unreadable scope costs it
@@ -242,7 +227,7 @@ def note_readers(
         for king in kings:
             add(king, why)
         break
-    return NoteReaders(node_id, recipients, author_box[0] if author_box else None, readings)
+    return NoteReaders(node_id, recipients, author_bound, readings)
 
 
 def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refused:
@@ -292,8 +277,6 @@ def send_note(readers: NoteReaders, text: str) -> list[tuple[str, bool]]:
 
 def deliver(readers: NoteReaders, text: str, *, json_output: bool) -> int:
     """Send to every bound reader; the exit code reports confirmed delivery."""
-    import typer
-
     if not readers.recipients:
         typer.echo(
             f"notify: you are the only reader bound to {readers.node_id} "

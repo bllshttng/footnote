@@ -1547,15 +1547,20 @@ def _is_identity_token(value: object) -> bool:
 
 
 def live_row_holding_session_id(
-    session_id: str, registry_path: Optional[Path] = None
+    session_id: str,
+    registry_path: Optional[Path] = None,
+    *,
+    rows: Optional[list[AgentEntry]] = None,
 ) -> Optional[AgentEntry]:
     """The live registry row whose ``harness_session_id`` is ``session_id``.
 
     The one ownership match loop: the ownership-live status filter plus the
     identity-key comparison, shared by every caller that must read the row
     itself (:func:`row_owning_session_id` reports the row's name; the owned-
-    identity prover reads its harness). Degrades to None on an absent,
-    unreadable, or alien-shape registry, the same contract as the detector.
+    identity prover reads its harness). ``rows`` is a caller's read, so a
+    resolver holding a registry snapshot never reloads the machine's. Degrades
+    to None on an absent, unreadable, or alien-shape registry, the same
+    contract as the detector.
     """
     if not session_id:
         return None
@@ -1563,7 +1568,7 @@ def live_row_holding_session_id(
 
     needle = session_identity_key(session_id)
     try:
-        entries = load_registry(registry_path)
+        entries = rows if rows is not None else load_registry(registry_path)
     except Exception:
         # Unreadable / wrong-schema / absent: cannot prove ownership either way.
         return None
