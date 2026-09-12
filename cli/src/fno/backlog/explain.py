@@ -311,7 +311,7 @@ def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
         return out
     verdict = admission.verdict
     # An instrument that never answered has no figures to show: render the
-    # row unmeasured, never a fabricated 0.00/0.00 (x-5f0b).
+    # row unmeasured, never a fabricated 0.00/0.00.
     unreadable = admission.axis == "cpu_instrument"
     # Same decision function the real gate runs, so the dry run cannot pass a
     # box the spawn would refuse or hold.

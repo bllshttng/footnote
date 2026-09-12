@@ -235,7 +235,7 @@ def test_cpu_share_row_reports_refuse_from_the_shared_decision(monkeypatch):
 
 
 def test_unreadable_instrument_renders_unmeasured_never_zero(monkeypatch):
-    """x-5f0b defect 2: an admission the instrument never measured renders
+    """An admission the instrument never measured renders
     as unmeasured, not as 0.00/0.00 - the same shape a real reading has."""
     from fno.agents import spawn_gate
     from fno.backlog import explain

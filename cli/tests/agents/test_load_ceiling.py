@@ -109,7 +109,7 @@ def test_gapped_reading_refuses_inside_the_interval(monkeypatch):
 
 
 def test_hold_names_the_top_holder(monkeypatch):
-    """x-5f0b: the hold names who holds the cores, from the same rows the
+    """The hold names who holds the cores, from the same rows the
     number was summed from. The specimen is the measured 2026-09-11 refusal:
     16 yes rows summing 513.0 %cpu out of one worktree's repro loop."""
     _pin_load15(monkeypatch, 45.0)

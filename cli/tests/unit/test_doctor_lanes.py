@@ -515,7 +515,7 @@ def _instrument_admission():
 def test_the_cpu_admission_arm_goes_dark_when_the_instrument_never_answered(
     monkeypatch,
 ) -> None:
-    """x-5f0b: zeros the instrument never measured are not a reading. The
+    """Zeros the instrument never measured are not a reading. The
     arm carries the admission's own words as its reason instead."""
     from fno.agents import spawn_gate
 

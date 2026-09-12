@@ -216,7 +216,7 @@ def test_unreadable_instrument_refuses_and_names_the_failure(tmp_path, monkeypat
     assert receipt["axis"] == "cpu_instrument"
     assert "ps unavailable: timed out" in capsys.readouterr().err
     # Figures the instrument never measured are null, never 0.0 dressed as a
-    # reading (x-5f0b defect 2, receipt seam).
+    # reading (the receipt seam).
     for key in (
         "share_low",
         "share_high",
