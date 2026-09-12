@@ -122,7 +122,7 @@ Exit is blocked while actionable rows exist; that is the stop hook doing its job
 
 ## The three halts
 
-Three halts, three scopes. `fno agents incident stop --reason "<why>"` arms the fleet breaker: from the next tick, new spawns, new dispatch, and test runs refuse fleet-wide until `fno agents incident clear --reason "<why>"` reopens admission. It kills nothing that is already running, and mail stays open so the stop can be announced; `fno agents incident status` prints the state and its generation. `fno agents king cancel --scope <scope>` cancels one scope's walk. `fno agents king done` ends one crown. Arming the fleet breaker is outward-facing, and no standing law grants an agent that authority: a king names the evidence and escalates, and arms only on operator order unless a later law grants it.
+Three halts, three scopes. `fno agents incident stop --reason "<why>"` arms the fleet breaker: from the next tick, new spawns, new dispatch, and `fno doctor test` admissions refuse fleet-wide until `fno agents incident clear --reason "<why>"` reopens admission. A suite started outside that admission path, a hand-run `pytest`, is not gated. It kills nothing that is already running, and mail stays open so the stop can be announced; `fno agents incident status` prints the state and its generation. `fno agents king cancel --scope <scope>` cancels one scope's walk. `fno agents king done` ends one crown. Arming the fleet breaker is outward-facing, and no standing law grants an agent that authority: a king names the evidence and escalates, and arms only on operator order unless a later law grants it.
 
 ## Abdicate
 
