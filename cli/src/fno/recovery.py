@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 from fno import _subprocess_util
+from fno.adapters.providers.error_taxonomy import ErrorClass
 from fno.agents.harnesses.claude import ProviderSocketError
 from fno.rust_binary import VerbUnavailable
 
@@ -302,6 +303,12 @@ def _refused_key(short_id: str, error_class: str) -> str:
     return f"refused:{short_id}:{error_class}"
 
 
+def _quota_key(short_id: str) -> str:
+    """Sentinel: the sweep-time quota lock was decided once for this id
+    (x-bbc0). Same flat counts dict, same collision-free prefix rule."""
+    return f"quota-locked:{short_id}"
+
+
 def recovery_sweep(
     now: datetime,
     cfg,
@@ -387,6 +394,36 @@ def recovery_sweep(
                     "reset_is_derived": _err.reset_is_derived,
                     "reset_stamp_unparsed": _err.reset_stamp_unparsed,
                     "excerpt": _err.body_excerpt,
+                })
+
+            # The sweep-time lock write (x-bbc0): a corroborated quota
+            # refusal cools the account the worker was LAUNCHED on, so the
+            # next spawn meets the window at the gate instead of dying in
+            # it. Four guards, each load-bearing: ``refusal_acts`` is the
+            # corroboration (a live worker's prose needs two consecutive
+            # ticks; a dead session's own error text acts at once); the
+            # class check keeps an auth refusal from writing a QUOTA lock;
+            # the sentinel makes it once per worker; and record_quota_lock
+            # itself refuses an unattributed account rather than guessing
+            # the active one. The event fires even when nothing was
+            # written - an unattributable refusal is the finding, and
+            # silence there reads as a sweep that never ran.
+            if (refusal_acts
+                    and _err.error_class is ErrorClass.PROVIDER_4XX_QUOTA
+                    and not counts.get(_quota_key(c.short_id))):
+                from fno.agents.quota_lock import record_quota_lock
+
+                counts[_quota_key(c.short_id)] = True
+                _wrote = record_quota_lock(
+                    c.launch_account, _err.body_excerpt, resets_at=_err.resets_at,
+                )
+                emit("provider_quota_locked", {
+                    "short_id": c.short_id,
+                    "account": _wrote,
+                    "attributed": _wrote is not None,
+                    "source": _source,
+                    "resets_at": _err.resets_at,
+                    "reset_is_derived": _err.reset_is_derived,
                 })
 
         truth_state = str(truth.get("state") or "unknown")
