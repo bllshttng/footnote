@@ -612,10 +612,9 @@ def emit(
 
     # BOT-REVIEW MIRROR: a review_attestation also posts to GitHub as the
     # reviewer lane's bot identity. This emit is the ONE call every verdict
-    # already funnels through, so the producer has exactly one reachable path.
-    # Best-effort, same posture as the global-log mirror above: the durable
-    # append has already succeeded and a network failure must never fail the
-    # emit. The producer lives in the Rust binary behind publish_review_call.
+    # already funnels through, so the producer has exactly one reachable
+    # path. Best-effort like the global-log mirror above: the durable append
+    # already succeeded, so a network failure must never fail the emit.
     if type_ in PUBLISH_REVIEW_TYPES:
         try:
             import os
