@@ -23,6 +23,8 @@ from fno.scoreboard.fold import (
     build_provider_scoreboard,
     build_scoreboard,
     build_skill_scoreboard,
+    classify_deliveries,
+    emission_failures_snapshot,
     load_ledger_rows,
     read_graph_nodes,
     read_jsonl_events,
@@ -53,37 +55,6 @@ def _event_node_id(e: dict) -> str | None:
     d = raw if isinstance(raw, dict) else {}
     nid = e.get("graph_node_id") or d.get("graph_node_id")
     return nid if isinstance(nid, str) and nid else None
-
-
-def _scope_to_project(
-    rows: list[dict],
-    graph_nodes: list[dict],
-    events: list[dict],
-    project: str,
-) -> tuple[list[dict], list[dict], list[dict], dict]:
-    """Scope the denominator to one project. Rows and nodes carry the project
-    directly; events ride their node id. Rows with no project stay
-    unattributed - counted in the returned scope, never copied in."""
-    pnodes = {
-        n.get("id")
-        for n in graph_nodes
-        if isinstance(n.get("id"), str) and n.get("project") == project
-    }
-    scoped_rows = [r for r in rows if r.get("project") == project]
-    unattributed = sum(1 for r in rows if not r.get("project"))
-
-    def _event_in(e: dict) -> bool:
-        nid = _event_node_id(e)
-        return nid is not None and nid in pnodes
-
-    scoped_events = [e for e in events if _event_in(e)]
-    scope = {
-        "project": project,
-        "nodes": len(pnodes),
-        "unattributed_rows": unattributed,
-        "other_project_rows": len(rows) - len(scoped_rows) - unattributed,
-    }
-    return scoped_rows, [n for n in graph_nodes if n.get("id") in pnodes], scoped_events, scope
 
 
 def scoreboard_command(
@@ -193,15 +164,27 @@ def scoreboard_command(
         raise typer.Exit(1)
 
     scope = None
+    pnodes: set[str] = set()
+    classified = None
     if project:
-        rows, scoped_nodes, _unused, scope = _scope_to_project(rows, read_graph_nodes(graph_path), [], project)
-        pnodes = {n.get("id") for n in scoped_nodes}
+        classified = classify_deliveries(read_graph_nodes(graph_path), rows, project)
+        if "scoped" not in classified:
+            raise RuntimeError(
+                f"classifier returned no scope; keys={sorted(classified)}"
+            )
+        pnodes = set((classified.get("scoped") or {}).get("node_ids") or [])
+        rows = (classified.get("scoped") or {}).get("rows") or rows
+        scope = (classified.get("coverage") or {}).get("project_scope")
+
+    if project:
 
         def _nodes():
-            return scoped_nodes
+            return (classified or {}).get("scoped", {}).get("entries") or []
 
         def _events(kinds):
-            return [e for e in read_jsonl_events(events_paths, kinds) if _event_node_id(e) in pnodes]
+            read = read_jsonl_events_with_coverage(events_paths, set(kinds))
+            read["events"] = [e for e in read["events"] if _event_node_id(e) in pnodes]
+            return read
 
     else:
 
@@ -209,14 +192,16 @@ def scoreboard_command(
             return read_graph_nodes(graph_path)
 
         def _events(kinds):
-            return read_jsonl_events(events_paths, kinds)
+            return read_jsonl_events_with_coverage(events_paths, set(kinds))
 
     if calibration:
+        verdict_read = _events({"verifier_verdict"})
         cal = build_calibration(
-            _events({"verifier_verdict"}),
+            verdict_read["events"],
             rows,
             _nodes(),
         )
+        cal["event_coverage"] = verdict_read["coverage"]
         if scope:
             cal["project_scope"] = scope
         if json_out:
@@ -226,13 +211,15 @@ def scoreboard_command(
         return
 
     if by_skill:
+        touch_read = _events({"human_touch"})
         sb = build_skill_scoreboard(
             rows,
             _nodes(),
-            _events({"human_touch"}),
+            touch_read["events"],
             since_days=since,
             now=datetime.now(),
         )
+        sb["event_coverage"] = touch_read["coverage"]
         if scope:
             sb["project_scope"] = scope
         if json_out:
@@ -242,13 +229,15 @@ def scoreboard_command(
         return
 
     if efficiency:
+        loop_read = _events({"loop_check"})
         eff = build_efficiency(
             rows,
-            _events({"loop_check"}),
+            loop_read["events"],
             _nodes(),
             since_days=since,
             now=datetime.now(),
         )
+        eff["event_coverage"] = loop_read["coverage"]
         if scope:
             eff["project_scope"] = scope
         if json_out:
@@ -279,15 +268,17 @@ def scoreboard_command(
         from fno.config import provider_limits_table
 
         settings = load_settings()
+        rate_read = _events({"provider_rate_limited"})
         lane_view = build_lanes(
             rows,
             _nodes(),
             [asdict(row) for row in load_registry(path=_paths.agents_registry_path())],
-            _events({"provider_rate_limited"}),
+            rate_read["events"],
             dict(provider_limits_table(settings.agents)),
             since_days=since,
             now=datetime.now(),
         )
+        lane_view["event_coverage"] = rate_read["coverage"]
         if scope:
             lane_view["project_scope"] = scope
         if json_out:
@@ -329,14 +320,23 @@ def scoreboard_command(
         _render_plan_fidelity(pf)
         return
 
-    touch_events = _events({"human_touch"})
+    touch_read = _events({"human_touch"})
     graph_nodes = _nodes()
 
     # Naive LOCAL throughout: the ledger's `completed` is written naive-local, so
     # `now` matches it; aware event timestamps are converted to local in
     # fold._parse_ts. One timeline, no local/UTC boundary skew.
-    sb = build_scoreboard(rows, touch_events, graph_nodes, since_days=since, now=datetime.now())
+    sb = build_scoreboard(
+        rows,
+        touch_read["events"],
+        graph_nodes,
+        since_days=since,
+        now=datetime.now(),
+        deliveries=(classified or {}).get("by_node"),
+    )
 
+    sb["event_coverage"] = touch_read["coverage"]
+    sb["emission_failures"] = emission_failures_snapshot()
     if scope:
         sb["project_scope"] = scope
     if json_out:
@@ -600,6 +600,27 @@ def _render(sb: dict) -> None:
             f"{cov['node_linkage_pct']}% node-linkage coverage - a partial window is not a trend.\n"
         )
 
+    # Journal integrity rides the same screen as any rate it could bias: a
+    # malformed or missing journal is an omission to state, never a zero.
+    ec = sb.get("event_coverage")
+    if ec and not ec.get("complete", True):
+        out(
+            f"  ! event journals incomplete: {ec.get('malformed_lines', 0)} malformed "
+            f"line(s), {ec.get('unreadable_paths', 0)} unreadable file(s); "
+            "affected counts are omissions, not zeros.\n"
+        )
+    emit = sb.get("emission_failures")
+    if emit and emit.get("available"):
+        out(
+            f"  ! touch emission failures: {emit.get('count')} since "
+            f"{emit.get('measured_since') or '?'} (measured "
+            f"{emit.get('measured_at') or '?'}; server instance lifetime).\n"
+        )
+    elif emit:
+        out(
+            f"  ! touch emission failures: unknown ({emit.get('reason') or 'server unreachable'}).\n"
+        )
+
     # x-b6bd: shipped is the merge; the terminal count rides beside it for one
     # release so the correction stays visible, then it drops.
     shipped = sb.get("shipped_nodes")
@@ -647,6 +668,8 @@ def _render(sb: dict) -> None:
     out("Survival      ")
     su = sb["survival"]
     if su["available"]:
-        out(f"{su['rate_pct']}% ({su['survived']}/{su['shipped_nodes']} shipped nodes)\n")
+        pending = su.get("pending")
+        suffix = f", {pending} pending observation" if pending else ""
+        out(f"{su['rate_pct']}% ({su['survived']}/{su['shipped_nodes']} shipped nodes{suffix})\n")
     else:
         out(f"n/a - {su['reason']}\n")

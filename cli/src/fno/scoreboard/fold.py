@@ -47,14 +47,53 @@ def _is_shipped_reason(termination_reason: str | None) -> bool:
     return tr in _SHIPPED_TERMINALS
 
 
-def classify_deliveries(graph_nodes: list[dict], rows: list[dict]) -> dict:
+def classify_deliveries(graph_nodes: list[dict], rows: list[dict], project: str | None = None) -> dict:
     """The one delivery classification, answered by the Rust keeper
-    (scoreboard.rs via the graph store): node id -> {class, delivered,
-    confirmed, evidence, ship_ts, cost_known}. Every view reads this one
-    decision. Test seam: monkeypatch this name to keep a fold test hermetic."""
+    (scoreboard.rs via the graph store): the full payload with ``by_node``
+    (node id -> {class, delivered, confirmed, evidence, ship_ts,
+    cost_known}), ``coverage``, and - with a project - the scoped
+    ``entries``/``rows``/``node_ids``. Test seam: monkeypatch this name to
+    keep a fold test hermetic."""
     from fno.graph.store import request_scoreboard_classify
 
-    return request_scoreboard_classify(graph_nodes, rows).get("by_node", {})
+    return request_scoreboard_classify(graph_nodes, rows, project)
+
+
+def emission_failures_snapshot() -> dict:
+    """The mux server's in-memory human_touch emission-failure counter, read
+    over one control roundtrip to the deployed binary. Unknown is an honest
+    answer when the binary or the server is absent; the count carries its own
+    measurement window (instance lifetime), never reset by reading it."""
+    import shutil
+    import subprocess
+
+    fno_bin = shutil.which("fno")
+    if not fno_bin:
+        return {"available": False, "reason": "fno binary not on PATH"}
+    try:
+        out = subprocess.run(
+            [fno_bin, "mux", "stats", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"available": False, "reason": type(exc).__name__}
+    if out.returncode != 0:
+        return {
+            "available": False,
+            "reason": (out.stderr or "stats unavailable").strip()[:200] or "stats unavailable",
+        }
+    try:
+        payload = json.loads(out.stdout)
+    except ValueError:
+        return {"available": False, "reason": "unreadable stats payload"}
+    return {
+        "available": True,
+        "count": payload.get("touch_emit_failures"),
+        "measured_since": payload.get("started_at"),
+        "measured_at": payload.get("measured_at"),
+    }
 
 
 def _row_shipped(row: dict, deliveries: dict | None) -> bool:
@@ -326,7 +365,7 @@ def build_scoreboard(
     windowed = [r for r in rows if _in_window(r.get("completed"))]
     total = len(windowed)
 
-    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
     window_node_ids = {r.get("graph_node_id") for r in windowed if r.get("graph_node_id")}
     delivered_nodes = {
         nid
@@ -386,7 +425,7 @@ def build_scoreboard(
     }
 
     autonomy = _autonomy(touch_events, shipped_nodes, cutoff, now)
-    survival = _survival(shipped_nodes, ship_rows, graph_nodes)
+    survival = _survival(shipped_nodes, ship_rows, graph_nodes, now)
 
     full = coverage["termination_reason_pct"] == 100 and autonomy["available"] and survival["available"]
     return {
@@ -424,10 +463,11 @@ def _autonomy(touch_events: list[dict], shipped_nodes: set, cutoff, now) -> dict
     }
 
 
-def _survival(shipped_nodes: set, ship_rows: list[dict], graph_nodes: list[dict]) -> dict:
+def _survival(shipped_nodes: set, ship_rows: list[dict], graph_nodes: list[dict], now) -> dict:
     """Shipped nodes with no `reverted` flag and no caused_by fix-node created
     within the follow-up window. Degrades to n/a until any node carries a Wave 4
-    causal field."""
+    causal field. Only deliveries that completed the observation period are
+    judged; younger ones are reported pending, never in the denominator."""
     w4 = any(("reverted" in n) or n.get("caused_by") for n in graph_nodes)
     if not w4:
         return {"available": False, "reason": "no causal telemetry (Wave 4 not shipped)"}
@@ -449,8 +489,17 @@ def _survival(shipped_nodes: set, ship_rows: list[dict], graph_nodes: list[dict]
         if origin:
             fixes.setdefault(origin, []).append(gn)
 
+    # A delivery younger than the observation window has no quality yet.
+    mature = {
+        nid
+        for nid in shipped_nodes
+        if (ts := ship_ts.get(nid)) is not None
+        and now - ts >= timedelta(days=_SURVIVAL_FOLLOWUP_DAYS)
+    }
+    pending = len(shipped_nodes) - len(mature)
+
     survived = 0
-    for nid in shipped_nodes:
+    for nid in mature:
         node = by_id.get(nid, {})
         if node.get("reverted"):
             continue
@@ -469,8 +518,14 @@ def _survival(shipped_nodes: set, ship_rows: list[dict], graph_nodes: list[dict]
         if not followed:
             survived += 1
 
-    n = len(shipped_nodes)
-    return {"available": True, "survived": survived, "shipped_nodes": n, "rate_pct": _pct(survived, n)}
+    n = len(mature)
+    return {
+        "available": True,
+        "survived": survived,
+        "shipped_nodes": n,
+        "rate_pct": _pct(survived, n),
+        "pending": pending,
+    }
 
 
 def _event_in_window(e: dict, cutoff, now) -> bool:
@@ -551,7 +606,7 @@ def build_calibration(
             fixes.setdefault(origin, []).append(g)
     # Ship times come from the one classifier, so a merged node carries its
     # merged_at even with no delivered-terminal row.
-    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
     ship_ts: dict[str, datetime] = {}
     for nid, c in deliveries.items():
         if not c.get("delivered"):
@@ -809,7 +864,7 @@ def build_skill_scoreboard(
     buckets: dict[tuple[str, str], dict] = {}
     attributed = 0
 
-    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
 
     for r in windowed:
         skills, method = _extract_skill_runs(r, read_transcript=read_transcript)
@@ -915,7 +970,7 @@ def build_lanes(
 ) -> dict:
     """Fold retrospective ledger axes and live registry occupancy together."""
     cutoff = now - timedelta(days=since_days)
-    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
     in_window = [
         row
         for row in rows
@@ -1045,7 +1100,7 @@ def build_provider_scoreboard(
     total = len(windowed)
     if total == 0:
         return {"state": "no_data", "since_days": since_days, "rows": 0}
-    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
 
     by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
     fixes: dict[str, list[dict]] = {}
@@ -1269,7 +1324,7 @@ def build_efficiency(
     total = len(windowed)
     if total == 0:
         return {"state": "no_data", "since_days": since_days, "rows": 0}
-    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
 
     # Index loop_check fires by session id: (ts_sort_key, ci) so a session's
     # fires order deterministically even when ts is missing (undated last).
@@ -2287,7 +2342,7 @@ def build_plan_fidelity(
         if origin:
             fixes.setdefault(origin, []).append(gn)
 
-    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
     shipped_by_plan: dict[str, list[dict]] = {}
     for r in windowed:
         if _row_shipped(r, deliveries):

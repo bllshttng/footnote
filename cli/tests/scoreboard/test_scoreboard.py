@@ -89,10 +89,12 @@ def test_hp_prints_core_metrics(tmp_path, monkeypatch):
 
 
 def test_hp_autonomy_survival_activate_with_w4(tmp_path, monkeypatch):
-    # W4 signals present: a human_touch event + a graph node carrying a causal field.
-    rows = [{"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0}]
+    # W4 signals present: a human_touch event + a graph node carrying a causal
+    # field. The ship is 20 days old, so it has completed the observation
+    # window and survival may judge it.
+    rows = [{"completed": _days_ago(20), "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0}]
     (tmp_path / "events.jsonl").write_text(json.dumps({"type": "human_touch", "ts": _days_ago(1, hour=9)}) + "\n")
-    (tmp_path / "graph.json").write_text(json.dumps({"entries": [{"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": _RECENT}]}))
+    (tmp_path / "graph.json").write_text(json.dumps({"entries": [{"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": _days_ago(20)}]}))
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), ["--json"])
     sb = json.loads(res.output)
@@ -182,19 +184,89 @@ def test_aware_offset_timestamps_land_on_one_timeline():
 def test_survival_ignores_fix_predating_ship(tmp_path, monkeypatch):
     # A fix-node created BEFORE the ship is not a follow-up to it -> node survives.
     # Fixed dates on purpose: this test injects an explicit `now=`, so it is
-    # deterministic and must NOT follow the wall clock.
-    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 1.0}]
+    # deterministic and must NOT follow the wall clock. The ship sits 20 days
+    # before `now`, so it has completed the observation window.
+    rows = [{"completed": "2026-06-15T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 1.0}]
     graph = [
-        {"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": "2026-07-03T10:00:00"},
-        {"id": "x-fix", "caused_by": "x-1", "created_at": "2026-07-01T00:00:00"},  # 2 days BEFORE ship
+        {"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": "2026-06-15T10:00:00"},
+        {"id": "x-fix", "caused_by": "x-1", "created_at": "2026-06-10T00:00:00"},  # 5 days BEFORE ship
     ]
-    sb = build_scoreboard(rows, [], graph, since_days=28, now=datetime(2026, 7, 3, 20, 0, 0))
+    sb = build_scoreboard(rows, [], graph, since_days=28, now=datetime(2026, 7, 5, 20, 0, 0))
     assert sb["survival"]["available"] is True and sb["survival"]["survived"] == 1
 
     # a fix AFTER the ship, within 14 days, counts against survival
-    graph[1]["created_at"] = "2026-07-04T00:00:00"
+    graph[1]["created_at"] = "2026-06-25T00:00:00"
     sb2 = build_scoreboard(rows, [], graph, since_days=28, now=datetime(2026, 7, 5, 20, 0, 0))
     assert sb2["survival"]["survived"] == 0
+
+
+# --- AC3: integrity, cohorts, emission failures -----------------------------
+def test_quality_denominator_only_mature_deliveries(tmp_path, monkeypatch):
+    # One delivery observed past the follow-up window, one 1 day old: only the
+    # mature one is judged; the young one is pending, never in the denominator.
+    rows = [
+        {"completed": _days_ago(20), "termination_reason": "DonePRGreen", "graph_node_id": "x-old", "cost_usd": 1.0},
+        {"completed": _days_ago(1), "termination_reason": "DonePRGreen", "graph_node_id": "x-new", "cost_usd": 1.0},
+    ]
+    graph = [
+        {"id": "x-old", "reverted": False, "merge_status": "merged", "completed_at": _days_ago(20)},
+        {"id": "x-new", "reverted": False, "merge_status": "merged", "completed_at": _days_ago(1)},
+    ]
+    sb = build_scoreboard(rows, [], graph, since_days=28, now=datetime.now())
+    su = sb["survival"]
+    assert su["available"] is True
+    assert su["shipped_nodes"] == 1
+    assert su["survived"] == 1
+    assert su["pending"] == 1
+
+
+def test_malformed_journal_states_its_omission(tmp_path, monkeypatch):
+    # A malformed line in the touch journal is an omission the report states,
+    # never a silent zero in the rates that read that journal.
+    rows = [{"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 1.0}]
+    (tmp_path / "events.jsonl").write_text("{not json\n")
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
+    res = runner.invoke(_app(), ["--json"])
+    sb = json.loads(res.output)
+    assert sb["event_coverage"]["complete"] is False
+    assert sb["event_coverage"]["malformed_lines"] == 1
+    res2 = runner.invoke(_app(), [])
+    assert "event journals incomplete" in res2.output
+
+
+def test_emission_failures_unknown_when_server_unreachable(tmp_path, monkeypatch):
+    # AC3-ERR: an unavailable counter renders as Unknown with its reason, not
+    # as a measured zero.
+    import fno.scoreboard.cli as cli_mod
+
+    monkeypatch.setattr(
+        cli_mod,
+        "emission_failures_snapshot",
+        lambda: {"available": False, "reason": "connection refused"},
+    )
+    rows = [{"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 1.0}]
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
+    res = runner.invoke(_app(), [])
+    assert "touch emission failures: unknown (connection refused)" in res.output
+
+
+def test_emission_failures_measured_count_renders(tmp_path, monkeypatch):
+    import fno.scoreboard.cli as cli_mod
+
+    monkeypatch.setattr(
+        cli_mod,
+        "emission_failures_snapshot",
+        lambda: {
+            "available": True,
+            "count": 3,
+            "measured_since": "2026-09-11T00:00:00Z",
+            "measured_at": "2026-09-11T12:00:00Z",
+        },
+    )
+    rows = [{"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 1.0}]
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
+    res = runner.invoke(_app(), [])
+    assert "touch emission failures: 3 since 2026-09-11T00:00:00Z" in res.output
 
 
 def test_zero_shipped_nodes_is_na_not_a_bare_rate():
