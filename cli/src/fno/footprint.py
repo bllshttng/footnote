@@ -90,6 +90,7 @@ class Admission(NamedTuple):
     gap: str | None = None
     load_15m: float | None = None
     backstop: float = 0.0
+    top_holder: str | None = None
 
 
 #: argv[0] basenames that are a test runner on their own.

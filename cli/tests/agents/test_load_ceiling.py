@@ -14,7 +14,9 @@ from fno.agents import spawn_gate
 from fno.footprint import Footprint
 
 
-def _reading(fleet: float, measured: float, gap: str | None = None) -> Footprint:
+def _reading(
+    fleet: float, measured: float, gap: str | None = None, top: list | None = None
+) -> Footprint:
     return Footprint(
         sustained_cpu_cores=0.0,
         descendant_cpu_cores=0.0,
@@ -25,7 +27,7 @@ def _reading(fleet: float, measured: float, gap: str | None = None) -> Footprint
         process_count=0,
         rss_gb=0.0,
         measured_cpu_cores=measured,
-        top=[],
+        top=top or [],
         unparsed_lines=0,
         attribution_gap=gap,
     )
@@ -104,6 +106,39 @@ def test_gapped_reading_refuses_inside_the_interval(monkeypatch):
     assert admission.verdict == "undecidable"
     assert "17.5%" in admission.reason and "60.0%" in admission.reason
     assert gap in admission.reason
+
+
+def test_hold_names_the_top_holder(monkeypatch):
+    """x-5f0b: the hold names who holds the cores, from the same rows the
+    number was summed from. The specimen is the measured 2026-09-11 refusal:
+    16 yes rows summing 513.0 %cpu out of one worktree's repro loop."""
+    _pin_load15(monkeypatch, 45.0)
+    top = [(32.0625, "yes > .fno/worktrees/x-b1ee/repro.out")] * 16
+    admission = spawn_gate._cpu_axis((_reading(7.5, 7.5, top=top), None))
+    assert admission.verdict == "hold"
+    holder = "yes 16 procs 5.13 cores in .fno/worktrees/x-b1ee"
+    assert f"top holder {holder}" in admission.reason
+    assert admission.top_holder == holder
+
+
+def test_hold_with_empty_top_names_no_holder(monkeypatch):
+    """No rows in hand, no clause: the sentence is exactly what it was
+    before, with no empty bracket and no doubled separator."""
+    _pin_load15(monkeypatch, 45.0)
+    admission = spawn_gate._cpu_axis((_reading(7.5, 7.5), None))
+    assert admission.verdict == "hold"
+    assert admission.top_holder is None
+    assert "top holder" not in admission.reason
+    assert ";;" not in admission.reason and " ;" not in admission.reason
+
+
+def test_admit_reason_stays_holder_free(monkeypatch):
+    """An admission needs no action, so it needs no holder; the field may
+    still carry what the rows said."""
+    _pin_load15(monkeypatch, 45.0)
+    admission = spawn_gate._cpu_axis((_reading(0.1, 6.9, top=[(500.0, "yes")]), None))
+    assert admission.verdict == "admit"
+    assert "top holder" not in admission.reason
 
 
 def test_retired_trigger_key_still_parses_and_defaults():
