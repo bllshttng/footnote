@@ -247,7 +247,10 @@ case "$sub $verb" in
     fi
     # The real resolver substitutes {id} when --node is given (per-node path).
     [[ -n "$r_node" ]] && cmd="${cmd//\{id\}/$r_node}"
-    printf '{"harness":"%s","substrate":"%s","command":"%s"}\n' "$h" "${pair##*/}" "$cmd" ;;
+    # x-14d4: the verb lane route rides the tuple ("" default = unset).
+    r_route=""
+    [[ -f "$S/resolve_route" ]] && r_route="$(cat "$S/resolve_route")"
+    printf '{"harness":"%s","substrate":"%s","command":"%s","route":"%s"}\n' "$h" "${pair##*/}" "$cmd" "$r_route" ;;
   "config get")
     # x-4391/x-4be1: only auto_merge.grant is modeled; every other key (e.g.
     # agents.defaults.permission_mode) falls through to empty here, matching
@@ -310,7 +313,7 @@ set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2"
 set_cwd() { echo "$2" > "$MOCKSTATE/cwd_$1"; }
 set_resolved_cwd() { echo "$2" > "$MOCKSTATE/resolved_cwd_$1"; }
 set_pr() { echo "$2" > "$MOCKSTATE/pr_$1"; }   # node carries an open (unmerged) PR
-reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/claim_garbage "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/diff_* "$MOCKSTATE"/rung_* "$MOCKSTATE"/nodiff_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err "$MOCKSTATE"/repo_ensure.log "$MOCKSTATE"/ensure_fail "$MOCKSTATE"/ensure_policy_never 2>/dev/null || true; }
+reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/claim_garbage "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/resolve_route "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/diff_* "$MOCKSTATE"/rung_* "$MOCKSTATE"/nodiff_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err "$MOCKSTATE"/repo_ensure.log "$MOCKSTATE"/ensure_fail "$MOCKSTATE"/ensure_policy_never 2>/dev/null || true; }
 ask_count()  { [[ -f "$MOCKSTATE/ask.log" ]] && wc -l < "$MOCKSTATE/ask.log" | tr -d ' ' || echo 0; }
 # Read repo_ensure.log joined on one line. cat + strip, never tail -1: the rtk
 # wrapper on this machine silently empties tail -1. One home for the join so
@@ -815,6 +818,43 @@ echo "$out" | grep -qF "'\$fno:target --no-merge ab-aaaa1111'" \
 echo "$out" | grep -q -- "--role build" \
   && fail "x-567d P1: non-claude spawn must NOT carry --role build: $out" \
   || pass "x-567d P1: non-claude spawn drops the claude-only --role/--route lane"
+
+# ============================================================
+# x-14d4: the verb lane route reaches the spawn argv (the vendor)
+# The resolver returns the stage table's route; the launcher seeds it into
+# the claude spawn, so an autonomous worker carries vendor+model as one unit
+# instead of dying on the default endpoint (HTTP 404 model_not_found).
+# ============================================================
+
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo 'zai,glm-5.3-flash[1m]' > "$MOCKSTATE/resolve_route"
+out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+grep -qF -- "--route zai,glm-5.3-flash[1m]" "$MOCKSTATE/ask.log" \
+  && pass "x-14d4 HP: lane route seeds the claude spawn argv" \
+  || fail "x-14d4 HP: ask.log missing --route lane: $(cat "$MOCKSTATE/ask.log")"
+echo "$out" | grep -qF 'route=zai,glm-5.3-flash[1m]' \
+  && pass "x-14d4 HP: receipt names the lane route" \
+  || fail "x-14d4 HP: receipt route= missing: $out"
+
+# Explicit --route outranks the lane route (operator pin wins the axis).
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo 'zai,glm-5.3-flash[1m]' > "$MOCKSTATE/resolve_route"
+out="$(bash "$DISPATCH" --route 'zai,other-model' ab-aaaa1111 2>&1)"
+if grep -qF -- "--route zai,other-model" "$MOCKSTATE/ask.log" \
+   && ! grep -qF -- "--route zai,glm-5.3-flash[1m]" "$MOCKSTATE/ask.log"; then
+  pass "x-14d4 HP: explicit --route outranks the lane route"
+else
+  fail "x-14d4 HP: explicit --route not authoritative: $(cat "$MOCKSTATE/ask.log")"
+fi
+
+# A non-claude lane drops the claude-only route axis (same gate as --role build).
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+echo 'zai,glm-5.3-flash[1m]' > "$MOCKSTATE/resolve_route"
+echo "codex/headless" > "$MOCKSTATE/resolve_pair"
+out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+grep -q -- "--route" "$MOCKSTATE/ask.log" \
+  && fail "x-14d4 EDGE: non-claude spawn must NOT carry --route: $(cat "$MOCKSTATE/ask.log")" \
+  || pass "x-14d4 EDGE: non-claude spawn drops the lane route"
 
 # ---- x-de43: an opencode worker gets the native /fno:target invocation (its
 #      fno plugin expands the palette command), never a prose brief nor a bare

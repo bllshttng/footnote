@@ -390,7 +390,10 @@ fn implied_vendor(model: Option<&str>) -> Option<String> {
     None
 }
 
-fn resolve_lane_vendor(
+/// The lane's vendor from route > provider > the harness chain. Inference-free
+/// by contract: the model-vendor mismatch check needs a lane answer that the
+/// model token did not inform, or it could never flag the model.
+fn resolve_lane_vendor_by_lane(
     toks: &[&str],
     harness: Option<&str>,
     env_harness: Option<&str>,
@@ -449,6 +452,26 @@ fn resolve_lane_vendor(
     None
 }
 
+fn resolve_lane_vendor(
+    toks: &[&str],
+    harness: Option<&str>,
+    env_harness: Option<&str>,
+    argv_head: Option<&str>,
+) -> Option<String> {
+    // No route and no provider named a vendor: the model token informs the
+    // answer. A routeless glm spawn answered the harness default (anthropic),
+    // minted a row under it, and died on the default endpoint's first
+    // inference; the model's own spelling is the only voice that named z.ai.
+    let vendor_pinned = flag_value(toks, &["--route"]).is_some()
+        || flag_value(toks, &["--provider", "-P"]).is_some();
+    if !vendor_pinned {
+        if let Some(vendor) = implied_vendor(flag_value(toks, &["--model", "-m"]).as_deref()) {
+            return Some(vendor);
+        }
+    }
+    resolve_lane_vendor_by_lane(toks, harness, env_harness, argv_head)
+}
+
 fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
     let toks: Vec<String> = payload
         .get("argv_tail")
@@ -475,7 +498,7 @@ fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
         // Explicit route: a deliberate lane choice beside a deliberate model.
         return Ok(json!({"verdict": "ok", "message": Value::Null, "event": Value::Null}));
     }
-    let lane = match resolve_lane_vendor(
+    let lane = match resolve_lane_vendor_by_lane(
         &refs,
         harness,
         payload.get("env_harness").and_then(Value::as_str),
@@ -919,6 +942,69 @@ mod tests {
             vendor(json!({"kind": "lane-vendor", "argv_tail": [], "harness": "opencode"})),
             None
         );
+    }
+
+    #[test]
+    fn lane_vendor_model_token_informs_the_answer_without_a_route_or_provider() {
+        // The measured A/B matrix: a routeless glm spawn answered the claude
+        // harness default (anthropic), minted a row under it, and died on the
+        // default endpoint's first inference. The model spelling is the only
+        // voice that named z.ai, so it outranks the harness default when no
+        // route and no provider named a vendor.
+        let vendor = |payload: Value| {
+            resolve(payload).unwrap()["vendor"]
+                .as_str()
+                .map(String::from)
+        };
+        assert_eq!(
+            vendor(json!({
+                "kind": "lane-vendor",
+                "argv_tail": ["--model", "glm-5.3-flash[1m]"],
+                "harness": "claude",
+            })),
+            Some("zai".into())
+        );
+        // A pinned vendor still answers ahead of the model spelling.
+        assert_eq!(
+            vendor(json!({
+                "kind": "lane-vendor",
+                "argv_tail": ["-P", "zai", "--model", "glm-5.3-flash[1m]"],
+                "harness": "claude",
+            })),
+            Some("zai".into())
+        );
+        assert_eq!(
+            vendor(json!({
+                "kind": "lane-vendor",
+                "argv_tail": ["--route", "zai/glm-5.3-flash"],
+                "harness": "claude",
+            })),
+            Some("zai".into())
+        );
+        // Control: a model the harness default agrees with is unchanged.
+        assert_eq!(
+            vendor(json!({
+                "kind": "lane-vendor",
+                "argv_tail": ["--model", "claude-opus-5"],
+                "harness": "claude",
+            })),
+            Some("anthropic".into())
+        );
+    }
+
+    #[test]
+    fn model_vendor_mismatch_check_stays_lane_inference_free() {
+        // The checker's lane answer must NOT absorb the model inference, or
+        // an injected glm-on-claude model would agree with itself and never
+        // refuse.
+        let out = resolve(json!({
+            "kind": "model-vendor",
+            "argv_tail": ["--model", "glm-5.3-flash[1m]"],
+            "harness": "claude",
+            "model_source": "config.agents.profiles.target",
+        }))
+        .unwrap();
+        assert_eq!(out["verdict"], "refuse");
     }
 }
 

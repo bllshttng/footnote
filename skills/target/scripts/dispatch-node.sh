@@ -28,11 +28,18 @@
 #
 # --route provider/model: per-dispatch explicit model route (x-b0b4), forwarded
 #   to every worker spawn. Fails CLOSED in the spawn (unknown/non-anthropic/
-#   keyless refuses -> the node stays dispatchable). Wins over the build lane.
-#   A CLAUDE worker carries --role build (the build lane is a fail-safe no-op
-#   until `fno config route set build ...` opts in). Non-claude workers do NOT: the
+#   keyless refuses -> the node stays dispatchable). Wins over the build lane
+#   AND over the verb lane route (below). A CLAUDE worker carries --role build
+#   (the build lane is a fail-safe no-op until `fno config route set build ...`
+#   opts in). Non-claude workers do NOT: the
 #   build/route lane is claude-specific, and a role-bearing spawn is classified
 #   Python-owned by the runtime, which rejects opencode/agy (x-567d / codex P1).
+#
+# Verb lane route (x-14d4): with no explicit --route, a claude worker also
+#   carries the stage table's route (config.agents.profiles.<verb>.route) when
+#   the per-node resolve returns one - the vendor lane that selects the
+#   worker's route settings file. A cutover dispatch drops it (the destination
+#   account owns billing).
 #
 # --here / --in-place: keep a worker without a recorded node cwd in the
 #   dispatcher's cwd. Default (no node cwd) is --fresh: start from canonical
@@ -327,6 +334,8 @@ for id in "${NODES[@]}"; do
   # error (the same trap the --cwd branches below avoid). Empty pin -> zero args =
   # byte-identical to today; fail-open on a bad read since jq // empty yields "".
   model_pin="$(printf '%s' "$node_json" | jq -r '.model // empty' 2>/dev/null || true)"
+  model_pin_source=""  # "node" (operator pin) | "band" (resolve-model), for the lane-route coordinate rule
+  [[ -n "$model_pin" ]] && model_pin_source="node"
   # x-d7a7: no exact `.model` pin? resolve the node's band via the single
   # Python projection (`fno do target resolve-model` -> route_resolve) so a
   # pinned node's worker spawns on the resolved model too - bash never
@@ -338,6 +347,7 @@ for id in "${NODES[@]}"; do
   # pin, cross-harness pick, or any resolve error) -> zero args.
   if [[ -z "$model_pin" ]]; then
     model_pin="$(fno do target resolve-model "$id" --harness "$DISPATCH_PROVIDER" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    [[ -n "$model_pin" ]] && model_pin_source="band"
   fi
   model_args=()
   [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")
@@ -703,6 +713,31 @@ for id in "${NODES[@]}"; do
     fi
   fi
 
+  # x-14d4: the verb lane vendor rides the SAME resolve that named the harness.
+  # The stage table's route (config.agents.profiles.<verb>.route) is what
+  # selects the worker's route settings file (endpoint+auth+model as one
+  # unit); a claude spawn carrying only --harness sends a routed model to the
+  # default endpoint, where it dies on first inference (HTTP 404
+  # model_not_found). An explicit --route outranks it, and a cutover's
+  # destination account owns billing instead.
+  lane_route=""
+  if [[ "$route_action" != "cutover" && -z "$ROUTE" && "$DISPATCH_PROVIDER" == "claude" ]]; then
+    lane_route="$(printf '%s' "$resolved_json" | jq -r '.route | select(. != null and . != "")' 2>/dev/null)"
+    if [[ -n "$lane_route" ]]; then
+      route_args=("--route" "$lane_route")
+      route_val="$lane_route"
+      # The lane is a COMPLETE coordinate (route/model stop at the lane, the
+      # same rule spawn_defaults enforces): a band-resolved --model would win
+      # over the route's model at the claude CLI and split the coordinate
+      # across two owners. A node .model pin (operator authority) keeps it.
+      case "$lane_route" in
+        *,*|*/*)
+          if [[ "$model_pin_source" != "node" ]]; then
+            model_args=(); model_pin=""
+          fi ;;
+      esac
+    fi
+  fi
   # Auto-brief (x-d1f4): the SAME resolve auto-resolves the node's brief chain
   # (explicit dispatch_brief > sidecar > details > transcript tail) whenever
   # --node is passed with no --brief, so a plain node cold-starts with context.
@@ -745,8 +780,10 @@ for id in "${NODES[@]}"; do
     dry_cwd="<fno-worktree-ensure>"
   fi
 
+  route_hint=""
+  [[ ${#route_args[@]} -gt 0 ]] && route_hint="--route ${route_args[1]} "
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --harness $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${squad_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${perm_hint}${route_account:+--dispatch-account $route_account }--name $agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --harness $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${squad_hint}${role_hint}${route_hint}${model_pin:+--model $model_pin }${perm_hint}${route_account:+--dispatch-account $route_account }--name $agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi

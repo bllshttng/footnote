@@ -1461,6 +1461,13 @@ def _spawn_worker(
         # The row's route owns vendor AND model as one fact; an explicit
         # dispatch-time vendor pin outranks it and is never replaced.
         cmd += ["--route", grid_lane_route]
+    elif resolved.get("harness") == "claude" and resolved.get("route"):
+        # No grid pick: fall back to the stage table's verb lane route (the
+        # same resolve that named the harness). A claude spawn carrying only
+        # --harness sends a routed model to the default endpoint, where it
+        # dies on first inference. Claude-gated: --route is a claude-only
+        # axis at the spawn seam, the same gate the shell dispatcher applies.
+        cmd += ["--route", resolved["route"]]
     if grid_lane_account and resolved.get("harness") == "claude":
         # The capacity pick read THIS account's quota; claude-only at the CLI.
         cmd += ["--account", grid_lane_account]

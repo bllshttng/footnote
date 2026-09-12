@@ -399,6 +399,7 @@ def test_settings_without_dispatch_section_yields_empty_cfg():
         "auto_merge": False,
         "harness": "",
         "harness_note": "",
+        "route": "",
     }
 
 

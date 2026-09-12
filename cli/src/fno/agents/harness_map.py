@@ -1394,7 +1394,9 @@ def resolve_dispatch(
     stage-table read so ``agents.profiles.<derived-verb>`` drives the harness;
     an explicit command bypasses it (reconcile and the other explicit doors
     spell their own verb). ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
-    at 8 KB, never truncated. ``trigger`` is autonomous or attended (pane
+    at 8 KB, never truncated. ``route`` is the stage table's vendor lane beside
+    the harness ("" when unset), returned so a caller forwarding the harness
+    can forward the vendor too. ``trigger`` is autonomous or attended (pane
     needs the capability). ``node_id`` substitutes the command's ``{id}``.
     ``merge_posture`` (x-8151): no-merge injects, allow overrides the config
     read (an explicit template is never edited), from-config reads the grant.
@@ -1418,6 +1420,12 @@ def resolve_dispatch(
         if dispatch_cfg is not None
         else _load_dispatch_cfg(settings, verb=lifecycle_verb or verb)
     )
+    # The verb lane vendor rides the same stage-table row the harness does:
+    # an autonomous dispatch that names the harness but not the route sends a
+    # routed model to the default endpoint (x-14d4: HTTP 404 model_not_found).
+    route_value = str(cfg.get("route", "") or "")
+    if route_value:
+        decision.append(f"route=config({route_value})")
     chosen_trigger = (trigger or "autonomous").strip().lower() or "autonomous"
     if chosen_trigger not in ("autonomous", "attended"):
         raise DispatchResolveError(
@@ -1682,6 +1690,7 @@ def resolve_dispatch(
         "map_version": MAP_VERSION,
         "harness": chosen_harness,
         "substrate": chosen_substrate,
+        "route": route_value,
         "command": resolved_command,
         # x-ebd2: the lifecycle-derived canonical verb, or None when the table
         # abstained (bare resolve, explicit command, out-of-family declared
@@ -1730,9 +1739,10 @@ def _load_dispatch_cfg(settings: object, verb: Optional[str] = None) -> dict:
     # One home for the harness axis (the stage table) with the deprecated
     # dispatch.harness folded beneath it; the note names the losing spelling
     # when both were set and disagreed.
-    from fno.dispatch_flags import configured_dispatch_harness
+    from fno.dispatch_flags import configured_dispatch_harness, configured_dispatch_route
 
     harness_value, harness_note = configured_dispatch_harness(settings, verb=verb or "target")
+    route_value = configured_dispatch_route(settings, verb=verb or "target")
     d = getattr(settings, "dispatch", None)
     # The grant lives in config.auto_merge, NOT under dispatch (x-4be1), so it
     # is read before the dispatch-block gate: a settings object carrying an
@@ -1745,6 +1755,7 @@ def _load_dispatch_cfg(settings: object, verb: Optional[str] = None) -> dict:
         return {
             "harness": harness_value or "",
             "harness_note": harness_note or "",
+            "route": route_value,
             "auto_merge": grant,
         }
 
@@ -1755,6 +1766,7 @@ def _load_dispatch_cfg(settings: object, verb: Optional[str] = None) -> dict:
         return {
             "harness": harness_value or "",
             "harness_note": harness_note or "",
+            "route": route_value,
             "substrate": _text("substrate"),
             "command": _text("command"),
             "allowed_verbs": list(getattr(d, "allowed_verbs", None) or []),
