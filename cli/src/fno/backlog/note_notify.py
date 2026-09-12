@@ -181,13 +181,12 @@ def note_readers(
 
     # Crown walk, nearest first; the walk stops at the first scope with a live crown.
     epic = (owner.get("parent") if owner else None) or entry.get("parent")
-    project = entry.get("project")
     scopes: list[tuple[str, str, str]] = []
     if entry.get("type") == "epic":
         scopes.append((node_id, f"king of {node_id}", f"crown {node_id}"))
     if isinstance(epic, str) and epic:
         scopes.append((epic, f"king of {epic}", f"crown {epic}"))
-    if isinstance(project, str) and project:
+    if isinstance(project := entry.get("project"), str) and project:
         scopes.append((project, f"king of {project} (project)", f"crown {project} (project)"))
     for scope, why, label in scopes:
         try:
@@ -205,7 +204,7 @@ def note_readers(
     return NoteReaders(node_id, recipients, author_bound, readings)
 
 
-def _refused(head: str, readings: list[str] = ()) -> Refused:
+def _refused(head: str, readings: Iterable[str] = ()) -> Refused:
     trail = "".join(f"\n  {reading}" for reading in readings)
     return Refused(f"{head}so nothing was written.{trail}\n{_QUIET_HINT}", 3)
 

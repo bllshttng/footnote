@@ -74,7 +74,7 @@ def cmd_note(
         note["source_session_id"] = identity.session_id
     if identity is not None and identity.harness:
         note["source_harness"] = identity.harness
-    from fno.backlog.note_notify import Refused, readers_before_append
+    from fno.backlog.note_notify import Refused, deliver, readers_before_append
 
     # Refuse BEFORE the append: an unread note is a silent drop wearing a receipt.
     resolved = None if quiet else readers_before_append(task_id, graph_cli._graph_path())
@@ -96,6 +96,4 @@ def cmd_note(
     else:
         typer.echo(f"noted {task_id}: {text}")
     if readers is not None:
-        from fno.backlog.note_notify import deliver
-
         raise typer.Exit(code=deliver(readers, text, json_output=json_output))
