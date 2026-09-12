@@ -1,5 +1,6 @@
 //! The king termination board read: what work and operator questions remain.
 
+use crate::loopcheck::TerminationReason;
 use serde_json::Value;
 use std::path::Path;
 
@@ -294,6 +295,46 @@ pub(crate) fn capacity_gate(
     }
 }
 
+/// Why a blocking branch must stop instead of blocking again.
+pub(crate) struct BoundBreach {
+    pub(crate) reason: TerminationReason,
+    pub(crate) message: String,
+    pub(crate) fires: u64,
+}
+
+/// The bounds every blocking branch of `king_decide` owes: the manifest
+/// ceiling `--max-iterations` advertises, and the dry-fire backstop. One
+/// function because a branch that grew its own copy of either lost both: the
+/// quiet-board return sat above both and a crown with undelivered scope
+/// blocked forever, never reaching the parked state that asks the operator.
+/// Budget is checked first, matching the ordering the ceiling branch commits
+/// to: an exhausted king reports the reason that actually stopped it.
+pub(crate) fn bound_breached(
+    total: u64,
+    dry: u64,
+    max_iterations: u64,
+    waiting_on: &str,
+) -> Option<BoundBreach> {
+    if total + 1 >= max_iterations {
+        return Some(BoundBreach {
+            reason: TerminationReason::Budget,
+            message: format!(
+                "{} fires reached the manifest ceiling of {max_iterations}; {waiting_on}",
+                total + 1
+            ),
+            fires: dry,
+        });
+    }
+    if dry + 1 >= crate::loop_king::KING_DRY_FIRE_CEILING {
+        return Some(BoundBreach {
+            reason: TerminationReason::NoProgress,
+            message: format!("{} fires with nothing cleared; {waiting_on}", dry + 1),
+            fires: dry + 1,
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +484,36 @@ mod tests {
         ])))
         .unwrap();
         assert!(saturation_verdict(&board, Some(&refused_probe())).is_none());
+    }
+
+    #[test]
+    fn the_manifest_ceiling_breaches_budget_on_the_advertised_fire() {
+        let b = bound_breached(39, 0, 40, "3 scope nodes still undelivered").expect("breach");
+        assert_eq!(b.reason, TerminationReason::Budget);
+        assert!(
+            b.message.contains("ceiling of 40")
+                && b.message.contains("3 scope nodes still undelivered"),
+            "{}",
+            b.message
+        );
+        assert_eq!(b.fires, 0);
+    }
+
+    #[test]
+    fn one_fire_below_the_manifest_ceiling_still_blocks() {
+        assert!(bound_breached(38, 0, 40, "waiting").is_none());
+    }
+
+    #[test]
+    fn the_dry_backstop_breaches_noprogress_on_the_third_quiet_fire() {
+        let b = bound_breached(0, 2, 40, "waiting").expect("breach");
+        assert_eq!(b.reason, TerminationReason::NoProgress);
+        assert_eq!(b.fires, 3);
+    }
+
+    #[test]
+    fn budget_is_reported_when_both_bounds_breach_on_one_fire() {
+        let b = bound_breached(2, 2, 3, "waiting").expect("breach");
+        assert_eq!(b.reason, TerminationReason::Budget);
     }
 }
