@@ -81,8 +81,7 @@ def reconcile_channel(
     an empty set closes, and a set a human already answered stays answered.
     ``question``/``ask`` are callables taking the dedupe ``key``; outcome in
     ``none | duplicate | answered | asked | closed``. ``blocks`` carries the
-    node ids the question is about, so the ask gate's pointer rule is met
-    from the run's own facts."""
+    node ids the question is about."""
     key = dedupe_key(identities)
 
     if not pairs:

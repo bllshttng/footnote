@@ -38,16 +38,12 @@ QUESTION_CLOSED_EVENT = "operator_question_closed"
 # Both question types share this prefix, so a raw line without it cannot be
 # one of ours. See the substring prefilter in read_open_questions.
 QUESTION_MARKER = "operator_question"
-# SessionStart has a 1.5s hook budget. The report reads only the quick stores
-# (transcript, registry, roster) and gives the resolver a 1.0s CEILING, not a
-# wait: the child streams one verdict per asker as it completes, and the parent
-# stops at the deadline or when the child closes the pipe, whichever comes
-# first. A hit proves True; a miss proves nothing (the graph and harness stores
-# went unread), so it reads unknown - never a measured False.
+# SessionStart has a 1.5s hook budget. A CEILING, not a wait: the child
+# streams one verdict per asker, the parent stops at the deadline or EOF. A
+# hit proves True; a miss proves nothing and reads unknown, never False.
 LIVENESS_BUDGET_SECONDS = 1.0
 
-# The quick stores the report's liveness read consults, in confidence order.
-# Delivery reads every store; the report reads only these three.
+# The report's quick stores, in confidence order. Delivery reads every store.
 REPORT_SOURCES = ("transcript", "registry", "roster")
 
 # Law d-59af3235: an ask is one line plus a node pointer. ask_refusal is its gate.
@@ -239,16 +235,13 @@ def ask_refusal(
 ) -> "str | None":
     """None when the ask complies with law d-59af3235; otherwise ONE refusal line.
 
-    Shape only, never existence: a graph read costs seconds, and the pointer
-    rule is about the ask carrying an address, not about the node being live.
+    Shape only, never existence: a graph read costs seconds.
     """
     from fno.graph._constants import is_wellformed_node_id
     from fno.style import word_count
 
     problems: "list[str]" = []
-    # A bare \r is a line break to a terminal and to splitlines(), so a
-    # CR-only file must refuse like an LF one.
-    stripped = question.strip()
+    stripped = question.strip()  # a bare \r breaks lines like \n does
     if "\n" in stripped or "\r" in stripped:
         problems.append("it spans more than one line")
     words = word_count(question)
@@ -272,9 +265,7 @@ def ask_refusal(
 def ask_cap() -> int:
     """The configured ask cap; the built-in default when settings cannot load.
 
-    Losing an escalation to a config typo is worse than enforcing the default,
-    so the fallback enforces ``WordCapBlock()``'s default rather than skipping
-    the gate.
+    An unloadable config must not open the gate.
     """
     try:
         from fno.config import load_settings
@@ -289,9 +280,7 @@ def ask_cap() -> int:
 def append_question_event(event: dict[str, Any], root: Path, *, require_pointer: bool = False) -> None:
     """Write one event to project durability first, then machine-wide recall.
 
-    Every ``operator_question`` passes the law gate before anything is written;
-    closed and decision events are never checked. ``require_pointer`` adds the
-    node-pointer rule; the verb is its only caller.
+    Every ``operator_question`` passes the law gate first; closes never do.
     """
     from fno.events import append_event
 
@@ -371,12 +360,9 @@ def _resolve_question_liveness(
 ) -> "dict[str, bool | None]":
     """Resolve unique askers within one wall-clock slice, streaming verdicts.
 
-    The resolver runs in a forked child that sends ONE ``(asker, verdict)``
-    pair as each asker completes, then closes its end; the parent keeps
-    polling with the remaining budget and stores every pair it receives. The
-    whole-batch send this replaces returned 96 of 96 askers as unknown under
-    every budget, because no partial verdict could ever land. A resolver
-    exception reads None - unknown - never a measured False.
+    The forked child sends ONE ``(asker, verdict)`` pair per completed asker;
+    the whole-batch send this replaced landed nothing under any budget. A
+    resolver exception reads None - unknown - never a measured False.
     """
     import multiprocessing
 
@@ -384,24 +370,19 @@ def _resolve_question_liveness(
         return {}
     context = multiprocessing.get_context("fork")
     receive, send = context.Pipe(duplex=False)
-
-    def resolve_one(asker: str) -> "bool | None":
-        if resolver is not None:
-            try:
-                return resolver(asker)
-            except Exception:  # noqa: BLE001 - a failed read is unknown
-                return None
-        from fno.outstanding.core import _quick_store_verdict
-
-        return _quick_store_verdict(asker, cache)
-
     cache: "dict" = {}
     started = clock()
 
     def resolve_all() -> None:
         try:
             for asker in dict.fromkeys(askers):
-                verdict = resolve_one(asker)
+                if resolver is not None:
+                    try:
+                        verdict: "bool | None" = resolver(asker)
+                    except Exception:  # noqa: BLE001 - a failed read is unknown
+                        verdict = None
+                else:
+                    verdict = _quick_store_verdict(asker, cache)
                 try:
                     send.send((asker, verdict))
                 except (BrokenPipeError, OSError):
@@ -436,13 +417,11 @@ def _resolve_question_liveness(
 
 
 def _quick_store_verdict(asker: str, cache: "dict") -> "bool | None":
-    """The report's liveness read (D5): the quick stores, nothing slower.
+    """The report's liveness read: a unique quick-store hit reads True.
 
-    A unique hit reads True. Ambiguous, a miss, and StoreReadError all read
-    None: a miss here proves nothing, because the graph and harness stores
-    went unread. Only delivery, which reads every store, can say an asker is
-    gone. ``cache`` is one dict per batch, so the transcript listing and the
-    registry load are paid once across every asker in the report.
+    Ambiguous, a miss, and a failed read all read None: only delivery, which
+    reads every store, can say an asker is gone. ``cache`` is one dict per
+    batch, so the listing and registry load are paid once per report.
     """
     from fno.agents.discover import resolve_reachable
 
@@ -469,8 +448,7 @@ def read_open_questions(
     Ranked by liveness, blocked nodes, age, then id. A malformed line is SKIPPED, never raised, inheriting
     ``read_carveouts``' rule: one bad row must not cost the others. A missing
     index reads as no questions with a recovery hint; an unreadable one fails.
-    Askers resolve newest question first, so a question asked a moment ago is
-    the one whose verdict lands inside the budget.
+    Askers resolve newest question first, so the freshest verdict lands first.
     """
     _ = root  # The index is machine-wide; retain the argument for caller parity.
     asked: "dict[str, Question]" = {}
@@ -511,9 +489,8 @@ def read_open_questions(
         clock=clock,
         resolver=resolver,
     )
-    # Unknown is the honest value for an asker nobody checked (no asker, or
-    # the budget expired before its verdict landed). False was a verdict
-    # nothing measured; the render already groups asker-less rows separately.
+    # Unknown, never a False nobody measured: an asker-less row or an expired
+    # budget checked nothing. The render groups asker-less rows separately.
     open_qs = [replace(q, live=None if not q.asker else resolved.get(q.asker)) for q in open_qs]
     # A stale asker never outranks a reachable one, even when it blocks more.
     # Within each liveness lane, unblock the most nodes first, then honor the

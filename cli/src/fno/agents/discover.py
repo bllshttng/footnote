@@ -2239,16 +2239,13 @@ def _reachable_from_transcripts(
     transcript store means no claude session ever ran under this HOME, so
     "nothing is reachable" is true rather than unknown. A directory that exists
     but cannot be read (permissions, EIO, a torn mount) IS a read failure --
-    that is the case where absence is unproven.
-
-    The distinction matters in both directions. Treating absent as unreadable
+    that is the case where absence is unproven. Treating absent as unreadable
     makes every typo queue durably on a host that has never run claude, which
-    strands envelopes and destroys the exit-16 typo guard. Treating a read
+    strands envelopes and destroys the exit-16 typo guard; treating a read
     ERROR as empty loses real mail.
 
-    ``scan_cache`` reuses one ``scan_files`` listing across tokens within one
-    batch; the cached failure is a definitive OSError read failure. A caller
-    that passes no cache rescans per token, unchanged.
+    ``scan_cache`` reuses one ``scan_files`` listing across tokens in a batch;
+    no cache rescans per token, unchanged.
     """
     cache_key = "transcript_entries"
     if scan_cache is not None and cache_key in scan_cache:
@@ -2314,11 +2311,8 @@ def _reachable_from_registry(
 
     An exited row is exactly the case the live lane drops and this lane keeps:
     the row is a durable record that this uuid exists, not a liveness claim.
-
-    Carries each row's harness through: the registry holds rows for every
-    provider, and waking a codex thread as claude would resume the wrong
-    session entirely. ``scan_cache`` reuses one ``load_registry`` read across
-    tokens within one batch, mirroring the transcript cache.
+    Each row's harness rides through: waking a codex thread as claude would
+    resume the wrong session. ``scan_cache`` mirrors the transcript cache.
     """
     from fno.agents.registry import RegistryVersionError, load_registry
 
@@ -2542,9 +2536,8 @@ def resolve_reachable(
     agent, and a later source only fills a cwd the earlier one lacked.
 
     ``sources`` consults only the named stores (same implementation, fewer
-    stores); ``scan_cache`` reuses one transcript listing and one registry
-    read across tokens within a batch. Passing neither behaves exactly as
-    before, so a long-lived daemon never reads a stale cached listing.
+    stores); ``scan_cache`` reuses one listing and registry read per batch.
+    Passing neither behaves exactly as before.
     """
     if not token or not token.strip():
         return None, []
@@ -2561,10 +2554,9 @@ def resolve_reachable(
     except RegistryVersionError:  # torn store: degrade, never a clean miss
         alias_sids, alias_ok, degraded = [], True, ["registry"]
 
-    # ``sources`` SUBSETS the consult order (the report's quick stores use
-    # ("transcript", "registry", "roster")); it is the same implementation
-    # with fewer stores, never a second resolver. Unselected stores are not
-    # consulted and cannot appear in ``degraded``.
+    # ``sources`` SUBSETS the consult order; it is the same implementation
+    # with fewer stores, never a second resolver. Unselected stores cannot
+    # appear in ``degraded``.
     all_sources = (
         ("transcript", lambda t: _reachable_from_transcripts(t, pdir, scan_cache=scan_cache)),
         ("harness-store", _reachable_from_harness_stores),

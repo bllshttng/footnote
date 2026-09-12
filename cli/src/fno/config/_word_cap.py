@@ -1,7 +1,6 @@
 """Per-surface masked-word caps (`config.style.word_cap`).
 
-Own module so the config root stays shrink-only at its 5,000-line budget:
-the ask surface (law d-59af3235) joined here and the block moved with it.
+Own module: the config root is shrink-only at its 5,000-line budget.
 """
 
 from pydantic import BaseModel, ConfigDict, field_validator

@@ -35,11 +35,7 @@ def _unique(findings):
 
 
 def question_text(findings, key: str, unknown_dimensions=()) -> str:
-    """One line: count, marker, pointer to the report. Rows live in `blocks`.
-
-    The inlined rows moved to ``blocks`` for the ask gate (law d-59af3235);
-    `fno agents watchdog` lists every finding with its clear command.
-    """
+    """One line: count, marker, pointer to the report. Rows live in `blocks`."""
     unique = _unique(findings)
     # An incomplete scan escalates what it DID reach and names what it did
     # not. Withholding the whole ask instead made the sweep permanently mute

@@ -47,14 +47,10 @@ def question_text(
     """The operator-facing text: one line, dedupe marker first, ids capped.
 
     The marker leads because ``already_asked`` matches on it, and a question
-    truncated past its marker dedupes into duplicates - the exact failure this
-    module exists to prevent. ``unknown_reason`` is deliberately absent from
-    the text: the ask gate caps the line, and the caller echoes the reason on
-    stderr so the unknown is still named, never silently dropped.
-
-    ``live`` branches the closing sentence on the CALLER's measured liveness:
-    telling a live king "has exited" hands it the double-crown recommendation.
-    ``None`` (unreadable) reads as dead, naming that the read failed.
+    truncated past its marker dedupes into duplicates. ``unknown_reason`` is
+    deliberately absent: the ask gate caps the line, and the caller echoes the
+    reason on stderr. ``live`` branches the closing on the CALLER's measured
+    liveness; ``None`` (unreadable) reads as dead, naming that the read failed.
     """
     subject = _stalled_subject(stalled_ids)
     if live:
@@ -99,9 +95,7 @@ def escalate(
 
     Returns ``(outcome, question_id)`` where outcome is ``recorded`` or
     ``duplicate``. Raises on a store failure; a quiet failure here would put the
-    king back in the silence this verb exists to break. ``live`` and
-    ``unknown_reason`` come from :func:`fno.king.state.reign_state`; the dedupe
-    key is unchanged either way.
+    king back in the silence this verb exists to break.
     """
     import secrets
 
@@ -116,10 +110,8 @@ def escalate(
         return ("duplicate", existing)
 
     ids = sorted(set(stalled_ids))
-    # The pointer rule, satisfied from the run's own facts: the reign scope is
-    # the node (when it spells one), and every stalled id that CONTAINS a node
-    # id contributes it (`stalled_holder:x-1005` gives `x-1005`). Shape only,
-    # never existence.
+    # The pointer rule, met from the run's own facts: the reign scope when it
+    # spells a node, plus every node id inside a stalled id. Shape only.
     node = scope if is_wellformed_node_id(scope) else None
     blocks = sorted({nid for raw in ids for nid in extract_node_ids(raw)})
     qid = f"q-{secrets.token_hex(4)}"
