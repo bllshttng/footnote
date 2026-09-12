@@ -362,6 +362,62 @@ pub(crate) struct BoardInputs {
     pub(crate) crown_scope: Option<String>,
 }
 
+/// True when any non-done descendant under `parent_id` is being driven: a
+/// live claim (even one whose holder probe did not answer - the lock is
+/// real), a crown, or a worked-feed listing. Container children recurse: a
+/// sub-epic carries no claim of its own, but its leaf's driver holds the
+/// whole chain. A claim-free child under an unreadable worked feed names no
+/// driver, so measurement blindness can never read as held. `seen` breaks
+/// parent cycles; ids are matched lowercased.
+fn subtree_held(
+    parent_id: &str,
+    children_by_parent: &HashMap<String, Vec<&Value>>,
+    claim_by_node: &HashMap<String, Value>,
+    activity: &HashMap<String, crate::truth_probe::TruthProbe>,
+    crown_ids: Option<&HashSet<String>>,
+    worked: Option<&SourceRead>,
+    seen: &mut HashSet<String>,
+) -> bool {
+    if parent_id.is_empty() || !seen.insert(parent_id.to_string()) {
+        return false;
+    }
+    children_by_parent.get(parent_id).is_some_and(|children| {
+        children.iter().any(|child| {
+            let done = derived_status(child) == "done"
+                || s_str(child, "status")
+                    .map(|s| TERMINAL_RUNGS.contains(&s))
+                    .unwrap_or(false)
+                || child.get("superseded_by").is_some_and(|v| !v.is_null());
+            if done {
+                return false;
+            }
+            let (state, claim) = node_driver(child, claim_by_node, activity, crown_ids, worked);
+            let live_claim = claim.is_some_and(|c| !claim_is_dead(c, activity));
+            if live_claim || state == "crowned" {
+                return true;
+            }
+            let worked_driven = state == "active"
+                && claim.is_none()
+                && s_str(child, "contained_in").is_none_or(|c| c.is_empty());
+            if worked_driven {
+                return true;
+            }
+            match s_str(child, "id") {
+                Some(child_id) => subtree_held(
+                    &child_id.to_ascii_lowercase(),
+                    children_by_parent,
+                    claim_by_node,
+                    activity,
+                    crown_ids,
+                    worked,
+                    seen,
+                ),
+                None => false,
+            }
+        })
+    })
+}
+
 /// Build the board payload. Pure; does no I/O. Queue names, order, and row
 /// shapes match board.py's `build_board` exactly.
 pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
@@ -584,6 +640,22 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     // list: with no claims read every node would look unheld at once.
     let mut unheld_rows: Vec<Value> = Vec::new();
     if inputs.claims.is_ok() {
+        // A container is judged by its children, never by the leaf test:
+        // an epic goes in_progress because its children are worked, and
+        // the epic itself never takes a claim or opens a PR, so the leaf
+        // test flagged every healthy epic forever. Held when any non-done
+        // descendant is driven (subtree_held); still reported when none
+        // is - an epic whose children all died is exactly what a king
+        // must see.
+        let mut children_by_parent: HashMap<String, Vec<&Value>> = HashMap::new();
+        for entry in inputs.entries.as_deref().unwrap_or(&[]) {
+            if let Some(parent) = s_str(entry, "parent") {
+                children_by_parent
+                    .entry(parent.to_ascii_lowercase())
+                    .or_default()
+                    .push(entry);
+            }
+        }
         for node in inputs.entries.as_deref().unwrap_or(&[]) {
             if !KING_PRIORITIES.contains(&s_str(node, "priority").unwrap_or("")) {
                 continue;
@@ -612,6 +684,18 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 Some(&inputs.worked),
             );
             if state != "none" {
+                continue;
+            }
+            let mut seen: HashSet<String> = HashSet::new();
+            if subtree_held(
+                s_str(node, "id").unwrap_or(""),
+                &children_by_parent,
+                &claim_by_node,
+                &inputs.holder_activity,
+                inputs.scope_ids.as_ref(),
+                Some(&inputs.worked),
+                &mut seen,
+            ) {
                 continue;
             }
             if !in_scope(

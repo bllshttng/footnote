@@ -1180,6 +1180,138 @@ mod tests {
     }
 
     #[test]
+    fn unheld_progress_omits_an_epic_with_a_live_claimed_child() {
+        // An epic goes in_progress because its children are worked. The epic
+        // never takes a claim or opens a PR, so the leaf test flagged every
+        // healthy epic forever. A live child claim is the epic's driver.
+        let mut inputs = inputs_with(
+            json!([]),
+            json!([{"key": "node:x-child", "state": "live", "holder": "h"}]),
+            json!([]),
+        );
+        inputs.entries = Some(vec![
+            json!({"id": "x-epic", "priority": "p1", "status": "in_progress", "type": "epic"}),
+            json!({"id": "x-child", "priority": "p1", "status": "in_progress", "parent": "x-epic"}),
+            json!({"id": "x-worked", "priority": "p1", "status": "in_progress", "parent": "x-epic"}),
+        ]);
+        // A worked-feed listing holds the parent with no claim anywhere.
+        inputs.worked = ok_read(json!([{"id": "x-worked"}]));
+        inputs.holder_activity.insert(
+            "h".to_string(),
+            crate::truth_probe::TruthProbe {
+                state: "working".to_string(),
+                harness_title: None,
+                reachability: None,
+                basis: None,
+                last_activity_age_s: Some(30.0),
+                last_event_at: None,
+                last_message: None,
+                observed_model: Value::Null,
+                provider_refusal: None,
+            },
+        );
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let unheld = queues
+            .iter()
+            .find(|q| q["name"] == "unheld_progress")
+            .unwrap();
+        assert_eq!(unheld["rows"].as_array().unwrap().len(), 0, "{unheld}");
+    }
+
+    #[test]
+    fn unheld_progress_keeps_an_epic_whose_children_all_lack_claims() {
+        // The inverse leg is the point of the queue: an epic whose children
+        // all died is genuinely stalled and must still reach the king. A done
+        // child never holds its parent, whatever its leftover claim says.
+        let mut inputs = inputs_with(
+            json!([]),
+            json!([{"key": "node:x-done", "state": "live", "holder": "h"}]),
+            json!([]),
+        );
+        inputs.entries = Some(vec![
+            json!({"id": "x-epic", "priority": "p1", "status": "in_progress", "type": "epic"}),
+            json!({"id": "x-done", "priority": "p1", "status": "done", "parent": "x-epic"}),
+            json!({"id": "x-dead", "priority": "p1", "status": "in_progress", "parent": "x-epic"}),
+        ]);
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let unheld = queues
+            .iter()
+            .find(|q| q["name"] == "unheld_progress")
+            .unwrap();
+        let ids: Vec<&str> = unheld["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"x-epic"), "{unheld}");
+    }
+
+    #[test]
+    fn unheld_progress_omits_an_epic_whose_child_claim_is_live_but_unmeasured() {
+        // The queue is UNHELD progress: a live lock is held even when the
+        // holder probe did not answer. Flagging the parent off an
+        // unmeasured-but-claimed child would read uncertainty as a dead
+        // handoff.
+        let mut inputs = inputs_with(
+            json!([]),
+            json!([{"key": "node:x-child", "state": "live", "holder": "u"}]),
+            json!([]),
+        );
+        inputs.entries = Some(vec![
+            json!({"id": "x-epic", "priority": "p1", "status": "in_progress", "type": "epic"}),
+            json!({"id": "x-child", "priority": "p1", "status": "in_progress", "parent": "x-epic"}),
+        ]);
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let unheld = queues
+            .iter()
+            .find(|q| q["name"] == "unheld_progress")
+            .unwrap();
+        assert_eq!(unheld["rows"].as_array().unwrap().len(), 0, "{unheld}");
+    }
+
+    #[test]
+    fn unheld_progress_omits_an_epic_held_through_a_nested_sub_epic() {
+        // Containers carry no claim and no worked entry of their own, so held
+        // state must walk the whole subtree: outer epic -> sub-epic -> worked
+        // leaf. Stopping at direct children flags the outer epic forever.
+        let mut inputs = inputs_with(
+            json!([]),
+            json!([{"key": "node:x-leaf", "state": "live", "holder": "h"}]),
+            json!([]),
+        );
+        inputs.entries = Some(vec![
+            json!({"id": "x-outer", "priority": "p1", "status": "in_progress", "type": "epic"}),
+            json!({"id": "x-sub", "priority": "p1", "status": "in_progress", "type": "epic", "parent": "x-outer"}),
+            json!({"id": "x-leaf", "priority": "p1", "status": "in_progress", "parent": "x-sub"}),
+        ]);
+        inputs.holder_activity.insert(
+            "h".to_string(),
+            crate::truth_probe::TruthProbe {
+                state: "working".to_string(),
+                harness_title: None,
+                reachability: None,
+                basis: None,
+                last_activity_age_s: Some(30.0),
+                last_event_at: None,
+                last_message: None,
+                observed_model: Value::Null,
+                provider_refusal: None,
+            },
+        );
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let unheld = queues
+            .iter()
+            .find(|q| q["name"] == "unheld_progress")
+            .unwrap();
+        assert_eq!(unheld["rows"].as_array().unwrap().len(), 0, "{unheld}");
+    }
+
+    #[test]
     fn an_expired_lease_under_a_writing_holder_reaches_neither_queue() {
         // AC3-EDGE, the 2026-09-09 measured fault: five nodes sat in
         // unheld_progress AND stale_claim at once because the clock check
