@@ -215,9 +215,8 @@ class Candidate:
     cwd: Optional[str] = None
     name: Optional[str] = None
     session_id: Optional[str] = None
-    # The CALLER's attributed account, stamped at the mint seam and carried
-    # here for the quota-lock write (x-bbc0). Never the process-global active
-    # one: a refusal belongs to the account the worker was launched onto.
+    # The CALLER's attributed account for the quota-lock write. Never the
+    # process-global active one: a refusal belongs to the launch account.
     launch_account: Optional[str] = None
     agent: str = "claude"
 
@@ -304,8 +303,8 @@ def _refused_key(short_id: str, error_class: str) -> str:
 
 
 def _quota_key(short_id: str) -> str:
-    """Sentinel: the sweep-time quota lock was decided once for this id
-    (x-bbc0). Same flat counts dict, same collision-free prefix rule."""
+    """Sentinel: the sweep-time quota lock was decided once for this id.
+    Same flat counts dict, same collision-free prefix rule."""
     return f"quota-locked:{short_id}"
 
 
@@ -396,14 +395,9 @@ def recovery_sweep(
                     "excerpt": _err.body_excerpt,
                 })
 
-            # The sweep-time lock write (x-bbc0): a corroborated quota
-            # refusal cools the account the worker was LAUNCHED on. Guards,
-            # each load-bearing: refusal_acts (corroboration - a live
-            # worker needs two ticks, a dead one's error text acts at
-            # once), the quota class (an auth refusal is not a quota
-            # window), the once-per-worker sentinel, and record_quota_lock
-            # refusing an unattributed account. The event fires even when
-            # nothing was written - that refusal is the finding.
+            # Guards: corroboration, the quota class, the once-per-worker
+            # sentinel, and record_quota_lock refusing an unattributed
+            # account. The event fires even when nothing was written.
             if (refusal_acts
                     and _err.error_class is ErrorClass.PROVIDER_4XX_QUOTA
                     and not counts.get(_quota_key(c.short_id))):

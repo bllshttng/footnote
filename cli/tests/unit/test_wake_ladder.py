@@ -394,6 +394,9 @@ def test_routed_fork_holds_provider_gate_across_dispatch(monkeypatch):
         "_roster_entry_for_session",
         lambda u: _entry("live", provider="zai", route_settings_path="/route.json"),
     )
+    import fno.agents.registry as registry_mod
+
+    monkeypatch.setattr(registry_mod, "load_registry", lambda *a, **k: [])
     events = []
 
     class _Gate:
@@ -418,7 +421,7 @@ def test_routed_fork_holds_provider_gate_across_dispatch(monkeypatch):
 
     assert ok is True and detail == "FORK"
     assert events[0][0] == "gate"
-    assert events[0][2:] == ("bg", {"route_provider": "zai"})
+    assert events[0][2:] == ("bg", {"route_provider": "zai", "account": None})
     assert events[1][0] == "dispatch"
     assert events[1][1]["route_provider"] == "zai"
     assert events[2] == "release"
@@ -528,3 +531,98 @@ def test_rung2_claim_held_falls_through_to_fork(monkeypatch):
     assert ok is True and detail == "FORK"
     assert respawned == []  # never respawned: the guard was held
     assert spawned and spawned[0]["resume_session_id"] == "uuid-full"
+
+
+def _gated_revival(monkeypatch, registry_rows):
+    """Route a revival through the gate with a stubbed registry; return the
+    kwargs the gate received."""
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry("exited", provider="zai", route_settings_path="/route.json"),
+    )
+    import fno.agents.registry as registry_mod
+
+    monkeypatch.setattr(registry_mod, "load_registry", lambda *a, **k: registry_rows)
+    gate_kwargs: dict = {}
+
+    class _Gate:
+        def retain_revived_worker(self, *a, **k):
+            return None
+
+        def release_gate_mutex(self):
+            return None
+
+        def release(self):
+            return None
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: gate_kwargs.update(kwargs) or _Gate(),
+    )
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+    monkeypatch.setattr(dispatch, "_stamp_revived_live", lambda entry: None)
+    monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t, **k: True)
+    return gate_kwargs
+
+
+def test_routed_revival_gates_on_the_registry_launch_account(monkeypatch):
+    # The revival launches work on the account the row pinned at mint, so the
+    # gate reads THAT account's lock: a revival onto a still-open quota window
+    # refuses instead of re-dying on it.
+    row = _entry("exited", sid="uuid-full")
+    row.harness = "claude"
+    row.launch_account = "readyrule"
+    gate_kwargs = _gated_revival(monkeypatch, [row])
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is True
+    assert gate_kwargs.get("account") == "readyrule"
+
+
+def test_an_unregistered_session_gates_with_no_account(monkeypatch):
+    # No registry row, no attribution: the gate skip is the honest answer.
+    gate_kwargs = _gated_revival(monkeypatch, [])
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is True
+    assert gate_kwargs.get("account") is None
+
+
+def test_an_unreadable_registry_gates_with_no_account(monkeypatch):
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry("exited", provider="zai", route_settings_path="/route.json"),
+    )
+    import fno.agents.registry as registry_mod
+
+    def _boom(*a, **k):
+        raise OSError("registry unreadable")
+
+    monkeypatch.setattr(registry_mod, "load_registry", _boom)
+    gate_kwargs: dict = {}
+
+    class _Gate:
+        def retain_revived_worker(self, *a, **k):
+            return None
+
+        def release_gate_mutex(self):
+            return None
+
+        def release(self):
+            return None
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: gate_kwargs.update(kwargs) or _Gate(),
+    )
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+    monkeypatch.setattr(dispatch, "_stamp_revived_live", lambda entry: None)
+    monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t, **k: True)
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is True
+    assert gate_kwargs.get("account") is None

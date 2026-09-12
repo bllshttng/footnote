@@ -66,3 +66,19 @@ def bg_account_field(result, account: Optional[str]) -> str:
             f'"account_source": {json.dumps(result.launch_account_source)}'
         )
     return f', "account": {json.dumps(account)}' if account else ""
+
+
+def launch_account_for_session(session_uuid: str) -> Optional[str]:
+    """The account the registry pinned at this session's mint, or None.
+
+    Best-effort: an unregistered row or an unreadable registry attributes
+    nothing, and the caller skips. Neither lock writer nor reader guesses."""
+    try:
+        from fno.agents.registry import load_registry
+
+        for entry in load_registry():
+            if entry.harness == "claude" and entry.harness_session_id == session_uuid:
+                return getattr(entry, "launch_account", None)
+    except Exception:  # noqa: BLE001 - an unreadable registry is no attribution
+        return None
+    return None

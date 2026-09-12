@@ -1598,13 +1598,11 @@ def run_gate(
     # schema to move underneath a waiting spawn.
     _check_registry_schema()
 
-    # Ahead of the force branch too (x-bbc0): a vendor quota window is not
-    # machine busy-ness, and forcing past it just buys another corpse. An
-    # unnamed account is not a silent skip: the accounts.quota picker reads
-    # the same lock through headroom() and is_in_cooldown (rotation.py).
+    # Ahead of the force branch too: a vendor quota window is not machine
+    # busy-ness, and forcing past it buys another corpse. An unnamed account
+    # is covered anyway: the accounts.quota picker reads the same lock.
     if account and account != "default":
         from fno.adapters.providers.runtime_state import is_in_cooldown, read_state
-
         if is_in_cooldown(account):
             health = read_state().provider_health.get(account)
             _refuse_quota_lock(account, getattr(health, "rate_limited_until", None))

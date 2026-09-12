@@ -2305,9 +2305,7 @@ def note_quota_death(account_env: Optional[Mapping[str, str]], tail: str | None)
     The reactive half of quota survival: a snapshot can be up to
     ``probe_ttl_seconds`` stale, so without this the next pick would hand the
     successor the account that just died. Thin caller over the one
-    lock-decision site; launch-time attribution stays here because a
-    launch-time death IS this process's account. Best-effort.
-    """
+    lock-decision site; launch-time attribution stays here. Best-effort."""
     if not tail:
         return
     try:
@@ -6792,8 +6790,15 @@ def wake_and_deliver(
     gate = None
     revived_reservation = False
     if route_provider is not None:
+        # The revival launches work on the account the row pinned at mint, so
+        # the gate reads that account's quota lock; an unattributed row skips.
+        from fno.agents.launch_provenance import launch_account_for_session
+
         try:
-            gate = run_gate(spawn_name, "bg", route_provider=route_provider)
+            gate = run_gate(
+                spawn_name, "bg", route_provider=route_provider,
+                account=launch_account_for_session(session_uuid),
+            )
         except GateRefused as exc:
             return False, f"spawn-exit-{exc.code}"
 
