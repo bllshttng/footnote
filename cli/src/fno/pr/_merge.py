@@ -1300,12 +1300,8 @@ def _merge_request_repo_and_project(cwd: str) -> tuple[str, str]:
 
 
 def _emit_merge_cleanup_skip(
-    pr_number: int,
-    cwd: str,
-    state_file: str,
-    reason: str,
-    detail: str = "",
-    branch: Optional[str] = None,
+    pr_number: int, cwd: str, state_file: str, reason: str,
+    detail: str = "", branch: Optional[str] = None,
 ) -> None:
     """Say that this merge minted no cleanup request, and why. Joined to the
     merge the same way a request row is, so one reader answers both."""
@@ -1348,8 +1344,7 @@ def _emit_merge_cleanup_request(
     try:
         meta = json.loads(res.stdout or "{}")
         if not isinstance(meta, dict):
-            # `null` and a bare array parse fine and then break `.get`, which
-            # would read as emit-failed rather than as the bad payload it is.
+            # `null` and a bare array parse fine and then break `.get`.
             raise ValueError("pr json is not an object")
     except ValueError as exc:  # JSONDecodeError is a ValueError
         _emit_merge_cleanup_skip(

@@ -368,8 +368,7 @@ def emit_session_transition(
 KIND_MERGE_CLEANUP_REQUESTED = "merge_cleanup_requested"
 KIND_MERGE_CLEANUP_SKIPPED = "merge_cleanup_skipped"
 
-# The skip reasons the merge mint may speak, taken verbatim from the ritual's
-# archive leg so the two legs cannot drift into two vocabularies.
+# Taken verbatim from the ritual's archive leg so the two legs cannot drift.
 MERGE_CLEANUP_SKIP_REASONS = (
     "gh-unavailable",
     "unparseable-pr-json",
@@ -532,10 +531,8 @@ def emit_merge_cleanup_skipped(
     session_id: Optional[str] = None,
     harness: Optional[str] = None,
 ) -> None:
-    """Say that a merge minted no cleanup request, and which precondition
-    was unmet. ``detail`` carries the variable part (the gh state, the
-    exception class); ``reason`` is a closed set, so an unclassifiable row
-    is refused rather than written."""
+    """Say that a merge minted no cleanup request, and which precondition was
+    unmet. ``reason`` is a closed set, so an unclassifiable row is refused."""
     if reason not in MERGE_CLEANUP_SKIP_REASONS:
         raise ValueError(
             f"unknown merge cleanup skip reason: {reason!r}; "
