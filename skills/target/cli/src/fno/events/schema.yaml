@@ -2723,7 +2723,7 @@ event_types:
             - {type: string, const: oldest_age_s}
         families:
           type: object
-          required: [expired_claims, plan_locks, agent_locks, pr_status_cache]
+          required: [expired_claims, plan_locks, agent_locks, pr_status_cache, claim_tmp]
           properties:
             expired_claims: &state_reap_counts
               type: array
@@ -2738,6 +2738,7 @@ event_types:
             plan_locks: *state_reap_counts
             agent_locks: *state_reap_counts
             pr_status_cache: *state_reap_counts
+            claim_tmp: *state_reap_counts
         totals: *state_reap_counts
         skip_reason:
           type: [string, "null"]
