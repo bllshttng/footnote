@@ -1172,7 +1172,7 @@ case "${1:-status}" in
                     reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
                     # An unborn tree is not dirty: it is a worker mid-setup,
                     # and the night 29 trees were eaten this is the row three
-                    # kings needed (x-d135).
+                    # kings needed.
                     if [[ "$reason" == "unborn" ]]; then
                         printf '%-18s %-34s %s\n' "kept (unborn)" "$branch" "$wt"; N_UNBORN=$((N_UNBORN + 1)); continue
                     fi

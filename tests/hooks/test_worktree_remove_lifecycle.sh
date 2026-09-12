@@ -143,6 +143,12 @@ echo "== 3. archive-worktree.sh declines cleanly without a tty =="
 S=$(new_sandbox)
 ( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
 WT="$S/wt"
+# The tty-decline test needs a finished-candidate tree: a fresh worktree on an
+# unmoved branch is refused by the reapable gate (reason=unborn) before the
+# confirmation prompt, which is the unborn bucket's job, not this test's.
+( cd "$WT" && printf 'x = 1\n' > f.py \
+  && git -c user.email=t@t -c user.name=t add f.py \
+  && git -c user.email=t@t -c user.name=t commit -qm work ) >/dev/null 2>&1
 ( cd "$WT" && exec sleep 300 ) & HOLD=$!
 disown "$HOLD" 2>/dev/null || true
 sleep 0.6
