@@ -401,6 +401,15 @@ frontdoor_receipt() {
 	return 0
 }
 
+# The post-install shim sweep (x-c911): repair any fno* shim in the tool bin
+# that dangles or resolves into a temp dir; fail loud when unrepairable.
+shim_sweep() {
+	[ -n "$FNO_TOOL_BIN" ] || FNO_TOOL_BIN="${HOME:-}/.local/bin"
+	"$FNO_VENV_PY" -m fno.setup.shim_check --repair --bin-dir "$FNO_TOOL_BIN" && return 0
+	say "INCOMPLETE install: fno shims in $FNO_TOOL_BIN dangle or point into a temp dir and could not be relinked to the durable copy. Inspect: $FNO_VENV_PY -m fno.setup.shim_check --bin-dir $FNO_TOOL_BIN"
+	return 1
+}
+
 # --- success report --------------------------------------------------------
 # Report the verified version (AC5-UI) and, when uv's tool bin is not on PATH,
 # make a later `fno`/`fno-py` call resolvable rather than a bare 127 (AC3-UI).
@@ -409,6 +418,7 @@ report_success() {
 	# line exists to carry (the twin of verified_receipt in bootstrap.rs).
 	[ -n "$FNO_VERIFIED_VERSION" ] || FNO_VERIFIED_VERSION="(version unreadable)"
 	say "verified fno $FNO_VERIFIED_VERSION (this project's package)."
+	shim_sweep
 	# The advertised command is `fno`; its receipt proves the mux and the
 	# Python forwarding rather than trusting uv's exit (x-538e AC2-HP/EDGE).
 	frontdoor_receipt
