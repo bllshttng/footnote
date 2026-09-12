@@ -341,3 +341,95 @@ def test_operator_spelling_still_reaches_the_queue(tmp_path, tmp_ledger, monkeyp
     result = runner.invoke(app, ["inbox", "operator", "status", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["depth"] == 1
+
+
+# -- machine shapes never queue --
+
+
+def test_machine_shapes_never_queue_and_are_counted(tmp_path, tmp_ledger, monkeypatch):
+    """AC: one row per measured machine shape plus prose queues only the prose,
+    and the skip line names every refused shape and count."""
+    _pin(
+        monkeypatch,
+        tmp_path,
+        [
+            _user_row(
+                "<task-notification><task-id>b55cj2z2z</task-id>"
+                "<output-file>/tmp/out</output-file></task-notification>",
+                "u-tn",
+            ),
+            _user_row(
+                'Another Claude session sent a message:\n'
+                '<teammate-message teammate_id="t1" color="blue">{}</teammate-message>',
+                "u-tm",
+            ),
+            _user_row(
+                "This session is being continued from a previous conversation "
+                "that ran out of context. The summary below covers the work.",
+                "u-cp",
+            ),
+            _user_row("[Request interrupted by user]", "u-int1"),
+            _user_row("[Request interrupted by user for tool use]", "u-int2"),
+            _user_row("<bash-input>git status</bash-input>", "u-bi"),
+            _user_row("<bash-stdout>nothing to commit</bash-stdout>", "u-bs"),
+            _user_row(
+                "<command-message>fno:target</command-message>\n"
+                "<command-name>/fno:target</command-name>",
+                "u-cm",
+            ),
+            _user_row("status on your nodes?", "u-prose"),
+        ],
+    )
+    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    assert [r["turn_id"] for r in json.loads(result.stdout)] == ["u-prose"]
+    assert "skipped 8 machine turn(s)" in result.output
+    for shape in (
+        "task_notification=1",
+        "teammate_message=1",
+        "compaction_preamble=1",
+        "interrupt_marker=2",
+        "bash_echo=2",
+        "command_invocation=1",
+    ):
+        assert shape in result.output
+
+
+def test_status_depth_excludes_machine_turns_and_carries_skipped(tmp_path, tmp_ledger, monkeypatch):
+    """AC: a task-notification turn does not raise depth; the JSON names the skip."""
+    _pin(
+        monkeypatch,
+        tmp_path,
+        [
+            _user_row(
+                "<task-notification><task-id>t9</task-id></task-notification>",
+                "u-tn",
+                ts="2026-09-06T20:30:00.000Z",
+            ),
+            _user_row("status on your nodes?", "u-real", ts="2026-09-06T21:00:00.000Z"),
+        ],
+    )
+    result = runner.invoke(app, ["inbox", "user", "status", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["depth"] == 1
+    assert payload["oldest_turn_id"] == "u-real"
+    assert payload["skipped"] == {"task_notification": 1}
+
+
+def test_status_human_path_names_skips_even_at_depth_zero(tmp_path, tmp_ledger, monkeypatch):
+    """A queue that is all machine noise reads depth 0 AND says what was skipped."""
+    _pin(
+        monkeypatch,
+        tmp_path,
+        [
+            _user_row("<task-notification><task-id>t1</task-id></task-notification>", "u-tn"),
+            _user_row("[Request interrupted by user]", "u-int"),
+        ],
+    )
+    result = runner.invoke(app, ["inbox", "user", "status"])
+    assert result.exit_code == 0, result.output
+    assert "user queue: 0" in result.output
+    assert "skipped 2 machine turn(s)" in result.output
+    assert "interrupt_marker=1" in result.output
+    assert "task_notification=1" in result.output
