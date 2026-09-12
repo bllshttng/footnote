@@ -182,12 +182,20 @@ def build_leaderboard(rows: list[dict], *, window: int = 20,
         entry["suspects"] = _suspects_for_pattern(
             ordered, entry["pattern"], window=window, include_all=include_all
         )
-    leaderboard = sorted(entries.values(), key=lambda item: (-item["sessions"], -item["count"], item["pattern"]))
+    leaderboard = sorted(
+        entries.values(),
+        key=lambda item: (
+            -item["sessions"],
+            -item["count"],
+            0 if item["pattern"].startswith("termination:") else 1,
+            item["pattern"],
+        ),
+    )
     return {"leaderboard": leaderboard}
 
 
 def drilldown(rows: list[dict], pattern: str, *, window: int = 20,
-              limit: int = 5) -> dict[str, Any]:
+              limit: int = 5, include_all: bool = False) -> dict[str, Any]:
     ordered = [row for _, row in _ordered_rows(rows)]
     sessions: dict[str, list[dict]] = defaultdict(list)
     for row in ordered:
@@ -198,7 +206,7 @@ def drilldown(rows: list[dict], pattern: str, *, window: int = 20,
         (session, index, row)
         for session, session_rows in sessions.items()
         for index, row in enumerate(session_rows)
-        if _pattern(row) == pattern
+        if _pattern(row, include_all=include_all) == pattern
     ]
     fires.sort(key=lambda item: (_timestamp(item[2]) or datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
     details = []
@@ -216,7 +224,7 @@ def drilldown(rows: list[dict], pattern: str, *, window: int = 20,
             "ts": row.get("ts") or row.get("timestamp"),
             "chain": chain,
         })
-    summary = build_leaderboard(rows, window=window)["leaderboard"]
+    summary = build_leaderboard(rows, window=window, include_all=include_all)["leaderboard"]
     match = next((entry for entry in summary if entry["pattern"] == pattern), None)
     return {
         "pattern": pattern,

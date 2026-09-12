@@ -1,6 +1,7 @@
 """`fno doctor evals run` CLI exit-code contract (no spawn / no worktree needed)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -220,3 +221,48 @@ def test_lane_and_cohort_flags_pass_through_to_run_task(tmp_path: Path, monkeypa
     assert seen["experiment_id"] == "cohort-a"
     # A lane is a complete coordinate; the provider default must not override it.
     assert seen["provider"] is None
+
+
+def _macro_journal(path: Path, *, old: bool = False) -> None:
+    ts = "2025-01-01T10:00:00Z" if old else "2026-09-12T10:00:00Z"
+    rows = [
+        {"ts": ts, "type": "loop_check_watch_idle", "data": {"session_id": "s1", "node_id": "n1", "reason": "ci"}},
+        {"ts": ts, "type": "termination", "data": {"session_id": "s1", "node_id": "n1", "reason": "Budget"}},
+        {"ts": ts, "type": "loop_check_watch_idle", "data": {"session_id": "s2", "node_id": "n2", "reason": "ci"}},
+        {"ts": ts, "type": "termination", "data": {"session_id": "s2", "node_id": "n2", "reason": "Budget"}},
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+
+def test_macro_json_and_topic_drilldown(tmp_path: Path) -> None:
+    journal = tmp_path / "events.jsonl"
+    _macro_journal(journal)
+
+    result = runner.invoke(evals_app, ["macro", "--events", str(journal), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["leaderboard"][0]["pattern"] == "termination:Budget"
+
+    drill = runner.invoke(evals_app, ["macro", "--events", str(journal),
+                                      "--topic", "termination:Budget"])
+    assert drill.exit_code == 0
+    assert "s1" in drill.stdout and "s2" in drill.stdout
+    assert "termination:Budget" in drill.stdout
+
+
+def test_macro_topic_error_and_empty_window(tmp_path: Path) -> None:
+    journal = tmp_path / "events.jsonl"
+    _macro_journal(journal)
+
+    missing = runner.invoke(evals_app, ["macro", "--events", str(journal),
+                                       "--topic", "nope:never"])
+    assert missing.exit_code == 1
+    assert "patterns present" in missing.stdout
+
+    old_journal = tmp_path / "old-events.jsonl"
+    _macro_journal(old_journal, old=True)
+    empty = runner.invoke(evals_app, ["macro", "--events", str(old_journal),
+                                      "--since", "1h"])
+    assert empty.exit_code == 0
+    assert "no events since" in empty.stdout

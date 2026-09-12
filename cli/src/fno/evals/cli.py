@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -235,6 +236,76 @@ def report_command(
             )
 
     raise typer.Exit(code=4 if report["regression_alarm"] else 0)
+
+
+@evals_app.command("macro")
+def macro_command(
+    since: str = typer.Option("30d", "--since", help="Time window: Nd, Nh, Nm, Ns, or ISO-8601."),
+    topic: Optional[str] = typer.Option(None, "--topic", help="Drill into TYPE:LABEL."),
+    window: int = typer.Option(20, "--window", min=1, help="Events to inspect before each pattern."),
+    include_all: bool = typer.Option(False, "--all", help="Include healthy labels and noise event types."),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit one structured result."),
+    events: Optional[list[Path]] = typer.Option(None, "--events", help="Event journal path (repeatable)."),
+) -> None:
+    """Find recurring labelled failure patterns in existing event journals."""
+    from fno.evals.macro import build_leaderboard, drilldown, load_events
+    from fno.events.cli import _parse_find_since
+    from fno.paths import event_journals
+
+    try:
+        since_dt = _parse_find_since(since)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    journal_paths = events if events else event_journals()
+    rows, coverage = load_events(journal_paths, since=since_dt)
+    patterns = build_leaderboard(rows, window=window, include_all=include_all)["leaderboard"]
+
+    if topic is not None:
+        result = drilldown(rows, topic, window=window, include_all=include_all)
+        if not result["count"]:
+            present = ", ".join(item["pattern"] for item in patterns) or "none"
+            message = f"macro: no '{topic}' rows since {since}; patterns present: {present}"
+            if json_output:
+                typer.echo(json.dumps({"error": message, "patterns": [item["pattern"] for item in patterns]}))
+            else:
+                typer.echo(message)
+            raise typer.Exit(code=1)
+        payload = {**result, "coverage": coverage}
+        if json_output:
+            typer.echo(json.dumps(payload, indent=2))
+        else:
+            typer.echo(f"macro: {topic}")
+            for session in result["sessions"]:
+                typer.echo(f"  session {session['session_id']} node {session['node_id'] or '-'} at {session['ts']}")
+                chain = " -> ".join(
+                    f"{event['ts']} {event['type']} {event['label'] or '-'}"
+                    for event in session["chain"]
+                )
+                typer.echo(f"    chain: {chain}")
+        raise typer.Exit(code=0)
+
+    if json_output:
+        typer.echo(json.dumps({"leaderboard": patterns, "coverage": coverage}, indent=2))
+    else:
+        if not coverage["complete"]:
+            typer.echo(
+                f"coverage: {len(coverage['paths'])} journals, "
+                f"{coverage['malformed_lines']} malformed lines skipped"
+            )
+        if not rows:
+            typer.echo(f"macro: no events since {since}")
+            raise typer.Exit(code=0)
+        typer.echo("rank  sessions  count  nodes  first  last  pattern  top suspect (lift)")
+        for rank, item in enumerate(patterns[:20], start=1):
+            suspect = item["suspects"][0] if item["suspects"] else None
+            suspect_text = f"{suspect['pattern']} ({suspect['lift']:.2f})" if suspect else "-"
+            typer.echo(
+                f"{rank:>4}  {item['sessions']:>8}  {item['count']:>5}  {item['nodes']:>5}  "
+                f"{item['first_seen'] or '-'}  {item['last_seen'] or '-'}  {item['pattern']}  {suspect_text}"
+            )
+    raise typer.Exit(code=0)
 
 
 @evals_app.command("graduate")
