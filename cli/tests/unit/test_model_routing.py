@@ -308,6 +308,144 @@ def test_explicit_route_rejects_empty_target(provider: str, model: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# tier_models: a provider declares a model per tier (x-f173)
+# ---------------------------------------------------------------------------
+
+
+def _zai(tier_models: dict[str, str] | None = None) -> SettingsModel:
+    providers: dict[str, object] = {"zai": {"tier_models": tier_models}}
+    if tier_models is None:
+        providers = {}
+    return _settings(providers=providers)
+
+
+def test_tier_map_layers_over_blanket_fill() -> None:
+    # AC1-HP: undeclared tiers keep the spawn model; opus moves; haiku keeps
+    # the provider's haiku_model (the folded-in default).
+    route = mr.resolve_explicit_route(
+        "zai",
+        "glm-5.3-flash[1m]",
+        settings=_settings(
+            providers={"zai": {"tier_models": {"opus": "glm-5.3[1m]"}}}
+        ),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "glm-5.3-flash[1m]"
+    assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3-flash[1m]"
+    assert route["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "glm-5.3-flash[1m]"
+    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3[1m]"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
+
+
+def test_tier_models_haiku_wins_over_haiku_model() -> None:
+    # Both set resolves to tier_models, asserted rather than left to dict order.
+    route = mr.resolve_explicit_route(
+        "zai",
+        "glm-5.3",
+        settings=_settings(
+            providers={
+                "zai": {
+                    "tier_models": {"haiku": "glm-4.7-air"},
+                    "haiku_model": "glm-4.5-air",
+                }
+            }
+        ),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7-air"
+
+
+def test_tier_models_haiku_beats_builtin_haiku_model_default() -> None:
+    # The built-in zai record already carries haiku_model=glm-4.7; a config
+    # tier_models.haiku overrides the BUILT-IN default per-field.
+    route = mr.resolve_explicit_route(
+        "zai",
+        "glm-5.3",
+        settings=_settings(providers={"zai": {"tier_models": {"haiku": "glm-4.7-air"}}}),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7-air"
+
+
+def test_haiku_model_only_composes_unchanged() -> None:
+    # AC3-INV: a provider with haiku_model and no tier_models composes exactly
+    # the pre-tier_models shape: spawn model on four keys, cheap haiku.
+    route = mr.resolve_explicit_route(
+        "zai", "glm-5.3", settings=_zai(), env={"ZAI_API_KEY": "k"}
+    )
+    assert route is not None
+    model_keys = {k: route[k] for k in mr.MODEL_ENV_KEYS}
+    assert model_keys == {
+        "ANTHROPIC_MODEL": "glm-5.3",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.3",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
+    }
+
+
+def test_empty_tier_models_behaves_as_unset() -> None:
+    route = mr.resolve_explicit_route(
+        "zai",
+        "glm-5.3",
+        settings=_settings(providers={"zai": {"tier_models": {}}}),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
+    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3"
+
+
+def test_extra_env_still_wins_over_tier_map() -> None:
+    route = mr.resolve_explicit_route(
+        "zai",
+        "glm-5.3",
+        settings=_settings(
+            extra_env={"ANTHROPIC_DEFAULT_OPUS_MODEL": "hand-pinned"},
+            providers={"zai": {"tier_models": {"opus": "glm-5.3[1m]"}}},
+        ),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "hand-pinned"
+
+
+def test_materialized_settings_keep_floor_and_undeclared_tiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # AC10-INV: the auth floor survives, an undeclared tier is PRESENT and set
+    # to the spawn model (never absent), and the declared tier carries the map.
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
+    route = mr.resolve_explicit_route(
+        "zai",
+        "glm-5.3-flash[1m]",
+        settings=_settings(
+            providers={"zai": {"tier_models": {"opus": "glm-5.3[1m]"}}}
+        ),
+        env={"ZAI_API_KEY": "k"},
+    )
+    assert route is not None
+    path = Path(mr.materialize_route_settings(route))
+    try:
+        import json
+
+        env_out = json.loads(path.read_text(encoding="utf-8"))["env"]
+    finally:
+        path.unlink()
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+
+    for var in SCRUB_AUTH_VARS:
+        assert var in env_out
+    assert env_out["ANTHROPIC_API_KEY"] == ""
+    assert env_out["CLAUDE_CODE_OAUTH_TOKEN"] == ""
+    assert env_out["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3-flash[1m]"
+    assert env_out["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3[1m]"
+
+
+# ---------------------------------------------------------------------------
 # AC4-FR: fail-safe fallback (no key -> None + notice, never raises)
 # ---------------------------------------------------------------------------
 

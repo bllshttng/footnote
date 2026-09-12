@@ -3450,6 +3450,37 @@ class ModelProvider(BaseModel):
     # to glm-4.7; set it here to override or to give another provider a
     # cheap background model.
     haiku_model: Optional[str] = None
+    # Model per Claude tier ({opus = "glm-5.3[1m]"}), so /model in a routed
+    # worker offers a real choice instead of the spawn model written into every
+    # tier. Undeclared tiers keep the spawn model. Keys validate against the
+    # Claude tier aliases at load; a tier naming no model is refused. There is
+    # no inventory check that the provider SERVES the named model - a wrong id
+    # fails at the endpoint, same as a bad --model.
+    tier_models: Optional[dict[str, str]] = None
+
+    @field_validator("tier_models")
+    @classmethod
+    def _tier_models_keys_are_tier_aliases(cls, v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        """Refuse a key outside the Claude tier aliases at load, naming the bad
+        key and the legal set (a typo is a refusal, never a silently ignored
+        tier). Lazy import: fno.agents.model_routing owns TIER_ALIASES and
+        restating the alias list here would let a new tier land in one and not
+        the other."""
+        if not v:
+            return v
+        from fno.agents.model_routing import TIER_ALIASES
+
+        cleaned = {str(k).strip().lower(): str(m).strip() for k, m in v.items()}
+        bad = sorted(set(cleaned) - set(TIER_ALIASES))
+        if bad:
+            raise ValueError(
+                f"tier_models keys {bad} are not Claude tier aliases; "
+                f"legal keys: {', '.join(TIER_ALIASES)}"
+            )
+        empty = sorted(k for k, m in cleaned.items() if not m)
+        if empty:
+            raise ValueError(f"tier_models[{empty}] names no model")
+        return cleaned
     # Codex/OpenAI-lane only (protocol == "openai"): the codex wire protocol for
     # this provider's endpoint. Third-party OpenAI-compatible endpoints (e.g.
     # z.ai's paas/v4) speak Chat Completions -> "chat"; leave unset to default

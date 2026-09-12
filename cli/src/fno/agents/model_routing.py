@@ -352,6 +352,29 @@ MODEL_ENV_KEYS = (
 )
 
 
+def tier_models_for(provider: Mapping[str, object]) -> dict[str, str]:
+    """The provider's effective per-tier model map (alias -> model id).
+
+    ``haiku_model`` folds in as the haiku entry and an explicit
+    ``tier_models`` entry wins over it, so ``tier_models.haiku`` and
+    ``haiku_model`` set together resolve deterministically, not by dict
+    order. Empty for a provider that declares nothing: every tier then
+    rides the spawn model.
+    """
+    tiers: dict[str, str] = {}
+    haiku_model = provider.get("haiku_model")
+    if haiku_model:
+        tiers["haiku"] = str(haiku_model)
+    declared = provider.get("tier_models")
+    if isinstance(declared, Mapping):
+        for alias, tier_model in declared.items():
+            key = str(alias).strip().lower()
+            value = str(tier_model or "").strip()
+            if key in TIER_ALIASES and value:
+                tiers[key] = value
+    return tiers
+
+
 class TierRemapConflict(RouteCompositionError):
     """A claude spawn names a tier alias the ambient environment redefines.
 
@@ -973,16 +996,19 @@ def _route_for_target(
         return None
 
     route = {"ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_AUTH_TOKEN": key}
+    # The blanket fill is load-bearing: an undeclared tier must be PRESENT and
+    # set to the spawn model, never absent, or Claude Code resolves that tier
+    # against its own default and a routed worker asks a third-party endpoint
+    # for an Anthropic model.
     for k in MODEL_ENV_KEYS:
         route[k] = model
-    # Item 1: route the background (haiku) tier to the provider's cheaper
-    # haiku_model (zai -> glm-4.7). Still the SAME secondary provider
-    # (base_url + token), so the whole worker stays off Anthropic; only the
-    # background model is cheaper. A provider with no haiku_model keeps the role
-    # model on the haiku tier (no regression, never an empty/invalid id).
-    haiku_model = provider.get("haiku_model")
-    if haiku_model:
-        route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = haiku_model
+    # Item 1: layer the provider's per-tier map over the blanket fill,
+    # generalized from the haiku_model special case (zai -> glm-4.7). Still the
+    # SAME secondary provider (base_url + token), so the whole worker stays off
+    # Anthropic; only the named tiers move. A provider with no tier map and no
+    # haiku_model composes exactly as before (never an empty/invalid id).
+    for alias, tier_model in tier_models_for(provider).items():
+        route[f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"] = tier_model
     # Item 2: a [1m]-routed worker gets an auto-compact backstop. The [1m]
     # variant selects the 1M context; this threshold (capped at the model
     # window, and precedence over /autocompact/--autocompact/setting) is the
