@@ -8,6 +8,7 @@ use super::{
     SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -423,14 +424,34 @@ fn subtree_held(
 pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     let mut warnings = inputs.warnings.clone();
     let mut out_of_scope: Vec<Value> = Vec::new();
+    // On a scoped board a row whose node id cannot be resolved is
+    // unknown, not mine. Work rows fail CLOSED - they land in no queue and
+    // are named in one warning line below - because "in scope" would hand
+    // every crown every unattributable PR, while out_of_scope would mislabel
+    // the row as another crown's work. A REPORT-ONLY queue (unreachable_worker)
+    // bypasses instead: its signals carry no node by design (needs.rs mints
+    // node: None for mail_escalation, carveout_stale, stale_claims,
+    // worker_refused) and the evidence must reach every board. The unscoped
+    // arm returns true before any of this: the operator board keeps showing
+    // every row.
+    let unattributed: RefCell<Vec<String>> = RefCell::new(Vec::new());
     let scope_ids = inputs.scope_ids.as_ref();
 
-    let in_scope = |queue: &str, node_id: &Value, row: &Value, out: &mut Vec<Value>| -> bool {
+    let in_scope = |queue: &str,
+                    report_only: bool,
+                    node_id: &Value,
+                    row: &Value,
+                    out: &mut Vec<Value>|
+     -> bool {
         let Some(ids) = scope_ids else {
             return true;
         };
         let Some(id) = node_id.as_str() else {
-            return true;
+            if report_only {
+                return true;
+            }
+            unattributed.borrow_mut().push(queue.to_string());
+            return false;
         };
         if ids.contains(id) {
             return true;
@@ -511,6 +532,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             .filter(|node| {
                 in_scope(
                     "undispatched",
+                    false,
                     node.get("id").unwrap_or(&Value::Null),
                     node,
                     &mut out_of_scope,
@@ -557,6 +579,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .filter(|node| {
             in_scope(
                 "unplanned",
+                false,
                 node.get("id").unwrap_or(&Value::Null),
                 node,
                 &mut out_of_scope,
@@ -597,6 +620,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         let claim = claim.expect("stalled always carries its claim");
         if !in_scope(
             "stalled_holder",
+            false,
             node.get("id").unwrap_or(&Value::Null),
             &node,
             &mut out_of_scope,
@@ -619,10 +643,14 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .iter()
         .filter(|row| claim_is_dead(row, &inputs.holder_activity))
         .filter(|row| {
+            // A key that is not `node:`-prefixed is unattributable, not
+            // another crown's: feed Null so it fails closed with the other
+            // unknown-attribution rows instead of matching `""` out of scope.
             let node_id = s_str(row, "key")
                 .and_then(|k| k.strip_prefix("node:"))
-                .unwrap_or("");
-            in_scope("stale_claim", &json!(node_id), row, &mut out_of_scope)
+                .map(|id| json!(id))
+                .unwrap_or(Value::Null);
+            in_scope("stale_claim", false, &node_id, row, &mut out_of_scope)
         })
         .map(|row| {
             json!({
@@ -700,6 +728,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             }
             if !in_scope(
                 "unheld_progress",
+                false,
                 node.get("id").unwrap_or(&Value::Null),
                 node,
                 &mut out_of_scope,
@@ -733,6 +762,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .filter(|row| {
             in_scope(
                 "blocked_child",
+                false,
                 row.get("id").unwrap_or(&Value::Null),
                 row,
                 &mut out_of_scope,
@@ -782,7 +812,8 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
 
     // mergeable_pr is scoped by the node that binds each PR (pr_number plus
     // additional_prs), the same join undriven_pr makes. A PR no node claims
-    // stays visible: an unattributable row is shown, never hidden.
+    // stays visible on the unscoped board; on a scoped board it fails closed
+    // and is named in `warnings` rather than read as every crown's work.
     let mut node_by_pr: HashMap<i64, String> = HashMap::new();
     for node in &inputs.pr_nodes.rows() {
         let Some(node_id) = s_str(node, "id").map(str::to_string) else {
@@ -808,7 +839,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 .get(&r.get("number").and_then(Value::as_i64).unwrap_or(-1))
                 .map(|id| json!(id))
                 .unwrap_or(Value::Null);
-            in_scope("mergeable_pr", &node_id, r, &mut out_of_scope)
+            in_scope("mergeable_pr", false, &node_id, r, &mut out_of_scope)
         })
         .map(|r| json!({"number": r.get("number"), "title": r.get("title")}))
         .collect();
@@ -878,6 +909,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             }
             if !in_scope(
                 "undriven_pr",
+                false,
                 node.get("id").unwrap_or(&Value::Null),
                 &node,
                 &mut out_of_scope,
@@ -969,6 +1001,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .filter(|row| {
             in_scope(
                 "unreachable_worker",
+                true,
                 row.get("node").unwrap_or(&Value::Null),
                 row,
                 &mut out_of_scope,
@@ -1226,6 +1259,21 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 None,
             ));
         }
+    }
+
+    // The scoped board just dropped every row it could not attribute.
+    // Name the hole in one warning line, the same shape the holder-activity
+    // warning uses, so a quietly shorter queue reads as a measured drop.
+    let unattributed = unattributed.into_inner();
+    if !unattributed.is_empty() {
+        let mut names = unattributed.clone();
+        names.sort();
+        names.dedup();
+        warnings.push(format!(
+            "unattributed: {} row(s) with no node binding dropped from this scoped board ({})",
+            unattributed.len(),
+            names.join(", ")
+        ));
     }
 
     let mut actionable: i64 = 0;
