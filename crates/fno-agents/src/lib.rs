@@ -191,6 +191,7 @@ pub mod stream_worker;
 pub mod subprocess_ask;
 pub mod subscribe;
 pub mod supervisor;
+pub mod task_context;
 pub mod terminal_stop;
 pub mod test_run;
 pub mod tick_ledger;

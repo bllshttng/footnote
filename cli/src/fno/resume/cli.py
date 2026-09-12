@@ -102,6 +102,7 @@ def write_cmd(
     watchers: Optional[str] = typer.Option(None, "--watchers", help="Newline-separated watcher ids"),
     idempotency_keys: Optional[str] = typer.Option(None, "--idempotency-keys", help="Newline-separated external-effect keys"),
     written_at: Optional[str] = typer.Option(None, "--written-at", help="Override UTC timestamp (default: now)"),
+    task_context: Optional[str] = typer.Option(None, "--task-context", help="Path to a bound binding JSON (embedding marks the receipt bound)"),
 ) -> None:
     """Write an immutable versioned resume receipt (producer).
 
@@ -114,6 +115,10 @@ def write_cmd(
         session_id, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
     )
     try:
+        try:
+            binding = json.loads(Path(task_context).read_text(encoding="utf-8")) if task_context else None
+        except (OSError, ValueError) as exc:
+            raise MalformedReceiptError(f"task_context file unreadable: {exc}") from exc
         receipt = build_receipt(
             node=node,
             session=session or "",
@@ -132,6 +137,7 @@ def write_cmd(
             known_reds=_split_list(known_reds),
             watchers=_split_list(watchers),
             idempotency_keys=_split_list(idempotency_keys),
+            task_context=binding,
         )
         path = write_receipt(receipt, _artifacts_dir())
     except FileExistsError as exc:
@@ -207,6 +213,29 @@ def _holder_of(status: dict) -> Optional[str]:
     return holder if isinstance(holder, str) and holder else None
 
 
+@receipt_app.command("context-prepare")
+def context_prepare_cmd(
+    input_file: str = typer.Option(..., "--input", help="Binding request JSON file"),
+    out: Optional[str] = typer.Option(None, "--out", help="Write the bound binding JSON here"),
+) -> None:
+    """Prepare a task-context execution binding (native verdict, thin transport)."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    req = json.loads(Path(input_file).read_text(encoding="utf-8"))
+    try:
+        answer = verb_call("task-context-prepare", {"binding": req})
+    except VerbUnavailable as exc:
+        typer.echo(json.dumps({"ok": False, "reason": "native_verifier_unavailable", "error": str(exc)}))
+        raise typer.Exit(code=3)
+    typer.echo(json.dumps(answer))
+    if not answer.get("ok"):
+        raise typer.Exit(code=1)
+    if out:
+        bound = {**answer["binding"], "binding_digest": answer["binding_digest"]}
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(json.dumps(bound, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 @receipt_app.command("validate")
 def validate_cmd(
     node: str = typer.Option(..., "--node", help="Backlog node id to revalidate"),
@@ -218,6 +247,7 @@ def validate_cmd(
     events_file: Optional[str] = typer.Option(None, "--events", help="Override events.jsonl path (default: <worktree>/.fno/events.jsonl)"),
     harness: Optional[str] = typer.Option(None, "--harness", help="Owning harness for generation scoping"),
     claims_root: Optional[str] = typer.Option(None, "--claims-root", help="Override claims root (default: ~/.fno)"),
+    attempt: Optional[str] = typer.Option(None, "--attempt", help="Executing attempt the binding's gate expects, when the receipt carries one"),
 ) -> None:
     """Revalidate the latest receipt for a node against live state (consumer).
 
@@ -243,6 +273,26 @@ def validate_cmd(
         raise typer.Exit(code=1)
 
     wt = Path(worktree) if worktree else Path(receipt.worktree)
+
+    # A receipt that carries a binding revalidates it natively BEFORE the
+    # authority checks; identity expectations ride only when named.
+    context_answer: Optional[dict] = None
+    if receipt.task_context is not None:
+        from fno.target_context_gate import TaskContextGateRefused, gate_declared_task_context
+
+        expect = {
+            "node": node,
+            **({"attempt": attempt} if attempt else {}),
+            **({"session": session} if session_id else {}),
+        }
+        try:
+            context_answer = gate_declared_task_context(node, str(wt), binding=receipt.task_context, expect=expect)
+        except TaskContextGateRefused as exc:
+            unavailable = exc.reason == "context_native_verifier_unavailable"
+            extra = {"error": exc.detail} if unavailable else {"binding": json.loads(exc.detail)}
+            typer.echo(json.dumps({"ok": False, "reason": exc.reason, "node": node, **extra}))
+            raise typer.Exit(code=3 if unavailable else 1)
+
     live_head, live_branch = _git_head_and_branch(wt) if wt.exists() else ("", "")
     croot = Path(claims_root).expanduser() if claims_root else None
     claim = _live_claim_status(node, croot)
@@ -288,6 +338,8 @@ def validate_cmd(
         "next_action": {"verb": receipt.next_action.verb, "target": receipt.next_action.target},
         "idempotency_keys": list(receipt.idempotency_keys),
         "checked": checked,
+        "context_checked": context_answer is not None,
+        "task_context_bound": receipt.task_context is not None,
     }
     typer.echo(json.dumps(out))
     raise typer.Exit(code=0 if res.ok else 1)
@@ -322,6 +374,22 @@ def show_cmd(
     except MalformedReceiptError as exc:
         typer.echo(json.dumps({"ok": False, "reason": "malformed_receipt", "error": str(exc)}))
         raise typer.Exit(code=1)
-    typer.echo(json.dumps(receipt.to_dict(), indent=2, sort_keys=True))
+    out = receipt.to_dict()
+    # Honesty labels: legacy receipts are explicitly UNBOUND; a declared one
+    # is verified natively, a corrupt one refuses by name.
+    out["task_context_bound"] = receipt.task_context is not None
+    if receipt.task_context is not None:
+        from fno.rust_binary import VerbUnavailable, verb_call
+
+        try:
+            shown = verb_call("task-context-show", {"binding": receipt.task_context})
+        except VerbUnavailable as exc:
+            typer.echo(json.dumps({"ok": False, "reason": "native_verifier_unavailable", "error": str(exc)}))
+            raise typer.Exit(code=3)
+        if not shown.get("ok"):
+            typer.echo(json.dumps({"ok": False, "reason": "corrupt_binding", "detail": shown}))
+            raise typer.Exit(code=1)
+        out["task_context_stage"] = shown.get("stage")
+    typer.echo(json.dumps(out, indent=2, sort_keys=True))
 
 

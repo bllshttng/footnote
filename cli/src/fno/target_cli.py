@@ -1811,6 +1811,16 @@ def init(
         typer.echo(_denom_refusal, err=True)
         raise typer.Exit(code=2)
 
+    # A DECLARED required binding revalidates natively before the claim; undeclared = no gate.
+    from fno.target_context_gate import TaskContextGateRefused, gate_declared_task_context
+
+    try:
+        gate_declared_task_context(str((_dispatch_node or {}).get("id") or ""), str(Path.cwd()))
+    except TaskContextGateRefused as exc:
+        detail = f" ({exc.detail})" if exc.detail else ""
+        typer.echo(f"fno do target init: task-context gate refused: {exc.reason}{detail}", err=True)
+        raise typer.Exit(code=2)
+
     # First-bind the graph pointer (x-f8b1 change 2), the reverse leg of the
     # x-39c0 backfill above: init --plan-path wrote only the manifest, so the
     # graph never learned the plan exists (x-7649). Sits after every refusal

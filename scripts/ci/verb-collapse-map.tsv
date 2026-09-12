@@ -345,6 +345,7 @@ do pr watch status	T1	do pr watch status	3
 do pr watch tick	T1	do pr watch tick	2
 do pr watch uninstall	T1	do pr watch uninstall	1
 do research	T1	do research	18
+do resume receipt context-prepare	T1	do resume receipt context-prepare	0
 do resume receipt show	T1	do resume receipt show	1
 do resume receipt validate	T1	do resume receipt validate	3
 do resume receipt write	T1	do resume receipt write	2
@@ -526,6 +527,7 @@ pr-watch tick	T1	pr-watch tick	2
 pr-watch uninstall	T1	pr-watch uninstall	1
 research	KEEP	research	18	single-leaf group
 restart	KEEP	restart	17	single-leaf group
+resume receipt context-prepare	T1	resume receipt context-prepare	0
 resume receipt show	T1	resume receipt show	1
 resume receipt validate	T1	resume receipt validate	3
 resume receipt write	T1	resume receipt write	2

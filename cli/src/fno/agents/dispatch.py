@@ -2593,9 +2593,9 @@ def dispatch_spawn(
             raise DispatchAskError(str(exc), exit_code=2) from exc
         effective_message = message
 
-    from fno.agents.spawn_payload import enrich_spawn_payload
+    from fno.agents.spawn_payload import prepare_spawn_payload
 
-    message = enrich_spawn_payload(message)
+    message, _payload_measures = prepare_spawn_payload(message)
 
     if output_format is not None and (
         harness != "claude" or not headless or output_format != "json"
