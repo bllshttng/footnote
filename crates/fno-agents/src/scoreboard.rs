@@ -53,6 +53,105 @@ fn project_of(obj: &Map<String, Value>, project: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Parse the ISO shapes the graph and ledger carry (naive local, or
+/// Z-suffixed / offset UTC) to epoch seconds; None means "no trustworthy
+/// time", which the caller treats as unknown, never as zero.
+fn iso_secs(raw: &str) -> Option<i64> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.timestamp());
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S")
+        .ok()
+        .map(|dt| dt.and_utc().timestamp())
+}
+
+/// The 14-day quality cohort over the classified nodes: a delivery survives
+/// when its node is not reverted and no caused_by fix-node was created after
+/// the ship within the follow-up window. Only deliveries that completed the
+/// window are judged; younger ones are pending, never in the denominator.
+/// Without causal telemetry it degrades to n/a.
+fn survival(
+    by_node: &Map<String, Value>,
+    by_id: &BTreeMap<String, &Map<String, Value>>,
+    now: Option<&str>,
+    followup_days: i64,
+) -> Value {
+    let w4 = by_id
+        .values()
+        .any(|n| n.contains_key("reverted") || n.contains_key("caused_by"));
+    if !w4 {
+        return json!({"available": false, "reason": "no causal telemetry (Wave 4 not shipped)"});
+    }
+    if !by_node.values().any(|c| c["delivered"] == true) {
+        return json!({"available": false, "reason": "no shipped nodes in window"});
+    }
+    let Some(now_secs) = now.and_then(iso_secs) else {
+        return json!({"available": false, "reason": "no usable now"});
+    };
+    let window = followup_days * 86400;
+    let mut mature: Vec<(&String, &Map<String, Value>, i64)> = Vec::new();
+    for (nid, c) in by_node {
+        if c["delivered"] != true {
+            continue;
+        }
+        let Some(ts) = c["ship_ts"].as_str().and_then(iso_secs) else {
+            continue;
+        };
+        if now_secs - ts >= window {
+            if let Some(node) = by_id.get(nid) {
+                mature.push((nid, *node, ts));
+            }
+        }
+    }
+    let delivered = by_node.values().filter(|c| c["delivered"] == true).count();
+    let pending = delivered - mature.len();
+    let mut survived = 0i64;
+    for (nid, node, shipped_at) in &mature {
+        if node.get("reverted") == Some(&Value::Bool(true)) {
+            continue;
+        }
+        let mut followed = false;
+        for fix in by_id.values() {
+            let Some(origin) = fix.get("caused_by").and_then(Value::as_str) else {
+                continue;
+            };
+            if origin != *nid {
+                continue;
+            }
+            match fix
+                .get("created_at")
+                .and_then(Value::as_str)
+                .and_then(iso_secs)
+            {
+                // Unparsable fix time: stay conservative, it counts against
+                // survival.
+                None => {
+                    followed = true;
+                    break;
+                }
+                // A follow-up is a fix created AFTER the ship, within the
+                // window. A fix predating the ship or post-window is not a
+                // follow-up to it.
+                Some(fx) if fx >= *shipped_at && fx - *shipped_at <= window => {
+                    followed = true;
+                    break;
+                }
+                Some(_) => {}
+            }
+        }
+        if !followed {
+            survived += 1;
+        }
+    }
+    json!({
+        "available": true,
+        "survived": survived,
+        "shipped_nodes": mature.len(),
+        "rate_pct": if mature.is_empty() { 0 } else { (100 * survived) / mature.len() as i64 },
+        "pending": pending,
+    })
+}
+
 /// Classify one node from its graph row and its ledger rows.
 /// The returned shape is the wire contract the Python views consume.
 pub fn classify_node(
@@ -259,6 +358,15 @@ pub fn classify(params: &Value) -> Result<Value, String> {
         .values()
         .filter(|c| c["class"] == "inferred")
         .count();
+    let survival = survival(
+        &by_node,
+        &by_id,
+        params.get("now").and_then(Value::as_str),
+        params
+            .get("followup_days")
+            .and_then(Value::as_i64)
+            .unwrap_or(14),
+    );
     let mut result = json!({
         "by_node": by_node,
         "coverage": {
@@ -267,6 +375,7 @@ pub fn classify(params: &Value) -> Result<Value, String> {
             "rows_without_node": rowless.len(),
             "inferred_nodes": inferred,
         },
+        "survival": survival,
     });
     if let Some(scope) = scope {
         result["coverage"]["project_scope"] = scope.clone();
@@ -394,11 +503,39 @@ mod tests {
     }
 
     #[test]
+    fn survival_judges_only_mature_deliveries() {
+        let params = json!({
+            "entries": [
+                {"id": "x-old", "merge_status": "merged", "completed_at": "2026-09-01T10:00:00", "reverted": false},
+                {"id": "x-new", "merge_status": "merged", "completed_at": "2026-09-20T10:00:00", "reverted": false},
+                {"id": "x-fix", "caused_by": "x-old", "created_at": "2026-09-10T00:00:00"}
+            ],
+            "rows": [
+                {"graph_node_id": "x-old", "termination_reason": "DonePRGreen", "completed": "2026-09-01T10:00:00"},
+                {"graph_node_id": "x-new", "termination_reason": "DonePRGreen", "completed": "2026-09-20T10:00:00"}
+            ],
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": ["DonePRGreen", "DoneBatched"],
+            "now": "2026-09-21T10:00:00",
+            "followup_days": 14
+        });
+        let out = classify(&params).unwrap();
+        let su = &out["survival"];
+        assert_eq!(su["available"], true);
+        // x-old is 20 days old: mature. x-new is 1 day old: pending.
+        assert_eq!(su["shipped_nodes"], 1);
+        assert_eq!(su["survived"], 0);
+        assert_eq!(su["survived"], 0); // x-fix lands 9 days after the ship: followed
+        assert_eq!(su["pending"], 1);
+    }
+
+    #[test]
     fn project_scope_filters_and_reports_unattributed() {
         let params = json!({
             "entries": [
                 {"id": "x-1", "project": "p1", "merge_status": "merged"},
-                {"id": "x-2", "project": "p2", "merge_status": "merged"}
+                {"id": "x-2", "project": "t2", "merge_status": "merged"}
             ],
             "rows": [
                 {"graph_node_id": "x-1", "termination_reason": "DonePRGreen", "cost_usd": 1.0, "project": "p1"},
