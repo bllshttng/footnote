@@ -11,6 +11,12 @@ from typing import Optional
 
 import typer
 
+# A subagent planner holds node:<id> under this prefix between session open
+# and session close, mirroring target-session:<id> for the do phase. The
+# constant lives in claims beside the other two holder prefixes; the one
+# resolver (holder_agent_name) reads it there.
+from fno.claims.core import BLUEPRINT_HOLDER_PREFIX
+
 
 def _graph_path():
     """Resolve through fno.graph.cli at call time (same seam as tests patch)."""
@@ -27,10 +33,6 @@ session_app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-
-# A subagent planner holds node:<id> under this prefix between session open
-# and session close, mirroring target-session:<id> for the do phase.
-BLUEPRINT_HOLDER_PREFIX = "blueprint-session:"
 
 
 def _release_into(receipt: dict, claim_key: str, holder: str) -> None:
