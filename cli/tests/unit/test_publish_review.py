@@ -1,324 +1,132 @@
-"""publish_review (x-93ea): the reviewer lane's GitHub posting producer.
+"""The Python door of the bot-review producer.
 
-Refusal matrix + posted-state assertions. Every test fakes the subprocess
-layer (``fno.pr._publish_review.run``) so no test touches the network; the
-assertions that matter are which calls fire (a refusal must never reach the
-POST) and what the result reports (the reviewDecision readback, never the
-POST receipt).
+The publish contract itself (gate chain, refusals, the POST, the
+reviewDecision readback) lives in the Rust module behind the binary
+(``crates/fno-agents/src/publish_review.rs``) and is tested there. These
+tests pin the Python side of the seam: the transport round-trip, and the
+hidden verb's exit-code mapping.
 """
+
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
-from typing import Optional
+import stat
 
-import pytest
+from typer.testing import CliRunner
 
-from fno.pr import _publish_review as pr_mod
-from fno.pr._proc import Result
+from fno.pr._publish_review import PublishReviewUnavailable, publish_review_call
 
-REPO = "bllshttng/footnote"
-IDENTITY = "fno-review-bot"
-TOKEN_ENV = "GH_REVIEW_BOT_TOKEN"
-HEAD = "a" * 40
+runner = CliRunner()
 
-
-class FakeGh:
-    """Answers git/gh argv from a script, recording every POST."""
-
-    def __init__(
-        self,
-        *,
-        author: str = "bllshttng",
-        pr_head: Optional[str] = HEAD,
-        slug: str = REPO,
-        post_rc: int = 0,
-        review_decision: str = "APPROVED",
-        pr_for_head: Optional[str] = "931",
-    ) -> None:
-        self.author = author
-        self.pr_head = pr_head
-        self.slug = slug
-        self.post_rc = post_rc
-        self.review_decision = review_decision
-        self.pr_for_head = pr_for_head
-        self.posts: list[dict] = []
-        self.saw_envs: list[Optional[dict]] = []
-
-    def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
-        argv = list(cmd)
-        self.saw_envs.append(env)
-        if argv[:3] == ["git", "rev-parse", "--show-toplevel"]:
-            return _ok(str(cwd))
-        if argv[:3] == ["git", "rev-parse", "HEAD"]:
-            return _ok(HEAD)
-        if argv[:2] == ["gh", "pr"] and "--json" in argv:
-            field = argv[argv.index("--json") + 1]
-            if "reviewDecision" in field.split(","):
-                return _ok(self.review_decision)
-            # The one combined PR read: number,author,headRefOid,url.
-            if {"number", "author", "headRefOid", "url"} <= set(field.split(",")):
-                if not self.pr_for_head:
-                    return _rc(1, "", "no PR for HEAD")
-                return _ok(
-                    json.dumps(
-                        {
-                            "number": int(self.pr_for_head),
-                            "author": {"login": self.author},
-                            "headRefOid": self.pr_head,
-                            "url": f"https://github.com/{self.slug}/pull/{self.pr_for_head}",
-                        }
-                    )
-                )
-            return _rc(1, "", f"fake: unhandled field list {field}")
-        if argv[:3] == ["gh", "api", "-X"] and "POST" in argv:
-            self.posts.append({"argv": argv, "env": env})
-            if self.post_rc != 0:
-                return _rc(self.post_rc, "", "gh: Not Found")
-            return _ok(json.dumps({"state": "APPROVED"}))
-        return _rc(1, "", f"fake: unhandled argv {argv}")
+ANSWER = {
+    "status": "posted",
+    "reason": "posted APPROVE as fno-review-bot on #931 (reviewDecision=APPROVED)",
+    "event": "APPROVE",
+    "review_decision": "APPROVED",
+    "stderr": None,
+    "receipt": "bot-review: posted APPROVE as fno-review-bot on #931 (reviewDecision=APPROVED)",
+    "exit": 0,
+}
 
 
-def _ok(stdout: str):
-    return Result(returncode=0, stdout=stdout, stderr="")
-
-
-def _rc(rc: int, stdout: str, stderr: str):
-    return Result(returncode=rc, stdout=stdout, stderr=stderr)
-
-
-@pytest.fixture
-def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A directory whose .fno/settings.yaml configures the bot lane."""
-    settings = tmp_path / ".fno"
-    settings.mkdir()
-    (settings / "settings.yaml").write_text(
-        "schema_version: 1\nconfig:\n  review:\n"
-        f"    bot_identity: {IDENTITY}\n    bot_token_env: {TOKEN_ENV}\n",
-        encoding="utf-8",
+def _fake_binary(tmp_path, stdout: str, exit_code: int = 0):
+    """A stand-in fno-agents binary: reads stdin, prints ``stdout``, exits."""
+    script = tmp_path / "fake-fno-agents.sh"
+    script.write_text(
+        "#!/bin/sh\ncat > /dev/null\n"
+        f"printf '%s' '{stdout}'\nexit {exit_code}\n"
     )
-    monkeypatch.setenv(TOKEN_ENV, "tok")
-    return tmp_path
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
 
 
-def _publish(repo: Path, fake: FakeGh, monkeypatch: pytest.MonkeyPatch, **kw):
-    monkeypatch.setattr(pr_mod, "run", fake)
-    return pr_mod.publish_review(
-        pr_number=931,
-        head_sha=kw.pop("head_sha", HEAD),
-        verdict=kw.pop("verdict", "pass"),
-        reviewer=kw.pop("reviewer", "sigma"),
-        cwd=str(repo),
-        **kw,
-    )
+def test_publish_review_call_round_trips_the_payload(tmp_path, monkeypatch):
+    import fno.rust_binary as rb
+
+    seen = {}
+
+    def fake_run(argv, input=None, capture_output=True, text=True, timeout=None):
+        seen["argv"] = argv
+        seen["input"] = input
+        seen["timeout"] = timeout
+
+        class Proc:
+            returncode = 0
+            stdout = json.dumps(ANSWER)
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr(rb, "find_dev_binary", lambda: tmp_path / "unused")
+    # verb_call imports subprocess locally, which resolves to this same module.
+    monkeypatch.setattr("subprocess.run", fake_run)
+    answer = publish_review_call({"pr_number": 931, "verdict": "pass"})
+    assert answer["status"] == "posted"
+    assert seen["argv"][-1] == "publish-review"
+    assert json.loads(seen["input"])["pr_number"] == 931
+    # Real network round trips: the transport bound must exceed the default.
+    assert seen["timeout"] == 45
 
 
-def test_posts_approve_and_reports_readback(repo, monkeypatch):
-    fake = FakeGh()
-    result = _publish(repo, fake, monkeypatch)
-    assert result.status == "posted"
-    assert result.review_decision == "APPROVED"
-    assert result.receipt == (
-        f"bot-review: posted APPROVE as {IDENTITY} on #931 (reviewDecision=APPROVED)"
-    )
-    assert len(fake.posts) == 1
-    argv = fake.posts[0]["argv"]
-    assert "event=APPROVE" in argv
-    assert f"commit_id={HEAD}" in argv
-    assert any(a.startswith("body=fno review mirror: reviewer=sigma") for a in argv)
-    assert f"/repos/{REPO}/pulls/931/reviews" in argv
+def test_publish_review_call_raises_a_named_refusal_on_failure(tmp_path, monkeypatch):
+    import fno.rust_binary as rb
+
+    def fake_run(argv, input=None, capture_output=True, text=True, timeout=None):
+        class Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "boom"
+
+        return Proc()
+
+    monkeypatch.setattr(rb, "find_dev_binary", lambda: tmp_path / "unused")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    try:
+        publish_review_call({})
+    except PublishReviewUnavailable as exc:
+        assert "boom" in str(exc)
+    else:
+        raise AssertionError("a failing binary must raise the named refusal")
 
 
-def test_post_auth_is_subprocess_env_only(repo, monkeypatch):
-    monkeypatch.delenv("GH_TOKEN", raising=False)
-    fake = FakeGh()
-    _publish(repo, fake, monkeypatch)
-    # The POST env carries the bot token; the caller's os.environ survives.
-    assert fake.posts[0]["env"]["GH_TOKEN"] == "tok"
-    assert os.environ.get("GH_TOKEN") is None
+def test_verb_maps_the_answer_exit_code(tmp_path, monkeypatch):
+    from fno.pr import cli as pr_cli
+    from fno.pr._publish_review import publish_review_call
 
-
-def test_identity_collision_refuses_without_posting(repo, monkeypatch):
-    fake = FakeGh(author=IDENTITY)
-    result = _publish(repo, fake, monkeypatch)
-    assert result.status == "refused"
-    assert IDENTITY in result.reason
-    assert fake.posts == []
-
-
-def test_identity_collision_strips_bot_suffix(repo, monkeypatch):
-    fake = FakeGh(author=f"{IDENTITY}[bot]")
-    result = _publish(repo, fake, monkeypatch)
-    assert result.status == "refused"
-    assert fake.posts == []
-
-
-def test_unset_identity_skips(repo, monkeypatch):
-    (repo / ".fno" / "settings.yaml").write_text(
-        "schema_version: 1\nconfig:\n  review:\n    peers: []\n", encoding="utf-8"
-    )
-    fake = FakeGh()
-    result = _publish(repo, fake, monkeypatch)
-    assert result.status == "skipped"
-    assert result.reason == "review.bot_identity unset"
-    assert fake.posts == []
-
-
-def test_unset_token_env_skips(repo, monkeypatch):
-    monkeypatch.delenv(TOKEN_ENV, raising=False)
-    fake = FakeGh()
-    result = _publish(repo, fake, monkeypatch)
-    assert result.status == "skipped"
-    assert TOKEN_ENV in result.reason
-    assert fake.posts == []
-
-
-def test_stale_head_refuses(repo, monkeypatch):
-    fake = FakeGh()
-    result = _publish(repo, fake, monkeypatch, head_sha="b" * 40)
-    assert result.status == "refused"
-    assert "stale" in result.reason
-    assert fake.posts == []
-
-
-def test_fail_verdict_posts_request_changes(repo, monkeypatch):
-    fake = FakeGh(review_decision="CHANGES_REQUESTED")
-    result = _publish(repo, fake, monkeypatch, verdict="fail")
-    assert result.status == "posted"
-    assert result.review_decision == "CHANGES_REQUESTED"
-    assert "event=REQUEST_CHANGES" in fake.posts[0]["argv"]
-
-
-def test_unmappable_verdict_refuses(repo, monkeypatch):
-    fake = FakeGh()
-    result = _publish(repo, fake, monkeypatch, verdict="meh")
-    assert result.status == "refused"
-    assert fake.posts == []
-
-
-def test_gh_post_failure_fails_closed_without_raising(repo, monkeypatch):
-    fake = FakeGh(post_rc=422)
-    result = _publish(repo, fake, monkeypatch)
-    assert result.status == "failed"
-    assert result.stderr and "Not Found" in result.stderr
-    assert result.review_decision is None
-
-
-def test_dry_run_names_event_without_posting(repo, monkeypatch):
-    fake = FakeGh()
-    result = _publish(repo, fake, monkeypatch, dry_run=True)
-    assert result.status == "skipped"
-    assert "APPROVE" in result.reason
-    assert fake.posts == []
-
-
-def test_no_open_pr_author_unreadable_skips(repo, monkeypatch):
-    fake = FakeGh(author="")
-    result = _publish(repo, fake, monkeypatch)
-    assert result.status == "skipped"
-    assert fake.posts == []
-
-
-def test_pr_number_omitted_resolves_head_pr(repo, monkeypatch):
-    """The emit-chokepoint shape: no PR in hand, resolve the branch's open PR."""
-    fake = FakeGh()
-    monkeypatch.setattr(pr_mod, "run", fake)
-    result = pr_mod.publish_review(
-        head_sha=HEAD, verdict="pass", reviewer="sigma", cwd=str(repo)
-    )
-    assert result.status == "posted"
-    assert "#931" in result.receipt
-
-
-def test_pr_number_omitted_no_open_pr_skips(repo, monkeypatch):
-    fake = FakeGh(pr_for_head=None)
-    monkeypatch.setattr(pr_mod, "run", fake)
-    result = pr_mod.publish_review(
-        head_sha=HEAD, verdict="pass", reviewer="sigma", cwd=str(repo)
-    )
-    assert result.status == "skipped"
-    assert result.reason == "no open PR for HEAD"
-    assert fake.posts == []
-
-
-def test_unconfigured_lane_makes_no_network_calls(tmp_path, monkeypatch):
-    """Byte-identical behavior apart from the receipt: with no bot_identity,
-    publish must not even resolve the PR (no gh call at all)."""
-    monkeypatch.delenv("GH_REVIEW_BOT_TOKEN", raising=False)
-    calls = []
-
-    def recorder(cmd, **kw):
-        calls.append(list(cmd))
-        return _rc(1, "", "should not be reached")
-
-    monkeypatch.setattr(pr_mod, "run", recorder)
-    result = pr_mod.publish_review(
-        head_sha=HEAD, verdict="pass", reviewer="sigma", cwd=str(tmp_path)
-    )
-    assert result.status == "skipped"
-    assert result.reason == "review.bot_identity unset"
-    # git rev-parse (repo-root resolution) is allowed; gh is not.
-    assert all(c[0] == "git" for c in calls)
-
-
-# --- the fno pr publish-review verb (change 4) ---
-
-
-def _write_attestation(repo: Path, verdict: str = "pass", reviewer: str = "sigma") -> None:
-    import time
-
-    row = (
-        '{"ts": "%s", "type": "review_attestation", "source": "target", '
-        '"data": {"reviewer": "%s", "head_sha": "%s", "verdict": "%s", '
-        '"session_id": "s"}}\n'
-        % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), reviewer, HEAD, verdict)
-    )
-    with (repo / ".fno" / "events.jsonl").open("a") as fh:
-        fh.write(row)
-
-
-def _invoke_verb(repo: Path, fake: FakeGh, monkeypatch, *args: str):
-    from typer.testing import CliRunner
-
-    from fno.pr.cli import pr_app
-
-    # The verb anchors on os.getcwd(); without the chdir it would read the
-    # REAL worktree's config and events instead of the fixture's.
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(pr_mod, "run", fake)
-    return CliRunner().invoke(pr_app, ["publish-review", "--pr", "931", *args])
-
-
-def test_verb_defaults_to_newest_head_attestation(repo, monkeypatch):
-    _write_attestation(repo)
-    fake = FakeGh()
-    result = _invoke_verb(repo, fake, monkeypatch)
+    monkeypatch.setattr("fno.pr._publish_review.publish_review_call", lambda p: dict(ANSWER))
+    result = runner.invoke(pr_cli.pr_app, ["publish-review", "--pr", "931"])
     assert result.exit_code == 0, result.output
-    assert len(fake.posts) == 1
-    assert "event=APPROVE" in fake.posts[0]["argv"]
-    assert f"bot-review: posted APPROVE as {IDENTITY} on #931" in result.output
 
 
-def test_verb_dry_run_makes_no_post(repo, monkeypatch):
-    _write_attestation(repo)
-    fake = FakeGh()
-    result = _invoke_verb(repo, fake, monkeypatch, "--dry-run")
-    assert result.exit_code == 0, result.output
-    assert fake.posts == []
-    assert "would post APPROVE" in result.output
+def test_verb_passes_the_default_verdict_and_dry_run_flag(tmp_path, monkeypatch):
+    from fno.pr import cli as pr_cli
+    from fno.pr._publish_review import publish_review_call
+
+    seen = {}
+
+    def fake(payload):
+        seen.update(payload)
+        return {"status": "skipped", "receipt": "bot-review: skipped (x)", "exit": 1}
+
+    monkeypatch.setattr("fno.pr._publish_review.publish_review_call", fake)
+    result = runner.invoke(
+        pr_cli.pr_app, ["publish-review", "--pr", "5", "--dry-run"]
+    )
+    assert result.exit_code == 1
+    assert seen["pr_number"] == 5
+    assert seen["verdict"] == ""
+    assert seen["dry_run"] is True
+    assert "bot-review: skipped (x)" in result.output
 
 
-def test_verb_no_attestation_no_verdict_exits_2(repo, monkeypatch):
-    fake = FakeGh()
-    result = _invoke_verb(repo, fake, monkeypatch)
-    assert result.exit_code == 2
-    assert fake.posts == []
+def test_verb_survives_an_unavailable_binary(monkeypatch):
+    from fno.pr import cli as pr_cli
+    from fno.pr._publish_review import PublishReviewUnavailable
 
+    def fake(payload):
+        raise PublishReviewUnavailable("the fno-agents binary was not found")
 
-def test_verb_explicit_verdict_overrides_attestation(repo, monkeypatch):
-    _write_attestation(repo, verdict="pass")
-    fake = FakeGh(review_decision="CHANGES_REQUESTED")
-    result = _invoke_verb(repo, fake, monkeypatch, "--verdict", "fail")
-    assert result.exit_code == 0, result.output
-    assert "event=REQUEST_CHANGES" in fake.posts[0]["argv"]
+    monkeypatch.setattr("fno.pr._publish_review.publish_review_call", fake)
+    result = runner.invoke(pr_cli.pr_app, ["publish-review", "--pr", "5"])
+    assert result.exit_code == 1
+    assert "bot-review: failed" in result.output
