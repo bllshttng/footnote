@@ -60,6 +60,7 @@ def rendered_activity(
     truth_state: Optional[str],
     age_s: Optional[float],
     reachability: str,
+    provider_refusal: Optional[str] = None,
 ) -> str:
     """The STATUS word both ``fno agents list`` lanes render (x-c672, AC7).
 
@@ -67,12 +68,17 @@ def rendered_activity(
     moved inside :data:`ACTIVITY_ATTENTION_S`), ``quiet`` (older), ``parked``
     (the tail closed a promise), with the measured age riding the row in its
     own field. A positively falsified row reads ``orphaned``, and a probe
-    that answered nothing reads ``unknown``. Nothing DECIDES on this word:
-    retirement reads the reverse join and the lanes read their own probes,
-    so the column is free to answer the operator's actual question.
+    that answered nothing reads ``unknown``. A row whose last assistant turn
+    is a provider refusal reads ``refused``: the error record is the newest
+    transcript entry, so without this arm a corpse reads ``writing``. Nothing
+    DECIDES on this word: retirement reads the reverse join and the lanes
+    read their own probes, so the column is free to answer the operator's
+    actual question.
     """
     if reachability == UNREACHABLE:
         return "orphaned"
+    if provider_refusal:
+        return "refused"
     if truth_state == "done":
         return "parked"
     if age_s is None:
@@ -97,6 +103,29 @@ TRANSCRIPT_EVIDENCE_S = 20 * 60
 #: Basis when an active tail resolved but is too old to certify liveness now.
 #: UNKNOWN, never UNREACHABLE: an old transcript is absence of evidence.
 STALE_TRANSCRIPT = "stale-transcript"
+
+#: Basis when the transcript moved but no vendor ever answered a turn on it.
+#: UNKNOWN, never UNREACHABLE, the same way STALE_TRANSCRIPT is.
+NO_INFERENCE = "no-inference"
+
+
+def inference_samples(observed_model: Optional[dict]) -> Optional[int]:
+    """Model-bearing records the transcript tail carried, or None for absence.
+
+    The marker a booted-and-died process cannot fake: only a vendor answering a
+    turn writes the record it counts. ``no-model-yet`` is a real zero; every
+    other variant is an absence and returns None, so it lowers nothing.
+    docs/architecture/fleet-watchdog.md carries the measurement.
+    """
+    if not isinstance(observed_model, dict):
+        return None
+    kind = observed_model.get("kind")
+    if kind == "no-model-yet":
+        return 0
+    if kind != "observed":
+        return None
+    samples = observed_model.get("samples")
+    return samples if isinstance(samples, int) else None
 
 
 @dataclass(frozen=True)
@@ -125,6 +154,7 @@ def classify_reachability(
     fresh_s: float = TRANSCRIPT_EVIDENCE_S,
     pid_alive: Optional[bool] = None,
     last_activity_basis: Optional[str] = None,
+    observed_model: Optional[dict] = None,
 ) -> Reachability:
     """Pure classifier. ``falsifier`` is a basis string, or None for "did not fire".
 
@@ -147,6 +177,11 @@ def classify_reachability(
         if last_activity_basis == "mtime":
             # Never positive: an mtime is a file stamp, not activity.
             return Reachability(UNKNOWN, MTIME_ONLY, age_s)
+        # Zero samples measures WRITES and no conversation, so the age
+        # certifies nothing. Before the staleness arm because it holds at every
+        # age; UNKNOWN because a just-booted live worker reads the same zero.
+        if inference_samples(observed_model) == 0:
+            return Reachability(UNKNOWN, NO_INFERENCE, age_s)
         # An unknowable age stays REACHABLE. Only POSITIVE evidence of staleness
         # demotes; a missing age is not evidence, and the monotone rule in this
         # module's header forbids lowering on absence.
@@ -178,6 +213,10 @@ TRANSCRIPT_TURN = "transcript-turn"
 OPERATOR_TURN = "operator-turn"
 PROMISE = "promise"
 MODEL_REFUSED = "model-refused"
+#: The row's last assistant turn is a provider refusal the error taxonomy
+#: classifies (x-e594). Distinct from ``model-refused``: that one is read off
+#: observed-model evidence, this one off the transcript's own refusal text.
+PROVIDER_REFUSED = "provider-refused"
 
 
 @dataclass(frozen=True)
@@ -204,6 +243,7 @@ def classify_progress(
     harness: Optional[str],
     route_settings_path: Optional[str],
     last_activity_age_s: Optional[int],
+    provider_refusal: Optional[str] = None,
 ) -> Progress:
     """Pure classifier for the progress axis. Never raises.
 
@@ -211,7 +251,8 @@ def classify_progress(
     has no progress state, and inventing one for it is the collapse again);
     then the refusal predicate (Locked Decision 3 -- structural, never reads
     the transcript's prose, so a reworded refusal message cannot break it);
-    then the truth-state arms plus the measured transcript age. The refusal
+    then the provider refusal the truth reading classified; then the
+    truth-state arms plus the measured transcript age. A refusal
     test MUST run before the truth-state arms: a refused worker emits exactly one assistant message
     and stops, so the transcript tail reads ``working`` for two hours and
     ``stalled`` after that, and testing state first would report
@@ -224,6 +265,8 @@ def classify_progress(
         return Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
     if _is_refused(observed_model, harness, route_settings_path):
         return Progress(REFUSED, MODEL_REFUSED)
+    if provider_refusal:
+        return Progress(REFUSED, PROVIDER_REFUSED)
     if truth_state in ("working", "watching"):
         if last_activity_age_s is None:
             return Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
@@ -430,6 +473,7 @@ def reachability(
         age_s=truth.get("last_activity_age_s"),
         falsifier=pid_falsifier(pid, pid_start_time),
         last_activity_basis=truth.get("last_activity_basis"),
+        observed_model=truth.get("observed_model"),
     )
 
 

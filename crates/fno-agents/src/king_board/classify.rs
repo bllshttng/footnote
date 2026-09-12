@@ -344,6 +344,7 @@ mod tests {
         // asserts its literal state word: a positive marker.
         let mut probed = crate::truth_probe::TruthProbe {
             state: "working".to_string(),
+            provider_refusal: None,
             harness_title: None,
             reachability: Some("reachable".to_string()),
             basis: Some("transcript".to_string()),
@@ -445,6 +446,7 @@ mod tests {
     fn probe(state: &str, age_s: f64) -> crate::truth_probe::TruthProbe {
         crate::truth_probe::TruthProbe {
             state: state.to_string(),
+            provider_refusal: None,
             harness_title: None,
             reachability: None,
             basis: None,

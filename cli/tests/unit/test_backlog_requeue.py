@@ -85,7 +85,7 @@ def _wedged_node(**over) -> dict:
     return node
 
 
-def _dead_truth(monkeypatch, state="stalled", age_s=18000) -> None:
+def _dead_truth(monkeypatch, state="stalled", age_s=18000, observed=None) -> None:
     monkeypatch.setattr(
         "fno.agents.session_truth.resolve_session_truth",
         lambda handle, **kw: {
@@ -93,6 +93,7 @@ def _dead_truth(monkeypatch, state="stalled", age_s=18000) -> None:
             "state": state,
             "last_activity_age_s": age_s,
             "last_event_at": "2026-09-05T06:11:05Z",
+            "observed_model": observed,
         },
     )
 
@@ -292,3 +293,79 @@ def test_update_null_locked_by_clears_lock_alone(tmp_graph):
     assert result.exit_code == 0, _out(result)
     assert "Updated" in result.output
     assert _read(tmp_graph)[0]["status"] == "ready"
+
+
+# -- x-e594: the inference-sample marker, measured 2026-09-12 -----------------
+
+
+def test_requeue_settles_a_429_corpse_inside_the_freshness_bound(
+    tmp_graph, claims_root, monkeypatch
+):
+    """The measured specimen. A worker killed by a usage-limit 429 dies WRITING
+    that error, so its transcript age is freshest at the instant it died: state
+    working at 13 minutes read reachable and requeue refused, then accepted the
+    same dead worker at 23 once age alone crossed the bound. Zero inference
+    samples says no vendor ever answered a turn, so the age certifies nothing."""
+    _seed(tmp_graph, [_wedged_node()])
+    _dead_truth(
+        monkeypatch, state="working", age_s=13 * 60, observed={"kind": "no-model-yet"}
+    )
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code == 0, _out(result)
+    node = _read(tmp_graph)[0]
+    assert node["status"] == "ready"
+    assert node["sessions"] == []
+
+
+def test_requeue_still_refuses_a_worker_with_a_climbing_sample_count(
+    tmp_graph, claims_root, monkeypatch
+):
+    """Same state and age, 31 samples: a live worker still owns the do window."""
+    _seed(tmp_graph, [_wedged_node()])
+    _dead_truth(
+        monkeypatch,
+        state="working",
+        age_s=13 * 60,
+        observed={"kind": "observed", "model": "glm-5.3-flash", "samples": 31},
+    )
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code != 0
+    assert "reachable" in _out(result)
+    assert _read(tmp_graph)[0]["status"] == "in_progress"
+
+
+def test_the_receipt_prints_the_sample_count_beside_the_state(
+    tmp_graph, claims_root, monkeypatch
+):
+    """`working, 0 samples` names a corpse and `working, 31 samples` names a
+    worker, so the state word alone is not a receipt a reader can act on."""
+    _seed(tmp_graph, [_wedged_node()])
+    _dead_truth(
+        monkeypatch, state="working", age_s=13 * 60, observed={"kind": "no-model-yet"}
+    )
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code == 0, _out(result)
+    assert "state=working samples=0" in result.output
+
+
+def test_the_receipt_never_renders_an_unanswerable_count_as_zero(
+    tmp_graph, claims_root, monkeypatch
+):
+    """opencode keeps no per-session transcript, so its count is absent, not 0.
+    Printing 0 there would name every opencode worker a corpse."""
+    _seed(tmp_graph, [_wedged_node()])
+    _dead_truth(monkeypatch, observed={"kind": "not-file-backed"})
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID, "--json"])
+    assert result.exit_code == 0, _out(result)
+    assert json.loads(result.output)["settled"][0]["samples"] is None
+
+
+def test_an_unanswerable_count_renders_as_a_question_mark(
+    tmp_graph, claims_root, monkeypatch
+):
+    """The plain receipt's spelling for the same absence."""
+    _seed(tmp_graph, [_wedged_node()])
+    _dead_truth(monkeypatch, observed={"kind": "not-file-backed"})
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code == 0, _out(result)
+    assert "samples=?" in result.output

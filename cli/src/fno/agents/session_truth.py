@@ -314,8 +314,8 @@ def resolve_session_truth(
     """Resolve ``handle`` and classify its transcript tail. Never raises.
 
     Returns ``{handle, state, reason, last_activity_age_s, last_event_at,
-    last_activity_basis, last_message, session_id, observed_model,
-    harness_title, suggestions}``.
+    last_activity_basis, last_message, provider_refusal, session_id,
+    observed_model, harness_title, suggestions}``.
     ``state`` is one of done | watching | your-move | working | stalled |
     unknown; ``reason`` is set only for ``unknown`` (``not-found``/``no-records``);
     ``last_event_at`` is the absolute ISO8601 UTC stamp of the newest transcript
@@ -341,6 +341,7 @@ def resolve_session_truth(
             "last_event_at": None,
             "last_activity_basis": None,
             "last_message": None,
+            "provider_refusal": None,
             "session_id": session_id,
             "observed_model": observed or {"kind": "no-transcript"},
             "harness_title": None,
@@ -428,6 +429,24 @@ def resolve_session_truth(
     last = records[-1]
     last_actor = next((r for r in reversed(records) if r.role != "peer"), last)
     state = classify_tail(last_actor.role, last_actor.text, age, stalled_after_s=stalled_after_s)
+    # A provider refusal is only read off the WORKER's own last turn: the role
+    # check keeps a mailed or pasted refusal text in a user turn from labeling
+    # the row, and a done promise is an outcome, not a refusal to consult.
+    provider_refusal: Optional[str] = None
+    if last_actor.role == "assistant" and state != "done":
+        from fno.recovery import classify_worker_refusal
+
+        try:
+            verdict = classify_worker_refusal(
+                None, " ".join((last_actor.text or "").split())
+            )
+        except Exception:  # noqa: BLE001 - see below
+            # This function is documented never to raise and every liveness
+            # surface reads it, so a reporting field must not break the read:
+            # the same rule `observed_model` states for itself.
+            verdict = None
+        if verdict is not None:
+            provider_refusal = verdict[0].error_class.value
     try:
         last_event_at = (
             None
@@ -454,6 +473,7 @@ def resolve_session_truth(
         "last_event_at": last_event_at,
         "last_activity_basis": basis,
         "last_message": " ".join((last.text or "").split())[:200] or None,
+        "provider_refusal": provider_refusal,
         "session_id": sid,
         "observed_model": observed,
         "harness_title": observed_title(agent, transcript_path),

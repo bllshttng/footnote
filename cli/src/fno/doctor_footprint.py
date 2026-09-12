@@ -237,7 +237,7 @@ def _row_is_advancing(row: Any) -> bool:
         truth = session_truth.resolve_session_truth(str(getattr(row, "name", "") or ""))
         state = truth.get("state")
         age_s = truth.get("last_activity_age_s")
-        reach = classify_reachability(truth_state=state, age_s=age_s, falsifier=None)
+        reach = classify_reachability(truth_state=state, age_s=age_s, falsifier=None, observed_model=truth.get("observed_model"))
         prog = classify_progress(truth_state=state, reachability=reach.verdict, observed_model=truth.get("observed_model"), harness=getattr(row, "harness", None), route_settings_path=getattr(row, "route_settings_path", None), last_activity_age_s=age_s)
         return prog.verdict == ADVANCING
     except Exception:  # noqa: BLE001 - an unreadable probe never voids or clears

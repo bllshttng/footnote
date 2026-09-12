@@ -82,6 +82,7 @@ def _reading_for_entry(entry: Any) -> Optional["Reachability"]:
             age_s=truth.get("last_activity_age_s"),
             falsifier=registry_falsifier(entry),
             last_activity_basis=truth.get("last_activity_basis"),
+            observed_model=truth.get("observed_model"),
         )
     except Exception:
         return None

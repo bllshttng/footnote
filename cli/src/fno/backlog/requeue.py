@@ -196,7 +196,7 @@ def _unclaim_node(task_id: str) -> None:
 
 def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     """Return a node wedged ``in_progress`` by a dead worker to the queue."""
-    from fno.agents.reachability import REACHABLE, classify_reachability
+    from fno.agents.reachability import REACHABLE, classify_reachability, inference_samples
     from fno.agents.session_truth import _humanize_age, resolve_session_truth
     from fno.claims.core import claim_status
     from fno.claims.io import claims_root_for
@@ -236,6 +236,8 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
             truth_state=truth.get("state"),
             age_s=truth.get("last_activity_age_s"),
             falsifier=None,
+            # A 429 corpse dies writing its error, so its age is freshest at death.
+            observed_model=truth.get("observed_model"),
         )
         if reach.verdict == REACHABLE:
             typer.echo(
@@ -258,11 +260,14 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         typer.echo(f"requeue: {node_id} still reads in_progress after settling ({remaining} open do row(s) remain).", err=True)
         raise typer.Exit(code=1)
 
-    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s"))} for r, truth in pairs]
+    # `working, 0 samples` names a corpse and `working, 31 samples` names a
+    # worker. None is a harness that keeps no transcript, never a zero.
+    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "samples": inference_samples(truth.get("observed_model")), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s"))} for r, truth in pairs]
     receipt = {"node_id": node_id, "status_before": status_before, "status_after": status_after, "settled": settled}
     if json_out:
         typer.echo(json.dumps(receipt, sort_keys=True))
         return
     typer.echo(f"requeued {node_id} ({status_before} -> {status_after})")
     for s in settled:
-        typer.echo(f"  {s['harness']}:{s['session_id']} state={s['state']} last_event_at={s['last_event_at']} age={s['age']}")
+        samples = "?" if s["samples"] is None else s["samples"]
+        typer.echo(f"  {s['harness']}:{s['session_id']} state={s['state']} samples={samples} last_event_at={s['last_event_at']} age={s['age']}")
