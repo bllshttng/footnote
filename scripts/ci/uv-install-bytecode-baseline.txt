@@ -14,5 +14,9 @@ cli/tests/smoke/cargo_bootstrap_smoke.sh::else miss "binary:$b" "absent (uv tool
 cli/tests/smoke/fno_sh_smoke.sh::else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
 cli/tests/smoke/test_postinstall.sh::for needle in "uv tool install" "pip install --user" "ERROR:"; do
 cli/tests/unit/test_update.py::(l for l in output.splitlines() if "uv tool install" in l), ""
-cli/tests/unit/test_update.py::assert "uv tool install --reinstall" in line
+cli/tests/unit/test_update.py::assert "uv tool install --reinstall-package fno" in line
 cli/tests/unit/test_update.py::assert line.index("uv tool install") < line.index("printf")
+# tests/ci/test_reinstall_window_narrow.sh: the fail-message below QUOTES the
+# command. The run line carries --compile-bytecode hoisted where the gate sees
+# it; the reinstall/refresh form flags live in uv_args at the call sites.
+tests/ci/test_reinstall_window_narrow.sh::[[ "$install_rc" -eq 0 ]] || fail "uv tool install failed:

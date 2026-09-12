@@ -7,10 +7,15 @@ Discovers the source via (in priority order):
 3. ``~/.fno/source-path`` cache (written on prior successful install)
 4. Well-known candidate paths (plugin install, common dev locations)
 
-Then execs ``uv tool install --reinstall --refresh <source>`` (or ``pip install --user
---force-reinstall <source>`` if uv is unavailable). Uses ``os.execvp`` so the
-installer replaces this Python process cleanly, avoiding the "binary being
-replaced while it runs" race.
+Then execs ``uv tool install --reinstall-package fno --refresh-package fno
+<source>`` (or ``pip install --user --force-reinstall <source>`` if uv is
+unavailable). Only the ``fno`` package is reinstalled: the wide ``--reinstall``
+form strips all packages out of the shared tool venv, and every fno process on
+the machine importing mid-rewrite raises ModuleNotFoundError. When the whole
+environment needs rebuilding (broken venv, new interpreter), use
+``.claude-plugin/postinstall.sh`` or a hand-run ``uv tool install --force``.
+Uses ``os.execvp`` so the installer replaces this Python process cleanly,
+avoiding the "binary being replaced while it runs" race.
 """
 from __future__ import annotations
 
@@ -1320,7 +1325,7 @@ def _install_then_mark(
 def _await_binary(post_install: str, binary: Optional[str]) -> str:
     """Wrap ``post_install`` in a bounded wait for ``binary`` to exist.
 
-    Measured, not assumed: during ``uv tool install --reinstall`` the console
+    Measured, not assumed: during a ``uv tool install`` the console
     script ``<tools>/fno/bin/fno-py`` is deleted and recreated, and the
     ``~/.local/bin`` exposure dangles with it, for roughly half a second. (The
     venv's python3 never disappears, so the shebang interpreter is not the
@@ -1407,8 +1412,9 @@ def update_command(
 ) -> None:
     """Reinstall fno from its source directory.
 
-    Picks up local CLI source changes by running ``uv tool install --reinstall``
-    (or ``pip install --user --force-reinstall`` if uv is unavailable).
+    Picks up local CLI source changes by running ``uv tool install
+    --reinstall-package fno`` (or ``pip install --user --force-reinstall`` if
+    uv is unavailable).
     """
     # Normalize to plain bool: when called directly (not via CLI), Typer Option
     # defaults are OptionInfo objects, not False. Guard against both.
@@ -1443,16 +1449,29 @@ def update_command(
     typer.echo(f"Reinstalling fno from {resolved}")
 
     if shutil.which("uv"):
-        # --refresh busts uv's build cache. Without it, a path source at an
-        # unchanged version (fno stays 0.2.1 across rebuilds) can reinstall a
-        # stale cached wheel that predates newly-added modules, so `fno agents restart`
-        # etc. crash with ModuleNotFoundError even after `fno doctor update`.
+        # Reinstall ONLY the fno package. The wide `--reinstall` form removes
+        # every package in the tool venv, and that venv is shared by every fno
+        # process on the machine: for the length of the rewrite each of them
+        # importing anything raises ModuleNotFoundError (measured: 43 packages
+        # absent for seconds, including launchd daemons and mid-loop agent
+        # calls). `--reinstall-package fno` leaves every dependency in place;
+        # uv still resolves the whole environment, so a dependency the source
+        # adds or bumps installs as normal.
+        # --refresh-package fno busts uv's build cache for a path source at an
+        # unchanged version (fno stays 0.3.2 across rebuilds). Without a
+        # refresh, a stale cached wheel that predates newly-added modules can
+        # be what installs, so `fno agents restart` etc. crash with
+        # ModuleNotFoundError even after `fno doctor update`.
+        # Whole-environment rebuilds (broken venv, new interpreter) belong to
+        # `.claude-plugin/postinstall.sh` or a hand-run
+        # `uv tool install --force`; neither runs on a merge.
         # --compile-bytecode: ship the venv's own .pyc so no later process
         # writes into a tree a reinstall may be deleting
         # (docs/architecture/cli-lazy-imports.md).
         cmd = [
             "uv", "tool", "install",
-            "--reinstall", "--refresh", "--compile-bytecode",
+            "--reinstall-package", "fno", "--refresh-package", "fno",
+            "--compile-bytecode",
             str(resolved),
         ]
     elif shutil.which("pip"):
@@ -1526,8 +1545,8 @@ def update_command(
 
     # Machine-global mutations start here (cargo bins below, the uv/pip env
     # at the exec), so this is where the machine-scoped guard belongs - not
-    # at the verb entry. `uv tool install --reinstall` tears down the venv
-    # every running fno verb executes from, and a racing pair of cargo
+    # at the verb entry. The install rewrites the `fno` package inside the
+    # venv every running fno verb executes from, and a racing pair of cargo
     # installs interleaves the same binaries running sessions exec, so two
     # concurrent updates kill unrelated sessions mid-turn. REFUSE, never
     # queue: the loser's update is either already landed (next lines say so)
