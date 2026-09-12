@@ -37,7 +37,6 @@ import math
 import os
 import re
 import tempfile
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional, cast
