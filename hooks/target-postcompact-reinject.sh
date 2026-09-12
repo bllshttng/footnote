@@ -93,6 +93,53 @@ if [[ -n "$PLAN_PATH" && -d "$PLAN_PATH" ]]; then
     TOTAL_TASKS=$(grep -c '### Task' "$PLAN_PATH"/*.md 2>/dev/null | awk -F: '{s+=$NF}END{print s+0}')
     CONTEXT="${CONTEXT}
 **Plan:** $PLAN_PATH ($TOTAL_TASKS tasks)"
+elif [[ -n "$PLAN_PATH" && -f "$PLAN_PATH" ]]; then
+    # A single-FILE plan used to vanish here: only -d was tested, so compaction
+    # lost the plan path exactly when a flat quick plan was in play (x-59b0).
+    CONTEXT="${CONTEXT}
+**Plan:** $PLAN_PATH (single file)"
+fi
+
+# Task-context binding pointer (x-59b0): the current attempt's bound binding
+# lives under the existing handoff artifact root, named by node + attempt
+# (attempt = the manifest's minted fno_id). The pointer and its declared
+# constraints ride once; source CONTENTS never ride. A pointer in context is
+# not a read - the stage field stays the only honest observation record.
+FNO_ID=$(grep '^fno_id:' "$STATE_FILE" 2>/dev/null | head -1 | sed 's/^fno_id: *//' | tr -d '"')
+BINDING_FILE=""
+if [[ -n "$NODE" && -n "$FNO_ID" ]]; then
+    CANDID=".fno/artifacts/handoff/task-context-${NODE}-${FNO_ID}.json"
+    [[ -f "$CANDID" ]] && BINDING_FILE="$CANDID"
+fi
+if [[ -n "$BINDING_FILE" ]]; then
+    BINDING_INFO="$(python3 - "$BINDING_FILE" <<'PY' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        b = json.load(fh)
+except Exception:
+    sys.exit(0)
+print(str(b.get("binding_digest", "unknown")))
+print(str(b.get("stage", "unknown")))
+for c in b.get("required_constraints", [])[:10]:
+    if isinstance(c, str) and c.strip():
+        print("- " + c)
+PY
+)"
+    if [[ -n "$BINDING_INFO" ]]; then
+        BDIGEST="$(printf '%s\n' "$BINDING_INFO" | sed -n 1p)"
+        BSTAGE="$(printf '%s\n' "$BINDING_INFO" | sed -n 2p)"
+        BCONSTRAINTS="$(printf '%s\n' "$BINDING_INFO" | sed -n '3,$p')"
+        CONTEXT="${CONTEXT}
+**Task context:** $BINDING_FILE (binding_digest $BDIGEST, stage $BSTAGE)"
+        if [[ -n "$BCONSTRAINTS" ]]; then
+            CONTEXT="${CONTEXT}
+**Required constraints:**
+$BCONSTRAINTS"
+        fi
+        CONTEXT="${CONTEXT}
+The binding pointer is not a read; required sources revalidate through the resume receipt context gate."
+    fi
 fi
 
 CONTEXT="${CONTEXT}
