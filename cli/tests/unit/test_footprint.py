@@ -461,3 +461,12 @@ def test_unparsed_pids_salvage_rejects_a_non_integer_first_token() -> None:
     assert reading.unparsed_lines == 1
     assert reading.unparsed_pids == set()
     assert reading.unparsed_samples[0].pid is None
+
+
+def test_negative_value_rows_report_their_field_reason() -> None:
+    reading = _parse_with_bad_row("200 -1 01:00:00 20.0 1024 fno-agents-worker --run")
+    assert reading.unparsed_samples[0].reason == "pid"
+    reading = _parse_with_bad_row("201 1 01:00:00 -20.0 1024 fno-agents-worker --run")
+    assert reading.unparsed_samples[0].reason == "cpu"
+    reading = _parse_with_bad_row("202 1 01:00:00 20.0 -4 fno-agents-worker --run")
+    assert reading.unparsed_samples[0].reason == "rss"
