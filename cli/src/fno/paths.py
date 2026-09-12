@@ -1344,6 +1344,8 @@ def crown_handoff_doc(scope: str) -> Path:
     import datetime as _dt
 
     key = "crown-" + re.sub(r"[^A-Za-z0-9._-]+", "-", scope.strip()).strip("-")
+    if key == "crown-":
+        raise ValueError("a crown scope is required")
     directory = handoffs_dir()
 
     def _mtime(path: Path) -> float:

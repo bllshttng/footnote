@@ -172,7 +172,10 @@ def handoff(
             raise typer.BadParameter("--scope cannot be combined with --session-id/--slug")
         from fno.paths import crown_handoff_doc
 
-        path = crown_handoff_doc(scope)
+        try:
+            path = crown_handoff_doc(scope)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         typer.echo(path.name if name_only else str(path))
         return
     if not session_id:
