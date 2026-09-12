@@ -87,6 +87,8 @@ task update
 # seam reads / renders
 get
 status
+# reads the store's mutation counter; writes nothing
+version
 view
 find
 next

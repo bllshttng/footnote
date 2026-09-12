@@ -111,7 +111,8 @@ pub fn state_type(status: Status) -> StateType {
 }
 
 /// The relation kinds between two nodes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RelationType {
     Blocks,
     Related,
@@ -277,7 +278,7 @@ pub struct NodeClaim {
 }
 
 /// The dispatch fields (one node_dispatch row).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct Dispatch {
     pub verb: Option<String>,
     pub brief: Option<String>,
@@ -317,8 +318,10 @@ pub struct PullRequest {
 }
 
 /// One sessions[] item.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct SessionRecord {
+    #[serde(flatten)]
+    pub extras: Map<String, Value>,
     pub phase: String,
     pub harness: String,
     pub session_id: String,
@@ -331,10 +334,10 @@ pub struct SessionRecord {
     pub claimed_at: Option<Value>,
     pub observed_model: Option<Value>,
     pub merge_grant: Option<Value>,
-    pub extras: Map<String, Value>,
 }
 
-/// One progress_notes[] item (a comments row; ts -> created_at, text -> body).
+/// One progress_notes[] item (a comments row; trailing keys land in the
+/// flattened extras map).
 #[derive(Clone, Debug)]
 pub struct Comment {
     pub created_at: Option<String>,
@@ -1572,7 +1575,7 @@ fn session_to_json(s: &SessionRecord) -> Value {
     Value::Object(obj)
 }
 
-fn comment_to_json(c: &Comment) -> Value {
+pub(crate) fn comment_to_json(c: &Comment) -> Value {
     let mut obj = Map::new();
     if let Some(v) = &c.created_at {
         obj.insert("ts".into(), json!(v));

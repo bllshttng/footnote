@@ -1,6 +1,7 @@
 """Type definitions for the fno graph module.
 
-Contains Status/Priority enums and the Entry pydantic model.
+Contains Status/Priority enums and the typed ``Node`` model (the Linear
+surface; ``Entry`` is its legacy alias until task 17.1).
 """
 from __future__ import annotations
 
@@ -109,7 +110,95 @@ def _derive_status(data: dict) -> str:
     return _rung_to_graph_status()[plan_rung(data)]
 
 
-class Entry(BaseModel):
+class RelationType(str, Enum):
+    """The named relation kinds (Linear-aligned; mirrors the Rust enum)."""
+
+    blocks = "blocks"
+    related = "related"
+    supersedes = "supersedes"
+
+
+class SessionRecord(BaseModel):
+    """One lifecycle-provenance row (graph.json ``sessions[]``)."""
+
+    model_config = {"extra": "allow"}
+
+    phase: str
+    harness: str
+    session_id: str
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    ended_by: Optional[str] = None
+
+
+class Comment(BaseModel):
+    """One progress-notes row (wire keys ts -> created_at, text -> body)."""
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    created_at: Optional[str] = Field(default=None, alias="ts")
+    body: Optional[str] = Field(default=None, alias="text")
+    kind: Optional[str] = None
+    title: Optional[str] = None
+
+
+class NodeClaim(BaseModel):
+    """Typed view over a node's flat lock fields (Linear-aligned)."""
+
+    locked_by: Optional[str] = None
+    harness: Optional[str] = None
+    harness_session: Optional[str] = None
+    locked_at: Optional[str] = None
+
+
+class Dispatch(BaseModel):
+    """Typed view over a node's flat dispatch fields (Linear-aligned)."""
+
+    verb: Optional[str] = None
+    brief: Optional[str] = None
+    model: Optional[str] = None
+
+
+class PullRequest(BaseModel):
+    """The primary or a follow-up PR attached to a node (Linear-aligned)."""
+
+    number: Optional[int] = None
+    url: Optional[str] = None
+    merge_status: Optional[str] = None
+    note: Optional[str] = None
+
+
+class NodeFilter(BaseModel):
+    """The typed API's node filter; unset fields match everything."""
+
+    id_in: Optional[list[str]] = None
+    project: Optional[str] = None
+    status_in: Optional[list[str]] = None
+    state_type: Optional[str] = None
+    parent: Optional[str] = None
+    label: Optional[str] = None
+    claimed: Optional[bool] = None
+    session_id: Optional[str] = None
+
+
+class NodeUpdateInput(BaseModel):
+    title: Optional[str] = None
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    project: Optional[str] = None
+    parent: Optional[str] = None
+    plan_path: Optional[str] = None
+    description: Optional[str] = None
+    estimate: Optional[str] = None
+
+
+class CommentCreateInput(BaseModel):
+    body: str
+    kind: Optional[str] = None
+    title: Optional[str] = None
+
+
+class Node(BaseModel):
     """A single feature graph node, matching the graph.json schema exactly."""
 
     id: str
@@ -253,7 +342,7 @@ class Entry(BaseModel):
     # (phase, harness, session_id); the same session may appear across phases and
     # a takeover appends another entry for the same phase. Written only through
     # store.append_session_record. Empty on legacy nodes.
-    sessions: list[dict] = Field(default_factory=list)
+    sessions: list[SessionRecord] = Field(default_factory=list)
 
     model_config = {"extra": "allow"}
 
@@ -374,3 +463,72 @@ class Entry(BaseModel):
             # Needed to resolve a repo-relative plan_path for the design probe.
             "cwd": self.cwd,
         })
+
+    # Linear-aligned typed views over the flat wire fields. Plain
+    # properties, not computed_field: model_dump stays wire-shaped, which
+    # keeps the store round-trip byte-stable.
+
+    @property
+    def description(self) -> Optional[str]:
+        return self.details
+
+    @property
+    def estimate(self) -> Optional[str]:
+        return self.size
+
+    @property
+    def labels(self) -> list[str]:
+        return list(getattr(self, "tags", None) or [])
+
+    @property
+    def comments(self) -> list[Comment]:
+        return [Comment.model_validate(row) for row in getattr(self, "progress_notes", None) or []]
+
+    @property
+    def claim(self) -> NodeClaim:
+        return NodeClaim(
+            locked_by=self.locked_by,
+            harness=self.locked_by_harness,
+            harness_session=self.locked_by_harness_session,
+            locked_at=self.locked_at,
+        )
+
+    @property
+    def dispatch(self) -> Dispatch:
+        return Dispatch(verb=self.dispatch_verb, brief=self.dispatch_brief, model=self.model)
+
+    @property
+    def pull_requests(self) -> list[PullRequest]:
+        prs: list[PullRequest] = []
+        if self.pr_number is not None:
+            prs.append(PullRequest(number=self.pr_number, url=self.pr_url, merge_status=self.merge_status))
+        for row in self.additional_prs or []:
+            prs.append(PullRequest.model_validate(row))
+        return prs
+
+
+# The legacy name stays importable until task 17.1 deletes the adapters.
+Entry = Node
+
+
+class PageInfo(BaseModel):
+    """Cursor pagination envelope (Linear-aligned)."""
+
+    has_next_page: bool = False
+    has_previous_page: bool = False
+    end_cursor: Optional[str] = None
+
+
+class NodeConnection(BaseModel):
+    """One page of typed nodes plus the resume cursor."""
+
+    nodes: list[Node] = Field(default_factory=list)
+    page_info: PageInfo = Field(default_factory=PageInfo)
+
+
+class NodePayload(BaseModel):
+    """A named mutation's reply: did it land, the row, the store version."""
+
+    success: bool
+    node: Optional[Node] = None
+    version: int = 0

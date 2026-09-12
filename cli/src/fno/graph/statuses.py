@@ -304,7 +304,7 @@ def live_worked_node_ids(
 
     Sources: the session-row join, the node-attributed fold (registry worker,
     no graph session row), the unmeasurable fold (no session id, attributed
-    by fleet_rows). Unattributable liveness still refuses.
+    by the fleet-rows probe). Unattributable liveness still refuses.
 
     ``reading`` hands in an already-paid fleet read; a caller that read the
     roster itself must pass it here rather than pay a second probe, which is
