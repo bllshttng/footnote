@@ -2,7 +2,7 @@
 agents workspace worktree cleanup !--kill-orphans
 agents ask !--provider
 agents discovered-json !--provider
-agents dispatch one !--mux-session
+agents dispatch next !--mux-session
 agents rm !--audit-actor
 agents rm !--audit-reason
 agents rm !--audit-reclaimed-bytes
@@ -22,6 +22,7 @@ agents spawn !--output-format
 agents spawn !--bounded-placement
 agents spawn !--recorded-provider
 agents spawn !--squad
+agents spawn !--mux-session
 agents worker external !--pr
 approvals decide !--db
 approvals ls !--db
@@ -50,7 +51,7 @@ do target resolve-model !--provider
 do target start !--provider
 doctor footprint !--cause-only
 doctor event find !--session
-dispatch one !--mux-session
+dispatch next !--mux-session
 event find !--session
 mail hold-release !--poll-s
 mail pane-prepare !--session

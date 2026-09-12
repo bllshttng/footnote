@@ -39,14 +39,15 @@ def launch_is_pinned(
     model: Optional[str] = None,
     account: Optional[str] = None,
     node_cwd: Optional[str] = None,
-    honors_config_harness: bool = True,
 ) -> bool:
     """True when this launch carries explicit intent quota policy must not move.
 
-    One implementation for both autonomous launchers, so they cannot drift on
-    what counts as a pin. Precedence is explicit invocation pin > node pin >
-    configured dispatch harness > quota policy, and each of those outranks an
-    automatic cutover.
+    Precedence is explicit invocation pin > node pin > configured dispatch
+    harness > quota policy, and each of those outranks an automatic cutover.
+    Since x-e53e there is ONE launcher (`fno agents spawn`), so every caller
+    reads the configured harness the same way and no launcher needs an opt-out
+    from this rung any more - the hardcoded-harness dispatcher that forced the
+    ``honors_config_harness`` escape hatch is gone with the collapse.
 
     The model pin matters as much as the provider one: a cutover swaps the
     harness, so forwarding a claude-only model to codex launches a worker that
@@ -59,12 +60,6 @@ def launch_is_pinned(
         str(node.get(k) or "").strip() for k in ("provider", "model", "harness")
     ):
         return True
-    if not honors_config_harness:
-        # A launcher that hardcodes its harness does not honor this setting, so
-        # letting it pin would suppress a cutover to protect a choice the launch
-        # never makes. Only a launcher that actually reads the setting may pin on
-        # it.
-        return False
     try:
         from fno.config import load_settings, load_settings_for_repo
         from fno.dispatch_flags import configured_dispatch_harness
@@ -356,9 +351,12 @@ def select_autonomous_route(
         # account is walled while a sibling account has headroom is the stall
         # this whole path exists to delete. A pinned launch skips it - picking is
         # a reroute, and a pin forbids reroutes, not defers. This lives HERE and
-        # not in one caller because the two launchers must reach the same
-        # verdict; when only `fno agents dispatch` had it, identical fixtures deferred
-        # on one path and launched on the other.
+        # not in a caller because the picking incident (2026-08, recorded in the
+        # dual-implementation inventory) happened when only ONE caller had the
+        # check: identical fixtures deferred under `backlog advance` and
+        # launched under `fno agents dispatch`. The second launcher is gone
+        # (x-e53e - everything dispatches through `fno agents spawn` now), and
+        # this function stays the single seam every remaining caller reads.
         if not pinned and _healthy_alternate_exists(node_cwd):
             return AutonomousRoute(
                 "stay", "alternate-account-available",

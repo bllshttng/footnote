@@ -5,7 +5,7 @@ Covers:
            "main"; the FNO_SESSION note prints only when FNO_SESSION decided
   AC12-HP  pane-identity accepts --server, --session-id and --session; the
            legacy spellings warn naming --server; two spellings exit 2
-  AC13-HP  dispatch one --server dispatches without a line; --mux-session
+  AC13-HP  dispatch next --server dispatches without a line; --mux-session
            warns to stderr only; neither flag exits 2 naming --server
   AC14-HP  the inside-leg-report pin path is identical under FNO_SERVER and
            FNO_SESSION
@@ -176,7 +176,7 @@ def test_ac12_pane_identity_server_and_aliases_reach_the_resolver(
 
 
 # ---------------------------------------------------------------------------
-# AC13-HP: dispatch one --server / --mux-session alias
+# AC13-HP: dispatch next --server / --mux-session alias
 # ---------------------------------------------------------------------------
 
 

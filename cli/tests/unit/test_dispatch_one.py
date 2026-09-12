@@ -1,4 +1,4 @@
-"""Unit tests for `fno agents dispatch one` (x-6f77, collapsed x-e53e): the mux
+"""Unit tests for `fno agents dispatch next` (x-6f77, collapsed x-e53e): the mux
 leader+g porcelain.
 
 The verb owns no launch of its own since x-e53e: node selection, the ONE
@@ -22,13 +22,17 @@ from fno import dispatch
 
 
 def test_registered_and_addressable():
-    """The verb is wired into the root CLI and the single-command sub-app does
-    not collapse (the no-op callback keeps `one` addressable)."""
+    """The verb is named for what it does (x-e53e: `next` - select and resolve;
+    the spawn door launches), and the pre-collapse `one` spelling stays as a
+    hidden deprecated alias."""
     from fno.cli import LAZY_SUBCOMMANDS
 
     assert "dispatch" in LAZY_SUBCOMMANDS
-    names = [c.name for c in dispatch.dispatch_app.registered_commands]
-    assert "one" in names
+    commands = {c.name: c for c in dispatch.dispatch_app.registered_commands}
+    assert "next" in commands
+    assert "one" in commands
+    assert commands["one"].hidden is True
+    assert not commands["next"].hidden
 
 
 def _receipt_line(**over) -> str:

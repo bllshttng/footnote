@@ -658,10 +658,10 @@ def test_an_explicit_account_is_the_record_that_gets_probed(monkeypatch, tmp_pat
     assert seen["provider_id"] == "ccr"
 
 
-def test_a_launcher_that_hardcodes_its_harness_cannot_pin_on_the_config(monkeypatch) -> None:
-    """`fno agents dispatch one` hardcodes a claude pane, so config.dispatch.harness is
-    not a choice it honors. Pinning on it there would suppress a cutover to
-    protect a setting the launch ignores."""
+def test_a_configured_harness_pins_the_launch(monkeypatch) -> None:
+    """config.dispatch.harness is a choice the launch honors (x-e53e deleted
+    the one dispatcher that hardcoded its harness and needed an opt-out), so
+    the configured rung pins: a cutover must never override it."""
     import fno.config as cfg
 
     monkeypatch.setattr(
@@ -670,9 +670,8 @@ def test_a_launcher_that_hardcodes_its_harness_cannot_pin_on_the_config(monkeypa
         lambda *a, **k: SimpleNamespace(dispatch=SimpleNamespace(harness="codex")),
     )
     assert ar.launch_is_pinned({}) is True
-    assert ar.launch_is_pinned({}, honors_config_harness=False) is False
-    # An explicit pin still wins regardless of the opt-out.
-    assert ar.launch_is_pinned({}, account="ccr", honors_config_harness=False) is True
+    # An explicit account pin needs no config at all.
+    assert ar.launch_is_pinned({}, account="ccr") is True
 
 
 class TestQuotaRotationDeclinedEvent:

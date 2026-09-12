@@ -44,7 +44,7 @@ agents loop-check
 agents needs
 agents resume
 agents rm !--audit-actor !--audit-reason !--audit-reclaimed-bytes !--audit-request-id !--audit-worktree-touched
-agents spawn !--bounded-placement !--output-format !--recorded-provider !--squad
+agents spawn !--bounded-placement !--output-format !--recorded-provider !--squad !--mux-session
 annotate
 annotate list
 approvals

@@ -2687,7 +2687,7 @@ pub(crate) fn config_get(key: &str) -> Option<String> {
     value
 }
 
-/// Shell `fno agents dispatch one --session <s> --json`, bounded + fail-open (the
+/// Shell `fno agents dispatch next --server <s> --json`, bounded + fail-open (the
 /// digest_overlay idiom), and turn its verdict into the client notice. An empty
 /// return says nothing (the launched pane speaks for itself); every error path
 /// yields a visible notice rather than a silent no-op (x-6f77).
@@ -2702,8 +2702,10 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
     let dispatch_timeout = dispatch_timeout();
     // A targeted node (a clicked work-queue card, x-a496) pins `--node`; without
     // it the porcelain picks the board's next ready node (prefix+g). The claim
-    // race, lane cap, and verdict shape are identical either way.
-    let mut args = vec!["agents", "dispatch", "one", "--server", session, "--json"];
+    // race, lane cap, and verdict shape are identical either way. x-e53e
+    // renamed the verb `one` -> `next` (`one` stays as a hidden alias); the
+    // launch itself is `fno agents spawn` inside the porcelain.
+    let mut args = vec!["agents", "dispatch", "next", "--server", session, "--json"];
     if let Some(n) = node {
         args.push("--node");
         args.push(n);
@@ -3046,7 +3048,7 @@ fn name_has_node_token(name: &str, node: &str) -> bool {
     false
 }
 
-/// Map a `fno agents dispatch one --json` verdict to the one-line client notice.
+/// Map a `fno agents dispatch next --json` verdict to the one-line client notice.
 /// Unparseable / unknown output fails open to a generic failure notice (never
 /// silent on an error).
 fn dispatch_notice(stdout: &str) -> String {
@@ -8633,7 +8635,7 @@ impl Core {
 
     /// "Grab work" (prefix+g, x-6f77): dispatch the next ready backlog node into
     /// a new pane. Selection + guard + gate + spawn is the Python porcelain's
-    /// job (`fno agents dispatch one`), shelled OFF the core loop in a detached
+    /// job (`fno agents dispatch next`), shelled OFF the core loop in a detached
     /// task so a slow backlog read never stalls a pane. The launched pane
     /// appears through the existing registry reader; the outcome (dispatched /
     /// no-work / refusal / failure) routes back as `DispatchResult` for a
@@ -11634,7 +11636,7 @@ impl Core {
                 // Targeted work-queue dispatch (a clicked card, x-a496). Reuses
                 // the prefix+g porcelain pinned to `--node`; the claim race
                 // (already-worked node bounces `already-dispatching`) and lane
-                // cap live in `fno agents dispatch one`. Routes through CoreMsg::Command,
+                // cap live in `fno agents dispatch next`. Routes through CoreMsg::Command,
                 // so the read-only-observer refusal already fired upstream.
                 //
                 // Re-check readiness against the server's OWN backlog snapshot

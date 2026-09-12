@@ -27,7 +27,8 @@ agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
 agents dispatch capabilities	T1	agents dispatch capabilities	0
 agents dispatch family	T1	agents dispatch family	1
-agents dispatch one	T1	agents dispatch one	9
+agents dispatch next	T1	agents dispatch next	9
+agents dispatch one	T1	agents dispatch one	0
 agents dispatch resolve	T1	agents dispatch resolve	23
 agents distress-scan	T1	agents distress-scan	0
 agents distress-verdicts	T1	agents distress-verdicts	0
@@ -288,7 +289,8 @@ cost	KEEP	cost	7	single-leaf group
 delivery	KEEP	delivery	7	single-leaf group
 dispatch capabilities	T1	dispatch capabilities	0
 dispatch family	T1	dispatch family	3
-dispatch one	T1	dispatch one	9
+dispatch next	T1	dispatch next	9
+dispatch one	T1	dispatch one	0
 dispatch resolve	T1	dispatch resolve	23
 do delivery evaluate	T1	do delivery evaluate	7
 do loops ls	T1	do loops ls	1

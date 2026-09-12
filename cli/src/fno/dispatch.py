@@ -40,10 +40,80 @@ dispatch_app = typer.Typer(no_args_is_help=True, help="Dispatch ready work into 
 @dispatch_app.callback()
 def _dispatch_callback() -> None:
     """No-op: keeps Typer from collapsing the single-command sub-app (a one-@command
-    app otherwise swallows the ``one`` subcommand name)."""
+    app otherwise swallows the ``next`` subcommand name)."""
 
 
-@dispatch_app.command("one")
+def _dispatch_next_impl(
+    server: Optional[str],
+    session_legacy: Optional[str],
+    node: Optional[str],
+    project: Optional[str],
+    account: Optional[str],
+    json_output: bool,
+) -> None:
+    from fno._flag_aliases import merge_deprecated_alias
+
+    session = merge_deprecated_alias(
+        server,
+        session_legacy,
+        canonical_flag="--server",
+        legacy_flag="--mux-session",
+    )
+    if session is None:
+        typer.echo("fno agents dispatch next: --server is required")
+        raise typer.Exit(code=2)
+    verdict = _dispatch_one(session=session, node=node, project=project, account=account)
+    if json_output:
+        typer.echo(json.dumps(verdict))
+    else:
+        line = verdict["outcome"]
+        if verdict.get("node"):
+            line += f" {verdict['node']}"
+        typer.echo(line)
+    raise typer.Exit(code=0 if verdict["outcome"] != "failed" else 1)
+
+
+@dispatch_app.command("next")
+def cmd_next(
+    server: Optional[str] = typer.Option(
+        None, "--server", help="Mux server to spawn the pane into (FNO_SERVER)."
+    ),
+    session_legacy: Optional[str] = typer.Option(
+        None,
+        "--mux-session",
+        hidden=True,
+        help="Deprecated alias for --server.",
+    ),
+    node: Optional[str] = typer.Option(
+        None, "--node", help="Dispatch this node id/slug (default: fno backlog next)."
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Scope the default selection to a project."
+    ),
+    account: Optional[str] = typer.Option(
+        None,
+        "--account",
+        help="Pin the spawned worker to a registered claude account (x-d012 "
+        "overlay); the mux passes its session-local active account here.",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit a one-line JSON verdict."
+    ),
+) -> None:
+    """Dispatch the next ready node into a new pane on SERVER, through the one
+    launcher (``fno agents spawn``).
+
+    Named for what it does since x-e53e: this verb SELECTS and RESOLVES; the
+    spawn door launches. Verdict ``outcome`` is one of ``launched | no-work |
+    already-dispatching | quota-deferred | failed`` (plus the guard's own
+    refusal reasons). A full fleet no longer returns a verdict: the spawn gate
+    queues inside the door or refuses with its own exit code. Exit 0 for
+    everything but ``failed``.
+    """
+    _dispatch_next_impl(server, session_legacy, node, project, account, json_output)
+
+
+@dispatch_app.command("one", hidden=True)
 def cmd_one(
     server: Optional[str] = typer.Option(
         None, "--server", help="Mux server to spawn the pane into (FNO_SERVER)."
@@ -70,33 +140,9 @@ def cmd_one(
         False, "--json", "-J", help="Emit a one-line JSON verdict."
     ),
 ) -> None:
-    """Dispatch one ready node into a new pane on SERVER, through the spawn gate.
-
-    Verdict ``outcome`` is one of ``launched | no-work | already-dispatching |
-    quota-deferred | failed`` (plus the guard's own refusal reasons). A full
-    fleet no longer returns a verdict: the spawn gate queues inside ``run_gate``
-    or refuses with its own exit code. Exit 0 for everything but ``failed``.
-    """
-    from fno._flag_aliases import merge_deprecated_alias
-
-    session = merge_deprecated_alias(
-        server,
-        session_legacy,
-        canonical_flag="--server",
-        legacy_flag="--mux-session",
-    )
-    if session is None:
-        typer.echo("fno agents dispatch one: --server is required")
-        raise typer.Exit(code=2)
-    verdict = _dispatch_one(session=session, node=node, project=project, account=account)
-    if json_output:
-        typer.echo(json.dumps(verdict))
-    else:
-        line = verdict["outcome"]
-        if verdict.get("node"):
-            line += f" {verdict['node']}"
-        typer.echo(line)
-    raise typer.Exit(code=0 if verdict["outcome"] != "failed" else 1)
+    """Deprecated alias for ``dispatch next`` (x-e53e): the name predates the
+    launcher collapse and answered "one of what?". Removed after one release."""
+    _dispatch_next_impl(server, session_legacy, node, project, account, json_output)
 
 
 @dispatch_app.command("resolve")
