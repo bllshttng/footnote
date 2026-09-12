@@ -20,6 +20,9 @@ use std::path::Path;
 
 pub const BINDING_VERSION: u32 = 1;
 
+/// The opening tag of the bounded pointer block a spawn payload carries.
+pub const TASK_CONTEXT_TAG_OPEN: &str = "<task-context ";
+
 pub const STAGE_PREPARED: &str = "prepared";
 pub const STAGE_SUBMITTED: &str = "submitted";
 pub const STAGE_OBSERVED: &str = "observed";
@@ -371,6 +374,65 @@ pub fn run_show(args: &[String]) -> i32 {
     )
 }
 
+/// At most this many declared constraints ride a payload. Bounded by
+/// declaration; source CONTENTS never ride a payload at all.
+const MAX_PAYLOAD_CONSTRAINTS: usize = 10;
+
+/// Render the bounded pointer block a spawn payload carries: identity, digest,
+/// stage, and the declared constraints. Never source contents. The pointer is
+/// not a read - the stage field stays the only honest observation record.
+pub fn payload_block(binding: &Value) -> Option<String> {
+    let bound = BoundBinding::load(binding).ok()?;
+    let b = &bound.binding;
+    let constraints: Vec<&str> = b
+        .required_constraints
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .take(MAX_PAYLOAD_CONSTRAINTS)
+        .collect();
+    let mut lines = vec![format!(
+        "{}node=\"{}\" attempt=\"{}\" binding_digest=\"{}\" stage=\"{}\">",
+        TASK_CONTEXT_TAG_OPEN,
+        b.node,
+        b.attempt,
+        bound.binding_digest,
+        b.stage.as_str()
+    )];
+    if !constraints.is_empty() {
+        lines.push("Required constraints:".to_string());
+        lines.extend(constraints.iter().map(|c| format!("- {c}")));
+    }
+    lines.push("</task-context>".to_string());
+    lines.push("The binding pointer is not a read; required sources revalidate through the resume receipt context gate.".to_string());
+    Some(lines.join("\n"))
+}
+
+/// `task-context-payload`: the payload-side render for the launch substrates.
+/// Takes the binding path (not the bytes) so Python only ever transports a
+/// path; a missing or corrupt file yields block:null (no block rides), which
+/// is the absent case, never a fabricated pointer.
+pub fn run_payload(args: &[String]) -> i32 {
+    run_stdin_verb(
+        args,
+        "task-context-payload  (one JSON request on stdin: path)",
+        |req| {
+            let answer = req
+                .get("path")
+                .and_then(Value::as_str)
+                .map(std::fs::read_to_string)
+                .and_then(|raw| raw.ok())
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .map(|v| {
+                    let block = payload_block(&v);
+                    serde_json::json!({"ok": true, "block": block})
+                })
+                .unwrap_or_else(|| serde_json::json!({"ok": true, "block": null}));
+            println!("{answer}");
+        },
+    )
+}
+
 /// `task-context-revalidate`: the gate. Verifies the stored digest, the
 /// expected executing identity, and every required source's live bytes under
 /// `root`. Content digests decide staleness; a moved code HEAD alone never
@@ -650,5 +712,55 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("foreign_session"));
+    }
+
+    #[test]
+    fn payload_block_is_bounded_and_names_identity() {
+        let mut b = binding(vec![]);
+        for i in 0..14 {
+            b.required_constraints.push(format!("constraint {i}"));
+        }
+        let block = payload_block(&bound_value(&b)).expect("block");
+        assert!(block.starts_with("<task-context "));
+        assert!(block.contains("attempt=\"20260912T052218Z-cl63988-4133dc\""));
+        assert!(block.contains("stage=\"prepared\""));
+        assert_eq!(block.matches("- constraint ").count(), 10, "{block}");
+        assert!(!block.contains("constraint 10"), "cap at 10: {block}");
+        assert!(block.contains("not a read"));
+    }
+
+    #[test]
+    fn payload_from_file_degrades_to_none_on_missing_or_corrupt() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("binding.json");
+        let payload_of = |p: &std::path::Path| {
+            let req = json!({"path": p.to_string_lossy()});
+            run_payload_with_stdin(&req)
+        };
+        // Missing file: no block, never a fabricated pointer.
+        assert_eq!(payload_of(&path)["block"], Value::Null);
+        // Corrupt file: same absence.
+        std::fs::write(&path, "{not json").expect("write");
+        assert_eq!(payload_of(&path)["block"], Value::Null);
+        // A valid bound binding renders the block.
+        let b = binding(vec![]);
+        std::fs::write(&path, bound_value(&b).to_string()).expect("write");
+        let answer = payload_of(&path);
+        assert_eq!(answer["ok"], json!(true));
+        assert!(answer["block"]
+            .as_str()
+            .unwrap()
+            .starts_with("<task-context "));
+    }
+
+    /// Drive run_payload with a request the way the binary verb does, without
+    /// re-reading stdin (the journey test exercises the binary itself).
+    fn run_payload_with_stdin(req: &Value) -> Value {
+        let path = req.get("path").and_then(Value::as_str).unwrap_or("");
+        let block = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|v| payload_block(&v));
+        serde_json::json!({"ok": true, "block": block})
     }
 }

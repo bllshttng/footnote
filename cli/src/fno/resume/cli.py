@@ -216,16 +216,10 @@ def _holder_of(status: dict) -> Optional[str]:
 
 @receipt_app.command("context-prepare")
 def context_prepare_cmd(
-    input_file: str = typer.Option(..., "--input", help="Binding request JSON (node, attempt, harness, session, worktree, plan_path, plan_digest, required_sources, required_constraints, bundle_reference, bundle_digest, payload_bytes, stage)"),
-    out: Optional[str] = typer.Option(None, "--out", help="Write the bound binding JSON here, under the existing artifact root"),
+    input_file: str = typer.Option(..., "--input", help="Binding request JSON file"),
+    out: Optional[str] = typer.Option(None, "--out", help="Write the bound binding JSON here"),
 ) -> None:
-    """Prepare a task-context execution binding (thin native transport).
-
-    The verdict is the native verifier's: structural validation and the
-    canonical digest are computed by the Rust module through verb_call; this
-    command only assembles the request, prints the answer, and optionally
-    writes the bound file. A named refusal exits 1 and never writes.
-    """
+    """Prepare a task-context execution binding (native verdict, thin transport)."""
     from fno.rust_binary import VerbUnavailable, verb_call
 
     req = json.loads(Path(input_file).read_text(encoding="utf-8"))
@@ -243,30 +237,6 @@ def context_prepare_cmd(
         out_path = Path(out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(bound, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-@receipt_app.command("context-stage")
-def context_stage_cmd(
-    binding_file: str = typer.Option(..., "--binding", help="Bound binding JSON to advance"),
-    to: str = typer.Option(..., "--to", help="Target stage: submitted|observed|unavailable"),
-    out: Optional[str] = typer.Option(None, "--out", help="Rewrite the binding file with the advanced stage"),
-) -> None:
-    """Advance a binding's observation stage (forward-only, native-checked)."""
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    req = json.loads(Path(binding_file).read_text(encoding="utf-8"))
-    try:
-        answer = verb_call("task-context-stage", {"binding": req, "to": to})
-    except VerbUnavailable as exc:
-        typer.echo(json.dumps({"ok": False, "reason": "native_verifier_unavailable", "error": str(exc)}))
-        raise typer.Exit(code=3)
-    typer.echo(json.dumps(answer))
-    if not answer.get("ok"):
-        raise typer.Exit(code=1)
-    if out:
-        bound = dict(answer["binding"])
-        bound["binding_digest"] = answer["binding_digest"]
-        Path(out).write_text(json.dumps(bound, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 @receipt_app.command("validate")

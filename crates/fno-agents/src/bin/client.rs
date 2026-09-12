@@ -227,22 +227,26 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::component_update::run_component_verdict(&args[1..]);
     }
 
-    // `task-context-prepare`/`-stage`/`-show`/`-revalidate` are the INTERNAL
-    // machine verbs behind the task-context execution binding (x-59b0):
-    // Python's resume receipt CLI shells them so every enforced decision
-    // (validation, digest, stage monotonicity, live-source revalidation) is
-    // native. stdin-JSON like evidence-gate, so the routable-verb parity sets
-    // never see them.
+    // `task-context-prepare`/`-stage`/`-show`/`-revalidate`/`-payload` are the
+    // INTERNAL machine verbs behind the task-context execution binding
+    // (x-59b0): Python's resume receipt CLI and spawn payload adapter shell
+    // them so every enforced decision (validation, digest, stage monotonicity,
+    // live-source revalidation, bounded payload render) is native. stdin-JSON
+    // like evidence-gate, so the routable-verb parity sets never see them.
     if matches!(verb, "task-context-prepare") {
         return fno_agents::task_context::run_prepare(&args[1..]);
     }
     if matches!(
         verb,
-        "task-context-stage" | "task-context-show" | "task-context-revalidate"
+        "task-context-stage"
+            | "task-context-show"
+            | "task-context-revalidate"
+            | "task-context-payload"
     ) {
         return match verb {
             "task-context-stage" => fno_agents::task_context::run_stage(&args[1..]),
             "task-context-show" => fno_agents::task_context::run_show(&args[1..]),
+            "task-context-payload" => fno_agents::task_context::run_payload(&args[1..]),
             _ => fno_agents::task_context::run_revalidate(&args[1..]),
         };
     }
