@@ -3400,7 +3400,7 @@ def start(
 
 def _bind_worktree(
     node: str, wt_path: Path, *, base_label: str, in_place: bool,
-    beastmode: bool, no_merge: bool,
+    node_match_guaranteed: bool, beastmode: bool, no_merge: bool,
 ) -> bool:
     """Classify and re-bind an existing manifest. True when the caller is done.
 
@@ -3425,12 +3425,12 @@ def _bind_worktree(
     if verdict == "foreign_live":
         _print_foreign_holder_park(node, claim_info or {}, wt_path)
         raise typer.Exit(code=1)
-    # In-place (policy=never) manifests live in the SHARED canonical .fno, so
-    # unlike a per-node worktree this one may belong to a DIFFERENT node - the
-    # fast-path's "manifest => THIS node's init ran" invariant does not hold.
-    # A node mismatch is another node's (stale/foreign) session; refuse rather
-    # than report already-claimed and let the caller run under its state.
-    if in_place:
+    # In-place (policy=never) manifests live in the SHARED canonical .fno, and
+    # an isolated caller reached this tree without ensure reserving it for THIS
+    # node - in both cases the fast-path's "manifest => THIS node's init ran"
+    # invariant does not hold. A node mismatch is another node's (stale or
+    # foreign) session; refuse rather than re-acquire under its roof.
+    if in_place or not node_match_guaranteed:
         mnode = _manifest_node_id(manifest)
         if mnode is not None and mnode != node:
             typer.echo(
@@ -3632,7 +3632,8 @@ def _start_body(
         typer.echo(f"already isolated at {cwd}; nothing created.")
         base_label = _remote_base_ref(cwd)
         if _bind_worktree(node_id, cwd, base_label=base_label, in_place=False,
-                          beastmode=beastmode, no_merge=no_merge):
+                          node_match_guaranteed=False, beastmode=beastmode,
+                          no_merge=no_merge):
             return
         # No manifest in this tree (a stranded session: mail woke it, so init
         # never ran and no claim was ever acquired). Bind the EXISTING tree
@@ -3784,7 +3785,8 @@ def _start_body(
     # Bind an existing manifest (idempotent re-run: never double-claim or
     # error) or fall through to a fresh init against this tree.
     if _bind_worktree(node, wt_path, base_label=base_label, in_place=in_place,
-                      beastmode=beastmode, no_merge=no_merge):
+                      node_match_guaranteed=not in_place, beastmode=beastmode,
+                      no_merge=no_merge):
         return
     # 3. Init the session FROM the worktree (binds owner_cwd, claims the node
     #    exactly once - preserve the existing one-call claim).

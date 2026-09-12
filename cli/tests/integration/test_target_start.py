@@ -916,6 +916,27 @@ def test_already_isolated_parks_on_foreign_holder(monkeypatch):
     assert spawned == []
 
 
+def test_already_isolated_refuses_foreign_node_manifest(monkeypatch, tmp_path):
+    """A manifest naming a DIFFERENT node means this tree belongs to another
+    node's session; the isolated bind refuses instead of re-acquiring under
+    its roof."""
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda nid: None)
+    monkeypatch.setattr(target_cli, "_remote_base_ref", lambda cwd: "origin/main")
+    (tmp_path / ".fno").mkdir()
+    (tmp_path / ".fno" / "target-state.md").write_text("graph_node_id: x-other1\n")
+    spawned = []
+    monkeypatch.setattr(
+        target_cli.subprocess, "run", lambda *a, **k: spawned.append(a) or None
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 1
+    assert "belongs to node x-other1" in result.stderr
+    assert spawned == []
+
+
 def test_already_isolated_binds_unclaimed_tree(monkeypatch, tmp_path):
     """AC1-HP: linked worktree, no manifest, claim free -> init runs against
     the EXISTING tree (owner_cwd = cwd) and no worktree or branch is created."""
