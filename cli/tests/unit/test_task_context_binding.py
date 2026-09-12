@@ -198,3 +198,34 @@ def test_non_object_task_context_is_malformed():
     d["task_context"] = "not an object"
     with pytest.raises(MalformedReceiptError):
         _receipt_from_dict(d)
+
+
+def test_write_with_malformed_task_context_file_refuses_by_name(tmp_path, monkeypatch):
+    # A named refusal, never a raw JSONDecodeError traceback (review finding).
+    from typer.testing import CliRunner
+
+    from fno.resume.cli import receipt_app
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        receipt_app,
+        [
+            "write",
+            "--node", "x-59b0",
+            "--session", "sess-w",
+            "--phase", "do",
+            "--generation", "1",
+            "--repo", "footnote",
+            "--worktree", str(tmp_path),
+            "--branch", "feature/x-59b0",
+            "--head", "b48ba4b8cfff",
+            "--next-verb", "/fno:target",
+            "--next-target", "x-59b0",
+            "--task-context", str(bad),
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "invalid_input" in result.output
