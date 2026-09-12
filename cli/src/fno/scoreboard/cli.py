@@ -27,7 +27,6 @@ from fno.scoreboard.fold import (
     emission_failures_snapshot,
     load_ledger_rows,
     read_graph_nodes,
-    read_jsonl_events,
     read_jsonl_events_with_coverage,
 )
 from fno import paths as _paths
