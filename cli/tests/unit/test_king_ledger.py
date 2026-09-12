@@ -47,6 +47,7 @@ def _court(crowns, **kw):
         "conflicts": [],
         "registry_readable": True,
         "graph_readable": True,
+        "entries": kw.pop("entries", []),
         "summary": {
             "total": len(crowns) if crowns is not None else None,
             "manifest_only": 0,
@@ -183,7 +184,89 @@ def test_write_honors_out(tmp_path):
     assert out.exists()
 
 
+def test_omitted_members_render_with_titles_not_a_bare_count():
+    from fno.king.ledger import render_ledger_html
+
+    entries = [
+        {"id": "e-1", "type": "epic", "title": "the crown epic", "status": "in_progress"},
+        {"id": "x-done", "parent": "e-1", "title": "shipped thing", "status": "done"},
+        {"id": "x-idea", "parent": "e-1", "title": "not started thing", "status": "idea"},
+    ]
+    page = render_ledger_html(
+        _court([_crown(scope="e-1", level=2)], entries=entries)
+    )
+    assert "shipped thing" in page
+    assert "not started thing" in page
+    assert "the crown epic" in page
+
+
+def test_uncrowned_epics_get_their_own_section_with_p1_count():
+    from fno.king.ledger import render_ledger_html
+
+    entries = [
+        {"id": "e-1", "type": "epic", "title": "reigned epic", "status": "in_progress", "priority": "p2"},
+        {"id": "e-2", "type": "epic", "title": "free one", "status": "ready", "priority": "p2"},
+        {"id": "e-3", "type": "epic", "title": "urgent orphan", "status": "idea", "priority": "p1"},
+    ]
+    page = render_ledger_html(
+        _court([_crown(scope="e-1", level=2)], entries=entries)
+    )
+    assert "uncrowned" in page
+    section = page[page.index("uncrowned epics"):]
+    assert "free one" in section and "urgent orphan" in section
+    assert "p1" in page
+    # the reigned epic belongs to its king's section, not the orphan list
+    assert "reigned epic" not in section
+
+
+def test_uncrowned_section_absent_when_every_epic_is_crowned():
+    from fno.king.ledger import render_ledger_html
+
+    entries = [{"id": "e-1", "type": "epic", "title": "reigned epic", "status": "ready"}]
+    page = render_ledger_html(
+        _court([_crown(scope="e-1", level=2)], entries=entries)
+    )
+    assert "uncrowned" not in page
+
+
+def test_uncrowned_section_absent_when_graph_entries_are_missing():
+    from fno.king.ledger import render_ledger_html
+
+    page = render_ledger_html(_court([_crown(scope="e-1", level=2)], entries=[]))
+    assert "uncrowned" not in page
+
+
+def test_compile_forces_the_crown_rows_own_level():
+    from fno.graph._intake import descendants_of  # control: the walk the compiler uses
+    from fno.king.scope import compile_scope_ids
+
+    entries = [
+        {"id": "e-1", "type": "epic"},
+        {"id": "x-1", "parent": "e-1"},
+        {"id": "x-2", "parent": "x-1"},
+    ]
+    assert compile_scope_ids("e-1", entries, level=2) == {"e-1", "x-1", "x-2"}
+    assert descendants_of(entries, "e-1") == {"x-1", "x-2"}
+
+
+def test_build_carries_graph_entries(monkeypatch):
+    import fno.agents.crown as crown_mod
+    import fno.agents.court as court_mod
+
+    from fno.king.ledger import build_ledger_data
+
+    monkeypatch.setattr(court_mod, "gather_court", lambda rows=None: _court([_crown()]))
+    monkeypatch.setattr(court_mod, "fold_scope_nodes", lambda crowns: None)
+    monkeypatch.setattr(
+        crown_mod, "_graph_index", lambda: {"e-1": {"id": "e-1", "type": "epic"}}
+    )
+
+    court = build_ledger_data()
+    assert court["entries"] == [{"id": "e-1", "type": "epic"}]
+
+
 def test_build_gathers_folds_and_skips_the_fold_when_no_crowns(monkeypatch):
+    import fno.agents.crown as crown_mod
     import fno.agents.court as court_mod
 
     from fno.king.ledger import build_ledger_data
@@ -200,6 +283,7 @@ def test_build_gathers_folds_and_skips_the_fold_when_no_crowns(monkeypatch):
 
     monkeypatch.setattr(court_mod, "gather_court", fake_gather)
     monkeypatch.setattr(court_mod, "fold_scope_nodes", fake_fold)
+    monkeypatch.setattr(crown_mod, "_graph_index", lambda: {})
 
     court = build_ledger_data(rows=["r7"])
     assert calls == {"rows": ["r7"], "folded": True}
@@ -207,5 +291,8 @@ def test_build_gathers_folds_and_skips_the_fold_when_no_crowns(monkeypatch):
 
     calls.clear()
     monkeypatch.setattr(court_mod, "gather_court", lambda rows=None: _court([]))
-    build_ledger_data()
+    monkeypatch.setattr(
+        court_mod, "fold_scope_nodes", lambda crowns: None
+    )
+    build_ledger_data(entries=[])
     assert calls == {}

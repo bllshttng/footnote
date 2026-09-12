@@ -2,7 +2,10 @@
 
 Contract: docs/architecture/reign.md. The crown-to-nodes join stays in the
 native court-fold read (``fno.agents.court.fold_scope_nodes``); this module
-renders that answer and never re-derives it.
+renders that answer and never re-derives it. Membership detail (titles for
+omitted nodes, uncrowned epics) comes from the SAME compiler the court and
+the wake read, ``fno.king.scope.compile_scope_ids``, forced to each crown
+row's own level.
 """
 from __future__ import annotations
 
@@ -45,15 +48,24 @@ def _esc(value: Any) -> str:
 
 
 def build_ledger_data(
-    rows: Optional[list] = None, *, fold_fn: Optional[Callable] = None
+    rows: Optional[list] = None,
+    *,
+    fold_fn: Optional[Callable] = None,
+    entries: Optional[list[dict]] = None,
 ) -> dict[str, Any]:
-    """gather_court plus the native scope fold; the ledger's whole input."""
+    """gather_court plus the native scope fold and the graph read; the
+    ledger's whole input."""
     from fno.agents.court import fold_scope_nodes, gather_court
 
     court = gather_court(rows)
     crowns = court.get("crowns")
     if crowns:
         (fold_fn or fold_scope_nodes)(crowns)
+    if entries is None:
+        from fno.agents.crown import _graph_index
+
+        entries = list((_graph_index() or {}).values())
+    court["entries"] = entries
     return court
 
 
@@ -74,7 +86,44 @@ def counts_line(fold: dict[str, Any]) -> str:
     return ", ".join(f"{s} {counts[s]}" for s in ordered)
 
 
-def _crown_section(crown: dict[str, Any]) -> str:
+def _scope_members(
+    crown: dict[str, Any], entries: list[dict]
+) -> Optional[set[str]]:
+    """The crown's member ids at its own level; None when it cannot compile."""
+    scope = crown.get("scope")
+    level = crown.get("level")
+    if not (isinstance(scope, str) and scope.strip()) or level is None:
+        return None
+    from fno.king.scope import compile_scope_ids
+
+    try:
+        return compile_scope_ids(scope, entries, level=level)
+    except Exception:  # noqa: BLE001 - an uncompilable scope is the fold's verdict already
+        return None
+
+
+def _row_tr(n: dict[str, Any], titles: dict[str, dict]) -> str:
+    entry = titles.get(str(n.get("id") or ""), {})
+    return "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+        _esc(n.get("id")),
+        _esc(entry.get("title") or "-"),
+        _esc(n.get("status")),
+        _esc(n.get("worker")) if n.get("worker") is not None else "",
+        f"#{_esc(n['pr_number'])}" if n.get("pr_number") else "",
+    )
+
+
+_TABLE_HEAD = (
+    "<table><thead><tr><th>node</th><th>title</th><th>status</th>"
+    "<th>worker</th><th>pr</th></tr></thead><tbody>"
+)
+
+
+def _crown_section(
+    crown: dict[str, Any],
+    titles: dict[str, dict],
+    entries: list[dict],
+) -> str:
     level = crown.get("level")
     level_s = "L?" if level is None else f"L{level}"
     agree = crown.get("agree")
@@ -101,25 +150,69 @@ def _crown_section(crown: dict[str, Any]) -> str:
                 _esc(fold.get("omitted", 0)),
             )
         )
-        body = "".join(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-                _esc(n.get("id")),
-                _esc(n.get("status")),
-                _esc(n.get("worker")),
-                f"#{_esc(n['pr_number'])}" if n.get("pr_number") else "",
-            )
-            for n in fold.get("nodes") or []
-        )
-        parts.append(
-            "<table><thead><tr><th>node</th><th>status</th><th>worker</th>"
-            f"<th>pr</th></tr></thead><tbody>{body}</tbody></table>"
-        )
+        listed = list(fold.get("nodes") or [])
+        rows = [_row_tr(n, titles) for n in listed]
+        members = _scope_members(crown, entries) if entries else None
+        if members is not None:
+            listed_ids = {str(n.get("id")) for n in listed}
+            for omitted_id in sorted(members - listed_ids):
+                entry = titles.get(omitted_id, {})
+                rows.append(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td></td><td></td></tr>".format(
+                        _esc(omitted_id),
+                        _esc(entry.get("title") or "-"),
+                        _esc(entry.get("status")),
+                    )
+                )
+        parts.append(_TABLE_HEAD + "".join(rows) + "</tbody></table>")
     parts.append("</section>")
     return "".join(parts)
 
 
+def _uncrowned_section(crowns: list[dict[str, Any]], entries: list[dict]) -> str:
+    """Epics in no crown's territory: absent from every fold, so the page
+    names them instead of letting their absence read as zero."""
+    covered: set[str] = set()
+    for crown in crowns:
+        members = _scope_members(crown, entries)
+        if members:
+            covered |= members
+    orphans = [
+        entry
+        for entry in entries
+        if entry.get("type") == "epic"
+        and str(entry.get("id") or "") not in covered
+    ]
+    if not orphans:
+        return ""
+    p1 = sum(1 for e in orphans if e.get("priority") == "p1")
+    orphans.sort(
+        key=lambda e: (str(e.get("priority") or "p2"), str(e.get("title") or ""))
+    )
+    rows = "".join(
+        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            _esc(e.get("id")),
+            _esc(e.get("title") or "-"),
+            _esc(e.get("status")),
+            _esc(e.get("priority")),
+        )
+        for e in orphans
+    )
+    head = (
+        f"<section class=\"crown\"><h2>uncrowned epics</h2>"
+        f"<p class=\"meta\">{len(orphans)} uncrowned, {p1} at p1</p>"
+        "<table><thead><tr><th>node</th><th>title</th><th>status</th>"
+        f"<th>priority</th></tr></thead><tbody>{rows}</tbody></table></section>"
+    )
+    return head
+
+
 def render_ledger_html(court: dict[str, Any]) -> str:
     summary = court.get("summary") or {}
+    entries = court.get("entries") or []
+    titles = {
+        str(e.get("id")): e for e in entries if isinstance(e.get("id"), str)
+    }
     head = (
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<title>Reign Ledger</title>"
@@ -154,7 +247,9 @@ def render_ledger_html(court: dict[str, Any]) -> str:
             "<p class=\"note\">orphan sweep did not run (stale or missing binary): "
             "zero manifest-only entries is an absence, not a finding</p>"
         )
-    body = "".join(_crown_section(c) for c in crowns or [])
+    body = "".join(_crown_section(c, titles, entries) for c in crowns or [])
+    if crowns and entries:
+        body += _uncrowned_section(crowns, entries)
     return head + body + "</body></html>"
 
 
