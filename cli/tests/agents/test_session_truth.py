@@ -73,6 +73,45 @@ import pytest
         # a trailing user turn clears an option-prompt signal exactly as it
         # already clears "?" and <help> (the operator answered)
         ("user", "continue? [Y/n]", 99999, "stalled"),
+        # a turn that IS a harness API error is a death signal at any age --
+        # two workers held claims 45 minutes while every reader called them
+        # working, keyed on an error tail read as activity.
+        (
+            "assistant",
+            "API Error: The response stopped arriving. The response above may be incomplete.",
+            45 * 60,
+            "stalled",
+        ),
+        # another measured spelling of the family (429 quota, 238 of 416)
+        ("assistant", "API Error: Request rejected (429)", 10, "stalled"),
+        # the node's named negative control: a correctly watching session with
+        # the SAME silence still reads live
+        ("assistant", '<watching reason="ci" pr="1822" timeout="30m">', 45 * 60, "watching"),
+        # anchoring, not substring: prose ABOUT an error is a live worker
+        # (this node's own worker reads "api error" in every turn and must
+        # never trip the arm)
+        (
+            "assistant",
+            "I saw an API Error: rate limit exceeded in the log, so I retried",
+            45 * 60,
+            "working",
+        ),
+        (
+            "assistant",
+            "the plan documents the API Error tail classifier and its false-positive bound",
+            45 * 60,
+            "working",
+        ),
+        # content arms apply to assistant turns only: a trailing user turn
+        # carrying error text means the operator pasted/quoted it
+        ("user", "API Error: The response stopped arriving.", 10, "working"),
+        # watching outranks the error arm when both appear in one turn
+        (
+            "assistant",
+            '<watching pr=5> API Error: connection closed mid-response',
+            10,
+            "watching",
+        ),
     ],
 )
 def test_classify_tail_precedence(role, text, age, expected):
@@ -1495,3 +1534,83 @@ def test_a_raising_refusal_classifier_never_breaks_the_liveness_read(tmp_path, m
     )
     assert result["provider_refusal"] is None
     assert result["state"] != "unknown"
+
+
+# ---------------------------------------------------------------------------
+# an API-error tail is a death signal, and the reason says which
+# ---------------------------------------------------------------------------
+
+def test_ac5_error_tail_resolves_stalled_with_reason(tmp_path):
+    """AC5-HP: through the resolve path, the errored session reads stalled and
+    the reason names the error arm -- "stalled" alone would read as "silent"
+    and send a debugger hunting for a timeout that does not exist."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-e594-0000-0000-000000000250"
+    _write_claude_transcript(
+        tmp_path,
+        cwd,
+        sid,
+        ["API Error: The response stopped arriving. The response above may be incomplete."],
+    )
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+    assert result["state"] == "stalled"
+    assert result["reason"] == "api-error-tail"
+
+
+def test_ac6_plain_silence_keeps_reason_null(tmp_path):
+    """AC6-EDGE: stalled from plain silence carries reason None -- the reason
+    marks the error path only and never becomes a second name for silence."""
+    import os
+    import time as _time
+
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-e594-0000-0000-000000000251"
+    path = _write_claude_transcript(tmp_path, cwd, sid, ["still grinding on the parser"])
+    # Age the mtime past STALLED_AFTER_S so this is the silence arm, not freshness
+    old = _time.time() - 3 * 3600
+    os.utime(path, (old, old))
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+    assert result["state"] == "stalled"
+    assert result["reason"] is None
+
+
+def test_ac7_tool_use_then_error_text_does_not_fire(tmp_path):
+    """AC7-EDGE: a turn that did tool work and then errored flattens to
+    ``[tool_use: name] API Error: ...`` -- the error text is off position 0,
+    so the anchor does not fire and the tail reads working. Pins the anchor
+    against a future _extract_text refactor that moves the error text."""
+    import json as _json
+
+    from fno.agents.peek import _parse_claude_record
+    from fno.agents.session_truth import classify_tail
+
+    rec = _json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+                    {
+                        "type": "text",
+                        "text": "API Error: The response stopped arriving.",
+                    },
+                ],
+            },
+        }
+    )
+    record = _parse_claude_record(_json.loads(rec))
+    assert record is not None
+    assert classify_tail(record.role, record.text, 45 * 60) == "working"

@@ -22,6 +22,7 @@ a dead worker reading ``watching`` at any age, and a wedged node blocked on it):
 
     <promise ...>                 -> done         (mission declared complete, any age)
     <watching ...>                -> watching     (fresh; past the bound -> stalled)
+    starts 'API Error'            -> stalled      (the turn IS the error; any age)
     ends in '?' OR <help ...>     -> your-move    (fresh; past the bound -> stalled)
     ends in [Y/n] / (y/N) / etc.  -> your-move    (an option prompt, x-1182; fresh)
     (none) transcript fresh       -> working
@@ -50,6 +51,12 @@ from typing import Any, Callable, Optional
 _PROMISE_RE = re.compile(r"<promise[>\s]")
 _WATCHING_RE = re.compile(r"<watching[>\s]")
 _HELP_RE = re.compile(r"<help[>\s]")
+
+# A turn that IS a harness API error, anchored at the start: the error text is
+# the whole turn, so a worker's prose ABOUT an error never leads with it. 416
+# of 19,381 local transcripts end on this shape across twelve spellings, so the
+# prefix is the family and the sentence after it is not.
+_API_ERROR_RE = re.compile(r"^API Error\b")
 
 # A trailing interactive option prompt (x-1182): [Y/n], [y/N], (y/N), (Y/n),
 # or a bracketed numbered menu like [1/2/3]. Matched only at the END of the
@@ -119,6 +126,14 @@ def classify_tail(
             return "stalled" if stale else "watching"
         if _PROMISE_RE.search(text):
             return "done"
+        # A turn that IS the harness's API error is a death signal at any age:
+        # readers once held two dead workers' claims for 45 minutes calling
+        # the error "activity". After the tag arms (a parked/finished worker
+        # is never re-read as stalled), before the trailing-? arm (an error
+        # turn must not read your-move). Fires immediately, not on expiry:
+        # the point is removing the 2-hour wait.
+        if _API_ERROR_RE.match(text.lstrip()):
+            return "stalled"
         stripped = text.rstrip()
         if stripped.endswith("?") or _HELP_RE.search(text) or _OPTION_PROMPT_RE.search(stripped):
             return "stalled" if stale else "your-move"
@@ -317,7 +332,9 @@ def resolve_session_truth(
     last_activity_basis, last_message, provider_refusal, session_id,
     observed_model, harness_title, suggestions}``.
     ``state`` is one of done | watching | your-move | working | stalled |
-    unknown; ``reason`` is set only for ``unknown`` (``not-found``/``no-records``);
+    unknown; ``reason`` is set only for ``unknown`` (``not-found``/``no-records``)
+    and for the x-b250 API-error tail (``api-error-tail`` -- a ``stalled`` that
+    is an error, not silence);
     ``last_event_at`` is the absolute ISO8601 UTC stamp of the newest transcript
     activity and ``last_message`` the flattened text of the LAST turn (compact
     ``[tool_use: name]`` markers included, whitespace collapsed, capped at 200
@@ -429,6 +446,16 @@ def resolve_session_truth(
     last = records[-1]
     last_actor = next((r for r in reversed(records) if r.role != "peer"), last)
     state = classify_tail(last_actor.role, last_actor.text, age, stalled_after_s=stalled_after_s)
+    # Derived from the SAME classification, so state and reason cannot disagree:
+    # downstream "stalled" means "silent" (daemon/list_rows.rs renders it so),
+    # and an API-errored session is not silent -- it died loudly.
+    reason: Optional[str] = (
+        "api-error-tail"
+        if state == "stalled"
+        and last_actor.role == "assistant"
+        and _API_ERROR_RE.match((last_actor.text or "").lstrip())
+        else None
+    )
     # A provider refusal is only read off the WORKER's own last turn: the role
     # check keeps a mailed or pasted refusal text in a user turn from labeling
     # the row, and a done promise is an outcome, not a refusal to consult.
@@ -468,7 +495,7 @@ def resolve_session_truth(
     return {
         "handle": handle,
         "state": state,
-        "reason": None,
+        "reason": reason,
         "last_activity_age_s": None if age is None else int(age),
         "last_event_at": last_event_at,
         "last_activity_basis": basis,
@@ -574,7 +601,9 @@ def render_truth(result: dict[str, Any]) -> str:
     model = _model_clause(result.get("observed_model"))
     basis = result.get("last_activity_basis")
     suffix = f" by {basis}" if basis else ""
+    reason = result.get("reason")
+    tag = f" [{reason}]" if reason else ""
     return (
-        f"truth {handle}: {state}{model} "
+        f"truth {handle}: {state}{model}{tag} "
         f"({_EVIDENCE.get(state, '')}, last activity {age} ago{suffix})"
     )
