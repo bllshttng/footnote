@@ -396,10 +396,8 @@ def _annotate_sessions(crowns: list[dict[str, Any]]) -> bool:
 
 def _blind_stuck(reason: str) -> dict[str, Any]:
     """The verdict when the fold itself could not answer, with the reason."""
-    return {
-        "unclaimed": [], "blocked": [], "unproven_claim": [], "in_review": [],
-        "blind": [reason], "threshold_minutes": None,
-    }
+    return {"unclaimed": [], "blocked": [], "unproven_claim": [], "in_review": [],
+            "blind": [reason], "threshold_minutes": None}
 
 
 def _stuck_render(summary: dict[str, Any], gate: dict[str, Any]) -> str:
