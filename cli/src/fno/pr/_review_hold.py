@@ -262,6 +262,38 @@ def scoped_verify_round(branch: str, head: str, cwd: Optional[str] = None) -> in
     return max(1, rounds_since_last_pass(attestation_chain(where, head_branch=branch, head=head)))
 
 
+def verify_fixes_advisory(branch: str, head: str, cwd: Optional[str] = None) -> str:
+    """The nudge a driver needs exactly when the default flow misleads: two
+    careful drivers both fixed findings and re-ran a full pass, spending the
+    round the law reserved for the verify. Advisory only - it never refuses
+    and never classifies the pass, because a fresh hunting round after a fix
+    looks identical from here and silently counting it as a verify would
+    under-spend a cap the operator set."""
+    from fno.pr._coverage_gate import attestation_chain
+
+    where = cwd or os.getcwd()
+    chain = attestation_chain(where, head_branch=branch, head=head)
+    if not chain:
+        return ""
+    last = chain[-1]
+    last_head = last.get("head_sha") or ""
+    if not last_head or last_head == head:
+        return ""
+    blocking = sum(
+        1
+        for f in (last.get("findings") or [])
+        if isinstance(f, dict) and f.get("blocking") is True
+    )
+    if blocking <= 0:
+        return ""
+    return (
+        f"review-hold: the last round at {last_head[:8]} raised {blocking} blocking "
+        "finding(s) and the head has moved.\n"
+        f"If this pass verifies those fixes, invoke it with {VERIFY_FIXES_FLAG}: a scoped "
+        "fix-verification declares the round it verifies and does not spend a new one."
+    )
+
+
 def release_review_hold(
     branch: str, *, holder: Optional[str] = None, root: Optional[Path] = None
 ) -> bool:
