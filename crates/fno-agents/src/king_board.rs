@@ -80,7 +80,7 @@ pub(crate) const SRC_UNDISPATCHED: &str = "fno backlog undispatched --json";
 pub(crate) const SRC_READY: &str = "backlog_ready::select (-A)";
 pub(crate) const SRC_WORKED: &str = "fno backlog worked --json";
 pub(crate) const SRC_CLAIMS: &str = "fno agents claim list -J --include-stale --prefix node:";
-/// The driver feed (x-1a70): registry rows that target a node. In-process,
+/// The driver feed: registry rows that target a node. In-process,
 /// like SRC_READY; the label names the mechanism, not a command.
 pub(crate) const SRC_DRIVERS: &str = "registry::load_registry (rows with node)";
 pub(crate) const SRC_PRS: &str =
@@ -404,7 +404,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     };
     warnings.extend(claimed_warnings);
 
-    // The driver feed (x-1a70): registry rows that target a node, read
+    // The driver feed: registry rows that target a node, read
     // in-place (missing file = empty roster; corrupt = loud, and every
     // node_driver queue then reads unreadable rather than silently clean).
     // Its tokens join the ONE batched truth probe, so the roster's drivers
@@ -909,7 +909,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     payload
 }
 
-/// The driver feed (x-1a70): registry rows that target a node. One in-place
+/// The driver feed: registry rows that target a node. One in-place
 /// read of the shared registry (`state::load_registry`); a missing file is an
 /// empty roster (a store with no workers is a positive empty answer, not a
 /// fault), a corrupt one is a failed read the consuming queues render loudly.

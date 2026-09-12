@@ -234,8 +234,8 @@ pub(crate) fn roster_verdict(
     activity: &HashMap<String, crate::truth_probe::TruthProbe>,
 ) -> Option<&'static str> {
     if !drivers.is_ok() {
-        // Degraded roster coverage never suppresses a row (x-a792): a board
-        // that cannot see the roster cannot say "nobody is driving".
+        // Degraded roster coverage never suppresses a row: a board that
+        // cannot see the roster cannot say "nobody is driving".
         return Some("unmeasured");
     }
     let Some(rows) = drivers.payload.as_ref().and_then(Value::as_array) else {
@@ -276,7 +276,7 @@ pub(crate) fn roster_verdict(
 /// Who is driving this node: active, stalled, crowned, none, or unmeasured.
 /// One answer, three queues: stalled_holder selects stalled, undriven_pr and
 /// unheld_progress select none, and an unmeasured holder belongs to no queue
-/// row. The ROSTER outranks the claim (x-1a70): a registry row whose `node`
+/// row. The ROSTER outranks the claim: a registry row whose `node`
 /// field targets this node is the driver, probed for a live transcript, and
 /// the claim lockfile below it only corroborates. `crowned` is a live crown
 /// driving the epic it reigns over: scope ids reach the build only through a
@@ -333,7 +333,7 @@ pub(crate) fn node_driver<'a>(
     if contained {
         return ("active", None);
     }
-    // Before the claim lookup too (x-1a70): the roster outranks the claim.
+    // Before the claim lookup too: the roster outranks the claim.
     // A claim is a snapshot, a driver is a process - measured 2026-09-04,
     // five free-claim PRs, three of them mid-edit under a live worker. A
     // registry row targeting this node with an advancing transcript is a
@@ -794,8 +794,8 @@ mod tests {
 
     #[test]
     fn a_live_roster_driver_with_a_free_claim_is_active() {
-        // x-1a70, the measured x-5baf shape: claim free, driver live mid-edit.
-        // The claim is a snapshot; the driver is a process.
+        // The measured shape that motivated the roster: claim free, driver
+        // live mid-edit. The claim is a snapshot; the driver is a process.
         let node = json!({"id": "x-5baf", "priority": "p1", "pr_number": 1});
         let claims: HashMap<String, Value> = HashMap::new();
         let mut activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
@@ -838,8 +838,8 @@ mod tests {
 
     #[test]
     fn a_failed_roster_read_is_unmeasured_never_none() {
-        // The x-a792 suppression: degraded roster coverage must not produce a
-        // healthy-looking zero.
+        // Measured in the field: a degraded roster read suppressed a real
+        // undriven PR. Coverage must not produce a healthy-looking zero.
         let node = json!({"id": "x-a792", "priority": "p1", "pr_number": 3});
         let claims: HashMap<String, Value> = HashMap::new();
         let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
@@ -886,14 +886,14 @@ mod tests {
 
     #[test]
     fn a_crown_scope_row_never_drives_the_scopes_leaf() {
-        // The fifth specimen: king-a792-control names scope x-a792 in its own
-        // row's node field, so the node-field join can never suppress a leaf's
+        // The field specimen: a crown's registry row names its scope in the
+        // node field, so the node-field join can never suppress a leaf's
         // genuinely driverless PR.
-        let leaf = json!({"id": "x-e221", "priority": "p1", "pr_number": 1545});
+        let leaf = json!({"id": "x-leaf", "priority": "p1", "pr_number": 1545});
         let claims: HashMap<String, Value> = HashMap::new();
         let mut activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
         activity.insert("king-uuid".to_string(), probe("working", 5.0));
-        let drivers = drivers_read(json!([driver_row("x-a792", "king-uuid")]));
+        let drivers = drivers_read(json!([driver_row("x-scope", "king-uuid")]));
         assert_eq!(
             node_driver(
                 &leaf,

@@ -334,7 +334,7 @@ pub(crate) struct BoardInputs {
     pub(crate) claims: SourceRead,
     pub(crate) worked: SourceRead,
     pub(crate) claimed_nodes: SourceRead,
-    /// The driver feed (x-1a70): registry rows that target a node, the
+    /// The driver feed: registry rows that target a node, the
     /// roster-side answer to "who drives" that the claim snapshot cannot
     /// give. Every node_driver-consuming queue reads unreadable when this
     /// fails, the same fold holder_activity_error gets.
@@ -463,11 +463,12 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     // x-db9c: a holder the probe batch never answered for is a hole in the
     // board's evidence, not a worker verdict. Name every hole in one warning
     // line so a partially-answered batch is visible in the payload, not only
-    // through the rows its absence silently removed. The expected set mirrors
-    // the probe feed exactly (king-priority claimed nodes + dead-state
-    // claims): a live claim on a lower-priority node is never fed to the
-    // probe, so counting it here would warn forever about a holder nobody
-    // promised to measure.
+    // through the rows its absence silently removed. The expected set is the
+    // CLAIM-derived subset of the probe feed (king-priority claimed nodes +
+    // dead-state claims; roster driver tokens are also fed to the probe but
+    // never warned about): a live claim on a lower-priority node is never fed
+    // to the probe, so counting it here would warn forever about a holder
+    // nobody promised to measure.
     let mut unmeasured_holders: Vec<String> = Vec::new();
     if inputs.holder_activity_error.is_none() {
         let probed_ids: HashSet<String> = inputs
