@@ -187,6 +187,22 @@ def test_reign_branches_on_harness_capability_before_arming():
     assert "wake arm" in arm  # the codex beat is the external wake contract
 
 
+def test_reign_checkin_binds_worker_age_to_the_top_json_payload():
+    # x-bd3f: the check-in required a live-worker count and an oldest-worker
+    # stamp while naming no field a machine payload actually carries, so a king
+    # following the skill reported both lines as unmeasurable while live workers
+    # ran. The contract is the top view's served payload, and an unreadable
+    # instrument prints a refusal, never a default that reads healthy.
+    text = _skill("skills/reign/SKILL.md")
+    checkin = text[text.index("## The check-in body") :]
+    checkin = checkin[: checkin.index("## Recording a ruling")]
+    assert "fno agents top --json" in checkin
+    assert "status_age_s" in checkin
+    assert "predicate" in checkin
+    assert "worker activity unmeasured" in checkin
+    assert "oldest worker last-seen stamp" not in checkin
+
+
 def test_review_empty_diff_guard_resolves_the_named_target():
     text = _skill("skills/review/SKILL.md")
     guard = text[text.index("### 2a. Empty-diff guard") :]
