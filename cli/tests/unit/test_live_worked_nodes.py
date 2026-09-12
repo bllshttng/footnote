@@ -166,6 +166,40 @@ def test_xdead_a_closed_phase_row_skips_its_worker(monkeypatch):
     assert live_worked_node_ids(strict=True) == {}
 
 
+def test_a_closed_blueprint_with_an_open_do_row_still_occupies(monkeypatch):
+    """AC1-EDGE: the close receipt frees a CLOSED session, never an open one.
+    A session whose blueprint row closed and whose do row on the same node is
+    still open is still working it."""
+    entry = {
+        "id": "x-edge",
+        "status": "in_progress",
+        "sessions": [
+            {
+                "phase": "blueprint",
+                "harness": "claude",
+                "session_id": "session-1",
+                "started_at": "2026-09-11T15:00:00Z",
+                "ended_at": "2026-09-11T16:00:54Z",
+            },
+            {
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "session-1",
+                "started_at": "2026-09-11T16:01:00Z",
+            },
+        ],
+    }
+    row = {
+        "name": "bp-worker", "state": "working",
+        "cwd": "/worktrees/x-edge", "row_id": "session-1",
+    }
+    reading = RosterReading(True, 1, {"x-edge": [row]}, "", {}, 0, ())
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [entry])
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+
+    assert live_worked_node_ids(strict=True) == {"x-edge": ["bp-worker"]}
+
+
 def test_read_roster_folds_unmeasurable_pairs(monkeypatch):
     """The producer's structured advisory line lands on the reading as node
     attribution, not as a blocking refusal."""

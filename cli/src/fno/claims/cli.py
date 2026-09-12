@@ -834,7 +834,7 @@ def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) ->
     return payload
 
 
-def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> str:
+def _roster_verdict_line(info: dict) -> str:
     """One line naming what was consulted and what it found.
 
     Each string is produced by exactly one outcome, so a caller asserts a
@@ -870,15 +870,7 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
             line += f"; coverage degraded: {unresolved} of {scanned} rows unresolved"
         return line
 
-    if worker_verdicts is None:
-        engaged, unmeasurable, worker_verdicts = classify_workers(workers)
-    else:
-        from fno.agents.reachability import REACHABLE, UNKNOWN
-
-        engaged = [w for w in workers if worker_verdicts.get(w.get("name") or "") == REACHABLE]
-        unmeasurable = [
-            w for w in workers if worker_verdicts.get(w.get("name") or "") == UNKNOWN
-        ]
+    engaged, unmeasurable, _verdicts = classify_workers(workers)
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
         line = f"UNCLAIMED but a live worker is on this node: {rendered}"
@@ -915,9 +907,14 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
         # the roster was complete", which both used to render as plain free.
         return f"{scanned}; roster coverage degraded"
     scanned = f"{state}, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
-    if workers:
-        rendered = ", ".join(w["name"] for w in workers)
-        return f"{scanned}; {len(workers)} finished session(s) resolved to it: {rendered}"
+    # Two ways a row reads finished: the predicate said so (it is still in
+    # `workers`), or the session closed its own phase row on this node and the
+    # display field dropped it. Both are named, so a node whose only row closed
+    # says so instead of reporting nothing at all.
+    finished = [w["name"] for w in workers] + list(info.get("roster_closed_workers") or [])
+    if finished:
+        rendered = ", ".join(finished)
+        return f"{scanned}; {len(finished)} finished session(s) resolved to it: {rendered}"
     return scanned
 
 
@@ -989,7 +986,20 @@ def status(
             from fno.graph.store import read_nodes_by_ids
             from fno.paths import graph_json
 
-            reply = read_nodes_by_ids(graph_json(), [node_id]) or {}
+            reply = read_nodes_by_ids(graph_json(), [node_id])
+            if reply is None:
+                # The fast path cannot answer (no keeper, a keeper that predates
+                # read_ids); the seam documents a full-read fallback so a stale
+                # keeper never reads as "no entry" and skips the closed-session
+                # filter below.
+                from fno.graph.store import read_graph_strict
+
+                reply = {
+                    "entries": [
+                        e for e in read_graph_strict(graph_json())
+                        if isinstance(e, dict) and e.get("id") == node_id
+                    ],
+                }
             entry = next(iter(reply.get("entries") or []), None)
         except Exception:  # noqa: BLE001 - a graph read failure never fakes a skip
             entry = None
@@ -1004,12 +1014,20 @@ def status(
                 )
                 # The display field drops the same rows the overlay's
                 # worked_by excludes: a session whose own phase row closed
-                # never renders here as an occupancy candidate.
+                # never renders as an occupancy candidate, and the array is
+                # the field the FAQ tells an operator to trust. The dropped
+                # names ride their own field so the verdict line can still
+                # name them as finished rather than reporting nothing.
                 closed = closed_worker_session_ids(entry)
-                info["roster_workers"] = [
-                    w for w in info.get("roster_workers") or []
-                    if str(w.get("row_id") or "") not in closed
-                ]
+                kept: list[dict] = []
+                finished: list[dict] = []
+                for w in info.get("roster_workers") or []:
+                    (finished if str(w.get("row_id") or "") in closed else kept).append(w)
+                info["roster_workers"] = kept
+                if finished:
+                    info["roster_closed_workers"] = [
+                        w.get("name") or "unknown" for w in finished
+                    ]
             except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
                 typer.echo(f"worked overlay degraded: {exc}", err=True)
                 worked = {}

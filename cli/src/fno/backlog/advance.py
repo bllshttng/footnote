@@ -3162,8 +3162,12 @@ def _observe_node_claim(
             event_data["block_reason"] = block_reason
         agent_events.emit(EVENT_CLAIM_OBSERVED, **event_data)
     if emit and claim_state in ("stale", "suspect"):
+        # Lead with the worker when one is on the node: this line pointed at a
+        # stale claim while the row was the occupant, and an operator followed
+        # it to a claim that read UNCLAIMED.
+        lead = f"worker row {worker} is on the node; " if worker else ""
         message = (
-            f"dispatch {action} for {node_id}: node claim is {claim_state}, "
+            f"dispatch {action} for {node_id}: {lead}node claim is {claim_state}, "
             f"prior holder={holder}, truth_status={truth}"
         )
         print(f"advance: WARNING: {message}", file=sys.stderr)
