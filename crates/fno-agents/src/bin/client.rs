@@ -542,7 +542,7 @@ async fn run(args: Vec<String>) -> i32 {
     // liveness pair with the vendored freshness rule; starts nothing, so the
     // Stop hook's never-lazy-start promise still holds.
     if verb == "registry-json" {
-        return fno_agents::client_verbs::run_registry_json(&args[1..], &AgentsHome::from_env());
+        return fno_agents::registry_json::run_registry_json(&args[1..], &AgentsHome::from_env());
     }
     if verb == "ping" {
         return fno_agents::client_verbs::run_ping(&args[1..]);

@@ -161,6 +161,7 @@ pub mod reap_render;
 pub mod receipt;
 pub mod reclaim;
 pub mod reentry;
+pub mod registry_json;
 pub mod rename;
 pub mod resume_args;
 pub mod resume_receipt;
