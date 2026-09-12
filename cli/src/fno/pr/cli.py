@@ -836,7 +836,7 @@ def sync_canonical(
     ),
 )
 def publish_review_cmd(
-    pr_number: int = typer.Option(..., "--pr-number", help="GitHub PR number"),
+    pr_number: Optional[int] = typer.Option(None, "--pr-number", help="GitHub PR number"),
     pr_legacy: Optional[int] = typer.Option(
         None, "--pr", hidden=True, help="[DEPRECATED] alias for --pr-number."
     ),
@@ -853,6 +853,9 @@ def publish_review_cmd(
     pr_number = merge_deprecated_alias(
         pr_number, pr_legacy, canonical_flag="--pr-number", legacy_flag="--pr"
     )
+    if pr_number is None:
+        typer.echo("publish-review: missing option --pr-number", err=True)
+        raise typer.Exit(code=2)
     try:
         result = publish_review_call(
             {
