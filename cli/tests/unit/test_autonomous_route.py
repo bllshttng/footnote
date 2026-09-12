@@ -16,6 +16,32 @@ from fno.adapters.providers import runtime_state as rs
 from fno.adapters.providers.runtime_state import HeadroomState, QuotaSignal
 from fno.agents import autonomous_route as ar
 
+
+def _stub_launch(monkeypatch, dm) -> None:
+    """Fake `fno agents dispatch`'s launch seam at the subprocess boundary
+    (x-e53e): the verb shells the one launcher; these tests assert the quota
+    route, not the launch, so the spawn subprocess returns a receipt and the
+    resolver's binary-backed helpers stay local."""
+    monkeypatch.setattr(
+        "fno.backlog.advance._grid_lane_for",
+        lambda node, *, model=None, provider=None, verb=None: (None, None, None, None, None),
+    )
+    monkeypatch.setattr(
+        "fno.backlog.advance._worker_agent_name",
+        lambda node_id, node_slug, *, source=None, verb_code="t": f"{verb_code}-{node_id}",
+    )
+    monkeypatch.setattr("fno.agents.naming.verb_code_for", lambda word: "t")
+    monkeypatch.setattr(
+        dm, "_worktree_ensure_for_launch", lambda cwd, name, harness: str(cwd)
+    )
+    monkeypatch.setattr(
+        dm.subprocess, "run",
+        lambda cmd, **kw: SimpleNamespace(
+            returncode=0, stdout='{"pane_id": "p1", "bound": true, "seed": "submitted"}\n',
+            stderr="",
+        ),
+    )
+
 DEST = ("ccr", "codex", {"CODEX_HOME": "/tmp/ccr"})
 
 
@@ -524,30 +550,10 @@ class TestAlternateAccountScope:
         assert _route(pinned=True).action == "defer"
 
 
-class TestCutoverMergePosture:
-    """Quota exhaustion must not change who may merge."""
-
-    def test_cutover_command_keeps_no_merge_under_auto_merge_config(self, monkeypatch) -> None:
-        # `fno agents dispatch`'s normal path always spawns the no-merge `/target`. Routing
-        # the cutover through the full resolver would read
-        # config.dispatch.auto_merge and could hand the rerouted worker merge
-        # authority the non-cutover launch never gets.
-        import fno.dispatch as dm
-        from fno.config import DispatchBlock
-
-        monkeypatch.setattr(
-            "fno.config.load_settings",
-            lambda *a, **k: SimpleNamespace(dispatch=DispatchBlock(auto_merge=True)),
-        )
-        for harness in ("claude", "codex"):
-            cmd = dm._cutover_command(harness, "ab-1111aaaa")
-            assert "--no-merge" in cmd, (harness, cmd)
-            assert "ab-1111aaaa" in cmd
-
-    def test_unresolvable_harness_renders_nothing(self) -> None:
-        import fno.dispatch as dm
-
-        assert dm._cutover_command("no-such-harness", "ab-1111aaaa") == ""
+# Quota exhaustion must not change who may merge. x-e53e deleted the pre-render
+# (`_cutover_command`) this class pinned; the carrier now is the subprocess
+# env - the cutover shellout sets TARGET_NO_MERGE=1 unconditionally, pinned in
+# test_dispatch_one.py::test_cutover_pins_harness_and_record_and_no_merge.
 
 
 class TestUnresolvableNodeIsNotRouted:
@@ -631,7 +637,10 @@ def test_an_explicit_account_is_the_record_that_gets_probed(monkeypatch, tmp_pat
     import fno.dispatch as dm
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(dm, "_next_node", lambda project: {"id": "ab-1111aaaa", "priority": "p2"})
+    monkeypatch.setattr(
+        dm, "_next_node",
+        lambda project: {"id": "ab-1111aaaa", "priority": "p2", "dispatch_verb": ""},
+    )
     monkeypatch.setattr(
         dm, "_resolve_provider_id", lambda *a, **k: pytest.fail("probed the active record")
     )
@@ -644,11 +653,7 @@ def test_an_explicit_account_is_the_record_that_gets_probed(monkeypatch, tmp_pat
         "fno.agents.account_env.resolve_account_overlay",
         lambda a, **k: SimpleNamespace(env={"CLAUDE_CONFIG_DIR": "/acct/ccr"}),
     )
-    # `bound` too: the dispatcher's `launched` return reports whether the worker
-    # actually bound a session, not just whether a pane was created.
-    monkeypatch.setattr(
-        dm, "dispatch_spawn_bounded_pane", lambda **kw: SimpleNamespace(pane_id="p1", bound=True)
-    )
+    _stub_launch(monkeypatch, dm)
     dm._dispatch_one(session="s", node=None, project=None, account="ccr")
     assert seen["provider_id"] == "ccr"
 
@@ -778,10 +783,7 @@ class TestQuotaRotationDeclinedEvent:
             "fno.agents.autonomous_route.select_autonomous_route",
             lambda **k: pytest.fail("explicit --node dispatch must never route on quota"),
         )
-        monkeypatch.setattr(
-            dm, "dispatch_spawn_bounded_pane",
-            lambda **kw: SimpleNamespace(pane_id="p1", bound=True),
-        )
+        _stub_launch(monkeypatch, dm)
 
         dm._dispatch_one(session="s", node="ab-1111aaaa", project=None)
 
