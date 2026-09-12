@@ -60,6 +60,10 @@ if [ -z "$FNO_PYTHON" ]; then
   echo "  Fix: create cli/.venv (cd cli && uv sync) - refusing to run vacuously." >&2
   exit 1
 fi
+# The successor name mints through the fno-agents binary; resolve it with a
+# stripped PATH so a stale installed binary cannot shadow the repo build.
+export REAL_AGENTS_BIN="$(env PATH='/usr/bin:/bin' PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c 'from fno import rust_binary; b = rust_binary.resolve_binary(); print(b or "")')"
+[ -n "$REAL_AGENTS_BIN" ] || { echo "test-handoff: no fno-agents binary resolves (cargo build -p fno-agents)" >&2; exit 1; }
 
 pass=0
 fail=0
@@ -332,9 +336,9 @@ if [ "$subcmd1 $subcmd2" = "plan rung" ]; then
 fi
 
 if [ "$subcmd1 $subcmd2" = "agents name" ]; then
-  # Name minting is the contract under test, not a scenario input: delegate
-  # to the real implementation exactly like `do plan rung` above.
-  exec env PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -m fno.cli agents name "${@:3}"
+  # Name minting is the contract under test: delegate to the binary, the
+  # surface the routed verb and every dispatcher hit in production.
+  exec "${REAL_AGENTS_BIN}" name "${@:3}"
 fi
 
 case "$subcmd1 $subcmd2" in

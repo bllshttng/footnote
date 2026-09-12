@@ -638,18 +638,12 @@ for id in "${NODES[@]}"; do
     n_failed=$((n_failed + 1))
     continue
   fi
-  # Provenance-carrying name (x-84b2): [<source>-]<verb-code>-<node>-<slug>,
+  # Provenance-carrying name: [<source>-]<verb-code>-<node>-<slug>,
   # minted AFTER the resolve so the verb comes from the same authoritative
   # tuple (resolved .verb; the node's declared verb reconciles the out-of-family
   # case; the builtin target path is the one literal default). The vocabulary
   # (codes, budget, refusals) lives in the bridge, never here.
-  # x-3218: the canonical owner (`fno.agents.naming`) sanitizes the slug AND
-  # budgets the assembled name against the runtime's 64-char limit.
-  # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
-  # EVERY `fno agents` verb to the binary, which has no `name` port. Exit 3 (not
-  # 2) is the naming refusal - Click spends 2 on usage errors including "no such
-  # command", so an `fno` too old to know this verb would otherwise read as
-  # "unrepresentable" and refuse the whole fleet.
+  # Exit 3 (not 2) is the naming refusal - 2 is the usage/stale-install error.
   # Streams are merged so a refusal's cause survives; the name is read as the
   # LAST line of the capture and that line alone must match the runtime
   # contract (a live config notice on stderr reproduced a false refusal on
@@ -664,7 +658,7 @@ for id in "${NODES[@]}"; do
   fi
   name_args=("$id" --slug "$node_slug" --verb "$verb_word")
   [[ -n "$SOURCE" ]] && name_args+=(--source "$SOURCE")
-  name_out="$(FNO_AGENTS_RUNTIME=python fno agents name "${name_args[@]}" 2>&1)"
+  name_out="$(fno agents name "${name_args[@]}" 2>&1)"
   name_rc=$?
   name_last="${name_out##*$'\n'}"
   agent_name=""

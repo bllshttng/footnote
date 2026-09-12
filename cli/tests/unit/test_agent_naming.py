@@ -290,13 +290,7 @@ def test_bridge_refusal_exit_code_is_three_not_two():
     catches that: the downstream receipt lines are indistinguishable, because
     the degraded path has its own over-64 refusal that prints a similar message.
     """
-    from fno.agents.cli import NAME_REFUSED_EXIT
-
-    assert NAME_REFUSED_EXIT == 3
-    assert NAME_REFUSED_EXIT != 2, "2 is Click's usage/unknown-command exit"
-
     res = _run_name("target", "n-" + "z" * 70)
-    assert res.exit_code == NAME_REFUSED_EXIT
     assert res.exit_code == 3
 
 
