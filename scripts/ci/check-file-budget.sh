@@ -91,10 +91,13 @@ esac
 # AGENTS.md restates this allowance on the SessionStart surface, because the
 # number decides a language before any gate runs. A restatement that drifts is
 # the failure that restatement exists to prevent, so the owner asserts it.
-# Skipped under an env override (that value is caller configuration, not the
-# stated rule) and in repos that ship this script without the bullet.
+# Two anchors: a repo whose AGENTS.md names this gate clearly opted to
+# restate; and the pitfalls corpus pins THIS repo's own surface even if the
+# whole bullet is deleted (the corpus outlives any one bullet). Skipped under
+# an env override (that value is caller configuration, not the stated rule)
+# and in repos that ship this script with neither anchor.
 if [[ -z "${PY_TREE_ALLOWANCE:-}" && -f AGENTS.md ]] \
-        && grep -q 'check-file-budget\.sh' AGENTS.md \
+        && { grep -q 'check-file-budget\.sh' AGENTS.md || grep -q '## Pitfalls corpus' AGENTS.md; } \
         && ! grep -qF "net +$PY_ALLOWANCE" AGENTS.md; then
     echo "check-file-budget: AGENTS.md no longer quotes the tree allowance (net +$PY_ALLOWANCE)." >&2
     echo "       The file-budget bullet must state the number an agent reads before choosing a language." >&2

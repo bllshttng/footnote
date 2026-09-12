@@ -32,8 +32,9 @@ git config user.email t@t.t
 git config user.name t
 export GIT_AUTHOR_DATE="2026-01-01T00:00:00" GIT_COMMITTER_DATE="2026-01-01T00:00:00"
 
-BULLET_NEW='- **File budget:** a source file over 5,000 lines, and `cli/src/fno` Python past net +100 per change, may only shrink; a feature lands in `crates/`. `scripts/ci/check-file-budget.sh` names the remedy.'
+BULLET_NEW='- **File budget:** a source file over 5,000 lines, or `cli/src/fno` Python past net +100 per change, is shrink-only. The Python cap counts the whole tree, net. A feature lands in `crates/`. `scripts/ci/check-file-budget.sh` names the remedy.'
 BULLET_OLD='- **File budget:** a source file over 5,000 lines is shrink-only. The refusal in `scripts/ci/check-file-budget.sh` names the remedy.'
+BULLET_DELETED='# AGENTS.md\n\nNo file budget bullet here; the corpus stays.\n\n## Pitfalls corpus (capped)\n\nNothing.'
 
 # Base commit carries the restating bullet; the diff base..head stays empty so
 # the clean path proves the assertion adds no findings of its own.
@@ -61,6 +62,15 @@ echo "$OUT" | grep -q "no longer quotes the tree allowance (net +100)" \
     || fail "ERR: refusal does not name the allowance ($OUT)"
 echo "$OUT" | grep -q "file-budget bullet" || fail "ERR: refusal does not name the bullet ($OUT)"
 pass "ERR: drifted AGENTS.md exits 2 with allowance named"
+
+# --- ERR2: deleting the whole bullet does not escape (the corpus anchors) ----
+log "ERR2: bullet deleted but corpus present still exits 2"
+printf '%b' "$BULLET_DELETED" > AGENTS.md
+OUT=$(run_gate); RC=$?
+(( RC == 2 )) || fail "ERR2: expected exit 2 with bullet deleted, got $RC ($OUT)"
+echo "$OUT" | grep -q "no longer quotes the tree allowance (net +100)" \
+    || fail "ERR2: refusal does not name the allowance ($OUT)"
+pass "ERR2: corpus anchor catches whole-bullet deletion"
 
 # --- SKIP: an env override is caller configuration, never the stated rule ----
 log "SKIP: env override bypasses the assertion"
