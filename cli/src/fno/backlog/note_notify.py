@@ -94,9 +94,7 @@ def note_readers(
     kings_of: Callable[[str], Iterable[str]] = crowned_over,
     self_session: Optional[str] = None,
 ) -> NoteReaders:
-    """Every bound reader for one note; the author is named, never mailed. The
-    worker chain runs per subject (node, then owner), first arm wins; the crown
-    walk goes outward and stops at the first live crown."""
+    """Every bound reader for one note; the author is named, never mailed."""
     from fno.agents.registry import live_row_holding_session_id, load_registry
     from fno.claims.core import holder_agent_name
     from fno.harness_identity import OWNERSHIP_LIVE_STATUSES, session_identity_key
