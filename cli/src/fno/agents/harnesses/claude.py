@@ -370,6 +370,7 @@ def headless_create(
     account_env: Optional[Mapping[str, str]] = None,
     route_env: Optional[Mapping[str, str]] = None,
     name: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
 ) -> ProviderResult:
     """Run a one-shot ``claude -p`` without creating a background session.
 
@@ -409,6 +410,10 @@ def headless_create(
     )
     if output_format:
         argv += ["--output-format", output_format]
+    if passthrough:
+        from fno.agents.mux_spawn import pane_passthrough_tokens
+
+        argv = [*argv, *pane_passthrough_tokens(passthrough, emitted=argv)]
     # Behind `--` like every other claude seed: a leading-flag seed must be
     # the prompt positional, not a claude flag.
     argv += ["--", message or "hello"]

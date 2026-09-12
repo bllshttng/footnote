@@ -1976,7 +1976,17 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 }
             };
             let mut outcome = dispatch_codex_once(
-                home, name, &message, from_name, &cwd, yolo, timeout, model, effort, add_dir,
+                home,
+                name,
+                &message,
+                from_name,
+                &cwd,
+                yolo,
+                timeout,
+                model,
+                effort,
+                add_dir,
+                &harness_args,
             );
             if let Some(receipt) = daemon_receipt.as_ref() {
                 fno_agents::codex_ask::append_daemon_receipt(&mut outcome, receipt);
@@ -1993,7 +2003,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // docs, it does not exist in `run --help`, and a comment naming it has
         // twice been read as proof this arm was never built.
         ("opencode", "headless") => emit!(dispatch_opencode_once(
-            home, name, &message, from_name, &cwd, yolo, timeout, model, effort,
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            yolo,
+            timeout,
+            model,
+            effort,
+            &harness_args,
         )),
 
         // opencode bg: the serve-HTTP worker lane (x-d9f9). A shared
@@ -2018,7 +2037,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             // It ignores `yolo` (headless create always passes
             // --dangerously-skip-permissions) and honors optional effort/model.
             emit!(dispatch_agy_once_with_effort(
-                home, name, &message, from_name, &cwd, model, effort, timeout, add_dir,
+                home,
+                name,
+                &message,
+                from_name,
+                &cwd,
+                model,
+                effort,
+                timeout,
+                add_dir,
+                &harness_args,
             ))
         }
 

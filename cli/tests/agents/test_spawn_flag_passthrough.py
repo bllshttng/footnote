@@ -348,6 +348,36 @@ def test_claude_bg_refuses_a_duplicate_fenced_flag(
     assert not captured, "no launch expected"
 
 
+# ---------------------------------------------------------------------------
+# The headless one-shot lanes append fenced tokens (AC6)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_headless_argv_carries_fenced_tokens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import fno.agents.harnesses.claude as claude_mod
+
+    _setup_tmp_home(tmp_path, monkeypatch)
+    captured: dict = {}
+
+    class _FakeResult:
+        returncode = 0
+        stdout = "the reply\n"
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = list(argv)
+        return _FakeResult()
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    claude_mod.headless_create(message="work", cwd=tmp_path, passthrough=["--verbose"])
+    argv = captured.get("argv") or []
+    assert "--verbose" in argv, argv
+    fence = argv.index("--")
+    assert argv.index("--verbose") < fence, "tokens ride before the prompt fence"
+
+
 def test_dash_c_existing_directory_works_as_before(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

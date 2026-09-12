@@ -83,7 +83,7 @@ pub fn build_argv_once(
     model: Option<&str>,
     add_dir: Option<&str>,
 ) -> Vec<String> {
-    build_argv_once_with_effort(full_prompt, cwd, model, None, add_dir)
+    build_argv_once_with_effort(full_prompt, cwd, model, None, add_dir, &[])
 }
 
 /// Build the one-shot argv with an optional provider-native reasoning effort.
@@ -93,6 +93,7 @@ pub fn build_argv_once_with_effort(
     model: Option<&str>,
     effort: Option<&str>,
     add_dir: Option<&str>,
+    harness_args: &[String],
 ) -> Vec<String> {
     let mut argv = vec![
         "agy".to_string(),
@@ -130,7 +131,9 @@ pub fn build_argv_once_with_effort(
     // -p LAST, prompt as its value.
     argv.push("-p".to_string());
     // argv-fence: exempt (probed 2026-08-15: agy folds flag-shaped text into
-    // the prompt; no clean end-of-options to fence with).
+    // the prompt; no clean end-of-options to fence with). Fenced tokens ride
+    // before -p so agy's own parser reads them as flags, not prompt text.
+    argv.extend(harness_args.iter().cloned());
     argv.push(full_prompt.to_string());
     argv
 }
@@ -564,6 +567,7 @@ pub fn agy_create(
     timeout: Option<Duration>,
     agent_self: Option<&str>,
     add_dir: Option<&str>,
+    harness_args: &[String],
 ) -> Result<AgyResult, AgyAskError> {
     agy_create_with_effort(
         cwd,
@@ -575,6 +579,7 @@ pub fn agy_create(
         timeout,
         agent_self,
         add_dir,
+        harness_args,
     )
 }
 
@@ -590,9 +595,10 @@ pub fn agy_create_with_effort(
     timeout: Option<Duration>,
     agent_self: Option<&str>,
     add_dir: Option<&str>,
+    harness_args: &[String],
 ) -> Result<AgyResult, AgyAskError> {
     let full_prompt = inject_from_name(prompt, from_name);
-    let argv = build_argv_once_with_effort(&full_prompt, cwd, model, effort, add_dir);
+    let argv = build_argv_once_with_effort(&full_prompt, cwd, model, effort, add_dir, harness_args);
     run_agy(&argv, output_path, timeout, cwd, agent_self)
 }
 
@@ -651,7 +657,16 @@ pub fn dispatch_agy_once(
     add_dir: Option<&str>,
 ) -> AskOutcome {
     dispatch_agy_once_with_effort(
-        home, name, message, from_name, cwd, model, None, timeout, add_dir,
+        home,
+        name,
+        message,
+        from_name,
+        cwd,
+        model,
+        None,
+        timeout,
+        add_dir,
+        &[],
     )
 }
 
@@ -667,6 +682,7 @@ pub fn dispatch_agy_once_with_effort(
     effort: Option<&str>,
     timeout: Option<Duration>,
     add_dir: Option<&str>,
+    harness_args: &[String],
 ) -> AskOutcome {
     use crate::claude_ask::py_repr;
     if let Err(msg) = crate::claude_ask::validate_spawn_inputs(name, from_name) {
@@ -726,6 +742,7 @@ pub fn dispatch_agy_once_with_effort(
         eff_timeout,
         Some(name),
         add_dir,
+        harness_args,
     ) {
         Ok(res) => AskOutcome::ok_reply(res.last_msg),
         Err(e) => {

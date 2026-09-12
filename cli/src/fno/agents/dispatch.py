@@ -643,6 +643,7 @@ def _codex_create_path(
     effort: Optional[str] = None,
     add_dir: Optional[str] = None,
     node: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
 ) -> DispatchAskResult:
     """Spawn a new codex agent under the per-agent flock.
 
@@ -674,6 +675,7 @@ def _codex_create_path(
             role=role,
             reasoning_effort=effort,
             add_dir=add_dir,
+            passthrough=list(passthrough) if passthrough else None,
         )
     except RouteCompositionError as exc:
         events.emit(
@@ -2897,6 +2899,7 @@ def dispatch_spawn(
                                 account_env=account_env,
                                 route_env=route_env,
                                 name=name,
+                                passthrough=list(passthrough) if passthrough else None,
                             )
                         except claude_mod.ProviderSubprocessError as exc:
                             # A quota death here is the freshest signal there is:
@@ -3053,6 +3056,7 @@ def dispatch_spawn(
                         effort=effort,
                         add_dir=add_dir,
                         node=node,
+                        passthrough=passthrough,
                     )
                 else:
                     raise DispatchAskError(

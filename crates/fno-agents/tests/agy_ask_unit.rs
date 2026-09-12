@@ -69,7 +69,7 @@ fn argv_once_with_model() {
 
 #[test]
 fn argv_once_with_effort_forwards_the_native_flag() {
-    let argv = build_argv_once_with_effort("hi", Path::new("/r"), None, Some("high"), None);
+    let argv = build_argv_once_with_effort("hi", Path::new("/r"), None, Some("high"), None, &[]);
     let effort = argv.iter().position(|arg| arg == "--effort").unwrap();
     assert_eq!(&argv[effort..effort + 2], ["--effort", "high"]);
 }
