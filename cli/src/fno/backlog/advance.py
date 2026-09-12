@@ -149,6 +149,34 @@ class AdvanceResult:
     # dispatched results only. "headless" is synchronous: the worker already
     # ran and released its claim before this result exists.
     substrate: Optional[str] = None
+    # x-4138: spawn-seam receipt lines (`fno agents spawn: ...`) the launch
+    # printed on stderr - every axis the seam did NOT apply. Empty on a quiet
+    # spawn. Set on dispatched results only.
+    notes: tuple = ()
+
+    def render(self) -> list[str]:
+        """The board verb's human stdout: the verdict line, then one
+        `advance: ` line per spawn-seam note (x-4138), so a dropped pin is
+        named where the dispatch was reported."""
+        parts = [self.decision]
+        if self.node_id:
+            parts.append(self.node_id)
+        if self.reason:
+            parts.append(f"reason={self.reason}")
+        if self.short_id:
+            parts.append(f"short_id={self.short_id}")
+        return [" ".join(parts)] + [f"advance: {note}" for note in self.notes]
+
+    def json_receipt(self) -> dict:
+        """The board verb's --json payload; notes ride beside the verdict."""
+        return {
+            "decision": self.decision,
+            "event": self.event,
+            "reason": self.reason,
+            "node_id": self.node_id,
+            "short_id": self.short_id,
+            "notes": list(self.notes),
+        }
 
     def __post_init__(self) -> None:
         # Make an invalid (decision, event) combination a loud construction
@@ -193,6 +221,12 @@ class DispatchClaimObservation:
 # The discriminator `fno agents spawn` prints on a name collision (exit 2). Kept
 # as a named constant so a future spawn-verb message change has one grep hit.
 _SPAWN_ALREADY_EXISTS = "already exists"
+
+# x-4138: the seam's stderr receipt prefix, shared vocabulary with
+# spawn_axes.rs - one spelling read by tests and operators alike. The cap
+# keeps a pathological spawn from turning one advance line into a screenful.
+_SPAWN_NOTE_PREFIX = "fno agents spawn: "
+_SPAWN_NOTE_CAP = 20
 
 
 class SpawnAlreadyRunning(RuntimeError):
@@ -1628,6 +1662,17 @@ def _spawn_worker(
                 f"fno agents spawn receipt carries a codex head-8 launch "
                 f"identity ({launch_identity}): {CODEX_SHORT_ADDRESS_RULE}"
             )
+    # x-4138: the spawn seam prints its own receipt on stderr (route/effort/
+    # substrate suppressions - spawn_axes.rs owns the `fno agents spawn: `
+    # prefix as its one spelling). capture_output would discard it on a
+    # successful launch, silently dropping every axis the seam did NOT apply.
+    # Match the prefix, never an allowlist of message shapes: the seam adds
+    # axes, and the next one must ride too.
+    notes = tuple(
+        line.strip()
+        for line in (proc.stderr or "").splitlines()
+        if line.startswith(_SPAWN_NOTE_PREFIX)
+    )[:_SPAWN_NOTE_CAP]
     # One row per launch: only the spawner knows the resolved argv, and it
     # sits after the guards, so the row is proof of a launch that happened.
     _emit(
@@ -1665,6 +1710,7 @@ def _spawn_worker(
                 "verb": receipt_verb,
                 "verb_source": verb_source,
                 "agent_name": agent_name,
+                "notes": notes,
             }
         )
     return launch_identity
@@ -3577,6 +3623,7 @@ def advance(
             "verb_source": next_receipt.get("verb_source", "field-absent"),
             "brief": _brief_tag,
             "rank": rank,
+            "notes": list(next_receipt.get("notes") or ()),
             **({"closed_node_id": closed_node_id} if closed_node_id else {}),
         },
         ev_path,
@@ -3598,7 +3645,13 @@ def advance(
         touch_nudge()
     except Exception:
         pass
-    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+    return AdvanceResult(
+        "dispatched",
+        EVENT_DISPATCHED,
+        node_id=node_id,
+        short_id=short_id,
+        notes=tuple(next_receipt.get("notes") or ()),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3909,6 +3962,7 @@ def _converge_one(
                     "verb": spawn_receipt.get("verb", "builtin"),
                     "verb_source": spawn_receipt.get("verb_source", "field-absent"),
                     "brief": _brief_tag,
+                    "notes": list(spawn_receipt.get("notes") or ()),
                 }
             ),
             ev_path,
@@ -3932,6 +3986,7 @@ def _converge_one(
             node_id=node_id,
             short_id=short_id,
             substrate=spawn_receipt.get("substrate"),
+            notes=tuple(spawn_receipt.get("notes") or ()),
         )
     finally:
         if not dispatched:
@@ -4123,7 +4178,8 @@ class AdvanceEpicResult:
             "children": [
                 {"node_id": r.node_id, "decision": r.decision,
                  "reason": r.reason, "detail": r.detail,
-                 "short_id": r.short_id, "substrate": r.substrate}
+                 "short_id": r.short_id, "substrate": r.substrate,
+                 "notes": list(r.notes)}
                 for r in self.child_results
             ],
         }
@@ -4528,13 +4584,20 @@ def run_advance_epic(
         )
     except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
         typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
+        # x-4138: the detail alone used to leave stdout empty and exit 0 -
+        # byte-identical to a swallowed crash for any caller reading stdout.
+        typer.echo(f"epic {epic}: failed reason=unexpected-error")
         raise typer.Exit(code=0)
 
     if json_out:
         typer.echo(json.dumps(result.receipt(), indent=2))
     else:
         if result.error:
-            typer.echo(f"epic {result.epic_id}: {result.error}", err=True)
+            # x-4138: a refusal (no-such-node / not-a-container, the exit-1
+            # set below) stays on stderr; every other error is a VERDICT and
+            # goes to stdout. Nothing exits 0 into an empty stdout.
+            is_refusal = result.error in ("no-such-node", "not-a-container")
+            typer.echo(f"epic {result.epic_id}: {result.error}", err=is_refusal)
         elif result.deactivated:
             reason = "complete" if result.all_done else "stopped"
             typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
@@ -4547,6 +4610,11 @@ def run_advance_epic(
                 + (f", skipped {len(skips)}" if skips else "")
                 + (f", failed {len(fails)}" if fails else "")
             )
+            # x-4138: each dispatched child's spawn-seam receipt prints under
+            # its own node id, so a fan-out stays attributable.
+            for r in result.child_results:
+                for note in r.notes:
+                    typer.echo(f"epic {result.epic_id}: {r.node_id}: {note}")
 
     # A refusal (bad node) is the only non-zero exit; a per-child failure is a
     # loud receipt, not a verb error.

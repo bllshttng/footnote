@@ -9016,31 +9016,16 @@ def cmd_advance(
             # advance() is designed non-fatal (every path emits + returns), but the
             # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
             # decision is not an error to whoever invoked the verb. Report on stderr
-            # and exit 0.
+            # and exit 0. x-4138: stdout also gets one verdict line - the detail
+            # alone left stdout empty, byte-identical to a swallowed crash.
             typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
+            typer.echo("advance: failed reason=unexpected-error")
             return
     if json_out:
-        typer.echo(
-            json.dumps(
-                {
-                    "decision": result.decision,
-                    "event": result.event,
-                    "reason": result.reason,
-                    "node_id": result.node_id,
-                    "short_id": result.short_id,
-                },
-                indent=2,
-            )
-        )
+        typer.echo(json.dumps(result.json_receipt(), indent=2))
     else:
-        parts = [result.decision]
-        if result.node_id:
-            parts.append(result.node_id)
-        if result.reason:
-            parts.append(f"reason={result.reason}")
-        if result.short_id:
-            parts.append(f"short_id={result.short_id}")
-        typer.echo(" ".join(parts))
+        for line in result.render():
+            typer.echo(line)
 
 
 @cli.command("reconcile-findings", hidden=True)
