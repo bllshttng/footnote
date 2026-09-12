@@ -6,6 +6,7 @@ ever asserted beside a same-run positive that proves the phase actually ran.
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1423,4 +1424,140 @@ def test_backstop_fires_when_every_row_is_driven_but_unshipped(tmp_path):
         now=datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc),
         backstop_s=1800,
         resolver=lambda _: (2, "x-root"),
+    )
+
+
+def _run_crowns(tmp_path, count, *, truth, mail=None, seconds=None, now=None):
+    """`count` crowned scopes epic-0..N with a seeded cursor sidecar each.
+    `mail` is None, "all", or one holder name; `seconds` is an optional
+    seconds_left_fn; every holder probe lands in the returned list."""
+    from fno.king.state import king_manifest_path, king_state_root, write_manifest
+
+    rec = _Recorder()
+    crowns = []
+    rows = []
+    for i in range(count):
+        root = tmp_path / f"proj-{i}"
+        root.mkdir(exist_ok=True)
+        manifest = king_manifest_path(f"epic-{i}", state_root=king_state_root(root))
+        write_manifest(
+            manifest,
+            scope=f"epic-{i}",
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+        # The sidecar name follows the scope, unlike the single-crown helper.
+        manifest.parent.joinpath(f"epic-{i}.wake.json").write_text(
+            json.dumps({"answered_cursor": "2026-08-29T10:00:00Z"}), encoding="utf-8"
+        )
+        holder = f"king-{i}"
+        crowns.append({"holder": holder, "scope": f"epic-{i}", "status": "live"})
+        rows.append(
+            SimpleNamespace(name=holder, cwd=str(root), status="live", short_id=f"aaaa{i:04d}")
+        )
+
+    probes: list[str] = []
+
+    def truth_fn(holder):
+        probes.append(holder)
+        return truth(holder)
+
+    def unread_fn(address):
+        rec.unread_calls.append(address)
+        hit = mail == "all" or (mail and address == mail)
+        return [object()] if hit else []
+
+    kwargs = dict(
+        emit=rec.emit,
+        now=now or NOW,
+        court_fn=lambda _rows: {"crowns": crowns, "conflicts": []},
+        rows_fn=lambda: rows,
+        truth_fn=truth_fn,
+        unread_fn=unread_fn,
+        answered_fn=lambda: [],
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda t, c, k: rec.asks.append((t.scope, c, k)),
+    )
+    if seconds is not None:
+        kwargs["seconds_left_fn"] = seconds
+    summary = run_king_wake(_settings(), **kwargs)
+    return rec, summary, probes
+
+
+def test_five_quiet_crowns_skip_the_truth_read_one_mail_crown_pays_it(tmp_path):
+    # AC1: a crown that cannot wake costs zero truth reads. Five seeded,
+    # quiet crowns are never probed; the sixth has undrained mail and is
+    # the only holder the pass reads truth for.
+    rec, summary, probes = _run_crowns(
+        tmp_path, 6, truth=lambda h: {"state": "done"}, mail="king-3"
+    )
+
+    assert probes == ["king-3"], f"quiet crowns must not be probed: {probes}"
+    assert summary["truth_reads"] == 1
+    assert summary["refused"] == [], "a skipped crown is not a refusal"
+    woken = [e for e in rec.events if e[0] == "king_woken"]
+    assert woken and woken[0][1]["scope"] == "epic-3"
+    assert [d[0] for d in rec.dispatches] == ["epic-3"]
+
+
+def test_a_pending_seed_still_reads_truth_but_writes_nothing_for_a_working_holder(tmp_path):
+    # AC1-EDGE: a first observation reads truth, and a holder that is there
+    # but working seeds nothing - the exact write set the truth-first order
+    # produced.
+    rec, summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "working"},
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_A_QUIET, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert summary["truth_reads"] == 1, "a pending seed must still read truth"
+    assert not _sidecar(manifest).exists(), "an absent holder seeds nothing"
+    assert summary["refused"] == [{"scope": "epic-x", "refusal": "working"}]
+    assert rec.dispatches == []
+
+
+def test_the_pass_stops_under_its_floor_and_names_what_it_evaluated(tmp_path):
+    # AC2: under 15s left, stop BEFORE the next truth read, so the alarm
+    # never cuts a pass mid-crown and discards the crowns it already woke.
+    budget = [100.0, 100.0, 14.0]
+
+    def seconds():
+        return budget.pop(0) if budget else 0.0
+
+    rec, summary, probes = _run_crowns(
+        tmp_path, 5, truth=lambda h: {"state": "done"}, mail="all", seconds=seconds
+    )
+
+    first = int(NOW.timestamp()) // 900 % 5
+    assert [d[0] for d in rec.dispatches] == [
+        f"epic-{(first + k) % 5}" for k in range(2)
+    ]
+    assert summary["evaluated"] == 2 and summary["truth_reads"] == 2
+    assert summary["budget_spent"] is True
+    assert "budget spent after 2 of 5 crowns" in summary["note"]
+
+
+def test_a_stopped_pass_rotates_its_starting_crown_per_debounce_window(tmp_path):
+    # AC2-EDGE: the crown a stopping pass evaluates first moves one slot per
+    # debounce window, so a fleet that always overruns still wakes everyone
+    # in turn.
+    def seconds():
+        budget = [100.0, 14.0]
+        return lambda: budget.pop(0) if budget else 0.0
+
+    _rec1, s1, _p1 = _run_crowns(
+        tmp_path, 5, truth=lambda h: {"state": "done"}, mail="all",
+        seconds=seconds(), now=NOW,
+    )
+    first = int(NOW.timestamp()) // 900 % 5
+    assert [d[0] for d in _rec1.dispatches] == [f"epic-{first}"], s1
+
+    rec2, s2, _p2 = _run_crowns(
+        tmp_path, 5, truth=lambda h: {"state": "done"}, mail="all",
+        seconds=seconds(), now=NOW + timedelta(seconds=900),
+    )
+    assert [d[0] for d in rec2.dispatches] == [f"epic-{(first + 1) % 5}"], (
+        f"the pass must start one crown later: {s2}"
     )

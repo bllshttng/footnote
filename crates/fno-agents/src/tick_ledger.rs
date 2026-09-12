@@ -159,9 +159,15 @@ pub struct ArmStatus {
     /// True when the arm never ticked, or its newest tick is older than twice
     /// its interval. Event-driven arms (interval 0) never read stale.
     pub stale: bool,
-    /// Fresh, but its newest run failed: the skip reason is itself a failure
-    /// token ([`FAILURE_SKIPS`]). Renders FAIL, not ok.
+    /// Its newest run failed: the skip reason is itself a failure token
+    /// ([`FAILURE_SKIPS`]). Independent of `stale` - the arm broken longest
+    /// is the one that most needs its diagnosis. Renders FAIL when fresh;
+    /// a stale row keeps the STALE verdict.
     pub failing: bool,
+    /// Seconds since the newest run that did NOT fail, set only while
+    /// [`ArmStatus::failing`]. `None` while failing means the journal holds
+    /// no non-failure run for the arm at all.
+    pub failing_for_s: Option<u64>,
     /// Why a stale row is red, set by [`explain`]. `Some("unexplained")`
     /// means the rules ran and found nothing - a written token, never an
     /// absent field, so the reader can tell the rules ran.
@@ -176,13 +182,14 @@ pub struct ArmStatus {
 /// new emitter deploys before its reader does.
 pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
     let mut newest: HashMap<String, NewestTick> = HashMap::new();
+    let mut newest_ok: HashMap<String, NewestTick> = HashMap::new();
     let mut paths: Vec<PathBuf> = Vec::new();
     for journal in journals {
         paths.push(journal.clone());
         paths.push(rotation_path(journal));
     }
     for path in &paths {
-        scan_journal(path, &mut newest);
+        scan_journal(path, &mut newest, &mut newest_ok);
     }
 
     let mut rows: Vec<ArmStatus> = KNOWN_ARMS
@@ -193,6 +200,7 @@ pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
                 Some(spec.scheduler),
                 spec.default_interval_s,
                 newest.get(spec.arm),
+                newest_ok.get(spec.arm),
                 now_unix,
             )
         })
@@ -200,7 +208,7 @@ pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
     let mut extra: Vec<ArmStatus> = newest
         .keys()
         .filter(|arm| !KNOWN_ARMS.iter().any(|spec| spec.arm == *arm))
-        .map(|arm| arm_status(arm, None, 0, newest.get(arm), now_unix))
+        .map(|arm| arm_status(arm, None, 0, newest.get(arm), newest_ok.get(arm), now_unix))
         .collect();
     extra.sort_by(|a, b| a.arm.cmp(&b.arm));
     rows.extend(extra);
@@ -209,6 +217,7 @@ pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
 
 /// The newest tick row seen for an arm: its parsed ts, the raw ts string, and
 /// its data object.
+#[derive(Clone)]
 struct NewestTick {
     ts_unix: u64,
     ts: String,
@@ -221,7 +230,11 @@ fn rotation_path(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn scan_journal(path: &Path, newest: &mut HashMap<String, NewestTick>) {
+fn scan_journal(
+    path: &Path,
+    newest: &mut HashMap<String, NewestTick>,
+    newest_ok: &mut HashMap<String, NewestTick>,
+) {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return,
@@ -247,24 +260,34 @@ fn scan_journal(path: &Path, newest: &mut HashMap<String, NewestTick>) {
         else {
             continue;
         };
-        let fresher = match newest.get(arm) {
-            Some(seen) => ts_unix >= seen.ts_unix,
-            None => true,
+        let row = NewestTick {
+            ts_unix,
+            ts: value
+                .get("ts")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            data: Value::Object(data.clone()),
         };
-        if fresher {
-            newest.insert(
-                arm.to_string(),
-                NewestTick {
-                    ts_unix,
-                    ts: value
-                        .get("ts")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    data: Value::Object(data.clone()),
-                },
-            );
+        if fresher_than(newest, arm, ts_unix) {
+            newest.insert(arm.to_string(), row.clone());
         }
+        // The newest run that did NOT fail anchors `failing_for_s`: how long
+        // the arm has been failing, not merely how long since it last spoke.
+        let ok = !data
+            .get("skip_reason")
+            .and_then(Value::as_str)
+            .is_some_and(|r| FAILURE_SKIPS.contains(&r));
+        if ok && fresher_than(newest_ok, arm, ts_unix) {
+            newest_ok.insert(arm.to_string(), row);
+        }
+    }
+}
+
+fn fresher_than(map: &HashMap<String, NewestTick>, arm: &str, ts_unix: u64) -> bool {
+    match map.get(arm) {
+        Some(seen) => ts_unix >= seen.ts_unix,
+        None => true,
     }
 }
 
@@ -273,6 +296,7 @@ fn arm_status(
     spec_scheduler: Option<&str>,
     default_interval_s: u64,
     newest: Option<&NewestTick>,
+    newest_ok: Option<&NewestTick>,
     now_unix: u64,
 ) -> ArmStatus {
     let Some(tick) = newest else {
@@ -287,6 +311,7 @@ fn arm_status(
             interval_s: default_interval_s,
             stale: default_interval_s > 0,
             failing: false,
+            failing_for_s: None,
             cause: None,
             line: String::new(),
         };
@@ -299,10 +324,14 @@ fn arm_status(
     let age_s = now_unix.saturating_sub(tick.ts_unix);
     let stale = interval_s > 0 && age_s > interval_s * 2;
     let skip_reason = str_field(&tick.data, "skip_reason");
-    let failing = !stale
-        && skip_reason
-            .as_deref()
-            .is_some_and(|r| FAILURE_SKIPS.contains(&r));
+    let failing = skip_reason
+        .as_deref()
+        .is_some_and(|r| FAILURE_SKIPS.contains(&r));
+    let failing_for_s = if failing {
+        newest_ok.map(|ok| now_unix.saturating_sub(ok.ts_unix))
+    } else {
+        None
+    };
     ArmStatus {
         arm: spec.to_string(),
         scheduler: str_field(&tick.data, "scheduler"),
@@ -314,6 +343,7 @@ fn arm_status(
         interval_s,
         stale,
         failing,
+        failing_for_s,
         cause: None,
         line: String::new(),
     }
@@ -505,6 +535,9 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
             let phase = t.end_phase.as_deref().unwrap_or("unknown");
             let pm = &mut rows[i];
             pm.failing = true;
+            // The synthesized failure is not an absence: the row itself was
+            // the newest healthy run, so it anchors the duration too.
+            pm.failing_for_s = pm.age_s;
             pm.cause = Some("tick_timeout".to_string());
             pm_tick_hint = Some(format!(
                 "the tick containing this phase ended {outcome} in phase {phase}; \
@@ -527,13 +560,7 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
         }
     }
     let pm = rows.iter().find(|r| r.arm == "pr_watch_merge");
-    let pm_fresh_failure = pm.is_some_and(|r| {
-        r.failing
-            || (!r.stale
-                && r.skip_reason
-                    .as_deref()
-                    .is_some_and(|s| FAILURE_SKIPS.contains(&s)))
-    });
+    let pm_fresh_failure = pm.is_some_and(|r| !r.stale && r.failing);
     let pm_stale = pm.is_some_and(|r| r.stale);
     let pm_last_ts = pm.and_then(|r| r.last_ts.clone());
     for (i, row) in rows.iter_mut().enumerate() {
@@ -713,8 +740,16 @@ pub fn render_row(row: &ArmStatus) -> String {
         .as_deref()
         .map(|d| format!(" {d}"))
         .unwrap_or_default();
+    let failing_for = if row.failing {
+        match row.failing_for_s {
+            Some(s) => format!(" failing_for={s}s"),
+            None => " no_ok_in_journal".to_string(),
+        }
+    } else {
+        String::new()
+    };
     format!(
-        "{arm:<16} {verdict:<5} {age:>10}{acted}{skip}{scheduler}{detail}",
+        "{arm:<16} {verdict:<5} {age:>10}{acted}{skip}{scheduler}{detail}{failing_for}",
         arm = row.arm,
         verdict = verdict,
         age = age,
@@ -987,6 +1022,7 @@ mod tests {
             interval_s: 60,
             stale: true,
             failing: false,
+            failing_for_s: None,
             cause: None,
             line: String::new(),
         };
@@ -1134,6 +1170,111 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_timeout_row_stays_failing_and_names_its_skip_reason() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // king_wake timed out once and never came back: age 1801s against a
+        // 900s interval reads stale, and the reason it stopped is still a
+        // failure the row must name.
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T09:33:19Z",
+                "king_wake",
+                SCHED_LAUNCHD,
+                0,
+                json!("timeout"),
+                900,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T10:03:20Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.stale, "1801s against 2x900 must read stale");
+        assert!(kw.failing, "the newest run is a timeout, stale or not");
+        assert!(kw.line.contains("STALE"), "line: {}", kw.line);
+        assert!(kw.line.contains("skip=timeout"), "line: {}", kw.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn failing_for_s_counts_from_the_last_run_that_did_not_fail() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // ok at 10:00, timeouts at 10:15 and 10:30, read at 10:31:40: the
+        // arm has been failing 1900s, not 100s since its newest word.
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T10:00:00Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    1,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-04T10:15:00Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("timeout"),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-04T10:30:00Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("timeout"),
+                    900,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T10:31:40Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.failing);
+        assert_eq!(kw.failing_for_s, Some(1900));
+        assert!(kw.line.contains("failing_for=1900s"), "line: {}", kw.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failure_with_no_healthy_run_in_the_journal_says_so() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:58:20Z",
+                "auto_continue",
+                "session",
+                0,
+                json!("error"),
+                1800,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(ac.failing);
+        assert_eq!(
+            ac.failing_for_s, None,
+            "no non-failure run anchors the count"
+        );
+        assert!(ac.line.contains("no_ok_in_journal"), "line: {}", ac.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn fresh_benign_auto_continue_skips_stay_ok() {
         for skip in ["disabled", "no-work"] {
             let dir = temp_dir();
@@ -1264,6 +1405,15 @@ mod tests {
         assert!(pm.line.contains("FAIL"), "line: {}", pm.line);
         assert!(
             pm.line.contains("ended timeout in phase catchup"),
+            "line: {}",
+            pm.line
+        );
+        // The synthesized failure is not an absence: the corrected row itself
+        // was the newest healthy run, so the duration anchors to it instead
+        // of claiming the journal held no healthy run.
+        assert_eq!(pm.failing_for_s, Some(100));
+        assert!(
+            pm.line.contains("failing_for=100s") && !pm.line.contains("no_ok_in_journal"),
             "line: {}",
             pm.line
         );

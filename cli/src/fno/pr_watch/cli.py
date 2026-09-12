@@ -168,7 +168,7 @@ def _catchup_roots() -> list[Path]:
     return [p for p in roots.values() if p.is_dir()]
 
 
-def _run_notify_watch_phase() -> None:
+def _run_notify_watch_phase(roots: "Optional[list[Path]]" = None) -> None:
     """Run the Rust notify_watch arm and turn its receipt into the tick row.
 
     The arm lives in fno-agents (``notify-watch``); the sampler, the signal
@@ -177,11 +177,15 @@ def _run_notify_watch_phase() -> None:
     root: launchd starts this daemon in ``/``, where a board read would read
     an empty world. An absent binary, a non-zero run and an unparseable
     receipt all land as ``notify_failed`` - a dead notice lane never raises
-    out of the tick.
+    out of the tick. ``roots`` rides the tick's one-scan memo; the two tick
+    phases are named apart so a cut says which half stalled.
     """
     from fno.pr_watch._dispatch import set_tick_phase
 
     set_tick_phase("notify_watch")
+    if roots is None:
+        set_tick_phase("notify_watch:roots")
+        roots = _catchup_roots()
     try:
         import subprocess
 
@@ -192,7 +196,7 @@ def _run_notify_watch_phase() -> None:
             _emit_tick_row("notify_watch", interval_s=300,
                            skip_reason="notify_failed", detail="rust binary absent")
             return
-        roots = _catchup_roots()
+        set_tick_phase("notify_watch:arm")
         argv = [str(binary), "notify-watch", "--json"]
         for root in roots:
             argv += ["--root", str(root)]
@@ -448,6 +452,15 @@ def tick() -> None:
     phase_s: dict[str, float] = {}
     ceiling_box: dict[str, Optional[int]] = {"v": None}
     arm_interval: dict[str, int] = {"king_wake": 900, "notify_watch": 300, "watchdog": 600}
+    roots_box: dict[str, Optional[list]] = {"v": None}
+
+    # One sidecar scan per tick: four phases each swept the same roots.
+    def _tick_roots() -> list:
+        roots = roots_box["v"]
+        if roots is None:
+            roots = _catchup_roots()
+            roots_box["v"] = roots
+        return roots
 
     try:
         try:
@@ -541,11 +554,15 @@ def tick() -> None:
                 cut.append(name)
                 cut_whys[name] = "deadline_exceeded" if wall_limited else "slice_starved"
                 if arm is not None:
+                    # Name the sub-step the alarm caught: a phase that reports
+                    # its halves reads as one stall, not a black box.
+                    step = current_tick_phase()
+                    at = f" at {step}" if step.startswith(name + ":") else ""
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
                                    skip_reason="timeout",
                                    detail=(f"deadline exceeded in phase {name} at "
                                            f"{int(slice_s)}s" if wall_limited else
-                                           f"phase slice {int(slice_s)}s spent"))
+                                           f"phase slice {int(slice_s)}s spent") + at)
             finally:
                 if alarm_ok:
                     try:
@@ -1103,7 +1120,12 @@ def tick() -> None:
                 try:
                     from fno.pr_watch._king_wake import run_king_wake
 
-                    wake_summary = run_king_wake(settings, emit=_emit_event)
+                    wake_summary = run_king_wake(
+                        settings,
+                        emit=_emit_event,
+                        seconds_left_fn=phase_seconds_left,
+                        on_step=lambda s: set_tick_phase(f"king_wake:{s}"),
+                    )
                     woke = ", ".join(
                         f"{w['scope']}:{w['reason']}" for w in wake_summary.get("woke", [])
                     )
@@ -1113,9 +1135,25 @@ def tick() -> None:
                     )
                     crowns = int(wake_summary.get("crowns", 0) or 0)
                     woke_n = len(wake_summary.get("woke", []) or [])
-                    skip = "no_crowned_target" if crowns == 0 else None if woke_n else "no_trigger"
+                    evaluated = int(wake_summary.get("evaluated", 0) or 0)
+                    truth_reads = int(wake_summary.get("truth_reads", 0) or 0)
+                    if crowns == 0:
+                        skip = "no_crowned_target"
+                    elif woke_n:
+                        skip = None
+                    elif wake_summary.get("budget_spent"):
+                        # The watchdog's own token: a pass that ran out of
+                        # slice before it could act is not a failure.
+                        skip = "budget_spent"
+                    else:
+                        skip = "no_trigger"
                     note = wake_summary.get("note")
-                    detail = f"crowns={crowns}" + (f" woke={woke}" if woke else "") + (f" note={note}" if note else "")
+                    detail = (
+                        f"crowns={crowns} evaluated={evaluated}/{crowns}"
+                        f" truth_reads={truth_reads}"
+                        + (f" woke={woke}" if woke else "")
+                        + (f" note={note}" if note else "")
+                    )
                     _emit_tick_row("king_wake", interval_s=kw_i, acted=woke_n,
                                    skip_reason=skip, detail=detail)
                 except Exception as exc:  # noqa: BLE001 - never let a wake break the tick
@@ -1129,7 +1167,7 @@ def tick() -> None:
         # Rust arm answers notify_off itself when the [notify] signals list
         # is empty, so the readout shows the arm whether or not it is armed.
         def _phase_notify(_slice_s: float) -> None:
-            _run_notify_watch_phase()
+            _run_notify_watch_phase(_tick_roots())
 
         # The heal drive loop (x-974c): nothing called the healer on a timer,
         # so every red open PR waited for a hand. The loop lives in Rust; this
@@ -1143,7 +1181,7 @@ def tick() -> None:
                 try:
                     from fno.pr_watch._heal_phase import run_heal_phase
 
-                    typer.echo(f"pr heal: {run_heal_phase(settings, _catchup_roots())}")
+                    typer.echo(f"pr heal: {run_heal_phase(settings, _tick_roots())}")
                 except Exception as exc:  # noqa: BLE001 - never let heal break the tick
                     log.warning("pr-watch: heal phase failed: %s", exc)
 
@@ -1167,7 +1205,7 @@ def tick() -> None:
 
                 wake = lane_armed and _wd_wake_armed(settings)
                 changed, stranded_n, unknown_n, acted_n, failed_n, roots_done = False, 0, 0, 0, 0, 0
-                for root in _catchup_roots():
+                for root in _tick_roots():
                     # Re-check per root, not just once before the loop: a
                     # code-review finding caught that the floor above only
                     # bounded the FIRST root - a multi-repo tick with several
@@ -1224,7 +1262,7 @@ def tick() -> None:
                 try:
                     from fno.pr._sync_canonical import run_sync_catchup
 
-                    for root in _catchup_roots():
+                    for root in _tick_roots():
                         try:
                             res = run_sync_catchup(
                                 settings=load_settings_for_repo(root), canonical_root=root
