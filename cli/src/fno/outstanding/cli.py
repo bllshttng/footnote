@@ -295,6 +295,8 @@ def ask(
     # liveness_budget_seconds=0.0: the receipt must not spend a liveness probe
     # budget on a write path, and an unresolved lane reads None - the position
     # is a lower bound on visibility, never an optimistic one.
+    position: "int | None" = None
+    total: "int | None" = None
     try:
         from fno.outstanding.core import QUESTION_RENDER_CAP, read_open_questions
 
