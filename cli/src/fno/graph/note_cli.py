@@ -35,10 +35,9 @@ def cmd_note(
 ) -> None:
     """Append a timestamped progress note to a backlog node, and DELIVER it.
 
-    Delivery is the DEFAULT: the verb mails a pointer to every bound reader.
-    Nobody bound, or unreadable bindings, refuses BEFORE the append (exit 3,
-    nothing written); no send confirmed exits 4 with the note written.
-    ``--quiet`` writes it anyway. Contract:
+    Delivery is the DEFAULT. Nobody bound (or unreadable bindings) refuses
+    BEFORE the append: exit 3, nothing written. No send confirmed: exit 4,
+    note written. ``--quiet`` writes it anyway. Contract:
     docs/architecture/backlog-graph-verb-contracts.md.
     """
     from fno.decide import (

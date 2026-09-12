@@ -1,10 +1,9 @@
 """Deliver a `fno backlog note` to the people bound to the node.
 
-A worker reads its node once, at dispatch, so a later note reaches nobody on its
-own. Resolution runs BEFORE the append: nobody bound, or a fault, refuses and
-writes nothing. Contract in docs/architecture/backlog-graph-verb-contracts.md.
-It lives beside ``advance`` because it reads the graph AND the agent runtime;
-the core layer may not import it.
+Resolution runs BEFORE the append: nobody bound, or a fault, refuses and writes
+nothing. Contract in docs/architecture/backlog-graph-verb-contracts.md. Beside
+``advance`` because it reads the graph AND the agent runtime; the core layer may
+not import it.
 """
 from __future__ import annotations
 
@@ -66,9 +65,8 @@ def own_session() -> Optional[str]:
 
 
 def send_pointer(address: str, body: str) -> str:
-    """Mail one pointer (short lock timeout: a contended recipient takes the
-    durable envelope now). The sender is this session's own handle, not a
-    literal: provenance is looked up by from_name."""
+    """Mail one pointer; the sender is this session's own handle, never a
+    literal, because provenance is looked up by from_name."""
     from fno.agents.dispatch import dispatch_send
     from fno.harness_identity import canonical_handle
 
@@ -90,19 +88,6 @@ def pointer(node_id: str, text: str) -> str:
     return f"note on {node_id}: {head} Read: fno backlog get {node_id}"
 
 
-def _is_author(row: Any, resolved: str, address: str, self_session: str) -> bool:
-    """A row-backed address decides by identity key; endswith stands only when
-    no row is behind the name."""
-    from fno.harness_identity import session_identity_key
-
-    if row is None:
-        return resolved.endswith(self_session) or address.endswith(self_session)
-    row_sid = getattr(row, "harness_session_id", None)
-    if not isinstance(row_sid, str) or not row_sid:
-        return False
-    return session_identity_key(row_sid) == session_identity_key(self_session)
-
-
 def note_readers(
     entry: dict,
     *,
@@ -113,13 +98,12 @@ def note_readers(
     self_session: Optional[str] = None,
 ) -> NoteReaders:
     """Every bound reader for one note; the author is named, never mailed. The
-    worker chain runs for the node and again for its owner, first arm wins;
-    the crown walk goes outward, first live crown wins. ``rows`` is the
-    caller's registry read; ``None`` reads the machine's once."""
-
+    worker chain runs for the node and again for its owner, first arm wins; the
+    crown walk goes outward, first live crown wins. ``rows`` is the caller's
+    registry read; ``None`` reads the machine's once."""
     from fno.agents.registry import live_row_holding_session_id, load_registry
     from fno.claims.core import holder_agent_name
-    from fno.harness_identity import OWNERSHIP_LIVE_STATUSES
+    from fno.harness_identity import OWNERSHIP_LIVE_STATUSES, session_identity_key
 
     registry_rows: list[Any] = list(rows) if rows is not None else list(load_registry())
     node_id = str(entry.get("id") or "")
@@ -127,10 +111,10 @@ def note_readers(
     readings: list[str] = []
     author_bound: Optional[str] = None
     seen: set[str] = set()
+    self_key = session_identity_key(self_session) if self_session else None
 
     def add(address: Optional[str], why: str) -> bool:
-        """Bind one address; True only when a live RECIPIENT joined - an author
-        hit names itself in author_bound and never stops the chain."""
+        """True only when a live RECIPIENT joined; an author hit is never mailed."""
         nonlocal author_bound
         if not address or address in seen:
             return False
@@ -139,23 +123,29 @@ def note_readers(
         if not resolved or resolved in seen:
             return False
         row = next((r for r in registry_rows if r.name == resolved), None)
-        if self_session and _is_author(row, resolved, address, self_session):
-            author_bound = author_bound or why
-            return False
+        if self_key is not None:
+            # A row-backed address decides by identity key; endswith stands
+            # only when no row is behind the name.
+            sid = getattr(row, "harness_session_id", None) if row else None
+            author = (
+                session_identity_key(sid) == self_key
+                if isinstance(sid, str) and sid
+                else resolved.endswith(self_session or "") or address.endswith(self_session)
+            )
+            if author:
+                author_bound = author_bound or why
+                return False
         seen.add(resolved)
         recipients.append((resolved, why))
         return True
 
     def bound_row(value: str) -> Optional[Any]:
-        """The ownership-live row behind a graph binding: the row named by the
-        resolved holder, else the row owning the value's session identity."""
+        """The ownership-live row behind a graph binding: by resolved name,
+        else by the value's session identity."""
         name = holder_agent_name(value, registry_rows)
         return next(
-            (
-                r
-                for r in registry_rows
-                if getattr(r, "status", None) in OWNERSHIP_LIVE_STATUSES and r.name == name
-            ),
+            (r for r in registry_rows
+             if getattr(r, "status", None) in OWNERSHIP_LIVE_STATUSES and r.name == name),
             None,
         ) or live_row_holding_session_id(value, rows=registry_rows)
 
@@ -196,8 +186,8 @@ def note_readers(
     if isinstance(owner_id, str) and owner_id:
         worker_readers(owner_id, f"owner {owner_id}", index.get(owner_id))
 
-    # Crown walk, nearest first: this epic when type==epic, then the epic (the
-    # owner's parent for a contained node), then the project.
+    # Crown walk, nearest first: this epic when type==epic, then the epic, then
+    # the project; the walk stops at the first scope with a live crown.
     epic = (owner.get("parent") if owner else None) or entry.get("parent")
     project = entry.get("project")
     scopes: list[tuple[str, str, str]] = []
@@ -223,6 +213,11 @@ def note_readers(
     return NoteReaders(node_id, recipients, author_bound, readings)
 
 
+def _refused(head: str, readings: list[str] = ()) -> Refused:
+    trail = "".join(f"\n  {reading}" for reading in readings)
+    return Refused(f"{head}so nothing was written.{trail}\n{_QUIET_HINT}", 3)
+
+
 def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refused:
     """Resolve the readers BEFORE the append; a Refused must be surfaced. A
     fault refuses for the reason a vacancy does: neither proves anyone would
@@ -233,39 +228,21 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
 
     try:
         rows = read_graph(graph_path)
-        entry = _find_node(rows, task_id)
-        if entry is None:
-            # The store's write path also accepts the exact slug; match it so
-            # a refusal never narrows what the append accepts.
-            slug = task_id.strip().lower()
-            entry = next(
-                (e for e in rows if isinstance(e.get("slug"), str) and e["slug"].lower() == slug),
-                None,
-            )
+        entry = _find_node(rows, task_id) or next(  # the write path takes slugs too
+            (e for e in rows if str(e.get("slug") or "").lower() == task_id.strip().lower()),
+            None,
+        )
         if entry is None:
             return Refused(f"Error: no node resolves to '{task_id}'", 1)
         index = {str(e.get("id")): e for e in rows if isinstance(e.get("id"), str)}
         readers = note_readers(
-            entry,
-            index=index,
-            rows=load_registry(),
-            holder_of=claim_holder,
-            kings_of=crowned_over,
-            self_session=own_session(),
+            entry, index=index, rows=load_registry(), holder_of=claim_holder,
+            kings_of=crowned_over, self_session=own_session(),
         )
     except Exception as exc:  # noqa: BLE001 - cannot prove a reader, so refuse
-        return Refused(
-            f"note refused: could not read who is bound to {task_id} ({exc}), "
-            f"so nothing was written.\n{_QUIET_HINT}",
-            3,
-        )
+        return _refused(f"note refused: could not read who is bound to {task_id} ({exc}), ")
     if not readers.recipients and not readers.author_bound:
-        trail = "".join(f"\n  {reading}" for reading in readers.readings)
-        return Refused(
-            f"note refused: nobody bound to {readers.node_id} would be told, "
-            f"so nothing was written.{trail}\n{_QUIET_HINT}",
-            3,
-        )
+        return _refused(f"note refused: nobody bound to {readers.node_id} would be told, ", readers.readings)
     return readers
 
 
@@ -306,10 +283,7 @@ def _one_receipt(address: str, why: str, body: str) -> str:
     if state == "ok":
         return f"notified {address} ({why}): {value}"
     if state == "timeout":
-        return (
-            f"notify UNCONFIRMED {address} ({why}): no answer in "
-            f"{_SEND_TIMEOUT_SECONDS:.0f}s"
-        )
+        return f"notify UNCONFIRMED {address} ({why}): no answer in {_SEND_TIMEOUT_SECONDS:.0f}s"
     return f"notify FAILED {address} ({why}): {value}"
 
 

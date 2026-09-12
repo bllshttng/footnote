@@ -1006,8 +1006,6 @@ TARGET_SESSION_HOLDER_PREFIX = "target-session:"
 #: and `session close`, mirroring target-session. Resolved in the same branch.
 BLUEPRINT_HOLDER_PREFIX = "blueprint-session:"
 
-_SESSION_ID_HOLDER_PREFIXES = (TARGET_SESSION_HOLDER_PREFIX, BLUEPRINT_HOLDER_PREFIX)
-
 
 def holder_agent_name(holder: Optional[str], rows: Any) -> Optional[str]:
     """Resolve a claim holder to the agent behind it, or None.
@@ -1021,9 +1019,8 @@ def holder_agent_name(holder: Optional[str], rows: Any) -> Optional[str]:
     if holder.startswith(HANDOVER_HOLDER_PREFIX):
         name = holder[len(HANDOVER_HOLDER_PREFIX):]
         return name if any(row.name == name for row in rows) else None
-    if holder.startswith(_SESSION_ID_HOLDER_PREFIXES):
-        prefix = next(p for p in _SESSION_ID_HOLDER_PREFIXES if holder.startswith(p))
-        sid = holder[len(prefix):]
+    if holder.startswith((TARGET_SESSION_HOLDER_PREFIX, BLUEPRINT_HOLDER_PREFIX)):
+        sid = holder.split(":", 1)[1]
         row = next(
             (
                 r
