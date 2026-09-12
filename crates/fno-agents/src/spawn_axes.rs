@@ -146,9 +146,19 @@ pub fn decide(payload: &Value) -> Value {
         } else {
             "no suppression reason recorded".to_string()
         };
+        // The caller's own argv is route-shaped when it carries a route, or a
+        // vendor and a model together: the pair carries what --route carries
+        // (spawn_defaults.py reads it that way), so the caller's own route
+        // bills and the "caller default" tail would be false.
+        let caller_route_shaped =
+            explicit_route || (explicit_vendor_present && explicit_model_present);
+        let tail = if caller_route_shaped {
+            "your own route bills this worker"
+        } else {
+            "this worker bills at the caller default"
+        };
         messages.push(format!(
-            "fno agents spawn: route skipped ({why}); {}.route {} NOT applied - \
-             this worker bills at the caller default",
+            "fno agents spawn: route skipped ({why}); {}.route {} NOT applied - {tail}",
             route.rung,
             repr(&route.value),
         ));
@@ -717,5 +727,31 @@ mod tests {
             .unwrap()
             .contains("route skipped (the caller passed --model)"));
         assert_eq!(out["route_injected"], json!(false));
+    }
+
+    #[test]
+    fn a_route_shaped_caller_receipt_bills_its_own_route_not_the_default() {
+        // -P plus -m is the pair spawn_defaults.py reads as a route: the
+        // suppression line must not claim the caller default bills.
+        let out = decide_map(json!({
+            "route": {"value": "zai/glm-5.3-flash[1m]", "rung": "agents.profiles.target.lanes[0]"},
+            "explicit_vendor_present": true,
+            "explicit_vendor": "zai",
+            "explicit_model_present": true,
+        }));
+        let msg = out["messages"][0].as_str().unwrap();
+        assert!(msg.ends_with("your own route bills this worker"));
+        assert!(msg.contains("the caller passed --provider 'zai'"));
+        // A bare -m with no vendor is not route-shaped: the old tail stays,
+        // because a foreign model on the default endpoint IS a caller-billed
+        // spawn.
+        let out = decide_map(json!({
+            "route": {"value": "zai/glm", "rung": "r"},
+            "explicit_model_present": true,
+        }));
+        assert!(out["messages"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("this worker bills at the caller default"));
     }
 }
