@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
 
 
 BREVITY_MARKER = "<fno_relay_compression>"
