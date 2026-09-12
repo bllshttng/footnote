@@ -2573,7 +2573,7 @@ def resolve_reachable(
         ("graph", lambda t: _reachable_from_graph(t)),
     )
     wanted = set(sources) if sources is not None else None
-    sources = [s for s in all_sources if wanted is None or s[0] in wanted]
+    consult = [s for s in all_sources if wanted is None or s[0] in wanted]
     tokens = [token, *alias_sids]
 
     if not alias_ok:
@@ -2588,7 +2588,7 @@ def resolve_reachable(
     # a second local copy of it is how the two drift apart.
     found: dict[tuple[str, str], ReachableSession] = {}
     cwd_verbatim: dict[tuple[str, str], bool] = {}
-    for source, lookup in sources:
+    for source, lookup in consult:
         for tok in tokens:
             hits, read_ok = lookup(tok)
             if not read_ok:

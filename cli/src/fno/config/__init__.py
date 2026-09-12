@@ -72,7 +72,7 @@ from fno.config._graph import GraphBlock
 # Shrink-only root: the ask surface (law d-59af3235) joined the word caps, so
 # the block moved to its own module and is re-exported under the name every
 # caller and test imports.
-from fno.config._word_cap import WordCapBlock
+from fno.config._word_cap import WordCapBlock as WordCapBlock
 # The keyed settings loader lives in fno.config._loader (this file is
 # shrink-only); re-exported under the names every caller and test imports.
 from fno.config._loader import _load_settings_at as _load_settings_at

@@ -9,6 +9,7 @@ session-bookkeeping vocabulary (PR 1227 measured the stale ask as noise).
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from fno.agents.stale_escalate import already_asked, answered_question, dedupe_key, reset_answered
@@ -73,7 +74,7 @@ def _close_question(qid: str, answer: str, root: Path, *, lane: str = "stale") -
 def reconcile_channel(
     pairs, *, root: Path, session_id: "str | None", cwd: Path,
     marker: str, subject: str, identities: "list[str]",
-    question, ask, blocks: "list[str]" = (),
+    question, ask, blocks: "Sequence[str]" = (),
 ) -> "tuple[str, str]":
     """Reconcile ONE durable ``[<marker>:<key>]`` operator question to the
     measured ``pairs``: same set is a duplicate, a changed set supersedes,
