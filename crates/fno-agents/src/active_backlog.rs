@@ -1143,20 +1143,43 @@ impl ConvergeGate {
 }
 
 /// What `fno config active-backlog --json` printed, read apart from whether
-/// the shell ran at all. A current CLI emits the object receipt (`Report`);
-/// one built before x-338c emits a bare list (`Legacy`), which carries no
-/// mission count and no zero-path, so its rows keep the pre-338c wording.
+/// the shell ran at all. A current CLI emits the object receipt; one built
+/// before x-338c emits a bare list, which carries no mission count and no
+/// zero-path, so its rows keep the pre-338c wording.
+///
+/// The two shapes are told apart by input shape (map vs sequence), never by
+/// an untagged enum: untagged serde reports the LAST variant's error, so a
+/// map that Report rejected for a real field reason read as "invalid type:
+/// map, expected a sequence" and hid the true cause behind a phantom shape
+/// fault (x-4a55).
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum DrainReceipt {
-    Report {
-        targets: Vec<ResolvedTarget>,
-        #[serde(default)]
-        missions: u64,
-        #[serde(default)]
-        skip_reason: Option<String>,
-    },
-    Legacy(Vec<ResolvedTarget>),
+struct DrainReport {
+    targets: Vec<ResolvedTarget>,
+    #[serde(default)]
+    missions: u64,
+    #[serde(default)]
+    skip_reason: Option<String>,
+}
+
+/// Parse a successful receipt by input shape: a map is the current object
+/// receipt and keeps its own field error on failure; a sequence (or anything
+/// else) is the pre-x-338c Legacy list.
+fn parse_drain_receipt(stdout: &[u8]) -> Result<DrainResolve, serde_json::Error> {
+    match serde_json::from_slice::<serde_json::Value>(stdout) {
+        Ok(v) if v.is_object() => serde_json::from_value::<DrainReport>(v).map(|r| DrainResolve {
+            targets: r.targets,
+            missions: r.missions,
+            skip_reason: r.skip_reason,
+            failure: None,
+        }),
+        Ok(v) => serde_json::from_value::<Vec<ResolvedTarget>>(v).map(|targets| DrainResolve {
+            targets,
+            missions: 0,
+            skip_reason: None,
+            failure: None,
+        }),
+        Err(e) => Err(e),
+    }
 }
 
 /// [`resolve_targets`] plus what the supervisor's tick row needs to say WHY:
@@ -1190,23 +1213,8 @@ pub fn resolve_targets_report(fno_bin: &str) -> DrainResolve {
         .args(["config", "active-backlog", "--json"])
         .output()
     {
-        Ok(o) if o.status.success() => match serde_json::from_slice::<DrainReceipt>(&o.stdout) {
-            Ok(DrainReceipt::Report {
-                targets,
-                missions,
-                skip_reason,
-            }) => DrainResolve {
-                targets,
-                missions,
-                skip_reason,
-                failure: None,
-            },
-            Ok(DrainReceipt::Legacy(targets)) => DrainResolve {
-                targets,
-                missions: 0,
-                skip_reason: None,
-                failure: None,
-            },
+        Ok(o) if o.status.success() => match parse_drain_receipt(&o.stdout) {
+            Ok(resolve) => resolve,
             Err(e) => DrainResolve {
                 targets: Vec::new(),
                 missions: 0,
@@ -1687,39 +1695,29 @@ mod tests {
     fn object_receipt_carries_reason_and_count() {
         // The x-338c receipt: a disabled drain names the config switch and
         // still counts the missions it is not draining.
-        let receipt: DrainReceipt =
-            serde_json::from_str(r#"{"targets":[],"missions":6,"skip_reason":"drain_disabled"}"#)
-                .unwrap();
-        match receipt {
-            DrainReceipt::Report {
-                targets,
-                missions,
-                skip_reason,
-            } => {
-                assert!(targets.is_empty());
-                assert_eq!(missions, 6);
-                assert_eq!(skip_reason.as_deref(), Some("drain_disabled"));
-            }
-            DrainReceipt::Legacy(_) => panic!("object receipt must read as Report"),
-        }
+        let resolve =
+            parse_drain_receipt(br#"{"targets":[],"missions":6,"skip_reason":"drain_disabled"}"#)
+                .expect("object receipt must parse");
+        assert!(resolve.failure.is_none());
+        assert!(resolve.targets.is_empty());
+        assert_eq!(resolve.missions, 6);
+        assert_eq!(resolve.skip_reason.as_deref(), Some("drain_disabled"));
     }
 
     #[test]
     fn bare_list_receipt_reads_as_legacy() {
         // A CLI built before x-338c emits a bare list; it parses as Legacy and
         // the tick row degrades to today's no_missions wording (AC5).
-        let receipt: DrainReceipt = serde_json::from_str(
-            r#"[{"project":"fno","cwd":"/repo/fno","interval_seconds":300,
-                 "failure_limit":3,"mission":"x-a","max_concurrent":1}]"#,
+        let resolve = parse_drain_receipt(
+            br#"[{"project":"fno","cwd":"/repo/fno","interval_seconds":300,
+                  "failure_limit":3,"mission":"x-a","max_concurrent":1}]"#,
         )
-        .unwrap();
-        match receipt {
-            DrainReceipt::Legacy(targets) => {
-                assert_eq!(targets.len(), 1);
-                assert_eq!(targets[0].mission.as_deref(), Some("x-a"));
-            }
-            DrainReceipt::Report { .. } => panic!("bare list must read as Legacy"),
-        }
+        .expect("bare list must parse");
+        assert!(resolve.failure.is_none());
+        assert_eq!(resolve.missions, 0);
+        assert_eq!(resolve.skip_reason, None);
+        assert_eq!(resolve.targets.len(), 1);
+        assert_eq!(resolve.targets[0].mission.as_deref(), Some("x-a"));
     }
 
     #[test]
@@ -1729,8 +1727,33 @@ mod tests {
         // masked fault reads as no_missions and the missing-click class of
         // silence comes back. The shell-level failure (env_broken) is the
         // honest row for an unparseable receipt.
-        let receipt: Result<DrainReceipt, _> = serde_json::from_str(r#"{"error":"boom"}"#);
+        let receipt = parse_drain_receipt(br#"{"error":"boom"}"#);
         assert!(receipt.is_err(), "a targets-less object must not decode");
+    }
+
+    #[test]
+    fn report_shape_error_names_the_field_not_the_other_variant() {
+        // x-4a55: a map that fails the object receipt must report ITS OWN
+        // field reason, never the bare-list variant's "invalid type: map,
+        // expected a sequence" - that phantom hid a build drift behind a
+        // shape fault that did not exist.
+        let missing_targets = parse_drain_receipt(br#"{"missions":6}"#)
+            .expect_err("a map without targets must not decode");
+        let msg = missing_targets.to_string();
+        assert!(msg.contains("missing field"), "unexpected message: {msg}");
+        assert!(msg.contains("targets"), "unexpected message: {msg}");
+        assert!(
+            !msg.contains("expected a sequence"),
+            "unexpected message: {msg}"
+        );
+
+        let bad_field = parse_drain_receipt(br#"{"targets":[],"missions":"six"}"#)
+            .expect_err("a non-numeric missions must not decode");
+        let msg = bad_field.to_string();
+        assert!(
+            !msg.contains("expected a sequence"),
+            "unexpected message: {msg}"
+        );
     }
 
     #[test]
