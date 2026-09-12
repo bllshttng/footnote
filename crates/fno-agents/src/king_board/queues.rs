@@ -4,8 +4,8 @@ use super::prs::derived_status;
 use super::scope::operator_lane_path;
 use super::{
     as_int, s_str, truthy, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX,
-    SRC_CLAIMS, SRC_DISTRESS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS, SRC_READY,
-    SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
+    SRC_CLAIMS, SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS,
+    SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
@@ -335,6 +335,11 @@ pub(crate) struct BoardInputs {
     pub(crate) claims: SourceRead,
     pub(crate) worked: SourceRead,
     pub(crate) claimed_nodes: SourceRead,
+    /// The driver feed: registry rows that target a node, the
+    /// roster-side answer to "who drives" that the claim snapshot cannot
+    /// give. Every node_driver-consuming queue reads unreadable when this
+    /// fails, the same fold holder_activity_error gets.
+    pub(crate) drivers: SourceRead,
     pub(crate) holder_activity: HashMap<String, crate::truth_probe::TruthProbe>,
     /// The truth batch's failure receipt: `Some` when the batch timed out or
     /// its reader panicked. The claim-dependent queues read unreadable
@@ -377,6 +382,7 @@ fn subtree_held(
     activity: &HashMap<String, crate::truth_probe::TruthProbe>,
     crown_ids: Option<&HashSet<String>>,
     worked: Option<&SourceRead>,
+    drivers: Option<&SourceRead>,
     seen: &mut HashSet<String>,
 ) -> bool {
     if parent_id.is_empty() || !seen.insert(parent_id.to_string()) {
@@ -392,7 +398,8 @@ fn subtree_held(
             if done {
                 return false;
             }
-            let (state, claim) = node_driver(child, claim_by_node, activity, crown_ids, worked);
+            let (state, claim) =
+                node_driver(child, claim_by_node, activity, crown_ids, worked, drivers);
             let live_claim = claim.is_some_and(|c| !claim_is_dead(c, activity));
             if live_claim || state == "crowned" {
                 return true;
@@ -411,6 +418,7 @@ fn subtree_held(
                     activity,
                     crown_ids,
                     worked,
+                    drivers,
                     seen,
                 ),
                 None => false,
@@ -479,11 +487,12 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     // x-db9c: a holder the probe batch never answered for is a hole in the
     // board's evidence, not a worker verdict. Name every hole in one warning
     // line so a partially-answered batch is visible in the payload, not only
-    // through the rows its absence silently removed. The expected set mirrors
-    // the probe feed exactly (king-priority claimed nodes + dead-state
-    // claims): a live claim on a lower-priority node is never fed to the
-    // probe, so counting it here would warn forever about a holder nobody
-    // promised to measure.
+    // through the rows its absence silently removed. The expected set is the
+    // CLAIM-derived subset of the probe feed (king-priority claimed nodes +
+    // dead-state claims; roster driver tokens are also fed to the probe but
+    // never warned about): a live claim on a lower-priority node is never fed
+    // to the probe, so counting it here would warn forever about a holder
+    // nobody promised to measure.
     let mut unmeasured_holders: Vec<String> = Vec::new();
     if inputs.holder_activity_error.is_none() {
         let probed_ids: HashSet<String> = inputs
@@ -573,6 +582,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 &inputs.holder_activity,
                 inputs.scope_ids.as_ref(),
                 Some(&inputs.worked),
+                Some(&inputs.drivers),
             );
             state == "none" && claim.is_none()
         })
@@ -613,6 +623,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             &inputs.holder_activity,
             inputs.scope_ids.as_ref(),
             Some(&inputs.worked),
+            Some(&inputs.drivers),
         );
         if state != "stalled" {
             continue;
@@ -710,6 +721,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 &inputs.holder_activity,
                 inputs.scope_ids.as_ref(),
                 Some(&inputs.worked),
+                Some(&inputs.drivers),
             );
             if state != "none" {
                 continue;
@@ -722,6 +734,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 &inputs.holder_activity,
                 inputs.scope_ids.as_ref(),
                 Some(&inputs.worked),
+                Some(&inputs.drivers),
                 &mut seen,
             ) {
                 continue;
@@ -897,6 +910,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 &inputs.holder_activity,
                 inputs.scope_ids.as_ref(),
                 Some(&inputs.worked),
+                Some(&inputs.drivers),
             );
             if state != "none" {
                 continue;
@@ -1054,10 +1068,11 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "unplanned",
-            format!("{SRC_READY} + {SRC_CLAIMS} + {SRC_WORKED} + holder_activity"),
+            format!("{SRC_READY} + {SRC_CLAIMS} + {SRC_WORKED} + {SRC_DRIVERS} + holder_activity"),
             &if inputs.ready.is_ok()
                 && inputs.claims.is_ok()
                 && inputs.worked.is_ok()
+                && inputs.drivers.is_ok()
                 && inputs.holder_activity_error.is_none()
             {
                 SourceRead::ok(Value::Null)
@@ -1069,6 +1084,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .clone()
                         .or_else(|| inputs.claims.error.clone())
                         .or_else(|| inputs.worked.error.clone())
+                        .or_else(|| inputs.drivers.error.clone())
                         .or_else(|| inputs.holder_activity_error.clone())
                         .unwrap_or_default(),
                 )
@@ -1081,9 +1097,10 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "stalled_holder",
-            format!("{SRC_CLAIMS} + fno backlog get <id> + fno agents peek <worker>"),
+            format!("{SRC_CLAIMS} + {SRC_DRIVERS} + fno backlog get <id> + fno agents peek <worker>"),
             &if inputs.claims.is_ok()
                 && inputs.claimed_nodes.is_ok()
+                && inputs.drivers.is_ok()
                 && inputs.holder_activity_error.is_none()
             {
                 SourceRead::ok(Value::Null)
@@ -1094,6 +1111,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .error
                         .clone()
                         .or_else(|| inputs.claimed_nodes.error.clone())
+                        .or_else(|| inputs.drivers.error.clone())
                         .or_else(|| inputs.holder_activity_error.clone())
                         .unwrap_or_default(),
                 )
@@ -1106,9 +1124,10 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "unheld_progress",
-            format!("graph entries + {SRC_CLAIMS} + holder_activity"),
+            format!("graph entries + {SRC_CLAIMS} + {SRC_DRIVERS} + holder_activity"),
             &if inputs.entries.is_some()
                 && inputs.claims.is_ok()
+                && inputs.drivers.is_ok()
                 && inputs.holder_activity_error.is_none()
             {
                 SourceRead::ok(Value::Null)
@@ -1120,6 +1139,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .claims
                         .error
                         .clone()
+                        .or_else(|| inputs.drivers.error.clone())
                         .or_else(|| inputs.holder_activity_error.clone())
                         .unwrap_or_default()
                 })
@@ -1142,9 +1162,10 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "undriven_pr",
-            format!("{SRC_PR_NODES} + {SRC_CLAIMS} + holder_activity"),
+            format!("{SRC_PR_NODES} + {SRC_CLAIMS} + {SRC_DRIVERS} + holder_activity"),
             &if inputs.pr_nodes.is_ok()
                 && inputs.claims.is_ok()
+                && inputs.drivers.is_ok()
                 && inputs.holder_activity_error.is_none()
             {
                 SourceRead::ok(Value::Null)
@@ -1155,6 +1176,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .error
                         .clone()
                         .or_else(|| inputs.claims.error.clone())
+                        .or_else(|| inputs.drivers.error.clone())
                         .or_else(|| inputs.holder_activity_error.clone())
                         .unwrap_or_default(),
                 )
