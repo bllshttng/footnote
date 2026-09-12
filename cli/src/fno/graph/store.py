@@ -762,6 +762,30 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
     return result["entries"]
 
 
+def request_scoreboard_classify(
+    entries: list[dict],
+    rows: list[dict],
+    project: str | None = None,
+    now=None,
+) -> dict:
+    """The delivery classifier (scoreboard.rs) over client-shipped rows.
+    Terminal vocabulary stays Python's (fno.terminals); ``now`` rides as ISO."""
+    from fno.terminals import DELIVERED_TERMINALS
+
+    return _client_for(GRAPH_JSON).request(
+        "scoreboard_classify",
+        {
+            "entries": entries,
+            "rows": rows,
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": sorted(DELIVERED_TERMINALS - {"DoneAdvisory", "DoneDelivery"}),
+            "project": project,
+            "now": now.isoformat() if now is not None else None,
+        },
+    )
+
+
 def _plan_rung_map(entries: list[dict]) -> "dict[str, str]":
     """Node id -> the rung of the node's linked plan, computed client-side.
 

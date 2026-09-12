@@ -221,6 +221,8 @@ fn wait_for_raw_frame(
             | Ok(ServerMsg::SquadReloaded { .. })
             // (v75) Exact-session retirement: same one-shot control shape.
             | Ok(ServerMsg::SessionRetired { .. })
+            // (v78) Server stats: same one-shot control shape.
+            | Ok(ServerMsg::ServerStats { .. })
             | Ok(ServerMsg::AgentRowsReceipt { .. }) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),
             Err(fno::proto::ProtoError::Io(e))

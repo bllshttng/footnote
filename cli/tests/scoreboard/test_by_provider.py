@@ -54,8 +54,13 @@ def _wire(monkeypatch, tmp_path, ledger_path):
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
 
 
-# Graph with W4 causal telemetry so shipped nodes are judgeable.
-GRAPH = [{"id": "x-1", "reverted": False}, {"id": "x-2", "reverted": False}]
+# Graph with W4 causal telemetry so shipped nodes are judgeable. The nodes
+# are merged: a delivered terminal proves a run shipped only when the node
+# actually delivered, so a fixture that means "shipped" must say merged.
+GRAPH = [
+    {"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": "2026-07-03T10:00:00"},
+    {"id": "x-2", "reverted": False, "merge_status": "merged", "completed_at": "2026-07-03T10:00:00"},
+]
 
 
 # --- AC1-HP -------------------------------------------------------------------
@@ -99,6 +104,32 @@ def test_hp_bounce_and_median_iterations():
     assert r["shipped_linked"] == 2
     assert r["bounce_rate_pct"] == 50  # x-1 bounced (fix-node next day), x-2 clean
     assert r["median_iterations"] == 3  # over shipped rows only
+
+
+def test_delivered_nodes_count_once_with_shared_credit_across_providers():
+    # Two providers worked the same node: each bucket counts the node once and
+    # the credit reads as shared, never copied as two deliveries.
+    rows = [
+        _row("zai", "glm", nid="x-1", cost=2.0),
+        _row("claude", "opus", nid="x-1", cost=3.0),
+    ]
+    pb = build_provider_scoreboard(rows, GRAPH, since_days=28, now=NOW)
+    by = {(r["provider"], r["model"]): r for r in pb["rows"]}
+    assert by[("zai", "glm")]["delivered_nodes"] == 1
+    assert by[("claude", "opus")]["delivered_nodes"] == 1
+    assert by[("zai", "glm")]["shared_nodes"] == 1
+    assert by[("claude", "opus")]["shared_nodes"] == 1
+
+
+def test_delivered_nodes_dedup_retries_within_one_provider():
+    rows = [
+        _row("zai", "glm", nid="x-1", tr="NoProgress", cost=1.0),
+        _row("zai", "glm", nid="x-1", cost=1.0),
+    ]
+    pb = build_provider_scoreboard(rows, GRAPH, since_days=28, now=NOW)
+    r = pb["rows"][0]
+    assert r["shipped"] == 1  # only the delivering run ships
+    assert r["delivered_nodes"] == 1  # the node counts once
 
 
 def test_hp_retry_rows_counts_redispatches():

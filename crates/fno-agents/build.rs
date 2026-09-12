@@ -43,6 +43,13 @@ fn main() {
     println!("cargo:rustc-env=FNO_AGENTS_GIT_REV={rev}");
     println!("cargo:rustc-env=FNO_AGENTS_GIT_DIRTY={}", u8::from(dirty));
     println!("cargo:rustc-env=FNO_AGENTS_CRATES_REV={crates_rev}");
+    // Baked for state::source_root_for_exe: a detached OUT_DIR (a build-dir
+    // override like the machine pool) marks this binary as a dev build whose
+    // manifest dir can recover the source root.
+    println!(
+        "cargo:rustc-env=FNO_AGENTS_BUILD_OUT_DIR={}",
+        std::env::var("OUT_DIR").unwrap_or_default()
+    );
 
     // Rebuild when HEAD moves so an incremental dev build does not bake a stale
     // rev. (The install path -- `cargo install` -- always does a clean build, so

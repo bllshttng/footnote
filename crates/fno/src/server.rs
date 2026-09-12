@@ -537,10 +537,8 @@ fn idle_shell_takeover(leaf_count: usize, cmd: Option<&str>, pristine_idle: bool
 }
 
 /// The last `n` non-empty lines of `text`, joined by `\n` - the mux-server twin
-/// of the daemon's `Region::BottomNonEmptyLines` extraction (x-c929). The crates
-/// share no code, so this is a focused copy (like `rfc3339_like_to_secs`); it
-/// must stay byte-identical to the daemon's so an answer's region fingerprint
-/// hashes the same on both sides.
+/// of the daemon `Region::BottomNonEmptyLines` extraction (x-c929); byte-
+/// identical to the daemon so a region fingerprint hashes the same.
 fn bottom_non_empty_lines(text: &str, n: usize) -> String {
     let nonblank: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = nonblank.len().saturating_sub(n);
@@ -549,6 +547,10 @@ fn bottom_non_empty_lines(text: &str, n: usize) -> String {
 
 /// What connected clients register with the core loop.
 enum CoreMsg {
+    /// (v78) A stats request; the Core owns the counter.
+    ServerStats {
+        reply: oneshot::Sender<ServerMsg>,
+    },
     Attach {
         id: u64,
         rows: u16,
@@ -1996,48 +1998,36 @@ pub(crate) struct Core {
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
-    /// Held writer claims: pane -> holder pid. Enforced on `Input` as an
-    /// in-memory lookup + a `kill(pid, 0)` liveness probe (one syscall, never
-    /// a subprocess - the origin freeze class); a dead holder releases lazily
-    /// on the next contested keystroke, so typing resumes without a server
-    /// restart (AC3-FR) and no sweep timer exists to tune.
+    /// Held writer claims: pane -> holder pid. In-memory lookup + a
+    /// `kill(pid, 0)` liveness probe (one syscall, never a subprocess); a
+    /// dead holder releases lazily on the next contested keystroke (AC3-FR).
     claims: HashMap<u64, u32>,
-    /// Per-pane last `human_touch(inject)` emit time (W4 touch telemetry):
-    /// at most one emit per pane per [`TOUCH_COALESCE_WINDOW`], so a typing
-    /// burst is one steering action, not a per-keystroke fork storm. Purged
-    /// with the pane in [`Core::reap_pane`].
+    /// Per-pane last `human_touch(inject)` emit time: at most one emit per
+    /// pane per [`TOUCH_COALESCE_WINDOW`], so a typing burst is one steering
+    /// action. Purged with the pane in [`Core::reap_pane`].
     touch_last_emit: HashMap<u64, Instant>,
     /// (x-9454) Per-pane wheel-passthrough rate gate: bounds how many wheel
-    /// ticks per window reach a mouse-owning pane's PTY, so a trackpad flood
-    /// stops scrolling when the finger stops instead of draining stale ticks.
-    /// Purged with the pane in [`Core::reap_pane`], the `touch_last_emit`
-    /// pattern.
+    /// ticks per window reach a mouse-owning pane PTY; purged with the pane
+    /// in [`Core::reap_pane`], the `touch_last_emit` pattern.
     wheel_gate: HashMap<u64, WheelGateState>,
     /// Failed `human_touch` emits (AC4-ERR): counted, never raised to the
-    /// steering path. An inflated autonomy rate is the dangerous silent
-    /// failure, so the count exists even before the scoreboard reads it.
+    /// steering path; read by the scoreboard stats answer (v78).
     touch_emit_failures: Arc<AtomicU64>,
-    /// Failed per-pane counter emits, same discipline as
-    /// [`Core::touch_emit_failures`]: counted and logged, never raised to the
-    /// serving path.
+    /// (v78) Server boot instant: the stats answer measurement window.
+    started_at: String,
+    /// Failed per-pane counter emits: same discipline as touch_emit_failures.
     pane_stats_emit_failures: Arc<AtomicU64>,
-    /// Attached-client count for the periodic readers (x-4e30). Published
-    /// from choke points (tail of `handle` + the main-loop tail), never
-    /// per mutation site: `clients` mutates in six places and per-site
-    /// stores drift on the next refactor. A `watch`, not an atomic,
-    /// because the readers park in `tick().await` and need the
-    /// `changed()` edge as the 0->1 wakeup.
+    /// Attached-client count for the periodic readers (x-4e30), published
+    /// from choke points only: `clients` mutates in six places and per-site
+    /// stores drift. A `watch`: the readers need the `changed()` edge.
     client_count: watch::Sender<usize>,
     /// (x-4328) Pane ids the operator has focused while badged `Done`.
-    /// Inserted as a one-shot side effect of an actual focus action
-    /// (`Command::FocusPane`, via [`Core::mark_seen_if_done`]) when that
-    /// pane is currently `Done`; evicted level-triggered every layout pass
-    /// the instant a pane's badge leaves `Done` (a re-run re-arms unseen,
-    /// and never self-reinserts merely by remaining the focused pane -
-    /// AC1-EDGE/AC2-EDGE). Reattach-durable for free - `Core` survives a
-    /// client detach/reattach - but not server-restart (a cold-scrape
-    /// non-goal, Locked Decision 7). Orphan ids from reaped panes are inert
-    /// (never re-matched); no GC.
+    /// Inserted by an actual focus action (`Command::FocusPane`, via
+    /// [`Core::mark_seen_if_done`]) on a `Done` pane; evicted level-triggered
+    /// every layout pass the instant a pane's badge leaves `Done`. Reattach-
+    /// durable (`Core` survives detach/reattach) but not server-restart (a
+    /// cold-scrape non-goal, Locked Decision 7). Orphan ids from reaped
+    /// panes are inert (never re-matched); no GC.
     seen: HashSet<u64>,
     /// (x-0090) Live attach panes: `attach_id -> pane`. Lifetime = pane
     /// lifetime, never persisted (server death kills panes; the bg agent
@@ -12862,6 +12852,13 @@ impl Core {
                 });
                 Flow::Continue
             }
+            CoreMsg::ServerStats { reply } => {
+                let _ = reply.send(crate::server_stats::answer(
+                    self.touch_emit_failures.load(Ordering::Relaxed),
+                    &self.started_at,
+                ));
+                Flow::Continue
+            }
             CoreMsg::Kill => {
                 // Notify clients, then let the shared shutdown choke point
                 // capture before killing non-keeper children. Keeper-held
@@ -13792,6 +13789,7 @@ async fn serve(
         touch_last_emit: HashMap::new(),
         wheel_gate: HashMap::new(),
         touch_emit_failures: Arc::new(AtomicU64::new(0)),
+        started_at: crate::server_stats::stamp_now(),
         client_count: client_count_tx,
         seen: HashSet::new(),
         attached: HashMap::new(),
@@ -14998,6 +14996,7 @@ async fn handle_control(
                 .await
         }
         ControlVerb::SquadReload => core_tx.send(CoreMsg::SquadReload { reply: reply_tx }).await,
+        ControlVerb::ServerStats => core_tx.send(CoreMsg::ServerStats { reply: reply_tx }).await,
         ControlVerb::RetireSession {
             harness,
             session_id,
@@ -24575,6 +24574,7 @@ mod tests {
             touch_last_emit: HashMap::new(),
             wheel_gate: HashMap::new(),
             touch_emit_failures: Arc::new(AtomicU64::new(0)),
+            started_at: crate::server_stats::stamp_now(),
             client_count: watch::channel(0).0,
             seen: HashSet::new(),
             attached: HashMap::new(),

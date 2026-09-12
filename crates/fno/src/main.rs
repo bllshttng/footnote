@@ -66,6 +66,9 @@ enum Role {
     /// `mux doctor [--json]`: read-only environment diagnostics (US6). The bool
     /// is `--json`.
     MuxDoctor(bool),
+    /// (v78) `mux stats [--json]`: server-instance telemetry (the human_touch
+    /// emission-failure counter with its measurement window). Hidden, read-only.
+    MuxStats(bool),
     /// `mux pane <verb> ...`: the v4 script API. Carries the tokens after
     /// `mux pane` verbatim; `mux_cli::pane` parses the verb + flags. No TTY
     /// needed (control verbs are scriptable one-shots).
@@ -293,6 +296,12 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 Some((pos, json)) if pos.is_empty() => Role::MuxDoctor(json),
                 _ => Role::MuxUsage,
             },
+            // (v78) `mux stats [--json]`: server-instance telemetry the
+            // scoreboard reads. Hidden, read-only, no positional.
+            Some("stats") => match split_json(&args[2..]) {
+                Some((pos, json)) if pos.is_empty() => Role::MuxStats(json),
+                _ => Role::MuxUsage,
+            },
             Some("attach") => match args.get(2).and_then(|a| a.to_str()) {
                 Some(name) if args.len() == 3 => {
                     if is_tty {
@@ -393,6 +402,7 @@ fn main() {
             std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
         }
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
+        Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
         Role::MuxWeb(web_args) => {
             // The bridge serves for hours, so the warning its startup
             // resolution recorded must surface NOW: exit_mux would print it

@@ -10378,12 +10378,11 @@ async fn attach_and_run(
                 | ServerMsg::LayoutGrafted { .. }
                 | ServerMsg::TabLocation { .. }
                 | ServerMsg::TabClosed { .. }
-                // (v60, x-7b5e) Bulk restore answers a one-shot `fno mux
-                // workspace restore` control connection, never an attached
-                // client. (v71) The prune reload is the same one-shot shape.
-                // (v75) The exact-session retirement, same one-shot shape.
+                // (v60/v71/v75/v78) one-shot control-verb replies: never
+                // attached-client traffic.
                 | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }
-                | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. },
+                | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
+                | ServerMsg::ServerStats { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -10883,11 +10882,10 @@ async fn attach_and_run(
                     | ServerMsg::LayoutGrafted { .. }
                     | ServerMsg::TabLocation { .. }
                     | ServerMsg::TabClosed { .. }
-                    // (v60, x-7b5e) Bulk restore answers a one-shot control
-                    // connection only. (v71) The prune reload is the same shape.
-                    // (v75) The exact-session retirement, same one-shot shape.
+                    // (v60/v71/v75/v78) one-shot control-verb replies.
                     | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }
-                    | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }) => {}
+                    | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
+                    | ServerMsg::ServerStats { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback

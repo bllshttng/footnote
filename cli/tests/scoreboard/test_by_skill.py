@@ -85,7 +85,12 @@ def test_hp_transcript_attribution_prints_runs_and_coverage():
          "cost_usd": 2.0, "sessions": [UUID_B]},
     ]
     sb = build_skill_scoreboard(
-        rows, [{"id": "x-1", "reverted": False}, {"id": "x-2", "reverted": False}], [],
+        rows,
+        [
+            {"id": "x-1", "reverted": False, "merge_status": "merged", "completed_at": "2026-07-03T10:00:00"},
+            {"id": "x-2", "reverted": False, "merge_status": "merged", "completed_at": "2026-07-02T10:00:00"},
+        ],
+        [],
         since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
         read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
     )
@@ -365,7 +370,10 @@ def test_reverted_node_lowers_revert_rate_not_ship_rate():
         {"completed": "2026-07-02T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-2",
          "cost_usd": 1.0, "sessions": [UUID_A]},
     ]
-    graph = [{"id": "x-1", "reverted": True}, {"id": "x-2", "reverted": False}]
+    graph = [
+        {"id": "x-1", "reverted": True, "merge_status": "merged", "completed_at": "2026-07-03T10:00:00"},
+        {"id": "x-2", "reverted": False, "merge_status": "merged", "completed_at": "2026-07-02T10:00:00"},
+    ]
     sb = build_skill_scoreboard(
         rows, graph, [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
         read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
@@ -391,7 +399,7 @@ def test_shipped_row_without_node_id_excluded_from_revert_denominator():
         {"completed": "2026-07-02T10:00:00", "termination_reason": "DonePRGreen", "cost_usd": 1.0,  # no graph_node_id
          "sessions": [UUID_A]},
     ]
-    graph = [{"id": "x-1", "reverted": True}]
+    graph = [{"id": "x-1", "reverted": True, "merge_status": "merged", "completed_at": "2026-07-03T10:00:00"}]
     sb = build_skill_scoreboard(
         rows, graph, [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
         read_transcript=read_transcript, resolve_skill_version=lambda s, ts: "v1",
