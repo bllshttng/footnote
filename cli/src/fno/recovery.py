@@ -214,6 +214,10 @@ class Candidate:
     cwd: Optional[str] = None
     name: Optional[str] = None
     session_id: Optional[str] = None
+    # The CALLER's attributed account, stamped at the mint seam and carried
+    # here for the quota-lock write (x-bbc0). Never the process-global active
+    # one: a refusal belongs to the account the worker was launched onto.
+    launch_account: Optional[str] = None
     agent: str = "claude"
 
 
@@ -264,6 +268,7 @@ def iter_candidates(registry_entries: Iterable, locate_fn: Callable) -> list[Can
             cwd=getattr(entry, "cwd", None), name=getattr(entry, "name", None),
             session_id=(getattr(entry, "harness_session_id", None)
                         or getattr(entry, "cc_session_id", None) or short_id),
+            launch_account=getattr(entry, "launch_account", None),
         ))
     return out
 

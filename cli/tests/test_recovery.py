@@ -174,6 +174,22 @@ class TestCandidateJoin:
         cands = recovery.iter_candidates(entries, locate_fn=lambda sid: live.get(sid))
         assert cands == []
 
+    def test_launch_account_is_carried_from_the_registry_row(self, tmp_path):
+        # x-bbc0: the quota lock is written against the account the worker
+        # was LAUNCHED on, so the join carries it off the registry row.
+        entry = _Entry("claude", "dddd4444")
+        entry.launch_account = "readyrule"
+        live = {"dddd4444": _Locator("dddd4444", "/tmp/d.sock", tmp_path)}
+        (cand,) = recovery.iter_candidates([entry], locate_fn=lambda sid: live.get(sid))
+        assert cand.launch_account == "readyrule"
+
+    def test_a_legacy_row_without_launch_account_yields_none(self, tmp_path):
+        # Older rows predate the column; getattr keeps the join from raising.
+        entry = _Entry("claude", "eeee5555")
+        live = {"eeee5555": _Locator("eeee5555", "/tmp/e.sock", tmp_path)}
+        (cand,) = recovery.iter_candidates([entry], locate_fn=lambda sid: live.get(sid))
+        assert cand.launch_account is None
+
 
 # ---------------------------------------------------------------------------
 # recovery_sweep — nudge, cap (AC4), one-event-per-decision (invariant)
