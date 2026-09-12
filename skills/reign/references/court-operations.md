@@ -52,6 +52,7 @@ Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king t
 | Wake a blocked/stopped teammate | `fno agents resume <handle>` (then re-send) |
 | Close a teammate pane | `fno mux pane kill` (a mux row's short_id is empty, so `fno agents stop` refuses it) |
 | End a thread/daemon worker | `fno agents stop <name>` |
+| Halt the fleet, a scope, or one crown | `fno agents incident stop --reason "<why>"` arms the fleet breaker: new spawns, dispatch ticks, and test runs refuse fleet-wide until `fno agents incident clear --reason "<why>"`; running workers keep going, mail stays open, `fno agents incident status` reads the generation. Arming is outward and no standing law grants an agent the authority, so escalate with evidence and arm on operator order. `fno agents king cancel --scope <scope>` cancels one scope's walk; `fno agents king done` ends one crown |
 | Encode a ruling | `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..." --add-blocker <up>` |
 | Land a green child | `fno do pr merge <n>` (only when config permits) |
 
