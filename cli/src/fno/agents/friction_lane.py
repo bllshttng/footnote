@@ -18,24 +18,19 @@ def reconcile_friction(pairs, *, root: Path, session_id: "str | None",
     a real ``run_sweep``."""
     from fno.agents.stale_lane import reconcile_channel
 
-    shown = [
-        f"{v.name} [node {_row.node or 'unknown'}]: {v.basis}"
-        for v, _row in pairs
-    ]
     return reconcile_channel(
         pairs, root=root, session_id=session_id, cwd=cwd,
         marker=FRICTION_MARKER, subject="friction",
         identities=[f"{v.verdict}:{v.row_id}" for v, _row in pairs],
         question=lambda key: (
-            f"[{FRICTION_MARKER}:{key}] The fleet watchdog holds "
-            f"{len(pairs)} contention/polling row(s) no lane will act on. "
-            "Each needs a human to separate the sessions or stop it. "
-            "Rows: " + "; ".join(shown)
+            f"[{FRICTION_MARKER}:{key}] The watchdog holds "
+            f"{len(pairs)} contention or polling row(s) no lane will act on."
         ),
         ask=lambda _key: (
             f"triage {len(pairs)} friction row(s): fno agents watchdog "
             "--only contended; fno agents watchdog --only polling_settled"
         ),
+        blocks=sorted({_row.node for _v, _row in pairs if _row.node}),
     )
 
 

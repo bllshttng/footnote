@@ -820,6 +820,8 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // forced the filing. Mechanical, not instructional: the same STUCK bucket
     // that gets a postmortem, with an operator-directed question in its last
     // message and nothing already filed for this session, gets it filed here.
+    // Law d-59af3235: the extracted text goes to the node as a note and the
+    // ask is one line pointing at it; a node-less session files nothing.
     let mut outstanding_filed = false;
     if predicates.stuck {
         let question = a
@@ -830,7 +832,16 @@ pub fn run_finalize(args: &[String]) -> i32 {
             .and_then(extract_operator_question);
         if let Some(q) = question {
             if !session_already_filed(&cwd, &session_id) {
-                outstanding_filed = file_outstanding_question(&cwd, &q, m.graph_node_id.as_deref());
+                match m.graph_node_id.as_deref() {
+                    Some(node) => {
+                        outstanding_filed = file_outstanding_question(&cwd, &session_id, &q, node);
+                    }
+                    None => {
+                        eprintln!(
+                            "finalize: operator question not filed: law d-59af3235 needs a node pointer and this session has none"
+                        );
+                    }
+                }
             }
         }
     }
@@ -2659,14 +2670,33 @@ fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
         })
 }
 
-fn file_outstanding_question(cwd: &Path, question: &str, node: Option<&str>) -> bool {
-    let mut cmd = Command::new("fno");
-    cmd.current_dir(cwd)
-        .args(["inbox", "outstanding", "ask", question]);
-    if let Some(n) = node {
-        cmd.args(["--node", n]);
+/// File a stuck session's operator question as a node note plus a one-line ask.
+///
+/// Law d-59af3235 caps an ask at one line plus a node pointer, so the
+/// extracted transcript text cannot BE the ask: it lands on the node as a
+/// note (the surface with no cap), and the ask is one line pointing at it.
+/// The note is best-effort; the ask is the part that must land.
+fn file_outstanding_question(cwd: &Path, session_id: &str, question: &str, node: &str) -> bool {
+    // --quiet: the note must APPEND even when no reader is bound to be
+    // notified; without it the verb refuses first and the ask below would
+    // point at a note that was never written.
+    let note = Command::new("fno")
+        .current_dir(cwd)
+        .args(["backlog", "note", node, question, "--quiet"])
+        .status();
+    if let Ok(s) = &note {
+        if !s.success() {
+            eprintln!("finalize: backlog note exited {:?}", s.code());
+        }
     }
-    match cmd.status() {
+    let short: String = session_id.chars().take(8).collect();
+    let ask =
+        format!("Stuck session {short} left an operator question on {node}. Read its latest note.");
+    match Command::new("fno")
+        .current_dir(cwd)
+        .args(["inbox", "outstanding", "ask", &ask, "--node", node])
+        .status()
+    {
         Ok(s) if s.success() => true,
         Ok(s) => {
             eprintln!("finalize: outstanding ask exited {:?}", s.code());

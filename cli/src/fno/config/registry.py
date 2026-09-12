@@ -278,6 +278,9 @@ FIELD_META: dict[str, Meta] = {
     "style.word_cap.encounter": Meta(
         "advanced", "Masked-word cap for the evidence on a `fno backlog encounter` vote (default 80). Over-length evidence is refused, never truncated.",
     ),
+    "style.word_cap.ask": Meta(
+        "advanced", "Masked-word cap for an operator ask on `fno inbox outstanding ask` (default 40, law d-59af3235: an ask is one line plus a node pointer). Over-cap asks are refused, never truncated.",
+    ),
     "style.pair_budget_words": Meta(
         "advanced", "Rolling per-pair mail word budget inside the 10-minute window (default 80). Raise it alongside style.word_cap.mail: a higher per-message cap that leaves this at 80 refuses the very message the cap now permits.",
     ),

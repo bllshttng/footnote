@@ -74,8 +74,10 @@ def test_question_names_the_clearing_verbs_not_session_rows() -> None:
 
     assert f"[{subject.MARKER}:{key}]" in text
     assert "unfinished-work finding(s)" in text
-    assert "/fno:target x-7d02" in text
-    assert "/fno:target x-3b05" in text
+    # One line: the per-finding clear commands live in the report verb, not
+    # the text (law d-59af3235 caps the ask).
+    assert "fno agents watchdog" in text
+    assert "/fno:target x-7d02" not in text
     # The retired session-bookkeeping phrasing must not survive the rewrite.
     assert "stale row" not in text
     assert "--only stale" not in text

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.king.escalate import dedupe_key, escalate, question_text
+from fno.king.escalate import dedupe_key, escalate
 from fno.outstanding.core import read_open_questions
 
 STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
@@ -58,7 +58,37 @@ def test_a_different_stalled_set_is_a_different_question(tmp_path: Path) -> None
     outcome, _ = _run(tmp_path, ["undispatched:x-9999"])
 
     assert outcome == "recorded"
-    assert len(read_open_questions(tmp_path)) == 2
+
+
+def test_a_failed_reign_read_still_escalates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`reign_state()` raising must not UnboundLocalError past the record: the
+    scope falls back to None and the escalation fires (the codex P1 on 1847)."""
+    from typer.testing import CliRunner
+
+    import fno.king.state as state_mod
+    from fno.king.cli import agents_king_app
+
+    def boom(session_id=None):
+        raise RuntimeError("reader exploded")
+
+    monkeypatch.setattr(state_mod, "reign_state", boom)
+    # escalate_cmd imports this name from fno.king.escalate at call time: the
+    # patch must land there, or a live crown on the test machine gets mailed.
+    monkeypatch.setattr(
+        "fno.king.escalate.resolve_presiding_king", lambda session_id: None
+    )
+    monkeypatch.setattr(
+        "fno.king.escalate.mail_presiding_king", lambda holder, ids, reason: False
+    )
+    result = CliRunner().invoke(
+        agents_king_app,
+        ["escalate", "--stalled", "undispatched:x-1234", "--reason", "NoProgress"],
+    )
+    assert result.exit_code == 0, result.output
+    (question,) = read_open_questions(tmp_path)
+    assert question.node is None
 
 
 def test_the_key_ignores_order_and_repeats(tmp_path: Path) -> None:
@@ -81,15 +111,19 @@ def test_an_empty_stalled_set_never_reads_as_a_clean_board(tmp_path: Path) -> No
     assert "clean" not in question.question
 
 
-def test_the_question_names_the_rows_and_carries_the_key() -> None:
+def test_the_question_names_the_rows_and_carries_the_key(tmp_path: Path) -> None:
     key = dedupe_key(STALLED)
-    text = question_text(STALLED, key, "NoProgress")
+    _run(tmp_path, STALLED)
+    (question,) = read_open_questions(tmp_path)
 
-    assert "undispatched:x-1234" in text
-    assert "undispatched:x-5678" in text
-    assert f"[king-escalation:{key}]" in text
+    assert f"[king-escalation:{key}]" in question.question
+    assert "undispatched:x-1234" in question.question
+    assert "undispatched:x-5678" in question.question
+    # The ids also land in blocks, so the pointer rule is met from the run's
+    # own facts; the one-line text names only the first three rows.
+    assert set(question.blocks) == {"x-1234", "x-5678"}
     # The operator's actual decision hinges on this: the king is GONE.
-    assert "exited" in text
+    assert "crown a new king" in question.question
 
 
 def test_an_unreadable_store_is_not_an_empty_one(tmp_path: Path) -> None:

@@ -1130,7 +1130,9 @@ def operator_question(
     """
     data: dict[str, Any] = {
         "question_id": question_id,
-        "question": question[:QUESTION_CAP],
+        # Full text: the question write path truncates at QUESTION_CAP AFTER
+        # the law gate, so a refusal names the words the sender typed.
+        "question": question,
     }
     for key, value in (
         ("session_id", session_id),

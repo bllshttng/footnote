@@ -1,9 +1,13 @@
-"""escalate's closing sentence reads the caller's liveness instead of asserting it.
+"""escalate's closing question reads the caller's liveness instead of asserting it.
 
-Each branch asserts a POSITIVE marker in the recorded text ("still reigning" /
-"It has exited"), never the absence of the other sentence: the original defect
-was exactly a sentence asserted without reading, so a test that only checks
-"does not contain X" would re-commit the absence-lie in miniature.
+Each branch asserts a POSITIVE marker in the recorded text (the live ruling
+ask vs the dead crown ask), never the absence of the other branch: the original
+defect was exactly a sentence asserted without reading, so a test that only
+checks "does not contain X" would re-commit the absence-lie in miniature.
+
+Law d-59af3235 capped the text: the branches are now the closing QUESTION, and
+an unknown liveness reads as dead with a named "(liveness unreadable)" marker
+while the full reason moves to the caller's stderr line.
 """
 from __future__ import annotations
 
@@ -15,40 +19,44 @@ IDS = ["x-1111", "x-2222"]
 KEY = dedupe_key(IDS)
 REASON = "NoProgress"
 
-_DEAD_SENTENCE = "It has exited, so nothing restarts it on its own"
+_LIVE_CLOSE = "Unblock, defer, or stand it down?"
+_DEAD_CLOSE = "Unblock, defer, or crown a new king?"
 
 
-def test_live_king_question_says_still_reigning() -> None:
+def test_live_king_question_asks_for_a_ruling() -> None:
     text = question_text(IDS, KEY, REASON, live=True)
-    assert "still reigning" in text
-    assert "stand down" in text
+    assert _LIVE_CLOSE in text
     # AC26: assert presence, not absence. The guard below only proves the
     # branch input was honored, not that the dead sentence is gone.
-    assert _DEAD_SENTENCE not in text
+    assert _DEAD_CLOSE not in text
 
 
-def test_dead_king_question_keeps_todays_text_verbatim() -> None:
+def test_dead_king_question_offers_the_crown() -> None:
     text = question_text(IDS, KEY, REASON, live=False)
-    assert _DEAD_SENTENCE in text
-    assert "crown a new king" in text
+    assert _DEAD_CLOSE in text
+    # A measured dead is not an unreadable read: the unreadable marker is
+    # reserved for the None branch, where nothing was measured.
     assert "liveness unreadable" not in text
 
 
-def test_unknown_king_reads_dead_and_names_the_reason() -> None:
+def test_unknown_king_reads_dead_and_names_the_read_failed() -> None:
     text = question_text(
         IDS, KEY, REASON, live=None, unknown_reason="registry unreadable: disk"
     )
-    # Unknown reads as dead (under-claiming is safe), and the reason is not
-    # silently dropped.
-    assert _DEAD_SENTENCE in text
+    # Unknown reads as dead (under-claiming is safe). The full reason is
+    # deliberately NOT in the text - the ask gate caps the line, and the
+    # caller (king cli) echoes it on stderr - but the text names that the
+    # read failed so a dead-looking king is never read as measured-dead.
+    assert _DEAD_CLOSE in text
     assert "liveness unreadable" in text
-    assert "registry unreadable: disk" in text
+    assert "registry unreadable: disk" not in text
 
 
-def test_default_live_argument_stays_the_dead_sentence() -> None:
-    """Callers that pass nothing (older arms) keep today's recorded text."""
+def test_default_live_argument_reads_unknown() -> None:
+    """Callers that pass nothing (older arms) under-claim: unknown, not dead."""
     text = question_text(IDS, KEY, REASON)
-    assert _DEAD_SENTENCE in text
+    assert _DEAD_CLOSE in text
+    assert "liveness unreadable" in text
 
 
 def test_marker_still_leads_and_dedupe_key_ignores_liveness() -> None:
@@ -66,4 +74,4 @@ def test_marker_still_leads_and_dedupe_key_ignores_liveness() -> None:
 def test_every_branch_carries_the_marker_and_reason(live: bool) -> None:
     text = question_text(IDS, KEY, REASON, live=live)
     assert f"[{MARKER}:{KEY}]" in text
-    assert f"Reason given: {REASON}" in text
+    assert f"Reason: {REASON}" in text

@@ -229,6 +229,8 @@ pair_budget_words = 80
 mail = 80
 # Masked-word cap for the evidence on a `fno backlog encounter` vote (default 80). Over-length evidence is refused, never truncated.
 encounter = 80
+# Masked-word cap for an operator ask on `fno inbox outstanding ask` (default 40, law d-59af3235: an ask is one line plus a node pointer). Over-cap asks are refused, never truncated.
+ask = 40
 
 [preflight]
 # Require a full local preflight receipt before opening a PR. Default false: CI is the merge gate and preflight is an opt-in rehearsal.

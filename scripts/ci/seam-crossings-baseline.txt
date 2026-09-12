@@ -28,7 +28,8 @@ crossing	crates/fno-agents/src/finalize.rs	1958	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2330	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2412	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2643	let out = match Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2663	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/finalize.rs	2683	let note = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2695	match Command::new("fno")
 crossing	crates/fno-agents/src/gc.rs	883	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/loop_dispatch.rs	364	let out = Command::new("fno")
 crossing	crates/fno-agents/src/loopcheck.rs	3494	pub(crate) fn loopcheck_fno_bin() -> String {

@@ -21,9 +21,9 @@ def dedupe_key(stalled_ids: "list[str]") -> str:
 
 
 # How many stalled rows the question names before it says "and N more". The
-# rows are context; the COUNT and the key are the load-bearing parts, and a
-# board with a hundred stalled rows must not push either out of the text.
-MAX_LISTED_IDS = 20
+# count and the key are the load-bearing parts, the id list is context, and
+# the ask gate caps the line at config.style.word_cap.ask words.
+MAX_LISTED_IDS = 3
 
 
 def _stalled_subject(stalled_ids: "list[str]") -> str:
@@ -33,7 +33,7 @@ def _stalled_subject(stalled_ids: "list[str]") -> str:
     shown = ", ".join(ids[:MAX_LISTED_IDS])
     if len(ids) > MAX_LISTED_IDS:
         shown += f", and {len(ids) - MAX_LISTED_IDS} more"
-    return f"{len(ids)} board row(s) nothing is clearing: {shown}"
+    return f"{len(ids)} board row(s): {shown}"
 
 
 def question_text(
@@ -44,39 +44,23 @@ def question_text(
     live: "bool | None" = None,
     unknown_reason: "str | None" = None,
 ) -> str:
-    """The operator-facing text, with the dedupe marker FIRST.
+    """The operator-facing text: one line, dedupe marker first, ids capped.
 
-    The marker leads because ``operator_question`` truncates the recorded text
-    at ``QUESTION_CAP``. With the marker last, a long enough id list pushed it
-    past the cap, ``already_asked`` stopped matching, and every respawned king
-    filed a fresh duplicate - the exact failure this module exists to prevent.
-    Leading it also caps the id list, so neither half can crowd the other out.
-
-    ``live`` branches the closing sentence on the CALLER's measured liveness:
-    telling the operator a live king "has exited" hands it the double-crown
-    recommendation. ``None`` (unreadable) reads as dead, naming the reason.
+    The marker leads because ``already_asked`` matches on it, and a question
+    truncated past its marker dedupes into duplicates. ``unknown_reason`` is
+    deliberately absent: the ask gate caps the line, and the caller echoes the
+    reason on stderr. ``live`` branches the closing on the CALLER's measured
+    liveness; ``None`` (unreadable) reads as dead, naming that the read failed.
     """
     subject = _stalled_subject(stalled_ids)
     if live:
-        closing = (
-            "It is still reigning and holding these rows, so decide whether to "
-            "unblock them, defer them, or tell it to stand down."
-        )
+        closing = "Unblock, defer, or stand it down?"
     else:
-        closing = (
-            "It has exited, so nothing restarts it on its own - decide whether "
-            "to unblock these rows, defer them, or crown a new king."
-        )
-        if live is None and unknown_reason:
-            # The unknown is named, never silently dropped: an operator told
-            # only "it has exited" would not know the liveness read failed and
-            # the king may in fact be live.
-            closing += f" (liveness unreadable: {unknown_reason})"
-    return (
-        f"[{MARKER}:{key}] The king stopped on {subject}. "
-        f"Reason given: {reason}. "
-        f"{closing}"
-    )
+        closing = "Unblock, defer, or crown a new king?"
+        if live is None:
+            closing += " (liveness unreadable)"
+    _ = unknown_reason
+    return f"[{MARKER}:{key}] The king stopped on {subject}. Reason: {reason}. {closing}"
 
 
 def already_asked(root: Path, key: str) -> "str | None":
@@ -96,20 +80,21 @@ def already_asked(root: Path, key: str) -> "str | None":
     return None
 
 
-def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str | None",
-             cwd: Path, *, live: "bool | None" = None,
-             unknown_reason: "str | None" = None) -> "tuple[str, str]":
+def escalate(
+    stalled_ids: "list[str]", reason: str, root: Path, session_id: "str | None",
+    cwd: Path, *, live: "bool | None" = None, unknown_reason: "str | None" = None,
+    scope: "str | None" = None,
+) -> "tuple[str, str]":
     """Record one operator question for this stalled set.
 
     Returns ``(outcome, question_id)`` where outcome is ``recorded`` or
     ``duplicate``. Raises on a store failure; a quiet failure here would put the
-    king back in the silence this verb exists to break. ``live`` and
-    ``unknown_reason`` come from :func:`fno.king.state.reign_state`; the dedupe
-    key is unchanged either way.
+    king back in the silence this verb exists to break.
     """
     import secrets
 
     from fno.events import operator_question
+    from fno.graph._constants import extract_node_ids, is_wellformed_node_id
     from fno.harness_identity import canonical_handle
     from fno.outstanding.core import append_question_event
 
@@ -119,6 +104,10 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         return ("duplicate", existing)
 
     ids = sorted(set(stalled_ids))
+    # The pointer rule, met from the run's own facts: the reign scope when it
+    # spells a node, plus every node id inside a stalled id. Shape only.
+    node = scope if is_wellformed_node_id(scope) else None
+    blocks = sorted({nid for raw in ids for nid in extract_node_ids(raw)})
     qid = f"q-{secrets.token_hex(4)}"
     append_question_event(
         operator_question(
@@ -132,9 +121,8 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
             # is dead by then, but the durable mail tier reaches its successor;
             # an asker-less row can only ever be answered into the void.
             asker=canonical_handle(session_id) if session_id else None,
-            # No node. A stalled row is queue-qualified (`undispatched:x-1234`)
-            # and not every queue holds backlog nodes, so any value here would
-            # be a guess. The question text names the rows instead.
+            node=node,
+            blocks=blocks or None,
         ),
         root,
     )

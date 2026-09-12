@@ -69,6 +69,10 @@ from fno.config._king import KING_GOAL_TEXT as KING_GOAL_TEXT
 from fno.config._king import KingBlock
 from fno.config._evals import EvalsBlock
 from fno.config._graph import GraphBlock
+# Shrink-only root: the ask surface (law d-59af3235) joined the word caps, so
+# the block moved to its own module and is re-exported under the name every
+# caller and test imports.
+from fno.config._word_cap import WordCapBlock as WordCapBlock
 # The keyed settings loader lives in fno.config._loader (this file is
 # shrink-only); re-exported under the names every caller and test imports.
 from fno.config._loader import _load_settings_at as _load_settings_at
@@ -1218,33 +1222,6 @@ def resolved_optional_apps(review: "ReviewBlock") -> list[str]:
         if login not in resolved:
             resolved.append(login)
     return resolved
-
-
-class WordCapBlock(BaseModel):
-    """Per-surface masked-word caps for style rule 7.
-
-    One number per surface that is read MID-TURN. The surface set itself lives
-    in `fno.style.CAPPED_SURFACES` and is not configurable: a project may move a
-    number here, and may never cap a surface the checker says is uncapped.
-
-    Bounds come from a validator, not from `Field(80, ge=1)`. A positional
-    default plus a constraint makes mypy resolve this class's `default_factory`
-    use below as `Callable[[], Never]`, and `fno.config` is held to mypy strict.
-    `MaintainBlock` above is the same shape for the same reason.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    mail: int = 80
-    encounter: int = 80
-
-    @field_validator("mail", "encounter")
-    @classmethod
-    def cap_is_positive(cls, v: int) -> int:
-        """A cap below one refuses every message, including its own refusal."""
-        if v < 1:
-            raise ValueError("config.style.word_cap.<surface> must be >= 1")
-        return v
 
 
 class StyleBlock(BaseModel):

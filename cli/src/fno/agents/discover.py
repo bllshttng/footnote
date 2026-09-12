@@ -2225,7 +2225,9 @@ def _alias_to_session_ids(token: str, name_map_path: Optional[Path]) -> tuple[li
     return hits, True
 
 
-def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, bool]:
+def _reachable_from_transcripts(
+    token: str, projects_dir: Path, *, scan_cache: "dict | None" = None
+) -> tuple[_Hits, bool]:
     """Session uuids whose transcript file exists on disk, matched on token.
 
     The transcript store is the broadest source: a session that ever ran wrote a
@@ -2237,14 +2239,20 @@ def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, 
     transcript store means no claude session ever ran under this HOME, so
     "nothing is reachable" is true rather than unknown. A directory that exists
     but cannot be read (permissions, EIO, a torn mount) IS a read failure --
-    that is the case where absence is unproven.
-
-    The distinction matters in both directions. Treating absent as unreadable
+    that is the case where absence is unproven. Treating absent as unreadable
     makes every typo queue durably on a host that has never run claude, which
-    strands envelopes and destroys the exit-16 typo guard. Treating a read
+    strands envelopes and destroys the exit-16 typo guard; treating a read
     ERROR as empty loses real mail.
+
+    ``scan_cache`` reuses one ``scan_files`` listing across tokens in a batch;
+    no cache rescans per token, unchanged.
     """
-    hits: _Hits = []
+    cache_key = "transcript_entries"
+    if scan_cache is not None and cache_key in scan_cache:
+        entries, ok = scan_cache[cache_key]
+        if not ok:
+            return [], False
+        return _match_transcript_entries(entries, token), True
     try:
         entries = [
             path
@@ -2256,7 +2264,16 @@ def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, 
             if path.parent != projects_dir
         ]
     except OSError:
+        if scan_cache is not None:
+            scan_cache[cache_key] = ([], False)
         return [], False
+    if scan_cache is not None:
+        scan_cache[cache_key] = (entries, True)
+    return _match_transcript_entries(entries, token), True
+
+
+def _match_transcript_entries(entries: "list[Path]", token: str) -> _Hits:
+    hits: _Hits = []
     seen: set[str] = set()
     for path in entries:
         sid = path.name[: -len(".jsonl")]
@@ -2265,7 +2282,7 @@ def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, 
             hits.append(
                 (sid, "claude", _decode_project_dir(path.parent.name), False, path)
             )
-    return hits, True
+    return hits
 
 
 def _token_matches(token: str, session_id: str) -> bool:
@@ -2287,24 +2304,33 @@ def _token_matches(token: str, session_id: str) -> bool:
     return session_handle_tier(token, session_id) is not None
 
 
-def _reachable_from_registry(token: str, registry_path: Optional[Path]) -> tuple[_Hits, bool]:
+def _reachable_from_registry(
+    token: str, registry_path: Optional[Path], *, scan_cache: "dict | None" = None
+) -> tuple[_Hits, bool]:
     """Registry rows including dead-pid and exited ones.
 
     An exited row is exactly the case the live lane drops and this lane keeps:
     the row is a durable record that this uuid exists, not a liveness claim.
-
-    Carries each row's harness through: the registry holds rows for every
-    provider, and waking a codex thread as claude would resume the wrong
-    session entirely.
+    Each row's harness rides through: waking a codex thread as claude would
+    resume the wrong session. ``scan_cache`` mirrors the transcript cache.
     """
     from fno.agents.registry import RegistryVersionError, load_registry
 
-    try:
-        entries = load_registry(registry_path)
-    except (OSError, ValueError, RegistryVersionError):
-        # A torn or version-drifted registry cannot be consulted. It reports
-        # unreadable rather than empty, so the aggregate can tell "this token
-        # is unknown" from "we could not look".
+    cache_key = "registry_entries"
+    if scan_cache is not None and cache_key in scan_cache:
+        entries, ok = scan_cache[cache_key]
+    else:
+        try:
+            entries = load_registry(registry_path)
+            ok = True
+        except (OSError, ValueError, RegistryVersionError):
+            # A torn or version-drifted registry cannot be consulted. It reports
+            # unreadable rather than empty, so the aggregate can tell "this token
+            # is unknown" from "we could not look".
+            entries, ok = [], False
+        if scan_cache is not None:
+            scan_cache[cache_key] = (entries, ok)
+    if not ok:
         return [], False
     hits: _Hits = []
     # (harness, normalized id), not the raw string: this source spans every
@@ -2485,6 +2511,8 @@ def resolve_reachable(
     registry_path: Optional[Path] = None,
     daemon_dir: Optional[Path] = None,
     name_map_path: Optional[Path] = None,
+    sources: "Iterable[str] | None" = None,
+    scan_cache: "dict | None" = None,
 ) -> tuple[Optional[ReachableSession], list[str]]:
     """Resolve ``token`` against the durable stores, ignoring liveness entirely.
 
@@ -2506,6 +2534,10 @@ def resolve_reachable(
     by a bad choice. Richer metadata wins on merge: sources are ordered by
     confidence, so the first source to contribute a uuid also supplies its
     agent, and a later source only fills a cwd the earlier one lacked.
+
+    ``sources`` consults only the named stores (same implementation, fewer
+    stores); ``scan_cache`` reuses one listing and registry read per batch.
+    Passing neither behaves exactly as before.
     """
     if not token or not token.strip():
         return None, []
@@ -2522,13 +2554,18 @@ def resolve_reachable(
     except RegistryVersionError:  # torn store: degrade, never a clean miss
         alias_sids, alias_ok, degraded = [], True, ["registry"]
 
-    sources = (
-        ("transcript", lambda t: _reachable_from_transcripts(t, pdir)),
+    # ``sources`` SUBSETS the consult order; it is the same implementation
+    # with fewer stores, never a second resolver. Unselected stores cannot
+    # appear in ``degraded``.
+    all_sources = (
+        ("transcript", lambda t: _reachable_from_transcripts(t, pdir, scan_cache=scan_cache)),
         ("harness-store", _reachable_from_harness_stores),
-        ("registry", lambda t: _reachable_from_registry(t, registry_path)),
+        ("registry", lambda t: _reachable_from_registry(t, registry_path, scan_cache=scan_cache)),
         ("roster", lambda t: _reachable_from_roster(t, daemon_dir)),
         ("graph", lambda t: _reachable_from_graph(t)),
     )
+    wanted = set(sources) if sources is not None else None
+    consult = [s for s in all_sources if wanted is None or s[0] in wanted]
     tokens = [token, *alias_sids]
 
     if not alias_ok:
@@ -2543,7 +2580,7 @@ def resolve_reachable(
     # a second local copy of it is how the two drift apart.
     found: dict[tuple[str, str], ReachableSession] = {}
     cwd_verbatim: dict[tuple[str, str], bool] = {}
-    for source, lookup in sources:
+    for source, lookup in consult:
         for tok in tokens:
             hits, read_ok = lookup(tok)
             if not read_ok:
