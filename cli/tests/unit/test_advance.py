@@ -2861,12 +2861,10 @@ def test_failover_racing_advances_dedup(iso, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# x-2716: both autonomous launchers consume ONE route decision.
-#
-# `backlog advance` and `fno agents dispatch` used to disagree - advance could walk the
-# combo onto another harness while dispatch could only defer or decline to
-# defer - so these pin that identical fixtures resolve to the identical
-# destination tuple, and that an unresolvable destination reaches neither spawn.
+# x-2716: the autonomous route decision. The second launcher it used to be
+# pinned against is gone (x-e53e): `fno agents dispatch` shells the ONE
+# launcher, so the identity question dissolved into structure. What survives
+# here is the refusal half - an unresolvable destination launches nothing.
 # ---------------------------------------------------------------------------
 
 
@@ -2874,7 +2872,9 @@ DISPATCH_NODE = {**NODE, "id": "ab-3333bbbb", "priority": "p2"}
 
 
 def _dispatch_one_capture(monkeypatch, tmp_path):
-    """Drive `fno agents dispatch`'s autonomous path, capturing its pane-spawn kwargs.
+    """Drive `fno agents dispatch`'s autonomous path, capturing its launch
+    shellout (x-e53e: the pane seam this helper used to capture is the spawn
+    door's now, covered by the door's own suites).
 
     Its own node id, so the sibling advance leg's live dispatch:<id> reservation
     does not read as this launcher already dispatching."""
@@ -2906,13 +2906,31 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
     from fno.agents import autonomous_route as ar
 
     monkeypatch.setattr(ar, "_healthy_alternate_exists", lambda: False)
+    # Unit seams beside the resolver: the grid consult, the name mint, and the
+    # launch cwd (the resolver and shellout are the subject, covered end to end
+    # in test_dispatch_one.py).
     monkeypatch.setattr(
-        dispatch_mod,
-        "dispatch_spawn_bounded_pane",
-        # `bound` too: the dispatcher's `launched` return reports whether the
-        # worker actually bound a session, not just whether a pane was created.
-        lambda **kw: captured.update(kw) or SimpleNamespace(pane_id="p1", bound=True),
+        "fno.backlog.advance._grid_lane_for",
+        lambda node, *, model=None, provider=None, verb=None: (None, None, None, None, None),
     )
+    monkeypatch.setattr(
+        "fno.backlog.advance._worker_agent_name",
+        lambda node_id, node_slug, *, source=None, verb_code="t": f"{verb_code}-{node_id}",
+    )
+    monkeypatch.setattr("fno.agents.naming.verb_code_for", lambda word: "t")
+    monkeypatch.setattr(
+        dispatch_mod, "_worktree_ensure_for_launch", lambda cwd, name, harness: str(cwd)
+    )
+
+    def fake_run(cmd, **kw):
+        captured.update({"cmd": cmd, **kw})
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"pane_id": "p1", "bound": True, "seed": "submitted"}) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", fake_run)
     try:
         verdict = dispatch_mod._dispatch_one(session="s", node=None, project=None)
     finally:
@@ -2923,75 +2941,22 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
     return verdict, captured
 
 
-def test_route_tuple_identical_across_launchers(iso, tmp_path, monkeypatch):
-    """AC6-CON: one node + config + quota fixture -> the same destination record
-    and harness on advance AND dispatch, each staging the credential at its own
-    launch boundary."""
-    env = {"CODEX_HOME": "/acct/codex"}
-    _force_exhausted(monkeypatch, "ccm")
-    _destination(monkeypatch, ("codex-acct", "codex", env))
-    # The codex surface rewrites bare /target only for a verb in the shipped
-    # roster. The roster resolves through resolve_plugin_script, which honors
-    # CLAUDE_PLUGIN_ROOT and CODEX_PLUGIN_ROOT ahead of FNO_REPO_ROOT; with no
-    # plugin-root var set (CI, and the hermetic sandbox, which scrubs them),
-    # it lands on FNO_REPO_ROOT, which `iso` points at this test's bare tmp
-    # dir: unreadable here by construction. Whether the read lands non-empty
-    # depends on a sibling test leaving the roster's cache warm
-    # (test_harness_map_roster clears it in a finally), which made this
-    # assertion an ordering flake. Pin the roster: the subject is
-    # cross-launcher identity, not cache warmth.
-    monkeypatch.setattr(
-        "fno.agents.harness_map.footnote_verbs", lambda: frozenset({"target"})
-    )
-    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    adv_captured: dict = {}
-    monkeypatch.setattr(
-        adv,
-        "_spawn_worker",
-        lambda node_id, node_cwd, node_slug=None, **kw: adv_captured.update(kw) or "sid",
-    )
-
-    assert adv.advance(project="fno", events_path=iso).decision == "dispatched"
-    verdict, disp_captured = _dispatch_one_capture(monkeypatch, tmp_path)
-
-    assert verdict["outcome"] == "launched"
-    assert adv_captured["provider"] == disp_captured["provider"] == "codex"
-    # Same destination RECORD on both launchers. They carry it differently on
-    # purpose: advance names the record on argv and lets the spawn front door
-    # stage the overlay at the launch boundary, while dispatch spawns the pane
-    # itself and hands the overlay straight to that seam. Neither puts the
-    # credential on a footnote wrapper's own environment (x-c33e).
-    assert adv_captured["dispatch_account"] == "codex-acct"
-    assert disp_captured["launch_account"] == "codex-acct"
-    assert disp_captured["account_env"] == env
-    # Codex takes its own command surface, never a raw claude slash verb.
-    assert disp_captured["message"] == f"$fno:target --no-merge {DISPATCH_NODE['id']}"
-    # Both launchers leave one post-spawn cutover receipt naming the same
-    # destination, triggering window, and reason.
-    for receipt in (
-        _events(iso)[0],
-        _events(tmp_path / ".fno" / "events.jsonl")[-1],
-    ):
-        assert receipt["type"] == "dispatch_failover"
-        d = receipt["data"]
-        assert (d["from"], d["to"], d["harness_to"]) == ("ccm", "codex-acct", "codex")
-        assert d["window"] == "exhausted" and d["reason"] == "exhausted-cutover"
-
-
 def test_unresolvable_harness_never_reaches_the_dispatch_spawn(tmp_path, monkeypatch):
     """AC5-FR: a destination whose harness cannot render a command is not
-    launched - the node stays dispatchable behind the defer floor."""
+    launched - the resolver refuses it and the verdict is failed, before any
+    subprocess fires."""
     import fno.dispatch as dispatch_mod
 
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, ("ghost-acct", "no-such-harness", {"X": "1"}))
-    monkeypatch.setattr(
-        dispatch_mod,
-        "dispatch_spawn_bounded_pane",
-        lambda **kw: pytest.fail("an unresolvable destination must not spawn"),
-    )
+
+    def no_launch(cmd, **kw):
+        pytest.fail("an unresolvable destination must not spawn")
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", no_launch)
     verdict, _ = _dispatch_one_capture(monkeypatch, tmp_path)
-    assert verdict["outcome"] == "quota-deferred"
+    assert verdict["outcome"] == "failed"
+    assert "no-such-harness" in (verdict.get("detail") or "")
 
 
 def test_quota_change_after_selection_cannot_rewrite_the_spawn(iso, monkeypatch):
