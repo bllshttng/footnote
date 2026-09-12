@@ -397,6 +397,57 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 9b. A crown's spawned children partition into alive vs unresolved liveness,
+# same rule as hooks/context-nudge.sh: a served "alive" word lists a child
+# under live workers, and anything else (missing, or the literal "unmeasured"
+# word liveness_sweep.rs can write) lists it separately as unresolved, never
+# silently among the alive - a broken reader must never clear the guard.
+# ---------------------------------------------------------------------------
+LIVENESS_BIN="$(mktemp -d -t canon-fake-fno-liveness-XXXXXX)"
+cat > "$LIVENESS_BIN/fno" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"agents registry-json"*)
+    echo '[
+      {"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"king-fixture"},
+      {"spawned_by_session":"c35abbca-bd2d-4407-8365-cf468baa7eea","name":"alive-child","status":"live","liveness":"alive"},
+      {"spawned_by_session":"c35abbca-bd2d-4407-8365-cf468baa7eea","name":"unmeasured-child","status":"live","liveness":"unmeasured"}
+    ]'
+    ;;
+  *"backlog epic status x-9e1e-fixture"*)
+    echo '{"children":[]}'
+    ;;
+  *"do pr list"*)
+    echo '[]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+chmod +x "$LIVENESS_BIN/fno"
+trap 'rm -rf "$TMP" "$FAKE_BIN" "$PORTFOLIO_BIN" "$LIVENESS_BIN"' EXIT
+
+LIVENESS_DOC="$TMP/liveness-canon.md"
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$LIVENESS_DOC" \
+  | env PATH="$LIVENESS_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
+if grep -q "^- .*alive-child" "$LIVENESS_DOC"; then
+  pass "liveness partition: alive child listed on a top-level live-worker line"
+else
+  fail "liveness partition: alive child missing from the live-worker lines"
+fi
+if grep -q "^- unresolved liveness:" "$LIVENESS_DOC" && grep -q "^  - .*unmeasured-child" "$LIVENESS_DOC"; then
+  pass "liveness partition: a served 'unmeasured' word lands under unresolved, not alive"
+else
+  fail "liveness partition: unmeasured-child missing from the unresolved sub-list"
+fi
+if grep -q "^- .*unmeasured-child" "$LIVENESS_DOC"; then
+  fail "liveness partition: unmeasured child leaked into a top-level alive line"
+else
+  pass "liveness partition: unmeasured child never lands in a top-level alive line"
+fi
+
+# ---------------------------------------------------------------------------
 # 10. A king hand-writes ONLY the two crown headings (the shape context-nudge.sh
 # now tells a king to write on a FIRST compaction, when the doc - and its
 # headings 1/2 - do not exist yet). The hook must bind each by heading text,

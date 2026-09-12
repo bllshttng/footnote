@@ -204,7 +204,7 @@ if command -v fno >/dev/null 2>&1; then
         # Active children this session spawned. Computed ONLY when crowned: the
         # orphan check below is crown-only, so scanning the registry for children
         # on every non-king Stop (the common case) is wasted work on a hot path.
-        # x-1b75: the stored `status` word lies (a dead row can read `live`
+        # The stored `status` word lies (a dead row can read `live`
         # indefinitely), so this reads the SERVED `liveness` field instead -
         # `fno agents registry-json` derives it from the freshness rule
         # (served_liveness.rs) and withholds a stale word as null. A row whose
@@ -213,69 +213,52 @@ if command -v fno >/dev/null 2>&1; then
         # folded into either the alive count or a dropped-dead bucket, so a
         # broken reader can never clear this guard by going quiet.
         if [[ -n "$CROWN_LEVEL" ]]; then
-            ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+            # One jq call per bucket, emitting the name list then the count as
+            # two output lines from the same filtered array - the count is
+            # `length` of the identical `select(...)`, so a second jq pass
+            # over the same JSON would only re-derive what the first already
+            # computed. `head`/`tail` split the two lines; no second parse.
+            _bucket=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
                 [.agents[] | select(
                     .spawned_by_session == $sid
                     and .liveness == "alive"
-                )] | map(.name) | join(", ")' \
+                )] | (map(.name) | join(", ")), length' \
                 2>/dev/null)
-            ORPHAN_COUNT=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
-                [.agents[] | select(
-                    .spawned_by_session == $sid
-                    and .liveness == "alive"
-                )] | length' \
-                2>/dev/null)
+            ORPHANS=$(printf '%s\n' "$_bucket" | head -n1)
+            ORPHAN_COUNT=$(printf '%s\n' "$_bucket" | tail -n1)
             case "$ORPHAN_COUNT" in ''|*[!0-9]*) ORPHAN_COUNT=0 ;; esac
-            ORPHAN_UNKNOWN=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+            _bucket=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
                 [.agents[] | select(
                     .spawned_by_session == $sid
                     and (.liveness != "alive" and .liveness != "dead")
-                )] | map(.name) | join(", ")' \
+                )] | (map(.name) | join(", ")), length' \
                 2>/dev/null)
-            ORPHAN_UNKNOWN_COUNT=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
-                [.agents[] | select(
-                    .spawned_by_session == $sid
-                    and (.liveness != "alive" and .liveness != "dead")
-                )] | length' \
-                2>/dev/null)
+            ORPHAN_UNKNOWN=$(printf '%s\n' "$_bucket" | head -n1)
+            ORPHAN_UNKNOWN_COUNT=$(printf '%s\n' "$_bucket" | tail -n1)
             case "$ORPHAN_UNKNOWN_COUNT" in ''|*[!0-9]*) ORPHAN_UNKNOWN_COUNT=0 ;; esac
-            UNLINKED_ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+            _bucket=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
                 [.agents[] | select(
                     ((.spawned_by_session // "") == "")
                     and ((.origin // "") != "operator")
                     and ((.crown_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
                     and .liveness == "alive"
-                )] | map(.name) | join(", ")' \
+                )] | (map(.name) | join(", ")), length' \
                 2>/dev/null)
-            UNLINKED_ORPHAN_COUNT=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
-                [.agents[] | select(
-                    ((.spawned_by_session // "") == "")
-                    and ((.origin // "") != "operator")
-                    and ((.crown_level // 0) == 0)
-                    and ((.session_id // .harness_session_id // "") != $sid)
-                    and .liveness == "alive"
-                )] | length' \
-                2>/dev/null)
+            UNLINKED_ORPHANS=$(printf '%s\n' "$_bucket" | head -n1)
+            UNLINKED_ORPHAN_COUNT=$(printf '%s\n' "$_bucket" | tail -n1)
             case "$UNLINKED_ORPHAN_COUNT" in ''|*[!0-9]*) UNLINKED_ORPHAN_COUNT=0 ;; esac
-            UNLINKED_UNKNOWN=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+            _bucket=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
                 [.agents[] | select(
                     ((.spawned_by_session // "") == "")
                     and ((.origin // "") != "operator")
                     and ((.crown_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
                     and (.liveness != "alive" and .liveness != "dead")
-                )] | map(.name) | join(", ")' \
+                )] | (map(.name) | join(", ")), length' \
                 2>/dev/null)
-            UNLINKED_UNKNOWN_COUNT=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
-                [.agents[] | select(
-                    ((.spawned_by_session // "") == "")
-                    and ((.origin // "") != "operator")
-                    and ((.crown_level // 0) == 0)
-                    and ((.session_id // .harness_session_id // "") != $sid)
-                    and (.liveness != "alive" and .liveness != "dead")
-                )] | length' \
-                2>/dev/null)
+            UNLINKED_UNKNOWN=$(printf '%s\n' "$_bucket" | head -n1)
+            UNLINKED_UNKNOWN_COUNT=$(printf '%s\n' "$_bucket" | tail -n1)
             case "$UNLINKED_UNKNOWN_COUNT" in ''|*[!0-9]*) UNLINKED_UNKNOWN_COUNT=0 ;; esac
         fi
     fi

@@ -127,11 +127,12 @@ RUST_CLIENT_VERBS = frozenset(
         "adopt",
         "attach",
         "logs",
-        # x-1b75: the daemon-free registry projection the hooks read. Reads the
-        # registry file client-side (load_registry_entries) and derives the
-        # served liveness pair with the vendored freshness rule. A client-side
-        # dispatch starts nothing, so the Stop hook's never-lazy-start promise
-        # still holds (the reason this verb once sat in the never-route set).
+        # registry-json: the daemon-free registry projection the hooks read.
+        # Reads the registry file client-side (load_registry_entries) and
+        # derives the served liveness pair with the vendored freshness rule.
+        # A client-side dispatch starts nothing, so the Stop hook's
+        # never-lazy-start promise still holds (the reason this verb once
+        # sat in the never-route set).
         "registry-json",
         # `host`/`promote` (interactive daemon PTY hosting) were retired at G4
         # (x-f54c); spawn a mux-hosted pane with `spawn --substrate pane`.

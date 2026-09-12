@@ -209,7 +209,7 @@ elif not crowned:
 else:
     crown = "level %s | scope %s" % (lvl if lvl is not None else "-", scp if scp is not None else "-")
 
-# x-1b75: the stored `status` word lies (a dead row can read `live`
+# The stored `status` word lies (a dead row can read `live`
 # indefinitely), so this reads the SERVED `liveness` field instead - `fno
 # agents registry-json` derives it from the freshness rule and withholds a
 # stale word as null. A row whose liveness is null (never measured, or stale

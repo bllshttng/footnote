@@ -767,8 +767,8 @@ fi
 rm -f "$FAKE_COUNTER"
 rm -rf "$COUNT_BINDIR"
 
-# === x-1b75: the liveness-primary partition, five cases each asserting the ==
-# === EXACT printed alive number - "fewer than the total" is not enough. =====
+# === The liveness-primary partition, six cases each asserting the EXACT ====
+# === printed alive number - "fewer than the total" is not enough. ==========
 # A synthetic registry: the king row is fixed, the children carry whatever
 # liveness shape the case needs. No case names bp-a238/bp-1939 (reaped from
 # the real registry days ago) or any other live specimen - every row here is

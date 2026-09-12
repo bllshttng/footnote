@@ -1,7 +1,7 @@
-//! `fno-agents registry-json` (x-1b75): the daemon-free registry projection
-//! the hooks read, with the served liveness pair layered on top of the
-//! stored eight-key row. Split out of `client_verbs.rs` rather than grown
-//! there: that file is over the 5,000-line budget and shrink-only.
+//! `fno-agents registry-json`: the daemon-free registry projection the hooks
+//! read, with the served liveness pair layered on top of the stored
+//! eight-key row. Split out of `client_verbs.rs` rather than grown there:
+//! that file is over the 5,000-line budget and shrink-only.
 
 use crate::client_verbs::{load_registry_entries, resume_session_id, to_python_json};
 use crate::paths::AgentsHome;
@@ -32,8 +32,9 @@ pub fn run_registry_json(rest: &[String], home: &AgentsHome) -> i32 {
 /// here by the vendored freshness rule (`served_liveness.rs`), never passed
 /// through raw -- past the window the word is withheld and the basis says
 /// why. A stored row's own `liveness` field is the measurement INPUT, not
-/// the served word; both served keys shadow it. Keys serialize in sorted
-/// order (no crate-wide `preserve_order`); consumers read by key.
+/// the served word; both served keys shadow it. Keys serialize in the
+/// `json!{}` macro's literal field order (`preserve_order` is on for this
+/// crate); consumers read by key, never by position.
 pub(crate) fn registry_json_logic(rows: &[Value]) -> Value {
     let agents: Vec<Value> = rows
         .iter()
