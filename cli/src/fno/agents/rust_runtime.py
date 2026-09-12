@@ -238,6 +238,11 @@ RUST_CLIENT_VERBS = frozenset(
         # passes every journal paths.event_journals resolves, then invokes
         # the binary directly (not via `fno agents` routing).
         "king-history",
+        # Reign ledger page renderer for `fno agents king ledger`: court JSON
+        # and the graph in, one HTML page out; Python resolves the court and
+        # the paths, then invokes the binary directly (not via `fno agents`
+        # routing).
+        "reign-ledger",
         # The delivery-slot resolver: payload JSON in, the answer out; Python
         # calls it via fno.route_slot_client (keeps the parity test in sync).
         "route-slot",

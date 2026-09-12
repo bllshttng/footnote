@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 
 def build_ledger_data(rows=None, *, fold_fn=None) -> dict:
@@ -28,12 +28,9 @@ def build_ledger_data(rows=None, *, fold_fn=None) -> dict:
 
 def default_ledger_path() -> Path:
     """``<state_dir>/reign.html``, the sibling of graph.html."""
-    try:
-        from fno import paths as _paths
+    from fno.graph._constants import _state_dir
 
-        return _paths.state_dir() / "reign.html"
-    except Exception:
-        return Path.home() / ".fno" / "reign.html"
+    return _state_dir() / "reign.html"
 
 
 def write_ledger(court: dict, path: Optional[Path] = None) -> Path:
@@ -47,6 +44,7 @@ def write_ledger(court: dict, path: Optional[Path] = None) -> Path:
             "the fno-agents binary was not found: the reign ledger page is "
             "rendered by the native reign-ledger verb"
         )
+    out = Path(path) if path is not None else default_ledger_path()
     fd, court_file = tempfile.mkstemp(suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -61,7 +59,7 @@ def write_ledger(court: dict, path: Optional[Path] = None) -> Path:
             "--generated",
             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "--out",
-            str(path),
+            str(out),
         ]
         proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=60)
     finally:
@@ -71,4 +69,4 @@ def write_ledger(court: dict, path: Optional[Path] = None) -> Path:
             pass
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"reign-ledger exited {proc.returncode}")
-    return path
+    return out
