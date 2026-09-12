@@ -53,6 +53,16 @@ class Footprint(NamedTuple):
     # Whole-machine census (x-d6ad AC10), beside the roster-scoped counts.
     machine_process_count: int = 0
     runnable_count: int = 0
+    # Masked unparsed-row evidence; unparsed_pids feeds the root arm (x-46cb).
+    unparsed_samples: tuple[UnparsedRow, ...] = ()
+    unparsed_pids: frozenset[int] = frozenset()
+
+
+class UnparsedRow(NamedTuple):
+    row: int
+    pid: int | None
+    reason: str
+    masked: str
 
 
 class Admission(NamedTuple):
@@ -226,6 +236,86 @@ def _attributed_command(command: str) -> bool:
     return names[0].startswith("python") and "fno-py" in names[1:]
 
 
+#: A token shaped like one of the row's numeric fields (pid, etime, %cpu,
+#: rss) prints verbatim in evidence; anything else is argv and is masked.
+_MASKED_TOKEN_RE = re.compile(r"^[0-9][0-9.:-]{0,15}$")
+_MASKED_ROW_MAX_CHARS = 120
+_MAX_UNPARSED_SAMPLES = 3
+
+#: Fixed evidence vocabulary for why a row failed. Never an exception string:
+#: `_elapsed_seconds` raises with the value repr, and on a non-row line that
+#: field holds argv, so raw text would leak what the mask hides (x-46cb).
+_UNPARSED_REASONS = frozenset({"field-count", "etime", "cpu", "rss", "pid"})
+
+
+def _mask_row(line: str) -> str:
+    """Mask a ps row for evidence output.
+
+    A ps row carries full argv and argv carries secrets, so only
+    numeric-shaped tokens print verbatim; every other token prints as
+    ``<tok:N>`` and a tail past the character cap collapses to a count.
+    Control bytes drop before tokenizing.
+    """
+    line = "".join(ch if ch.isprintable() else " " for ch in line)
+    # Room for the tail marker, so the finished sample still honors the cap.
+    budget = _MASKED_ROW_MAX_CHARS - len(" <+999999 tokens>")
+    pieces: list[str] = []
+    used = 0
+    tail_tokens = 0
+    for token in line.split():
+        piece = token if _MASKED_TOKEN_RE.match(token) else f"<tok:{len(token)}>"
+        width = len(piece) + (1 if pieces else 0)
+        if used + width > budget:
+            tail_tokens += 1
+            continue
+        pieces.append(piece)
+        used += width
+    if tail_tokens:
+        pieces.append(f"<+{tail_tokens} tokens>")
+    return " ".join(pieces)
+
+
+def _unparsed_reason(line: str, new_format: bool) -> str:
+    """Name the first field that failed, from the fixed vocabulary.
+
+    Re-derives the cause with the same casts the parse attempted, in parse
+    order. Runs only on rows that already failed, so the double work is
+    bounded by the bad-row count.
+    """
+    if new_format:
+        fields = line.split(None, 5)
+        if len(fields) != 6:
+            return "field-count"
+        probes = (
+            ("pid", fields[0]),
+            ("pid", fields[1]),
+            ("etime", fields[2]),
+            ("cpu", fields[3]),
+            ("rss", fields[4]),
+        )
+    else:
+        fields = line.split(None, 4)
+        if len(fields) != 5:
+            return "field-count"
+        probes = (
+            ("pid", fields[0]),
+            ("etime", fields[1]),
+            ("cpu", fields[2]),
+            ("rss", fields[3]),
+        )
+    for reason, value in probes:
+        try:
+            if reason == "etime":
+                _elapsed_seconds(value)
+                continue
+            number = int(value) if reason == "pid" or reason == "rss" else float(value)
+        except (TypeError, ValueError):
+            return reason
+        if number < 0:
+            return reason
+    return "field-count"
+
+
 def parse_footprint(
     ps_output: str,
     *,
@@ -241,6 +331,9 @@ def parse_footprint(
     """
     processes: dict[int, _Process] = {}
     unparsed_lines = 0
+    samples: list[UnparsedRow] = []
+    salvaged_pids: set[int] = set()
+    row_number = 0
     new_format = False
     new_state_format = False
 
@@ -254,6 +347,7 @@ def parse_footprint(
             # The state header varies by platform: STAT/STATE (BSD, macOS) or S (Linux).
             new_state_format = len(header) > 2 and header[2] in ("STAT", "STATE", "S")
             continue
+        row_number += 1
         try:
             # Shapes, newest first: (maxsplit, has_state, has_ppid). The first
             # that parses wins; an etime's colon never collides with a state.
@@ -286,6 +380,22 @@ def parse_footprint(
                 raise ValueError("invalid process fields")
         except (TypeError, ValueError):
             unparsed_lines += 1
+            salvaged: int | None
+            try:
+                salvaged = int(line.split(None, 1)[0])
+            except (TypeError, ValueError):
+                salvaged = None
+            if salvaged is not None:
+                salvaged_pids.add(salvaged)
+            if len(samples) < _MAX_UNPARSED_SAMPLES:
+                samples.append(
+                    UnparsedRow(
+                        row=row_number,
+                        pid=salvaged,
+                        reason=_unparsed_reason(line, new_format),
+                        masked=_mask_row(line),
+                    )
+                )
             continue
         processes[pid] = _Process(pid, ppid, elapsed, cpu_percent, rss, command, state)
 
@@ -395,6 +505,8 @@ def parse_footprint(
         measured_cpu_cores=measured_cpu_percent / 100,
         top=sustained,
         unparsed_lines=unparsed_lines,
+        unparsed_samples=tuple(samples),
+        unparsed_pids=frozenset(salvaged_pids),
         test_process_count=test_process_count,
         spare_pool_process_count=spare_pool_count,
         spare_pool_cpu_cores=spare_pool_cpu_percent / 100,
