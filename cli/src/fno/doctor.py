@@ -1331,24 +1331,13 @@ def _launch_agent_failures() -> dict[str, Any]:
 
 
 def _tool_bin_shims_report() -> dict[str, Any]:
-    """Advisory fno* shim scan of the tool bin (x-c911).
-
-    A dangling or temp-resolving link means an install staged its target
-    into a cleaned mktemp dir. Read-only here; the repair lives in the
-    install channels that already own filesystem mutation.
-    """
+    """Advisory fno* shim scan (x-c911); repair lives in the install channels."""
     try:
         from fno.setup.shim_check import scan
 
         return scan()
     except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
-        return {
-            "bin_dir": None,
-            "checked": 0,
-            "defects": [],
-            "healthy": True,
-            "error": "shim scan failed to run",
-        }
+        return {"healthy": True, "error": "shim scan failed to run"}
 
 
 # --------------------------------------------------------------------------

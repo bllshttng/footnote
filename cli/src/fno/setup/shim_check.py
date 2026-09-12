@@ -1,10 +1,9 @@
-"""fno shims must never dangle into a cleaned mktemp dir.
+"""fno shims must never dangle into a cleaned mktemp dir (x-c911).
 
-On 2026-09-12 five fno shims in ~/.local/bin were symlinks into a mktemp
-staging dir (`<tmp>/tools/fno/bin/`); when the staged install was cleaned,
-every gh read in the fleet degraded to cache (x-c911). This module scans the
-tool bin for fno* symlinks that dangle or resolve under a temp root, and
-repoints them to the durable uv tools copy.
+Five shims in ~/.local/bin were links into a cleaned mktemp staging dir and
+every gh read degraded. This scans the tool bin for fno* symlinks that
+dangle or resolve under a temp root, and repoints them to the durable
+uv tools copy (`python -m fno.setup.shim_check [--repair] [--bin-dir D]`).
 """
 
 from __future__ import annotations
@@ -23,11 +22,10 @@ def _temp_root() -> str:
 
 
 def scan(bin_dir: Path | None = None) -> dict:
-    """Report every fno* symlink defect in bin_dir.
+    """Report every fno* symlink defect in bin_dir (dangling or temp-resolving).
 
-    A defect is a link whose target is missing (dangling) or resolves under
-    the system temp root. Unrelated links stay out: the fno prefix is the
-    scope, so a broken third-party link is never this installer's finding.
+    Unrelated links stay out: the fno prefix is the scope, so a broken
+    third-party link is never this installer's finding.
     """
     directory = Path(bin_dir) if bin_dir else DEFAULT_BIN_DIR
     temp_root = _temp_root()
@@ -37,8 +35,7 @@ def scan(bin_dir: Path | None = None) -> dict:
         if not entry.is_symlink():
             continue
         checked += 1
-        raw = os.readlink(entry)
-        target = Path(raw)
+        target = Path(os.readlink(entry))
         if not target.is_absolute():
             target = entry.parent / target
         resolved = target.resolve()
@@ -67,11 +64,7 @@ def _defect(link: Path, resolved: Path, problem: str) -> dict:
 
 
 def repair(defects: list[dict]) -> list[str]:
-    """Repoint repairable defects to the durable copy; return what still fails.
-
-    The repoint is atomic: a temp symlink in the link's own dir, then
-    os.replace, so a reader never sees the link absent.
-    """
+    """Repoint repairable defects to the durable copy; return what still fails."""
     remaining: list[str] = []
     for defect in defects:
         durable = defect.get("repair")
@@ -84,7 +77,7 @@ def repair(defects: list[dict]) -> list[str]:
         tmp = link.with_name(f".{link.name}.relink.{os.getpid()}")
         try:
             tmp.symlink_to(durable)
-            os.replace(tmp, link)
+            os.replace(tmp, link)  # atomic: a reader never sees the link absent
         except OSError as exc:
             remaining.append(f"{defect['name']}: relink failed: {exc}")
         finally:
@@ -100,20 +93,15 @@ def main(argv: list[str] | None = None) -> int:
         bin_dir = Path(args[args.index("--bin-dir") + 1])
     report = scan(bin_dir)
     for defect in report["defects"]:
-        print(
-            f"shim defect: {defect['name']} -> {defect['target']} "
-            f"({defect['problem']})"
-        )
+        print(f"shim defect: {defect['name']} -> {defect['target']} ({defect['problem']})")
     if do_repair and report["defects"]:
-        remaining = repair(report["defects"])
-        for line in remaining:
+        for line in repair(report["defects"]):
             print(f"shim unrepairable: {line}")
         report = scan(bin_dir)
     if not report["healthy"]:
         print(
             f"shim scan: {len(report['defects'])} defect(s) in {report['bin_dir']}; "
-            "re-run with --repair, or relink to "
-            f"{UV_TOOL_FNO_BIN}",
+            f"re-run with --repair, or relink to {UV_TOOL_FNO_BIN}",
             file=sys.stderr,
         )
         return 1

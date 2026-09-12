@@ -11680,6 +11680,24 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let bounded = |dry: u64, waiting: &str| {
         bound_breached(history.total, dry, manifest.max_iterations, waiting)
     };
+    // The shared spine of both blind-board blocks: bounded first, then the
+    // quiet emit, then the block. `dry` stays a parameter because the quiet
+    // branch re-streaks it after a shrinking read.
+    let blind_block = |message: &str, actionable: i64, dry: u64| -> (i32, String) {
+        if let Some(b) = bounded(dry, message) {
+            return terminate(b.reason, &b.message, 0, b.fires, &[]);
+        }
+        emit(
+            "king_loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "actionable": actionable,
+                "actionable_ids": [],
+                "cleared": false,
+            }),
+        );
+        (0, king_output("block", None, message, actionable, dry + 1))
+    };
 
     let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
         Ok(b) => b,
@@ -11712,69 +11730,20 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     };
 
     if board.actionable < 0 {
-        // x-c911: a board with a blind ACTIONABLE queue reports actionable -1
-        // (count unknown), never a number that reads as rows. Block, bounded,
-        // naming the blind queue; a negative count must never render as rows.
-        if let Some(b) = bounded(
-            dry,
-            "actionable count unknown: an actionable queue is unreadable",
-        ) {
-            return terminate(b.reason, &b.message, 0, b.fires, &[]);
-        }
-        emit(
-            "king_loop_check",
-            serde_json::json!({
-                "session_id": session_id,
-                "actionable": -1,
-                "actionable_ids": [],
-                "cleared": false,
-            }),
-        );
-        return (
-            0,
-            king_output(
-                "block",
-                None,
-                &format!(
-                    "board actionable count unknown ({} unreadable, {} over budget): {}",
-                    board.unreadable,
-                    board.over_budget,
-                    board
-                        .top_row
-                        .clone()
-                        .unwrap_or_else(|| { "the board named no failing queue".to_string() })
-                ),
-                -1,
-                dry + 1,
-            ),
-        );
+        // x-c911: -1 is "unknown", never a row count; the message names the
+        // blind queue.
+        let message = crate::king_termination::blind_count_message(&board);
+        return blind_block(&message, -1, dry);
     }
 
     if board.actionable == 0 {
         if board.operator_questions_unreadable {
             // Bounded, and each blocking fire emits its row so the counters
             // advance; the old return left both frozen and blocked forever.
-            if let Some(b) = bounded(dry, "outstanding operator questions are unreadable") {
-                return terminate(b.reason, &b.message, 0, b.fires, &[]);
-            }
-            emit(
-                "king_loop_check",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "actionable": 0,
-                    "actionable_ids": [],
-                    "cleared": false,
-                }),
-            );
-            return (
+            return blind_block(
+                "board clean but outstanding operator questions are unreadable; blocking completion",
                 0,
-                king_output(
-                    "block",
-                    None,
-                    "board clean but outstanding operator questions are unreadable; blocking completion",
-                    0,
-                    dry + 1,
-                ),
+                dry,
             );
         }
         let open_question = board

@@ -94,6 +94,20 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
     })
 }
 
+/// The x-c911 unknown-count message: -1 means a blind actionable queue, so
+/// the board has no row count to name and the failure rides instead.
+pub(crate) fn blind_count_message(board: &KingBoard) -> String {
+    format!(
+        "board actionable count unknown ({} unreadable, {} over budget): {}",
+        board.unreadable,
+        board.over_budget,
+        board
+            .top_row
+            .clone()
+            .unwrap_or_else(|| "the board named no failing queue".to_string())
+    )
+}
+
 pub(crate) fn read_king_board(
     fno_bin: &str,
     cwd: &Path,
