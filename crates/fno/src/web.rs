@@ -568,7 +568,7 @@ async fn backlog_response(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            format!("backlog not rendered; run {render_hint}"),
+            format!("page not rendered; run {render_hint}"),
         )
             .into_response(),
         Err(err) => (
