@@ -330,7 +330,7 @@ def stranded_board(tmp_path, monkeypatch):
     # (what merged is not this test's subject).
     import fno.graph._reconcile as rec
 
-    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None, listings=None: [])
     return graph_path
 
 

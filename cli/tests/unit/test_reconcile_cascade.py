@@ -111,7 +111,7 @@ def merged_pr(monkeypatch: pytest.MonkeyPatch):
     """
     import fno.graph._reconcile as rec
 
-    def _scan(entries, node_id=None):
+    def _scan(entries, node_id=None, listings=None):
         return [rec.MergeDriftRecord(
             node_id=UNIT,
             plan_path=PLAN,
@@ -468,7 +468,7 @@ def test_clean_graph_still_reports_in_sync(world, merged_pr, monkeypatch):
     """The new accumulator must not turn a no-op sweep into a noisy one."""
     import fno.graph._reconcile as rec
 
-    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None, listings=None: [])
     result = _reconcile()
     assert result.exit_code == 0
     assert "in sync" in result.output
@@ -526,7 +526,7 @@ def test_reconcile_heals_a_stranded_contained_node_with_no_drift(world, monkeypa
             e["completed_at"] = "2026-07-28T00:00:00+00:00"
             e["cost_usd"] = 18.22
     write(entries)
-    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None, listings=None: [])
 
     result = _reconcile()
     assert result.exit_code == 0
@@ -553,7 +553,7 @@ def test_heal_is_full_sweep_only(world, monkeypatch, dispatches):
         if e["id"] == UNIT:
             e["completed_at"] = "2026-07-28T00:00:00+00:00"
     write(entries)
-    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None, listings=None: [])
 
     assert _reconcile("--node", DEP).exit_code == 0
     assert read()[KID_A]["completed_at"] is None
@@ -569,7 +569,7 @@ def test_heal_is_previewed_by_dry_run_and_mutates_nothing(world, monkeypatch,
         if e["id"] == UNIT:
             e["completed_at"] = "2026-07-28T00:00:00+00:00"
     write(entries)
-    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None, listings=None: [])
 
     result = _reconcile("--dry-run")
     assert result.exit_code == 0
@@ -587,7 +587,7 @@ def test_heal_is_idempotent_across_repeated_sweeps(world, monkeypatch, dispatche
         if e["id"] == UNIT:
             e["completed_at"] = "2026-07-28T00:00:00+00:00"
     write(entries)
-    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None, listings=None: [])
 
     assert _reconcile().exit_code == 0
     first = read()[KID_A]["completed_at"]
@@ -692,7 +692,7 @@ def test_heal_only_sweep_does_not_claim_there_were_PRs(world, monkeypatch,
         if e["id"] == UNIT:
             e["completed_at"] = "2026-07-28T00:00:00+00:00"
     write(entries)
-    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None, listings=None: [])
 
     out = _reconcile().output
     assert "Closed 0 node(s)" not in out

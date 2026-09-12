@@ -563,7 +563,7 @@ def test_condition_C_holds_open_on_reconcile(routed, tmp_path, monkeypatch):
         lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=None),
     )
 
-    def _scan(entries, node_id=None):
+    def _scan(entries, node_id=None, listings=None):
         return [rec.MergeDriftRecord(
             node_id="ab-prom01",
             plan_path=plan,
@@ -611,7 +611,7 @@ def _outage_world(g: Path, tmp_path: Path, monkeypatch, node_id: str = "ab-out01
 def _reconcile_scan(monkeypatch, held_id: str, plan: str):
     import fno.graph._reconcile as rec
 
-    def _scan(entries, node_id=None):
+    def _scan(entries, node_id=None, listings=None):
         return [rec.MergeDriftRecord(
             node_id=held_id,
             plan_path=plan,
@@ -769,7 +769,7 @@ def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch
     # reconcile: stub the scan to mark x-d3 closeable.
     import fno.graph._reconcile as rec
 
-    def _scan(entries, node_id=None):
+    def _scan(entries, node_id=None, listings=None):
         return [rec.MergeDriftRecord(
             node_id="ab-d3", plan_path=str(plan), pr_number=42,
             pr_url="https://github.com/o/r/pull/42", pr_state="MERGED",
@@ -825,7 +825,7 @@ def test_condition_D_refuses_on_all_three_verbs(routed, tmp_path, monkeypatch):
     assert CliRunner().invoke(app, ["done", "ab-dc2", "--pr", "42"]).exit_code == 6
     assert _node(routed, "ab-dc2").get("completed_at") is None
 
-    def _scan(entries, node_id=None):
+    def _scan(entries, node_id=None, listings=None):
         return [rec.MergeDriftRecord(
             node_id="ab-dc3", plan_path=str(plan), pr_number=42,
             pr_url="https://github.com/o/r/pull/42", pr_state="MERGED",
