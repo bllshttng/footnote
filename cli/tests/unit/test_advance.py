@@ -3888,3 +3888,223 @@ def test_undispatched_observer_normal_answer_returned_unchanged(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
 
     assert adv._undispatched_nodes("fno") == receipt
+
+
+# ---------------------------------------------------------------------------
+# x-4138: advance says what it dropped, and never exits 0 into silence
+# ---------------------------------------------------------------------------
+
+_SPAWN_NOTE = (
+    "fno agents spawn: route skipped (the caller passed --provider 'zai'); "
+    "agents.profiles.target.lanes[0].route 'zai/glm-5.3-flash[1m]' NOT applied "
+    "- this worker bills at the caller default"
+)
+
+
+def _output(r) -> str:
+    """stdout + stderr, tolerant of Click's mix_stderr version differences."""
+    out = r.stdout or ""
+    try:
+        out += r.stderr or ""
+    except (ValueError, AttributeError):
+        pass  # stderr not separately captured on this Click version
+    return out
+
+
+def _streams_runner():
+    """A runner whose .stdout is stdout only, on every Click version: click 8.1
+    merges the streams unless mix_stderr=False; 8.2+ removed the flag and
+    always separates them."""
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:
+        return CliRunner()
+
+
+def _fake_seam_run(stderr):
+    """A subprocess.run stub answering the spawn door with a launch receipt
+    plus the seam stderr under test (name verbs ride the real binary)."""
+    def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
+        return _FakeProc(0, _RECEIPT, stderr)
+    return fake_run
+
+
+def _run_epic(monkeypatch, result):
+    """Drive run_advance_epic against a canned advance_epic outcome through a
+    one-command typer app, so the echo/exit contract is read from the runner,
+    not from the test's own hands."""
+    import typer as _typer
+
+    stub = result if callable(result) else (lambda *a, **k: result)
+    monkeypatch.setattr(adv, "advance_epic", stub)
+    app = _typer.Typer()
+
+    @app.command()
+    def _epic():
+        adv.run_advance_epic(
+            "x-EPIC", stop=False, max_dispatch=None, json_out=False,
+            verbose=False, model=None, provider=None,
+        )
+
+    return _streams_runner().invoke(app, [])
+
+
+def test_spawn_worker_harvests_seam_receipt_from_stderr(monkeypatch):
+    """AC1-HP: the seam's suppression receipt survives a successful launch -
+    matched on the `fno agents spawn: ` prefix, never an allowlist of message
+    shapes (spawn_axes.rs owns the prefix as its one spelling)."""
+    receipt: dict = {}
+    monkeypatch.setattr(
+        adv.subprocess, "run",
+        _fake_seam_run(f"noise before\n{_SPAWN_NOTE}\nnoise after\n"),
+    )
+    sid = adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt)
+
+    assert sid == "abc12345"
+    assert receipt["notes"] == (_SPAWN_NOTE,)
+    assert any("NOT applied" in n for n in receipt["notes"])
+
+
+def test_spawn_worker_note_harvest_caps_at_twenty(monkeypatch):
+    """A pathological spawn must not turn one advance line into a screenful."""
+    receipt: dict = {}
+    flood = "\n".join(f"fno agents spawn: axis {i} ignored" for i in range(25))
+    monkeypatch.setattr(adv.subprocess, "run", _fake_seam_run(flood))
+
+    adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt)
+
+    assert len(receipt["notes"]) == 20
+
+
+def test_advance_carries_notes_onto_result_and_event(iso, monkeypatch):
+    """AC1-HP: the harvested note rides AdvanceResult.notes and the
+    advance_dispatched event - the durable half, readable after the scroll."""
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv.subprocess, "run", _fake_seam_run(_SPAWN_NOTE + "\n"))
+
+    res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    assert res.decision == "dispatched"
+    assert any("NOT applied" in n for n in res.notes)
+    dispatched = [e for e in _events(iso) if e["type"] == "advance_dispatched"]
+    assert len(dispatched) == 1
+    assert any("NOT applied" in n for n in dispatched[0]["data"]["notes"])
+
+
+def test_board_advance_prints_notes_under_the_decision_line(iso, monkeypatch):
+    """AC1-HP print half: the `dispatched ...` verdict is followed by one
+    `advance: <note>` line per seam message."""
+    monkeypatch.setattr(
+        adv, "advance",
+        lambda *a, **k: adv.AdvanceResult(
+            "dispatched", adv.EVENT_DISPATCHED, node_id="ab-2222aaaa",
+            short_id="abc12345", notes=(_SPAWN_NOTE,),
+        ),
+    )
+    from fno.cli import app as cli_app
+
+    r = _streams_runner().invoke(cli_app, ["backlog", "advance"])
+
+    assert r.exit_code == 0
+    assert f"advance: {_SPAWN_NOTE}" in (r.stdout or "")
+
+
+def test_board_advance_json_carries_notes(iso, monkeypatch):
+    """The --json payload carries the receipt too - the scripted-caller lane."""
+    monkeypatch.setattr(
+        adv, "advance",
+        lambda *a, **k: adv.AdvanceResult(
+            "dispatched", adv.EVENT_DISPATCHED, node_id="ab-2222aaaa",
+            short_id="abc12345", notes=(_SPAWN_NOTE,),
+        ),
+    )
+    from fno.cli import app as cli_app
+
+    r = _streams_runner().invoke(cli_app, ["backlog", "advance", "--json"])
+
+    assert r.exit_code == 0
+    assert json.loads(r.stdout)["notes"] == [_SPAWN_NOTE]
+
+
+def test_quiet_spawn_stays_quiet(iso, monkeypatch):
+    """AC3-EDGE: no seam line -> empty notes and no new output; a clean spawn
+    never grows a blank line or an empty notes label."""
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv.subprocess, "run", _fake_seam_run("plain stderr noise\n"))
+
+    res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    assert res.decision == "dispatched" and res.notes == ()
+    dispatched = [e for e in _events(iso) if e["type"] == "advance_dispatched"]
+    assert dispatched[0]["data"]["notes"] == []
+
+
+def test_unreadable_stderr_never_wedges_the_launch(monkeypatch):
+    """AC6-ERR: stderr is None (nothing to read at all) - the dispatch still
+    returns its launch identity and notes stay empty. The launch happened; the
+    receipt read never raises past it."""
+    receipt: dict = {}
+    monkeypatch.setattr(adv.subprocess, "run", _fake_seam_run(None))
+
+    sid = adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt)
+
+    assert sid == "abc12345" and receipt["notes"] == ()
+
+
+@pytest.mark.parametrize("err", ["disabled", "walker-live", "graph-error: journal locked"])
+def test_epic_verdict_errors_reach_stdout(monkeypatch, err):
+    """AC4-EDGE: a verdict error exits 0 with a NAMED stdout line. These used
+    to render stderr-only, leaving stdout empty and byte-identical to a
+    swallowed crash."""
+    r = _run_epic(monkeypatch, adv.AdvanceEpicResult("x-EPIC", error=err))
+
+    assert r.exit_code == 0
+    assert f"epic x-EPIC: {err}" in (r.stdout or "")
+
+
+def test_epic_unexpected_error_names_the_failure_on_stdout(monkeypatch):
+    """AC4-EDGE: the injected-exception path keeps its stderr detail and gains
+    one stdout verdict line."""
+    def boom(*a, **k):
+        raise RuntimeError("journal wedged")
+
+    r = _run_epic(monkeypatch, boom)
+
+    assert r.exit_code == 0
+    assert "epic x-EPIC: failed reason=unexpected-error" in (r.stdout or "")
+    assert "journal wedged" in _output(r)
+
+
+@pytest.mark.parametrize("refusal", ["no-such-node", "not-a-container"])
+def test_epic_refusals_still_exit_nonzero_on_stderr(monkeypatch, refusal):
+    """AC5-EDGE (the AC4 control): a bad invocation still fails - exit 1, the
+    refusal on stderr, never absorbed into the stdout verdict channel."""
+    r = _run_epic(monkeypatch, adv.AdvanceEpicResult("x-EPIC", error=refusal))
+
+    assert r.exit_code == 1
+    assert refusal in (r.stderr or "")
+    assert refusal not in (r.stdout or "")
+
+
+def test_epic_notes_attribute_to_the_dispatched_child(monkeypatch):
+    """AC2-HP: a suppressed child's note prints under ITS node id; the quiet
+    sibling contributes none."""
+    loud = adv.AdvanceResult("dispatched", adv.EVENT_DISPATCHED,
+                             node_id="x-1", short_id="s1", notes=(_SPAWN_NOTE,))
+    quiet = adv.AdvanceResult("dispatched", adv.EVENT_DISPATCHED,
+                              node_id="x-2", short_id="s2")
+    canned = adv.AdvanceEpicResult("x-EPIC", dispatched=("x-1", "x-2"),
+                                   child_results=(loud, quiet))
+
+    r = _run_epic(monkeypatch, canned)
+
+    out = r.stdout or ""
+    assert "epic x-EPIC: dispatched 2" in out
+    assert f"epic x-EPIC: x-1: {_SPAWN_NOTE}" in out
+    assert "x-2:" not in out
+    children = canned.receipt()["children"]
+    assert children[0]["notes"] == [_SPAWN_NOTE]
+    assert children[1]["notes"] == []

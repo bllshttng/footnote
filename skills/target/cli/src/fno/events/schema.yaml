@@ -4154,6 +4154,11 @@ event_types:
           type: string
           enum: [env, config, default, autonomy]
           description: "The precedence rank that supplied config.auto_continue's armed value for this decision: env = FNO_AUTO_CONTINUE override, config = settings.yaml, default = neither set (false) (x-aaaf wave 1, AC3-HP). autonomy = the config.autonomy.enabled master panic switch vetoed it, checked before env even (x-aaaf wave 3, AC4-HP). Answers 'what armed this' from the log without inference."
+        notes:
+          type: array
+          items:
+            type: string
+          description: "Spawn-seam receipt lines the launch printed on stderr, each starting 'fno agents spawn: ' (x-4138): route/effort/substrate suppressions naming every axis the seam did NOT apply, so a dropped model pin is legible after the fact. Empty on a quiet spawn. The durable copy - stdout scrolls away, this row answers 'was this worker's pin dropped?' about a dispatch nobody watched."
     consumers: [operator]
 
   - name: advance_skipped

@@ -269,6 +269,7 @@ def _dispatch_reconcile(
         "kind": "reconcile",
         # The exact registered rd-t-* name from the spawn receipt (x-84b2).
         "agent_name": spawn_receipt.get("agent_name", ""),
+        "notes": list(spawn_receipt.get("notes") or ()),
     }
     if rank:
         dispatched_data["rank"] = rank
@@ -277,7 +278,13 @@ def _dispatch_reconcile(
         import sys
 
         print(f"reconcile: dispatched {node_id} -> worker {short_id}", file=sys.stderr)
-    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+    return AdvanceResult(
+        "dispatched",
+        EVENT_DISPATCHED,
+        node_id=node_id,
+        short_id=short_id,
+        notes=tuple(spawn_receipt.get("notes") or ()),
+    )
 
 
 def _route_one(
