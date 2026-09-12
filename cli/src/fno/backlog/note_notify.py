@@ -1,9 +1,8 @@
 """Deliver a `fno backlog note` to the people bound to the node.
 
 Resolution runs BEFORE the append: nobody bound, or a fault, refuses and writes
-nothing. Contract in docs/architecture/backlog-graph-verb-contracts.md. Beside
-``advance`` because it reads the graph AND the agent runtime; the core layer may
-not import it.
+nothing. Contract: docs/architecture/backlog-graph-verb-contracts.md. Beside
+``advance`` because it reads the graph AND the agent runtime.
 """
 from __future__ import annotations
 
@@ -98,9 +97,8 @@ def note_readers(
     self_session: Optional[str] = None,
 ) -> NoteReaders:
     """Every bound reader for one note; the author is named, never mailed. The
-    worker chain runs for the node and again for its owner, first arm wins; the
-    crown walk goes outward, first live crown wins. ``rows`` is the caller's
-    registry read; ``None`` reads the machine's once."""
+    worker chain runs per subject (node, then owner), first arm wins; the crown
+    walk goes outward, first live crown wins. ``rows=None`` reads the machine's."""
     from fno.agents.registry import live_row_holding_session_id, load_registry
     from fno.claims.core import holder_agent_name
     from fno.harness_identity import OWNERSHIP_LIVE_STATUSES, session_identity_key
@@ -124,14 +122,13 @@ def note_readers(
             return False
         row = next((r for r in registry_rows if r.name == resolved), None)
         if self_key is not None:
+            sid = getattr(row, "harness_session_id", None) if row else None
             # A row-backed address decides by identity key; endswith stands
             # only when no row is behind the name.
-            sid = getattr(row, "harness_session_id", None) if row else None
-            author = (
-                session_identity_key(sid) == self_key
-                if isinstance(sid, str) and sid
-                else resolved.endswith(self_session or "") or address.endswith(self_session)
-            )
+            if isinstance(sid, str) and sid:
+                author = session_identity_key(sid) == self_key
+            else:
+                author = resolved.endswith(self_session or "") or address.endswith(self_session)
             if author:
                 author_bound = author_bound or why
                 return False
@@ -140,8 +137,7 @@ def note_readers(
         return True
 
     def bound_row(value: str) -> Optional[Any]:
-        """The ownership-live row behind a graph binding: by resolved name,
-        else by the value's session identity."""
+        """The ownership-live row behind a graph binding, by name or identity."""
         name = holder_agent_name(value, registry_rows)
         return next(
             (r for r in registry_rows
@@ -160,11 +156,9 @@ def note_readers(
                 readings.append(f"graph {field}: none")
                 continue
             row = bound_row(value)
-            if row is None:
-                readings.append(f"graph {field}: {value} names no live row")
-                continue
-            readings.append(f"graph {field}: {value} -> {row.name}")
-            if add(row.name, f"session bound to {subject} (graph {field})"):
+            suffix = f"-> {row.name}" if row else "names no live row"
+            readings.append(f"graph {field}: {value} {suffix}")
+            if row and add(row.name, f"session bound to {subject} (graph {field})"):
                 return
         named = sorted(
             (r for r in registry_rows if getattr(r, "node", None) == subject_id
@@ -220,8 +214,7 @@ def _refused(head: str, readings: list[str] = ()) -> Refused:
 
 def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refused:
     """Resolve the readers BEFORE the append; a Refused must be surfaced. A
-    fault refuses for the reason a vacancy does: neither proves anyone would
-    be told."""
+    fault refuses as a vacancy does: neither proves anyone would be told."""
     from fno.agents.registry import load_registry
     from fno.graph._intake import _find_node
     from fno.graph.store import read_graph

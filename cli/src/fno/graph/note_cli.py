@@ -25,9 +25,7 @@ def cmd_note(
         help="Read the note text from a file ('-' = stdin). Same length guidance applies.",
     ),
     quiet: bool = typer.Option(
-        False,
-        "--quiet",
-        "-q",
+        False, "--quiet", "-q",
         help="Write it, mail nobody: the acknowledgment when the verb would refuse.",
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
@@ -78,15 +76,12 @@ def cmd_note(
         note["source_harness"] = identity.harness
     from fno.backlog.note_notify import Refused, readers_before_append
 
-    # Refuse BEFORE the append: a note nobody bound would hear is a silent
-    # drop wearing a receipt, so it costs the write instead.
-    readers = None
-    if not quiet:
-        resolved = readers_before_append(task_id, graph_cli._graph_path())
-        if isinstance(resolved, Refused):
-            typer.echo(resolved.message, err=True)
-            raise typer.Exit(code=resolved.exit_code)
-        readers = resolved
+    # Refuse BEFORE the append: an unread note is a silent drop wearing a receipt.
+    resolved = None if quiet else readers_before_append(task_id, graph_cli._graph_path())
+    if isinstance(resolved, Refused):
+        typer.echo(resolved.message, err=True)
+        raise typer.Exit(code=resolved.exit_code)
+    readers = resolved
     found, _ = append_progress_note(
         graph_cli._graph_path(), readers.node_id if readers is not None else task_id, note
     )

@@ -1557,8 +1557,7 @@ def live_row_holding_session_id(
     The one ownership match loop: the ownership-live status filter plus the
     identity-key comparison, shared by every caller that must read the row
     itself (:func:`row_owning_session_id` reports the row's name; the owned-
-    identity prover reads its harness). ``rows`` is a caller's read, so a
-    resolver holding a registry snapshot never reloads the machine's. Degrades
+    identity prover reads its harness). ``rows`` is a caller's read. Degrades
     to None on an absent, unreadable, or alien-shape registry, the same
     contract as the detector.
     """
