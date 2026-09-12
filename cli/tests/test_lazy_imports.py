@@ -1012,6 +1012,54 @@ def test_import_hook_does_not_retry_a_module_that_is_absent(monkeypatch):
     assert "fno doctor" in message
 
 
+def test_import_hook_stays_reachable_from_other_threads_during_a_wait(monkeypatch):
+    """The recursion stop is per-thread: one thread parked inside the bounded
+    wait must not silence another thread's guard. A plain class flag held for
+    the whole wait would return None for the second thread and hand it the
+    bare error the guard exists to replace."""
+    import threading
+
+    import fno
+
+    finder = _installed_finder()
+    release = threading.Event()
+    consulted: list[tuple[str, str]] = []
+
+    def slow_helper(name):
+        if name.endswith(".a"):
+            consulted.append(("wait", name))
+            release.wait(2)
+            return True
+        consulted.append(("quick", name))
+        return True
+
+    monkeypatch.setattr(fno, "_module_appears_on_disk", slow_helper)
+    seen: list[str] = []
+    _spy_path_finder(monkeypatch, seen)
+
+    a_result: list = []
+    thread_a = threading.Thread(
+        target=lambda: a_result.append(finder.find_spec("fno.a", None, None))
+    )
+    thread_a.start()
+    deadline = threading.Event()
+    for _ in range(100):
+        if ("wait", "fno.a") in consulted:
+            break
+        deadline.wait(0.02)
+    assert ("wait", "fno.a") in consulted, "thread A never reached the wait"
+
+    # Thread A is parked inside its budget, recursion flag set on ITS local.
+    b_result = finder.find_spec("fno.b", None, None)
+
+    release.set()
+    thread_a.join(5)
+
+    assert b_result == "SPEC", "another thread's wait must not silence this guard"
+    assert ("quick", "fno.b") in consulted, "the second thread's re-check must run"
+    assert a_result == ["SPEC"]
+
+
 def test_import_hook_ignores_third_party_modules(monkeypatch):
     """A missing dependency is a broken install: no re-check, no retry, no hint,
     and no wait -- the shared helper now polls its budget for any name it is

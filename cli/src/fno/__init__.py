@@ -213,18 +213,30 @@ class _ReinstallWindowFinder:
     # would see a stranger and stack a second guard onto the same meta path.
     _fno_reinstall_window_guard = True
 
-    # A plain flag rather than thread-local state, because its only job is to
-    # stop the re-check below from recursing back into this finder: it goes
-    # through `importlib.util.find_spec`, which DOES walk `sys.meta_path`. Two
-    # threads racing it lose one retry and fall back to the pre-guard behavior,
-    # which is a hard failure either way. Neither can be handed a wrong answer.
-    _rechecking = False
+    # Thread-local, not a plain class flag. The flag's only job is to stop
+    # THIS thread's re-check from recursing back into this finder: it goes
+    # through `importlib.util.find_spec`, which DOES walk `sys.meta_path`, and
+    # recursion is always same-thread, so per-thread state guards it fully. A
+    # plain flag also silenced every OTHER thread's import for the whole hold,
+    # which used to be one lookup and is now a bounded wait -- a plain flag
+    # would trade one thread's reinstall wait for another thread's bare
+    # failure. Created lazily because `import threading` on the startup path
+    # costs more than anything else in this module; the first FAILED import
+    # pays it instead. Concurrent first use is safe: each thread captures the
+    # object it set and clears that one, and a stranger's overwrite only means
+    # the other thread's recursion stop rides its own fresh local.
+    _rechecking = None
 
     def find_spec(self, fullname: str, path=None, target=None):  # noqa: ANN001
         cls = type(self)
-        if cls._rechecking or not _is_fno_module(fullname):
+        tl = cls._rechecking
+        if tl is None:
+            import threading
+
+            tl = cls._rechecking = threading.local()
+        if getattr(tl, "active", False) or not _is_fno_module(fullname):
             return None
-        cls._rechecking = True
+        tl.active = True
         try:
             # `_module_appears_on_disk` rather than an inlined PathFinder
             # probe, even though inlining would save this second lookup:
@@ -242,7 +254,7 @@ class _ReinstallWindowFinder:
 
             return PathFinder.find_spec(fullname, path, target)
         finally:
-            cls._rechecking = False
+            tl.active = False
 
 
 def _install_reinstall_window_finder() -> None:
