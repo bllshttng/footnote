@@ -16,6 +16,7 @@ they cannot disagree about what counts.
 """
 from __future__ import annotations
 
+import importlib
 from typing import Any, NamedTuple, Optional
 
 from fno.graph.relatedness import _RETIRED_EPIC_STATUSES, epic_candidates
@@ -34,6 +35,12 @@ CLOSED_STATUSES = frozenset({"done", "superseded", "deferred"})
 # never coin-flip a parent edge - below either bar we suggest instead.
 AUTO_LINK_MIN = 0.55
 AUTO_LINK_MARGIN = 0.20
+
+#: ``module:attr`` of a zero-arg crown reader, set by the CLI layer. The
+#: boundary check bars fno.graph from importing fno.agents, so the seam
+#: rides as data and the ladder resolves it lazily - the same string-loaded
+#: idiom the root CLI uses for its own sub-apps.
+crown_reader_spec: Optional[str] = None
 
 
 class Resolution(NamedTuple):
@@ -161,10 +168,9 @@ def _crown_or_orphan(
     node: Entry, entries: list[Entry], crown: Any, *, candidates: tuple = ()
 ) -> Resolution:
     """The tail of the ladder: a crown override if one applies, else today."""
-    if crown is None:
-        from fno.agents.crown import current_crown
-
-        crown = current_crown()
+    if crown is None and crown_reader_spec:
+        module_name, _, attr = crown_reader_spec.partition(":")
+        crown = getattr(importlib.import_module(module_name), attr)()
     if crown is not None:
         crowned = crown_resolution(node, entries, crown)
         if crowned is not None:

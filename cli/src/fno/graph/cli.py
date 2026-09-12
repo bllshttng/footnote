@@ -1202,12 +1202,9 @@ def _create_node_impl(
         # Strictly non-fatal - any failure degrades to the orphan line (AC4).
         try:
             from fno.graph import rollup as _rollup
-            from fno.graph._intake import (
-                _find_node,
-                _would_create_cycle,
-                _would_exceed_epic_depth,
-            )
+            from fno.graph._intake import _find_node, _would_create_cycle, _would_exceed_epic_depth
 
+            _rollup.crown_reader_spec = "fno.agents.crown:current_crown"
             resolution = _rollup.resolve(node, entries)
             link_to: Optional[str] = None
             if resolution.kind in ("linked", "crown"):
