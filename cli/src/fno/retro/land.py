@@ -149,6 +149,7 @@ def land_candidates(
     inbox_fn: Optional[InboxFn] = None,
     caused_by: Optional[str] = None,
     anchor_scan_fn: Optional[Callable] = None,
+    dedup_entries: Optional[list] = None,
 ) -> list[LandResult]:
     """Land each candidate per mode/tier. Per-node failures are recorded (not raised)
     so partial progress persists and a re-run dedups what landed (AC4-FR)."""
@@ -218,6 +219,16 @@ def land_candidates(
         results.append(
             LandResult("queued" if interactive else "active", c, node_id=node_id)
         )
+
+        # The filing-time dedup net shared by every birth path (warn-only).
+        if dedup_entries:
+            try:
+                from fno.graph._intake import _warn_similar_nodes
+
+                stub = {"id": node_id, "title": c.title or "", "details": c.body or "", "domain": domain}
+                _warn_similar_nodes(stub, dedup_entries, intake_hint=False)
+            except Exception as exc:
+                print(f"dedup net failed for {node_id}: {exc}", file=sys.stderr)
 
         # Born-with-why (v2 A1): the retro-harvest birth path is the exact gap
         # this epic fixes (x-7c38 / x-6e23 filed follow-ups with no /think). Route
