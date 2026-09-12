@@ -292,20 +292,20 @@ def _read_board_sidecar(target: CrownTarget) -> "tuple[str, list[tuple[str, ...]
 
 def _board_trigger(
     target: CrownTarget, rows
-) -> tuple[bool, Optional[str], Optional[list], Optional[str]]:
-    """``(wake?, hash+rows_to_store_after_a_dispatch, diff)``. An absent hash
-    or row-less sidecar is a first observation; a changed hash stores only
-    after a dispatch; no rows is no signal."""
+) -> tuple[bool, Optional[str], Optional[list], Optional[str], bool]:
+    """``(wake?, hash+rows_to_store_after_a_dispatch, diff, first_observation)``.
+    Pure: it never writes. An absent hash or row-less sidecar is a first
+    observation - the caller stores it only after the holder reads present; a
+    changed hash stores only after a dispatch; no rows is no signal."""
     if rows is None:
-        return False, None, None, None
+        return False, None, None, None, False
     fresh = _hash_rows(rows)
     stored, stored_rows = _read_board_sidecar(target)
     if not stored or stored_rows is None:
-        _store_board_hash(target, fresh, rows)
-        return False, None, None, None
+        return False, fresh, rows, None, True
     if stored == fresh:
-        return False, None, None, None
-    return True, fresh, rows, render_board_diff(stored_rows, rows)
+        return False, None, None, None, False
+    return True, fresh, rows, render_board_diff(stored_rows, rows), False
 
 
 def _store_board_hash(target: CrownTarget, digest: str, rows: Iterable) -> None:
@@ -430,6 +430,13 @@ def _dispatch_walk(
         )
 
 
+#: A pass stops before a step it cannot finish: one truth read measured up to
+#: 10.4s (x-16e9), so under 15s left the crown is left for the next tick
+#: instead of being cut mid-read by the phase alarm and losing every crown
+#: before it.
+_KING_STEP_FLOOR_S = 15.0
+
+
 def run_king_wake(
     settings,
     *,
@@ -445,9 +452,14 @@ def run_king_wake(
     admit_fn: Optional[Callable] = None,
     dispatch_fn: Optional[Callable] = None,
     ask_fn: Optional[Callable] = None,
+    seconds_left_fn: Optional[Callable[[], Optional[float]]] = None,
+    on_step: Optional[Callable[[str], None]] = None,
 ) -> dict[str, Any]:
     """One pass over every crowned scope; never raises into the tick. Returns
-    the summary the tick echoes: scopes considered, wakes, refusals."""
+    the summary the tick echoes: scopes considered, wakes, refusals, plus
+    ``truth_reads``/``evaluated`` (the pass's real cost) and ``budget_spent``
+    when it stopped under its step floor. Triggers are evaluated read-only,
+    cheapest first; the truth read runs only for a crown that can wake."""
     cfg = getattr(settings, "king", None)
     if not getattr(cfg, "wake_enabled", False):
         return {"armed": False}
@@ -500,40 +512,54 @@ def run_king_wake(
     debounce_s = _cfg_int("wake_debounce_seconds", 900)
     backstop_s = _cfg_int("wake_backstop_seconds", 1800)
 
-    # One question-journal read per tick, shared by every scope like `entries`.
-    try:
-        answered_records: list = answered_fn()
-    except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
-        answered_records = []
+    _step = on_step or (lambda _s: None)
 
+    def _under_floor() -> bool:
+        left = seconds_left_fn() if seconds_left_fn is not None else None
+        return left is not None and left < _KING_STEP_FLOOR_S
+
+    def _budget_stop() -> dict[str, Any]:
+        budget_note = (
+            f"budget spent after {summary['evaluated']} of {len(targets)} crowns"
+        )
+        summary["note"] = f"{note}; {budget_note}" if note else budget_note
+        summary["budget_spent"] = True
+        return summary
+
+    _step("court")
     targets, note = _crowned(court_fn, rows_fn)
     summary: dict[str, Any] = {
         "armed": True,
         "crowns": len(targets),
         "woke": [],
         "refused": [],
+        "truth_reads": 0,
+        "evaluated": 0,
         "note": note,
     }
-    for target in targets:
-        truth = truth_fn(target.holder)
-        refusal = _holder_absent(truth)
-        if refusal is not None:
-            # Liveness refusals ride the summary, not the event stream.
-            summary["refused"].append({"scope": target.scope, "refusal": refusal})
-            continue
-        # A GONE holder is replaced, not woken: the dispatch bills the
-        # respawn budget, not only the wake ledger.
-        holder_gone = truth.get("state") == "unknown" and truth.get("reason") == "not-found"
+    _step("answers")
+    # One question-journal read per tick, shared by every scope like `entries`.
+    try:
+        answered_records: list = answered_fn()
+    except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
+        answered_records = []
+
+    # Start where the last pass stopped: rotation by debounce window gives
+    # every crown a turn at the front when the pass keeps running out of
+    # slice. ponytail: the ceiling is fairness per debounce window, not per
+    # crown - a crown can wait two windows when every pass overruns.
+    offset = int(now.timestamp() // max(1, debounce_s)) % len(targets) if targets else 0
+    for target in targets[offset:] + targets[:offset]:
+        sidecar = _read_sidecar(target)
         reason: Optional[str] = None
         wake_address: Optional[str] = None
         wake_detail: Optional[str] = None
         answered_cursor_to_store = ""
-        sidecar = _read_sidecar(target)
-        if "answered_cursor" not in sidecar:
-            # Seed at birth, never the journal max: a max seed swallows an
-            # answer closed before the first armed tick saw it.
-            _update_sidecar(target, answered_cursor=_birth_cursor(target.manifest))
-        else:
+        # Triggers are evaluated read-only, cheapest first (x-16e9): the truth
+        # read costs seconds per crown and a quiet crown can never wake, so it
+        # runs only for a trigger or a pending first-observation seed.
+        pending_answer_seed = "answered_cursor" not in sidecar
+        if not pending_answer_seed:
             answer_prompt, matched_ts = _escalation_answer_trigger(
                 target, answered_records, str(sidecar.get("answered_cursor") or "")
             )
@@ -556,26 +582,61 @@ def run_king_wake(
                     answer_prompt = answer_prompt[:MAX_DETAIL_CHARS] + " ...(truncated)"
                 wake_detail = answer_prompt
                 answered_cursor_to_store = matched_ts
-        matched = None if reason is not None else _mail_trigger(target, unread_fn)
-        if matched is not None:
-            reason = "mail"
-            wake_address = matched
+        if reason is None:
+            _step("mail")
+            matched = _mail_trigger(target, unread_fn)
+            if matched is not None:
+                reason = "mail"
+                wake_address = matched
         fresh_board_hash: Optional[str] = None
         fresh_board_rows: Optional[list] = None
+        first_observation = False
         if reason is None:
             if entries is None:
+                if _under_floor():
+                    return _budget_stop()
+                _step("graph")
                 entries = entries_fn()
             # One compile feeds both lanes; None rows (empty or uncompilable
             # scope) is no signal for either.
             rows = _board_rows(target.scope, entries, scope_resolver) if entries else None
-            changed, fresh_board_hash, fresh_board_rows, wake_detail = _board_trigger(target, rows)
+            changed, fresh_board_hash, fresh_board_rows, wake_detail, first_observation = (
+                _board_trigger(target, rows)
+            )
             if changed:
                 reason = "board"
             elif rows is not None and _backstop_due(
                 target, entries, now=now, backstop_s=backstop_s, resolver=scope_resolver
             ):
                 reason = "backstop"
+        if reason is None and not pending_answer_seed and not first_observation:
+            summary["evaluated"] += 1
+            continue
+        if _under_floor():
+            return _budget_stop()
+        _step(f"truth:{target.scope}")
+        truth = truth_fn(target.holder)
+        summary["truth_reads"] += 1
+        refusal = _holder_absent(truth)
+        if refusal is not None:
+            # Liveness refusals ride the summary, not the event stream.
+            summary["refused"].append({"scope": target.scope, "refusal": refusal})
+            summary["evaluated"] += 1
+            continue
+        # A GONE holder is replaced, not woken: the dispatch bills the
+        # respawn budget, not only the wake ledger.
+        holder_gone = truth.get("state") == "unknown" and truth.get("reason") == "not-found"
+        # Seeds land only for a holder that is present, exactly as when the
+        # truth read came first: the write set is unchanged (x-16e9).
+        if pending_answer_seed:
+            # Seed at birth, never the journal max: a max seed swallows an
+            # answer closed before the first armed tick saw it.
+            _update_sidecar(target, answered_cursor=_birth_cursor(target.manifest))
+        if first_observation:
+            _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
         if reason is None:
+            # A first observation is a seed, never a trigger: nothing to wake.
+            summary["evaluated"] += 1
             continue
         if holder_gone:
             from fno.king.state import at_respawn_ceiling, parse_manifest, respawn_ceiling
@@ -666,4 +727,5 @@ def run_king_wake(
         }
         emit("king_woken", {**receipt, "window_count": window_count, "ceiling": ceiling})
         summary["woke"].append(receipt)
+        summary["evaluated"] += 1
     return summary
