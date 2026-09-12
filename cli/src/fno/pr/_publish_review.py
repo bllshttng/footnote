@@ -1,6 +1,5 @@
 """Transport for the ``publish-review`` verb: one JSON payload in, one parsed
-answer out. The producer lives in the Rust binary; this module is the Python
-door the emit chokepoint and the hidden verb share.
+answer out. The producer lives in the Rust binary; this is the Python door.
 """
 
 from __future__ import annotations
