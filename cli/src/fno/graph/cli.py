@@ -4211,7 +4211,9 @@ def cmd_next(
         command costs; selector, observer recovery and the starvation receipts
         each used to pay for them and got the same answer every time. Both
         reads stay strict: an unreadable source refuses the selection, it never
-        substitutes an empty occupancy set.
+        substitutes an empty occupancy set. A `--claim` transaction that loses
+        to an interleaved writer pays this again on its retry, deliberately:
+        the entries it selects from are new, so its occupancy must be too.
         """
         try:
             claimed, worked = read_occupancy(entries, _live_claimed_node_ids)
