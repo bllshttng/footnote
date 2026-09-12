@@ -40,10 +40,9 @@ _PROTOCOL_DATA_STR_CAP = 500
 GLOBAL_MIRROR_TYPES = frozenset({"review_attestation", "review_coverage", "worktree_removed"})
 
 # Event types whose emit ALSO mirrors the verdict to GitHub as the reviewer
-# lane's bot identity. Deliberately a SEPARATE set from GLOBAL_MIRROR_TYPES:
-# global-log membership answers "which events earn a cross-checkout copy"
-# and drifts for its own reasons; joining it must not silently gain a GitHub
-# posting call whose data may carry no verdict.
+# lane's bot identity. A SEPARATE set from GLOBAL_MIRROR_TYPES on purpose:
+# global-log membership drifts for its own reasons and must not silently
+# gain a GitHub posting call.
 PUBLISH_REVIEW_TYPES = frozenset({"review_attestation"})
 
 
