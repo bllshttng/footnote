@@ -1290,6 +1290,15 @@ def cmd_spawn(
             "Mux tab selector (number, id:<n>, name:<s>, active/new, or group name). Pane only."
         ),
     ),
+    mux_session: str | None = typer.Option(
+        None,
+        "--mux-session",
+        hidden=True,
+        help=(
+            "Pane only: spawn into THIS named mux session instead of the "
+            "ambient resolution. The dispatch-next porcelain pins its lane."
+        ),
+    ),
     bounded_placement: bool = typer.Option(
         False,
         "--bounded-placement",
@@ -1539,6 +1548,64 @@ def cmd_spawn(
             file=sys.stderr,
         )
 
+    # x-e53e change 1: `--node` with no typed message resolves the seed from the
+    # node itself, so the front door can carry what a dispatch would have. The
+    # verb renders through resolve_dispatch for THIS spawn's harness (the same
+    # effective-verb read `_spawn_worker` runs); the brief rides the node's own
+    # chain into TARGET_BRIEF. A typed message wins over both.
+    node_seed_env: dict = {}
+    node_seed_receipt: dict = {}
+    if node is not None and not (message or "").strip():
+        from fno.graph.ladder import plan_rung as _node_plan_rung
+        from fno.provenance.autobrief import resolve_dispatch_brief
+
+        rec: Optional[dict] = None
+        try:
+            from fno.graph.load import load_graph
+
+            for candidate in load_graph():
+                if candidate.get("id") == node or candidate.get("slug") == node:
+                    rec = candidate
+                    break
+        except Exception:  # noqa: BLE001 - an unreadable graph cannot seed a spawn
+            rec = None
+        seed_node_id = (rec or {}).get("id") or node
+        if not isinstance(rec, dict) or not str(rec.get("dispatch_verb") or "").strip():
+            print(
+                f"refusing node-seeded spawn: node {seed_node_id} carries no "
+                "dispatch_verb and no message was typed; an idle worker holds "
+                "a fleet slot and reads as alive. Encode one with `fno backlog "
+                f"update {seed_node_id} --dispatch-verb <verb>` or type a "
+                "message.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        try:
+            from fno.agents.harness_map import resolve_dispatch
+
+            node_brief, node_brief_source = resolve_dispatch_brief(rec)
+            resolved_seed = resolve_dispatch(
+                harness=harness,
+                node_id=str(seed_node_id),
+                verb=str(rec.get("dispatch_verb")).strip(),
+                difficulty=rec.get("difficulty"),
+                plan_rung=_node_plan_rung(rec).value,
+                brief=node_brief,
+                trigger="autonomous",
+            )
+        except DispatchResolveError as exc:
+            # An unanswerable lifecycle or an explicit >8KB brief (the one
+            # failure the brief chain leaves to this gate) refuses here, before
+            # any worker exists; a truncated brief is never seeded.
+            print(str(exc), file=sys.stderr)
+            raise typer.Exit(code=2) from exc
+        message = resolved_seed["command"]
+        node_seed_env = resolved_seed.get("env") or {}
+        node_seed_receipt = {
+            "verb_source": "declared",
+            "brief_source": node_brief_source,
+        }
+
     from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
 
     substrate = resolve_spawn_gates(substrate, monitor, once=once, harness=harness)
@@ -1547,6 +1614,14 @@ def cmd_spawn(
     )
     if seedless:
         print(f"fno agents spawn: {seedless}", file=sys.stderr)
+        raise typer.Exit(code=2)
+
+    if mux_session is not None and substrate != "pane":
+        print(
+            f"--mux-session is pane-only; substrate {substrate!r} has no mux "
+            "session to spawn into",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=2)
 
     if output_format is not None and (
@@ -1960,6 +2035,19 @@ def cmd_spawn(
     message = normalize_legacy_no_merge(message)
     if prov_env is not None and message_carries_no_merge(message):
         prov_env["TARGET_NO_MERGE"] = "1"
+    # The node seed's env (TARGET_BRIEF and friends) rides the same provenance
+    # overlay the pane argv wrapper exports; the resolver's answer is
+    # authoritative (x-9d11).
+    if node_seed_env and prov_env is not None:
+        prov_env.update(node_seed_env)
+    # (x-c914) The pane's birth account rides the provenance env (FNO_ACCOUNT)
+    # so the mux server reads it back for the sideline account glyph - the
+    # account this launch actually bills, not the session's ambient one. The
+    # glyph is a claude-account axis, the same gate the minted row applies.
+    if prov_env is not None and harness == "claude":
+        launch_account_label = dispatch_account or account
+        if launch_account_label:
+            prov_env["FNO_ACCOUNT"] = launch_account_label
 
     # The loop gate, on the same message and for the same reason as the carrier
     # above. resolve_dispatch runs this check too, and the comment three lines
@@ -2264,6 +2352,7 @@ def cmd_spawn(
                     message=message,
                     provider=harness,
                     cwd=workdir,
+                    session=mux_session,
                     yolo=yolo,
                     role=role,
                     model=model,
@@ -2325,6 +2414,11 @@ def cmd_spawn(
             }
             if pane_result.seed_source is not None:
                 receipt_obj["seed_source"] = pane_result.seed_source
+            # Where the seed came from when the node supplied it (x-e53e
+            # change 1): the `_spawn_worker` verb_source vocabulary beside the
+            # brief chain's own source tag. A typed message receipts neither.
+            if node_seed_receipt:
+                receipt_obj.update(node_seed_receipt)
             # The other half of the same question, and the discriminator for the
             # non-zero exit below. `seed: submitted` with
             # `pane_observation: unreadable` is a delivered payload on a pane

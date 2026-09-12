@@ -111,6 +111,8 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         "--wait",
         # A prompt-file PATH is never a prompt word.
         "--prompt-file",
+        # The dispatch-next porcelain's pinned lane name is a value.
+        "--mux-session",
     }
 )
 
