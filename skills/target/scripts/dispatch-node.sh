@@ -461,13 +461,12 @@ for id in "${NODES[@]}"; do
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
         echo "already-running $id reason=\"node:$id is held by $holder but no target init took that claim; no worker has reached target init\""
         n_already=$((n_already + 1))
-      elif [[ "$reason" == "worked-overlay" ]]; then
-        # No claim holder exists and the worked overlay named a worker. The
-        # old path rendered this as "is held by unknown", sent the reader
-        # hunting a release remedy for a claim nobody holds, and hid the one
-        # actionable field: who is actually on the node.
+      elif [[ "$reason" == "worker-row" ]]; then
+        # The worker ROW is the occupant, not the claim. The old text named the
+        # claim, sent the reader hunting a release remedy for a claim nobody
+        # holds, and hid the one actionable field: who is on the node.
         worker="$(printf '%s' "$guard_json" | jq -r '.worker // empty' 2>/dev/null)"
-        echo "already-running $id reason=\"a live worker is on node:$id (${worker:-unmeasured}); nothing holds the claim\""
+        echo "already-running $id reason=\"worker row ${worker:-unmeasured} is on node:$id; peek it, and stop it if its run is finished\""
         n_already=$((n_already + 1))
       elif [[ "$reason" == "suspect-claim" ]]; then
         # x-ba4b: TTL-unexpired dead-pid claim (a respawned worker). Contested
@@ -894,9 +893,9 @@ for id in "${NODES[@]}"; do
           echo "already-running $id reason=\"node:$id is held but no target init took that claim; no worker has reached target init\""
           n_already=$((n_already + 1))
           continue ;;
-        worked-overlay)
+        worker-row)
           guard_worker="$(printf '%s' "$spawn_err" | sed -n 's/.* worker=\([^ ;]*\).*/\1/p;q')"
-          echo "already-running $id reason=\"a live worker is on node:$id (${guard_worker:-unmeasured}); nothing holds the claim\""
+          echo "already-running $id reason=\"worker row ${guard_worker:-unmeasured} is on node:$id; peek it, and stop it if its run is finished\""
           n_already=$((n_already + 1))
           continue ;;
         reservation-held|duplicate-claim)

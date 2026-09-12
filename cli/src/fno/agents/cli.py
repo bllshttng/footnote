@@ -66,6 +66,18 @@ class AgentProgressFilter(str, enum.Enum):
     unknown = "unknown"
 
 
+def _worker_token(worker: str) -> str:
+    """Bare worker names, comma-joined, no spaces.
+
+    Both shell consumers read the ``worker=`` token with ``sed -n 's/.*
+    worker=\\([^ ;]*\\).*/\\1/p;q'``, which stops at the first space, so the
+    worked overlay's ``<name> (unmeasurable: ...)`` label would truncate a
+    name mid-token. The full labelled string stays on the JSON field.
+    """
+    names = [part.strip().split(" ")[0] for part in worker.split(",")]
+    return ",".join(n for n in names if n)
+
+
 def _remedy_for(key: str) -> str:
     """The two commands that clear KEY, safest first.
 
@@ -442,18 +454,33 @@ def _spawn_guard_decision(
             # block_reason wins only for the authority outage; an occupied
             # node keeps the stable machine token, evidence rides the refusal.
             block = observation.block_reason
+            # The worker ROW is the occupant whenever the claim is not. A
+            # stale claim plus a worker the overlay named read `unproven-claim`
+            # and named the claim's prior holder, which sent the reader after
+            # a release that frees nothing: the operator followed that text to
+            # a claim `fno agents claim status` read as UNCLAIMED. The row is
+            # what blocked, so the receipt names it and the remedy peeks it.
+            # block_reason stays first: an authority outage is not a worker.
+            if (
+                not (block and not block.startswith("held:"))
+                and observation.worker
+                and observation.verdict not in ("ours", "foreign_live")
+            ):
+                first = _worker_token(observation.worker).split(",")[0]
+                return {
+                    "verdict": "already-running",
+                    "reason": "worker-row",
+                    "worker": observation.worker,
+                    "truth_status": observation.truth_status,
+                    "remedy": (
+                        f"fno agents peek {first}; if its run is finished, "
+                        f"fno agents stop {first}"
+                    ),
+                }, 0
             reason = (
                 block if block and not block.startswith("held:")
                 else "suspect-claim" if wedged
                 else "live-claim" if common["init_reached"]
-                # No claim holder (the literal "unknown") and the worked
-                # overlay named a worker: the block is REAL but the claim is
-                # not. Borrowing unproven-claim here asserted a claim that
-                # does not exist and hid the worker name, which sent the
-                # reader looking for a release remedy for a block that needs
-                # none.
-                else "worked-overlay" if observation.worker
-                and observation.holder == "unknown"
                 else "unproven-claim"
             )
             return {
@@ -2047,7 +2074,10 @@ def cmd_spawn(
                 guard.get("reason") or guard.get("verdict") or "unknown"
             )
             prior = f" prior_holder={guard['holder']}" if guard.get("holder") else ""
-            worker = f" worker={guard['worker']}" if guard.get("worker") else ""
+            worker = (
+                f" worker={_worker_token(str(guard['worker']))}"
+                if guard.get("worker") else ""
+            )
             detail = f" detail={guard['detail']!r}" if guard.get("detail") else ""
             print(
                 f"node dispatch refused: node={guarded_node} "
@@ -2780,8 +2810,13 @@ def cmd_spawn_guard(
                       a worker is unproven),
                       a suspect claim (reason=suspect-claim: TTL-unexpired dead pid,
                       a respawned worker - the caller maps this to skipped-contested,
-                      x-ba4b), OR a racing dispatcher already holds ``dispatch:<id>``
-                      (reason=reservation-held). No reservation acquired.
+                      x-ba4b), a worker ROW on the node while the claim itself does
+                      not hold it (reason=worker-row, worker=<names>: the receipt
+                      names the row and no claim holder, because peeking and
+                      stopping that worker is what frees the node - a release
+                      frees nothing), OR a racing dispatcher already holds
+                      ``dispatch:<id>`` (reason=reservation-held). No reservation
+                      acquired.
     - refused        the durable dead-dispatch limit blocked another birth
                       (reason=auto-deferred|defer-failed). No reservation acquired.
     - corrupted       the ``node:<id>`` claim is corrupted; launch nothing.

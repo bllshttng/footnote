@@ -250,13 +250,12 @@ if [[ -n "$NODE" ]]; then
         else
           printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
         fi
-      elif [[ "$reason" == "worked-overlay" ]]; then
-        # No claim holder and the worked overlay named a worker: the honest
-        # receipt names the worker and says nothing holds the claim, instead
-        # of "is held by unknown" sending the caller after a release remedy
-        # for a claim that does not exist.
+      elif [[ "$reason" == "worker-row" ]]; then
+        # The worker ROW is the occupant, not the claim. Naming the claim here
+        # sent the caller after a release that frees nothing; peeking the row
+        # and stopping it if its run is finished is what frees the node.
         worker="$(printf '%s' "$guard_json" | jq -r '.worker // empty' 2>/dev/null)"
-        printf 'result=already-running name=%s reason="a live worker is on node:%s (%s); nothing holds the claim"\n' "$NAME" "$NODE" "${worker:-unmeasured}"
+        printf 'result=already-running name=%s reason="worker row %s is on node:%s; peek it, and stop it if its run is finished"\n' "$NAME" "${worker:-unmeasured}" "$NODE"
       else
         # NO suspect-claim arm here, and the omission is load-bearing. This call
         # is a probe, a probe reports every wedge as recovery not-attempted, and
@@ -516,9 +515,9 @@ if [[ "$spawn_rc" -ne 0 ]]; then
         # a benign dedup skip becomes result=failed with exit 1.
         printf 'result=already-running name=%s action=%s reason="node:%s is held but no target init took that claim; no worker has reached target init"\n' "$NAME" "$guard_reason" "$NODE"
         exit 0 ;;
-      worked-overlay)
+      worker-row)
         guard_worker="$(printf '%s' "$spawn_err" | sed -n 's/.* worker=\([^ ;]*\).*/\1/p;q')"
-        printf 'result=already-running name=%s reason="a live worker is on node:%s (%s); nothing holds the claim"\n' "$NAME" "$NODE" "${guard_worker:-unmeasured}"
+        printf 'result=already-running name=%s reason="worker row %s is on node:%s; peek it, and stop it if its run is finished"\n' "$NAME" "${guard_worker:-unmeasured}" "$NODE"
         exit 0 ;;
       suspect-claim)
         # THE wedge, and this is the arm that fires on one. Recovery ran here,

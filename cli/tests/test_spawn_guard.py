@@ -25,7 +25,12 @@ from typer.testing import CliRunner
 
 from fno.agents.cli import agents_app
 from fno.claims.core import acquire_claim, claim_status
-from fno.claims.io import claim_path, read_claim_file, serialize_claim
+from fno.claims.io import (
+    claim_path,
+    global_claims_root as _global_claims_root,
+    read_claim_file,
+    serialize_claim,
+)
 from fno.claims.types import now_ms
 
 runner = CliRunner()
@@ -567,13 +572,13 @@ def test_a_worked_authority_outage_names_itself_not_a_running_worker(
     assert obj["reason"] == "worked-authority-unavailable"
 
 
-def test_a_worked_overlay_block_with_no_claim_names_the_worker(
+def test_a_worker_row_block_with_no_claim_names_the_row(
     claims_tmp, monkeypatch: pytest.MonkeyPatch
 ):
-    """x-a8b5 AC4, producer side: no claim holder, the worked overlay names a
-    worker. The block is real but the claim is not, so the reason is its own
-    token and `worker` rides the payload - `unproven-claim` asserted a claim
-    that does not exist and dropped the only actionable field."""
+    """No claim holder, the worked overlay names a worker. The row is the
+    occupant, so the reason is its own token, `worker` rides the payload, and
+    no claim holder is named - `unproven-claim` asserted a claim that does not
+    exist and dropped the only actionable field."""
     monkeypatch.setattr(
         "fno.graph.statuses.live_worked_node_ids",
         lambda **_kw: {"x-8888": ["king-a792-control"]},
@@ -582,6 +587,111 @@ def test_a_worked_overlay_block_with_no_claim_names_the_worker(
     assert res.exit_code == 0
     obj = json.loads(res.output)
     assert obj["verdict"] == "already-running"
-    assert obj["reason"] == "worked-overlay"
+    assert obj["reason"] == "worker-row"
     assert obj["worker"] == "king-a792-control"
-    assert obj["holder"] == "unknown"
+    assert "holder" not in obj
+    assert obj["remedy"] == (
+        "fno agents peek king-a792-control; if its run is finished, "
+        "fno agents stop king-a792-control"
+    )
+
+
+# --- x-c08a: the refusal names the worker ROW, never the claim ----------------
+
+
+def test_a_stale_claim_with_a_worker_row_names_the_row_not_the_claim(
+    claims_tmp, monkeypatch: pytest.MonkeyPatch
+):
+    """AC3-HP, the x-6f98 specimen: the claim read stale with a dead
+    predecessor while a worker row sat on the node. The old receipt said
+    `unproven-claim` and named the claim's prior holder, and the operator
+    followed it to a claim `fno agents claim status` read as UNCLAIMED."""
+    import psutil
+
+    dead_pid = 999_999
+    while psutil.pid_exists(dead_pid):
+        dead_pid += 1
+    acquire_claim(
+        "node:x-6f98", "spawn-handover:bp-6f98-locked-decision",
+        pid=dead_pid, ttl_ms=60_000,
+    )
+    path = claim_path("node:x-6f98", root=_global_claims_root())
+    claim = read_claim_file(path)
+    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
+    assert claim_status("node:x-6f98", root=_global_claims_root())["state"] == "stale"
+
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda **_kw: {"x-6f98": ["bp-6f98-locked-decision"]},
+    )
+    res = _invoke("x-6f98", "--holder", "probe:1", "--no-reserve", "--json")
+    assert res.exit_code == 0
+    obj = json.loads(res.stdout)
+    assert obj["verdict"] == "already-running"
+    assert obj["reason"] == "worker-row"
+    assert obj["worker"] == "bp-6f98-locked-decision"
+    assert "fno agents peek bp-6f98-locked-decision" in obj["remedy"]
+    # The claim's prior holder is NOT the occupant, so it is not on the receipt.
+    assert "holder" not in obj
+    assert "bp-6f98-locked-decision" not in json.dumps(obj.get("prior_holder", ""))
+
+
+def test_the_contested_dispatch_warning_leads_with_the_worker_row(
+    claims_tmp, monkeypatch: pytest.MonkeyPatch
+):
+    """AC4-HP: the same block on the reserving path, where the warning fires
+    (a --no-reserve probe emits nothing). The line pointed at a stale claim
+    while the row was the occupant."""
+    import psutil
+
+    dead_pid = 999_999
+    while psutil.pid_exists(dead_pid):
+        dead_pid += 1
+    acquire_claim(
+        "node:x-6f99", "spawn-handover:bp-6f99-planner", pid=dead_pid, ttl_ms=60_000
+    )
+    path = claim_path("node:x-6f99", root=_global_claims_root())
+    claim = read_claim_file(path)
+    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda **_kw: {"x-6f99": ["bp-6f99-planner"]},
+    )
+    res = _invoke("x-6f99", "--holder", "dispatch-node:444", "--json")
+    assert res.exit_code == 0
+    assert json.loads(res.stdout)["reason"] == "worker-row"
+    assert "worker row bp-6f99-planner is on the node" in res.stderr
+    # No reservation was taken: the row still occupies the node.
+    assert claim_status("dispatch:x-6f99")["state"] == "free"
+
+
+def test_a_live_claim_with_a_worker_row_still_reads_live_claim(
+    claims_tmp, monkeypatch: pytest.MonkeyPatch
+):
+    """AC3-CTRL: the discriminator discriminates. When the CLAIM itself holds
+    the node, the claim is the occupant and its reason stands, worked overlay
+    or not."""
+    import os
+
+    acquire_claim("node:x-c0c0", "target-session:owner", pid=os.getpid())
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda **_kw: {"x-c0c0": ["t-c0c0-worker"]},
+    )
+    res = _invoke("x-c0c0", "--holder", "dispatch-node:222", "--no-reserve", "--json")
+    assert res.exit_code == 0
+    obj = json.loads(res.stdout)
+    assert obj["reason"] == "live-claim"
+    assert obj["holder"] == "target-session:owner"
+
+
+def test_the_worker_token_survives_an_unmeasurable_label(claims_tmp):
+    r"""AC4-HP, the machine token: both shell consumers read `worker=` with
+    `sed -n 's/.* worker=\([^ ;]*\).*/\1/p;q'`, which stops at the first
+    space. The overlay's own ` (unmeasurable: ...)` label would truncate a name
+    mid-token, and two names would lose all but the first."""
+    from fno.agents.cli import _worker_token
+
+    assert _worker_token("w1 (unmeasurable: no harness session id)") == "w1"
+    assert _worker_token("w1, w2") == "w1,w2"
+    assert _worker_token("w1 (unmeasurable: x), w2") == "w1,w2"
