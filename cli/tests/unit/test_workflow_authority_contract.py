@@ -203,6 +203,21 @@ def test_reign_checkin_binds_worker_age_to_the_top_json_payload():
     assert "oldest worker last-seen stamp" not in checkin
 
 
+def test_reign_checkin_names_the_merge_finish_line():
+    # The check-in printed open-PR indicators and a lever list that never
+    # merged, so a king following the skill read a ready PR as report-only and
+    # escalated it instead of merging. The merge law makes the team the
+    # merger, so the skill must carry the verb, the gate, and the law id
+    # together: a lever the file cannot name is a law rediscovered by
+    # exhaustion.
+    text = _skill("skills/reign/SKILL.md")
+    checkin = text[text.index("## The check-in body") :]
+    checkin = checkin[: checkin.index("## Recording a ruling")]
+    assert "fno do pr status" in checkin
+    assert "fno do pr merge" in checkin
+    assert "d-a44a5a00" in checkin
+
+
 def test_review_empty_diff_guard_resolves_the_named_target():
     text = _skill("skills/review/SKILL.md")
     guard = text[text.index("### 2a. Empty-diff guard") :]
