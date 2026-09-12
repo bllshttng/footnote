@@ -32,7 +32,17 @@ def bin_dir(tmp_path: Path) -> Path:
     return d
 
 
-def test_dangling_fno_link_detected_and_unrelated_link_ignored(bin_dir):
+@pytest.fixture()
+def no_durable_anywhere(tmp_path, monkeypatch):
+    """Point both durable candidates at absent dirs: pytest's own venv or the
+    real uv tools dir would otherwise answer as the durable copy."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(shim_check.sys, "executable", str(empty / "python"))
+    monkeypatch.setattr(shim_check, "UV_TOOL_FNO_BIN", tmp_path / "absent-uv" / "bin")
+
+
+def test_dangling_fno_link_detected_and_unrelated_link_ignored(bin_dir, no_durable_anywhere):
     _dangling(bin_dir, "fno-py")
     os.symlink(bin_dir.parent / "nowhere" / "pyfiglet", bin_dir / "pyfiglet")
 
@@ -95,7 +105,7 @@ def test_repair_repoints_to_the_durable_copy(bin_dir, tmp_path):
     assert os.path.realpath(bin_dir / "fno-py") == str(durable / "fno-py")
 
 
-def test_repair_reports_unrepairable_without_a_durable_copy(bin_dir):
+def test_repair_reports_unrepairable_without_a_durable_copy(bin_dir, no_durable_anywhere):
     _dangling(bin_dir, "fno-py")
     report = scan(bin_dir)
     assert report["defects"][0]["repair"] is None
@@ -108,10 +118,13 @@ def test_repair_reports_unrepairable_without_a_durable_copy(bin_dir):
 
 
 def test_main_exit_codes(bin_dir, tmp_path, monkeypatch):
-    # The real durable bin lives outside the temp root; in tests it lands
+    # The running-venv candidate is the durable bin: point sys.executable at
+    # it. The real durable bin lives outside the temp root; in tests it lands
     # under pytest's tmp_path, so point the temp root away or the repaired
     # link reads as temp-resolving.
-    monkeypatch.setattr(shim_check, "UV_TOOL_FNO_BIN", tmp_path / "durable-bin")
+    durable = tmp_path / "durable-bin"
+    monkeypatch.setattr(shim_check, "UV_TOOL_FNO_BIN", durable)
+    monkeypatch.setattr(shim_check.sys, "executable", str(durable / "python"))
     monkeypatch.setattr(shim_check, "_temp_root", lambda: "/fno-no-temp-root")
 
     assert main(["--bin-dir", str(bin_dir)]) == 0
@@ -121,4 +134,4 @@ def test_main_exit_codes(bin_dir, tmp_path, monkeypatch):
 
     _make_durable(tmp_path)
     assert main(["--bin-dir", str(bin_dir), "--repair"]) == 0
-    assert os.path.realpath(bin_dir / "fno-py") == str(tmp_path / "durable-bin" / "fno-py")
+    assert os.path.realpath(bin_dir / "fno-py") == str(durable / "fno-py")

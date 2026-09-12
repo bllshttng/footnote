@@ -1,7 +1,6 @@
 """fno shims must never dangle into a cleaned mktemp dir (x-c911).
 Scans the tool bin for fno* symlinks that dangle or resolve under a temp
 root, and repoints them to the durable uv tools copy.
-Run: `python -m fno.setup.shim_check [--repair] [--bin-dir D]`.
 """
 
 from __future__ import annotations
@@ -41,7 +40,13 @@ def scan(bin_dir: Path | None = None) -> dict:
 
 
 def _defect(link: Path, resolved: Path, problem: str) -> dict:
-    durable = UV_TOOL_FNO_BIN / link.name
+    # Prefer the bin of the RUNNING venv: the install channels invoke through
+    # the tool venv python, so its parent is the durable bin even when uv
+    # stores tools outside the default home location (UV_TOOL_DIR,
+    # XDG_DATA_HOME). Fall back to the default location.
+    durable = Path(sys.executable).parent / link.name
+    if not (durable.is_file() and os.access(durable, os.X_OK)):
+        durable = UV_TOOL_FNO_BIN / link.name
     repairable = durable.is_file() and os.access(durable, os.X_OK)
     return {
         "name": link.name,

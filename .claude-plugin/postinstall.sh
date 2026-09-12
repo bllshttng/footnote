@@ -204,6 +204,7 @@ if command -v uv >/dev/null 2>&1; then
      && command -v fno-agents-daemon >/dev/null 2>&1 \
      && command -v fno-agents-worker >/dev/null 2>&1; then
     log "fno $SRC_VERSION already installed (binary-complete); skipping."
+    shim_sweep || exit 1
     exit 0
   fi
 
