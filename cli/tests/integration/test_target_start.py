@@ -898,6 +898,35 @@ def test_already_isolated_is_noop(monkeypatch, tmp_path):
     assert spawned == []  # nothing created
 
 
+def test_already_isolated_degrades_base_when_remote_unreadable(monkeypatch, tmp_path):
+    """The base label is receipt-only on the isolated path: a tree whose
+    remote does not resolve still binds, printing the unmeasured spelling."""
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
+    monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda nid: None)
+
+    def _no_remote(cwd):
+        raise typer.Exit(code=1)
+
+    monkeypatch.setattr(target_cli, "_remote_base_ref", _no_remote)
+    (tmp_path / ".fno").mkdir()
+    (tmp_path / ".fno" / "target-state.md").write_text("session_id: x\n")
+    monkeypatch.setattr(
+        target_cli, "_classify_node_claim",
+        lambda node: ("ours", {"holder": "s1", "state": "live"}),
+    )
+    spawned = []
+    monkeypatch.setattr(
+        target_cli.subprocess, "run", lambda *a, **k: spawned.append(a) or None
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0
+    assert "base=in-place" in result.stdout
+    assert "node=already-claimed" in result.stdout
+    assert spawned == []
+
+
 def test_already_isolated_parks_on_foreign_holder(monkeypatch):
     """AC1-ERR: a DIFFERENT live session holds the claim -> park, exit 1,
     nothing acquired."""
