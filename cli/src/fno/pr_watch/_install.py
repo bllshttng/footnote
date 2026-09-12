@@ -595,6 +595,10 @@ _WHY_PHRASES = {
 #: "the tick broke" - lock_held, quota_skip and disabled are benign.
 _BROKEN_OUTCOMES = ("timeout", "error")
 
+#: How many tail end records the watermark pass keeps for the wedged streak
+#: (oldest first). Caps the streak any config knob can see.
+_RECENT_ENDS_KEEP = 16
+
 
 def tick_end_bits(end: dict) -> list[str]:
     """The parenthesised detail bits after a tick outcome: duration, sweep
@@ -720,6 +724,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
         "last_attempt": None,
         "last_end": None,
         "completed_tick": None,
+        "recent_ends": [],
     }
     if events_path is None:
         try:
@@ -783,6 +788,9 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                     "duration_s": data.get("duration_s"),
                     "sweep_failures": data.get("sweep_failures"),
                 }
+                recent = marks["recent_ends"]
+                recent.append(marks["last_end"])
+                del recent[:-_RECENT_ENDS_KEEP]
     except OSError:
         pass
     return marks
@@ -899,6 +907,19 @@ def _parse_ts(ts: Optional[str]) -> Optional[float]:
         return None
 
 
+def _broken_streak(ends: Optional[list]) -> int:
+    """Consecutive broken tick ends at the tail of an oldest-first list."""
+    if not ends:
+        return 0
+    streak = 0
+    for end in reversed(ends):
+        if isinstance(end, dict) and end.get("outcome") in _BROKEN_OUTCOMES:
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def liveness_report(
     *,
     enabled: bool,
@@ -909,17 +930,24 @@ def liveness_report(
     plist_mtime: Optional[float],
     now: float,
     last_end: Optional[dict] = None,
+    recent_ends: Optional[list] = None,
+    wedged_after_ticks: int = 3,
 ) -> dict:
     """Pure verdict: is an enabled pr-watch actually running?  (fully injectable)
 
-    ``verdict`` is one of ``disabled | healthy | healthy-pending | dead``.
-    Derives from tick recency (ground truth), not config alone (locked decision
-    #4).  A freshly-installed agent with no tick yet reads ``healthy-pending``,
-    not ``dead`` (AC1-UI boundary); enabled-but-not-loaded, or a stale/absent
-    tick past 2x the interval, reads ``dead`` with a fix command.
+    ``verdict`` is one of ``disabled | healthy | healthy-pending | wedged |
+    dead``.  Derives from tick recency (ground truth), not config alone
+    (locked decision #4).  A freshly-installed agent with no tick yet reads
+    ``healthy-pending``, not ``dead`` (AC1-UI boundary); enabled-but-not-
+    loaded, or a stale/absent tick past 2x the interval, reads ``dead`` with
+    a fix command.
     A post-install tick that ended broken (``last_end``, outcome timeout or
     error, newer than the plist) defeats that grace: the watcher HAD its tick
     and it died, so the verdict reads ``dead`` naming ``fno agents status``.
+    A fresh watermark with ``wedged_after_ticks`` consecutive broken ends
+    reads ``wedged``, not ``healthy``: the process is up and completing its
+    sweeps, so recency alone cannot see that every tick still fails; the fix
+    re-renders the plist onto the current binary.
     """
     threshold = 2 * max(interval_seconds, 1)
 
@@ -997,6 +1025,15 @@ def liveness_report(
             f"last tick {int(age)}s ago (> 2x interval {threshold}s)",
             "fno do pr watch install",
         )
+    streak = _broken_streak(recent_ends)
+    if streak >= max(wedged_after_ticks, 1):
+        return verdict(
+            "wedged",
+            f"last tick {int(age)}s ago but each of the last {streak} ticks "
+            "ended broken; the watermark is fresh, so the watcher is up and "
+            "delivering nothing",
+            "fno do pr watch refresh",
+        )
     return verdict("healthy", f"last tick {int(age)}s ago")
 
 
@@ -1032,6 +1069,8 @@ def liveness_report_live(
         plist_mtime=plist_mtime,
         now=time.time(),
         last_end=marks.get("last_end"),
+        recent_ends=marks.get("recent_ends"),
+        wedged_after_ticks=cfg.wedged_after_ticks,
     )
     # The last completed grant scan rides the same report the liveness verdict
     # uses: a done-probe can then assert "a healthy watcher completed a scan

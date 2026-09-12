@@ -1367,7 +1367,9 @@ def test_liveness_live_passes_last_end_to_the_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "fno.config.load_settings",
         lambda: types.SimpleNamespace(
-            pr_watch=types.SimpleNamespace(enabled=True, interval_seconds=600),
+            pr_watch=types.SimpleNamespace(
+                enabled=True, interval_seconds=600, wedged_after_ticks=3
+            ),
         ),
     )
     monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
@@ -1383,6 +1385,90 @@ def test_liveness_live_passes_last_end_to_the_verdict(tmp_path, monkeypatch):
     )
     assert report["verdict"] == "dead"
     assert report["fix"] == "fno agents status"
+
+
+# ---------------------------------------------------------------------------
+# A fresh watermark with consecutive broken ends reads wedged, not healthy
+# ---------------------------------------------------------------------------
+
+
+def test_liveness_fresh_watermark_three_broken_ends_is_wedged():
+    # The sweep completes, so the watermark stays fresh, while every tick
+    # still dies: recency alone read this "healthy" at 26% success. The
+    # streak is what liveness was missing; the cure is a re-render, not a
+    # reinstall.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    ends = [_end_at(tick - 1800), _end_at(tick - 1200), _end_at(tick - 600)]
+    v = _live(now=tick, recent_ends=ends)
+    assert v["verdict"] == "wedged"
+    assert v["fix"] == "fno do pr watch refresh"
+    assert "3" in v["detail"]
+
+
+def test_liveness_one_broken_end_among_ok_stays_healthy():
+    # One broken tick is transient; only a CONSECUTIVE tail bounces the job.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    ends = [_end_at(tick - 1800, outcome="timeout"),
+            _end_at(tick - 1200, outcome="ok"),
+            _end_at(tick - 600, outcome="ok")]
+    v = _live(now=tick, recent_ends=ends)
+    assert v["verdict"] == "healthy"
+
+
+def test_liveness_wedged_knob_is_honored():
+    # pr_watch.wedged_after_ticks lowers the threshold; 2 broken ends at a
+    # knob of 2 already read wedged.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    ends = [_end_at(tick - 1200), _end_at(tick - 600)]
+    v = _live(now=tick, recent_ends=ends, wedged_after_ticks=2)
+    assert v["verdict"] == "wedged"
+    v = _live(now=tick, recent_ends=ends, wedged_after_ticks=3)
+    assert v["verdict"] == "healthy"
+
+
+def test_liveness_wedged_streak_never_defeats_the_install_grace():
+    # A just-refreshed plist awaits its first tick; ends that predate it are
+    # the OLD install's failures. Grace holds until the watcher has had its
+    # chance, else a refresh could never clear the verdict.
+    v = _live(last_tick_ts=None, plist_mtime=100.0, now=200.0,
+              recent_ends=[_end_at(50), _end_at(80), _end_at(95)])
+    assert v["verdict"] == "healthy-pending"
+
+
+def test_liveness_live_passes_recent_ends_to_the_verdict(tmp_path, monkeypatch):
+    # The live surface feeds marks["recent_ends"] in, so a wedged streak
+    # survives the real read path, not only the pure function.
+    import os as _os
+    import time as _time
+    import types
+
+    m = _install()
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: types.SimpleNamespace(
+            pr_watch=types.SimpleNamespace(
+                enabled=True, interval_seconds=600, wedged_after_ticks=3
+            ),
+        ),
+    )
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+    plist = tmp_path / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    now = _time.time()
+    _os.utime(plist, (now - 5000, now - 5000))  # old plist: no grace arm
+    from datetime import datetime as _dt, timezone as _tz
+
+    tick_iso = _dt.fromtimestamp(now - 25, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ends = [_end_at(now - 1800), _end_at(now - 1200), _end_at(now - 600)]
+
+    report = m.liveness_report_live(
+        launch_agents_dir=tmp_path,
+        marks={"last_tick": tick_iso, "last_attempt": None,
+               "last_end": ends[-1], "completed_tick": None,
+               "recent_ends": ends},
+    )
+    assert report["verdict"] == "wedged"
+    assert report["fix"] == "fno do pr watch refresh"
 
 
 # ---------------------------------------------------------------------------
@@ -1402,7 +1488,9 @@ def test_liveness_report_carries_interval_and_merge_scan(
     monkeypatch.setattr(
         "fno.config.load_settings",
         lambda: types.SimpleNamespace(
-            pr_watch=types.SimpleNamespace(enabled=True, interval_seconds=600),
+            pr_watch=types.SimpleNamespace(
+                enabled=True, interval_seconds=600, wedged_after_ticks=3
+            ),
         ),
     )
     monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)

@@ -497,6 +497,8 @@ model = "claude-haiku-4-5"
 # tick_timeout_seconds = <unset>   # optional; no default
 # Skip the PR-watcher's per-PR dispatch pass when the shared GraphQL budget falls below this floor.
 graphql_min_remaining = 200
+# Consecutive broken tick ends (timeout/error) at a fresh watermark before the watcher reads `wedged` and auto-heal re-renders its plist via `fno do pr watch refresh`.
+wedged_after_ticks = 3
 
 [groom]
 # Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true.

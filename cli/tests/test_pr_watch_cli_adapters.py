@@ -635,6 +635,7 @@ def test_provider_supervisor_exception_is_nonfatal_and_runs_each_tick(
         pr_watch=SimpleNamespace(
             enabled=True, interval_seconds=600, tick_timeout_seconds=500,
             max_age_days=30, retries=3, graphql_min_remaining=0,
+            wedged_after_ticks=3,
         ),
     )
     monkeypatch.setattr(prcli, "load_settings", lambda: settings)

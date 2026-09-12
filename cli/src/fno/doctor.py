@@ -2355,6 +2355,12 @@ def _emit_human(
             f"fno doctor: pr-watch enabled but not running ({pw.get('detail')}); "
             f"run `{fix}`, then verify with `fno do pr watch status`."
         )
+    elif pw_verdict == "wedged":
+        fix = pw.get("fix") or "fno do pr watch refresh"
+        out(
+            f"fno doctor: pr-watch wedged ({pw.get('detail')}); "
+            f"run `{fix}`, then verify with `fno do pr watch status`."
+        )
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
 
@@ -2576,10 +2582,13 @@ def _emit_human(
         # silent scan read as a clean bill of health.
         out("fno doctor: LaunchAgent health: not applicable (no launchctl on this host).")
     for entry in agents.get("dead") or []:
+        if entry["label"] == "sh.fno.pr-watcher":
+            remedy = "run `fno do pr watch refresh`"
+        else:
+            remedy = "re-run `fno doctor update` if the entry point moved"
         out(
             f"fno doctor: LaunchAgent {entry['label']} last exited {entry['exit']} "
-            "(it is installed but failing); check its log under ~/.fno/ and re-run "
-            "`fno doctor update` if the entry point moved."
+            f"(it is installed but failing); check its log under ~/.fno/ and {remedy}."
         )
 
     # Silent-switch legibility (x-8cd5 Wave 6): the applied posture, then both
@@ -4409,16 +4418,31 @@ def doctor_command(
 
     # Report BEFORE delegating: `fno doctor update` execs/replaces this process.
     if fix:
-        # Heal a dead pr-watch first: the verdict's own fix is the bounce, and a
-        # python_stale --fix execs `fno doctor update` below and never returns, so act
-        # on it here. Advisory - never changes doctor's exit code (a dead
-        # watcher and a stale binary are distinct concerns).
+        # Heal a dead or wedged pr-watch first: the verdict's own fix is the
+        # bounce, and a python_stale --fix execs `fno doctor update` below and
+        # never returns, so act on it here. Advisory - never changes doctor's
+        # exit code (a dead watcher and a stale binary are distinct concerns).
+        # `wedged` takes the refresh cure, not the bounce: its watermark is
+        # fresh, so the tick already runs and re-bouncing the same plist
+        # re-runs the same failure; the plist must be re-rendered onto the
+        # current binary first.
         pw = result.get("pr_watch") or {}
-        if pw.get("verdict") == "dead" and not json_out:
-            from fno.pr_watch._install import _LAUNCH_AGENTS_DIR, heal_watcher
+        if pw.get("verdict") in ("dead", "wedged") and not json_out:
+            from fno.pr_watch._install import _LAUNCH_AGENTS_DIR, heal_watcher, refresh_watcher
 
-            hmsg, _ = heal_watcher(launch_agents_dir=_LAUNCH_AGENTS_DIR)
-            typer.echo(f"fno doctor: --fix pr-watch heal: {hmsg}", err=True)
+            if pw.get("verdict") == "wedged":
+                from fno.pr_watch.cli import _resolve_fno_binary
+
+                rmsg, _ = refresh_watcher(
+                    launch_agents_dir=_LAUNCH_AGENTS_DIR,
+                    fno_binary=_resolve_fno_binary(),
+                    install_path=os.environ.get("PATH", "/usr/bin:/bin"),
+                    interval=int(pw.get("interval_seconds") or 600),
+                )
+                typer.echo(f"fno doctor: --fix pr-watch refresh: {rmsg}", err=True)
+            else:
+                hmsg, _ = heal_watcher(launch_agents_dir=_LAUNCH_AGENTS_DIR)
+                typer.echo(f"fno doctor: --fix pr-watch heal: {hmsg}", err=True)
 
         # A stale plugin cache is counted in `blockers`, and nothing on this path
         # clears it: the exec below is `fno update`, which does not own claude's

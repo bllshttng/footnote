@@ -2966,28 +2966,16 @@ class PrWatchBlock(BaseModel):
     Controls the global launchd watcher that polls open-PR backlog nodes
     and fires headless /fno:pr check / /fno:pr merged.
 
-    Fields
-    ------
-    enabled:
-        True to activate the watcher (default False; operator opt-in).
-    interval_seconds:
-        ``StartInterval`` for the LaunchAgent plist (default 600 = 10 min).
-    retries:
-        Maximum consecutive dispatch failures before a PR is parked
-        (default 3).
-    max_age_days:
-        PRs older than this many days are parked without dispatch (default 14).
-    model:
-        The claude model used for headless skill fires (default haiku-4-5;
-        cheap mechanical task).
-    tick_timeout_seconds:
-        Wall-clock ceiling for one tick. Unset (None) derives at the tick
-        boundary as max(60, 0.8 * interval_seconds), so the deadline stays
-        under StartInterval and launchd never suppresses the next tick.
-    graphql_min_remaining:
-        Floor on the shared per-user GraphQL budget: below it the tick's
-        per-PR dispatch pass is skipped loudly rather than issuing queries
-        that stall (default 200).
+    Fields: enabled (operator opt-in, default False); interval_seconds
+    (plist StartInterval, default 600); retries (consecutive dispatch
+    failures before a PR parks, default 3); max_age_days (default 14);
+    model (headless skill-fire model, default claude-haiku-4-5);
+    tick_timeout_seconds (wall clock per tick; unset derives
+    max(60, 0.8 * interval_seconds) so launchd never suppresses the next
+    tick); graphql_min_remaining (dispatch-pass skip floor on the shared
+    GraphQL budget, default 200); wedged_after_ticks (consecutive broken
+    tick ends at a fresh watermark before liveness reads wedged, default
+    3; one broken tick is transient).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2999,6 +2987,7 @@ class PrWatchBlock(BaseModel):
     model: str = Field(default="claude-haiku-4-5", min_length=1)
     tick_timeout_seconds: Optional[int] = Field(default=None, gt=0)
     graphql_min_remaining: int = Field(default=200, ge=0)
+    wedged_after_ticks: int = Field(default=3, ge=1)
 
 
 class GroomBlock(BaseModel):
