@@ -1,9 +1,8 @@
 """The one decision site for writing a provider quota lock.
 
-``update_provider_health`` is the only writer of the cooldown, and this
-module is the only place that decides one is owed. Attribution stays with
-the caller: the function refuses to guess, so an unattributed refusal
-cannot poison a healthy account by falling back to the active one.
+``update_provider_health`` is the only writer of the cooldown; this module
+is the only place that decides one is owed. Attribution stays with the
+caller: the function refuses to guess.
 """
 
 from __future__ import annotations
@@ -21,11 +20,10 @@ def record_quota_lock(
 ) -> Optional[str]:
     """Write the provider cooldown for a refusal already attributed to an account.
 
-    Returns the account id written, or None when nothing was written. The
-    caller supplies its own account attribution; ``"default"`` (the spawn
-    positively pinned nothing) and None are refused rather than resolved to
-    the active account, which is how one dead worker's refusal reads as a
-    verdict on an account it never used.
+    Returns the account id written, or None when nothing was written. None
+    and ``"default"`` (the spawn positively pinned nothing) are refused
+    rather than resolved to the active account, so one dead worker's refusal
+    cannot read as a verdict on an account it never used.
     """
     if not account_id or account_id == "default" or not text:
         return None

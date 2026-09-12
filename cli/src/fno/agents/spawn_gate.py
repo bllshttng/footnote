@@ -1599,13 +1599,10 @@ def run_gate(
     # schema to move underneath a waiting spawn.
     _check_registry_schema()
 
-    # Ahead of the force branch too (x-bbc0): a vendor quota window on the
-    # caller-named account is not machine busy-ness, and forcing past it
-    # just buys another corpse. The lock is read through the shared
-    # vocabulary, never a hand-rolled field compare. An unnamed account is
-    # NOT a silent skip: a spawn that lets accounts.quota.pick_on_launch
-    # choose is already covered, because the picker reads the same lock
-    # through headroom() and is_in_cooldown (rotation.py).
+    # Ahead of the force branch too (x-bbc0): a vendor quota window is not
+    # machine busy-ness, and forcing past it just buys another corpse. An
+    # unnamed account is not a silent skip: the accounts.quota picker reads
+    # the same lock through headroom() and is_in_cooldown (rotation.py).
     if account and account != "default":
         from fno.adapters.providers.runtime_state import is_in_cooldown, read_state
 

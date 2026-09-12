@@ -397,17 +397,13 @@ def recovery_sweep(
                 })
 
             # The sweep-time lock write (x-bbc0): a corroborated quota
-            # refusal cools the account the worker was LAUNCHED on, so the
-            # next spawn meets the window at the gate instead of dying in
-            # it. Four guards, each load-bearing: ``refusal_acts`` is the
-            # corroboration (a live worker's prose needs two consecutive
-            # ticks; a dead session's own error text acts at once); the
-            # class check keeps an auth refusal from writing a QUOTA lock;
-            # the sentinel makes it once per worker; and record_quota_lock
-            # itself refuses an unattributed account rather than guessing
-            # the active one. The event fires even when nothing was
-            # written - an unattributable refusal is the finding, and
-            # silence there reads as a sweep that never ran.
+            # refusal cools the account the worker was LAUNCHED on. Guards,
+            # each load-bearing: refusal_acts (corroboration - a live
+            # worker needs two ticks, a dead one's error text acts at
+            # once), the quota class (an auth refusal is not a quota
+            # window), the once-per-worker sentinel, and record_quota_lock
+            # refusing an unattributed account. The event fires even when
+            # nothing was written - that refusal is the finding.
             if (refusal_acts
                     and _err.error_class is ErrorClass.PROVIDER_4XX_QUOTA
                     and not counts.get(_quota_key(c.short_id))):
