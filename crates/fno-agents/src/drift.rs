@@ -124,6 +124,33 @@ pub fn drift_label(state: &DriftState) -> &'static str {
     }
 }
 
+/// The live store keeper's path note (x-d6ad AC13): name the path the keeper
+/// runs from, and mark it against the installed release path. The keeper's
+/// identity comes from the footprint payload's `top` array - its own argv
+/// string - so no new probe is needed. The note always names the path (a
+/// positive marker), and marks it "not the installed release path" whenever
+/// that equality cannot be proven, not only when drift is proven.
+pub fn keeper_path_note(top_commands: &[String], installed_exe: Option<&Path>) -> Option<String> {
+    let argv0 = top_commands.iter().find_map(|command| {
+        let mut words = command.split_whitespace();
+        let program = words.next()?;
+        if Path::new(program).file_name()?.to_str()? != "fno-agents" {
+            return None;
+        }
+        if !words.any(|word| word == "--store-keeper") {
+            return None;
+        }
+        Some(program)
+    })?;
+    let running = ExeFingerprint::of(Path::new(argv0));
+    let installed = installed_exe.and_then(ExeFingerprint::of);
+    let kind = match (running, installed) {
+        (Some(r), Some(d)) if r.path == d.path => "the installed release path",
+        _ => "not the installed release path",
+    };
+    Some(format!("store keeper: {argv0} ({kind})"))
+}
+
 /// Format the operator-facing drift warning, or `None` when there is nothing to
 /// warn about (`Fresh`/`DaemonDown`/`Unknown`). The message is advisory and
 /// names the exact remedy verb. The caller routes it to **stderr** only, so a
@@ -313,5 +340,52 @@ mod tests {
             running: fp.clone(),
             on_disk: fp,
         }
+    }
+
+    #[test]
+    fn keeper_note_names_the_path_and_marks_a_worktree_build() {
+        // AC13: the note is a positive marker - it names the path the keeper
+        // runs from, and marks what it is, by its own string.
+        let commands = vec![
+            "Google Chrome Helper (Renderer)".to_string(),
+            "/Users/dev/.fno/worktrees/footnote/x-d6ad/target/debug/fno-agents --store-keeper --sock /tmp/x".to_string(),
+        ];
+        let note = keeper_path_note(&commands, None).expect("note");
+        assert!(
+            note.contains("/Users/dev/.fno/worktrees/footnote"),
+            "{note}"
+        );
+        assert!(note.contains("not the installed release path"), "{note}");
+    }
+
+    #[test]
+    fn keeper_note_says_when_the_keeper_is_the_installed_release() {
+        // The keeper detector matches argv0's basename, so the staged file
+        // must be named like the real binary.
+        let dir = std::env::temp_dir().join(format!(
+            "fno_drift_keeper_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("fno-agents");
+        write_file(&p, b"bin");
+        let commands = vec![format!("{} --store-keeper --sock /tmp/x", p.display())];
+        let note = keeper_path_note(&commands, Some(&p)).expect("note");
+        assert!(note.contains("the installed release path"), "{note}");
+        fs::remove_file(&p).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn keeper_note_is_none_without_a_keeper_row() {
+        let commands = vec![
+            "/usr/bin/rustc --edition=2021".to_string(),
+            "claude bg-spare --bg-spare /tmp/spare".to_string(),
+        ];
+        assert_eq!(keeper_path_note(&commands, None), None);
     }
 }

@@ -217,7 +217,9 @@ def _cpu_admission_arm() -> ArmReading:
     )
 
 
-def _machine_cpu_arm(sample: Optional[dict], reason: Optional[str]) -> ArmReading:
+def _machine_cpu_arm(
+    sample: Optional[dict], reason: Optional[str], footprint: Any = None
+) -> ArmReading:
     if sample is None:
         return ArmReading("whole-machine cpu", DARK, reason=reason or "macmon dark")
     pct = sample.get("cpu_usage_pct")
@@ -231,7 +233,13 @@ def _machine_cpu_arm(sample: Optional[dict], reason: Optional[str]) -> ArmReadin
     return ArmReading(
         "whole-machine cpu",
         MEASURED,
-        value={"busy_fraction": round(busy, 3), "capacity_cores": _cpu_capacity_cores()},
+        value={
+            "busy_fraction": round(busy, 3),
+            "capacity_cores": _cpu_capacity_cores(),
+            # x-d6ad AC10: census rides the fleet read; unknown, never guessed.
+            "runnable": getattr(footprint, "runnable_count", None),
+            "processes": getattr(footprint, "machine_process_count", None),
+        },
         source="macmon cpu_usage_pct",
     )
 
@@ -403,15 +411,13 @@ def read_lanes(
     sample, macmon_reason = macmon_fn()
     reading = LaneReading()
     load_arm = _cpu_admission_arm()
-    cpu_arm = _machine_cpu_arm(sample, macmon_reason)
+    # One fleet read serves the census, the per-lane divisor, and the machine
+    # arm's counts (x-d6ad AC10); taken before the refusal branch.
+    footprint, rows, rows_error, read_ms = _fleet_snapshot()
+    cpu_arm = _machine_cpu_arm(sample, macmon_reason, footprint)
     mem_arm = _memory_arm(sample, macmon_reason)
     power_arm = _power_arm(sample, macmon_reason)
     reading.arms.extend([load_arm, cpu_arm, mem_arm, power_arm])
-
-    # One fleet read serves both the census and the per-lane divisor, taken
-    # BEFORE the refusal branch: a refused lane number is exactly when a
-    # person most wants to see what the machine is holding.
-    footprint, rows, rows_error, read_ms = _fleet_snapshot()
     reading.census = _census(footprint, rows, rows_error, read_ms)
 
     dark = [a for a in reading.arms if a.state == DARK]

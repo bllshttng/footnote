@@ -288,6 +288,27 @@ def test_a_macmon_fraction_passes_through_unrescaled(monkeypatch) -> None:
     assert reading.arm("whole-machine cpu").value["busy_fraction"] == 0.45
 
 
+def test_the_machine_cpu_arm_quotes_the_machine_census(monkeypatch) -> None:
+    """x-d6ad AC10: the lanes arm quotes the same machine-wide census the
+    control-plane arm reads, taken from the one footprint read the fleet
+    census already made."""
+    _healthy_reading(monkeypatch)
+    footprint = SimpleNamespace(
+        fleet_cpu_cores=0.5,
+        rss_gb=1.9,
+        test_process_count=0,
+        attribution_gap=None,
+        top=[],
+        runnable_count=66,
+        machine_process_count=1010,
+    )
+    monkeypatch.setattr(dl, "_fleet_snapshot", lambda: (footprint, _rows(6), None, 421))
+    reading = dl.read_lanes()
+    value = reading.arm("whole-machine cpu").value
+    assert value["runnable"] == 66
+    assert value["processes"] == 1010
+
+
 @pytest.mark.skipif(
     shutil.which("macmon") is None,
     reason="macmon not on PATH; the live smoke needs the real sensor",

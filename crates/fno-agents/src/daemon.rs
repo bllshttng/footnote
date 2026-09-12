@@ -2233,6 +2233,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut last_orphan_sweep = Instant::now();
     let liveness_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_liveness_sweep = Instant::now();
+    // Machine watch (x-d6ad): the arm owns its cadence, gate and memory.
+    let machine_watch = crate::machine_watch::Arm::default();
     // Retirement-sweep cadence (x-d354): the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
@@ -2324,14 +2326,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::scrape::scrape_sweep(&home, &emitter, notify_on_blocked);
                     });
                 }
-                // Retirement sweep (x-c672): a row leaves when its WORK is
-                // done (reverse join) and its transcript is quiet past
-                // `agents.retire_grace_s`; its held process is stopped first,
-                // its receipt is written before the drop, and its
-                // clean-and-merged worktree is pruned. Throttled to
-                // `agents.retire_interval_s` (x-d354, default grace/3), handed
-                // back by the sweep body so the tick never blocks on config
-                // reads; off-loop behind a gate like every sweep (x-ef7f).
+                // Retirement sweep (x-c672): a row leaves when its work is done
+                // (reverse join) and its transcript is quiet past
+                // `agents.retire_grace_s`; held process stopped first, receipt
+                // written before the drop, clean worktree pruned. Throttled to
+                // `agents.retire_interval_s` (x-d354); off-loop (x-ef7f).
                 let retire_interval = crate::gc::retire_interval_snapshot(&retire_interval_next);
                 crate::gc::maybe_retirement_sweep(
                     &mut last_gc_sweep,
@@ -2346,11 +2345,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     // opt-in via the manual verb (Locked Decision 6).
                     || crate::gc::mux_tab_sweep(false, false),
                 );
-                // Worktree sweep + merge reaper (x-07dc). The sweep is the
-                // backstop for what the reaper cannot reach; the reaper is the
-                // merge-triggered consumer of `merge_cleanup_requested`, with
-                // its own 60s floor. Both run off-loop behind the one-in-flight
-                // gate; the reaper's grace and stop order live in merge_reap.rs.
+                // Worktree sweep + merge reaper (x-07dc): the sweep backstops
+                // what the reaper cannot reach; the reaper is the merge-triggered
+                // consumer of `merge_cleanup_requested` (60s floor). Both
+                // off-loop; grace and stop order live in merge_reap.rs.
                 if !worktree_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     let flag = Arc::clone(&worktree_sweep_in_flight);
                     let home = ctx.home.clone();
@@ -2406,6 +2404,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     &orphan_sweep_in_flight,
                     ctx.home.events_jsonl(),
                 );
+                // The machine gets an arm (x-d6ad): bands the box, escalates, gates nothing.
+                crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's
                 // measurement, refreshed every SERVED_LIVENESS_CADENCE with
                 // no lifecycle write. Off-loop behind a one-in-flight gate,

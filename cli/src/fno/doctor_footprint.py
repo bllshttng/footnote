@@ -13,7 +13,7 @@ import time
 from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
 import typer
 
@@ -27,7 +27,7 @@ from fno.footprint import Admission, Footprint, parse_footprint
 SUSTAINED_CPU_CAPACITY_FRACTION = 0.1
 SUSTAINED_CPU_FLOOR_CORES = 0.25
 DAEMON_ALLOWANCE = 1
-_PS_COLUMNS = "pid,ppid,etime,%cpu,rss,command"
+_PS_COLUMNS = "pid,ppid,state,etime,%cpu,rss,command"
 PS_TIMEOUT_SECONDS = 5.0
 _NO_LOAD_SNAPSHOT = object()
 #: Exit codes. A capacity breach keeps 3 (existing readers depend on it); the
@@ -890,6 +890,90 @@ def cpu_admission(
     )
 
 
+class MachinePressure(NamedTuple):
+    """The whole-machine band's verdict, read verbatim by machine_watch
+    (x-d6ad LD3); ``load_15m`` and ``runnable`` are context, never deciders."""
+
+    verdict: str
+    busy_fraction: float | None
+    band: float
+    machine_cores: float | None
+    capacity_cores: float
+    runnable: int | None
+    processes: int | None
+    load_15m: float | None
+    throttle_minutes: int
+    reason: str
+
+
+def machine_pressure(
+    reading: Footprint | None,
+    *,
+    capacity_cores: float,
+    busy_band: float,
+    load_15m: float | None,
+    throttle_minutes: int,
+    failure: str | None = None,
+) -> MachinePressure:
+    """The one whole-machine decider (x-d6ad LD2/LD4). A ``None`` reading is
+    ``unreadable``, never calm. Pure: no clocks, no subprocesses, no config."""
+    if reading is None:
+        busy = None
+        verdict, reason = "unreadable", failure or "machine reading unavailable"
+        cores = runnable = processes = None
+    else:
+        raw_busy = reading.measured_cpu_cores / capacity_cores if capacity_cores > 0 else 0.0
+        busy = round(raw_busy, 3)
+        verdict = "hot" if raw_busy > busy_band else "calm"
+        load_text = f"{load_15m:.1f}" if load_15m is not None else "unavailable"
+        reason = (
+            f"machine {raw_busy * 100:.1f}% "
+            + ("crosses" if verdict == "hot" else "of")
+            + f" band {busy_band * 100:.0f}% "
+            f"({reading.measured_cpu_cores:.3f} of {capacity_cores:.2f} cores) -> "
+            f"{verdict}; load_15m {load_text}, {reading.runnable_count} runnable of "
+            f"{reading.machine_process_count} processes"
+        )
+        cores, runnable, processes = (
+            reading.measured_cpu_cores,
+            reading.runnable_count,
+            reading.machine_process_count,
+        )
+    return MachinePressure(
+        verdict=verdict,
+        busy_fraction=busy,
+        band=busy_band,
+        machine_cores=cores,
+        capacity_cores=capacity_cores,
+        runnable=runnable,
+        processes=processes,
+        load_15m=load_15m,
+        throttle_minutes=throttle_minutes,
+        reason=reason,
+    )
+
+
+def _compute_machine_pressure(reading: Footprint, load_snapshot: Any) -> MachinePressure:
+    """Feed :func:`machine_pressure` from one snapshot; band and throttle
+    come from ``config.resource_meter``, degraded to the registry defaults."""
+    try:
+        from fno.config import load_settings
+
+        meter = load_settings().resource_meter
+        band = float(meter.thresholds.cpu_busy_fraction)
+        # Clamped: a wild value fails the Rust reader's u64 and blinds the read.
+        throttle = min(max(int(meter.notifications.throttle_minutes), 0), 10_080)
+    except Exception:  # noqa: BLE001 - footprint is a reading, not an enforcer
+        band, throttle = 0.9, 60
+    return machine_pressure(
+        reading,
+        capacity_cores=_cpu_capacity_cores(),
+        busy_band=band,
+        load_15m=getattr(load_snapshot, "load_15m", None),
+        throttle_minutes=throttle,
+    )
+
+
 def leak_verdict(direct_processes: int, threshold: int | None) -> str:
     """``clean`` | ``unexplained`` | ``unknown`` from the roster arithmetic.
 
@@ -942,6 +1026,9 @@ def _payload(
         # code. `capacity_verdict` stays one release as an alias of the verdict.
         "admission": admission._asdict(),
         "capacity_verdict": admission.verdict,
+        # x-d6ad LD3: the whole-machine verdict on every emission (cause-only
+        # included); the machine_watch arm reads THIS and computes none of its own.
+        "machine": _compute_machine_pressure(reading, load_snapshot)._asdict(),
         "load_1m": getattr(load_snapshot, "load_1m", None),
         "load_5m": getattr(load_snapshot, "load_5m", None),
         "load_15m": getattr(load_snapshot, "load_15m", None),

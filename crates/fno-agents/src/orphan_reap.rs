@@ -72,7 +72,7 @@ fn elapsed_seconds(value: &str) -> Option<u64> {
     }
 }
 
-/// Detect candidates from one `ps -Ao pid,ppid,etime,%cpu,rss,command`
+/// Detect candidates from one `ps -Ao pid,ppid,state,etime,%cpu,rss,command`
 /// snapshot: a deps test binary that is parentless or holds a zombie pile,
 /// with its dead children counted from the same snapshot. Rows that do not
 /// parse are skipped; they carry no candidate.
@@ -84,17 +84,17 @@ pub fn detect(ps_output: &str) -> Vec<OrphanedTestBinary> {
             continue;
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 6 {
+        if fields.len() < 7 {
             continue;
         }
         let (Ok(pid), Ok(ppid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>()) else {
             continue;
         };
-        let Some(elapsed) = elapsed_seconds(fields[2]) else {
+        let Some(elapsed) = elapsed_seconds(fields[3]) else {
             continue;
         };
         // The command is the tail; rejoin so argv words survive.
-        let command = fields[5..].join(" ");
+        let command = fields[6..].join(" ");
         processes.push((pid, ppid, elapsed, command));
     }
     // A defunct row is a dead child: count it against its PPID.
@@ -190,7 +190,7 @@ pub fn reap_rows(ps_output: &str, apply: bool, min_elapsed: u64) -> Vec<ReapRow>
 
 fn read_ps() -> Option<String> {
     let output = std::process::Command::new("ps")
-        .args(["-Ao", "pid,ppid,etime,%cpu,rss,command"])
+        .args(["-Ao", "pid,ppid,state,etime,%cpu,rss,command"])
         .output()
         .ok()?;
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -303,13 +303,13 @@ mod tests {
 
     fn snapshot_with(orphan_ppid: u32, command: &str) -> String {
         let mut rows = vec![
-            "PID PPID ELAPSED %CPU RSS COMMAND".to_string(),
-            format!("59929 {orphan_ppid} 03:07:00 0.0 4096 {command}"),
+            "PID PPID S ELAPSED %CPU RSS COMMAND".to_string(),
+            format!("59929 {orphan_ppid} S 03:07:00 0.0 4096 {command}"),
         ];
         for i in 0..227 {
-            rows.push(format!("{} 59929 00:00:10 0.0 0 <defunct>", 70000 + i));
+            rows.push(format!("{} 59929 Z 00:00:10 0.0 0 <defunct>", 70000 + i));
         }
-        rows.push("900 1 01:00:00 0.1 1024 fno-agents-daemon --serve".to_string());
+        rows.push("900 1 Ss 01:00:00 0.1 1024 fno-agents-daemon --serve".to_string());
         rows.join("\n")
     }
 
@@ -343,20 +343,20 @@ mod tests {
 
     #[test]
     fn skips_a_childless_deps_binary_with_a_parent() {
-        let ps = "PID PPID ELAPSED %CPU RSS COMMAND\n\
-                  59929 4321 03:07:00 0.0 4096 /w/crates/fno/target/debug/deps/fno-aa7282e99eecb046 portal\n";
+        let ps = "PID PPID S ELAPSED %CPU RSS COMMAND\n\
+                  59929 4321 S 03:07:00 0.0 4096 /w/crates/fno/target/debug/deps/fno-aa7282e99eecb046 portal\n";
         assert!(detect(ps).is_empty());
     }
 
     #[test]
     fn holds_below_the_zombie_bar_when_parented() {
         let mut rows = vec![
-            "PID PPID ELAPSED %CPU RSS COMMAND".to_string(),
-            "59929 4321 03:07:00 0.0 4096 /w/crates/fno/target/debug/deps/fno-aa7282e99eecb046"
+            "PID PPID S ELAPSED %CPU RSS COMMAND".to_string(),
+            "59929 4321 S 03:07:00 0.0 4096 /w/crates/fno/target/debug/deps/fno-aa7282e99eecb046"
                 .to_string(),
         ];
         for i in 0..(ORPHAN_MIN_ZOMBIES - 1) {
-            rows.push(format!("{} 59929 00:00:10 0.0 0 <defunct>", 70000 + i));
+            rows.push(format!("{} 59929 Z 00:00:10 0.0 0 <defunct>", 70000 + i));
         }
         assert!(detect(&rows.join("\n")).is_empty());
     }

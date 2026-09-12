@@ -1,0 +1,82 @@
+{
+  "comment": "Shared branch fixture for the whole-machine band (x-d6ad AC11). Each case feeds `inputs` to cli machine_pressure and pins the exact MachinePressure; the Rust machine_watch arm parses `payload.machine` and must take the branch the verdict names, printing reason verbatim. Regenerate via the 1.1 generator, never by hand.",
+  "cases": [
+    {
+      "name": "hot_box",
+      "inputs": {
+        "measured_cpu_cores": 11.0,
+        "runnable_count": 160,
+        "machine_process_count": 1100,
+        "capacity_cores": 12,
+        "busy_band": 0.9,
+        "load_15m": 279.12,
+        "throttle_minutes": 30
+      },
+      "payload": {
+        "machine": {
+          "verdict": "hot",
+          "busy_fraction": 0.917,
+          "band": 0.9,
+          "machine_cores": 11.0,
+          "capacity_cores": 12,
+          "runnable": 160,
+          "processes": 1100,
+          "load_15m": 279.12,
+          "throttle_minutes": 30,
+          "reason": "machine 91.7% crosses band 90% (11.000 of 12.00 cores) -> hot; load_15m 279.1, 160 runnable of 1100 processes"
+        }
+      }
+    },
+    {
+      "name": "busy_but_calm_box",
+      "inputs": {
+        "measured_cpu_cores": 5.186,
+        "runnable_count": 66,
+        "machine_process_count": 1010,
+        "capacity_cores": 12,
+        "busy_band": 0.9,
+        "load_15m": 112.96,
+        "throttle_minutes": 60
+      },
+      "payload": {
+        "machine": {
+          "verdict": "calm",
+          "busy_fraction": 0.432,
+          "band": 0.9,
+          "machine_cores": 5.186,
+          "capacity_cores": 12,
+          "runnable": 66,
+          "processes": 1010,
+          "load_15m": 112.96,
+          "throttle_minutes": 60,
+          "reason": "machine 43.2% of band 90% (5.186 of 12.00 cores) -> calm; load_15m 113.0, 66 runnable of 1010 processes"
+        }
+      }
+    },
+    {
+      "name": "unreadable_sensor",
+      "inputs": {
+        "measured_cpu_cores": null,
+        "failure": "footprint probe fno-footprint-cause did not answer inside 8s",
+        "capacity_cores": 12,
+        "busy_band": 0.9,
+        "load_15m": null,
+        "throttle_minutes": 60
+      },
+      "payload": {
+        "machine": {
+          "verdict": "unreadable",
+          "busy_fraction": null,
+          "band": 0.9,
+          "machine_cores": null,
+          "capacity_cores": 12,
+          "runnable": null,
+          "processes": null,
+          "load_15m": null,
+          "throttle_minutes": 60,
+          "reason": "footprint probe fno-footprint-cause did not answer inside 8s"
+        }
+      }
+    }
+  ]
+}
