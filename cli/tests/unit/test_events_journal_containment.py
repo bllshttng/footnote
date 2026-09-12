@@ -132,7 +132,9 @@ def test_ask_writes_under_its_own_root_never_the_shared_pin(pinned, runner) -> N
     from fno.outstanding.cli import outstanding_app
     from fno.paths import project_log
 
-    result = runner.invoke(outstanding_app, ["ask", "which auth?"])
+    # --node satisfies the ask law's pointer rule; this test is about journal
+    # containment, and the node field changes nothing it asserts.
+    result = runner.invoke(outstanding_app, ["ask", "which auth?", "--node", "x-0000000c"])
     assert result.exit_code == 0, result.output
 
     space_journal = project_log("events.jsonl", project_root=pinned["root"])
