@@ -559,11 +559,11 @@ def _parse_flags(flags_json: Optional[str]) -> Optional[List[str]]:
         "Register, clear, or read the hold that says a review of this PR's head "
         "is RUNNING. Merge readiness only knows what verdicts EXIST for a head, "
         "so a review still writing its fixes is invisible to it. Actions: "
-        "check <pr> (exit 0 clear, 3 held, 4 unanswered), acquire, release."
+        "check <pr> (exit 0 clear, 3 held, 4 unanswered), acquire, release, round."
     ),
 )
 def review_hold(
-    action: str = typer.Argument(..., help="check | acquire | release"),
+    action: str = typer.Argument(..., help="check | acquire | release | round"),
     pr_number: Optional[int] = typer.Argument(None, help="GitHub PR number (check)"),
     branch: Optional[str] = typer.Option(None, "--branch", help="Head branch (acquire/release)."),
     head: str = typer.Option("", "--head", help="The head sha being reviewed (acquire)."),
@@ -638,6 +638,28 @@ def review_hold(
 
         typer.echo(json.dumps(claim_status(_review_hold.review_hold_key(branch))))
         raise typer.Exit(code=0)
+    if action == "round":
+        if not head:
+            typer.echo("review-hold round needs --head", err=True)
+            raise typer.Exit(code=1)
+        # The instrument must have RUN: an empty chain is an absence with more
+        # than one explanation, and journals missing on both mirrors means no
+        # read ever answered. Fail closed so the caller stamps nothing rather
+        # than trusting a zero-shaped read.
+        from fno.pr._reviews import _coverage_logs
+
+        try:
+            journal_paths = _coverage_logs(cwd)[:2]
+        except Exception:  # noqa: BLE001 - a dead probe never mints a round
+            raise typer.Exit(code=1) from None
+        if not any(path is not None and path.exists() for path in journal_paths):
+            raise typer.Exit(code=1)
+        try:
+            round_no = _review_hold.scoped_verify_round(branch, head, cwd=cwd)
+        except Exception:  # noqa: BLE001 - fail closed: no number, no stamp
+            raise typer.Exit(code=1) from None
+        typer.echo(round_no)
+        raise typer.Exit(code=0)
     if not holder:
         typer.echo("review-hold acquire needs --holder", err=True)
         raise typer.Exit(code=1)
@@ -681,6 +703,9 @@ def review_hold(
         if refusal:
             typer.echo(f"review-invocation-refused: {refusal}")
             raise typer.Exit(code=3)
+        advisory = _review_hold.verify_fixes_advisory(branch, head, cwd=cwd)
+        if advisory:
+            typer.echo(advisory, err=True)
         claim = _review_hold.acquire_review_hold(
             branch,
             head=head,

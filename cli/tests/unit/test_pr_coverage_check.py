@@ -3205,6 +3205,50 @@ def test_cap_verdict_rounds_read_the_max_of_both_axes(tmp_path):
     assert events_only.rounds_used == 1
 
 
+def test_cap_verdict_mixed_declared_chain_reads_two(tmp_path):
+    """The parity corpus row: an undeclared fail at head A, a declared verify
+    pass (review_round 1) at head B, an undeclared fail at head C. The
+    declared verify does not double-count the fail it verifies; the trailing
+    undeclared round still counts, so both mirrors read 2. The Rust half is
+    cap_the_mixed_declared_chain_reads_two_on_both_mirrors."""
+    rows = []
+    for i, (verdict, declared) in enumerate([("fail", None), ("pass", 1), ("fail", None)]):
+        data = {
+            "reviewer": "code-review",
+            "head_sha": f"{i:040x}",
+            "verdict": verdict,
+            "session_id": "s-cap",
+            "branch": "feature/x-cap",
+            "reviewed_base_sha": "a" * 40,
+            "reviewed_head_sha": f"{i:040x}",
+            "findings_blocking": 1 if verdict == "fail" else 0,
+            "findings": (
+                [
+                    {
+                        "category": "correctness",
+                        "verdict": "CONFIRMED",
+                        "blocking": True,
+                        "has_required_fields": True,
+                        "finding_key": _CAP_HARD_KEY,
+                    }
+                ]
+                if verdict == "fail"
+                else []
+            ),
+        }
+        if declared is not None:
+            data["review_round"] = declared
+        rows.append(
+            {"ts": f"2026-08-31T2{i:02d}:00:00Z", "type": "review_attestation",
+             "source": "hook", "data": data}
+        )
+    _seed_cap_chain(tmp_path, rows)
+    cap = _coverage_gate.cap_verdict(
+        str(tmp_path), f"{2:040x}", "feature/x-cap", _cap_cov_row()
+    )
+    assert cap.rounds_used == 2
+
+
 def test_cap_verdict_on_an_empty_chain_answers_zero(tmp_path):
     """No chain at all: rounds 0, nothing omitted."""
     (tmp_path / ".fno").mkdir(exist_ok=True)

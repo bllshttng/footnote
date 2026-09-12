@@ -426,6 +426,14 @@ def classify(
         "(json_block | report_findings | prose_unparseable); prose_unparseable "
         "always rides a fail verdict.",
     ),
+    review_round: Optional[int] = typer.Option(
+        None,
+        "--review-round",
+        help="The branch-scoped round this verdict declares itself: stamped "
+        "onto the record and the attested row when the invocation carried "
+        "--verify-fixes, so the counter reads the round it verified. Absent: "
+        "the pass counts as a fresh round.",
+    ),
 ) -> None:
     """Classify a findings payload; the one shell entry point producers share."""
     try:
@@ -443,6 +451,11 @@ def classify(
     except RecordBuildError as exc:
         typer.secho(f"classify: {findings_file}: {exc}", err=True)
         raise typer.Exit(code=2) from exc
+    if review_round is not None:
+        if review_round < 0:
+            typer.secho("classify: --review-round must be a non-negative integer", err=True)
+            raise typer.Exit(code=2)
+        record["review_round"] = review_round
     if attest:
         if not attest.strip():
             typer.secho(

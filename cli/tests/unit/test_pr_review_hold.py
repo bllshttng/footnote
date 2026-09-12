@@ -644,6 +644,185 @@ def test_unmeasurable_interdiff_fails_open(monkeypatch, tmp_path: Path) -> None:
     assert _review_hold.review_invocation_refusal("feature/x", moved, cwd=str(tmp_path)) == ""
 
 
+def _fail_event(head: str, base: str) -> dict:
+    event = _chain_event(head, base)
+    event["verdict"] = "fail"
+    return event
+
+
+def test_verify_round_names_the_round_behind_the_fix(monkeypatch, tmp_path: Path) -> None:
+    """One fail at head A, fix moved to head B: the verify pass verifies round 1."""
+    import fno.pr._coverage_gate as gate
+
+    chain = [_fail_event("a" * 40, "b" * 40)]
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    assert _review_hold.scoped_verify_round("feature/x", "c" * 40, cwd=str(tmp_path)) == 1
+
+
+def test_verify_round_is_floored_at_one_on_an_empty_chain(monkeypatch, tmp_path: Path) -> None:
+    """A verify with no round behind it still names a round: a declared row can
+    never read the chain down to zero."""
+    import fno.pr._coverage_gate as gate
+
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: [])
+    assert _review_hold.scoped_verify_round("feature/x", "a" * 40, cwd=str(tmp_path)) == 1
+
+
+def test_verify_round_follows_a_declared_round(monkeypatch, tmp_path: Path) -> None:
+    import fno.pr._coverage_gate as gate
+
+    second = _fail_event("b" * 40, "c" * 40)
+    second["review_round"] = 2
+    chain = [_fail_event("a" * 40, "b" * 40), second]
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    assert _review_hold.scoped_verify_round("feature/x", "d" * 40, cwd=str(tmp_path)) == 2
+
+
+def _round_runner(monkeypatch, tmp_path: Path, chain: list[dict]):
+    """The `round` action with the chain and both journals pointed at fixtures."""
+    from typer.testing import CliRunner
+
+    from fno.pr import pr_app
+    import fno.pr._coverage_gate as gate
+    import fno.pr._reviews as reviews
+
+    journal = tmp_path / "events.jsonl"
+    journal.write_text("")
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    monkeypatch.setattr(
+        reviews, "_coverage_logs", lambda cwd=None, project_events=None: (journal, None, None)
+    )
+    return CliRunner().invoke(
+        pr_app,
+        ["review-hold", "round", "--branch", "feature/x", "--head", "c" * 40, "--repo", str(tmp_path)],
+    )
+
+
+def test_round_action_prints_the_integer(monkeypatch, tmp_path: Path) -> None:
+    r = _round_runner(monkeypatch, tmp_path, [_fail_event("a" * 40, "b" * 40)])
+    assert r.exit_code == 0, r.output
+    assert r.output.strip() == "1"
+
+
+def test_round_action_fails_closed_with_no_journal(monkeypatch, tmp_path: Path) -> None:
+    """No readable events journal: print nothing, exit non-zero, stamp nothing."""
+    import fno.pr._coverage_gate as gate
+    import fno.pr._reviews as reviews
+    from typer.testing import CliRunner
+
+    from fno.pr import pr_app
+
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: [])
+    monkeypatch.setattr(
+        reviews,
+        "_coverage_logs",
+        lambda cwd=None, project_events=None: (tmp_path / "absent.jsonl", None, None),
+    )
+    r = CliRunner().invoke(
+        pr_app,
+        ["review-hold", "round", "--branch", "feature/x", "--head", "a" * 40, "--repo", str(tmp_path)],
+    )
+    assert r.exit_code != 0
+    assert r.output.strip() == ""
+
+
+def test_round_action_needs_a_head(monkeypatch, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from fno.pr import pr_app
+
+    r = CliRunner().invoke(
+        pr_app,
+        ["review-hold", "round", "--branch", "feature/x", "--repo", str(tmp_path)],
+    )
+    assert r.exit_code != 0
+    # The refusal rides stderr (CliRunner mixes it in); stdout answers nothing.
+    assert "needs --head" in r.output
+
+
+def _fail_event_with_finding(head: str, base: str) -> dict:
+    event = _fail_event(head, base)
+    event["findings"] = [{"finding_key": "f.py:1:correctness", "blocking": True}]
+    return event
+
+
+def test_advisory_names_the_flag_when_the_head_moved_past_blockers(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import fno.pr._coverage_gate as gate
+
+    chain = [_fail_event_with_finding("a" * 40, "b" * 40)]
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    adv = _review_hold.verify_fixes_advisory("feature/x", "c" * 40, cwd=str(tmp_path))
+    assert "--verify-fixes" in adv
+    assert "1 blocking finding" in adv
+    assert ("a" * 40)[:8] in adv
+
+
+def test_advisory_stays_silent_when_the_head_is_unchanged(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import fno.pr._coverage_gate as gate
+
+    chain = [_fail_event_with_finding("a" * 40, "b" * 40)]
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    assert _review_hold.verify_fixes_advisory("feature/x", "a" * 40, cwd=str(tmp_path)) == ""
+
+
+def test_advisory_stays_silent_without_blocking_findings(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import fno.pr._coverage_gate as gate
+
+    chain = [_fail_event("a" * 40, "b" * 40)]
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    assert _review_hold.verify_fixes_advisory("feature/x", "c" * 40, cwd=str(tmp_path)) == ""
+
+
+def test_advisory_names_truncated_blockers_without_a_count(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A shed findings array hides the blockers it carried: the advisory says
+    so instead of going silent on exactly the row a driver most needs."""
+    import fno.pr._coverage_gate as gate
+
+    event = _fail_event("a" * 40, "b" * 40)
+    event["findings_truncated"] = True
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: [event])
+    adv = _review_hold.verify_fixes_advisory("feature/x", "c" * 40, cwd=str(tmp_path))
+    assert "--verify-fixes" in adv
+    assert "could not carry" in adv
+
+
+def test_acquire_below_the_cap_advises_and_still_acquires(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """AC6: the acquire prints the advisory naming --verify-fixes and what it
+    costs, then acquires anyway. The advisory never classifies the pass."""
+    import fno.pr._coverage_gate as gate
+    from typer.testing import CliRunner
+
+    from fno.pr import pr_app
+
+    chain = [_fail_event_with_finding("a" * 40, "b" * 40)]
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    r = CliRunner().invoke(
+        pr_app,
+        [
+            "review-hold", "acquire",
+            "--branch", "feature/x",
+            "--head", "c" * 40,
+            "--holder", "test",
+            "--repo", str(tmp_path),
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    assert "holding feature/x" in r.output
+    assert "--verify-fixes" in r.output
+
+
 def test_interdiff_mirror_matches_the_rust_fixture_numbers(tmp_path: Path) -> None:
     """The Python interdiff is a mirror of review_freshness.rs, held to the
     same fixture the Rust tests use: a 5-then-8 line rewrite measures 13, a

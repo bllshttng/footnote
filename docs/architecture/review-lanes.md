@@ -301,6 +301,10 @@ That identity is the diff from `merge-base(base, sha)` to `sha`, documentation p
 Equal identities mean the code under review is byte-identical, whatever happened to the sha.
 That is what makes a rebase carry and a one-line code fix die.
 
+A carry answers freshness, never the round ledger.
+
+The `--verify-fixes` carveout is the count-side complement. Its hold half lives in `review_invocation_refusal`. When the invocation flags carry `--verify-fixes`, its count half is the `review_round` the emitter stamps: the counter reads the round the pass verified. An undeclared pass counts a fresh round, as it always has.
+
 `reviewed_sha` comes from a different place per producer, and both were already available.
 
 | Producer | `reviewed_sha` source | Cost |
