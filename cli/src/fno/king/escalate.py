@@ -81,14 +81,8 @@ def already_asked(root: Path, key: str) -> "str | None":
 
 
 def escalate(
-    stalled_ids: "list[str]",
-    reason: str,
-    root: Path,
-    session_id: "str | None",
-    cwd: Path,
-    *,
-    live: "bool | None" = None,
-    unknown_reason: "str | None" = None,
+    stalled_ids: "list[str]", reason: str, root: Path, session_id: "str | None",
+    cwd: Path, *, live: "bool | None" = None, unknown_reason: "str | None" = None,
     scope: "str | None" = None,
 ) -> "tuple[str, str]":
     """Record one operator question for this stalled set.

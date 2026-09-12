@@ -223,7 +223,6 @@ def ask(
     from fno.events import QUESTION_CAP, operator_question
     from fno.harness_identity import canonical_handle
     from fno.outstanding.core import (
-        AskRefused,
         QuestionIndexWriteError,
         append_question_event,
         ask_cap,
@@ -289,9 +288,6 @@ def ask(
             subject=subject,
         )
         append_question_event(event, _storage_root(), require_pointer=True)
-    except AskRefused as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(2)
     except QuestionIndexWriteError as exc:
         typer.echo(
             f"outstanding: recorded {exc.question_id} in the project journal, "

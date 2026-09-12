@@ -226,12 +226,8 @@ def questions_path() -> Path:
 
 
 def ask_refusal(
-    question: str,
-    *,
-    node: str | None,
-    blocks: "Sequence[str]",
-    cap: int,
-    require_pointer: bool,
+    question: str, *, node: str | None, blocks: "Sequence[str]",
+    cap: int, require_pointer: bool,
 ) -> "str | None":
     """None when the ask complies with law d-59af3235; otherwise ONE refusal line.
 
