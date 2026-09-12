@@ -143,13 +143,14 @@ def render_public_roadmap_html(
     cols: dict[str, list[dict]] | None = None,
     *,
     all_projects: bool = False,
+    flow: dict | None = None,
 ) -> str:
     from fno.graph.render_html import render_public_sections_html
     if cols is None:
         cols = _columns(entries, project, all_projects=all_projects)
     sections = [(label, cols[column]) for column, label in _PUBLIC_COLUMNS]
     return render_public_sections_html(
-        sections, title=f"{project} roadmap", projection="roadmap"
+        sections, title=f"{project} roadmap", projection="roadmap", flow=flow
     )
 
 
@@ -159,6 +160,7 @@ def render_public_backlog_html(
     backlog_entries: list[dict] | None = None,
     *,
     all_projects: bool = False,
+    flow: dict | None = None,
 ) -> str:
     from fno.graph.render_html import render_public_sections_html
 
@@ -170,6 +172,7 @@ def render_public_backlog_html(
         _backlog_sections_for(backlog_entries),
         title=f"{project} backlog",
         projection="backlog",
+        flow=flow,
     )
 
 
@@ -426,6 +429,7 @@ def render_configured_targets(
     written under the flock via ``render_one_target``.
     """
     from fno.graph.render_html import (
+        _board_flow,
         atomic_write_documents,
         leak_offender_lines,
         public_title_leaks,
@@ -472,7 +476,16 @@ def render_configured_targets(
                 cols = _columns(entries, scope, all_projects=all_projects)
                 render_set = [e for items in cols.values() for e in items]
                 html = render_public_roadmap_html(
-                    entries, scope, cols=cols, all_projects=all_projects
+                    entries,
+                    scope,
+                    cols=cols,
+                    all_projects=all_projects,
+                    # Flow covers the whole scoped population, never just the
+                    # displayed columns: throughput counts shipped work, and
+                    # a roadmap hides done rows by design.
+                    flow=_board_flow(
+                        scoped_entries, None if all_projects else scope
+                    ),
                 )
             else:
                 render_set = public_backlog_entries(
@@ -483,6 +496,9 @@ def render_configured_targets(
                     scope,
                     backlog_entries=render_set,
                     all_projects=all_projects,
+                    flow=_board_flow(
+                        scoped_entries, None if all_projects else scope
+                    ),
                 )
             offenders = public_title_leaks(render_set)
             if offenders:

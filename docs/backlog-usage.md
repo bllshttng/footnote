@@ -354,6 +354,14 @@ When a source cannot be read, the section renders an explicit `(unknown: ...)`. 
 
 The "In progress" blocking fact comes from the cache's newest row for that PR. That row can be stale by up to the cache TTL. When the PR stays quiet, the row can be older still. The line prints the age beside the verdict, so nobody reads it as the current state.
 
+## Delivery flow panel
+
+The HTML boards carry a flow panel under the status tiles. It answers three questions: how fast work ships, how long a PR stays open, and where work waits. The numbers come from the one delivery classifier in the Rust keeper, computed once per board render for the board's own scope.
+
+The panel has three groups. Delivered counts confirmed deliveries in the window, split into code (merged PRs and explicit delivery terminals) and documents (DoneAdvisory), with per-local-week counts and a `*` marker on partial weeks. Elapsed shows the PR open-to-merge median and nearest-rank p85 with the sample count, plus the current open PR population and its oldest age. Waiting shows the canonical in-progress, review and blocked counts with the oldest age of each.
+
+Read the fine print before comparing numbers. The scope line names the window, the local timezone, and the fact that the panel does not follow row filters: searching, hiding Done, or picking projects moves the rows, never the throughput denominator. Ages are measured from node `created_at`, and accumulated blocked time is unmeasured because the graph keeps no interval history. PRs the graph cannot link to a node ride the coverage line as unlinked deliveries instead of the weekly counts. When the ledger or the keeper cannot be read, the panel names the reason and shows no numbers at all.
+
 ## Health and hygiene
 
 ```bash
