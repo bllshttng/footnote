@@ -1,11 +1,10 @@
 """Deliver a `fno backlog note` to the people bound to the node.
 
-A worker reads its node once, at dispatch, so a note appended after that reaches
-nobody on its own. Resolution runs BEFORE the append: nobody bound, or a fault,
-refuses and writes nothing - a note no reader would hear is a silent drop wearing
-a receipt. Contract in docs/architecture/backlog-graph-verb-contracts.md. It
-lives beside ``advance`` because it reads the graph AND the agent runtime (claim,
-crown, send); ``fno.backlog`` holds that pair, the core layer may not import it.
+A worker reads its node once, at dispatch, so a later note reaches nobody on its
+own. Resolution runs BEFORE the append: nobody bound, or a fault, refuses and
+writes nothing. Contract in docs/architecture/backlog-graph-verb-contracts.md.
+It lives beside ``advance`` because it reads the graph AND the agent runtime;
+the core layer may not import it.
 """
 from __future__ import annotations
 
@@ -113,13 +112,11 @@ def note_readers(
     kings_of: Callable[[str], Iterable[str]] = crowned_over,
     self_session: Optional[str] = None,
 ) -> NoteReaders:
-    """Every bound reader for one note; the author is named, never mailed.
+    """Every bound reader for one note; the author is named, never mailed. The
+    worker chain runs for the node and again for its owner, first arm wins;
+    the crown walk goes outward, first live crown wins. ``rows`` is the
+    caller's registry read; ``None`` reads the machine's once."""
 
-    The worker chain runs for the node and again for its owner, first winning
-    arm per run; the crown walk goes outward, first live crown wins. ``rows``
-    is the caller's registry read; ``None`` reads the machine's once (tests
-    always pass ``rows``, so no test reads this machine's registry).
-    """
     from fno.agents.registry import live_row_holding_session_id, load_registry
     from fno.claims.core import holder_agent_name
     from fno.harness_identity import OWNERSHIP_LIVE_STATUSES
@@ -180,12 +177,8 @@ def note_readers(
             if add(row.name, f"session bound to {subject} (graph {field})"):
                 return
         named = sorted(
-            (
-                r
-                for r in registry_rows
-                if getattr(r, "node", None) == subject_id
-                and getattr(r, "status", None) in OWNERSHIP_LIVE_STATUSES
-            ),
+            (r for r in registry_rows if getattr(r, "node", None) == subject_id
+             and getattr(r, "status", None) in OWNERSHIP_LIVE_STATUSES),
             key=lambda r: r.name,
         )
         if named:
@@ -293,8 +286,8 @@ def deliver(readers: NoteReaders, text: str, *, json_output: bool) -> int:
     failed = sum(line.startswith("notify FAILED") for line, _ in receipts)
     typer.echo(
         f"notify: {readers.node_id} is noted, but no reader confirmed delivery "
-        f"({unconfirmed} UNCONFIRMED, {failed} FAILED). An UNCONFIRMED send may "
-        "still land, so check before you re-send.",
+        f"({unconfirmed} UNCONFIRMED, {failed} FAILED). An UNCONFIRMED send may still "
+        "land, so check before you re-send.",
         err=True,
     )
     return 4
