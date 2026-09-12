@@ -7039,10 +7039,9 @@ fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
             .transport_short()
             .map(str::to_string)
             .or_else(|| e.session_id.clone()),
-        // Python writes opencode ids to the canonical harness_session_id and
-        // drops `session_id` on write (it is Rust-set only), so falling through
-        // to `session_id` would hand the probe None for every pane row and make
-        // it a permanent no-op.
+        // Python writes opencode ids to the canonical harness_session_id and drops
+        // `session_id` on write; falling through to it would hand the probe None
+        // for every pane row and make it a permanent no-op.
         "opencode" => e
             .harness_session_id
             .clone()
@@ -7051,7 +7050,8 @@ fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
     };
     crate::provider::AgentEntry {
         name: e.name.clone(),
-        provider: e.harness_name().to_string(), substrate: e.substrate.clone(),
+        provider: e.harness_name().to_string(),
+        substrate: e.substrate.clone(),
         session_id,
         cwd: PathBuf::from(&e.cwd),
     }

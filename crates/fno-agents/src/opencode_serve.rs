@@ -1559,12 +1559,10 @@ mod tests {
             assert_eq!(rule["action"], "allow");
         }
         assert!(permission_rules_for(&[]).as_array().unwrap().is_empty());
-        assert!(
-            permission_rules_for(&[String::new()])
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(permission_rules_for(&[String::new()])
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1777,13 +1775,12 @@ mod tests {
         assert!(
             serve_session_reachable_in(&h, "ses_reachable123", Duration::from_secs(2)).unwrap()
         );
-        assert!(
-            fake.requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|line| line == "GET /session/ses_reachable123 HTTP/1.1")
-        );
+        assert!(fake
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line == "GET /session/ses_reachable123 HTTP/1.1"));
     }
 
     #[test]
