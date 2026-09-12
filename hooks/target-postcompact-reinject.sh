@@ -112,24 +112,38 @@ if [[ -n "$NODE" ]]; then
     [[ -f "$CANDID" ]] && BINDING_FILE="$CANDID"
 fi
 if [[ -n "$BINDING_FILE" ]]; then
-    BINDING_INFO="$(python3 - "$BINDING_FILE" <<'PY' 2>/dev/null
-import json, sys
+    # The verifier decides what may be re-emitted: an edited digest, stage, or
+    # constraint set is a corrupt declared binding and renders NOTHING (the
+    # fields below are the verifier's answer, never the raw file's).
+    VERIFIED="$(python3 - "$BINDING_FILE" <<'PY' 2>/dev/null
+import json, subprocess, sys
 try:
     with open(sys.argv[1]) as fh:
-        b = json.load(fh)
+        binding = json.load(fh)
 except Exception:
     sys.exit(0)
-print(str(b.get("binding_digest", "unknown")))
-print(str(b.get("stage", "unknown")))
-for c in b.get("required_constraints", [])[:10]:
+try:
+    out = subprocess.run(
+        ["fno-agents", "task-context-show"],
+        input=json.dumps({"binding": binding}),
+        capture_output=True, text=True, timeout=20,
+    )
+    answer = json.loads(out.stdout)
+except Exception:
+    sys.exit(0)
+if not answer.get("ok"):
+    sys.exit(0)
+print(str(binding.get("binding_digest", "unknown")))
+print(str(binding.get("stage", "unknown")))
+for c in binding.get("required_constraints", [])[:10]:
     if isinstance(c, str) and c.strip():
         print("- " + c)
 PY
 )"
-    if [[ -n "$BINDING_INFO" ]]; then
-        BDIGEST="$(printf '%s\n' "$BINDING_INFO" | sed -n 1p)"
-        BSTAGE="$(printf '%s\n' "$BINDING_INFO" | sed -n 2p)"
-        BCONSTRAINTS="$(printf '%s\n' "$BINDING_INFO" | sed -n '3,$p')"
+    if [[ -n "$VERIFIED" ]]; then
+        BDIGEST="$(printf '%s\n' "$VERIFIED" | sed -n 1p)"
+        BSTAGE="$(printf '%s\n' "$VERIFIED" | sed -n 2p)"
+        BCONSTRAINTS="$(printf '%s\n' "$VERIFIED" | sed -n '3,$p')"
         CONTEXT="${CONTEXT}
 **Task context:** $BINDING_FILE (binding_digest $BDIGEST, stage $BSTAGE)"
         if [[ -n "$BCONSTRAINTS" ]]; then

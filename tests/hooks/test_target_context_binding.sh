@@ -99,73 +99,20 @@ fi
 # ── 2. Binding pointer: present exactly once with constraints, absent when ──
 #    there is no binding or a malformed one.
 
+# The hook verifies a binding through the native verifier before printing, so
+# the pointer cases need the checkout's own binary AND a MINTED binding (the
+# verifier refuses a hand-typed one by design). Without the binary the hook
+# correctly renders nothing: skip those cases, never read absence as failure.
 BOUND="$TMP/bound"
 mkdir -p "$BOUND"
 printf '# plan\n' > "$BOUND/PLAN.md"
 setup_repo "$BOUND" "$BOUND/PLAN.md"
 write_binding "$BOUND"
-OUT="$(run_hook "$BOUND")"
-if printf '%s' "$OUT" | grep -qF "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"; then
-    pass "binding pointer carries the digest"
-else
-    fail "binding pointer carries the digest; got: $OUT"
-fi
-if printf '%s' "$OUT" | grep -qF "stage prepared" && printf '%s' "$OUT" | grep -qF -- "- Do not widen scope beyond the plan"; then
-    pass "binding pointer carries stage and declared constraints"
-else
-    fail "binding pointer carries stage and declared constraints; got: $OUT"
-fi
-N=$(count_occurrences "$OUT" "**Task context:**")
-if [[ "$N" == "1" ]]; then
-    pass "binding pointer rides exactly once"
-else
-    fail "binding pointer rides exactly once (got $N)"
-fi
 
-# The SECOND carrier shape: the codex lane delivers the same pointer through
-# systemMessage (claude rides hookSpecificOutput.additionalContext).
-OUT_CODEX="$( (cd "$BOUND" && printf '{"session_id":"%s"}' "$SID" \
-    | FNO_PLATFORM="codex" CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash "$TARGET_HOOK" 2>/dev/null) )"
-if printf '%s' "$OUT_CODEX" | grep -qF '"systemMessage"' \
-    && printf '%s' "$OUT_CODEX" | grep -qF "**Task context:**" \
-    && printf '%s' "$OUT_CODEX" | grep -qF -- "- Do not widen scope beyond the plan"; then
-    pass "codex carrier delivers the same pointer through systemMessage"
-else
-    fail "codex carrier delivers the same pointer through systemMessage; got: $OUT_CODEX"
-fi
-
-# No binding file: no pointer, hook still exits 0 with the goal line.
-NOBIND="$TMP/nobind"
-mkdir -p "$NOBIND"
-printf '# plan\n' > "$NOBIND/PLAN.md"
-setup_repo "$NOBIND" "$NOBIND/PLAN.md"
-OUT="$(run_hook "$NOBIND")"
-if [[ "$OUT" != *"Task context:"* ]] && printf '%s' "$OUT" | grep -qF "**Goal:** bind task context"; then
-    pass "no binding file means no pointer, goal still reinjected"
-else
-    fail "no binding file means no pointer, goal still reinjected; got: $OUT"
-fi
-
-# Malformed binding file: degrades to absent, never to a fabricated pointer.
-MAL="$TMP/malformed"
-mkdir -p "$MAL"
-printf '# plan\n' > "$MAL/PLAN.md"
-setup_repo "$MAL" "$MAL/PLAN.md"
-printf '{not json' > "$MAL/.fno/artifacts/handoff/task-context-${NODE}.json"
-OUT="$(run_hook "$MAL")"
-if [[ "$OUT" != *"Task context:"* ]]; then
-    pass "malformed binding degrades to absent (no fabricated pointer)"
-else
-    fail "malformed binding degrades to absent; got: $OUT"
-fi
-
-# ── 3. One payload-preparation entry for both substrates ──────────────────
-
-# The block renders natively, so this section needs the checkout's own binary;
-# shards without it skip honestly rather than read absence as pass or fail.
-if PYTHONPATH="$REPO_ROOT/cli/src" python3 -c "from fno.rust_binary import find_dev_binary; import sys; sys.exit(0 if find_dev_binary() else 1)"; then
-MINTED_BINDING="$BOUND/.fno/artifacts/handoff/task-context-${NODE}.json"
-PYTHONPATH="$REPO_ROOT/cli/src" python3 - "$BOUND" "$MINTED_BINDING" <<'PY'
+if DEV_BIN_DIR="$(PYTHONPATH="$REPO_ROOT/cli/src" python3 -c "from fno.rust_binary import find_dev_binary; b = find_dev_binary(); print(str(b.parent) if b else '')" 2>/dev/null)" && [[ -n "$DEV_BIN_DIR" ]]; then
+    export PATH="$DEV_BIN_DIR:$PATH"
+    MINTED_BINDING="$BOUND/.fno/artifacts/handoff/task-context-${NODE}.json"
+    PYTHONPATH="$REPO_ROOT/cli/src" python3 - "$BOUND" "$MINTED_BINDING" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
 from fno.rust_binary import verb_call
@@ -203,10 +150,70 @@ bound["binding_digest"] = answer["binding_digest"]
 out.write_text(json.dumps(bound, indent=2, sort_keys=True) + "\n")
 print("MINT_OK")
 PY
-MINT_RC=$?
-if [[ "$MINT_RC" != "0" ]]; then
-    fail "mint the payload-section binding through the real verb (rc=$MINT_RC)"
+    MINT_RC=$?
+    if [[ "$MINT_RC" != "0" ]]; then
+        fail "mint the hook-fixture binding through the real verb (rc=$MINT_RC)"
+    fi
+
+    OUT="$(run_hook "$BOUND")"
+    if printf '%s' "$OUT" | grep -qF -- "- Do not widen scope beyond the plan"; then
+        pass "binding pointer carries verified stage and declared constraints"
+    else
+        fail "binding pointer carries verified stage and declared constraints; got: $OUT"
+    fi
+    N=$(count_occurrences "$OUT" "**Task context:**")
+    if [[ "$N" == "1" ]]; then
+        pass "binding pointer rides exactly once"
+    else
+        fail "binding pointer rides exactly once (got $N)"
+    fi
+
+    # The SECOND carrier shape: the codex lane delivers the same pointer
+    # through systemMessage (claude rides additionalContext).
+    OUT_CODEX="$( (cd "$BOUND" && printf '{"session_id":"%s"}' "$SID" \
+        | FNO_PLATFORM="codex" CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash "$TARGET_HOOK" 2>/dev/null) )"
+    if printf '%s' "$OUT_CODEX" | grep -qF '"systemMessage"' \
+        && printf '%s' "$OUT_CODEX" | grep -qF "**Task context:**" \
+        && printf '%s' "$OUT_CODEX" | grep -qF -- "- Do not widen scope beyond the plan"; then
+        pass "codex carrier delivers the same pointer through systemMessage"
+    else
+        fail "codex carrier delivers the same pointer through systemMessage; got: $OUT_CODEX"
+    fi
+else
+    echo "  SKIP: pointer/codex cases (no dev binary; the hook verifies natively)"
 fi
+
+# No binding file: no pointer, hook still exits 0 with the goal line.
+NOBIND="$TMP/nobind"
+mkdir -p "$NOBIND"
+printf '# plan\n' > "$NOBIND/PLAN.md"
+setup_repo "$NOBIND" "$NOBIND/PLAN.md"
+OUT="$(run_hook "$NOBIND")"
+if [[ "$OUT" != *"Task context:"* ]] && printf '%s' "$OUT" | grep -qF "**Goal:** bind task context"; then
+    pass "no binding file means no pointer, goal still reinjected"
+else
+    fail "no binding file means no pointer, goal still reinjected; got: $OUT"
+fi
+
+# Malformed binding file: degrades to absent, never to a fabricated pointer.
+MAL="$TMP/malformed"
+mkdir -p "$MAL"
+printf '# plan\n' > "$MAL/PLAN.md"
+setup_repo "$MAL" "$MAL/PLAN.md"
+printf '{not json' > "$MAL/.fno/artifacts/handoff/task-context-${NODE}.json"
+OUT="$(run_hook "$MAL")"
+if [[ "$OUT" != *"Task context:"* ]]; then
+    pass "malformed binding degrades to absent (no fabricated pointer)"
+else
+    fail "malformed binding degrades to absent; got: $OUT"
+fi
+
+# ── 3. One payload-preparation entry for both substrates ──────────────────
+
+# The block renders natively, so this section needs the checkout's own binary;
+# shards without it skip honestly rather than read absence as pass or fail.
+if PYTHONPATH="$REPO_ROOT/cli/src" python3 -c "from fno.rust_binary import find_dev_binary; import sys; sys.exit(0 if find_dev_binary() else 1)"; then
+MINTED_BINDING="$BOUND/.fno/artifacts/handoff/task-context-${NODE}.json"
 PAYLOAD_CHECK="$(REPO_ROOT="$REPO_ROOT" FNO_TASK_CONTEXT_FILE="$MINTED_BINDING" \
 PYTHONPATH="$REPO_ROOT/cli/src" python3 - "$BOUND/PLAN.md" <<'PY'
 import json, os
