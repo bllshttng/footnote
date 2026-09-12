@@ -628,10 +628,8 @@ def _dispatch_one(
             # pinned account because an unrelated active account is walled.
             provider_id=(account or "").strip() or _resolve_provider_id(cwd) or "",
             priority=priority,
-            # The same pin rule `backlog advance` applies (the default: a
-            # launch the config harness answers for is pinned). x-e53e deleted
-            # this verb's hardcoded claude, so config.dispatch.harness IS a
-            # choice it honors - a cutover must never override it.
+            # The same pin rule `backlog advance` applies (default); x-e53e
+            # deleted the hardcoded claude, so the config harness pins.
             pinned=launch_is_pinned(picked, account=account, node_cwd=cwd),
             node_cwd=cwd,
             node_id=node_id,
@@ -670,13 +668,8 @@ def _dispatch_one(
     )
 
     # The declared verb rides so this render matches the door's own node-seed
-    # render: the command below ships as the typed message, which wins over
-    # the node.
-    declared_verb = (
-        str(rec.get("dispatch_verb") or "").strip() or None
-        if isinstance(rec, dict)
-        else None
-    )
+    # render: the command below ships as the typed message, which wins.
+    declared_verb = str((rec or {}).get("dispatch_verb") or "").strip() or None
     try:
         args = resolve_node_spawn(
             node_id,

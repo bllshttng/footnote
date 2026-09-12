@@ -1549,8 +1549,8 @@ def cmd_spawn(
         )
 
     # x-e53e change 1: `--node` with no typed message resolves the seed from
-    # the node - the verb rendered through resolve_dispatch for THIS spawn's
-    # harness, the brief through the node's own chain. A typed message wins.
+    # the node - verb via resolve_dispatch for this harness, brief via the
+    # node's chain. A typed message wins.
     node_seed_env: dict = {}
     node_seed_receipt: dict = {}
     if node is not None and not (message or "").strip():

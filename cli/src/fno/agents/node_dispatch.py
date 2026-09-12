@@ -1,11 +1,9 @@
 """One resolver for node-dispatch spawn preferences (x-e53e change 2).
 
-Everything `backlog.advance._spawn_worker` computed above its argv build - the
-verb derivation and its lossy-projection refusal, the grid consult, the
-settings/grant read, ``resolve_dispatch``, the permission cascade, and the
-state-root env refusal - is :func:`resolve_node_spawn`, so every node-dispatching
-caller reads ONE answer and `fno agents spawn` stays the only launcher. Callers
-build argv via :func:`node_spawn_argv` and shell the door; none launches a peer.
+Everything `backlog.advance._spawn_worker` computed above its argv build is
+:func:`resolve_node_spawn`, so every node-dispatching caller reads ONE answer
+and `fno agents spawn` stays the only launcher. Callers build argv via
+:func:`node_spawn_argv` and shell the door; none launches a peer.
 """
 
 from __future__ import annotations
