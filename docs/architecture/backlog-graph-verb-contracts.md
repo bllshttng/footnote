@@ -149,7 +149,7 @@ re-parking is ``defer``'s job - the same policy ``cmd_unsupersede`` applies to u
 
 Close ancestor epics whose children are now all complete .
 
-Called inside the close mutator right after a node's completion fields are set. An epic is a container with no PR of its own - its work IS its decomposed children - so it is "done" exactly when all of them are. Walking UP the ``parent`` chain, each ancestor whose children all carry ``completed_at`` is closed too (and tagged with a completion_note so the PR-less close is self-explaining), continuing to the grandparent.
+Called inside the close mutator right after a node's completion fields are set. An epic is a container with no PR of its own - its work IS its decomposed children - so it is "done" exactly when all of them are. Walking UP the ``parent`` chain, each ancestor that passes ``children_all_closed`` is closed too (and tagged with a completion_note so the PR-less close is self-explaining), continuing to the grandparent. ``children_all_closed`` asks three things: every child terminal (``is_terminal_entry``: done, superseded, or freshly stamped ``completed_at``), no child superseded BY the parent itself, and at least one child that really shipped. A child superseded by its own parent is one the parent absorbed, so the parent's own work is still open and the parent stays up; a parent whose every child was replaced elsewhere stays up too, so nothing closes as done with nothing built.
 
 This is the closure path that lets epics be excluded from build-SELECTION everywhere (`next`/`ready`/advance_dependents never dispatch the box): the box closes itself off the merge event that finishes its last child. It fires on every close path (done + reconcile) since each calls this after ``_apply_completion_fields``, and it is uniform across projects because it follows the parent EDGE, not a project filter - so a cross-project parent closes on the same merge that completes its last child.
 
@@ -896,18 +896,18 @@ Classify one ready node for lane-fill. ``None`` = selectable, else a typed
 
 ## _strandable_epic_ids
 
-Open epics (parents) whose children are ALL done - closeable right now.
+Open epics (parents) that pass ``children_all_closed`` - closeable right now.
 
 Read-only. The cascade (_cascade_close_parents) only fires on a child-CLOSE
-event, so an epic whose children were all completed BEFORE this code shipped
+event, so an epic whose children were all closed BEFORE this code shipped
 (or whose last child closed via a path that did not cascade) is stranded:
-open, all children done, and - now that containers are hidden from
+open, every child terminal, and - now that containers are hidden from
 next/ready - unreachable for closure. This identifies them so reconcile can
 self-heal.
 
 ## _sweep_close_done_epics
 
-Close every open epic whose children are all done (self-heal/migration).
+Close every open epic that passes ``children_all_closed`` (self-heal/migration).
 
 Idempotent, mutating, run inside a close mutator. Repeats to a fixpoint so a
 freshly-closed epic heals ITS parent too (grandparent chains). Returns the
@@ -928,7 +928,10 @@ Four close paths read a reopen; the deliberate verb (``cmd_done``, with its
 own ``--force`` plus ``--reason`` ladder) does not:
 
 - ``_cascade_close_parents`` and ``_sweep_close_done_epics`` key on the
-  CHILDREN's closes (``_reopen_outranks_child_closes``).
+  CHILDREN's closes (``_reopen_outranks_child_closes``). That guard still
+  reads child ``completed_at`` alone: a superseded child carries no
+  ``completed_at``, so it adds no close evidence there, and
+  ``children_all_closed`` does not change it.
 - reconcile's PR-merged close leg keys on the MERGE
   (``_reopen_outranks_merge``): it reads no children, so the child-keyed
   guard never reached it.
