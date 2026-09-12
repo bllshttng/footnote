@@ -82,7 +82,7 @@ def _load_corpus(skill: str, since: int) -> tuple[dict, dict]:
     """Build the read-only corpus and return ``(corpus, by_id)`` where ``by_id``
     maps graph node id -> node dict (for PR lookup in review scoring)."""
     from fno import paths as _paths
-    from fno.scoreboard.fold import load_ledger_rows, read_graph_nodes
+    from fno.scoreboard.fold import classify_deliveries, load_ledger_rows, read_graph_nodes
 
     ledger_path = _paths.ledger_json()
     graph_path = _paths.graph_json()
@@ -90,7 +90,8 @@ def _load_corpus(skill: str, since: int) -> tuple[dict, dict]:
     nodes = read_graph_nodes(graph_path)
     postmortems = _read_postmortems(_paths.postmortems_dir())
     corpus = fold.build_corpus(
-        rows, nodes, postmortems, skill=skill, since_days=since, now=datetime.now()
+        rows, nodes, postmortems, skill=skill, since_days=since, now=datetime.now(),
+        deliveries=classify_deliveries(nodes, rows)["by_node"],
     )
     by_id = {n.get("id"): n for n in nodes if n.get("id")}
     return corpus, by_id

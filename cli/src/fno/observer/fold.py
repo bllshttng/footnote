@@ -32,7 +32,9 @@ from fno.scoreboard.fold import (
     _parse_ts,
     _pct,
     _row_session_ids,
+    _row_shipped,
     _transcript_counts,
+    classify_deliveries,
 )
 
 # Mirrors _CALIBRATION_MIN_VERDICTS (scoreboard/fold.py): below this, a ranking
@@ -81,6 +83,7 @@ def build_corpus(
     now: datetime,
     read_transcript=None,
     resolve_skill_version=None,
+    deliveries: dict | None = None,
 ) -> dict:
     """Read-only fold: ledger rows attributed to *skill* -> corpus items.
 
@@ -102,6 +105,8 @@ def build_corpus(
     windowed = [r for r in rows if _in_window(r.get("completed"))]
     read_transcript = read_transcript or _default_read_transcript
     resolve_skill_version = resolve_skill_version or _default_skill_version
+    # Shipped is the one classifier's answer, like every scoreboard view.
+    deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
 
     by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
     fixes: dict[str, list[dict]] = {}
@@ -130,7 +135,7 @@ def build_corpus(
 
         nid = r.get("graph_node_id")
         session_id = _first_session_id(r)
-        shipped = _is_shipped_reason(r.get("termination_reason"))
+        shipped = _row_shipped(r, deliveries)
         judgeable = bool(shipped and nid and w4_available and nid in by_id)
         outcome = (
             _node_outcome(nid, _parse_ts(r.get("completed")), by_id, fixes)
@@ -707,7 +712,7 @@ if __name__ == "__main__":
             "phases_completed": ["do"],  # different skill -> not attributed
         },
     ]
-    graph_nodes = [{"id": "x-1", "reverted": False}, {"id": "x-2", "reverted": False}]
+    graph_nodes = [{"id": "x-1", "merge_status": "merged", "reverted": False}, {"id": "x-2", "reverted": False}]
     corpus = build_corpus(rows, graph_nodes, [], skill="blueprint", since_days=28, now=now)
     assert corpus["total_rows"] == 2, corpus
     assert corpus["attributed"] == 1, corpus
