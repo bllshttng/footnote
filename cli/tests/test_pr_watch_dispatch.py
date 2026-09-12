@@ -2530,10 +2530,10 @@ class TestTickRecordsAndDeadline:
         # a loaded runner cuts them too and this reads as a different failure.
         monkeypatch.setattr(
             "fno.pr_watch._king_wake.run_king_wake",
-            lambda _settings, emit: {"woke": [], "crowns": 0},
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
             raising=True,
         )
-        def _notify_row() -> None:
+        def _notify_row(_roots=None) -> None:
             prcli._emit_tick_row("notify_watch", interval_s=300,
                                  skip_reason="notify_off")
 
@@ -2560,6 +2560,147 @@ class TestTickRecordsAndDeadline:
         assert ends[-1].get("why") == "slice_starved"
         assert "sweep" in ends[-1].get("phase_s", {})
         assert "king_wake" in ends[-1].get("phase_s", {})
+
+    def test_a_cut_inside_a_step_names_the_step_in_the_row_detail(self, monkeypatch, tmp_path):
+        """AC2-ERR (x-16e9): the alarm catching the pass mid-truth-read names
+        the sub-step, and the end record still blames the phase."""
+        import time as _time
+
+        from fno.pr_watch import cli as prcli
+
+        def _stall_in_step(_settings, emit, **_kw):
+            from fno.pr_watch._dispatch import set_tick_phase
+
+            set_tick_phase("king_wake:truth:epic-x")
+            _time.sleep(2)
+            return {"woke": [], "crowns": 1}
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake", _stall_in_step, raising=True,
+        )
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda _roots=None: None, raising=True)
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+        monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+        def _stall(**_kw):
+            _time.sleep(2)
+
+        res, events = self._invoke_tick(monkeypatch, _stall)
+
+        assert res.exit_code == 75, f"expected 75, got {res.exit_code}: {res.output!r}"
+        rows = [d for t, d in events if t == "control_plane_tick"]
+        king_rows = [d for d in rows if d.get("arm") == "king_wake"]
+        assert king_rows and king_rows[-1].get("skip_reason") == "timeout"
+        assert "at king_wake:truth:epic-x" in king_rows[-1].get("detail", ""), (
+            f"the cut must name its sub-step: {king_rows[-1].get('detail')!r}"
+        )
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends[-1].get("phase") == "king_wake"
+        assert ends[-1].get("cut") == ["king_wake"]
+
+    def test_one_roots_scan_feeds_every_phase_that_sweeps(self, monkeypatch, tmp_path):
+        """AC3-HP (x-16e9): notify_watch, heal, stranded and catchup share the
+        tick's one sidecar scan - four consumers, one call, the same list."""
+        from types import SimpleNamespace as _NS
+
+        from fno.pr_watch import cli as prcli
+
+        calls = []
+        roots = [tmp_path]
+
+        def _counting_roots():
+            calls.append(1)
+            return roots
+
+        healed, stranded_seen, catchup_seen = [], [], []
+        monkeypatch.setattr(prcli, "_catchup_roots", _counting_roots, raising=True)
+        monkeypatch.setattr(
+            "fno.rust_binary.resolve_binary", lambda: None, raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.pr_watch._heal_phase.run_heal_phase",
+            lambda _s, r: healed.append(r) or "healed", raising=True,
+        )
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 0.0, raising=True)
+        monkeypatch.setattr(
+            "fno.agents.watchdog.lane_armed", lambda _s: False, raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.worktree_stranded.sweep", lambda repo: stranded_seen.append(repo) or [],
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.worktree_stranded.apply_sweep", lambda rows, wake: [], raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.branch_provenance_cache.write_cache", lambda root, rows: False,
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.pr._sync_canonical.run_sync_catchup",
+            lambda settings, canonical_root: catchup_seen.append(canonical_root)
+            or _NS(outcome="disabled", stale=False, detail=""),
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+
+        res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+
+        assert calls == [1], f"the sidecar scan ran {len(calls)} times"
+        assert healed and healed[0] is roots, "heal got the memoized list"
+        assert stranded_seen == [tmp_path], "stranded swept the shared roots"
+        assert catchup_seen == [tmp_path], "catchup swept the shared roots"
+
+    def test_empty_roots_still_scan_once_and_spawn_with_no_root_flag(
+        self, monkeypatch, tmp_path
+    ):
+        """AC3-ERR (x-16e9): no roots is a memoized answer, not four scans,
+        and notify_watch spawns a bare argv without a --root flag."""
+        import json as _json
+        from types import SimpleNamespace as _NS
+
+        from fno.pr_watch import cli as prcli
+
+        calls = []
+        argvs = []
+
+        def _counting_roots():
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr(prcli, "_catchup_roots", _counting_roots, raising=True)
+        monkeypatch.setattr(
+            "fno.rust_binary.resolve_binary", lambda: "/fake/fno-agents", raising=True,
+        )
+
+        def _fake_run(argv, **_kw):
+            argvs.append(argv)
+            return _NS(stdout=_json.dumps({"acted": 0, "skip_reason": "notify_off"}))
+
+        monkeypatch.setattr("subprocess.run", _fake_run, raising=True)
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+
+        res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+
+        assert calls == [1], f"the sidecar scan ran {len(calls)} times"
+        assert argvs, "notify_watch spawned nothing"
+        assert argvs[0] == ["/fake/fno-agents", "notify-watch", "--json"]
+        assert "--root" not in argvs[0]
+        rows = [d for t, d in events if t == "control_plane_tick"]
+        notify_rows = [d for d in rows if d.get("arm") == "notify_watch"]
+        assert notify_rows and notify_rows[-1].get("skip_reason") == "notify_off"
 
     def test_ritual_timeout_follows_the_phase_deadline(self):
         """AC6-EDGE (x-c79d): the cold ritual's subprocess timeout is the
@@ -3213,10 +3354,10 @@ class TestFleetLegRunsAfterACutPRLeg:
         # recovery phase must be cheap, or a loaded runner cuts recovery too.
         monkeypatch.setattr(
             "fno.pr_watch._king_wake.run_king_wake",
-            lambda _settings, emit: {"woke": [], "crowns": 0},
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
             raising=True,
         )
-        monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda: None, raising=True)
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda _roots=None: None, raising=True)
         monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
