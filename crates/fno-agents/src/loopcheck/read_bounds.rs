@@ -27,12 +27,14 @@ pub(crate) const STOPGATE_FIRE_BUDGET: std::time::Duration = std::time::Duration
 pub(crate) const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// King fires hold this much of the fire budget back for the drain read, the
-/// last read and the one that decides completion. Measured standalone the
-/// drain needs 4.5s to 7.9s; without a reservation a spent budget clamps it
-/// to the 250ms floor and the kill is deterministic. Every cheaper read
-/// before the drain is clamped to `remaining - reserve`, and the drain
+/// last read and the one that decides completion. Drain cost scales with
+/// graph rows: measured standalone 4.5s to 7.9s on one scope and 8.8s to
+/// 11.2s on the largest, so the reserve is sized off the BIGGEST scope with
+/// headroom, not the median. Without a reservation a spent budget clamps the
+/// drain to the 250ms floor and the kill is deterministic. Every cheaper
+/// read before the drain is clamped to `remaining - reserve`, and the drain
 /// itself reads against the full remaining (`stopgate_drain_timeout`).
-const STOPGATE_DRAIN_RESERVE: std::time::Duration = std::time::Duration::from_secs(12);
+const STOPGATE_DRAIN_RESERVE: std::time::Duration = std::time::Duration::from_secs(16);
 
 thread_local! {
     /// The fire's read-bound override (from `--read-timeout-ms`, 0 meaning
@@ -142,12 +144,12 @@ mod tests {
         STOPGATE_READS.with(|cell| {
             *cell.borrow_mut() = (0, Some(deadline), STOPGATE_DRAIN_RESERVE.as_millis() as u64);
         });
-        // Pre-drain read: 30s ceiling clamped to 20s - 12s, minus only the
-        // microseconds between the stamp and the two asserts.
+        // Pre-drain read: 30s ceiling clamped to 20s minus the reserve,
+        // minus only the microseconds between the stamp and the asserts.
+        let expected = std::time::Duration::from_secs(20) - STOPGATE_DRAIN_RESERVE;
         let pre_drain = stopgate_read_timeout();
         assert!(
-            pre_drain <= std::time::Duration::from_secs(8)
-                && pre_drain >= std::time::Duration::from_secs(7),
+            pre_drain <= expected && pre_drain >= expected - std::time::Duration::from_secs(1),
             "{pre_drain:?}"
         );
         // The reserved read itself: the full 20s.
