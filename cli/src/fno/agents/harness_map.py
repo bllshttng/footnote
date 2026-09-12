@@ -1174,11 +1174,10 @@ def thread_uncarried(
 ) -> str | None:
     """The first launch flag this harness's thread lane cannot carry, or None.
 
-    The facts live in the capability contract: the ``[harness.<name>.thread]``
-    carrier row where the harness has one, else the ``keeper`` row. ``axes``
-    maps the ``keeper_thread.LAUNCH_AXES`` axis names to set values and
-    ``passthrough`` is the fenced ``--`` token list. The caller demotes the
-    spawn to the pane on a non-None answer; it never refuses on the substrate.
+    Reads the ``[harness.<name>.thread]`` carrier row, else the ``keeper``
+    row. ``axes`` maps ``keeper_thread.LAUNCH_AXES`` axis names to set values;
+    ``passthrough`` is the fenced ``--`` token list. A non-None answer
+    demotes the spawn to the pane; it never refuses on the substrate.
     """
     caps = _BUNDLED_CAPS.get(harness) or {}
     arm = caps.get("thread") or caps.get("keeper")

@@ -270,28 +270,13 @@ def _positional_indices(toks: Sequence[str]) -> List[int]:
     return idxs
 
 
-def _spawn_harness(toks: Sequence[str]) -> Optional[str]:
-    """The ``-H/--harness`` value in a spawn argv, or None (the CLI resolves
-    it to claude downstream). Stops at the ``--argv``/``--`` fence."""
-    it = iter(toks)
-    for t in it:
-        if t in ("--argv", "--"):
-            break
-        if t in ("-H", "--harness"):
-            return next(it, None)
-        if t.startswith("--harness="):
-            return t.split("=", 1)[1]
-    return None
-
-
 def _demote_thread_uncarried_passthrough(toks: List[str], err: IO[str]) -> None:
     """Rewrite an explicit or injected thread/bg substrate to pane when the
-    harness's thread lane cannot carry the fenced `--` tokens (spawn flag
-    passthrough). The Rust-routed lane reroutes to the client before the
-    Python CLI's resolver can run, so this seam is the one front door both
-    runtimes share; the daemon-side harness_args parser stays the
-    trust-boundary backstop. Headless keeps its tokens: the one-shot lanes
-    carry them.
+    harness's thread lane cannot carry the fenced `--` tokens. Runs on
+    operator argv and again after config injection, covering the Rust-routed
+    lane the Python resolver never sees; the daemon-side harness_args parser
+    stays the trust-boundary backstop. Headless keeps its tokens: the
+    one-shot lanes carry them.
     """
     fence = next((i for i, t in enumerate(toks) if t == "--"), None)
     if fence is None:
@@ -300,7 +285,7 @@ def _demote_thread_uncarried_passthrough(toks: List[str], err: IO[str]) -> None:
         return
     from fno.agents.harness_map import thread_uncarried
 
-    harness = _spawn_harness(toks) or "claude"
+    harness = _flag_value(toks, "--harness", "-H") or "claude"
     uncarried = thread_uncarried(harness, {}, toks[fence + 1 :])
     if uncarried is None:
         return

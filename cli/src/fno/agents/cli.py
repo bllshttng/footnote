@@ -1339,9 +1339,8 @@ def cmd_spawn(
     )
 
     workdir = _resolve_dispatch_workdir(cwd, fresh, here)
-    # `-c` is `--cwd` on spawn. The operator template types codex's own
-    # `-c key=value` config spelling here, which silently becomes a working
-    # directory; stop before launch and name the fence that carries it.
+    # `-c` is `--cwd` on spawn: codex's own `-c key=value` config spelling
+    # silently becomes a working directory. Stop before launch, name the fence.
     if cwd and not Path(cwd).exists():
         print(
             f"working directory {cwd!r} does not exist; no worker launched. "
@@ -1478,10 +1477,8 @@ def cmd_spawn(
     # claude+once+not-headless and die on the "persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    # A thread seat meeting an uncarried flag demotes loudly, whether the
-    # seat was named or defaulted: the operator typed the flag expecting it
-    # to land, so the move to pane names itself. An explicit pane or a
-    # headless one-shot is the operator's own choice and stays silent.
+    # A thread seat meeting an uncarried flag demotes loudly, named seat or
+    # defaulted; an explicit pane or headless one-shot stays silent.
     if (
         uncarried is not None
         and substrate != "headless"
