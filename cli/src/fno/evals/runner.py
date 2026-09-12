@@ -37,7 +37,7 @@ SpawnFn = Callable[[str, Path, int], SpawnResult]
 
 
 def _observe_worker(name: str) -> Optional[dict]:
-    """Registry identity, when a lookupable row exists (never for the default headless spawn)."""
+    """Registry identity, when the spawn left a registry row to read back."""
     try:
         from fno.agents.registry import load_registry
         for entry in load_registry():
@@ -45,7 +45,7 @@ def _observe_worker(name: str) -> Optional[dict]:
                 return {"harness": entry.harness, "model": entry.model,
                         "model_basis": entry.model_basis, "effort": entry.effort,
                         "harness_session_id": entry.harness_session_id}
-    except Exception:  # noqa: BLE001
+    except (AttributeError, KeyError):
         return None
     return None
 
@@ -55,8 +55,8 @@ def _lane_evidence(lane: Optional[Any], observed: Optional[dict], *,
     """Requested vs. observed config; a harness/model mismatch is ``substituted``.
     No ``observed`` dict is one of three things: never attempted (grade-only,
     ``not-applicable``), a real spawn failure (``unavailable``), or a spawn that
-    succeeded but left nothing to check - the default headless lane always -
-    which is ``unverified``, not a capacity refusal."""
+    succeeded but left no readable registry row - which is ``unverified``, not
+    a capacity refusal."""
     if lane is None:
         return {}
     fields: dict[str, object] = {

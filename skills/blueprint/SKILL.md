@@ -512,7 +512,7 @@ python3 skills/blueprint/scripts/mutate_doc.py <doc-path> \
 
 Exit codes:
 - `0` success
-- `1` doc already at status:ready without --rewrite; or path is a nonexistent file / feature description (redirect to /think)
+- `1` doc already at status:ready without --rewrite; or the argument is not a path or names a missing file (remedy: `fno do plan path`)
 - `2` section ownership violation
 - `3` frontmatter status missing / invalid
 
