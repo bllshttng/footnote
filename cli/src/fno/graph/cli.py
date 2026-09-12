@@ -4258,14 +4258,15 @@ def cmd_next(
         if not descendants_of(pre_entries, parent_target_id):
             typer.echo(f"no children under {parent_target_id}", err=True)
 
-    def _select(entries):
+    def _select(entries, occupancy):
         """One call into the native leg: survivors, in selection order.
 
         The admission set, the narrowing cascade, and the ranking are the
         keeper verb's (backlog_ready::select); `next` takes rows[0] of the
         same answer its sibling verb serves, so the two surfaces cannot
         drift. `entries` rides IN so a `--claim` mutation and its selection
-        read the same instant under the graph lock.
+        read the same instant under the graph lock, and `occupancy` rides IN
+        so the keeper is not asked to re-read claims this command already has.
         """
         from fno.graph._intake import repo_root
         from fno.graph.store import (
@@ -4286,6 +4287,7 @@ def cmd_next(
                 include_deferred=include_deferred,
                 repo_root=repo_root(),
                 entries=entries,
+                occupancy=occupancy,
             )["rows"]
         except StoreUnavailable as exc:
             typer.echo(f"Error: store keeper unavailable; selection refused: {exc}", err=True)
@@ -4300,50 +4302,54 @@ def cmd_next(
     from fno.backlog.undispatched import (
         ObserverReadError,
         build_selection_divergence_event,
-        classify_planned_unclaimed,
         prepend_missed_rows,
-        read_claim_snapshot,
-        read_planned_unclaimed,
         read_planned_unclaimed_from_entries,
     )
 
-    try:
-        if _external:
-            assert pre_entries is not None
-            read_planned_unclaimed_from_entries(
-                pre_entries,
-                project=None if all_ else project_filter,
-                mission=mission,
-                roadmap_id=roadmap_id,
-                parent=parent_target_id,
-            )
-        else:
-            read_planned_unclaimed(
-                graph_path=_graph_path(),
-                project=None if all_ else project_filter,
-                mission=mission,
-                roadmap_id=roadmap_id,
-                parent=parent_target_id,
-            )
-    except ObserverReadError as exc:
-        typer.echo(f"Error: {exc}; selection refused", err=True)
-        raise typer.Exit(code=1) from exc
+    # The claim set of the selection that actually ran, for the receipts below.
+    selection_claimed: list = [set()]
 
-    def _with_observer(candidates: list[dict], source_entries: list[dict]) -> list[dict]:
-        by_id = {entry.get("id"): entry for entry in source_entries}
+    def _prepare(entries: list[dict]) -> tuple[set, dict, dict]:
+        """Dispatch occupancy plus the observer receipt, read ONCE per selection.
+
+        The live claim verdict and the roster-backed worked read are what this
+        command costs; selector, observer recovery and the starvation receipts
+        each used to pay for them and got the same answer every time. Both
+        reads stay strict: an unreadable source refuses the selection, it never
+        substitutes an empty occupancy set.
+        """
+        from fno.graph.statuses import live_worked_node_ids
+
+        claimed = _require_live_claimed_node_ids("backlog next")
         try:
-            current_observer = classify_planned_unclaimed(
-                source_entries,
-                read_claim_snapshot(),
+            worked = live_worked_node_ids(strict=True, entries=entries)
+        except Exception as exc:  # noqa: BLE001 - unknown liveness refuses
+            typer.echo(
+                f"Error: worked overlay unreadable: {exc}; selection refused", err=True
+            )
+            raise typer.Exit(code=1) from exc
+        try:
+            observer = read_planned_unclaimed_from_entries(
+                entries,
                 project=None if all_ else project_filter,
                 mission=mission,
                 roadmap_id=roadmap_id,
                 parent=parent_target_id,
+                worked=worked,
             )
-        except Exception as exc:  # noqa: BLE001 - unknown state refuses recovery
-            typer.echo(f"Error: observer revalidation failed: {exc}", err=True)
+        except ObserverReadError as exc:
+            typer.echo(f"Error: {exc}; selection refused", err=True)
             raise typer.Exit(code=1) from exc
-        claimed = _require_live_claimed_node_ids("backlog next observer recovery")
+        selection_claimed[0] = claimed
+        return claimed, worked, observer
+
+    def _with_observer(
+        candidates: list[dict],
+        source_entries: list[dict],
+        occupied: set,
+        current_observer: dict,
+    ) -> list[dict]:
+        by_id = {entry.get("id"): entry for entry in source_entries}
         container_ids = _container_ids(source_entries)
         from fno.backlog.advance import _guard_staleness_days, selection_guards
 
@@ -4352,7 +4358,7 @@ def cmd_next(
         safe_rows = []
         for row in current_observer["rows"]:
             entry = by_id.get(row.get("id"))
-            if entry is None or row.get("id") in claimed:
+            if entry is None or row.get("id") in occupied:
                 continue
             if entry.get("completed_at") or _has_unmerged_open_pr(entry):
                 continue
@@ -4405,7 +4411,11 @@ def cmd_next(
             from fno.claims.io import claims_root_for
 
             assert pre_entries is not None
-            candidates = _with_observer(_select(pre_entries), pre_entries)
+            claimed, worked, observer = _prepare(pre_entries)
+            occupied = claimed | set(worked)
+            candidates = _with_observer(
+                _select(pre_entries, occupied), pre_entries, occupied, observer
+            )
             for winner in candidates:
                 key = f"node:{winner['id']}"
     # Rationale (14 lines): docs/architecture/graph-cli-rationale.md#cmd-next-4593
@@ -4423,7 +4433,11 @@ def cmd_next(
         else:
 
             def mutator(entries):
-                candidates = _with_observer(_select(entries), entries)
+                claimed, worked, observer = _prepare(entries)
+                occupied = claimed | set(worked)
+                candidates = _with_observer(
+                    _select(entries, occupied), entries, occupied, observer
+                )
                 if candidates:
                     winner = candidates[0]
                     # Rows are serialized summaries, not graph references:
@@ -4449,8 +4463,13 @@ def cmd_next(
             assert pre_entries is not None
             entries = pre_entries
         else:
-            entries = read_graph(_graph_path())
-        candidates = _with_observer(_select(entries), entries)
+            # The prelude may already have read this graph for project
+            # detection or parent resolution, and nothing mutates it on the
+            # read-only path: a second read buys the same rows.
+            entries = pre_entries if pre_entries is not None else read_graph(_graph_path())
+        claimed, worked, observer = _prepare(entries)
+        occupied = claimed | set(worked)
+        candidates = _with_observer(_select(entries, occupied), entries, occupied, observer)
         if candidates:
             result[0] = _dispatch_node_summary(candidates[0])
 
@@ -4476,7 +4495,7 @@ def cmd_next(
             project_filter,
             all_,
             scope_ids,
-            _live_claimed_node_ids(),
+            selection_claimed[0],
             datetime.now(timezone.utc),
             _guard_staleness_days(),
             mission=mission,

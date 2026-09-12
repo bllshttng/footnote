@@ -837,6 +837,7 @@ def ready(
     include_deferred: bool = False,
     repo_root: str | None = None,
     entries: "list[dict] | None" = None,
+    occupancy: "set[str] | None" = None,
 ) -> "dict":
     """The dispatch admission decision, answered by the native leg.
 
@@ -848,6 +849,11 @@ def ready(
     backend's joined candidates); otherwise the keeper reads the graph it
     owns. An unreachable keeper raises ``StoreUnavailable`` - selection
     refuses, it never falls back to a locally recomputed answer.
+
+    ``occupancy`` hands in an already-paid strict read of live claims plus
+    roster-worked nodes (``backlog next`` pays it once for its whole
+    selection). Absent, this reads both itself, which is what every other
+    caller wants.
     """
     params: "dict" = {
         "project": project,
@@ -859,21 +865,24 @@ def ready(
         "include_deferred": include_deferred,
         "repo_root": repo_root,
     }
-    from fno.graph.statuses import live_claimed_node_ids, live_worked_node_ids
+    if occupancy is not None:
+        params["claimed"] = sorted(occupancy)
+    else:
+        from fno.graph.statuses import live_claimed_node_ids, live_worked_node_ids
 
-    try:
-        claimed = set(live_claimed_node_ids(strict=True))
-    except Exception as exc:  # noqa: BLE001 - unknown claim state refuses
-        # The keeper's own refusal wording: an unreadable claims root is
-        # UNKNOWN claim state, which must refuse, never read as "nothing is
-        # claimed". The parent-side strict read can hit that refusal first.
-        raise ClaimsUnavailableError(f"live claim state is unavailable ({exc})") from exc
-    try:
-        worked = set(live_worked_node_ids())
-    except Exception as exc:  # noqa: BLE001 - claims stay fail-closed
-        print(f"worked overlay degraded: {exc}", file=sys.stderr)
-        worked = set()
-    params["claimed"] = sorted(claimed | worked)
+        try:
+            claimed = set(live_claimed_node_ids(strict=True))
+        except Exception as exc:  # noqa: BLE001 - unknown claim state refuses
+            # The keeper's own refusal wording: an unreadable claims root is
+            # UNKNOWN claim state, which must refuse, never read as "nothing is
+            # claimed". The parent-side strict read can hit that refusal first.
+            raise ClaimsUnavailableError(f"live claim state is unavailable ({exc})") from exc
+        try:
+            worked = set(live_worked_node_ids())
+        except Exception as exc:  # noqa: BLE001 - claims stay fail-closed
+            print(f"worked overlay degraded: {exc}", file=sys.stderr)
+            worked = set()
+        params["claimed"] = sorted(claimed | worked)
     if entries is not None:
         params["entries"] = entries
     from fno import paths as _paths
