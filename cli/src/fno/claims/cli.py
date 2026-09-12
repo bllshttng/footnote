@@ -834,7 +834,7 @@ def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) ->
     return payload
 
 
-def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> str:
+def _roster_verdict_line(info: dict) -> str:
     """One line naming what was consulted and what it found.
 
     Each string is produced by exactly one outcome, so a caller asserts a
@@ -870,32 +870,18 @@ def _roster_verdict_line(info: dict, worker_verdicts: Optional[dict] = None) -> 
             line += f"; coverage degraded: {unresolved} of {scanned} rows unresolved"
         return line
 
-    if worker_verdicts is None:
-        engaged, unmeasurable, worker_verdicts = classify_workers(workers)
-        if any(w.get("closed_own_row") for w in workers):
-            # The closed-own-row stamp outranks the transcript: the session
-            # closed its own phase row on this node, so it is finished HERE
-            # whatever it wrote afterwards (x-c08a).
-            from fno.agents.reachability import REACHABLE, UNREACHABLE, UNKNOWN
+    engaged, unmeasurable, verdicts = classify_workers(workers)
+    if any(w.get("closed_own_row") for w in workers):
+        # The closed-own-row stamp outranks the transcript: the session closed
+        # its own phase row on this node, so it is finished HERE whatever it
+        # wrote afterwards.
+        from fno.agents.reachability import REACHABLE, UNKNOWN, UNREACHABLE
 
-            for w in workers:
-                if w.get("closed_own_row"):
-                    worker_verdicts[w.get("name") or ""] = UNREACHABLE
-            engaged = [
-                w for w in workers
-                if worker_verdicts.get(w.get("name") or "") == REACHABLE
-            ]
-            unmeasurable = [
-                w for w in workers
-                if worker_verdicts.get(w.get("name") or "") == UNKNOWN
-            ]
-    else:
-        from fno.agents.reachability import REACHABLE, UNKNOWN
-
-        engaged = [w for w in workers if worker_verdicts.get(w.get("name") or "") == REACHABLE]
-        unmeasurable = [
-            w for w in workers if worker_verdicts.get(w.get("name") or "") == UNKNOWN
-        ]
+        for w in workers:
+            if w.get("closed_own_row"):
+                verdicts[w.get("name") or ""] = UNREACHABLE
+        engaged = [w for w in workers if verdicts.get(w.get("name") or "") == REACHABLE]
+        unmeasurable = [w for w in workers if verdicts.get(w.get("name") or "") == UNKNOWN]
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
         line = f"UNCLAIMED but a live worker is on this node: {rendered}"
