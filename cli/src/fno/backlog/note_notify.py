@@ -167,8 +167,7 @@ def note_readers(
             + (", ".join(r.name for r in named) or f"no live row names {subject_id}")
         )
         for r in named:
-            if add(r.name, f"worker on {subject} (registry node)"):
-                return
+            add(r.name, f"worker on {subject} (registry node)")
 
     contained_in = entry.get("contained_in")
     owner = index.get(contained_in) if isinstance(contained_in, str) else None

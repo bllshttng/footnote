@@ -115,6 +115,20 @@ def test_the_registry_arm_reaches_a_worker_no_graph_field_names(monkeypatch) -> 
     assert "graph session_id: sess-gone names no live row" in got.readings
 
 
+def test_every_live_row_on_the_node_is_reached_not_just_the_first(monkeypatch) -> None:
+    """The registry arm binds EVERY ownership-live row naming the node."""
+    _free(monkeypatch)
+    rows = [
+        _row("bp-a-first", node="x-2e1f"),
+        _row("bp-b-second", node="x-2e1f"),
+    ]
+    got = note_readers({"id": "x-2e1f"}, index={}, rows=rows, kings_of=lambda scope: [])
+    assert got.recipients == [
+        ("bp-a-first", "worker on x-2e1f (registry node)"),
+        ("bp-b-second", "worker on x-2e1f (registry node)"),
+    ]
+
+
 def test_a_live_claim_stops_the_chain_before_the_registry_arm(monkeypatch) -> None:
     monkeypatch.setattr(
         "fno.claims.core.claim_status",
