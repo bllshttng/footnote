@@ -9,7 +9,7 @@ x-59b0 delivered as PR #1823: the task-context execution binding lives natively 
 
 ## Operator open item
 
-- [ ] Residue budget ruling on PR 1823: `cli/src/fno` sits at net +179 vs the +100 Python tree allowance after the d-4b39ad4c shrink round (+326 to +179). Same band as the operator-granted exceptions on PR 1720 (+247) and PR 1794 (+265). Apply `file-budget-exception` or rule otherwise. #jc
+- [ ] Residue budget ruling on PR 1823: `cli/src/fno` sits at net +179 vs the +100 Python tree allowance after the d-4b39ad4c shrink round (+326 to +179). The PR 1720 and PR 1794 exceptions were per-PR mints, not a band this PR inherits; d-4b39ad4c still governs the residue. Mint `file-budget-exception` for this PR or rule otherwise. #jc
 
 ## Incidents
 
