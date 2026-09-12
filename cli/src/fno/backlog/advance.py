@@ -26,7 +26,7 @@ from typing import Any, Callable, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
-from fno.agents.naming import AgentNameError, dispatch_agent_name, verb_code_for
+from fno.agents.naming import AgentNameError, dispatch_agent_name
 from fno.agents.node_dispatch import node_spawn_argv, resolve_node_spawn
 from fno.agents import spawn_gate as _spawn_gate
 from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
