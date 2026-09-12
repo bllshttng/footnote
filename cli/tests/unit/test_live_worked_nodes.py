@@ -40,7 +40,7 @@ def test_ac1_hp_names_a_live_worker(monkeypatch):
 
 
 def test_an_injected_reading_is_the_one_used(monkeypatch):
-    """The shared read is proven, not assumed (x-a8b5): a caller that read
+    """The shared read is proven, not assumed: a caller that read
     the roster passes it in and the resolver never probes the fleet again.
     The claim reader joins through this parameter, so a second harness
     fan-out per status call would be the defect this pins shut."""
