@@ -91,6 +91,7 @@ cli.add_typer(_capture_cli, name="capture", hidden=True)
 # (.fno/batches/<domain>.json) — coalesce same-domain nodes into one PR.
 from fno.backlog.batch import cli as _batch_cli  # noqa: E402
 from fno.backlog.advance import refuse_unknown_source as _refuse_unknown_source  # noqa: E402
+from fno.backlog import dispatch_overrides as _dispatch_overrides  # noqa: E402
 
 cli.add_typer(_batch_cli, name="batch", hidden=True)
 
@@ -3101,7 +3102,7 @@ def cmd_update(
     dispatch_brief: Optional[str] = typer.Option(
         None,
         "--dispatch-brief",
-        help="Free-text brief carried to the worker via TARGET_BRIEF env at cold-start (US3), never the command line. Capped at 8 KB at dispatch. Pass 'null' to clear.",
+        help="Free-text brief carried to the worker via TARGET_BRIEF env at cold-start (US3), never the command line. Warns at write and is refused at dispatch when over the 8 KB env budget. Pass 'null' to clear.",
     ),
     type_: Optional[str] = typer.Option(None, "--type", help="Update node type (feature|epic|bug)"),
     public: Optional[bool] = typer.Option(
@@ -3631,26 +3632,9 @@ def cmd_update(
                 raise typer.Exit(code=2)
             else:
                 node["orphan_ok"] = orphan_ok
-        # Dispatch overrides (US3). Stored permissively; the resolver stays the
-        # trust boundary (allowlist + hard 8 KB cap at dispatch time). The brief
-        # additionally warns at write (x-c837): the author is present here and
-        # absent at spawn, so surface the size now, in the spawn path's wording.
-        if dispatch_verb is not None:
-            node["dispatch_verb"] = None if dispatch_verb.lower() == "null" else dispatch_verb
-        if dispatch_brief is not None:
-            from fno.agents.harness_map import _BRIEF_MAX_BYTES
-
-            brief_val = None if dispatch_brief.lower() == "null" else dispatch_brief
-            node["dispatch_brief"] = brief_val
-            if brief_val is not None:
-                n_bytes = len(brief_val.encode("utf-8"))
-                if n_bytes > _BRIEF_MAX_BYTES:
-                    typer.echo(
-                        f"warning: dispatch brief is {n_bytes} bytes, over the "
-                        f"{_BRIEF_MAX_BYTES}-byte (8 KB) env budget; shorten it "
-                        f"(no silent truncation) - spawn will refuse it",
-                        err=True,
-                    )
+        # Dispatch overrides (US3): write-time handling (permissive store,
+        # over-budget brief warn) lives in fno.backlog.dispatch_overrides.
+        _dispatch_overrides.apply(node, dispatch_verb, dispatch_brief)
         if priority is not None:
             node["priority"] = priority
         # --blocks-everything acknowledges p0. Standalone, it acknowledges an
