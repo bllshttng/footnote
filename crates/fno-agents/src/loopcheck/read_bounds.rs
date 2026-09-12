@@ -26,6 +26,13 @@ pub(crate) const STOPGATE_FIRE_BUDGET: std::time::Duration = std::time::Duration
 /// bounded time instead of degenerating into an unbounded wait.
 pub(crate) const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// What a pre-drain read gets once the reserve line is breached. The 250ms
+/// floor cannot apply here: a floored read spends part of the drain's slice,
+/// and enough of them spend it whole (measured: a floored drain at 271ms
+/// after roughly 64 such reads). Refusing fast keeps the aggregate erosion
+/// near zero, and the bound stays positive so the read is still killable.
+const STOPGATE_PRE_DRAIN_SPENT_BOUND: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// King fires hold this much of the fire budget back for the drain read, the
 /// last read and the one that decides completion. Drain cost scales with
 /// graph rows: measured standalone 4.5s to 7.9s on one scope and 8.8s to
@@ -35,7 +42,8 @@ pub(crate) const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration
 /// (`stopgate_drain_timeout`): the reserve guarantees only the floor a
 /// starved fire still leaves, which is what turns a spent budget from a
 /// silent 250ms kill into a readable timeout. Every cheaper read before the
-/// drain is clamped to `remaining - reserve`.
+/// drain is clamped to `remaining - reserve` and refuses fast past that
+/// line, so the slice survives any number of pre-drain reads.
 const STOPGATE_DRAIN_RESERVE: std::time::Duration = std::time::Duration::from_secs(16);
 
 thread_local! {
@@ -76,8 +84,9 @@ fn stopgate_configured_timeout(override_ms: u64) -> std::time::Duration {
 
 /// Effective bound for one stop-gate read: the configured ceiling (flag or
 /// production default) clamped to whatever remains of this fire's aggregate
-/// budget minus the drain reserve, floored so the answer is always a
-/// positive killable bound.
+/// budget minus the drain reserve. Past the reserve line the read refuses
+/// fast instead of taking the floor: the floor is per-read and the erosion
+/// is aggregate, so a floored read here spends the drain's reserved slice.
 pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
     STOPGATE_READS.with(|cell| {
         let (override_ms, deadline, reserve_ms) = *cell.borrow();
@@ -87,7 +96,11 @@ pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
                 let remaining = d.saturating_duration_since(std::time::Instant::now());
                 let for_pre_drain =
                     remaining.saturating_sub(std::time::Duration::from_millis(reserve_ms));
-                clamp_to_fire_budget(configured, for_pre_drain)
+                if for_pre_drain.is_zero() {
+                    STOPGATE_PRE_DRAIN_SPENT_BOUND
+                } else {
+                    configured.min(for_pre_drain)
+                }
             }
             None => configured,
         }
@@ -164,12 +177,35 @@ mod tests {
     }
 
     #[test]
-    fn a_spent_budget_floors_both_bounds_still_killable() {
+    fn a_spent_budget_refuses_pre_drain_reads_fast_and_floors_the_drain() {
         let deadline = std::time::Instant::now();
         STOPGATE_READS.with(|cell| {
             *cell.borrow_mut() = (0, Some(deadline), STOPGATE_DRAIN_RESERVE.as_millis() as u64);
         });
-        assert_eq!(stopgate_read_timeout(), STOPGATE_BOUND_FLOOR);
+        assert_eq!(stopgate_read_timeout(), STOPGATE_PRE_DRAIN_SPENT_BOUND);
         assert_eq!(stopgate_drain_timeout(), STOPGATE_BOUND_FLOOR);
+    }
+
+    #[test]
+    fn a_breached_reserve_line_stops_eroding_into_the_drain_slice() {
+        // The measured specimen: remaining == reserve, so a floored
+        // pre-drain read would take 250ms of the drain's slice and a few
+        // dozen of them would spend it whole. The refuse-fast bound spends
+        // ~nothing, and the drain still reads the full remaining.
+        let deadline = std::time::Instant::now() + STOPGATE_DRAIN_RESERVE;
+        STOPGATE_READS.with(|cell| {
+            *cell.borrow_mut() = (0, Some(deadline), STOPGATE_DRAIN_RESERVE.as_millis() as u64);
+        });
+        let pre_drain = stopgate_read_timeout();
+        assert!(
+            pre_drain <= std::time::Duration::from_millis(5),
+            "{pre_drain:?}"
+        );
+        let reserved = stopgate_drain_timeout();
+        assert!(
+            reserved <= STOPGATE_DRAIN_RESERVE
+                && reserved >= STOPGATE_DRAIN_RESERVE - std::time::Duration::from_secs(1),
+            "{reserved:?}"
+        );
     }
 }
