@@ -212,22 +212,26 @@ def is_open_do_row(row: object) -> bool:
 
 
 def completed_at_status_divergence(entries: list[dict]) -> list[str]:
-    """Ids where ``completed_at`` is set but the stored ``status`` is not terminal.
+    """Ids where ``completed_at`` and the terminal ``status`` disagree.
 
-    ``_cascade_close_parents`` (graph/cli.py) decides an ancestor is already
-    closed by reading ``completed_at`` alone, never ``status``. That is safe
-    only because, measured across the live graph on 2026-09-05 (2428
-    entries), the two fields agreed on every row. This is the regression pin
-    for that measurement: it names any row where they diverge instead of
-    letting the guard silently trust the wrong field forever.
+    Checked in BOTH directions: the epic close guard now reads the two fields
+    together (``children_all_closed`` in ``graph/_reconcile.py``), and a pin
+    tested one way reads green while its invariant breaks the other. Forward:
+    ``completed_at`` set while ``status`` is not terminal (measured zero on
+    the live graph, 2026-09-05). Reverse: ``status`` ``done`` with no
+    ``completed_at``. Superseded rows carry no ``completed_at`` BY DESIGN -
+    supersede stamps only ``superseded_by`` - so the reverse direction must
+    never name them (measured 147 of 147 without it, 2026-09-12).
     """
     return [
         e["id"]
         for e in entries
         if isinstance(e, dict)
         and isinstance(e.get("id"), str)
-        and e.get("completed_at")
-        and e.get("status") not in TERMINAL_RUNGS
+        and (
+            (e.get("completed_at") and e.get("status") not in TERMINAL_RUNGS)
+            or (e.get("status") == "done" and not e.get("completed_at"))
+        )
     ]
 
 

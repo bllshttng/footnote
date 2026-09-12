@@ -1516,9 +1516,10 @@ def clear_reopen_warning_if_child_matches(parent: dict, child: object) -> None:
 def _reopen_outranks_child_closes(parent: dict, kids: list[dict]) -> bool:
     """True when a deliberate reopen postdates every child's close.
 
-    Both close paths ask only whether every child carries ``completed_at``, and
-    that predicate stays true forever once the last child merges. So a node
-    reopened after its children finished was re-closed by the very next sweep:
+    Both close paths ask :func:`children_all_closed` - every child closed, at
+    least one really shipped - and that predicate stays true forever once the
+    last child merges. So a node reopened after its children finished was
+    re-closed by the very next sweep:
     measured 2026-09-05, a reopen carrying a written reason was overridden by
     ``reconcile`` seven minutes later, and no retry could hold it. ``reopen``
     requires ``--reason`` precisely because a close is evidenced by a merged PR
@@ -1603,6 +1604,28 @@ def _merge_postdates_reopen(
     return False
 
 
+def children_all_closed(parent: dict, kids: list[dict]) -> bool:
+    """Every child is closed, and at least one really shipped.
+
+    The one closure question both epic close paths ask
+    (:func:`cascade_close_should_stop` and ``_strandable_epic_ids``). A child
+    counts closed when :func:`fno.graph.statuses.is_terminal_entry` says so -
+    done, superseded, or freshly stamped ``completed_at`` with its status
+    still catching up - EXCEPT a child superseded BY THIS PARENT: the parent
+    absorbed that child's work, so the parent's own liveness keeps it open.
+    The shipped term keeps a parent whose every child was replaced elsewhere
+    from closing as done with nothing built.
+    """
+    from fno.graph.statuses import is_terminal_entry
+
+    pid = parent.get("id")
+    if not kids:
+        return False
+    if any(not is_terminal_entry(k) or k.get("superseded_by") == pid for k in kids):
+        return False
+    return any(k.get("status") != "superseded" and not k.get("superseded_by") for k in kids)
+
+
 def cascade_close_should_stop(parent: dict, kids: list[dict], child: object) -> bool:
     """One climb step of ``_cascade_close_parents``: clear a stale marker on
     ``parent`` first, then report whether the walk stops here (``parent``
@@ -1614,7 +1637,7 @@ def cascade_close_should_stop(parent: dict, kids: list[dict], child: object) -> 
         return True
     if _reopen_outranks_child_closes(parent, kids):
         return True  # reopened after its children finished -> the human call holds
-    return not kids or any(not k.get("completed_at") for k in kids)
+    return not children_all_closed(parent, kids)
 
 
 @dataclass
