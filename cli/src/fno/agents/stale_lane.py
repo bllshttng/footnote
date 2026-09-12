@@ -10,6 +10,7 @@ session-bookkeeping vocabulary (PR 1227 measured the stale ask as noise).
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from fno.agents.stale_escalate import reconcile_channel
