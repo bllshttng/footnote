@@ -597,17 +597,6 @@ def _live_shared_serve_root_pids(
     return roots, None
 
 
-def _snapshot_row_count(ps_output: str) -> int:
-    """Count the data rows the parser attempts, mirroring its skip rules."""
-    rows = 0
-    for raw_line in ps_output.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("PID "):
-            continue
-        rows += 1
-    return rows
-
-
 def _unparsed_sample_evidence(reading: Footprint) -> str:
     """Render the capped masked samples for a refusal message."""
     parts = [
@@ -661,30 +650,23 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
         threshold_excluded_root_pids=shared_serve_pids | codex_roots,
     )
     if reading.unparsed_lines:
-        # Three arms replace any-count-refuses (x-46cb). A count arm made 4
-        # bad rows of 1163 take the whole fleet's dispatch offline while 1159
-        # rows parsed fine. No ratio either: the measured event is 0.34
-        # percent, and any bound between "admits it" and "catches a real
-        # fault" is invented. Relevance and total failure refuse; everything
-        # else keeps the reading with the rows as evidence.
+        # Three arms replace any-count-refuses (x-46cb): no ratio is
+        # defensible (the measured event is 4 of 1163 rows) and a count arm
+        # took the fleet's dispatch offline over rows nobody read. Relevance
+        # and total failure refuse; anything else keeps the reading.
         discovered = root_pids | shared_serve_pids | codex_roots
-        root_hits = sorted(reading.unparsed_pids & discovered)
-        if root_hits:
-            # A bad row on a discovered root reads that root's whole subtree
-            # as zero CPU - a blind gate, not a noisy one. Mirrors the
-            # missing-root guard above.
+        if root_hits := sorted(reading.unparsed_pids & discovered):
+            # A bad root row reads its subtree as zero CPU: blind, not noisy.
             return None, (
-                "footprint unavailable: unparsable ps row carries discovered "
-                f"fleet root pid {root_hits[0]}"
+                f"footprint unavailable: unparsable ps row carries discovered fleet root pid {root_hits[0]}"
                 + _unparsed_sample_evidence(reading)
             )
-        total_rows = _snapshot_row_count(ps_output)
-        if total_rows and reading.unparsed_lines >= total_rows:
-            # Floor, not ceiling: every data row failing means ps wrote
-            # something the parser cannot read at all.
+        # Floor, not ceiling: every data row failing is an unreadable ps.
+        rows = sum(1 for raw in ps_output.splitlines() if (ln := raw.strip()) and not ln.startswith("PID "))
+        if reading.unparsed_lines >= rows:
             return None, (
-                f"footprint unavailable: all {total_rows} ps row(s) failed to parse"
-                + _unparsed_sample_evidence(reading)
+                f"footprint unavailable: all {reading.unparsed_lines} ps row(s) "
+                "failed to parse" + _unparsed_sample_evidence(reading)
             )
     if attribution_gap is not None:
         reading = reading._replace(attribution_gap=attribution_gap)
@@ -1096,7 +1078,6 @@ def _payload(
             )
         ],
         "unparsed_lines": reading.unparsed_lines,
-        # Masked evidence rows; argv never reaches the payload (x-46cb).
         "unparsed_samples": [sample._asdict() for sample in reading.unparsed_samples],
         "exit_code": exit_code,
     }
@@ -1247,9 +1228,7 @@ def _emit_result(
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
             for sample in reading.unparsed_samples:
                 pid_text = f"pid {sample.pid}" if sample.pid is not None else "no pid"
-                typer.echo(
-                    f"  row {sample.row} ({pid_text}, {sample.reason}): {sample.masked}"
-                )
+                typer.echo(f"  row {sample.row} ({pid_text}, {sample.reason}): {sample.masked}")
         if note is not None:
             typer.echo(f"degraded: {note}")
         if exit_code != 0 or cause_only:
