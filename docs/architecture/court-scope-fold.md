@@ -42,9 +42,9 @@ reads the answer back. A fold that cannot run - stale binary, unreadable
 graph, timeout - marks the crown `unresolved` with the reason rather than
 rendering an empty table.
 
-The fold resolves its own claims directory. Every key it asks after is a `node:` key, and those route to the global claims root on both the Rust and the Python side, so one resolver answers and no caller passes a path. `--claims-dir` stays as an override for tests.
+The fold resolves its own claims directory. Every key it asks after is a `node:` key. Those route to the global claims root on both the Rust and the Python side. One resolver answers, and no caller passes a path. `--claims-dir` stays as an override for tests.
 
-Until 2026-09-12 the one Python caller passed no directory and the Rust side returned an empty map on its `None` arm, so the worker column read null on every row of every surface while the help string already documented the flag. That is the false-zero shape AGENTS.md names: the instrument ran, it reported clean, and it had read nothing.
+Until 2026-09-12 the one Python caller passed no directory. The Rust side then returned an empty map on its `None` arm. So the worker column read null on every row of every surface, while the help string already documented the flag. That is the false-zero shape AGENTS.md names: the instrument ran, it reported clean, and it had read nothing.
 
 The scope compile is a FORCED-level arm of the board's compiler: the
 level comes from the crown row the court already adjudicated, never
@@ -85,13 +85,13 @@ A node counts as stuck under exactly these rules, with the threshold at 60 minut
 - An unproven claim (`corrupted` or `unreadable`). An unproven claim blocks a dispatch as hard as a held one does.
 - `in_review` with a `pr_number`, older than the threshold.
 
-A node is counted ONCE. An L1 crown folds the nodes its L2 epics also fold, so an overlapping node reaches the verdict once per crown covering it, and counting it twice reports more stuck work than exists. Several crowns failing the same way is one fault and prints one line.
+A node is counted ONCE. An L1 crown folds the nodes its L2 epics also fold. An overlapping node therefore reaches the verdict once per crown covering it. Counting it twice reports more stuck work than exists. Several crowns failing the same way is one fault and prints one line.
 
 A clause names five ids and then counts the rest, because a live court put 40 ids in one clause. The full list stays in the JSON.
 
 The caller adds only what the fold cannot see. `fno agents court` appends the spawn gate's refusal. An unknown gate is itself a blind spot, so it lands in `blind` rather than being dropped. When nothing is stuck and the gate accepts, the line reads `stuck: nothing`. When the fold, the sweep or the gate cannot answer, the line says which one cannot answer. A clean line and a blind line must never look the same.
 
-Live PR state is deliberately out of scope. `merge_status` on a graph entry is a closure stamp that only ever reads `merged` or null, so it cannot say CONFLICTING or red, and the honest verdict needs a network read that `fno do pr status <n>` already performs. The row carries `pr_number` and an age, so an `in_review` node past the threshold surfaces without one.
+Live PR state is deliberately out of scope. `merge_status` on a graph entry is a closure stamp that only ever reads `merged` or null. It cannot say CONFLICTING or red. The honest verdict needs a network read, and `fno do pr status <n>` already performs it. The row carries `pr_number` and an age, so an `in_review` node past the threshold surfaces without one.
 
 ## Session ids on a row
 
