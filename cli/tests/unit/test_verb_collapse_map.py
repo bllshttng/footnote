@@ -168,8 +168,10 @@ def test_map_covers_current_surface_once():
     # `dispatch one` to `dispatch next` under both spellings (`one` stays as
     # a hidden deprecated alias), allocating +2 rows: 607 -> 609. `do pr
     # publish-review` and `pr publish-review`, the bot-identity backfill
-    # door and its forwarded spelling: 609 -> 611.
-    assert len(mapped) == 611, (
+    # door and its forwarded spelling: 609 -> 611. `agents king checkin`,
+    # the one verb that runs the reign check-in body and journals its row:
+    # 611 -> 612.
+    assert len(mapped) == 612, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
