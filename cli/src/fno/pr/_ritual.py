@@ -47,7 +47,7 @@ from typing import Callable, Optional
 import typer
 
 from fno._subprocess_util import fno_py_cmd
-from fno.agents.naming import dispatch_agent_name
+from fno.agents.naming import AgentNameError, dispatch_agent_name
 from fno.agents.events import (
     emit_merge_cleanup_requested,
     merge_cleanup_request_id,
@@ -854,7 +854,17 @@ class Ritual:
                 file=sys.stderr,
             )
             return False
-        name = dispatch_agent_name("pm", "r", node_ids[0], qualifier=f"pr-{self.ctx.pr}")
+        try:
+            name = dispatch_agent_name("pm", "r", node_ids[0], qualifier=f"pr-{self.ctx.pr}")
+        except AgentNameError as exc:
+            # A stale/missing binary must fail this leg, not abort the ritual
+            # legs after it (run() has no per-leg guard).
+            print(
+                f"post-merge judgment: skipped, worker name unmintable ({exc}); "
+                "no pm-r worker spawned",
+                file=sys.stderr,
+            )
+            return False
         prompt = self._judgment_prompt(deferred, files, lines)
         argv = [*fno_py_cmd(), "agents", "spawn", "--substrate", "headless",
                 "--timeout", str(int(_JUDGMENT_TIMEOUT_S)),

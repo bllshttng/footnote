@@ -26,7 +26,7 @@ from typing import Any, Callable, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
-from fno.agents.naming import dispatch_agent_name, verb_code_for
+from fno.agents.naming import AgentNameError, dispatch_agent_name, verb_code_for
 from fno.agents import spawn_gate as _spawn_gate
 from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
 from fno.control_plane import emit_tick, scheduler_from_env
@@ -2199,7 +2199,7 @@ class JoinRefuse(Exception):
 
     2 = no live node claim (nothing to join), 3 = width 1 (a second worker
     has nothing to pull), 4 = no usable bound plan, 5 = already joined
-    (live ``j-<node>-*`` workers exist).
+    (live ``j-<node>-*`` workers exist), 6 = joiner name unmintable.
     """
 
     def __init__(self, code: int, message: str) -> None:
@@ -2802,10 +2802,13 @@ def _join_node(
         # x-84b2: joiner names are minted once through the canonical bridge -
         # jn-t-<node>-<ordinal>, the operator-verb source stamped so a joiner
         # is distinguishable from an autonomous dispatch.
-        joiner_names = {
-            k: dispatch_agent_name("jn", "t", node_id, slug=str(k))
-            for k in range(1, len(worker_bands) + 1)
-        }
+        try:
+            joiner_names = {
+                k: dispatch_agent_name("jn", "t", node_id, slug=str(k))
+                for k in range(1, len(worker_bands) + 1)
+            }
+        except AgentNameError as exc:
+            raise JoinRefuse(6, f"joiner name unmintable: {exc}") from exc
         brief_dir.mkdir(parents=True, exist_ok=True)
         band_table = ""
         if bands:

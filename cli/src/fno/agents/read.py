@@ -153,6 +153,8 @@ def list_agents(
     not_blocked_minus_working = claude_mod.NOT_BLOCKED_STATUSES_LOWER - {"working"}
 
     rows: list[dict] = []
+    # One batched name-parse for the join, never one subprocess per row.
+    node_by_name = truth_status.parse_node_ids([entry.name for entry in filtered])
     for entry in filtered:
         from fno.agents import session_truth
 
@@ -236,7 +238,7 @@ def list_agents(
             or str(live_status).lower() in not_blocked_minus_working
             or reach.verdict == UNREACHABLE
         ):
-            node_id = truth_status.parse_node_id(entry.name)
+            node_id = node_by_name.get(entry.name)
             if node_id is not None:
                 truth = truth_status.resolve_truth_status(
                     node_id,

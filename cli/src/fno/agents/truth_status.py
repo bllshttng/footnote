@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fno.agents.naming import parse_dispatch_agent_name
+from fno.agents.naming import AgentNameError, parse_dispatch_agent_name, parse_many
 from fno.claims.core import claim_status
 
 # Claim-live + a fire within this window reads as working; older reads waiting.
@@ -71,6 +71,27 @@ def parse_node_id(name: Optional[str]) -> Optional[str]:
         return parsed.node
     m = _NAME_NODE_RE.match(name)
     return m.group(1) if m else None
+
+
+def parse_node_ids(names) -> dict[str, Optional[str]]:
+    """Batch :func:`parse_node_id`: one name-parse subprocess for the whole
+    list instead of one per row (the ``agents list`` join reads every row)."""
+    keys = list(names)
+    rows: list = []
+    if keys:
+        try:
+            rows = parse_many([name or "" for name in keys])
+        except AgentNameError:
+            # Stale/missing binary: every name degrades to the legacy regex.
+            rows = [None] * len(keys)
+    out: dict[str, Optional[str]] = {}
+    for name, row in zip(keys, rows):
+        node = row.node if row is not None and row.node else None
+        if node is None:
+            m = _NAME_NODE_RE.match(name or "")
+            node = m.group(1) if m else None
+        out[name] = node
+    return out
 
 
 def parse_worker_mission(name: Optional[str]) -> Optional[tuple[str, str]]:

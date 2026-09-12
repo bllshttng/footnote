@@ -1180,7 +1180,14 @@ def _redispatch(
         # Raced to completion: nothing to continue, so do not re-dispatch.
         return _Failed("node-done")
     name = getattr(candidate, "name", None)
-    agent = _recovery_agent_name(name, node, candidate.short_id)
+    from fno.agents.naming import AgentNameError
+
+    try:
+        agent = _recovery_agent_name(name, node, candidate.short_id)
+    except AgentNameError as exc:
+        # A stale/missing binary unmints this candidate; report it as the
+        # candidate's failure, never crash the sweep.
+        return _Failed(f"name-unmintable: {exc}")
     old_worker_stopped = False
     try:
         if name:
@@ -1542,7 +1549,13 @@ def _respawn_bg_resume(
     cwd = getattr(candidate, "cwd", None)
     name = getattr(candidate, "name", None)
     # Nodeless resume: a typed session identity, never a fabricated node.
-    agent = _recovery_agent_name(name, f"session-{candidate.short_id}", candidate.short_id)
+    from fno.agents.naming import AgentNameError
+
+    try:
+        agent = _recovery_agent_name(name, f"session-{candidate.short_id}", candidate.short_id)
+    except AgentNameError:
+        # A stale/missing binary unmints the resume; the caller notifies.
+        return False
     if not name:
         # No name to stop the dead thread by. The node-less path has no claim +
         # `target init` backstop against a double (unlike _redispatch), so a blind
