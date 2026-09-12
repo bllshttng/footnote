@@ -650,17 +650,93 @@ def test_daemon_drift_probe_uses_installed_status_and_relays_canonical_warning(
         return type(
             "Completed",
             (),
-            {"returncode": 0, "stdout": '{"daemon": {"pid": 91627}}', "stderr": warning},
+            {
+                "returncode": 0,
+                "stdout": '{"drift": "drifted", "daemon": {"pid": 91627}}',
+                "stderr": warning,
+            },
         )()
 
     monkeypatch.setattr(doctor.subprocess, "run", fake_run)
     assert doctor._daemon_drift_warning() == warning
     assert calls == [
         (
-            ["/cargo/bin/fno-agents", "status"],
+            ["/cargo/bin/fno-agents", "status", "--json"],
             {"capture_output": True, "text": True, "check": False, "timeout": 5},
         )
     ]
+
+
+def test_daemon_drift_probe_appends_measured_process_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """x-538f: process age rides beside the artifact verdict - a long-lived
+    daemon on pre-fix code must read as lag, not as an unqualified fresh."""
+    from fno import rust_binary
+
+    warning = (
+        "fno agents: the running daemon (pid 30324) is an older build than the installed "
+        "binary; `fno agents restart` fixes it but restarts every worker on the shared "
+        "daemon, so it is an operator action - surface it to the operator instead of "
+        "running it from an agent session."
+    )
+    monkeypatch.setattr(
+        rust_binary, "resolve_installed_binary", lambda: Path("/cargo/bin/fno-agents")
+    )
+    monkeypatch.setattr(
+        doctor.subprocess,
+        "run",
+        lambda *args, **kwargs: type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": json.dumps(
+                    {"drift": "drifted", "daemon": {"pid": 30324, "uptime_secs": 2241}}
+                ),
+                "stderr": warning,
+            },
+        )(),
+    )
+    result = doctor._daemon_drift_warning()
+    assert result is not None
+    assert result.startswith(warning)
+    assert "(daemon up 37m; the binary postdates its start)" in result
+
+
+def test_daemon_drift_probe_gates_on_structured_drift_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stderr sentence alone is not the verdict; the JSON ``drift`` field is."""
+    from fno import rust_binary
+
+    warning = (
+        "fno agents: the running daemon (pid 7) is an older build than the installed "
+        "binary; `fno agents restart` fixes it but restarts every worker on the shared "
+        "daemon, so it is an operator action - surface it to the operator instead of "
+        "running it from an agent session."
+    )
+    monkeypatch.setattr(
+        rust_binary, "resolve_installed_binary", lambda: Path("/cargo/bin/fno-agents")
+    )
+    for drift_value in ("fresh", "unknown", None):
+        payload = {"daemon": {"pid": 7}}
+        if drift_value is not None:
+            payload["drift"] = drift_value
+        monkeypatch.setattr(
+            doctor.subprocess,
+            "run",
+            lambda *args, _p=payload, **kwargs: type(
+                "Completed",
+                (),
+                {
+                    "returncode": 0,
+                    "stdout": json.dumps(_p),
+                    "stderr": warning,
+                },
+            )(),
+        )
+        assert doctor._daemon_drift_warning() is None, drift_value
 
 
 def test_daemon_drift_probe_uses_forced_runtime_binary(
@@ -688,7 +764,7 @@ def test_daemon_drift_probe_uses_forced_runtime_binary(
         lambda cmd, **kwargs: type(
             "Completed",
             (),
-            {"returncode": 0, "stdout": '{"daemon": {}}', "stderr": warning},
+            {"returncode": 0, "stdout": '{"drift": "drifted", "daemon": {}}', "stderr": warning},
         )(),
     )
 
@@ -709,6 +785,14 @@ def test_daemon_drift_probe_uses_forced_runtime_binary(
             "running it from an agent session.",
         ),
         (1, '{"daemon": {"pid": 7}}', "fno agents: transport failed"),
+        (
+            0,
+            '{"drift": "fresh", "daemon": {"pid": 7}}',
+            "fno agents: the running daemon (pid 7) is an older build than the installed "
+            "binary; `fno agents restart` fixes it but restarts every worker on the shared "
+            "daemon, so it is an operator action - surface it to the operator instead of "
+            "running it from an agent session.",
+        ),
     ],
 )
 def test_daemon_drift_probe_fails_silent_without_proven_status(
@@ -757,6 +841,43 @@ def test_doctor_reports_measured_daemon_drift_without_changing_verdict(
     payload = json.loads(runner.invoke(app, ["doctor", "--json"]).stdout)
     assert payload["status"] == "fresh"
     assert payload["daemon_drift"] == warning
+
+
+def test_daemon_drift_never_prints_unqualified_fresh_component_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """x-538f test clause: with an artifact newer than the running process,
+    doctor reports the lag AND the summary line stops reading as bare
+    "N/N fresh" - the exact false evidence the incident shipped."""
+    warning = (
+        "fno agents: the running daemon (pid 30324) is an older build than the installed "
+        "binary; `fno agents restart` fixes it but restarts every worker on the shared "
+        "daemon, so it is an operator action - surface it to the operator instead of "
+        "running it from an agent session."
+    )
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc",
+        marker="abc",
+        capture_present="present",
+        rust_binary="/cargo/bin/fno-agents",
+        rust_marker="def",
+        rust_source_rev="def",
+        cargo_bin_present=True,
+        components=[
+            {"component": "fno", "status": "fresh"},
+            {"component": "fno-agents-daemon", "status": "fresh"},
+        ],
+    )
+    # _stub_signals defaults the probe to None; the drift case overrides it.
+    monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: warning)
+
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "fno doctor: note: " + warning in result.stdout
+    assert "2/2 fresh on disk; a daemon drift note follows." in result.stdout
+    assert "2/2 fresh (" not in result.stdout
 
 
 # ---------------------------------------------------------------------------
