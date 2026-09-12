@@ -418,6 +418,7 @@ def sweep_carveouts(
             cwd=cwd,
             create_fn=create_fn,
             inbox_fn=inbox_fn,
+            dedup_entries=nodes,
         )
         if not results:
             item.error = "candidate did not land (no result)"
@@ -435,24 +436,6 @@ def sweep_carveouts(
                 report.warnings.append(
                     f"could not link {item.node_id} to {item.link_to}: {exc}"
                 )
-        # The filing-time dedup net every other birth path runs; print its
-        # offer rather than swallowing it.
-        if item.node_id:
-            try:
-                from fno.graph._intake import _warn_similar_nodes
-
-                _warn_similar_nodes(
-                    {
-                        "id": item.node_id,
-                        "title": item.candidate.title if item.candidate else "",
-                        "details": item.candidate.body if item.candidate else "",
-                        "domain": "code",
-                    },
-                    nodes,
-                    intake_hint=False,
-                )
-            except Exception as exc:
-                report.warnings.append(f"dedup net failed for {item.node_id}: {exc}")
         # An inbox line carries no node id but IS a durable record of the work,
         # so the row is still consumed.
         to_consume.append(item.carveout_id)
