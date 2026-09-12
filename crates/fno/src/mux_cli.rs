@@ -2078,7 +2078,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
     // sweep modal's "both" queues exactly that pair, and gating tabs on bare
     // `!dead_only` made it close zero tabs while reporting both.
     let tab_outcome = if scope.fold_tabs && (!dead_only || tabs_only) {
-        prune_live_tabs(&tabs, include_named, dry_run, include_used_shells)
+        prune_live_tabs_measuring_named(&tabs, include_named, dry_run, include_used_shells)
     } else {
         TabPruneOutcome {
             kept: tabs.len(),
@@ -4674,7 +4674,7 @@ pub use thread_verb::thread;
 mod prune_sync;
 // (v71) The live-tab fold, same rule; its tests moved with it.
 mod tab_prune;
-use tab_prune::{live_tabs, prune_live_tabs, LiveTab, TabPruneOutcome};
+use tab_prune::{live_tabs, prune_live_tabs_measuring_named, TabPruneOutcome};
 // (v72) The `fno mux thread reseat` verb, same child-module pattern.
 mod reseat_verb;
 pub use reseat_verb::reseat;

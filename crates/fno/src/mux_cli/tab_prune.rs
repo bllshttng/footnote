@@ -156,6 +156,10 @@ pub(super) struct TabPruneOutcome {
     /// The orphaned-worker subset of `closed`/`would_close` (v71).
     pub(super) closed_orphaned: usize,
     pub(super) would_close_orphaned: usize,
+    /// Of `skipped_named`, the tabs a `--include-named` pass would close.
+    /// Measured on a dry-run only, so the sweep modal's named row can show
+    /// exactly what its tap closes.
+    pub(super) named_would_close: usize,
     /// One label per tab this pass would close (or closed) - nineteen is past
     /// the point where a bare count is a decision an operator can make.
     pub(super) closed_named: Vec<String>,
@@ -305,6 +309,25 @@ pub(super) fn prune_live_tabs(
     out
 }
 
+/// The fold, plus `named_would_close` on a dry-run that left named tabs out:
+/// a second dry fold over the same snapshot with named tabs in. The open-tab
+/// counter is per squad and a name is per squad, so the unnamed tabs fold the
+/// same both times and the difference is the named tabs alone.
+pub(super) fn prune_live_tabs_measuring_named(
+    tabs: &[LiveTab],
+    include_named: bool,
+    dry_run: bool,
+    include_used_shells: bool,
+) -> TabPruneOutcome {
+    let mut out = prune_live_tabs(tabs, include_named, dry_run, include_used_shells);
+    if dry_run && !include_named {
+        out.named_would_close = prune_live_tabs(tabs, true, true, include_used_shells)
+            .would_close
+            .saturating_sub(out.would_close);
+    }
+    out
+}
+
 /// One close roundtrip for a tab the fold has decided to close. `true` only
 /// on the positive `TabClosed` receipt - a refused close keeps the tab and is
 /// counted as kept, never as a silent success.
@@ -383,6 +406,36 @@ mod tests {
         assert_eq!(outcome.kept_zero_panes, 0);
         assert_eq!(outcome.kept_unreachable, 0);
         assert_eq!(outcome.kept_not_probed, 0);
+    }
+
+    #[test]
+    fn named_would_close_is_what_an_include_named_pass_folds() {
+        let tab = |squad_id: u64, squad_name: Option<&str>, tab_id: u64| LiveTab {
+            session: "main".into(),
+            squad_id,
+            squad_name: squad_name.map(Into::into),
+            tab_id,
+            tab_name: None,
+            pane_count: 1,
+            pristine: true,
+            used_shell_only: false,
+            orphaned: false,
+            release: None,
+        };
+        // Two pristine tabs per workspace: each folds one, its last tab stays.
+        let tabs = vec![
+            tab(1, None, 11),
+            tab(1, None, 12),
+            tab(2, Some("named"), 21),
+            tab(2, Some("named"), 22),
+        ];
+        let dry = prune_live_tabs_measuring_named(&tabs, false, true, false);
+        assert_eq!(
+            (dry.would_close, dry.skipped_named, dry.named_would_close),
+            (1, 2, 1)
+        );
+        let widened = prune_live_tabs(&tabs, true, true, false);
+        assert_eq!(widened.would_close, dry.would_close + dry.named_would_close);
     }
 
     #[test]
