@@ -2402,8 +2402,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     &orphan_sweep_in_flight,
                     ctx.home.events_jsonl(),
                 );
-                // The machine gets an arm (x-d6ad): it bands the box, escalates
-                // on its own, and gates nothing. Details in machine_watch.rs.
+                // The machine gets an arm (x-d6ad): bands the box, escalates, gates nothing.
                 crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's
                 // measurement, refreshed every SERVED_LIVENESS_CADENCE with

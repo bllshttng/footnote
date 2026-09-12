@@ -236,10 +236,8 @@ def _machine_cpu_arm(
         value={
             "busy_fraction": round(busy, 3),
             "capacity_cores": _cpu_capacity_cores(),
-            # x-d6ad AC10: the machine-wide census rides the same footprint
-            # reading the fleet census already took, so the lanes arm and the
-            # control-plane arm quote one count. Unknown when the reading
-            # could not be taken, never guessed.
+            # x-d6ad AC10: the census rides the fleet read, unknown when
+            # unreadable, never guessed.
             "runnable": getattr(footprint, "runnable_count", None),
             "processes": getattr(footprint, "machine_process_count", None),
         },

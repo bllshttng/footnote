@@ -891,10 +891,8 @@ def cpu_admission(
 
 
 class MachinePressure(NamedTuple):
-    """The whole-machine band's verdict, computed once and read verbatim by
-    the machine_watch arm (x-d6ad LD3). The band sits on whole-machine CPU
-    against ``resource_meter.thresholds.cpu_busy_fraction``; ``load_15m`` and
-    ``runnable`` are context and never decide (LD2)."""
+    """The whole-machine band's verdict, read verbatim by machine_watch
+    (x-d6ad LD3); ``load_15m`` and ``runnable`` are context, never deciders."""
 
     verdict: str
     busy_fraction: float | None
@@ -1029,9 +1027,8 @@ def _payload(
         # code. `capacity_verdict` stays one release as an alias of the verdict.
         "admission": admission._asdict(),
         "capacity_verdict": admission.verdict,
-        # x-d6ad LD3/LD4: the whole-machine band's verdict, carried on every
-        # emission (cause-only included) so the machine_watch arm reads THIS
-        # object and computes no verdict of its own.
+        # x-d6ad LD3: the whole-machine verdict on every emission (cause-only
+        # included); the machine_watch arm reads THIS and computes none of its own.
         "machine": _compute_machine_pressure(reading, load_snapshot)._asdict(),
         "load_1m": getattr(load_snapshot, "load_1m", None),
         "load_5m": getattr(load_snapshot, "load_5m", None),

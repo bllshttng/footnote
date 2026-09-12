@@ -50,9 +50,7 @@ class Footprint(NamedTuple):
     spare_pool_process_count: int = 0
     spare_pool_cpu_cores: float = 0.0
     spare_pool_rss_gb: float = 0.0
-    # Whole-machine census (x-d6ad AC10): every parsed row and the rows whose
-    # ps state begins with R. Machine-wide on purpose, beside the roster-scoped
-    # ``process_count``/``direct_process_count`` above, which do not change.
+    # Whole-machine census (x-d6ad AC10), beside the roster-scoped counts.
     machine_process_count: int = 0
     runnable_count: int = 0
 
@@ -143,7 +141,7 @@ class _Process(NamedTuple):
     cpu_percent: float
     rss_kb: int
     command: str
-    # ps state letter(s), read only when the snapshot carries the state column.
+    # ps state letter(s); empty when the snapshot has no state column.
     state: str = ""
 
 
@@ -259,8 +257,7 @@ def parse_footprint(
             continue
         try:
             # Shapes, newest first: (maxsplit, has_state, has_ppid). The first
-            # that parses wins; a real etime carries a colon where a state
-            # never does, so the shapes cannot silently collide.
+            # that parses wins; an etime's colon never collides with a state.
             if new_format:
                 shapes = [(6, True, True)] if new_state_format else [(5, False, True)]
             else:
