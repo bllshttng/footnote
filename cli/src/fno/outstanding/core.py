@@ -909,7 +909,7 @@ def render(
         lines.append('  Answer with: fno inbox outstanding clear <id> --answer "..."')
         if body_trimmed:
             lines.append(
-                "  Bodies are trimmed to one line; read a full question with: fno inbox outstanding -J"
+                "  Rows are trimmed to one line; read a full question with: fno inbox outstanding -J"
             )
         lines.append("")
 

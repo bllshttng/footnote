@@ -757,7 +757,7 @@ def test_a_long_body_renders_bounded_with_the_trim_footer():
     printed_body = body_line.split("  ", 2)[2].split("  (")[0]
     assert len(printed_body) == QUESTION_BODY_CAP
     assert printed_body.endswith("…")
-    assert "Bodies are trimmed to one line" in output
+    assert "Rows are trimmed to one line" in output
     assert "fno inbox outstanding -J" in output
 
 
@@ -778,7 +778,7 @@ def test_a_multiline_body_renders_first_line_with_the_trim_footer():
 
     assert "first line" in output
     assert "second line" not in output
-    assert "Bodies are trimmed to one line" in output
+    assert "Rows are trimmed to one line" in output
 
 
 def test_short_single_line_bodies_render_no_trim_footer():
@@ -797,7 +797,7 @@ def test_short_single_line_bodies_render_no_trim_footer():
 
     output = render(report)
 
-    assert "Bodies are trimmed" not in output
+    assert "Rows are trimmed" not in output
 
 
 def test_stale_questions_render_under_visible_heading_with_age(

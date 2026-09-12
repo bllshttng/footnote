@@ -294,8 +294,18 @@ def escalate_unfinished(
     unknown_dimensions=(),
 ) -> "tuple[str, str]":
     if not findings:
-        reset_answered(root, marker=MARKER)
-        return ("none", "")
+        outcome, qid = reconcile_channel(
+            [],
+            root=root,
+            session_id=session_id,
+            cwd=cwd,
+            marker=MARKER,
+            subject="unfinished-work",
+            identities=[],
+            question=lambda _key: "",
+            ask=lambda _key: "",
+        )
+        return ("none", "") if outcome == "none" else (outcome, qid)
 
     unique = _unique(findings)
     outcome, qid = reconcile_channel(

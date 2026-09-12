@@ -186,6 +186,30 @@ def test_mechanical_supersede_close_does_not_suppress_a_returning_set(
     assert third_id not in (first_id, second_id)
 
 
+def test_emptied_finding_set_closes_the_open_ask(tmp_path: Path) -> None:
+    """The empty branch reconciles like any other: a measured-clean sweep
+    closes the open ask instead of leaving it open and unread forever."""
+    from types import SimpleNamespace
+
+    from fno.agents.stale_escalate import escalate_unfinished
+
+    finding = SimpleNamespace(
+        kind="dirty", subject="/w/x", basis="82 files dirty",
+        clear_command="fno agents workspace worktree cleanup", node_id=None,
+        pr_number=None, cwd="/w/x", age_s=100.0,
+    )
+    _outcome, asked_id = escalate_unfinished(
+        [finding], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+    outcome, closed_id = escalate_unfinished(
+        [], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+
+    assert outcome == "closed"
+    assert closed_id == asked_id
+    assert read_open_questions(tmp_path) == []
+
+
 def test_changed_finding_set_supersedes_the_old_ask(tmp_path: Path) -> None:
     """The unfinished-work emitter rides the shared fold: a changed finding
     set supersedes (one open row), it never piles a second ask beside the
