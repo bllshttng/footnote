@@ -385,7 +385,21 @@ def test_after_admission_the_timeout_names_the_slot_cap(tmp_path, monkeypatch, c
         "census",
         lambda socket_map=None: spawn_gate.LiveCensus(workers=[], fno_slot_workers=99),
     )
-    monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 30.0)
+    monkeypatch.setattr(spawn_gate, "CPU_ADMIT_SAMPLES", 1)
+
+    # A fake clock makes the drain deterministic: a wall-clock 50ms budget
+    # fired before the second axis read on a cold or loaded box, so the
+    # timeout blamed the CPU axis instead of the slot cap. The clock ticks
+    # once per monotonic() call, so 30 lands a dozen iterations past the
+    # two-iteration drain but inside the 50 admits.
+    clock = {"t": 100.0}
+
+    def _tick(*_a):
+        clock["t"] += 1.0
+        return clock["t"]
+
+    monkeypatch.setattr(spawn_gate.time, "monotonic", _tick)
     with pytest.raises(SystemExit) as exc:
         _drive(
             monkeypatch,
