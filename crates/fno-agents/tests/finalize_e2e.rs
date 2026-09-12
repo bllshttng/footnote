@@ -111,6 +111,8 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
          \x20   sys.exit(1)\n\
          if args[:3] == ['agents', 'claim', 'release']:\n\
          \x20   sys.exit(1 if os.environ.get('FNO_STUB_CLAIM_RELEASE_FAIL') else 0)\n\
+         if args[:2] == ['backlog', 'note']:\n\
+         \x20   sys.exit(0)\n\
          sys.exit(1)\n",
     )
     .unwrap();
@@ -1991,7 +1993,8 @@ fn fno_calls(env: &Env) -> String {
 
 /// The specimen this fix exists for: a worker idles seven hours on an
 /// unanswered question, then dies with `fno inbox outstanding` empty the whole
-/// time. Assert the question survives the death.
+/// time. Assert the question survives the death: the extracted text lands on
+/// the node as a note and the ask is one line carrying --node (law d-59af3235).
 #[test]
 fn finalize_files_outstanding_question_on_stuck_terminal() {
     let env = setup("S-outq", false);
@@ -2005,10 +2008,57 @@ fn finalize_files_outstanding_question_on_stuck_terminal() {
     assert!(out.status.success(), "{out:?}");
 
     let c = fno_calls(&env);
-    assert!(c.contains("outstanding ask"), "{c}");
+    let note_pos = c.find("backlog note ab-testnode");
+    let ask_pos = c.find("outstanding ask");
+    assert!(
+        note_pos.is_some(),
+        "the extracted text must land on the node as a note: {c}"
+    );
+    assert!(ask_pos.is_some(), "{c}");
+    assert!(
+        note_pos.unwrap() < ask_pos.unwrap(),
+        "the note must land before the ask that points at it: {c}"
+    );
+    let ask_line = c[ask_pos.unwrap()..].lines().next().unwrap_or_default();
+    assert!(ask_line.contains("--node ab-testnode"), "{ask_line}");
+    let ask_text = ask_line
+        .trim_start_matches("fno inbox outstanding ask ")
+        .trim_end_matches(" --node ab-testnode")
+        .trim_matches('\'');
+    assert!(
+        !ask_text.contains('\n'),
+        "the ask must be one line: {ask_text}"
+    );
     assert!(
         env.outstanding_store.exists(),
         "the stub must have recorded the filed question"
+    );
+}
+
+/// A stuck session with no graph_node_id files nothing and says why (AC11).
+#[test]
+fn finalize_files_nothing_on_a_node_less_stuck_session_and_names_the_law() {
+    let env = setup("S-outq-nodeless", false);
+    let transcript = env.cwd.join("transcript.jsonl");
+    write_transcript(
+        &transcript,
+        "mouse-mode root cause identified; awaiting operator's terminal/mux info",
+    );
+    let state = fs::read_to_string(&env.state)
+        .unwrap()
+        .replace("graph_node_id: ab-testnode\n", "");
+    fs::write(&env.state, state).unwrap();
+
+    let out = run_finalize_with_transcript(&env, "NoProgress", "S-outq-nodeless", &transcript);
+    assert!(out.status.success());
+    assert!(
+        !fno_calls(&env).contains("outstanding ask"),
+        "a node-less session must not file an ask the law would refuse"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("d-59af3235"),
+        "the refusal must name the law: {stderr}"
     );
 }
 
