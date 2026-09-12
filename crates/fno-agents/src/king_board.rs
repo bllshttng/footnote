@@ -1445,8 +1445,10 @@ mod tests {
 
     #[test]
     fn mergeable_pr_is_scoped_by_the_binding_node() {
-        // A scoped board returned PRs 1494 and 1490 outside the crown; the
-        // undriven_pr sibling already filtered, mergeable_pr did not.
+        // x-2fde: on a scoped board a PR whose node cannot be resolved fails
+        // CLOSED - unknown attribution is not every crown's work. PR 1494 is
+        // attributed outside the crown (out_of_scope); PR 99 is bound by no
+        // node at all, so it lands in no queue and the warning names the drop.
         let mut inputs = inputs_with(json!([]), json!([]), json!([]));
         inputs.prs = ok_read(json!([
             {"number": 1494, "title": "foreign"},
@@ -1456,6 +1458,45 @@ mod tests {
             {"id": "x-out", "priority": "p1", "pr_number": 1494},
         ]));
         inputs.scope_ids = Some(["x-in"].into_iter().map(str::to_string).collect());
+        inputs.crown_scope = Some("x-crown".to_string());
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let mergeable = queues.iter().find(|q| q["name"] == "mergeable_pr").unwrap();
+        let numbers: Vec<i64> = mergeable["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["number"].as_i64())
+            .collect();
+        assert_eq!(numbers, Vec::<i64>::new(), "{mergeable}");
+        let out_of_scope = queues.iter().find(|q| q["name"] == "out_of_scope").unwrap();
+        let mut ids: Vec<&str> = out_of_scope["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids, vec!["x-out"], "{out_of_scope}");
+        let warnings = board["warnings"].as_array().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains("unattributed")
+                    && w.as_str().unwrap_or("").contains("mergeable_pr")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn unscoped_board_still_shows_a_pr_no_node_binds() {
+        // x-2fde: the fail-closed verdict is scoped-board only. The operator
+        // board (no scope_ids) keeps showing every PR, unattributable or not.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.prs = ok_read(json!([
+            {"number": 99, "title": "unbound"},
+        ]));
         let board = build_board(&inputs);
         let queues = board.get("queues").and_then(Value::as_array).unwrap();
         let mergeable = queues.iter().find(|q| q["name"] == "mergeable_pr").unwrap();
@@ -1466,6 +1507,42 @@ mod tests {
             .filter_map(|r| r["number"].as_i64())
             .collect();
         assert_eq!(numbers, vec![99], "{mergeable}");
+        assert!(board["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| !w.as_str().unwrap_or("").contains("unattributed")));
+    }
+
+    #[test]
+    fn scoped_board_keeps_report_only_signals_whose_node_is_none_by_design() {
+        // x-2fde companion: needs.rs mints node: None for mail_escalation,
+        // carveout_stale, stale_claims and worker_refused on purpose - they
+        // describe a worker, not a node. A report-only queue bypasses the
+        // crown filter, so a scoped board still sees the distress signal and
+        // the drop is not counted unattributed.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.needs = ok_read(json!([
+            {"kind": "worker_refused", "name": "w-1", "node": null},
+            {"kind": "mail_escalation", "name": "m-1", "node": null},
+        ]));
+        inputs.scope_ids = Some(["x-in"].into_iter().map(str::to_string).collect());
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let unreachable = queues
+            .iter()
+            .find(|q| q["name"] == "unreachable_worker")
+            .unwrap();
+        assert_eq!(
+            unreachable["rows"].as_array().unwrap().len(),
+            2,
+            "{unreachable}"
+        );
+        assert!(board["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| !w.as_str().unwrap_or("").contains("unattributed")));
     }
 
     #[test]
