@@ -122,6 +122,18 @@ else
     fail "binding pointer rides exactly once (got $N)"
 fi
 
+# The SECOND carrier shape: the codex lane delivers the same pointer through
+# systemMessage (claude rides hookSpecificOutput.additionalContext).
+OUT_CODEX="$( (cd "$BOUND" && printf '{"session_id":"%s"}' "$SID" \
+    | FNO_PLATFORM="codex" CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash "$TARGET_HOOK" 2>/dev/null) )"
+if printf '%s' "$OUT_CODEX" | grep -qF '"systemMessage"' \
+    && printf '%s' "$OUT_CODEX" | grep -qF "**Task context:**" \
+    && printf '%s' "$OUT_CODEX" | grep -qF -- "- Do not widen scope beyond the plan"; then
+    pass "codex carrier delivers the same pointer through systemMessage"
+else
+    fail "codex carrier delivers the same pointer through systemMessage; got: $OUT_CODEX"
+fi
+
 # No binding file: no pointer, hook still exits 0 with the goal line.
 NOBIND="$TMP/nobind"
 mkdir -p "$NOBIND"
