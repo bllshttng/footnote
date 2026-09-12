@@ -1365,6 +1365,212 @@ def test_ac6_edge_cause_only_refuses_root_missing_from_snapshot(
     assert "missing from ps snapshot" in result.stdout
 
 
+def _ps_with(header: str, *rows: str) -> str:
+    return header + "\n" + "\n".join(rows) + "\n"
+
+
+def test_ac1_hp_one_bad_row_keeps_the_reading_and_the_gate_admits(
+    monkeypatch, no_worker_roots
+) -> None:
+    from fno import doctor_footprint
+    from fno.agents.spawn_gate import _cpu_axis
+
+    good = "\n".join(
+        f"{1000 + n} 1 01:00:00 0.5 1024 /usr/bin/tool{n}" for n in range(200)
+    )
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        good,
+        "9999 1 - 20.0 1024 /bin/echo oops",
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps_output, [], []),
+    )
+    monkeypatch.setattr(os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+    monkeypatch.setattr("fno.agents.spawn_gate._load_cpus", lambda: 12)
+
+    reading, error = doctor_footprint.cause_reading()
+
+    assert error is None
+    assert reading is not None
+    assert reading.unparsed_lines == 1
+    # The 200 good rows all parsed: unattributed (no fno root), so they ride
+    # in the measured whole-machine number, not the attributed process count.
+    assert reading.process_count == 0
+    assert reading.measured_cpu_cores == pytest.approx(1.0)
+
+    admission = _cpu_axis((reading, None))
+    assert admission.verdict == "admit"
+    assert admission.axis == "fleet_cpu_share"
+    assert admission.axis != "cpu_instrument"
+
+
+def test_ac1_edge_all_bad_rows_still_refuse_and_name_the_rows(
+    monkeypatch, no_worker_roots
+) -> None:
+    from fno import doctor_footprint
+
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        "12345 1 00:01 - 4096 /usr/bin/true",
+        "second bad row here",
+        "third bad row here",
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps_output, [], []),
+    )
+
+    reading, error = doctor_footprint.cause_reading()
+
+    assert reading is None
+    assert error is not None
+    # The floor arm: every data row failing means the instrument is
+    # unreadable, and the refusal names the count and the masked first row.
+    assert "all 3 ps row(s) failed to parse" in error
+    assert "12345 1 00:01 <tok:1> 4096" in error
+
+
+def test_ac2_hp_the_refusal_names_the_masked_row_and_the_failing_field(
+    monkeypatch, no_worker_roots
+) -> None:
+    from fno import doctor_footprint
+
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        "12345 1 00:01 - 4096 /usr/bin/true",
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps_output, [], []),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+
+    assert result.exit_code == 4
+    payload = json.loads(result.stdout)
+    assert "all 1 ps row(s) failed to parse" in payload["error"]
+    assert "12345 1 00:01 <tok:1> 4096" in payload["error"]
+    assert "cpu" in payload["error"]
+
+
+def test_ac1_root_a_bad_row_on_a_discovered_root_refuses(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_root_pids",
+        lambda **_kwargs: ({500}, None),
+    )
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        "500 1 - 0.0 1024 fno-agents-worker --run",
+        "501 1 01:00:00 0.0 1024 /usr/bin/tool",
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps_output, [], []),
+    )
+
+    reading, error = doctor_footprint.cause_reading()
+
+    assert reading is None
+    assert error is not None
+    # The root's whole subtree would read zero CPU, so this refuses like the
+    # missing-root guard above it.
+    assert "fleet root pid 500" in error
+    assert "missing from ps snapshot" not in error
+
+
+def test_ac2_sec_no_argv_token_reaches_any_render(
+    monkeypatch, no_worker_roots
+) -> None:
+    from fno import doctor_footprint
+
+    def ps(rows: str) -> str:
+        return _ps_with("PID PPID ELAPSED %CPU RSS COMMAND", *rows.splitlines())
+
+    secret_row = (
+        "12345 1 00:01 - 4096 /usr/bin/curl -H Authorization:Bearer SUPERSECRET1234"
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps(secret_row + "\n200 1 - 0.0 1024 tool"), [], []),
+    )
+    # The refusal renders twice: json error payload and text readout.
+    for argv in (
+        ["doctor", "footprint", "--json", "--cause-only"],
+        ["doctor", "footprint", "--cause-only"],
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 4, (argv, result.output)
+        for secret in ("SUPERSECRET1234", "Authorization", "curl", "Bearer"):
+            assert secret not in result.output, argv
+
+    # The surviving reading renders twice: json payload and text readout.
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(
+            monkeypatch,
+            ps(secret_row + "\n200 1 01:00:00 0.0 1024 /usr/bin/tool"),
+            [],
+            [],
+        ),
+    )
+    for argv in (
+        ["doctor", "footprint", "--json", "--cause-only"],
+        ["doctor", "footprint", "--cause-only"],
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 0, (argv, result.output)
+        for secret in ("SUPERSECRET1234", "Authorization", "curl", "Bearer"):
+            assert secret not in result.output, argv
+        if "--json" in argv:
+            payload = json.loads(result.stdout)
+            assert payload["unparsed_lines"] == 1
+            assert payload["unparsed_samples"][0]["masked"].startswith("12345 1")
+
+
+def test_ac3_hp_two_bad_rows_print_as_samples_under_the_count(
+    monkeypatch, no_worker_roots
+) -> None:
+    from fno import doctor_footprint
+
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        "200 1 01:00:00 0.0 1024 /usr/bin/tool",
+        "201 1 - 0.0 1024 fno-agents-worker --run",
+        "202 1 ??:??:?? 0.0 1024 fno-agents-worker --run",
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps_output, [], []),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint", "--cause-only"])
+
+    assert result.exit_code == 0, result.output
+    assert "unparsed lines: 2" in result.output
+    assert "  row 2 (pid 201, etime): " in result.output
+    assert "  row 3 (pid 202, etime): " in result.output
+    # The verb still prints its verdict beside the evidence.
+    assert "verdict:" in result.output
+
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+    payload = json.loads(result.stdout)
+    assert payload["unparsed_lines"] == 2
+    assert [s["row"] for s in payload["unparsed_samples"]] == [2, 3]
+    assert payload["unparsed_samples"][0]["reason"] == "etime"
+
+
 def test_sustained_cpu_threshold_derives_from_capacity_and_honors_override(
     monkeypatch,
 ) -> None:
