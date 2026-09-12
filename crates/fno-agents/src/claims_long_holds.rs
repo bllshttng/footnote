@@ -6,7 +6,8 @@
 //!
 //! The holder annotation is the session-aware classification (x-63f9): claim
 //! basis outranks the pid, so an ambient pid is never printed as the holder
-//! verdict - it appears only to name its contradiction with a live basis,
+//! verdict. An absent pid prints on every row with the flight gate's own
+//! consequence - the gate reclaims a pid-absent hold on the next acquire -
 //! and an expired lease renders as its own axis, never a liveness verdict.
 
 use crate::claims::{
@@ -103,16 +104,20 @@ fn render_lines(rows: &[LongHoldRow], min_hold_s: i64) -> Vec<String> {
             row.requests
         );
         // The pid is holder evidence only when the record proves it. An
-        // ambient pid that reads absent is printed solely to name its
-        // contradiction with a live basis, never as the verdict itself.
+        // absent pid is printed on every row with its gate consequence: the
+        // flight gate reclaims a pid-absent hold on the next acquire
+        // (flight_gate.rs HeldByOther), whatever the session-healed state
+        // says, so top never hides the lock's real future behind the basis.
         let pid = match row.pid {
             Some(pid) => pid.to_string(),
             None => "None".to_string(),
         };
         if row.pid_provenance.as_deref() == Some("session-prover") {
             line.push_str(&format!("  pid {pid} ({})", row.pid_observed));
-        } else if row.state == "live" && row.pid_observed == "absent" {
-            line.push_str(&format!("  pid {pid} ambient, absent"));
+        } else if row.pid_observed == "absent" {
+            line.push_str(&format!(
+                "  pid {pid} absent, gate reclaims on next acquire"
+            ));
         }
         if row.expired && row.state != "stale" {
             line.push_str("  lease expired");
@@ -317,8 +322,8 @@ mod tests {
         assert!(rendered.contains("stale (pid-absent)"), "{rendered}");
         assert!(rendered.contains("requests 3"), "{rendered}");
         assert!(
-            !rendered.contains(" pid "),
-            "ambient pid is not holder evidence: {rendered}"
+            rendered.contains("gate reclaims on next acquire"),
+            "the gate consequence prints on every absent pid: {rendered}"
         );
 
         // Longest first when two qualify.
@@ -366,7 +371,10 @@ mod tests {
         assert_eq!(row["expired"], true);
         let rendered = payload["lines"].as_array().unwrap()[1].as_str().unwrap();
         assert!(rendered.contains("live (transcript-live)"), "{rendered}");
-        assert!(rendered.contains("ambient, absent"), "{rendered}");
+        assert!(
+            rendered.contains("absent, gate reclaims on next acquire"),
+            "{rendered}"
+        );
         assert!(rendered.contains("lease expired"), "{rendered}");
         let dead = dead_pid();
         assert!(
