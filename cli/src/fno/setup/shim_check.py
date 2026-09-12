@@ -1,7 +1,6 @@
 """fno shims must never dangle into a cleaned mktemp dir (x-c911).
-
-Scans the tool bin for fno* symlinks whose target dangles or resolves under
-a temp root, and repoints them to the durable uv tools copy.
+Scans the tool bin for fno* symlinks that dangle or resolve under a temp
+root, and repoints them to the durable uv tools copy.
 Run: `python -m fno.setup.shim_check [--repair] [--bin-dir D]`.
 """
 

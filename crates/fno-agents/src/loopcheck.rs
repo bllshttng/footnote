@@ -21,7 +21,7 @@ use crate::{
 use crate::acceptance_evidence::{evaluate_done_probes, ProbeGate, PROBE_TIMEOUT};
 use crate::bounded_spawn::{kill_process_group, killpg};
 pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
-use crate::king_termination::bound_breached;
+use crate::king_termination::{blind_count_message, bound_breached, king_quiet_body};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11680,17 +11680,12 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let bounded = |dry: u64, waiting: &str| {
         bound_breached(history.total, dry, manifest.max_iterations, waiting)
     };
-    // The shared spine of both blind-board blocks: bounded first, then the
-    // quiet emit, then the block. `dry` stays a parameter because the quiet
-    // branch re-streaks it after a shrinking read.
+    // Shared spine of both blind-board blocks: bounded, quiet emit, block.
     let blind_block = |message: &str, actionable: i64, dry: u64| -> (i32, String) {
         if let Some(b) = bounded(dry, message) {
             return terminate(b.reason, &b.message, 0, b.fires, &[]);
         }
-        emit(
-            "king_loop_check",
-            crate::king_termination::king_quiet_body(&session_id, actionable),
-        );
+        emit("king_loop_check", king_quiet_body(&session_id, actionable));
         (0, king_output("block", None, message, actionable, dry + 1))
     };
 
@@ -11726,11 +11721,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
 
     if board.actionable < 0 {
         // x-c911: -1 is "unknown", never a row count; the message names the blind queue.
-        return blind_block(
-            &crate::king_termination::blind_count_message(&board),
-            -1,
-            dry,
-        );
+        return blind_block(&blind_count_message(&board), -1, dry);
     }
 
     if board.actionable == 0 {
