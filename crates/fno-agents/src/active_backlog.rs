@@ -1142,44 +1142,98 @@ impl ConvergeGate {
     }
 }
 
+/// What `fno config active-backlog --json` printed, read apart from whether
+/// the shell ran at all. A current CLI emits the object receipt (`Report`);
+/// one built before x-338c emits a bare list (`Legacy`), which carries no
+/// mission count and no zero-path, so its rows keep the pre-338c wording.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum DrainReceipt {
+    Report {
+        #[serde(default)]
+        targets: Vec<ResolvedTarget>,
+        #[serde(default)]
+        missions: u64,
+        #[serde(default)]
+        skip_reason: Option<String>,
+    },
+    Legacy(Vec<ResolvedTarget>),
+}
+
+/// [`resolve_targets`] plus what the supervisor's tick row needs to say WHY:
+/// the receipt's own zero-path token and mission count (a disabled drain is
+/// `drain_disabled`, not `no_missions` - x-338c), beside the shell-level
+/// failure (`env_broken`, the missing-click class) that predates the receipt.
+#[derive(Debug, Clone)]
+pub struct DrainResolve {
+    pub targets: Vec<ResolvedTarget>,
+    /// Active missions counted by the CLI whatever the config says; a legacy
+    /// receipt reports none.
+    pub missions: u64,
+    /// The receipt's zero-path token (`drain_disabled`, `bad_interval`, ...);
+    /// absent from a legacy receipt and whenever targets resolved.
+    pub skip_reason: Option<String>,
+    /// Why the resolver never produced a reading (missing fno, non-zero exit,
+    /// unparseable output); `None` when it ran clean.
+    pub failure: Option<String>,
+}
+
 /// Shell `fno config active-backlog --json` to discover enabled drain targets.
 /// Best-effort: any failure (missing fno, non-zero exit, unparseable output)
 /// yields an empty list, so the feature simply stays dormant.
 pub fn resolve_targets(fno_bin: &str) -> Vec<ResolvedTarget> {
-    resolve_targets_report(fno_bin).0
+    resolve_targets_report(fno_bin).targets
 }
 
-/// [`resolve_targets`] plus the failure detail the supervisor reports in its
-/// tick row: an empty target list from a broken resolver (`env_broken`, the
-/// missing-click class) is a different arm state from an empty list because
-/// nothing is enabled (`no_missions`).
-pub fn resolve_targets_report(fno_bin: &str) -> (Vec<ResolvedTarget>, Option<String>) {
+/// [`resolve_targets`] with the reason channel the tick row reads.
+pub fn resolve_targets_report(fno_bin: &str) -> DrainResolve {
     match fno_cmd(fno_bin)
         .args(["config", "active-backlog", "--json"])
         .output()
     {
-        Ok(o) if o.status.success() => match serde_json::from_slice(&o.stdout) {
-            Ok(targets) => (targets, None),
-            Err(e) => (
-                Vec::new(),
-                Some(format!("active-backlog receipt unparseable: {e}")),
-            ),
+        Ok(o) if o.status.success() => match serde_json::from_slice::<DrainReceipt>(&o.stdout) {
+            Ok(DrainReceipt::Report {
+                targets,
+                missions,
+                skip_reason,
+            }) => DrainResolve {
+                targets,
+                missions,
+                skip_reason,
+                failure: None,
+            },
+            Ok(DrainReceipt::Legacy(targets)) => DrainResolve {
+                targets,
+                missions: 0,
+                skip_reason: None,
+                failure: None,
+            },
+            Err(e) => DrainResolve {
+                targets: Vec::new(),
+                missions: 0,
+                skip_reason: None,
+                failure: Some(format!("active-backlog receipt unparseable: {e}")),
+            },
         },
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            (
-                Vec::new(),
-                Some(format!(
+            DrainResolve {
+                targets: Vec::new(),
+                missions: 0,
+                skip_reason: None,
+                failure: Some(format!(
                     "active-backlog resolve exited {}: {}",
                     o.status,
                     stderr.chars().take(120).collect::<String>()
                 )),
-            )
+            }
         }
-        Err(e) => (
-            Vec::new(),
-            Some(format!("active-backlog resolve failed: {e}")),
-        ),
+        Err(e) => DrainResolve {
+            targets: Vec::new(),
+            missions: 0,
+            skip_reason: None,
+            failure: Some(format!("active-backlog resolve failed: {e}")),
+        },
     }
 }
 
@@ -1384,7 +1438,13 @@ pub async fn run_supervisor(
         tasks.retain(|_, h| !h.is_finished());
         fanout_tasks.retain(|_, h| !h.is_finished());
 
-        let (targets, resolve_failure) = resolve_targets_report(&fno_bin);
+        let report = resolve_targets_report(&fno_bin);
+        let DrainResolve {
+            targets,
+            missions: receipt_missions,
+            skip_reason: receipt_reason,
+            failure: resolve_failure,
+        } = report;
         // Re-sync the cap every recheck so `fno config set` lands without a
         // daemon restart. With no targets there is nothing to gate.
         if let Some(cap) = targets.iter().map(|t| t.max_concurrent).max() {
@@ -1403,18 +1463,25 @@ pub async fn run_supervisor(
         // The arm's supervisor-level tick row, ONLY while no mission loop is
         // live to write its own (fresher) rows: it says why the drain has
         // nothing to do - a broken resolver (env_broken, the class that ticked
-        // silently for hours because its Python env lacked click) or simply no
-        // enabled missions. ab_live covers the fanout family too.
+        // silently for hours because its Python env lacked click), the
+        // receipt's own zero-path (drain_disabled names the config switch;
+        // x-338c), or genuinely no missions. ab_live covers the fanout family.
         if targets.is_empty() {
+            let skip = if resolve_failure.is_some() {
+                "env_broken".to_string()
+            } else {
+                receipt_reason.unwrap_or_else(|| "no_missions".to_string())
+            };
             let _ = emitter.emit(
                 crate::tick_ledger::EVENT_TYPE,
                 &serde_json::json!({
                     "arm": "active_backlog",
                     "scheduler": "daemon",
                     "acted": 0,
-                    "skip_reason": if resolve_failure.is_some() { "env_broken" } else { "no_missions" },
+                    "skip_reason": skip,
                     "detail": format!(
-                        "targets=0 ab_live={} fanouts={}{}",
+                        "missions={} targets=0 ab_live={} fanouts={}{}",
+                        receipt_missions,
                         !fanout_targets.is_empty(),
                         fanout_targets.len(),
                         resolve_failure.as_deref().map(|f| format!(" resolve={f}")).unwrap_or_default()
@@ -1616,6 +1683,45 @@ async fn mission_drain_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_receipt_carries_reason_and_count() {
+        // The x-338c receipt: a disabled drain names the config switch and
+        // still counts the missions it is not draining.
+        let receipt: DrainReceipt =
+            serde_json::from_str(r#"{"targets":[],"missions":6,"skip_reason":"drain_disabled"}"#)
+                .unwrap();
+        match receipt {
+            DrainReceipt::Report {
+                targets,
+                missions,
+                skip_reason,
+            } => {
+                assert!(targets.is_empty());
+                assert_eq!(missions, 6);
+                assert_eq!(skip_reason.as_deref(), Some("drain_disabled"));
+            }
+            DrainReceipt::Legacy(_) => panic!("object receipt must read as Report"),
+        }
+    }
+
+    #[test]
+    fn bare_list_receipt_reads_as_legacy() {
+        // A CLI built before x-338c emits a bare list; it parses as Legacy and
+        // the tick row degrades to today's no_missions wording (AC5).
+        let receipt: DrainReceipt = serde_json::from_str(
+            r#"[{"project":"fno","cwd":"/repo/fno","interval_seconds":300,
+                 "failure_limit":3,"mission":"x-a","max_concurrent":1}]"#,
+        )
+        .unwrap();
+        match receipt {
+            DrainReceipt::Legacy(targets) => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].mission.as_deref(), Some("x-a"));
+            }
+            DrainReceipt::Report { .. } => panic!("bare list must read as Legacy"),
+        }
+    }
 
     #[test]
     fn status_fanout_targets_parse_from_json() {
