@@ -121,10 +121,8 @@ class ResumeReceipt:
     # PR create, comment, or merge.
     idempotency_keys: tuple[str, ...] = ()
     content_sha: str = ""
-    # Task-context execution binding (x-59b0), when this receipt was written
-    # under one. Absent (None) = the receipt is explicitly UNBOUND; loading it
-    # is ordinary legacy behavior. Corrupt declared bindings refuse in the
-    # native verifier, not here (Python is transport only).
+    # Task-context execution binding when written under one; None = explicitly
+    # UNBOUND (ordinary legacy behavior). Corrupt bindings refuse natively.
     task_context: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -165,11 +163,9 @@ def _short_sha(sha: str) -> str:
 
 
 def _canonical_payload(receipt_dict: dict[str, Any]) -> str:
-    """Stable serialization for the content_sha integrity tag.
-
-    Excludes content_sha itself (circular), drops None values (an absent
-    optional field must not change a legacy receipt's digest), and sorts keys
-    so two writers producing the same receipt compute the same sha."""
+    """Stable serialization for the content_sha integrity tag: excludes
+    content_sha itself (circular), drops None values (an absent optional field
+    must not change a legacy receipt's digest), sorts keys."""
     d = {k: v for k, v in receipt_dict.items() if k != "content_sha" and v is not None}
     return json.dumps(d, sort_keys=True, separators=(",", ":"))
 
@@ -375,13 +371,9 @@ def _opt_str(d: Any, key: str) -> Optional[str]:
 
 def _opt_obj(d: Any, key: str, origin: str) -> Optional[dict[str, Any]]:
     v = d.get(key) if isinstance(d, dict) else None
-    if v is None:
-        return None
-    if not isinstance(v, dict):
-        raise MalformedReceiptError(
-            f"{origin}: field {key!r} must be an object when present"
-        )
-    return v
+    if v is not None and not isinstance(v, dict):
+        raise MalformedReceiptError(f"{origin}: field {key!r} must be an object when present")
+    return v if isinstance(v, dict) else None
 
 
 def _str_tuple(v: Any, key: str, origin: str) -> tuple[str, ...]:

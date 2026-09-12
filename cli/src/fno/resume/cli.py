@@ -102,9 +102,7 @@ def write_cmd(
     watchers: Optional[str] = typer.Option(None, "--watchers", help="Newline-separated watcher ids"),
     idempotency_keys: Optional[str] = typer.Option(None, "--idempotency-keys", help="Newline-separated external-effect keys"),
     written_at: Optional[str] = typer.Option(None, "--written-at", help="Override UTC timestamp (default: now)"),
-    task_context: Optional[str] = typer.Option(
-        None, "--task-context", help="Path to a bound task-context binding JSON (embedding marks the receipt bound)"
-    ),
+    task_context: Optional[str] = typer.Option(None, "--task-context", help="Path to a bound binding JSON (embedding marks the receipt bound)"),
 ) -> None:
     """Write an immutable versioned resume receipt (producer).
 
@@ -117,12 +115,10 @@ def write_cmd(
         session_id, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
     )
     try:
-        binding = None
-        if task_context:
-            try:
-                binding = json.loads(Path(task_context).read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise MalformedReceiptError(f"task_context file unreadable: {exc}") from exc
+        try:
+            binding = json.loads(Path(task_context).read_text(encoding="utf-8")) if task_context else None
+        except (OSError, ValueError) as exc:
+            raise MalformedReceiptError(f"task_context file unreadable: {exc}") from exc
         receipt = build_receipt(
             node=node,
             session=session or "",
@@ -235,11 +231,9 @@ def context_prepare_cmd(
     if not answer.get("ok"):
         raise typer.Exit(code=1)
     if out:
-        bound = dict(answer["binding"])
-        bound["binding_digest"] = answer["binding_digest"]
-        out_path = Path(out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(bound, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        bound = {**answer["binding"], "binding_digest": answer["binding_digest"]}
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(json.dumps(bound, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 @receipt_app.command("validate")
@@ -253,9 +247,7 @@ def validate_cmd(
     events_file: Optional[str] = typer.Option(None, "--events", help="Override events.jsonl path (default: <worktree>/.fno/events.jsonl)"),
     harness: Optional[str] = typer.Option(None, "--harness", help="Owning harness for generation scoping"),
     claims_root: Optional[str] = typer.Option(None, "--claims-root", help="Override claims root (default: ~/.fno)"),
-    attempt: Optional[str] = typer.Option(
-        None, "--attempt", help="Executing attempt expected by the binding's context gate (required when the receipt carries one)"
-    ),
+    attempt: Optional[str] = typer.Option(None, "--attempt", help="Executing attempt the binding's gate expects, when the receipt carries one"),
 ) -> None:
     """Revalidate the latest receipt for a node against live state (consumer).
 
@@ -282,43 +274,24 @@ def validate_cmd(
 
     wt = Path(worktree) if worktree else Path(receipt.worktree)
 
-    # Task-context gate (x-59b0): a receipt that carries a binding revalidates
-    # it natively BEFORE the authority checks - a stale/foreign binding refuses
-    # here with its own named reason, never as an ordinary receipt verdict.
-    # Identity expectations ride ONLY when the caller names them: a handoff
-    # receipt binds the PARENT's attempt/session (lineage evidence), so the
-    # successor validates sources here and derives authority from the receipt's
-    # own claim/manifest proof, never from a vacuous or parent-identity match.
+    # A receipt that carries a binding revalidates it natively BEFORE the
+    # authority checks; identity expectations ride only when named.
     context_answer: Optional[dict] = None
     if receipt.task_context is not None:
-        from fno.rust_binary import VerbUnavailable, verb_call
+        from fno.target_context_gate import TaskContextGateRefused, gate_declared_task_context
 
-        expect: dict = {"node": node}
-        if attempt:
-            expect["attempt"] = attempt
-        if session_id:
-            expect["session"] = session
+        expect = {
+            "node": node,
+            **({"attempt": attempt} if attempt else {}),
+            **({"session": session} if session_id else {}),
+        }
         try:
-            context_answer = verb_call(
-                "task-context-revalidate",
-                {"binding": receipt.task_context, "expect": expect, "root": str(wt)},
-            )
-        except VerbUnavailable as exc:
-            typer.echo(json.dumps({
-                "ok": False,
-                "reason": "context_native_verifier_unavailable",
-                "node": node,
-                "error": str(exc),
-            }))
-            raise typer.Exit(code=3)
-        if not context_answer.get("ok"):
-            typer.echo(json.dumps({
-                "ok": False,
-                "reason": f"context_{context_answer.get('reason', 'refused')}",
-                "node": node,
-                "binding": context_answer,
-            }))
-            raise typer.Exit(code=1)
+            context_answer = gate_declared_task_context(node, str(wt), binding=receipt.task_context, expect=expect)
+        except TaskContextGateRefused as exc:
+            unavailable = exc.reason == "context_native_verifier_unavailable"
+            extra = {"error": exc.detail} if unavailable else {"binding": json.loads(exc.detail)}
+            typer.echo(json.dumps({"ok": False, "reason": exc.reason, "node": node, **extra}))
+            raise typer.Exit(code=3 if unavailable else 1)
 
     live_head, live_branch = _git_head_and_branch(wt) if wt.exists() else ("", "")
     croot = Path(claims_root).expanduser() if claims_root else None
@@ -402,9 +375,8 @@ def show_cmd(
         typer.echo(json.dumps({"ok": False, "reason": "malformed_receipt", "error": str(exc)}))
         raise typer.Exit(code=1)
     out = receipt.to_dict()
-    # Honesty labels: a legacy receipt is explicitly UNBOUND; a declared
-    # binding is verified by the native module, and a corrupt one refuses by
-    # name instead of printing as if it were intact.
+    # Honesty labels: legacy receipts are explicitly UNBOUND; a declared one
+    # is verified natively, a corrupt one refuses by name.
     out["task_context_bound"] = receipt.task_context is not None
     if receipt.task_context is not None:
         from fno.rust_binary import VerbUnavailable, verb_call

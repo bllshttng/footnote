@@ -1811,18 +1811,14 @@ def init(
         typer.echo(_denom_refusal, err=True)
         raise typer.Exit(code=2)
 
-    # Task-context gate (x-59b0): a DECLARED required binding revalidates
-    # natively BEFORE the init script acquires the node claim. Undeclared -> no gate.
+    # A DECLARED required binding revalidates natively before the claim; undeclared = no gate.
     from fno.target_context_gate import TaskContextGateRefused, gate_declared_task_context
 
     try:
         gate_declared_task_context(str((_dispatch_node or {}).get("id") or ""), str(Path.cwd()))
     except TaskContextGateRefused as exc:
-        typer.echo(
-            f"fno do target init: task-context gate refused: {exc.reason}"
-            + (f" ({exc.detail})" if exc.detail else ""),
-            err=True,
-        )
+        detail = f" ({exc.detail})" if exc.detail else ""
+        typer.echo(f"fno do target init: task-context gate refused: {exc.reason}{detail}", err=True)
         raise typer.Exit(code=2)
 
     # First-bind the graph pointer (x-f8b1 change 2), the reverse leg of the

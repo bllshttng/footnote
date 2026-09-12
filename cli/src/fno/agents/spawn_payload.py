@@ -17,17 +17,10 @@ BREVITY_INSTRUCTION = (
 )
 BREVITY_BLOCK = f"{BREVITY_MARKER}\n{BREVITY_INSTRUCTION}\n{BREVITY_END_MARKER}"
 
-# The spawner arms the current attempt's bound binding here (absolute path to
-# the bound JSON under the existing artifact root). Both launch substrates go
-# through prepare_spawn_payload, so pane and non-pane carries stay identical.
+# The spawner arms the current attempt's bound binding here; both substrates prepare identically.
 TASK_CONTEXT_ENV = "FNO_TASK_CONTEXT_FILE"
 
 TASK_CONTEXT_TAG = "<task-context "
-
-# Rendered natively (task-context-payload): a binding only exists where the
-# native verifier runs, so a missing binary means no block, never a Python
-# re-implementation of the render.
-_TASK_CONTEXT_VERB = "task-context-payload"
 
 
 def enrich_spawn_payload(message: str) -> str:
@@ -38,20 +31,17 @@ def enrich_spawn_payload(message: str) -> str:
 
 
 def prepare_spawn_payload(message: str) -> tuple[str, dict]:
-    """ONE payload-preparation entry for both launch substrates (x-59b0).
-
-    Preserves the original message as the prefix, appends the brevity guidance
-    once, then the natively rendered task-context pointer once. payload_bytes
-    measures THIS payload, never the sources' bytes.
-    """
+    """ONE payload entry for both launch substrates: brevity guidance once,
+    then the natively rendered task-context pointer once (missing binary = no
+    block; the render is native, never re-implemented here)."""
     payload = enrich_spawn_payload(message)
     measures: dict = {"task_context": False, "payload_bytes": len(payload.encode("utf-8"))}
-    path = os.environ.get(TASK_CONTEXT_ENV) or ""
-    if path.strip():
+    path = (os.environ.get(TASK_CONTEXT_ENV) or "").strip()
+    if path:
         from fno.rust_binary import VerbUnavailable, verb_call
 
         try:
-            block = verb_call(_TASK_CONTEXT_VERB, {"path": path}).get("block")
+            block = verb_call("task-context-payload", {"path": path}).get("block")
         except VerbUnavailable:
             block = None
         if block and TASK_CONTEXT_TAG not in payload:
