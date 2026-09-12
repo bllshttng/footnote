@@ -169,14 +169,10 @@ def scoreboard_command(
     if project:
         classified = classify_deliveries(read_graph_nodes(graph_path), rows, project)
         if "scoped" not in classified:
-            raise RuntimeError(
-                f"classifier returned no scope; keys={sorted(classified)}"
-            )
+            raise RuntimeError(f"classifier returned no scope; keys={sorted(classified)}")
         pnodes = set((classified.get("scoped") or {}).get("node_ids") or [])
         rows = (classified.get("scoped") or {}).get("rows") or rows
         scope = (classified.get("coverage") or {}).get("project_scope")
-
-    if project:
 
         def _nodes():
             return (classified or {}).get("scoped", {}).get("entries") or []
@@ -194,6 +190,14 @@ def scoreboard_command(
         def _events(kinds):
             return read_jsonl_events_with_coverage(events_paths, set(kinds))
 
+    def _finish(view: dict, render) -> None:
+        if scope:
+            view["project_scope"] = scope
+        if json_out:
+            typer.echo(_json.dumps(view, indent=2))
+        else:
+            render(view)
+
     if calibration:
         verdict_read = _events({"verifier_verdict"})
         cal = build_calibration(
@@ -202,13 +206,7 @@ def scoreboard_command(
             _nodes(),
         )
         cal["event_coverage"] = verdict_read["coverage"]
-        if scope:
-            cal["project_scope"] = scope
-        if json_out:
-            typer.echo(_json.dumps(cal, indent=2))
-            return
-        _render_calibration(cal)
-        return
+        return _finish(cal, _render_calibration)
 
     if by_skill:
         touch_read = _events({"human_touch"})
@@ -220,13 +218,7 @@ def scoreboard_command(
             now=datetime.now(),
         )
         sb["event_coverage"] = touch_read["coverage"]
-        if scope:
-            sb["project_scope"] = scope
-        if json_out:
-            typer.echo(_json.dumps(sb, indent=2))
-            return
-        _render_by_skill(sb)
-        return
+        return _finish(sb, _render_by_skill)
 
     if efficiency:
         loop_read = _events({"loop_check"})
@@ -238,13 +230,7 @@ def scoreboard_command(
             now=datetime.now(),
         )
         eff["event_coverage"] = loop_read["coverage"]
-        if scope:
-            eff["project_scope"] = scope
-        if json_out:
-            typer.echo(_json.dumps(eff, indent=2))
-            return
-        _render_efficiency(eff)
-        return
+        return _finish(eff, _render_efficiency)
 
     if by_provider:
         pb = build_provider_scoreboard(
@@ -253,13 +239,7 @@ def scoreboard_command(
             since_days=since,
             now=datetime.now(),
         )
-        if scope:
-            pb["project_scope"] = scope
-        if json_out:
-            typer.echo(_json.dumps(pb, indent=2))
-            return
-        _render_by_provider(pb)
-        return
+        return _finish(pb, _render_by_provider)
 
     if lanes:
         from fno.agents.registry import load_registry
@@ -279,13 +259,7 @@ def scoreboard_command(
             now=datetime.now(),
         )
         lane_view["event_coverage"] = rate_read["coverage"]
-        if scope:
-            lane_view["project_scope"] = scope
-        if json_out:
-            typer.echo(_json.dumps(lane_view, indent=2))
-            return
-        _render_lanes(lane_view)
-        return
+        return _finish(lane_view, _render_lanes)
 
     if plan_fidelity:
         trace_paths = [*events_paths, _paths.project_log("events.jsonl")]
@@ -312,13 +286,7 @@ def scoreboard_command(
             trace_events=trace_events,
             event_coverage=trace_read["coverage"],
         )
-        if scope:
-            pf["project_scope"] = scope
-        if json_out:
-            typer.echo(_json.dumps(pf, indent=2))
-            return
-        _render_plan_fidelity(pf)
-        return
+        return _finish(pf, _render_plan_fidelity)
 
     touch_read = _events({"human_touch"})
     graph_nodes = _nodes()
@@ -337,12 +305,7 @@ def scoreboard_command(
 
     sb["event_coverage"] = touch_read["coverage"]
     sb["emission_failures"] = emission_failures_snapshot()
-    if scope:
-        sb["project_scope"] = scope
-    if json_out:
-        typer.echo(_json.dumps(sb, indent=2))
-        return
-    _render(sb)
+    return _finish(sb, _render)
 
 
 def _render_calibration(cal: dict) -> None:

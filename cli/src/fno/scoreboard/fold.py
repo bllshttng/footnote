@@ -53,21 +53,17 @@ def classify_deliveries(
     project: str | None = None,
     now=None,
 ) -> dict:
-    """The one delivery classification, answered by the Rust keeper
-    (scoreboard.rs via the graph store): the full payload with ``by_node``,
-    ``coverage``, ``survival``, and - with a project - the scoped
-    ``entries``/``rows``/``node_ids``. Test seam: monkeypatch this name to
-    keep a fold test hermetic."""
+    """The one delivery classification (Rust keeper): ``by_node``,
+    ``coverage``, ``survival``, and with a project the scoped
+    ``entries``/``rows``/``node_ids``. Test seam for hermetic fold tests."""
     from fno.graph.store import request_scoreboard_classify
 
     return request_scoreboard_classify(graph_nodes, rows, project, now)
 
 
 def emission_failures_snapshot() -> dict:
-    """The mux server's in-memory human_touch emission-failure counter, read
-    over one control roundtrip to the deployed binary. Unknown is an honest
-    answer when the binary or the server is absent; the count carries its own
-    measurement window (instance lifetime), never reset by reading it."""
+    """The mux server's human_touch emission-failure counter (instance
+    lifetime, never reset by reading). Unreachable means Unknown, not zero."""
     import shutil
     import subprocess
 
@@ -75,36 +71,26 @@ def emission_failures_snapshot() -> dict:
     if not fno_bin:
         return {"available": False, "reason": "fno binary not on PATH"}
     try:
-        out = subprocess.run(
-            [fno_bin, "mux", "stats", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        out = subprocess.run([fno_bin, "mux", "stats", "--json"],
+                             capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"available": False, "reason": type(exc).__name__}
     if out.returncode != 0:
-        return {
-            "available": False,
-            "reason": (out.stderr or "stats unavailable").strip()[:200] or "stats unavailable",
-        }
+        return {"available": False,
+                "reason": (out.stderr or "stats unavailable").strip()[:200]}
     try:
         payload = json.loads(out.stdout)
     except ValueError:
         return {"available": False, "reason": "unreadable stats payload"}
-    return {
-        "available": True,
-        "count": payload.get("touch_emit_failures"),
-        "measured_since": payload.get("started_at"),
-        "measured_at": payload.get("measured_at"),
-    }
+    return {"available": True,
+            "count": payload.get("touch_emit_failures"),
+            "measured_since": payload.get("started_at"),
+            "measured_at": payload.get("measured_at")}
 
 
 def _row_shipped(row: dict, deliveries: dict | None) -> bool:
-    """Row-level ship check through the classifier. A delivered terminal
-    proves the ROW shipped only when the node it links to actually delivered
-    (a known unmerged node never ships from its terminal); a row with no node
-    keeps the terminal check, since there is nothing else to consult."""
+    """A terminal proves the ROW shipped only when its node delivered; a row
+    with no node keeps the terminal check (nothing else to consult)."""
     if not _is_shipped_reason(row.get("termination_reason")):
         return False
     nid = row.get("graph_node_id")
