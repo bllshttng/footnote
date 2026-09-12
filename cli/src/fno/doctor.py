@@ -538,13 +538,25 @@ def _binary_crates_rev(binary: Optional[str]) -> Optional[str]:
     return _clean_rev(_binary_version_json(binary).get("crates_rev"))
 
 
+def _human_age(seconds: int) -> str:
+    """Compact process-age label. Reuses the fleet's formatter (the same
+    cross-module import `mail/receipts.py` makes) rather than a 4th copy."""
+    from fno.agents.top import _fmt_age
+
+    return _fmt_age(seconds)
+
+
 def _daemon_drift_warning() -> Optional[str]:
     """Return Rust's measured daemon-drift warning, or None on unknown state.
 
-    ``fno-agents status`` owns the executable fingerprint comparison. This
-    adapter only validates its JSON response and relays the canonical stderr
-    warning; it never infers freshness from process presence or Python-side
-    version data.
+    ``fno-agents status`` owns the executable fingerprint comparison. The
+    verdict is read from the structured ``drift`` field of ``status --json``,
+    never regex-parsed from prose. Bare ``status`` prints the human arms
+    table, so the old JSON gate over its stdout could never pass and the
+    relay stayed dead: doctor printed an unqualified fresh verdict while the
+    daemon ran pre-fix code. The canonical stderr sentence is still the
+    relayed text; the daemon's measured process age is appended beside it so
+    a fresh artifact verdict carries the lag in view.
     """
     try:
         from fno import rust_binary
@@ -559,7 +571,7 @@ def _daemon_drift_warning() -> Optional[str]:
         return None
     try:
         result = subprocess.run(
-            [str(binary), "status"],
+            [str(binary), "status", "--json"],
             capture_output=True,
             text=True,
             check=False,
@@ -573,13 +585,26 @@ def _daemon_drift_warning() -> Optional[str]:
         payload = json.loads(result.stdout or "")
     except (TypeError, ValueError):
         return None
-    if not isinstance(payload, dict) or not isinstance(payload.get("daemon"), dict):
+    if not isinstance(payload, dict) or payload.get("drift") != "drifted":
         return None
-    for line in (result.stderr or "").splitlines():
-        line = line.strip()
-        if _DAEMON_DRIFT_WARNING.fullmatch(line):
-            return line
-    return None
+    warning = next(
+        (
+            line.strip()
+            for line in (result.stderr or "").splitlines()
+            if _DAEMON_DRIFT_WARNING.fullmatch(line.strip())
+        ),
+        None,
+    )
+    if warning is None:
+        return None
+    daemon = payload.get("daemon")
+    uptime = daemon.get("uptime_secs") if isinstance(daemon, dict) else None
+    if isinstance(uptime, int) and 0 <= uptime < 10 * 365 * 24 * 3600:
+        # Process age stated as what drift proves: the daemon still runs the
+        # build it started with. "Predates the binary" is only provable for
+        # same-path content drift, not for a path-drifted daemon.
+        return f"{warning} (daemon up {_human_age(uptime)}; running its startup build, not this one)"
+    return warning
 
 
 def _rust_report() -> dict[str, Optional[str]]:
@@ -2293,7 +2318,17 @@ def _emit_human(
     non_fresh = [c for c in components if c.get("status") not in ("fresh", "updated")]
     if components and not non_fresh:
         names = ", ".join(str(c.get("component")) for c in components)
-        out(f"fno doctor: components: {len(components)}/{len(components)} fresh ({names}).")
+        if result.get("daemon_drift"):
+            # An all-fresh on-disk sweep is not a fleet verdict while the
+            # daemon keeps executing pre-fix code. Never print the bare
+            # "N/N fresh" form beside a measured drift; the note below carries
+            # the canonical warning and the restart remedy.
+            out(
+                f"fno doctor: components: {len(components)}/{len(components)} fresh "
+                "on disk; a daemon drift note follows."
+            )
+        else:
+            out(f"fno doctor: components: {len(components)}/{len(components)} fresh ({names}).")
     else:
         from fno import update as _update
 
