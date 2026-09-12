@@ -103,11 +103,10 @@ def escalate(
     ``unknown_reason`` come from :func:`fno.king.state.reign_state`; the dedupe
     key is unchanged either way.
     """
-    import re
     import secrets
 
     from fno.events import operator_question
-    from fno.graph._constants import NODE_ID_BODY
+    from fno.graph._constants import extract_node_ids, is_wellformed_node_id
     from fno.harness_identity import canonical_handle
     from fno.outstanding.core import append_question_event
 
@@ -121,14 +120,8 @@ def escalate(
     # the node (when it spells one), and every stalled id that CONTAINS a node
     # id contributes it (`stalled_holder:x-1005` gives `x-1005`). Shape only,
     # never existence.
-    node = scope if scope and re.fullmatch(NODE_ID_BODY, scope) else None
-    blocks = sorted(
-        {
-            match
-            for raw in ids
-            for match in re.findall(rf"\b{NODE_ID_BODY}\b", raw)
-        }
-    )
+    node = scope if is_wellformed_node_id(scope) else None
+    blocks = sorted({nid for raw in ids for nid in extract_node_ids(raw)})
     qid = f"q-{secrets.token_hex(4)}"
     append_question_event(
         operator_question(

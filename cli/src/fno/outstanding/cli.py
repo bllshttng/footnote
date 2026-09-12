@@ -226,6 +226,8 @@ def ask(
         AskRefused,
         QuestionIndexWriteError,
         append_question_event,
+        ask_cap,
+        ask_refusal,
     )
     from fno.text_or_file import read_text_arg
 
@@ -261,6 +263,19 @@ def ask(
     # the address the answer comes back to.
     ident = resolve_self_identity()
     asker = canonical_handle(ident.session_id) if ident.session_id and ident.harness else None
+    # The verb gates on the FULL text, before the event builder truncates it at
+    # QUESTION_CAP: a refusal must name the words the sender typed. The append
+    # gate below stays as the shared write path's own check.
+    refusal = ask_refusal(
+        question,
+        node=node,
+        blocks=blocks or (),
+        cap=ask_cap(),
+        require_pointer=True,
+    )
+    if refusal:
+        typer.echo(refusal, err=True)
+        raise typer.Exit(2)
     try:
         event = operator_question(
             question_id=qid,

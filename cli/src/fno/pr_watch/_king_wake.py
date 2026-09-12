@@ -169,18 +169,17 @@ def _escalation_answer_trigger(
 def _raise_marker_question(target: CrownTarget, marker: str, question: str, ask: str) -> str:
     """One durable question per scope per marker; clearing it while the
     scope is still stranded re-asks - correctly."""
-    import re
     import secrets
 
     from fno.agents.stale_escalate import already_asked
     from fno.events import operator_question
-    from fno.graph._constants import NODE_ID_BODY
+    from fno.graph._constants import is_wellformed_node_id
     from fno.outstanding.core import append_question_event
 
     existing = already_asked(target.root, target.scope, marker=marker)
     if existing:
         return existing
-    node = target.scope if re.fullmatch(NODE_ID_BODY, target.scope) else None
+    node = target.scope if is_wellformed_node_id(target.scope) else None
     qid = f"q-{secrets.token_hex(4)}"
     append_question_event(
         operator_question(

@@ -427,6 +427,16 @@ class TestAskLawGate:
         assert not _journal_has_questions(root)
         assert not (root / "questions.jsonl").exists(), "the index gains no line"
 
+    def test_a_refusal_counts_the_words_the_sender_typed(self, root: Path):
+        # The verb gates on the full text BEFORE the event builder's
+        # QUESTION_CAP truncation: 600 words is 2999 chars, and the truncated
+        # count (~400) would under-report what the sender typed.
+        long_q = " ".join(["word"] * 600)
+        refused = runner.invoke(outstanding_app, ["ask", long_q, "--node", "x-14c8"])
+        assert refused.exit_code == 2, refused.output
+        assert "600 words" in refused.output
+        assert not _journal_has_questions(root)
+
     def test_a_pointer_less_ask_names_the_missing_node_and_a_node_ask_records(
         self, root: Path
     ):

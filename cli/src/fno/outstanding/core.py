@@ -242,9 +242,7 @@ def ask_refusal(
     Shape only, never existence: a graph read costs seconds, and the pointer
     rule is about the ask carrying an address, not about the node being live.
     """
-    import re
-
-    from fno.graph._constants import NODE_ID_BODY
+    from fno.graph._constants import is_wellformed_node_id
     from fno.style import word_count
 
     problems: "list[str]" = []
@@ -253,8 +251,8 @@ def ask_refusal(
     words = word_count(question)
     if words > cap:
         problems.append(f"it runs {words} words; the cap is {cap} (config.style.word_cap.ask)")
-    pointer = bool(node and re.fullmatch(NODE_ID_BODY, node)) or any(
-        re.fullmatch(NODE_ID_BODY, str(b)) for b in blocks
+    pointer = is_wellformed_node_id(node) or any(
+        is_wellformed_node_id(str(b)) for b in blocks
     )
     if require_pointer and not pointer:
         problems.append("it names no node (--node, or a node id in --blocks)")
@@ -268,7 +266,7 @@ def ask_refusal(
     )
 
 
-def _ask_cap() -> int:
+def ask_cap() -> int:
     """The configured ask cap; the built-in default when settings cannot load.
 
     Losing an escalation to a config typo is worse than enforcing the default,
@@ -303,7 +301,7 @@ def append_question_event(event: dict[str, Any], root: Path, *, require_pointer:
             str(data.get("question") or ""),
             node=data.get("node"),
             blocks=data.get("blocks") or (),
-            cap=_ask_cap(),
+            cap=ask_cap(),
             require_pointer=require_pointer,
         )
         if refusal:
