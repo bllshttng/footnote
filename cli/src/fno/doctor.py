@@ -1330,6 +1330,27 @@ def _launch_agent_failures() -> dict[str, Any]:
     return {"applicable": True, "dead": dead}
 
 
+def _tool_bin_shims_report() -> dict[str, Any]:
+    """Advisory fno* shim scan of the tool bin (x-c911).
+
+    A dangling or temp-resolving link means an install staged its target
+    into a cleaned mktemp dir. Read-only here; the repair lives in the
+    install channels that already own filesystem mutation.
+    """
+    try:
+        from fno.setup.shim_check import scan
+
+        return scan()
+    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        return {
+            "bin_dir": None,
+            "checked": 0,
+            "defects": [],
+            "healthy": True,
+            "error": "shim scan failed to run",
+        }
+
+
 # --------------------------------------------------------------------------
 # Silent-switch legibility (x-8cd5 Wave 6). Fail-safe defaults compose to
 # inertness, and inertness is invisible because every component behaves as
@@ -4161,6 +4182,11 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
         result["evals"] = None
     result["source_checkout_sync"] = _source_checkout_sync(src)
     result["launch_agents"] = _launch_agent_failures()
+
+    # Advisory fno-shim health (x-c911): a dangling or temp-resolving fno*
+    # shim in the tool bin means an install staged into a cleaned mktemp dir.
+    # Never changes status/exit; repair lives in the install channels.
+    result["tool_bin_shims"] = _tool_bin_shims_report()
 
     # Advisory silent-switch legibility (x-8cd5 Wave 6): default-off switches
     # silently producing inaction + default-on/armed switches silently merging.
