@@ -3135,7 +3135,7 @@ event_types:
           description: "Actions this tick (wakes, dispatches, merges); 0 when it skipped."
         skip_reason:
           type: string
-          description: "Optional. One token for why nothing was done (no_crowned_target, watchdog_off, wake_disabled, env_broken, disabled, lock_held, quota, never). Absent or null when the arm acted."
+          description: "Optional. One token for why nothing was done (no_crowned_target, watchdog_off, wake_disabled, disabled, gate:disabled, drain_disabled, config_unreadable, bad_interval, project_disabled, no_workspace_path, env_broken, lock_held, quota, never). Absent or null when the arm acted."
         detail:
           type: string
           description: "Optional. Short human detail (mission ids, counts, per-arm fields like targets/ab_live)."
