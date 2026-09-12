@@ -28,20 +28,17 @@ def cmd_note(
         False,
         "--quiet",
         "-q",
-        help="Annotate silently: write it, mail nobody. The acknowledgment "
-        "when the verb would otherwise refuse.",
+        help="Write it, mail nobody: the acknowledgment when the verb would refuse.",
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
     read: list[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Append a timestamped progress note to a backlog node, and DELIVER it.
 
-    Delivery is the DEFAULT: a worker reads its node once, at dispatch, so the
-    verb mails a pointer to every bound reader (claim, graph session, registry
-    workers, then the crown walk out to the project). When nobody bound would
-    be told, the verb REFUSES before the append and exits 3 with nothing
-    written; when no send confirms, it exits 4 with the note written.
-    ``--quiet`` writes it anyway and mails nobody. Contract:
+    Delivery is the DEFAULT: the verb mails a pointer to every bound reader.
+    Nobody bound, or unreadable bindings, refuses BEFORE the append (exit 3,
+    nothing written); no send confirmed exits 4 with the note written.
+    ``--quiet`` writes it anyway. Contract:
     docs/architecture/backlog-graph-verb-contracts.md.
     """
     from fno.decide import (

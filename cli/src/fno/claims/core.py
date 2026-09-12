@@ -1002,9 +1002,8 @@ HANDOVER_HOLDER_PREFIX = "spawn-handover:"
 #: node, not an agent. `holder_agent_name` is the one resolver.
 TARGET_SESSION_HOLDER_PREFIX = "target-session:"
 
-#: A subagent planner holds node:<id> under this prefix between
-#: `fno backlog session open` and `session close`, mirroring
-#: target-session for the blueprint phase. Resolved in the same branch.
+#: A subagent planner holds node:<id> under this prefix between `session open`
+#: and `session close`, mirroring target-session. Resolved in the same branch.
 BLUEPRINT_HOLDER_PREFIX = "blueprint-session:"
 
 _SESSION_ID_HOLDER_PREFIXES = (TARGET_SESSION_HOLDER_PREFIX, BLUEPRINT_HOLDER_PREFIX)

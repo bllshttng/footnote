@@ -1,14 +1,11 @@
 """Deliver a `fno backlog note` to the people bound to the node.
 
 A worker reads its node once, at dispatch, so a note appended after that reaches
-nobody on its own. Resolution runs BEFORE the append: when nobody is bound, or a
-fault makes the bindings unreadable, the verb refuses and writes nothing, because
-a note no reader would hear is a silent drop wearing a receipt. Contract, and
-every "why", in docs/architecture/backlog-graph-verb-contracts.md.
-
-It lives beside ``advance`` rather than under ``fno.graph`` because it reads the
-graph AND reaches the agent runtime for the claim, the crown and the send. That
-pair is what ``fno.backlog`` already holds; the core layer may not import it.
+nobody on its own. Resolution runs BEFORE the append: nobody bound, or a fault,
+refuses and writes nothing - a note no reader would hear is a silent drop wearing
+a receipt. Contract in docs/architecture/backlog-graph-verb-contracts.md. It
+lives beside ``advance`` because it reads the graph AND the agent runtime (claim,
+crown, send); ``fno.backlog`` holds that pair, the core layer may not import it.
 """
 from __future__ import annotations
 
@@ -21,14 +18,11 @@ _SEND_TIMEOUT_SECONDS = 30.0
 _UNDELIVERED = ("notify FAILED", "notify UNCONFIRMED")
 _GRAPH_FIELDS = ("locked_by_harness_session", "session_id", "locked_by")
 _QUIET_HINT = (
-    "Write it anyway with --quiet, or find a reader with "
-    "fno agents court and mail them by name."
+    "Write it anyway with --quiet, or find a reader with fno agents court and mail them by name."
 )
 
 
 class NoteReaders(NamedTuple):
-    """Who a note on one node reaches, what each lookup read, who the author is."""
-
     node_id: str
     recipients: list[tuple[str, str]]
     author_bound: Optional[str]
@@ -36,8 +30,6 @@ class NoteReaders(NamedTuple):
 
 
 class Refused(NamedTuple):
-    """The refusal a caller must surface: the message and the exit to raise."""
-
     message: str
     exit_code: int
 
@@ -73,13 +65,9 @@ def own_session() -> Optional[str]:
 
 
 def send_pointer(address: str, body: str) -> str:
-    """Mail one pointer. Short lock timeout: a contended recipient takes the
-    durable envelope now rather than blocking the writer.
-
-    The sender is this session's own handle, not a literal: provenance is
-    looked up by from_name, so an unregistered literal ships harness=unknown
-    with no from_session. No ambient identity keeps the default; the
-    dispatch-side miss is loud."""
+    """Mail one pointer (short lock timeout: a contended recipient takes the
+    durable envelope now). The sender is this session's own handle, not a
+    literal: provenance is looked up by from_name."""
     from fno.agents.dispatch import dispatch_send
     from fno.harness_identity import canonical_handle
 
@@ -102,24 +90,24 @@ def pointer(node_id: str, text: str) -> str:
 
 
 def _is_author(row: Any, resolved: str, address: str, self_session: str) -> bool:
-    """An address naming a registry row is the author by identity key
-    (never by name shape); otherwise the bare endswith match stands."""
+    """A row-backed address decides by identity key; endswith stands only when
+    no row is behind the name."""
     from fno.harness_identity import session_identity_key
 
-    if row is not None:
-        row_sid = getattr(row, "harness_session_id", None)
-        if not isinstance(row_sid, str) or not row_sid:
-            return False
-        try:
-            return session_identity_key(row_sid) == session_identity_key(self_session)
-        except Exception:  # noqa: BLE001 - an unreadable key cannot prove authorship
-            return False
-    return resolved.endswith(self_session) or address.endswith(self_session)
+    if row is None:
+        return resolved.endswith(self_session) or address.endswith(self_session)
+    row_sid = getattr(row, "harness_session_id", None)
+    if not isinstance(row_sid, str) or not row_sid:
+        return False
+    try:
+        return session_identity_key(row_sid) == session_identity_key(self_session)
+    except Exception:  # noqa: BLE001 - an unreadable key cannot prove authorship
+        return False
 
 
 def _live_row_for_value(value: str, registry_rows: list[Any]) -> Optional[Any]:
     """The ownership-live row behind a graph binding: by resolved name, else by
-    the row's harness_session_id matching the value's identity key."""
+    harness_session_id under the identity key."""
     from fno.claims.core import holder_agent_name
     from fno.harness_identity import OWNERSHIP_LIVE_STATUSES, session_identity_key
 
@@ -145,13 +133,12 @@ def note_readers(
     kings_of: Callable[[str], Iterable[str]] = crowned_over,
     self_session: Optional[str] = None,
 ) -> NoteReaders:
-    """Every bound reader for one note, the author named but never mailed.
+    """Every bound reader for one note; the author is named, never mailed.
 
-    The worker chain runs for the node and again for its owner; the first arm
-    that yields a live reader wins within a run. The crown walk goes outward
-    and stops at the first scope with a live crown. ``rows`` is the caller's
-    registry read; ``None`` reads the machine's registry once. Tests always
-    pass ``rows``, so no test reads this machine's registry.
+    The worker chain runs for the node and again for its owner, first winning
+    arm per run; the crown walk goes outward, first live crown wins. ``rows``
+    is the caller's registry read; ``None`` reads the machine's once (tests
+    always pass ``rows``, so no test reads this machine's registry).
     """
     from fno.agents.registry import load_registry
     from fno.claims.core import holder_agent_name
@@ -165,8 +152,8 @@ def note_readers(
     seen: set[str] = set()
 
     def add(address: Optional[str], why: str) -> bool:
-        """Bind one address; True when a live RECIPIENT joined (an author hit
-        names itself in author_bound but never stops the chain)."""
+        """Bind one address; True only when a live RECIPIENT joined - an author
+        hit names itself in author_bound and never stops the chain."""
         if not address or address in seen:
             return False
         # A role holder is a marker, not an address; None: nobody behind it.
@@ -182,20 +169,19 @@ def note_readers(
         recipients.append((resolved, why))
         return True
 
-    def worker_readers(subject_id: str, subject: str, subject_entry: Optional[dict]) -> None:
+    def worker_readers(subject_id: str, subject: str, source: Optional[dict]) -> None:
         holder = holder_of(subject_id)
         readings.append(f"claim node:{subject_id}: {holder or 'free'}")
         if holder and add(holder, f"holder of {subject}"):
             return
-        source = subject_entry or {}
         for field in _GRAPH_FIELDS:
-            value = source.get(field)
+            value = (source or {}).get(field)
             if not isinstance(value, str) or not value:
                 readings.append(f"graph {field}: none")
                 continue
             try:
                 row = _live_row_for_value(value, registry_rows)
-            except Exception as exc:  # noqa: BLE001 - one unreadable field costs that field
+            except Exception as exc:  # noqa: BLE001 - one unreadable field costs it
                 readings.append(f"graph {field}: unreadable ({exc})")
                 continue
             if row is None:
@@ -228,19 +214,17 @@ def note_readers(
     if isinstance(owner_id, str) and owner_id:
         worker_readers(owner_id, f"owner {owner_id}", index.get(owner_id))
 
-    # Crown walk, nearest first: the epic itself when this is one, then the
-    # epic (the owner's parent for a contained node), then the project.
+    # Crown walk, nearest first: this epic when type==epic, then the epic (the
+    # owner's parent for a contained node), then the project.
+    epic = (owner.get("parent") if owner else None) or entry.get("parent")
+    project = entry.get("project")
     scopes: list[tuple[str, str, str]] = []
     if entry.get("type") == "epic":
         scopes.append((node_id, f"king of {node_id}", f"crown {node_id}"))
-    epic = (owner.get("parent") if owner else None) or entry.get("parent")
     if isinstance(epic, str) and epic:
         scopes.append((epic, f"king of {epic}", f"crown {epic}"))
-    project = entry.get("project")
     if isinstance(project, str) and project:
-        scopes.append(
-            (project, f"king of {project} (project)", f"crown {project} (project)")
-        )
+        scopes.append((project, f"king of {project} (project)", f"crown {project} (project)"))
     walked: set[str] = set()
     for scope, why, label in scopes:
         if scope in walked:
@@ -248,7 +232,7 @@ def note_readers(
         walked.add(scope)
         try:
             kings = list(kings_of(scope))
-        except Exception as exc:  # noqa: BLE001 - one unreadable scope costs that scope
+        except Exception as exc:  # noqa: BLE001 - one unreadable scope costs it
             readings.append(f"{label}: unreadable ({exc})")
             continue
         if not kings:
@@ -262,12 +246,9 @@ def note_readers(
 
 
 def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refused:
-    """Resolve the readers BEFORE the append; a Refused must be surfaced.
-
-    A resolution fault cannot prove anyone would be told, so it refuses with
-    the fault text instead of writing. A node nobody is bound to refuses with
-    every arm reading, so the author can name the miss.
-    """
+    """Resolve the readers BEFORE the append; a Refused must be surfaced. A
+    fault refuses for the reason a vacancy does: neither proves anyone would
+    be told."""
     from fno.agents.registry import load_registry
     from fno.graph._intake import _find_node
     from fno.graph.store import read_graph
@@ -323,17 +304,17 @@ def deliver(readers: NoteReaders, text: str, *, json_output: bool) -> int:
     receipts = send_note(readers, text)
     for line, undelivered in receipts:
         typer.echo(line, err=undelivered or json_output)
-    if not any(line.startswith("notified ") for line, _ in receipts):
-        unconfirmed = sum(1 for line, _ in receipts if line.startswith("notify UNCONFIRMED"))
-        failed = sum(1 for line, _ in receipts if line.startswith("notify FAILED"))
-        typer.echo(
-            f"notify: {readers.node_id} is noted, but no reader confirmed "
-            f"delivery ({unconfirmed} UNCONFIRMED, {failed} FAILED). An "
-            "UNCONFIRMED send may still land, so check before you re-send.",
-            err=True,
-        )
-        return 4
-    return 0
+    if any(line.startswith("notified ") for line, _ in receipts):
+        return 0
+    unconfirmed = sum(line.startswith("notify UNCONFIRMED") for line, _ in receipts)
+    failed = sum(line.startswith("notify FAILED") for line, _ in receipts)
+    typer.echo(
+        f"notify: {readers.node_id} is noted, but no reader confirmed delivery "
+        f"({unconfirmed} UNCONFIRMED, {failed} FAILED). An UNCONFIRMED send may "
+        "still land, so check before you re-send.",
+        err=True,
+    )
+    return 4
 
 
 def _one_receipt(address: str, why: str, body: str) -> str:
@@ -349,11 +330,9 @@ def _one_receipt(address: str, why: str, body: str) -> str:
 
 
 def _bounded_send(address: str, body: str) -> tuple[str, Any]:
-    """One send, bounded by a wall clock: ``(ok|err|timeout, value)``.
-
-    A live inject waits on the recipient's flock; one run wedged past 150s. The
-    thread is a daemon, so the process exits without it and the OS drops that lock.
-    """
+    """One send, bounded by a wall clock: ``(ok|err|timeout, value)``. A live
+    inject waits on the recipient's flock; one run wedged past 150s, so the
+    daemon thread dies with the process and the OS drops that lock."""
     out: list[tuple[str, Any]] = []
 
     def run() -> None:
