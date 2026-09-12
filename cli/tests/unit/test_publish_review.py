@@ -82,7 +82,7 @@ def test_verb_maps_the_answer_exit_code(tmp_path, monkeypatch):
     from fno.pr._publish_review import publish_review_call
 
     monkeypatch.setattr("fno.pr._publish_review.publish_review_call", lambda p: dict(ANSWER))
-    result = runner.invoke(pr_cli.pr_app, ["publish-review", "--pr", "931"])
+    result = runner.invoke(pr_cli.pr_app, ["publish-review", "--pr-number", "931"])
     assert result.exit_code == 0, result.output
 
 
