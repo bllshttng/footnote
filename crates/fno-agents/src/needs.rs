@@ -363,12 +363,22 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
     for (_, (_, _, item)) in mail_escalations {
         items.push(item);
     }
-    for (qid, (_, _, item)) in questions {
-        if closed_questions.contains(&qid) {
-            continue;
-        }
-        items.push(item);
-    }
+    // Operator questions rank newest-first, matching
+    // outstanding/core.py::read_open_questions: an ask filed minutes ago is
+    // the one a human can still act on. Ordered here by (epoch, seq)
+    // descending - the fold's own total order, exact across a same-second
+    // stream where a ts string compare is not - and tied on purpose in the
+    // comparator below, which the stable sort turns into this push order.
+    let mut open_questions: Vec<_> = questions
+        .into_iter()
+        .filter(|(qid, _)| !closed_questions.contains(qid))
+        .collect();
+    open_questions.sort_by(|a, b| {
+        let (epoch_a, seq_a, _) = a.1;
+        let (epoch_b, seq_b, _) = b.1;
+        epoch_b.cmp(&epoch_a).then_with(|| seq_b.cmp(&seq_a))
+    });
+    items.extend(open_questions.into_iter().map(|(_, (_, _, item))| item));
     // `kind` is part of the sort key because it is part of the mail accumulator's
     // key: one recipient can now yield both a mail_question and a
     // mail_delivery_miss, and for mail rows session_id IS the recipient, so those
@@ -377,6 +387,12 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
     // process. That makes `needs --json` reorder run to run and anything
     // diffing it flaky.
     items.sort_by(|a, b| {
+        // Operator questions are pre-ordered newest-first above and tie here on
+        // purpose: the stable sort preserves their push order. Every other kind
+        // keeps stream order.
+        if a.kind == "operator_question" && b.kind == "operator_question" {
+            return std::cmp::Ordering::Equal;
+        }
         a.ts.cmp(&b.ts)
             .then_with(|| a.session_id.cmp(&b.session_id))
             .then_with(|| a.kind.cmp(&b.kind))
@@ -1750,6 +1766,36 @@ mod tests {
         .join("\n");
         let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn operator_questions_rank_newest_first_and_other_kinds_stay_ascending() {
+        // AC11 (x-0dc5): the fold mirrors outstanding/core.py's rank - question
+        // rows newest-first among themselves, every other kind keeps ascending
+        // (ts, session_id, kind) stream order. Interleaved streams, so push
+        // order alone can satisfy neither half.
+        let events = [
+            operator_question("2026-07-03T01:00:00Z", "q-old", "older ask", None),
+            termination("2026-07-03T02:00:00Z", "sa", "Budget"),
+            operator_question("2026-07-03T03:00:00Z", "q-new", "newer ask", None),
+            termination("2026-07-03T02:30:00Z", "sb", "Budget"),
+        ]
+        .join("\n");
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+
+        let question_ids: Vec<&str> = items
+            .iter()
+            .filter(|i| i.kind == "operator_question")
+            .map(|i| i.session_id.as_str())
+            .collect();
+        let stop_sessions: Vec<&str> = items
+            .iter()
+            .filter(|i| i.kind == "budget_stop")
+            .map(|i| i.session_id.as_str())
+            .collect();
+
+        assert_eq!(question_ids, ["q-new", "q-old"]);
+        assert_eq!(stop_sessions, ["sa", "sb"]);
     }
 
     #[test]
