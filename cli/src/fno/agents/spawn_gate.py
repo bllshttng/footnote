@@ -1119,6 +1119,29 @@ def _refuse_gate_fault(
     _refuse(EXIT_PROVIDER_CAP, receipt)
 
 
+def _refuse_quota_lock(account: str, resets_at: Optional[float]) -> NoReturn:
+    """A vendor quota window on the caller-named account. NOT machine
+    busy-ness, so --force does not buy past it: forcing just mints the
+    next corpse. Keeps EXIT_PROVIDER_CAP so exit-code consumers are
+    unaffected, like _refuse_gate_fault."""
+    from datetime import datetime, timezone
+
+    when = (
+        datetime.fromtimestamp(resets_at, tz=timezone.utc).isoformat()
+        if resets_at else "unknown (no reset was readable)"
+    )
+    _warn(
+        f"spawn-gate: account {account} is rate-limited until {when}; "
+        "refusing; no worker launched"
+    )
+    _refuse(EXIT_PROVIDER_CAP, {
+        "status": "refused",
+        "reason": "provider_quota_lock",
+        "account": account,
+        "resets_at": resets_at,
+    })
+
+
 def _emit_gate_event(kind: str, **data: Any) -> None:
     """Best-effort agents-log event. Never raises, never blocks a spawn."""
     try:
@@ -1516,6 +1539,7 @@ def run_gate(
     force: bool = False,
     no_wait: bool = False,
     route_provider: Optional[str] = None,
+    account: Optional[str] = None,
 ) -> GateGuard:
     """Run the full gate. Returns a :class:`GateGuard` to hold across dispatch
     on pass; raises :class:`GateRefused` (a SystemExit) on refusal/timeout.
@@ -1574,6 +1598,20 @@ def run_gate(
     # RAM floor does, because the queue window is long enough for the shared
     # schema to move underneath a waiting spawn.
     _check_registry_schema()
+
+    # Ahead of the force branch too (x-bbc0): a vendor quota window on the
+    # caller-named account is not machine busy-ness, and forcing past it
+    # just buys another corpse. The lock is read through the shared
+    # vocabulary, never a hand-rolled field compare. An unnamed account is
+    # NOT a silent skip: a spawn that lets accounts.quota.pick_on_launch
+    # choose is already covered, because the picker reads the same lock
+    # through headroom() and is_in_cooldown (rotation.py).
+    if account and account != "default":
+        from fno.adapters.providers.runtime_state import is_in_cooldown, read_state
+
+        if is_in_cooldown(account):
+            health = read_state().provider_health.get(account)
+            _refuse_quota_lock(account, getattr(health, "rate_limited_until", None))
 
     if force and provider_cap is None:
         # Byte-twin with the Rust gate (check-reachable-paths); force also

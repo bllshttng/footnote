@@ -2177,6 +2177,7 @@ def cmd_spawn(
                 force=force,
                 no_wait=no_wait or wait is not None,
                 route_provider=route_provider,
+                account=account or dispatch_account,
             )
             break
         except GateRefused as exc:

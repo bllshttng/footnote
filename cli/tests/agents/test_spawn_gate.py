@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -1640,3 +1641,115 @@ def test_fleet_incident_stale_runtime_without_the_verb(tmp_path, monkeypatch):
     )
 
     assert spawn_gate._fleet_incident_gate() is None
+
+
+class TestQuotaLockRefusal:
+    """The gate reads the sweep's quota lock (x-bbc0 change 3): a vendor
+    window on the caller-named account refuses with exit 78, names the
+    reset, and is NOT waitable."""
+
+    @pytest.fixture
+    def locked_account(self, tmp_path, monkeypatch):
+        """Write a real quota lock into an isolated runtime-state file."""
+        from datetime import datetime, timedelta, timezone
+
+        monkeypatch.setenv(
+            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
+        )
+        from fno.agents.quota_lock import record_quota_lock
+
+        reset = datetime.now(timezone.utc) + timedelta(hours=3)
+        body = (
+            "API Error: 429 usage limit reached. Quota exceeded; "
+            f"resets at {reset.strftime('%Y-%m-%dT%H:%M:%S+00:00')}."
+        )
+        assert record_quota_lock("readyrule", body) == "readyrule"
+        return body
+
+    def _admitting_world(self, monkeypatch):
+        _settings(monkeypatch, max_live=3)
+        monkeypatch.setattr(
+            spawn_gate,
+            "census",
+            lambda socket_map=None: spawn_gate.LiveCensus(workers=[]),
+        )
+
+    def test_a_future_lock_refuses_with_78_and_names_the_reset(
+        self, monkeypatch, capsys, locked_account
+    ):
+        self._admitting_world(monkeypatch)
+        emitted: list[tuple] = []
+
+        import fno.agents.events as events_mod
+
+        monkeypatch.setattr(
+            events_mod, "emit", lambda kind, **data: emitted.append((kind, data))
+        )
+
+        with pytest.raises(spawn_gate.GateRefused) as excinfo:
+            spawn_gate.run_gate("w2", "bg", account="readyrule")
+
+        assert excinfo.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        receipt = excinfo.value.receipt
+        assert receipt["reason"] == "provider_quota_lock"
+        assert receipt["account"] == "readyrule"
+        assert receipt["resets_at"] > time.time()
+        assert any(
+            k == "spawn_gate_refused" and d.get("reason") == "provider_quota_lock"
+            for k, d in emitted
+        )
+        err = capsys.readouterr().err
+        assert "readyrule" in err
+        assert "rate-limited until" in err
+
+    def test_the_refusal_sits_ahead_of_force(self, monkeypatch, locked_account):
+        self._admitting_world(monkeypatch)
+
+        with pytest.raises(spawn_gate.GateRefused) as excinfo:
+            spawn_gate.run_gate("w2", "bg", force=True, account="readyrule")
+
+        assert excinfo.value.receipt["reason"] == "provider_quota_lock"
+
+    def test_a_past_lock_passes_silently(self, monkeypatch, capsys, tmp_path):
+        # A lock whose named reset already passed reads not-in-cooldown via
+        # the shared vocabulary. Written directly: a record_quota_lock call
+        # with a past resets_at falls back to a computed backoff step, which
+        # is a different (and still-live) lock.
+        monkeypatch.setenv(
+            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
+        )
+        state = tmp_path / "provider-runtime-state.json"
+        state.write_text(json.dumps({
+            "schema_version": 2,
+            "provider_health": {
+                "readyrule": {
+                    "backoff_level": 1,
+                    "rate_limited_until": time.time() - 5.0,
+                    "last_error_at": time.time(),
+                },
+            },
+        }))
+        self._admitting_world(monkeypatch)
+
+        guard = spawn_gate.run_gate("w2", "bg", account="readyrule")
+        assert capsys.readouterr().err == ""
+        guard.release()
+
+    def test_no_account_or_default_passes_silently(self, monkeypatch, capsys, tmp_path):
+        from fno.agents.quota_lock import record_quota_lock
+
+        monkeypatch.setenv(
+            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
+        )
+        record_quota_lock("readyrule", "quota exceeded", resets_at=time.time() + 3600.0)
+        self._admitting_world(monkeypatch)
+
+        for account in (None, "default"):
+            guard = spawn_gate.run_gate("w2", "bg", account=account)
+            guard.release()
+        assert "quota" not in capsys.readouterr().err
+
+    def test_the_reason_is_not_waitable(self):
+        # A vendor window runs hours; the queue times out at 600s. Waiting
+        # would convert an honest refusal into a hang (x-bbc0).
+        assert "provider_quota_lock" not in spawn_gate.WAITABLE_REFUSAL_REASONS
