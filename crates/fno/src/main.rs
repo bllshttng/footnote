@@ -766,9 +766,9 @@ mod tests {
 
     #[test]
     fn serve_parses_the_status_flag_like_stop() {
-        // `--status` is the read door beside `--stop` (x-6a44): it parses
-        // alone and alongside --web/--port, and the mode-required check
-        // admits all three modes.
+        // `--status` is the read door beside `--stop`: it parses alone and
+        // alongside --web/--port, and the mode-required check admits all
+        // three modes.
         let parsed = parse_web_args(&os(&["--status"])).expect("--status parses");
         assert!(parsed.status);
         assert!(!parsed.stop);

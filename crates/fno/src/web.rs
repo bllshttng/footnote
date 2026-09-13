@@ -18,6 +18,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use crate::client::humanize_ago;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,7 +76,7 @@ pub struct WebArgs {
     pub stop: bool,
     /// `--status`: read the state file and report who is serving (pid, bind,
     /// port, binary, build rev, start time, launching session id), flagging a
-    /// bridge whose build rev predates the installed binary (x-6a44).
+    /// bridge whose build rev predates the installed binary.
     pub status: bool,
 }
 
@@ -249,8 +251,8 @@ impl WebStateFile {
         // `started` is the pid's start-time token, so `--stop` can tell the
         // bridge it names from a process that later reused the pid.
         // `bin`/`rev`/`started_at`/`session` answer "who started this and how
-        // old is its build" (x-6a44): rev is the crates/ subtree rev this
-        // binary baked, so --status can flag a bridge running pre-deploy code.
+        // old is its build": rev is the crates/ subtree rev this binary
+        // baked, so --status can flag a bridge running pre-deploy code.
         let body = serde_json::json!({
             "bind": bind,
             "port": port,
@@ -393,7 +395,7 @@ fn stop_web(session: &str, socket: &Path) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// --status and port-collision naming (x-6a44)
+// --status and port-collision naming
 // ---------------------------------------------------------------------------
 
 /// The launching agent's harness session id, when the environment carries one.
@@ -446,18 +448,6 @@ fn tcp_answers(host: &str, port: u16) -> bool {
 /// know, so we do not claim to.
 fn rev_is_stale(recorded: &str) -> bool {
     recorded != "unknown" && recorded != env!("FNO_MUX_CRATES_REV")
-}
-
-/// Epoch seconds -> "<n>d<n>h", "<n>h<n>m", "<n>m<n>s", or "<n>s" age.
-fn format_age(unix_secs: u64, now: u64) -> String {
-    let s = now.saturating_sub(unix_secs);
-    match (s / 86_400, (s % 86_400) / 3_600, (s % 3_600) / 60, s % 60) {
-        (d, h, _, _) if d > 0 => format!("{d}d{h}h"),
-        (0, h, m, _) if h > 0 => format!("{h}h{m}m"),
-        (0, 0, m, _) if m > 0 => format!("{m}m"),
-        (0, 0, 0, s) => format!("{s}s"),
-        _ => "0s".into(),
-    }
 }
 
 /// Parse a `web-*.json` state file into (session, pid, port, bind, rev,
@@ -536,7 +526,10 @@ fn status_web(session: &str, socket: &Path) -> i32 {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        println!("  started: {at} ({} ago)", format_age(at, now));
+        println!(
+            "  started: {at} ({} ago)",
+            humanize_ago(now.saturating_sub(at))
+        );
     }
     println!(
         "  started by session: {}",
@@ -1657,8 +1650,8 @@ console.log("evictedRowCount: 18 cases ok");
 
     #[test]
     fn state_file_carries_the_ownership_fields() {
-        // x-6a44: the record answers "who started this and how old is its
-        // build" - binary path, build rev, wall-clock start, launcher session.
+        // The record answers "who started this and how old is its build":
+        // binary path, build rev, wall-clock start, launcher session.
         let dir = temp_state_dir("own");
         let socket = dir.join("t.sock");
         let guard = WebStateFile::write(&socket, "127.0.0.1", 8944, "tok").expect("wrote state");
@@ -1685,15 +1678,6 @@ console.log("evictedRowCount: 18 cases ok");
         assert!(!rev_is_stale(env!("FNO_MUX_CRATES_REV")));
         assert!(!rev_is_stale("unknown"), "cannot know, so never stale");
         assert!(rev_is_stale("deadbeef-old-build"));
-    }
-
-    #[test]
-    fn format_age_buckets_by_largest_unit() {
-        let now: u64 = 1_800_000_000;
-        assert_eq!(format_age(now - 5, now), "5s");
-        assert_eq!(format_age(now - 125, now), "2m");
-        assert_eq!(format_age(now - 3_725, now), "1h2m");
-        assert_eq!(format_age(now - 172_800, now), "2d0h");
     }
 
     #[test]
