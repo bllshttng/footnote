@@ -129,10 +129,13 @@ _nested_count=${#_nested_paths[@]}
 # A per-project `never` worktree policy means working on the canonical checkout
 # IS the policy (an Obsidian vault whose working tree is the product), so the
 # protected-branch gate must not refuse it. Consult the SAME resolver ensure uses
-# (`fno agents workspace worktree policy`); its `never` receipt is exactly `never` (non-never adds a
-# `base=` line), so exact-match needs no `head`/pipe. Fail CLOSED (empty != never).
+# (`fno agents workspace worktree policy`) and read LINE 1 only: the receipt is
+# multi-line for every repo now (source= ...), so a whole-output exact match
+# would block every `never` repo - the defect this helper exists to remove.
+# Fail CLOSED (empty != never).
 if [[ "$_verdict" == "canonical-protected" ]] && command -v fno >/dev/null 2>&1; then
-  if [[ "$(fno agents workspace worktree policy --repo "$_root" 2>/dev/null || fno workspace worktree policy --repo "$_root" 2>/dev/null)" == "never" ]]; then
+  _pol_line1="$( { fno agents workspace worktree policy --repo "$_root" 2>/dev/null || fno workspace worktree policy --repo "$_root" 2>/dev/null; } | head -1 | tr -d '[:space:]')"
+  if [[ "$_pol_line1" == "never" ]]; then
     _verdict="ok"
   fi
 fi

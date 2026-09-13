@@ -196,7 +196,7 @@ class WorktreePolicy:
     policy: str   # one of VALID_WORKTREE_POLICIES (post harness degradation)
     base: Path    # target worktrees base (informational for a `never` result)
     project: str  # resolved project id (for the receipt line)
-    source: str   # "per-project" | "global" | "default"
+    source: str   # "per-project" | "global" | "default" | "env"
     requested_policy: str  # pre-degradation policy, for truthful receipts
     degraded: bool  # requested harness-native but substrate cannot allocate it
     note: str = ""  # advisory the caller should surface (deprecations)
@@ -289,10 +289,12 @@ def resolve_worktree_policy(
 ) -> WorktreePolicy:
     """Resolve the worktree policy for ``repo_root`` under ``harness``.
 
-    Precedence: per-project ``work.workspaces.<slug>.projects[].worktree`` >
-    global ``worktree.policy`` > built-in ``harness-native``. A config file that
-    exists but fails to parse RAISES (fail closed); an absent key is not an
-    error. ``harness-native`` degrades to ``external`` when the harness has no
+    Precedence: ``FNO_WORKTREE_POLICY`` > per-project
+    ``work.workspaces.<slug>.projects[].worktree`` > global ``worktree.policy`` >
+    built-in ``harness-native``. The env var is how a dispatcher pins an
+    undeclared target's policy for its child without writing config into that
+    repo. A config file that exists but fails to parse RAISES (fail closed); an
+    absent key is not an error. ``harness-native`` degrades to ``external`` when the harness has no
     native mechanism (anything but claude), when ``paths.worktrees_base`` is
     explicitly set (x-f96e: the key alone relocates; setting it AND
     ``worktree.policy`` is no longer required), and under the deprecated
@@ -322,17 +324,24 @@ def resolve_worktree_policy(
 
     raw_policy: object = None
     source = "default"
-    entry = _match_project_entry(merged, repo_root, project_id)
-    entry_policy = entry.get("worktree") if entry is not None else None
-    if entry_policy is not None:
-        raw_policy = entry_policy
-        source = "per-project"
-    else:
-        wt = merged.get("worktree")
-        wt_policy = wt.get("policy") if isinstance(wt, dict) else None
-        if wt_policy is not None:
-            raw_policy = wt_policy
-            source = "global"
+    # The env value flows into the SAME validation below, so an out-of-enum
+    # value refuses exactly like an out-of-enum config value.
+    env_policy = os.environ.get("FNO_WORKTREE_POLICY")
+    if env_policy:
+        raw_policy = env_policy
+        source = "env"
+    if raw_policy is None:
+        entry = _match_project_entry(merged, repo_root, project_id)
+        entry_policy = entry.get("worktree") if entry is not None else None
+        if entry_policy is not None:
+            raw_policy = entry_policy
+            source = "per-project"
+        else:
+            wt = merged.get("worktree")
+            wt_policy = wt.get("policy") if isinstance(wt, dict) else None
+            if wt_policy is not None:
+                raw_policy = wt_policy
+                source = "global"
     if raw_policy is None:
         raw_policy = "harness-native"
 
