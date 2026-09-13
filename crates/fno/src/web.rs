@@ -72,6 +72,10 @@ pub struct WebArgs {
     /// one. The state file names the pid; the pid's start token names the
     /// process.
     pub stop: bool,
+    /// `--status`: read the state file and report who is serving (pid, bind,
+    /// port, binary, build rev, start time, launching session id), flagging a
+    /// bridge whose build rev predates the installed binary (x-6a44).
+    pub status: bool,
 }
 
 impl Default for WebArgs {
@@ -81,6 +85,7 @@ impl Default for WebArgs {
             bind: "127.0.0.1".to_string(),
             port: 8722,
             stop: false,
+            status: false,
         }
     }
 }
@@ -219,23 +224,11 @@ pub(crate) fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
     } else {
         bind
     };
-    // Probe liveness for ANY spelling the operator may have bound. A bare
-    // SocketAddr parse only accepts IPs, so `localhost` and `::1` would skip
-    // the probe and trust a corpse file (codex P2); the tuple form resolves
-    // hostnames and needs no IPv6 brackets.
-    let probe_addr = {
-        use std::net::ToSocketAddrs;
-        (host, port as u16)
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut it| it.next())
-    };
-    if let Some(addr) = probe_addr {
-        let timeout = Duration::from_millis(300);
-        if std::net::TcpStream::connect_timeout(&addr, timeout).is_err() {
-            eprintln!("{verb}: {hint}");
-            return 1;
-        }
+    // Probe liveness for ANY spelling the operator may have bound (codex P2):
+    // a corpse file must not read as a bridge. Same probe --status uses.
+    if !tcp_answers(host, port as u16) {
+        eprintln!("{verb}: {hint}");
+        return 1;
     }
     // Bracket a literal IPv6 host; a bare ::1 in a URL truncates at the colon.
     let url_host = if host.contains(':') {
@@ -255,12 +248,24 @@ impl WebStateFile {
         // exiting OLDER bridge must not delete the newer one's state (codex P2).
         // `started` is the pid's start-time token, so `--stop` can tell the
         // bridge it names from a process that later reused the pid.
+        // `bin`/`rev`/`started_at`/`session` answer "who started this and how
+        // old is its build" (x-6a44): rev is the crates/ subtree rev this
+        // binary baked, so --status can flag a bridge running pre-deploy code.
         let body = serde_json::json!({
             "bind": bind,
             "port": port,
             "token": token,
             "pid": std::process::id(),
             "started": proto::pid_start_time(std::process::id()),
+            "bin": std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".into()),
+            "rev": env!("FNO_MUX_CRATES_REV"),
+            "started_at": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            "session": launching_session_id(),
         });
         let wrote = {
             use std::io::Write;
@@ -387,6 +392,213 @@ fn stop_web(session: &str, socket: &Path) -> i32 {
     0
 }
 
+// ---------------------------------------------------------------------------
+// --status and port-collision naming (x-6a44)
+// ---------------------------------------------------------------------------
+
+/// The launching agent's harness session id, when the environment carries one.
+/// `FNO_HARNESS_SESSION_ID` is what fno stamps; the rest are the per-harness
+/// fallbacks the claim system recognizes.
+fn launching_session_id() -> Option<String> {
+    [
+        "FNO_HARNESS_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+        "OPENCODE_SESSION_ID",
+    ]
+    .iter()
+    .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+}
+
+/// A state-file record whose pid is alive under its recorded start token.
+/// Dead, zombie, or a reused pid all read as not-live, so a corpse file never
+/// passes as a bridge.
+fn recorded_pid_is_live(v: &serde_json::Value) -> bool {
+    let Some(pid) = v
+        .get("pid")
+        .and_then(|p| p.as_u64())
+        .map(|p| p as libc::pid_t)
+    else {
+        return false;
+    };
+    let recorded = v.get("started").and_then(|s| s.as_u64());
+    !proto::pid_confirmed_dead(pid)
+        && !proto::pid_is_zombie(pid)
+        && recorded.is_none_or(|r| proto::pid_start_time(pid as u32).is_some_and(|now| now == r))
+}
+
+/// Does something answer TCP on host:port right now?
+fn tcp_answers(host: &str, port: u16) -> bool {
+    use std::net::ToSocketAddrs;
+    (host, port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.next())
+        .is_some_and(|addr| {
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+        })
+}
+
+/// True when a bridge was built from a different, known crates/ rev than the
+/// binary this verb runs from, i.e. it is serving pre-deploy code. "unknown"
+/// revs (a hand-built or stripped binary) are never called stale - we cannot
+/// know, so we do not claim to.
+fn rev_is_stale(recorded: &str) -> bool {
+    recorded != "unknown" && recorded != env!("FNO_MUX_CRATES_REV")
+}
+
+/// Epoch seconds -> "<n>d<n>h", "<n>h<n>m", "<n>m<n>s", or "<n>s" age.
+fn format_age(unix_secs: u64, now: u64) -> String {
+    let s = now.saturating_sub(unix_secs);
+    match (s / 86_400, (s % 86_400) / 3_600, (s % 3_600) / 60, s % 60) {
+        (d, h, _, _) if d > 0 => format!("{d}d{h}h"),
+        (0, h, m, _) if h > 0 => format!("{h}h{m}m"),
+        (0, 0, m, _) if m > 0 => format!("{m}m"),
+        (0, 0, 0, s) => format!("{s}s"),
+        _ => "0s".into(),
+    }
+}
+
+/// Parse a `web-*.json` state file into (session, pid, port, bind, rev,
+/// started_at, bin, launched-by). None for an unreadable or non-JSON file.
+fn read_state_record(path: &Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Every live bridge recorded beside this mux's sockets: (session, record).
+/// Same-dir scan only: sockets of one server live here, so this sees every
+/// bridge that server's sessions started. A bridge under a DIFFERENT server's
+/// socket dir is out of sight (ponytail: the collision note says so).
+fn live_bridge_records(socket_dir: &Path) -> Vec<(String, serde_json::Value)> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(socket_dir) else {
+        return found;
+    };
+    let mut names: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    names.sort();
+    for path in names {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(session) = name
+            .strip_prefix("web-")
+            .and_then(|s| s.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if let Some(v) = read_state_record(&path) {
+            if recorded_pid_is_live(&v) {
+                found.push((session.to_string(), v));
+            }
+        }
+    }
+    found
+}
+
+/// `serve --status`: report who is serving for a session - pid, bind, port,
+/// binary, build rev, start time, launching session id - flagging a bridge
+/// whose rev predates the installed binary. Exit 0 live, 1 none.
+fn status_web(session: &str, socket: &Path) -> i32 {
+    let Some(state) = web_state_path(socket) else {
+        eprintln!("fno mux serve --web: cannot resolve the state-file path");
+        return 1;
+    };
+    let record = read_state_record(&state).filter(|v| {
+        // A live record owns the file; a stale one is a corpse from a killed
+        // bridge (stop removes those; status only refuses to report it).
+        recorded_pid_is_live(v)
+    });
+    let Some(v) = record else {
+        println!("no live web bridge for session {session:?}");
+        return 1;
+    };
+    let pid = v.get("pid").and_then(|p| p.as_u64()).unwrap_or(0);
+    let bind = v.get("bind").and_then(|b| b.as_str()).unwrap_or("unknown");
+    let port = v.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16;
+    println!("web bridge for session {session:?}: live (pid {pid})");
+    println!("  bind:    {bind}:{port}");
+    println!(
+        "  binary:  {}",
+        v.get("bin").and_then(|b| b.as_str()).unwrap_or("unknown")
+    );
+    let rev = v.get("rev").and_then(|r| r.as_str()).unwrap_or("unknown");
+    if rev_is_stale(rev) {
+        println!(
+            "  build:   {rev} - STALE, installed build is {}; restart the bridge to serve current code",
+            env!("FNO_MUX_CRATES_REV")
+        );
+    } else {
+        println!("  build:   {rev}");
+    }
+    if let Some(at) = v.get("started_at").and_then(|s| s.as_u64()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        println!("  started: {at} ({} ago)", format_age(at, now));
+    }
+    println!(
+        "  started by session: {}",
+        v.get("session")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("(none recorded)")
+    );
+    if !tcp_answers(bind, port) {
+        println!("  note:    port {port} is not answering (bridge may be mid-start or wedged)");
+    }
+    // Sibling sessions: the measured pain was TWO bridges nobody could find.
+    // One line each for the other sessions this server's socket dir records.
+    let dir = socket.parent().map(|p| p.to_path_buf());
+    if let Some(dir) = dir {
+        for (other, r) in live_bridge_records(&dir) {
+            if other == session {
+                continue;
+            }
+            println!(
+                "  also live: session {other:?} pid {} port {}",
+                r.get("pid").and_then(|p| p.as_u64()).unwrap_or(0),
+                r.get("port").and_then(|p| p.as_u64()).unwrap_or(0)
+            );
+        }
+    }
+    0
+}
+
+/// On a taken port, name the recorded bridge holding it, so a second start
+/// points at the process to stop instead of a bare EADDRINUSE. Only state
+/// files beside THIS session's socket are checked; a port held by a bridge
+/// under another server's socket dir (or by a non-fno process) falls through
+/// to the generic error.
+fn port_holder_note(socket: &Path, port: u16) {
+    let Some(dir) = socket.parent() else { return };
+    let holders: Vec<_> = live_bridge_records(dir)
+        .into_iter()
+        .filter(|(_, r)| r.get("port").and_then(|p| p.as_u64()) == Some(port as u64))
+        .collect();
+    if holders.is_empty() {
+        eprintln!(
+            "  no recorded web bridge names port {port}; another process likely holds it \
+             (try: lsof -i :{port})"
+        );
+        return;
+    }
+    for (session, r) in holders {
+        let pid = r.get("pid").and_then(|p| p.as_u64()).unwrap_or(0);
+        let who = r
+            .get("session")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("started by session {s}"))
+            .unwrap_or_else(|| "starter session not recorded".into());
+        eprintln!(
+            "  port {port} is held by the web bridge of session {session:?} (pid {pid}, {who}); \
+             stop it with: fno mux serve --stop --server {session}"
+        );
+    }
+}
+
 /// Entry point for the `mux serve --web` role. Owns its own runtime like the
 /// server role; returns the process exit code.
 pub fn serve(args: WebArgs) -> i32 {
@@ -397,6 +609,9 @@ pub fn serve(args: WebArgs) -> i32 {
             return 2;
         }
     };
+    if args.status {
+        return status_web(&args.session, &socket);
+    }
     if args.stop {
         return stop_web(&args.session, &socket);
     }
@@ -447,6 +662,11 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
     let addr = bind_addr(&args.bind, args.port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!("fno mux serve --web: cannot bind {addr}: {e}");
+            port_holder_note(&socket, args.port);
+            return 1;
+        }
         Err(e) => {
             eprintln!("fno mux serve --web: cannot bind {addr}: {e}");
             return 1;
@@ -1433,5 +1653,163 @@ console.log("evictedRowCount: 18 cases ok");
             snap.lock().unwrap().frames.contains_key(&0),
             "a pane that keeps updating survives the eviction sweep"
         );
+    }
+
+    #[test]
+    fn state_file_carries_the_ownership_fields() {
+        // x-6a44: the record answers "who started this and how old is its
+        // build" - binary path, build rev, wall-clock start, launcher session.
+        let dir = temp_state_dir("own");
+        let socket = dir.join("t.sock");
+        let guard = WebStateFile::write(&socket, "127.0.0.1", 8944, "tok").expect("wrote state");
+        let raw = std::fs::read_to_string(web_state_path(&socket).unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["port"], 8944);
+        assert_eq!(v["pid"], u64::from(std::process::id()));
+        assert_eq!(v["rev"], env!("FNO_MUX_CRATES_REV"));
+        assert_eq!(v["bin"], std::env::current_exe().unwrap().to_str().unwrap());
+        assert!(v["started_at"].as_u64().unwrap() > 0);
+        match launching_session_id() {
+            Some(id) => assert_eq!(v["session"], id),
+            None => assert!(
+                v["session"].is_null(),
+                "no launcher id -> the field is null"
+            ),
+        }
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rev_is_stale_only_flags_known_different_revs() {
+        assert!(!rev_is_stale(env!("FNO_MUX_CRATES_REV")));
+        assert!(!rev_is_stale("unknown"), "cannot know, so never stale");
+        assert!(rev_is_stale("deadbeef-old-build"));
+    }
+
+    #[test]
+    fn format_age_buckets_by_largest_unit() {
+        let now: u64 = 1_800_000_000;
+        assert_eq!(format_age(now - 5, now), "5s");
+        assert_eq!(format_age(now - 125, now), "2m");
+        assert_eq!(format_age(now - 3_725, now), "1h2m");
+        assert_eq!(format_age(now - 172_800, now), "2d0h");
+    }
+
+    #[test]
+    fn live_bridge_records_reads_only_live_sibling_sessions() {
+        let dir = temp_state_dir("scan");
+        // Live: this test process under its real start token.
+        let live = dir.join("web-live.json");
+        std::fs::write(
+            &live,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "started": proto::pid_start_time(std::process::id()),
+                "port": 8945,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Corpse: a pid proven gone.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let corpse = dir.join("web-corpse.json");
+        std::fs::write(
+            &corpse,
+            serde_json::json!({"pid": dead_pid, "started": 1, "port": 8946}).to_string(),
+        )
+        .unwrap();
+        // Unrelated file shape: ignored.
+        std::fs::write(dir.join("other.json"), "{}").unwrap();
+        let found: Vec<_> = live_bridge_records(&dir)
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
+        assert_eq!(
+            found,
+            vec!["live".to_string()],
+            "corpse and non-bridge skipped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn port_holder_filter_matches_only_the_taken_port() {
+        let dir = temp_state_dir("holder");
+        let holder = dir.join("web-hold.json");
+        std::fs::write(
+            &holder,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "started": proto::pid_start_time(std::process::id()),
+                "port": 8947,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let holders: Vec<_> = live_bridge_records(&dir)
+            .into_iter()
+            .filter(|(_, r)| r.get("port").and_then(|p| p.as_u64()) == Some(8947))
+            .collect();
+        assert_eq!(holders.len(), 1, "the port match names the holder");
+        assert_eq!(
+            holders[0].1.get("session").and_then(|s| s.as_str()),
+            launching_session_id().as_deref(),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_web_exits_one_with_no_state_file() {
+        let dir = temp_state_dir("status-none");
+        let socket = dir.join("t.sock");
+        assert_eq!(status_web("t", &socket), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_web_exits_zero_for_a_live_own_pid_record() {
+        let dir = temp_state_dir("status-live");
+        let socket = dir.join("t.sock");
+        let state = web_state_path(&socket).unwrap();
+        std::fs::write(
+            &state,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "started": proto::pid_start_time(std::process::id()),
+                "bind": "127.0.0.1",
+                "port": 8948,
+                "rev": env!("FNO_MUX_CRATES_REV"),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(status_web("t", &socket), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_web_refuses_a_recycled_pid_record() {
+        let dir = temp_state_dir("status-recycled");
+        let socket = dir.join("t.sock");
+        let state = web_state_path(&socket).unwrap();
+        // This live test process under a WRONG start token: the record reads
+        // stale, so status reports no bridge instead of a stranger's pid.
+        std::fs::write(
+            &state,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "started": 1,
+                "bind": "127.0.0.1",
+                "port": 8949,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(status_web("t", &socket), 1);
+        assert!(state.exists(), "status is a read door: it never deletes");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

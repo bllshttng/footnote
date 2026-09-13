@@ -179,9 +179,10 @@ fn split_json(rest: &[OsString]) -> Option<(Vec<&str>, bool)> {
     Some((positionals, json))
 }
 
-/// Parse `serve` flags into [`fno::web::WebArgs`]. `--web` or `--stop` is
-/// required; a missing flag value, an unknown flag, a non-UTF-8 arg, or a bad
-/// `--port` is `None` (the caller maps that to `MuxUsage`, exit 2).
+/// Parse `serve` flags into [`fno::web::WebArgs`]. One of `--web`, `--stop`,
+/// `--status` is required; a missing flag value, an unknown flag, a non-UTF-8
+/// arg, or a bad `--port` is `None` (the caller maps that to `MuxUsage`, exit
+/// 2).
 fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
     let mut web = false;
     let mut args = fno::web::WebArgs::default();
@@ -190,6 +191,7 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
         match a.to_str()? {
             "--web" => web = true,
             "--stop" => args.stop = true,
+            "--status" => args.status = true,
             tok @ ("--server" | "--session") => {
                 mux_cli::note_server_flag(tok);
                 args.session = it.next()?.to_str()?.to_string()
@@ -199,7 +201,7 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
             _ => return None,
         }
     }
-    (web || args.stop).then_some(args)
+    (web || args.stop || args.status).then_some(args)
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
@@ -384,6 +386,7 @@ fn main() {
                  | fno mux serve --web [--server <name>] [--bind <addr>] [--port <n>] \
                  | fno mux serve --stop [--server <name>] \
                  | fno mux web reap [--json] \
+                 | fno mux serve --status [--server <name>] \
                  | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
                  | fno mux block pipe|annotate ... \
                  | fno mux tab ls|create|rename|join|move|close ... (--tab takes the visible \
@@ -759,5 +762,20 @@ mod tests {
             Role::MuxUsage
         );
         assert_eq!(decide_role(&os(&["mux", "bogus"]), false), Role::MuxUsage);
+    }
+
+    #[test]
+    fn serve_parses_the_status_flag_like_stop() {
+        // `--status` is the read door beside `--stop` (x-6a44): it parses
+        // alone and alongside --web/--port, and the mode-required check
+        // admits all three modes.
+        let parsed = parse_web_args(&os(&["--status"])).expect("--status parses");
+        assert!(parsed.status);
+        assert!(!parsed.stop);
+        let parsed = parse_web_args(&os(&["--web", "--port", "9001", "--status"]))
+            .expect("--web --status parses");
+        assert!(parsed.status);
+        assert_eq!(parsed.port, 9001);
+        assert!(parse_web_args(&os(&["--server", "main"])).is_none());
     }
 }
