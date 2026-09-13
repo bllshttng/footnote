@@ -101,7 +101,7 @@ def list_providers(
 
     The human listing always carries an identity column: the ``.active`` stamp
     says who PUT a credential in the slot, not who it serves, so the binding
-    verdict rides the row (``!serves <record>``, ``?<reason>``, or doctor's
+    verdict rides the row (``!serves <record>``, ``?<reason>``, plus doctor's
     per-record problems as `` !<problem>``).
     """
     config = _load()
@@ -116,13 +116,30 @@ def list_providers(
     # DISARMED footer below all read the same config, never a parse per row.
     quota = load_quota_config()
 
-    if json_output and not identity:
+    # Binding reads only ever run for the human listing and --identity; bare
+    # `list -J` stays byte-compatible and does none.
+    needs_binding = identity or not json_output
+    identities: dict = {}
+    findings: list = []
+    shared: set = set()
+    if needs_binding:
+        findings = _doctor_findings()
+        now = time_module.time()
+        for record in config.records:
+            identities[record.id] = _identity_for(record, config.by_id, now)
+        shared = _shared_identity_ids(identities)
+    problems = {
+        r.id: [f["problem"] for f in findings if f.get("record") == r.id]
+        for r in config.records
+    }
+
+    if json_output:
         import json as _json
 
         rows = []
         for record in config.records:
             usage_reading = _usage_age(record.id, ttl=quota.probe_ttl_seconds)
-            rows.append({
+            row = {
                 "id": record.id,
                 "name": record.name,
                 "harness": record.harness,
@@ -138,7 +155,11 @@ def list_providers(
                 "usage_age_s": usage_reading.age_seconds,
                 "usage_ttl_seconds": usage_reading.ttl_seconds,
                 "usage_stale": usage_reading.stale,
-            })
+            }
+            if needs_binding:
+                row["identity"] = _identity_json(record, identities.get(record.id))
+                row["problems"] = problems[record.id]
+            rows.append(row)
         typer.echo(_json.dumps(rows))
         return
 
@@ -147,44 +168,6 @@ def list_providers(
             "No accounts configured. Run `fno config accounts add` to add one."
         )
         return
-
-    now = time_module.time()
-    findings = _doctor_findings()
-    identities: dict = {}
-    for record in config.records:
-        identities[record.id] = _identity_for(record, config.by_id, now)
-    shared = _shared_identity_ids(identities)
-
-    if json_output:
-        import json as _json
-
-        rows = []
-        for record in config.records:
-            usage_reading = _usage_age(record.id, ttl=quota.probe_ttl_seconds)
-            rows.append({
-                "id": record.id,
-                "name": record.name,
-                "harness": record.harness,
-                "auth": record.auth,
-                "priority": record.priority,
-                "active": _is_active(record),
-                "headroom": _headroom_label(record.id),
-                "cred-snapshot": (
-                    managed.snapshot_age_label(record.id)
-                    if record.auth == "managed"
-                    else None
-                ),
-                "usage_age_s": usage_reading.age_seconds,
-                "usage_ttl_seconds": usage_reading.ttl_seconds,
-                "usage_stale": usage_reading.stale,
-                "identity": _identity_json(record, identities.get(record.id)),
-                "problems": [
-                    f["problem"] for f in findings if f.get("record") == record.id
-                ],
-            })
-        typer.echo(_json.dumps(rows))
-        return
-
     for record in config.records:
         marker = "*" if _is_active(record) else " "
         headroom_col = _headroom_label(record.id)
@@ -196,9 +179,7 @@ def list_providers(
             line += f"  cred-snapshot={managed.snapshot_age_label(record.id)}"
         line += f"  {_usage_age_col(record.id, ttl=quota.probe_ttl_seconds)}"
         cell = _identity_cell(record, identities.get(record.id), shared)
-        cell += "".join(
-            f" !{f['problem']}" for f in findings if f.get("record") == record.id
-        )
+        cell += "".join(f" !{p}" for p in problems[record.id])
         line += f"  identity={cell}"
         typer.echo(line)
 
@@ -332,51 +313,42 @@ def _identity_cell(record: ProviderRecord, got, shared_identity: set) -> str:
 
 def _shared_identity_ids(identities: dict) -> set:
     """Record ids whose observed principal is also observed through a
-    different credential root. The managed records share one slot root (its
-    ``credential_root`` is None for all of them), so a normal managed pair
-    never trips this; two scoped config dirs serving one principal do."""
+    different credential root. Managed records share one slot root (their
+    ``credential_root`` is None), so a managed pair never trips this; two
+    scoped config dirs serving one principal do."""
     by_principal: dict = {}
     for got in identities.values():
         if got is None or got.observed_principal is None:
             continue
-        by_principal.setdefault(got.observed_principal, set()).add(
-            got.credential_root
-        )
+        by_principal.setdefault(got.observed_principal, set()).add(got.credential_root)
     return {
-        rid
-        for rid, got in identities.items()
-        if got is not None
-        and got.observed_principal is not None
+        rid for rid, got in identities.items()
+        if got is not None and got.observed_principal is not None
         and len(by_principal[got.observed_principal]) > 1
     }
 
 
 def _identity_json(record: ProviderRecord, got) -> dict:
-    """The ``identity`` object for ``list -J --identity``. Same verdict the
+    """The ``identity`` object for ``list -J --identity``: the verdict the
     human cell renders, with nulls where nothing was proved."""
     from fno.adapters.providers.binding import MATCHED, MISMATCH
 
     if got is None:
-        if record.harness != "claude":
-            reason = "unsupported-harness"
-        elif record.auth == "api_key":
-            reason = "api-key-route"
-        else:
-            reason = "no-observation"
+        reason = (
+            "unsupported-harness" if record.harness != "claude"
+            else "api-key-route" if record.auth == "api_key"
+            else "no-observation"
+        )
         return {
-            "status": "unknown",
-            "account": None,
-            "served_by": None,
-            "reason": reason,
-            "observed_at": None,
+            "status": "unknown", "account": None, "served_by": None,
+            "reason": reason, "observed_at": None,
         }
-    served_by = None
     if got.status == MATCHED:
         served_by = got.matched_record or got.requested_record
     elif got.status == MISMATCH:
-        served_by = (
-            got.matched_record or got.observed_label or got.observed_principal
-        )
+        served_by = got.matched_record or got.observed_label or got.observed_principal
+    else:
+        served_by = None
     return {
         "status": got.status,
         "account": got.requested_record,
