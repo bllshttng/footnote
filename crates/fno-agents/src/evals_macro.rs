@@ -512,7 +512,7 @@ fn build_leaderboard(rows: &[Row], include_all: bool) -> Vec<(String, EntryAcc)>
 /// `lift = P(suspect | pattern) / P(suspect in any pattern row)`, needing
 /// support in at least two sessions, top three.
 fn suspects_for_pattern(
-    sessions: &HashMap<String, Vec<usize>>,
+    sessions: &std::collections::BTreeMap<String, Vec<usize>>,
     rows: &[Row],
     target: &str,
     window: usize,
@@ -596,9 +596,11 @@ fn suspects_for_pattern(
     suspects
 }
 
-/// Session name -> indices into `rows`, in the ordered row sequence.
-fn sessions_map(rows: &[Row]) -> HashMap<String, Vec<usize>> {
-    let mut map: HashMap<String, Vec<usize>> = HashMap::new();
+/// Session name -> indices into `rows`, in the ordered row sequence. A
+/// BTreeMap, not a HashMap: the drilldown walks it to build the fire list,
+/// and equal-timestamp ties must resolve the same way on every run.
+fn sessions_map(rows: &[Row]) -> std::collections::BTreeMap<String, Vec<usize>> {
+    let mut map: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
     for (i, row) in rows.iter().enumerate() {
         if let Some(s) = &row.session {
             map.entry(s.clone()).or_default().push(i);
@@ -613,7 +615,7 @@ fn sessions_map(rows: &[Row]) -> HashMap<String, Vec<usize>> {
 /// Unassigned rows never chain: they have no session to chain within.
 fn drilldown(
     rows: &[Row],
-    sessions: &HashMap<String, Vec<usize>>,
+    sessions: &std::collections::BTreeMap<String, Vec<usize>>,
     board: &[(String, EntryAcc)],
     pattern: &str,
     window: usize,
@@ -910,7 +912,7 @@ fn display_value(v: &Value) -> String {
 fn entry_json(
     pattern: &str,
     acc: &EntryAcc,
-    sessions: &HashMap<String, Vec<usize>>,
+    sessions: &std::collections::BTreeMap<String, Vec<usize>>,
     rows: &[Row],
     window: usize,
     include_all: bool,
@@ -1330,5 +1332,34 @@ mod tests {
         assert!(parse_since("7é").is_err());
         assert!(parse_since("3日").is_err());
         assert!(parse_since("7d").is_ok());
+    }
+
+    #[test]
+    fn drilldown_breaks_equal_timestamp_ties_deterministically() {
+        // Two sessions fire at the same instant; the five-slot detail list is
+        // cut to one. The session order comes from the BTreeMap, so the pick
+        // is the same on every run instead of HashMap's per-process order.
+        let rows = rows_of(&[
+            event(
+                "2026-09-12T10:00:00Z",
+                "termination",
+                Some("s2"),
+                Some("n2"),
+                json!({"reason": "Budget"}),
+            ),
+            event(
+                "2026-09-12T10:00:00Z",
+                "termination",
+                Some("s1"),
+                Some("n1"),
+                json!({"reason": "Budget"}),
+            ),
+        ]);
+        let sessions = sessions_map(&rows);
+        let board = build_leaderboard(&rows, false);
+        let result = drilldown(&rows, &sessions, &board, "termination:Budget", 20, 1, false);
+        let details = result["sessions"].as_array().expect("details list");
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0]["session_id"], "s1", "sorted session order");
     }
 }
