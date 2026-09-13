@@ -2410,15 +2410,9 @@ fn arms_readout(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // The global journal derives from the agents root we already hold (its
-    // parent dir), never a hand-built path: the root is the declared resolver
-    // surface, so an FNO_AGENTS_HOME override reaches this scan by construction.
-    let global = home
-        .root()
-        .parent()
-        .map(|p| p.join("events.jsonl"))
-        .unwrap_or_else(|| home.events_jsonl());
-    let journals = vec![home.events_jsonl(), global];
+    // The journal list is owned by tick_ledger::journals, so the readout and
+    // the arm_watch daemon arm fold the same files and cannot drift.
+    let journals = fno_agents::tick_ledger::journals(home);
     let arms = fno_agents::tick_ledger::read_arms(&journals, now_unix);
     let trace = fno_agents::tick_ledger::read_tick_trace(&journals, now_unix);
     (arms, trace)

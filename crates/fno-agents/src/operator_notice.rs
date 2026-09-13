@@ -78,7 +78,7 @@ pub enum Verdict {
     SendFailed,
 }
 
-fn notify_signals_path() -> PathBuf {
+pub(crate) fn notify_signals_path() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_NOTIFY_SIGNALS").filter(|v| !v.is_empty()) {
         return PathBuf::from(v);
     }

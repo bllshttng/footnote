@@ -2226,9 +2226,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // Screen-manifest scrape gate: at most one sweep in flight (a slow mux
     // stalls its own sweep, never the loop or a pile-up of sweeps).
     let scrape_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Terminal-stop sweep gate (x-fcbf): same one-in-flight discipline. Each
-    // `claude stop` is a subprocess; a large marker set must never serialize
-    // inline in the select arm and starve accept()/SIGTERM.
+    // Terminal-stop sweep gate (x-fcbf): same one-in-flight discipline; a large
+    // marker set must never serialize inline and starve accept()/SIGTERM.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Orphaned-test-binary reap gate: same one-in-flight discipline. The verb
@@ -2239,14 +2238,14 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut last_liveness_sweep = Instant::now();
     // Machine watch (x-d6ad): the arm owns its cadence, gate and memory.
     let machine_watch = crate::machine_watch::Arm::default();
+    let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     // Retirement-sweep cadence (x-d354): the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
     let mut last_gc_sweep = Instant::now();
     let retire_interval_next = crate::gc::seed_retire_interval_cell(&ctx.opts.agents_config_cwd);
     // Dead-row GC gate (x-ef7f): its dormant check shells out to the truth
-    // probe, so it gets the same one-in-flight discipline as the sweeps beside
-    // it rather than running inline in the select arm.
+    // probe, so it gets the same one-in-flight discipline as its neighbors.
     let gc_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Idle-exit liveness probe gate + verdict handoff: the probe is blocking
     // I/O (a connect per socket candidate), so the arm spawns it and reads
@@ -2410,6 +2409,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 );
                 // The machine gets an arm (x-d6ad): bands the box, escalates, gates nothing.
                 crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
+                crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's
                 // measurement, refreshed every SERVED_LIVENESS_CADENCE with
                 // no lifecycle write. Off-loop behind a one-in-flight gate,
