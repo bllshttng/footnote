@@ -29,52 +29,37 @@ def resolve_self_identity(
     """Resolve the harness identity this process can prove it owns.
 
     The prover is the process-tree walk, and it is the only prover for an
-    AMBIENT marker. The nearest harness ancestor is what a process actually
-    runs under, so it separates a marker this session minted from one it
-    merely inherited.
+    AMBIENT marker: the nearest harness ancestor separates a marker this
+    session minted from one it merely inherited. A self-set marker such as
+    ``CLAUDECODE`` is never a prover - it survives a fork, so a codex session
+    under a shell that ran claude inherits it, and env alone cannot tell the
+    two cases apart (see
+    :data:`fno.harness_identity.SELF_SET_HARNESS_MARKERS`). When the walk has
+    no answer, resolution refuses rather than guesses, except for the
+    uncontended single-family elimination; a walk that cannot tell is
+    "cannot tell" (``None``), never a contradiction (``False``) - only a walk
+    that found a DIFFERENT harness contradicts (x-0992: returning False on a
+    silent walk refused every spawned worker whose ancestry the sandbox
+    hides).
 
     The spawn record is a separate, narrower source that fills a session id
-    ancestry structurally cannot supply: a codex thread worker owns no process
-    (N thread workers share the ONE app-server daemon pid), and the
-    daemon-written registry row, keyed by this process's own cwd, is the only
-    per-worker identity the lane has. See :func:`_fill_spawn_record`, which
-    runs after the walk and never overwrites a proven session id.
-
-    A self-set marker does NOT belong here, and the attempt is worth recording
-    because it looks correct. ``CLAUDECODE`` is written by the claude binary at
-    startup, so a shell that never ran claude cannot produce it; that reads like
-    proof of a claude self. It is not. The variable survives a fork, so a codex
-    session started from a shell that HAD run claude inherits it, and promoting
-    it to a prover contradicts that session's own ``CODEX_THREAD_ID``: a sole
-    codex marker that resolved cleanly degrades to ambiguous, and every identity
-    consumer loses a valid codex session. Environment alone cannot tell the two
-    cases apart, because they carry the identical name set. Only ancestry can,
-    which is what the walk reads.
-
-    So when the walk has no answer - psutil denied, no harness ancestor, a
-    container that hides the parent chain - resolution refuses rather than
-    guesses, and ``fno whoami`` names the inherited family so the operator can
-    clear it. See :data:`fno.harness_identity.SELF_SET_HARNESS_MARKERS`. The
-    one exception is the uncontended single-family case, which every branch
-    resolves by the same elimination the marker loop calls the dominant case:
-    a walk that cannot tell is "cannot tell" (``None``), never a contradiction
-    (``False``) - only a walk that found a DIFFERENT harness contradicts
-    (x-0992: returning False on a silent walk refused every spawned worker
-    whose ancestry the sandbox hides).
+    ancestry structurally cannot supply: a codex thread worker owns no
+    process, and the daemon-written registry row keyed by this process's cwd
+    is the only per-worker identity the lane has. See
+    :func:`_fill_spawn_record`, which runs after the walk and never
+    overwrites a proven session id.
 
     ``collide(harness, session_id, own_pair) -> owner | None`` reports a live
     registry row owning an id. ``own_pair`` is this process's own
-    ``(harness, session_id)`` pair as declared by a COMPLETE canonical stamp,
-    or None when the stamp does not name an id: a row agreeing with the pair
-    on both halves is the caller's OWN row and never contention. The id half
-    must come from the STAMP, never from the ambient marker under test - a
-    name_only stamp plus a marker-built pair is circular (the pair asserts
-    exactly what the marker claims), and a leaked marker meeting its owner's
-    live row would then read as self (the round-1 P1 shape, re-measured by
-    review round 2). A name_only worker instead resolves when the attester
-    witnesses its marker from process ancestry, and fails closed otherwise.
-    The agreement check stays in the registry; this layer computes the pair
-    and hands it over.
+    ``(harness, session_id)`` pair, or None when nothing proves an id: a row
+    agreeing with the pair on both halves is the caller's OWN row and never
+    contention. The id half must come from the STAMP or a witness, never from
+    the ambient marker under test - that pair would assert exactly what the
+    marker claims, and a leaked marker meeting its owner's live row would
+    read as self (round-1 P1). A name_only worker resolves when the attester
+    witnesses its marker from ancestry, or the rollout witness sees its id in
+    a live fd, and fails closed otherwise. The agreement check stays in the
+    registry; this layer computes the pair and hands it over.
 
     ``witness(harness) -> frozenset[session_id]`` names the session ids a live
     rollout fd witnesses for this process (see
