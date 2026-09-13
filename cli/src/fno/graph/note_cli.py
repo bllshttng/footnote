@@ -60,7 +60,7 @@ def cmd_note(
     # A contradicted citation refuses BEFORE the write; an unmeasured claim
     # only warns (this verb advises, never refuses a body).
     try:
-        _, claims = note_evidence(text, list(read))
+        read_rows, claims = note_evidence(text, list(read))
     except (UnresolvableCitationError, UnmeasuredClaimError) as exc:
         typer.echo(f"Error: note refused: {exc}", err=True)
         raise typer.Exit(code=1)
@@ -97,6 +97,7 @@ def cmd_note(
         quiet=quiet,
         session_id=session_id,
         graph_path=graph_path,
+        reads=read_rows,
     )
     if code != 0:
         # 1 = budget/history refusal, 3 = a stale revision conflict. The
@@ -139,7 +140,13 @@ def _receipt(stdout: str) -> Optional[dict]:
 
 
 def _write_state(
-    node_id: str, text: str, *, quiet: bool, session_id: Optional[str], graph_path
+    node_id: str,
+    text: str,
+    *,
+    quiet: bool,
+    session_id: Optional[str],
+    graph_path,
+    reads=None,
 ) -> "tuple[int, Optional[dict]]":
     """One native `backlog-note` invocation. Returns `(exit, receipt)`; the
     receipt is parsed from the child's stdout when the exit is 0."""
@@ -151,6 +158,8 @@ def _write_state(
         raise typer.Exit(code=1)
     argv = [str(binary), "backlog-note", "--graph", str(graph_path), "--stdin",
             "--json", "--node", node_id]
+    if reads:
+        argv.extend(["--reads", json.dumps(reads, separators=(",", ":"))])
     if session_id:
         argv.append("--self-session")
         argv.append(session_id)

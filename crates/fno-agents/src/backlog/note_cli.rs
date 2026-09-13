@@ -28,6 +28,7 @@ struct NoteArgs {
     refresh_marker: bool,
     graph: Option<PathBuf>,
     self_session: Option<String>,
+    reads: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
@@ -46,6 +47,7 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
         refresh_marker: false,
         graph: None,
         self_session: None,
+        reads: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -93,6 +95,14 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
                     .get(i)
                     .ok_or_else(|| "--node needs an id".to_string())?
                     .clone();
+            }
+            "--reads" => {
+                i += 1;
+                out.reads = args
+                    .get(i)
+                    .ok_or_else(|| "--reads needs JSON".to_string())?
+                    .clone()
+                    .into();
             }
             "--self-session" => {
                 i += 1;
@@ -345,12 +355,17 @@ fn write_human(
     // current revision (the optimistic-concurrency guard is always on).
     let rev = node_state::current_revision(graph, &node_id).unwrap_or(0);
     let submitted = parsed.if_revision.unwrap_or(rev);
+    let reads: Option<Value> = parsed
+        .reads
+        .as_deref()
+        .and_then(|r| serde_json::from_str(r).ok());
     let input = StateWriteInput {
         node_id: node_id.clone(),
         body,
         if_revision: Some(submitted),
         source_session_id: parsed.self_session.clone(),
         source_harness: None,
+        reads,
     };
     let receipt = match node_state::replace_state(graph, &input) {
         Ok(r) => r,

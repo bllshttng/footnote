@@ -136,16 +136,26 @@ fn logical_identity(
     )
 }
 
+/// How far back the dedupe scan reaches, in records. The journal is
+/// append-only and logically deduped, so a duplicate can only be the
+/// harmless retry the state writer tolerates - and a retry lands within a
+/// run or two of the failure it retries. Scanning a bounded recent window
+/// keeps the append O(window) instead of O(journal), which would hold the
+/// graph mutation lock for an unbounded read as history ages.
+const DEDUPE_SCAN_WINDOW: usize = 4096;
+
 fn scan_identities(path: &Path) -> std::collections::HashSet<String> {
     let mut seen = std::collections::HashSet::new();
     let Ok(file) = std::fs::File::open(path) else {
         return seen;
     };
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    let lines: Vec<String> = BufReader::new(file).lines().map_while(Result::ok).collect();
+    let start = lines.len().saturating_sub(DEDUPE_SCAN_WINDOW);
+    for line in lines[start..].iter() {
         if line.trim().is_empty() {
             continue;
         }
-        let Some(rec) = record_from_line(&line) else {
+        let Some(rec) = record_from_line(line) else {
             continue;
         };
         seen.insert(logical_identity(

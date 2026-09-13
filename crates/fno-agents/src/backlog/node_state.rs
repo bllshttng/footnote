@@ -154,6 +154,9 @@ pub struct StateWriteInput {
     pub if_revision: Option<u64>,
     pub source_session_id: Option<String>,
     pub source_harness: Option<String>,
+    /// Citation evidence rows (`note --read` provenance), stored beside the
+    /// body inside the state object. `None` leaves the key absent.
+    pub reads: Option<Value>,
 }
 
 /// The outcome of one successful replacement.
@@ -306,16 +309,19 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
             continue;
         }
         let obj = row.as_object_mut().unwrap();
-        obj.insert(
-            STATE_KEY.into(),
-            json!({
-                "body": body,
-                "revision": expected + 1,
-                "updated_at": graph_store::now_isoformat(),
-                "source_session_id": session,
-                "source_harness": harness,
-            }),
-        );
+        let mut state = json!({
+            "body": body,
+            "revision": expected + 1,
+            "updated_at": graph_store::now_isoformat(),
+            "source_session_id": session,
+            "source_harness": harness,
+        });
+        if let Some(reads) = &input.reads {
+            if let Some(state_obj) = state.as_object_mut() {
+                state_obj.insert("reads".into(), reads.clone());
+            }
+        }
+        obj.insert(STATE_KEY.into(), state);
         break;
     }
     graph_store::locked_mutate_with_hook(

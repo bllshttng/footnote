@@ -31,6 +31,7 @@ fn ws(_graph: &std::path::Path, id: &str, body: &str) -> StateWriteInput {
         if_revision: None,
         source_session_id: None,
         source_harness: None,
+        reads: None,
     }
 }
 
@@ -168,6 +169,7 @@ fn ws_rev(_graph: &std::path::Path, id: &str, body: &str, if_revision: u64) -> S
         if_revision: Some(if_revision),
         source_session_id: None,
         source_harness: None,
+        reads: None,
     }
 }
 

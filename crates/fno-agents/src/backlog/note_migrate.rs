@@ -397,6 +397,7 @@ fn run_migrate(
         };
         // Re-read and re-judge UNDER the lock, journal originals, then let the
         // candidate publish. A stale or refusing row leaves the row intact.
+        let journaled_count = std::cell::Cell::new(0usize);
         let mut hook = |raw: &[Value]| -> Result<(), graph_store::StoreError> {
             let row = raw
                 .iter()
@@ -418,9 +419,10 @@ fn run_migrate(
             } else {
                 note_history::REASON_NOTE_MIGRATED
             };
-            journal_originals(graph, row, entry.as_ref(), reason).map_err(|e| {
+            let n = journal_originals(graph, row, entry.as_ref(), reason).map_err(|e| {
                 graph_store::StoreError::Invalid(format!("history write failed: {e}"))
             })?;
+            journaled_count.set(n);
             Ok(())
         };
         let candidate = build_candidate(
@@ -460,10 +462,13 @@ fn run_migrate(
             .unwrap_or(false);
         let (_, history_count) =
             note_history::read(graph, Some(id), 0, usize::MAX).unwrap_or((Vec::new(), 0));
-        if clean && history_count > 0 {
+        let journaled = journaled_count.get();
+        if clean && history_count > 0 && journaled > 0 {
             digested_nodes += 1;
             verified += 1;
-            archived_notes += history_count;
+            // Count what THIS run journaled, not the node's whole history:
+            // a node with prior state revisions already carries records.
+            archived_notes += journaled;
             if entry.as_ref().map(|e| e.details.is_some()).unwrap_or(false) {
                 details_archived += 1;
             }

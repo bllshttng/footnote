@@ -649,7 +649,7 @@ def _run(monkeypatch, argv: list[str], readers=None, refused=None, send=None):
     monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
     written: list[str] = []
 
-    def fake_write(node_id, text, *, quiet, session_id, graph_path):
+    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None):
         written.append(node_id)
         return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
 
@@ -691,7 +691,7 @@ def test_quiet_writes_the_note_and_resolves_nobody(monkeypatch) -> None:
     monkeypatch.setattr(
         note_bridge,
         "_write_state",
-        lambda node_id, text, *, quiet, session_id, graph_path: (
+        lambda node_id, text, *, quiet, session_id, graph_path, reads=None: (
             0,
             {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1},
         ),
@@ -759,7 +759,7 @@ def test_an_unknown_node_refuses_before_the_append(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: graph)
     written: list[str] = []
 
-    def fake_write(node_id, text, *, quiet, session_id, graph_path):
+    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None):
         written.append(node_id)
         return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
 
