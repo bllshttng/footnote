@@ -2,7 +2,7 @@
 # test_king_delegation_guard.sh
 #
 # Unit tests for hooks/king-delegation-guard.sh: a crowned court session is
-# refused source authorship with a reason naming the delegation verbs (AC1);
+# refused with a reason naming the write target and the allowed roots (AC1);
 # the unblock allowlist, the plans-directory carveout, and the off knob allow
 # (AC2); a pass shape, an uncrowned row, and an unreadable registry all allow,
 # the unreadable case with a line on stderr (AC3); a Task limb of the court
@@ -89,15 +89,17 @@ edit_payload_t() { printf '{"tool_name":"Edit","session_id":"%s","transcript_pat
 # the parent session id plus the harness's per-call subagent marker.
 edit_payload_ag() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"%s","agent_id":"%s","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$2" "$3" "$TMP/repo" "$1"; }
 
-# ── AC1-HP: crowned court + Edit on a source file -> deny naming both verbs ──
+# ── AC1-HP: crowned court + Edit on a source file -> deny names path + roots ─
 registry_fixture "$CROWNED"
 manifest_fixture court
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
+REASON="$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')"
 if [[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-   && echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q "fno agents spawn '/fno:target <id>' --node <id> --substrate thread" \
-   && echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q "fno backlog advance" \
+   && printf '%s' "$REASON" | grep -qF "$SRC_FILE" \
+   && printf '%s' "$REASON" | grep -qF "$KGD_PLANS" \
+   && ! printf '%s' "$REASON" | grep -qiE "spawn|advance" \
    && echo "$OUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
-  pass "AC1: crowned court Edit denied, reason names spawn + advance"
+  pass "AC1: crowned court Edit denied, reason names the path + allowed roots, no delegation verbs"
 else
   fail "AC1: rc=$RC out=${OUT:0:300}"
 fi
@@ -135,8 +137,8 @@ OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 printf 'warn\n' > "$KGD_KNOB"
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 ERR="$(cat "$TMP/stderr.txt")"
-[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"crowned court session does not implement"* ]] \
-  && pass "AC2: knob warn emits refusal on stderr and allows" \
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"$SRC_FILE"* && "$ERR" == *"outside the allowed roots"* ]] \
+  && pass "AC2: knob warn names the path on stderr and allows" \
   || fail "AC2: knob warn rc=$RC out=$OUT err=$ERR"
 : > "$KGD_KNOB"
 
@@ -264,6 +266,33 @@ OUT="$(run_guard "$(bash_payload "cat > \"$KGD_PLANS/plan;.md\"")")"; RC=$?
 OUT="$(run_guard "$(bash_payload "fno backlog session close x-1 --launch '/fno:target x-1' 2>&1; echo done")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "glue: session close with 2>&1; chain allows" \
   || fail "glue session close rc=$RC out=$OUT"
+
+# ── Node specimens: reads pass untouched; a refusal names the path, never ────
+# delegation. These are the verify shapes the node names.
+registry_fixture "$CROWNED"
+manifest_fixture court
+OUT="$(run_guard "$(bash_payload "git log --oneline -5")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "reads: git log allows" \
+  || fail "reads git log rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "ls -la $TMP/repo/src")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "reads: ls allows" \
+  || fail "reads ls rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $KGD_HANDOFF")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: cp into the canon doc allowed" \
+  || fail "handoff cp rc=$RC out=$OUT"
+
+mkdir -p "$TMP/vault/briefs"
+OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $TMP/vault/briefs/b.md")")"; RC=$?
+REASON="$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')"
+if echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+   && printf '%s' "$REASON" | grep -qF "vault/briefs/b.md" \
+   && ! printf '%s' "$REASON" | grep -qiE "spawn|advance"; then
+  pass "vault: cp outside the roots denied, reason names the path, no delegation verbs"
+else
+  fail "vault cp rc=$RC out=${OUT:0:300}"
+fi
 
 # ── Limb carve-out: a Task subagent of this very court is a limb, not the king.
 # Its payload carries the parent's session_id, so sections 2-4 see the crown,
