@@ -221,3 +221,49 @@ def test_wake_entries_read_once_per_graph_identity(graph, monkeypatch):
     assert len(calls) == 2  # the write moved the identity: one real re-read
     epic = next(row for row in third if row.get("id") == SCOPE)
     assert epic["status"] == "done"  # the fresh row, not the memo
+
+
+def test_sqlite_backend_names_no_file_identity(graph):
+    import sqlite3
+
+    from fno.king import drain_cache
+
+    assert drain_cache.graph_ident(graph) is not None
+    con = sqlite3.connect(graph.with_suffix(".db"))
+    try:
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS graph_meta ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        con.execute(
+            "INSERT INTO graph_meta(key, value) VALUES('backend', 'sqlite')"
+        )
+        con.commit()
+    finally:
+        con.close()
+    # The keeper serves graph.db under this backend; the json file can lag
+    # until export, so no file identity may exist to key a cache on.
+    assert drain_cache.graph_ident(graph) is None
+
+
+def test_store_skipped_when_the_identity_moved_during_the_read(graph, monkeypatch):
+    from fno.king import drain_cache
+
+    real_ident = drain_cache.graph_ident(graph)
+    assert real_ident is not None
+    stats = {"n": 0}
+
+    def _write_lands_mid_read(path):
+        stats["n"] += 1
+        if stats["n"] == 1:
+            return real_ident  # the pre-read stat
+        return ("moved",)  # a write landed before the post-read stat
+
+    monkeypatch.setattr(drain_cache, "graph_ident", _write_lands_mid_read)
+    exit_code, payload, _ = _invoke_drain()
+    assert exit_code == 0
+    assert payload["undelivered"] == UNDELIVERED_COUNT
+    # The mismatched pair was never stored: the moved identity is not real,
+    # and the true identity has no row, so the next fire recomputes.
+    monkeypatch.setattr(drain_cache, "graph_ident", lambda p: real_ident)
+    assert drain_cache.load(SCOPE, real_ident) is None

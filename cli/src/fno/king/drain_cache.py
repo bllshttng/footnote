@@ -21,14 +21,36 @@ def cache_file() -> Path:
 def graph_ident(path: Path) -> "tuple | None":
     """Stat identity of the graph file, or None when it cannot be stat'd.
 
+    None too when the store names the sqlite backend in the sibling db's
+    graph_meta: the keeper serves rows from graph.db and the json file can
+    lag until an export, so a file-identity cache would never invalidate.
     ctime rides along: a same-size same-mtime overwrite moves neither, and
     only ctime catches it (the keeper's cache carries it for the same reason).
     """
     try:
         st = Path(path).stat()
+        if _sqlite_backend(path):
+            return None
     except OSError:
         return None
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _sqlite_backend(path: Path) -> bool:
+    """The keeper's own predicate, read-only: unset/absent db reads as json."""
+    import sqlite3
+
+    try:
+        con = sqlite3.connect(f"file:{path.with_suffix('.db')}?mode=ro", uri=True)
+        try:
+            row = con.execute(
+                "SELECT value FROM graph_meta WHERE key = 'backend'"
+            ).fetchone()
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 - any read fault reads as the json default
+        return False
+    return bool(row) and row[0] == "sqlite"
 
 
 def load(scope: str, ident: tuple) -> "int | None":

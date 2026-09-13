@@ -781,9 +781,10 @@ def drain_cmd(
     ) as exc:
         typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
         raise typer.Exit(1) from exc
-    # Post-read stat: the row cannot outlive the bytes it was computed from.
+    # Store only when no write landed during the read: a post-read identity
+    # that moved describes bytes the count never saw.
     post = drain_cache.graph_ident(path)
-    if post is not None:
+    if post is not None and post == ident:
         drain_cache.store(scope, post, undelivered)
     typer.echo(json.dumps({"scope": scope, "undelivered": undelivered}))
 
