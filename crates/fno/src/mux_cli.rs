@@ -4490,7 +4490,7 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
 // file shrink-only.
 mod thread_verb;
 pub use thread_verb::thread;
-// (x-9943) The `fno mux web stop|reap` verbs, same child-module pattern: this
+// The `fno mux web stop|reap` verbs, same child-module pattern: this
 // over-budget file stays shrink-only.
 mod web_ctl;
 pub use web_ctl::web;

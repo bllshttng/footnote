@@ -1,6 +1,6 @@
-//! (x-9943) The `fno mux web stop|reap` verbs: the off switch and corpse sweep
-//! for the `--web` bridge marker (`web-<session>.json`, written and Drop-removed
-//! by `mux serve --web`, crates/fno/src/web.rs). A bridge killed by anything but
+//! The `fno mux web stop|reap` verbs: the off switch and corpse sweep for the
+//! `--web` bridge marker (`web-<session>.json`, written and Drop-removed by
+//! `mux serve --web`, crates/fno/src/web.rs). A bridge killed by anything but
 //! its own Drop - SIGKILL, a crash, a machine reboot - leaves the file and its
 //! 64-hex token on disk forever. `stop` ends the bridge a session named; `reap`
 //! removes every marker whose port refuses.
@@ -29,18 +29,22 @@ pub fn web(args: &[OsString], env_session: Option<&str>) -> i32 {
     }
 }
 
-/// Can anything accept a TCP connection on (bind, port) right now? One probe,
-/// 300 ms. Shared with `print_pane_url`'s liveness check so the URL door and
-/// the reap verdict read the same world.
+/// Can anything accept a TCP connection on (bind, port) right now? One probe
+/// per resolved address, 300 ms each, first answer wins: startup's bind tries
+/// every resolved address until one succeeds, so a live bridge can sit on the
+/// second of them. Shared with `print_pane_url`'s liveness check so the URL
+/// door and the reap verdict read the same world.
 pub(crate) fn bridge_alive(bind: &str, port: u16) -> bool {
     use std::net::ToSocketAddrs;
-    let Ok(mut addrs) = (bind, port).to_socket_addrs() else {
+    let Ok(addrs) = (bind, port).to_socket_addrs() else {
         return false;
     };
-    let Some(addr) = addrs.next() else {
-        return false;
-    };
-    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+    for addr in addrs.take(8) {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 /// The marker's ownership fold, shared with `WebStateFile::drop`: a file that
@@ -113,12 +117,25 @@ fn stop_ladder(pid: u32) -> bool {
 fn web_stop(args: &[OsString], env_session: Option<&str>) -> i32 {
     let mut session_arg = None;
     let mut json = false;
+    let mut end_of_flags = false;
     for a in args {
         let Some(s) = a.to_str() else {
             eprintln!("fno mux web stop: non-UTF-8 argument");
             return EXIT_USAGE;
         };
+        if end_of_flags {
+            // After `--` everything is the session name, even one that starts
+            // with a dash: `mux serve --web --server <name>` accepts such a
+            // name, so its bridge must stay stoppable.
+            if session_arg.is_some() {
+                eprintln!("fno mux web stop: at most one session name");
+                return EXIT_USAGE;
+            }
+            session_arg = Some(s.to_string());
+            continue;
+        }
         match s {
+            "--" => end_of_flags = true,
             "--json" if json => {
                 eprintln!("fno mux web stop: --json given twice");
                 return EXIT_USAGE;
@@ -161,8 +178,24 @@ fn web_stop(args: &[OsString], env_session: Option<&str>) -> i32 {
             return EXIT_ERROR;
         }
     };
-    let port = state.get("port").and_then(|v| v.as_u64());
-    let already_dead = !pid_alive(pid);
+    let port = state
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .and_then(|p| u16::try_from(p).ok());
+    let bind = state
+        .get("bind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1");
+    // The pid alone does not name the bridge: a corpse marker's number can be
+    // recycled by an innocent process. The marker's own port is the identity
+    // check - the marker is written only after the listener binds, so a
+    // refused port means the bridge is gone and the pid belongs to someone
+    // else. Signal only a pid whose port still answers.
+    let already_dead = !pid_alive(pid)
+        || match port {
+            Some(p) => !bridge_alive(bind, p),
+            None => false,
+        };
     if !already_dead {
         stop_ladder(pid);
     }
@@ -222,10 +255,11 @@ fn reap_partition(dir: &std::path::Path) -> (Vec<String>, Vec<String>, Vec<Strin
     let (mut reaped, mut live, mut unreadable) = (Vec::new(), Vec::new(), Vec::new());
     for path in paths {
         let session = session_of(&path);
-        let Some(state) = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        else {
+        let Some(raw) = std::fs::read_to_string(&path).ok() else {
+            unreadable.push(session);
+            continue;
+        };
+        let Ok(state) = serde_json::from_str::<serde_json::Value>(&raw) else {
             unreadable.push(session);
             continue;
         };
@@ -242,12 +276,20 @@ fn reap_partition(dir: &std::path::Path) -> (Vec<String>, Vec<String>, Vec<Strin
             continue;
         };
         // The marker is written only after the listener binds, so a refused
-        // port means the listener is gone: this is a corpse.
+        // port means the listener is gone: this is a corpse. Remove it only
+        // while the file still holds the bytes this verdict came from: a
+        // replacement bridge that overwrote the path between read and unlink
+        // must not lose its marker to the sweep.
         if bridge_alive(bind, port) {
             live.push(session);
-        } else {
-            let _ = std::fs::remove_file(&path);
+        } else if std::fs::read_to_string(&path)
+            .map(|now| now == raw)
+            .unwrap_or(false)
+            && std::fs::remove_file(&path).is_ok()
+        {
             reaped.push(session);
+        } else {
+            unreadable.push(session);
         }
     }
     (reaped, live, unreadable)
@@ -355,11 +397,13 @@ mod tests {
 
     #[test]
     fn stop_signals_a_live_bridge_and_removes_the_marker() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let live_port = listener.local_addr().unwrap().port();
         let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
         write_marker(
             "livebridge",
             &format!(
-                "{{\"bind\":\"127.0.0.1\",\"port\":1,\"token\":\"a\",\"pid\":{}}}",
+                "{{\"bind\":\"127.0.0.1\",\"port\":{live_port},\"token\":\"a\",\"pid\":{}}}",
                 child.id()
             ),
         );
@@ -369,8 +413,55 @@ mod tests {
         );
         assert_eq!(code, EXIT_OK);
         assert!(!marker_path("livebridge").exists());
-        // wait_gone reaped the child through waitpid; the exit status is
-        // already collected, so only the file contract is asserted here.
+        // The port answered and the pid answered, so the ladder ran: the
+        // stand-in bridge must be dead. web_stop's liveness probe reaped it
+        // through waitpid, so std's Child no longer owns it; the signal
+        // probe is the death proof.
+        assert_ne!(
+            unsafe { libc::kill(child.id() as libc::pid_t, 0) },
+            0,
+            "a live pid with a live port gets signaled"
+        );
+    }
+
+    #[test]
+    fn stop_spares_a_recycled_pid_when_the_port_refuses() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        write_marker(
+            "recycled",
+            &format!(
+                "{{\"bind\":\"127.0.0.1\",\"port\":{dead_port},\"token\":\"a\",\"pid\":{}}}",
+                child.id()
+            ),
+        );
+        let code = web(&[OsString::from("stop"), OsString::from("recycled")], None);
+        assert_eq!(code, EXIT_OK);
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "a live pid behind a refused port is a recycled number, not the bridge"
+        );
+        assert!(!marker_path("recycled").exists());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn stop_honors_end_of_options() {
+        assert_eq!(
+            web(
+                &[
+                    OsString::from("stop"),
+                    OsString::from("--"),
+                    OsString::from("--weird")
+                ],
+                None
+            ),
+            EXIT_ERROR,
+            "-- names session --weird; no such marker is the error path"
+        );
     }
 
     #[test]
