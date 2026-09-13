@@ -142,7 +142,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_RUNTIME_STATE_PATH` | py | unclear: cli/src/fno/adapters/providers/runtime_state.py:186 |
 | `FNO_RUST_FRONT` | py | unclear: cli/src/fno/lint_verb_ratchet.py:674 |
 | `FNO_SERVER` | py | Names the target mux server. |
-| `FNO_SESSION` | py | Deprecated alias of FNO_SERVER. |
+| `FNO_SESSION` | py+rs | Deprecated alias of FNO_SERVER; the Rust pane-send audit row also reads it as the calling session the send came from (x-91ba). |
 | `FNO_SESSION_HARNESS` | py | unclear: cli/src/fno/claims/session_pid.py:223 |
 | `FNO_SESSION_PID` | py | unclear: cli/src/fno/claims/session_pid.py:163 |
 | `FNO_SIDECAR_SOCKET` | py | unclear: cli/src/fno/mcp/sidecar.py:97 |
