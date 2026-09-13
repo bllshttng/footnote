@@ -1022,11 +1022,8 @@ fn ac3_hp_budget_flat_key_trips_cost() {
     fs::write(&settings_path, "budget_cap = 0.01\n").unwrap();
 
     // Ledger with cost > 0.01 for this session
-    let ledger_path = {
-        let path = fno_agents::paths::ledger_path(&cwd);
-        let _ = std::fs::create_dir_all(path.parent().unwrap());
-        path
-    };
+    let ledger_path = fno_agents::paths::ledger_path(&cwd);
+    let _ = std::fs::create_dir_all(ledger_path.parent().unwrap());
     let ledger = serde_json::json!([
         {"session_id": "sess-budget", "cost_usd": 0.05, "tokens": 1000}
     ]);

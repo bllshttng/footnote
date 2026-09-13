@@ -1478,8 +1478,6 @@ mod feed_view;
 mod keys_modal;
 mod needs_view;
 pub(crate) use needs_view::needs_overlay_lines;
-#[cfg(test)]
-pub(crate) use needs_view::NeedsProjection;
 
 /// The move-tab / move-pane destination picker's state (x-96e8, cursored by
 /// x-3e17). Was a bare `(MoveSrc, Vec<u64>)` tuple, which had nowhere to keep a
@@ -2313,8 +2311,6 @@ use update_menu::{
     build_sideline_menu, build_update_modal, probe_update_readiness, run_restart_verb,
     UpdateOutcome,
 };
-#[cfg(test)]
-use update_menu::{RunningRow, UpdateReadiness};
 
 /// The operator tapped a choice: the modal named the counts, so the tap IS
 /// the confirmation. Queue the apply for the run loop (or say why not).

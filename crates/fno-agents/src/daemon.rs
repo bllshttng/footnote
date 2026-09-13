@@ -8740,14 +8740,6 @@ fn fill_random(buf: &mut [u8]) {
     }
 }
 
-// Test-only consumers (daemon's own cfg(test) modules and src/daemon/tests/*)
-// reach these through `use super::*`, so the imports stay scoped to test builds.
-#[cfg(test)]
-use crate::client_verbs::RowLiveness;
-#[cfg(test)]
-use crate::codex_thread_entry::build_codex_thread_entry;
-#[cfg(test)]
-pub(crate) use crate::row_truth::{apply_title_changes, row_truth_handles};
 #[cfg(test)]
 mod tests {
     #[path = "blocking_bound_tests.rs"]
@@ -8756,6 +8748,8 @@ mod tests {
     mod store_socket_sweep_tests;
     use super::blocking_bound::directory_bytes_within;
     use super::*;
+    use crate::client_verbs::RowLiveness;
+    use crate::codex_thread_entry::build_codex_thread_entry;
 
     /// The e2e restart-storm test only exercises `state_error_code` when the
     /// scheduler happens to race a task into shutdown-cancellation, so its

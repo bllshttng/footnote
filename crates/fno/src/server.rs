@@ -35,8 +35,6 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::agents_view::{self, RegistryAgent};
 use crate::backlog_view;
-#[cfg(test)]
-use crate::proto::AgentRow;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge,
     AgentNoPaneReason, AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel, CardState,
@@ -15572,6 +15570,7 @@ async fn client_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::AgentRow;
     use crate::pty::ChildGuard;
     use crate::restore_gate::{set_restore_registry_rows, RestoreRegistryRowsGuard};
 
