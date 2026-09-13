@@ -410,7 +410,7 @@ Decide whether a node's plan promised work that has not all shipped.
          (legacy, ambient shell, harness without a session id) block nothing
          at close time; they stay visible via ``fno backlog carveout list`` and the
          retro sweep, which are the repo-wide backstop.
-      E. Open prove-it FAIL verdict (x-6d64). The node's own
+      E. Open prove-it FAIL verdict. The node's own
          ``<plan>.artifacts/`` tree holds a terminal ``fno-prove-it:`` record
          whose verdict is FAIL and which no ruling names. A FAIL is claimed
          work whose outcome did not hold, so it holds the close of a node that
