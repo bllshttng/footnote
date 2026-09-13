@@ -13,7 +13,11 @@ FNO_EVENTS_PATH pinned per test, so no gate state reaches a real store.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -57,8 +61,12 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _advance_result(decision: str = "disabled") -> SimpleNamespace:
+    # notes/json_receipt: newer AdvanceResult contract; a dev binary present
+    # (FNO_AGENTS_BIN) routes --json through json_receipt(), which CI's
+    # binary-less skip never reaches.
     return SimpleNamespace(
-        decision=decision, event="", reason="", node_id=None, short_id=None
+        decision=decision, event="", reason="", node_id=None, short_id=None,
+        notes=(), json_receipt=lambda: {"decision": decision},
     )
 
 
@@ -254,3 +262,253 @@ def test_epic_stop_bypasses_the_gate(iso, monkeypatch):
     result = runner.invoke(app, ["backlog", "advance", "--epic", "x-epic-a", "--stop"])
     assert result.exit_code == 0, result.output
     assert ran, "deactivating a mission must never be held by its own drain"
+
+
+# ---------------------------------------------------------------------------
+# x-626f: a live holder carries its own budget, dumps its stack on SIGUSR1,
+# and dies with an opted-in parent. The specimen shape: a LIVE holder parked
+# at 0.0 pct CPU on a blocking read, which no pid probe can call dead.
+# ---------------------------------------------------------------------------
+
+_SRC = str(Path(__file__).resolve().parents[2] / "src")
+
+
+def _short_sock_dir() -> Path:
+    """A short-lived dir with a socket path UNDER the 104-char AF_UNIX cap
+    (pytest's tmp_path is far over it on macOS)."""
+    import tempfile
+
+    return Path(tempfile.mkdtemp(prefix="x626f-"))
+
+# A reconcile whose work blocks forever reading a unix socket that accepted
+# but never replies - the AC1-HP blocking read, in ~15 lines.
+_CHILD_BLOCK_ON_SOCKET = """
+import socket, sys
+from fno.backlog.single_flight import reconcile_gate
+
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sys.argv[1])
+srv.listen(1)
+c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+c.connect(sys.argv[1])
+conn, _ = srv.accept()
+
+def once():
+    conn.recv(1)  # the silent-socket read: blocks forever
+
+reconcile_gate(dry_run=False, node=None, json_out=False, pr_number=None, once=once)
+"""
+
+# The same blocker as a SESSION LEADER with its own sleep child: the budget
+# watchdog's group kill must take the descendant with the holder (the codex
+# P1 on this PR), not only the Python process.
+_CHILD_LEADER_WITH_CHILD = """
+import os, socket, subprocess, sys
+os.setsid()
+sleeper = subprocess.Popen(["sleep", "98766"])
+with open(sys.argv[2], "w") as fh:
+    fh.write(str(sleeper.pid))
+from fno.backlog.single_flight import reconcile_gate
+
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sys.argv[1])
+srv.listen(1)
+c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+c.connect(sys.argv[1])
+conn, _ = srv.accept()
+
+def once():
+    conn.recv(1)
+
+reconcile_gate(dry_run=False, node=None, json_out=False, pr_number=None, once=once)
+"""
+
+# Spawns the blocker with FNO_DIE_WITH_PARENT naming ITSELF, then lives until
+# killed - the child's real parent in everything but the env var it passed.
+_INTERMEDIATE_PARENT = """
+import os, subprocess, sys, time
+env = dict(os.environ, FNO_DIE_WITH_PARENT=str(os.getpid()))
+proc = subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]], env=env)
+with open(sys.argv[3], "w") as fh:
+    fh.write(str(proc.pid))
+time.sleep(120)
+"""
+
+
+def _child_env(iso: Path, extra: dict) -> dict:
+    env = dict(
+        os.environ,
+        FNO_CLAIMS_ROOT=str(iso),
+        FNO_REPO_ROOT=str(iso),
+        FNO_EVENTS_PATH=str(iso / ".fno" / "events.jsonl"),
+        PYTHONPATH=_SRC + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    )
+    dev = find_dev_binary()
+    if dev is not None:
+        env["FNO_AGENTS_BIN"] = str(dev)
+    env.update(extra)
+    return env
+
+
+def _wait_for_flight_held(key: str, iso: Path, proc: "subprocess.Popen | None" = None, timeout: float = 8.0) -> None:
+    from fno.claims.io import claim_path
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if claim_path(key, root=iso).exists():
+            return
+        if proc is not None and proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    stderr = proc.stderr.read()[:500] if proc is not None and proc.stderr else b""
+    raise AssertionError(f"child never acquired the flight {key} (rc={proc.poll() if proc else 'n/a'}); stderr: {stderr}")
+
+
+def _pid_gone(pid: int) -> bool:
+    """True when the pid is gone OR a reaped-pending zombie (a grandchild we
+    can never waitpid)."""
+    out = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+    )
+    stat = out.stdout.strip()
+    return not stat or stat[0] == "Z"
+
+
+def test_budget_trips_a_live_blocked_holder(iso):
+    """AC1-HP: budget 2s elapses while the holder blocks on a silent socket;
+    the process exits 124, the flight reads free, and the stack file names
+    the blocking frame."""
+    key = reconcile_flight_key(node=None, pr_number=None)
+    sock = _short_sock_dir() / "s.sock"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _CHILD_BLOCK_ON_SOCKET, str(sock)],
+        env=_child_env(iso, {"FNO_FLIGHT_BUDGET_S": "2"}),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for_flight_held(key, iso, proc)
+        assert proc.wait(timeout=8) == 124, f"child did not self-trip: {proc.stderr.read()[:400]}"
+        stack_file = iso / ".fno" / "flight" / f"stack-{proc.pid}.txt"
+        assert stack_file.exists(), "the watchdog must leave the stack file"
+        # dump_traceback names the FRAME's function ("in once"), not the line text
+        assert b"once" in stack_file.read_bytes(), "the stack must name the blocking frame"
+        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_die_with_parent_exits_the_orphan(iso):
+    """AC1-ERR positive: the named parent is SIGKILLed; the child exits within
+    4 seconds and its flight reads free."""
+    key = reconcile_flight_key(node=None, pr_number=None)
+    sock = _short_sock_dir() / "s.sock"
+    pidfile = iso / "child.pid"
+    intermediate = subprocess.Popen(
+        [sys.executable, "-c", _INTERMEDIATE_PARENT, _CHILD_BLOCK_ON_SOCKET, str(sock), str(pidfile)],
+        env=_child_env(iso, {}),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not pidfile.exists():
+            time.sleep(0.1)
+        child_pid = int(pidfile.read_text())
+        _wait_for_flight_held(key, iso)  # child is a grandchild; no Popen handle
+        os.kill(intermediate.pid, signal.SIGKILL)
+        intermediate.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not _pid_gone(child_pid):
+            time.sleep(0.2)
+        if not _pid_gone(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
+            raise AssertionError("orphaned child did not exit within 5s of its parent's death")
+        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+    finally:
+        if intermediate.poll() is None:
+            intermediate.kill()
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_die_with_parent_unset_keeps_the_orphan_running(iso):
+    """AC1-ERR negative: without the opt-in, the child outlives its parent
+    (the detached reconcile-throttle shape stays legal)."""
+    key = reconcile_flight_key(node=None, pr_number=None)
+    sock = _short_sock_dir() / "s.sock"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _CHILD_BLOCK_ON_SOCKET, str(sock)],
+        env=_child_env(iso, {}),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for_flight_held(key, iso, proc)
+        time.sleep(2.5)
+        assert proc.poll() is None, "unset FNO_DIE_WITH_PARENT must never trip the watchdog"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_budget_takes_the_subtree_when_session_leader(iso):
+    """The codex P1: a holder blocked in a subprocess must not orphan it on
+    the trip. As a session leader the group kill takes the descendant too."""
+    key = reconcile_flight_key(node=None, pr_number=None)
+    sock = _short_sock_dir() / "lead.sock"
+    pidfile = iso / "sleeper.pid"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _CHILD_LEADER_WITH_CHILD, str(sock), str(pidfile)],
+        env=_child_env(iso, {"FNO_FLIGHT_BUDGET_S": "2"}),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for_flight_held(key, iso, proc)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not pidfile.exists():
+            time.sleep(0.1)
+        time.sleep(0.3)  # let the sleep child spawn
+        rc = proc.wait(timeout=8)
+        # the pending SIGKILL and the os._exit(124) fallback race; both prove
+        # the trip fired
+        assert rc in (124, 137, -9), f"the leader holder must die on the trip (rc={rc})"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(int(pidfile.read_text()), 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+        else:
+            raise AssertionError("the sleep descendant must die with the holder")
+        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_sigusr1_dumps_the_stack_and_the_holder_survives(iso):
+    """AC1-EDGE: SIGUSR1 writes a traceback into the stack file; the holder
+    keeps running."""
+    key = reconcile_flight_key(node=None, pr_number=None)
+    sock = _short_sock_dir() / "s.sock"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _CHILD_BLOCK_ON_SOCKET, str(sock)],
+        env=_child_env(iso, {}),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for_flight_held(key, iso, proc)
+        time.sleep(0.5)  # let the child pass register(); default SIGUSR1 would kill it
+        os.kill(proc.pid, signal.SIGUSR1)
+        time.sleep(1.0)
+        assert proc.poll() is None, "SIGUSR1 must not kill the holder"
+        stack_file = iso / ".fno" / "flight" / f"stack-{proc.pid}.txt"
+        assert stack_file.exists(), "SIGUSR1 must leave the stack file"
+        assert b"once" in stack_file.read_bytes(), "the dump must name the blocking frame"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
