@@ -15,7 +15,6 @@ fail() {
 }
 
 command -v jq >/dev/null 2>&1 || fail "jq is required (brew install jq)"
-command -v rg >/dev/null 2>&1 || fail "rg is required"
 
 # ── 1. the compile edge is dev-only, both directions ────────────────────────
 AGENTS_JSON=$(cargo metadata --no-deps --offline --format-version 1 \
@@ -55,13 +54,15 @@ echo "$FNO_JSON" | jq -e '
     fail "docs/architecture/product-boundaries.md is missing"
 
 # ── 3. one availability classifier ──────────────────────────────────────────
-CLASSIFIER_FILES=$(rg -l "not found \(set FNO_AGENTS_WORKER" \
+# Scoped grep, not rg: ubuntu-latest runners ship no ripgrep, and both paths
+# are source dirs with no build artifacts or nested checkouts beneath them.
+CLASSIFIER_FILES=$(grep -rl --include='*.rs' "not found (set FNO_AGENTS_WORKER" \
     crates/fno/src crates/fno-agents/src | wc -l | tr -d ' ')
 [ "$CLASSIFIER_FILES" = "1" ] ||
     fail "the worker-missing refusal is defined in $CLASSIFIER_FILES files, expected 1 (product_boundary.rs)"
 
 # ── 4. one PATH walk for paired binaries ────────────────────────────────────
-WALK_FILES=$(rg -l "fn find_on_path" crates/fno/src | wc -l | tr -d ' ')
+WALK_FILES=$(grep -rl --include='*.rs' "fn find_on_path" crates/fno/src | wc -l | tr -d ' ')
 [ "$WALK_FILES" = "1" ] ||
     fail "find_on_path is defined in $WALK_FILES files, expected 1 (product_boundary.rs)"
 
