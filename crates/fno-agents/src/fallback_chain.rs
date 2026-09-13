@@ -256,17 +256,6 @@ fn type_name(v: &Value) -> &'static str {
     }
 }
 
-/// True only when every account the link can land on is KNOWN exhausted.
-fn link_is_exhausted(
-    link: &Value,
-    accounts: Option<&Value>,
-    health: &Map<String, Value>,
-    usage: &Map<String, Value>,
-    now: f64,
-) -> bool {
-    worst_link_verdict(link, accounts, health, usage, now) == Verdict::Exhausted
-}
-
 /// The worst headroom verdict across the link's accounts. Callers that must
 /// treat UNKNOWN differently from exhausted (the provider-cap destination
 /// filter, x-7e05 trap 3) read this instead of the collapsed bool.

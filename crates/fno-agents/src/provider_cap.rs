@@ -18,14 +18,11 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::agents_config::{provider_cap_config, ProviderCapConfig};
+use crate::agents_config::ProviderCapConfig;
 use crate::paths::AgentsHome;
 
 /// Snapshot cadence. The snapshot persists armed or unarmed, so the readout's
@@ -1015,7 +1012,6 @@ fn open_question(home: &AgentsHome, lane: &CapLane, now_epoch: i64) {
 }
 
 fn ask_body(lane: &CapLane) -> String {
-    let members: Vec<String> = lane.members.iter().map(|m| m.name.clone()).collect();
     format!(
         "lane {} capped ({} member(s)), reset {}. Run fno agents provider-cap status for details.",
         lane.lane,
@@ -1064,7 +1060,7 @@ fn write_handoff_doc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::agents_config::provider_cap_config;
 
     const FOUR29_LINE: &str = r#"{"parentUuid":"p1","isSidechain":false,"type":"assistant","timestamp":"2026-09-11T06:22:32.000Z","isApiErrorMessage":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-09-11 14:37:39][20260911143739fc56663065714c5e]"}]}}"#;
     const OK_LINE: &str = r#"{"type":"assistant","timestamp":"2026-09-13T10:00:00.000Z","message":{"role":"assistant","model":"glm-5.3-flash","content":[{"type":"text","text":"Running the tests now."}]}}"#;
@@ -1276,24 +1272,20 @@ mod tests {
             "[provider_cap]\nenabled = true\nmode = \"auto\"\nmin_wait_minutes = 45\nquorum = 1\n",
         )
         .unwrap();
-        let armed = provider_cap_config(&ProviderCapConfig_test_cwd(&root));
+        let armed = provider_cap_config(&provider_cap_config_test_cwd(&root));
         assert!(armed.enabled);
         assert_eq!(armed.mode, "auto");
         assert_eq!(armed.min_wait_minutes, 45);
         assert_eq!(armed.quorum, 1);
     }
 
-    fn ProviderCapConfig_test_cwd(root: &std::path::Path) -> std::path::PathBuf {
+    fn provider_cap_config_test_cwd(root: &std::path::Path) -> std::path::PathBuf {
         root.to_path_buf()
     }
 
     // -----------------------------------------------------------------------
     // Wave 3: the leave ladder (fake deps, real journal + question files).
     // -----------------------------------------------------------------------
-
-    struct Rec {
-        calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
-    }
 
     fn rec_deps(
         calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,

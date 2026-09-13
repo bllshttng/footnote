@@ -357,7 +357,6 @@ pub fn now_epoch_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     fn tmp_home(name: &str) -> AgentsHome {
         let dir =

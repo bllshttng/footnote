@@ -967,7 +967,7 @@ pub fn provider_cap_config(cwd: &Path) -> ProviderCapConfig {
             .unwrap_or(default),
         None => default,
     };
-    let mut cfg = ProviderCapConfig {
+    let cfg = ProviderCapConfig {
         enabled: as_bool(value("enabled"), defaults.enabled),
         mode: value("mode")
             .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
