@@ -1039,6 +1039,18 @@ def _route_for_target(
     # operator can differentiate tiers or tune the routed worker.
     for k, v in (getattr(block, "extra_env", None) or {}).items():
         route[str(k)] = str(v)
+    # Checked after extra_env so a hand pin that already differentiates the
+    # tiers silences it. Four identical /model rows read as "the config did
+    # not take" when the truth was "the config took and there is only one
+    # value" (x-f173); the config key is the one lever that fixes it.
+    tier_values = {route[k] for k in MODEL_ENV_KEYS}
+    if len(tier_values) == 1:
+        _emit(
+            notice,
+            f"model-routing: every tier resolves to {next(iter(tier_values))}; /model "
+            "will offer no alternative; declare "
+            f"model_routing.providers.{pname}.tier_models to differentiate",
+        )
     return route
 
 

@@ -444,6 +444,43 @@ def test_accepts_bare_tier_alias_on_anthropic_endpoint() -> None:
     assert route["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
 
 
+def test_collapsed_tiers_emit_a_notice_naming_the_config_key() -> None:
+    # AC8-HP: four identical /model rows read as "the config did not take" when
+    # the truth was "the config took and there is only one value"; say so and
+    # name the one lever that fixes it. A provider with no haiku_model is the
+    # one-distinct-value case (the zai builtin's glm-4.7 fold already makes two).
+    notes, sink = _collector()
+    settings = _settings(
+        providers={
+            "glm": {
+                "base_url": "https://api.z.ai/api/anthropic",
+                "api_key_env": "GLM_KEY",
+            }
+        }
+    )
+    route = mr.resolve_explicit_route(
+        "glm", "glm-5.3-flash[1m]", settings=settings, env={"GLM_KEY": "k"}, notice=sink
+    )
+    assert route is not None
+    assert any(
+        "no alternative" in n and "glm-5.3-flash[1m]" in n and "tier_models" in n
+        for n in notes
+    )
+
+
+def test_differentiated_tiers_emit_no_collapse_notice() -> None:
+    notes, sink = _collector()
+    route = mr.resolve_explicit_route(
+        "zai",
+        "glm-5.3-flash[1m]",
+        settings=_settings(providers={"zai": {"tier_models": {"opus": "glm-5.3[1m]"}}}),
+        env={"ZAI_API_KEY": "k"},
+        notice=sink,
+    )
+    assert route is not None
+    assert not notes
+
+
 def test_materialized_settings_keep_floor_and_undeclared_tiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
