@@ -44,6 +44,11 @@ make_repo() {
   (cd "$_dir" && git init -q && mkdir -p .fno home/.fno) || fail "repo setup failed in $_dir"
   printf '# isolated\n' > "${_dir}/.fno/config.toml"
   printf '# isolated global\n' > "${_dir}/home/.fno/config.toml"
+  # State-path stub pins init's manifest to the scenario space dir; other verbs
+  # delegate to the real fno-agents so the modern claim stays real.
+  mkdir -p "${_dir}/bin" "${_dir}/space"
+  cp "${REPO_ROOT}/tests/helpers/fno-agents-state-path-stub.sh" "${_dir}/bin/fno-agents"
+  chmod 755 "${_dir}/bin/fno-agents"
   cat > "${_dir}/home/.fno/graph.json" <<'JSON'
 {"entries":[
   {"id":"tst-aa00aa00","title":"first guard node","session_id":null},
@@ -55,10 +60,14 @@ JSON
 # $1 = tmp repo dir, $2 = TARGET_INPUT ; sets STATE / ERRLOG globals
 run_init() {
   local _dir="$1" _input="$2"
-  STATE="${_dir}/.fno/target-state.md"
+  STATE="${_dir}/space/target-state.md"
   ERRLOG="${_dir}/stderr.log"
   (cd "$_dir" && \
     HOME="${_dir}/home" \
+    PATH="${_dir}/bin:$PATH" \
+    FNO_TEST_SPACE="${_dir}/space" \
+    FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
+    FNO_TARGET_INIT_GATED=1 \
     TARGET_START=1 \
     TARGET_INPUT="$_input" \
     TARGET_LOCATION_OK="main-acknowledged" \
