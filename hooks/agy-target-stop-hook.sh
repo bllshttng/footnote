@@ -217,7 +217,9 @@ else
     done
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 fi
-DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
+# Same rule as target-stop-hook.sh: no pending state, no candidate path.
+DELIVERY_CANDIDATE=""
+[[ -n "$DELIVERY_PENDING_STATE" ]] && DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
 
 # jq-free event writer (string interpolation, so it also runs on the jq-missing
 # give-up path). Fields are hook-internal and safe to interpolate.
@@ -411,7 +413,7 @@ if [[ -z "$BIN" ]]; then
 fi
 
 CANDIDATE_READY=0
-if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+if [[ -n "$DELIVERY_CANDIDATE" && "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
     && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
     CANDIDATE_READY=1
 fi

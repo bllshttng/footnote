@@ -285,7 +285,11 @@ else
     done
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 fi
-DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
+# A candidate exists only to be promoted into DELIVERY_PENDING_STATE. A king
+# stop has no pending state, and the bare expansion then wrote `.candidate.$$`
+# into the checkout the hook runs in.
+DELIVERY_CANDIDATE=""
+[[ -n "$DELIVERY_PENDING_STATE" ]] && DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
 trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 
 # Second candidate: a king session. Its manifest is a separate file because a
@@ -558,7 +562,7 @@ fi
 # <<< is harmless: serde_json tolerates trailing whitespace.)
 mkdir -p "$SPACE_DIR" 2>/dev/null || true
 CANDIDATE_READY=0
-if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+if [[ -n "$DELIVERY_CANDIDATE" && "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
     && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
     CANDIDATE_READY=1
 fi
