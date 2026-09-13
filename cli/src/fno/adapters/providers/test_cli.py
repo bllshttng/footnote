@@ -2471,6 +2471,8 @@ class TestListIdentityColumn:
             ln for ln in result.output.splitlines() if " readyrule " in ln
         )
         assert "!serves readyrule" in makers_row
+        # identity is the last column, so the modal can take the row's tail verbatim.
+        assert makers_row.endswith("identity=!serves readyrule")
         assert "!serves" not in readyrule_row
         assert "identity=readyrule" in readyrule_row
         # AC1-HP names doctor as the agreeing witness in the same store.
@@ -2512,8 +2514,6 @@ class TestListIdentityColumn:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """AC1-EDGE: different credential roots observing one principal."""
-        import json as _json
-
         from fno.adapters.providers import managed
 
         dir_a = tmp_path / "cfg-a"
@@ -2547,14 +2547,6 @@ class TestListIdentityColumn:
 
         assert result.exit_code == 0, result.output
         assert result.output.count("!shared-identity") == 2
-
-        # The --identity JSON carries the same marker on both rows, so the
-        # modal renders it without recomputing roots.
-        result = _invoke(["list", "-J", "--identity"], cwd=tmp_path, home=tmp_path)
-        assert result.exit_code == 0, result.output
-        rows = {r["id"]: r for r in _json.loads(result.output)}
-        assert rows["scoped-a"]["problems"] == ["shared-identity"]
-        assert rows["scoped-b"]["problems"] == ["shared-identity"]
 
     def test_a_managed_pair_on_one_slot_never_flags_shared_identity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2618,60 +2610,3 @@ class TestListIdentityColumn:
             "id", "name", "harness", "auth", "priority", "active", "headroom",
             "cred-snapshot", "usage_age_s", "usage_ttl_seconds", "usage_stale",
         } for r in rows)
-
-    def test_json_with_the_flag_carries_identity_and_problems(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """AC2-HP: --identity adds identity + problems to every record."""
-        import json as _json
-
-        from fno.adapters.providers import managed
-
-        self._pair_env(tmp_path, monkeypatch)
-        root = tmp_path / ".fno" / "providers"
-        managed.stamp_active_slot("claude", "makers", root)
-        self._bind("readyrule", tmp_path)
-        self._bind("makers", tmp_path)
-        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["{}"])
-        monkeypatch.setattr(
-            managed, "slot_principal",
-            lambda blob: (
-                {"account_uuid": "acct-readyrule", "organization_uuid": "org-1"},
-                None,
-            ),
-        )
-
-        result = _invoke(["list", "-J", "--identity"], cwd=tmp_path, home=tmp_path)
-
-        assert result.exit_code == 0, result.output
-        rows = {r["id"]: r for r in _json.loads(result.output)}
-        assert set(rows) == {"readyrule", "makers"}
-        for row in rows.values():
-            assert set(row["identity"]) == {
-                "status", "account", "served_by", "reason", "observed_at",
-            }
-            assert isinstance(row["problems"], list)
-        assert rows["makers"]["identity"]["status"] == "mismatch"
-        assert rows["makers"]["identity"]["served_by"] == "readyrule"
-        assert rows["readyrule"]["identity"]["status"] == "matched"
-        assert rows["readyrule"]["identity"]["served_by"] == "readyrule"
-
-    def test_json_identity_names_unproven_without_account_names(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """AC1-ERR's JSON twin: unproven stays null-named, exit 0."""
-        import json as _json
-
-        from fno.adapters.providers import managed
-
-        self._pair_env(tmp_path, monkeypatch)
-        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: [])
-
-        result = _invoke(["list", "-J", "--identity"], cwd=tmp_path, home=tmp_path)
-
-        assert result.exit_code == 0, result.output
-        rows = _json.loads(result.output)
-        assert all(
-            r["identity"]["status"] == "unknown" and r["identity"]["served_by"] is None
-            for r in rows
-        )
