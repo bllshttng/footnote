@@ -2051,6 +2051,22 @@ def cmd_spawn(
         if launch_account_label:
             prov_env["FNO_ACCOUNT"] = launch_account_label
 
+    # An undeclared FOREIGN target (explicit --cwd only) pins `never`; an
+    # explicit ambient override rides the same overlay, else the pane wrapper
+    # strips what the operator set.
+    from fno.worktree_paths import UNDECLARED_REPO_RECEIPT, undeclared_dispatch_pin
+
+    _pin = (
+        undeclared_dispatch_pin(workdir, Path(os.getcwd()), harness) if cwd else {}
+    )
+    if _pin:
+        prov_env = dict(prov_env) if prov_env is not None else {}
+        prov_env.update(_pin)
+        print(UNDECLARED_REPO_RECEIPT, file=sys.stderr)
+    elif os.environ.get("FNO_WORKTREE_POLICY"):
+        prov_env = dict(prov_env) if prov_env is not None else {}
+        prov_env["FNO_WORKTREE_POLICY"] = os.environ["FNO_WORKTREE_POLICY"]
+
     # The loop gate, on the same message and for the same reason as the carrier
     # above. resolve_dispatch runs this check too, and the comment three lines
     # up is why it is not enough: a direct spawn never reaches that resolver, so
@@ -2598,7 +2614,9 @@ def cmd_spawn(
         from fno.agents.mux_spawn import PROVENANCE_KEYS
 
         prov_prev.update({k: os.environ.get(k) for k in PROVENANCE_KEYS})
-        for _k in PROVENANCE_KEYS:
+        # The worktree-policy pin clears like the group but is not node provenance.
+        prov_prev["FNO_WORKTREE_POLICY"] = os.environ.get("FNO_WORKTREE_POLICY")
+        for _k in (*PROVENANCE_KEYS, "FNO_WORKTREE_POLICY"):
             os.environ.pop(_k, None)
         os.environ.update(prov_env)
         # TARGET_NO_MERGE was set-or-cleared above, before the substrate

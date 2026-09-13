@@ -143,6 +143,32 @@ OUT="$( cd "$T" && PATH="$TMP_BASE/stub-hn:$PATH" bash "$HELPER" )"
 [[ "$(val "$OUT" verdict)" == "canonical-protected" ]] && pass "harness-native leaves protected intact" || fail "verdict was '$(val "$OUT" verdict)'"
 
 echo ""
+echo "--- multi-line never receipt (source= lines) still lifts to ok ---"
+mkdir -p "$TMP_BASE/stub-never-multi"
+cat > "$TMP_BASE/stub-never-multi/fno" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1 $2 $3 $4" == "agents workspace worktree policy" ]] && { printf 'never\nsource=env\n'; exit 0; }
+exit 0
+STUB
+chmod +x "$TMP_BASE/stub-never-multi/fno"
+T="$TMP_BASE/never-multi-canon"; make_repo "$T" main
+OUT="$( cd "$T" && PATH="$TMP_BASE/stub-never-multi:$PATH" bash "$HELPER" )"
+[[ "$(val "$OUT" verdict)" == "ok" ]] && pass "multi-line never receipt lifts protected -> ok" || fail "verdict was '$(val "$OUT" verdict)'"
+
+echo ""
+echo "--- multi-line non-never receipt stays protected ---"
+mkdir -p "$TMP_BASE/stub-hn-multi"
+cat > "$TMP_BASE/stub-hn-multi/fno" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1 $2 $3 $4" == "agents workspace worktree policy" ]] && { printf 'harness-native\nsource=default\nrequested=harness-native degraded=true\n'; exit 0; }
+exit 0
+STUB
+chmod +x "$TMP_BASE/stub-hn-multi/fno"
+T="$TMP_BASE/hn-multi-canon"; make_repo "$T" main
+OUT="$( cd "$T" && PATH="$TMP_BASE/stub-hn-multi:$PATH" bash "$HELPER" )"
+[[ "$(val "$OUT" verdict)" == "canonical-protected" ]] && pass "multi-line harness-native stays protected" || fail "verdict was '$(val "$OUT" verdict)'"
+
+echo ""
 echo "--- policy verb error stays fail-closed to protected ---"
 mk_fno_stub "$TMP_BASE/stub-err" error
 T="$TMP_BASE/err-canon"; make_repo "$T" main
