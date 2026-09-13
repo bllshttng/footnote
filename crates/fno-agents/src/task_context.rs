@@ -57,16 +57,6 @@ pub enum Stage {
 }
 
 impl Stage {
-    fn rank(&self) -> u8 {
-        match self {
-            Stage::Prepared => 0,
-            Stage::Submitted => 1,
-            // Unavailable is an honesty ceiling, not progress: it can follow a
-            // prepare or a submit, but never counts as an observation.
-            Stage::Observed | Stage::Unavailable => 2,
-        }
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             Stage::Prepared => STAGE_PREPARED,
@@ -550,8 +540,8 @@ pub fn revalidate_request(req: &Value) -> Value {
         ] {
             // A door checks the identities it KNOWS: an absent expectation key
             // is unchecked at that door, never a silent pass (the receipt door
-            // passes attempt+session; the init gate knows node + root). A key
-            // that IS present must match exactly.
+            // passes session when its caller names it; the init gate knows
+            // node + root). A key that IS present must match exactly.
             let expected = match expect.get(field) {
                 Some(Value::String(s)) => s.as_str(),
                 _ => continue,
