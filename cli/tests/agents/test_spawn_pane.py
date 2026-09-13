@@ -1006,6 +1006,62 @@ def test_codex_trust_screen_refusal_fires_despite_hook_trust_bypass() -> None:
     assert refusal.startswith("Codex project trust required for /w/proj")
 
 
+def _codex_pane_run_tail(runner: FakeRunner) -> list[str]:
+    run_call = next(c for c in runner.calls if c[1:4] == ["mux", "pane", "run"])
+    return run_call[run_call.index("--") + 1 :]
+
+
+def test_codex_pane_mesh_identity_rides_config_set_args(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A daemon-run tool sees none of the TUI's env, so the mesh pairs ride
+    into the tool shell as `-c shell_environment_policy.set` leaves; the
+    env(1) wrapper still carries them for the TUI process itself."""
+    from fno.agents import codex_pane
+
+    monkeypatch.setattr(codex_pane, "ensure_codex_daemon", lambda *_a, **_k: None)
+
+    runner = FakeRunner()
+    _spawn(
+        monkeypatch, tmp_path, provider=CODEX_HARNESS, name="w1", runner=runner
+    )
+
+    tail = _codex_pane_run_tail(runner)
+    assert tail[0] == "env"
+    assert "FNO_AGENT_SELF=w1" in tail
+    codex_at = tail.index("codex")
+    assert tail[codex_at + 1 : codex_at + 3] == [
+        "-c",
+        'shell_environment_policy.set.FNO_AGENT_SELF="w1"',
+    ]
+    assert 'shell_environment_policy.set.FNO_AGENT_HARNESS="codex"' in tail
+
+    claude_runner = FakeRunner()
+    _spawn(monkeypatch, tmp_path, name="w2", runner=claude_runner)
+    claude_tail = _codex_pane_run_tail(claude_runner)
+    assert not any("shell_environment_policy" in tok for tok in claude_tail)
+
+
+def test_two_codex_workers_carry_only_their_own_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import codex_pane
+
+    monkeypatch.setattr(codex_pane, "ensure_codex_daemon", lambda *_a, **_k: None)
+
+    first = FakeRunner()
+    _spawn(monkeypatch, tmp_path, provider=CODEX_HARNESS, name="w1", runner=first)
+    second = FakeRunner()
+    _spawn(monkeypatch, tmp_path, provider=CODEX_HARNESS, name="w2", runner=second)
+
+    tail_one = _codex_pane_run_tail(first)
+    tail_two = _codex_pane_run_tail(second)
+    assert 'shell_environment_policy.set.FNO_AGENT_SELF="w1"' in tail_one
+    assert 'shell_environment_policy.set.FNO_AGENT_SELF="w2"' not in tail_one
+    assert 'shell_environment_policy.set.FNO_AGENT_SELF="w2"' in tail_two
+    assert 'shell_environment_policy.set.FNO_AGENT_SELF="w1"' not in tail_two
+
+
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     no_state_grant: None, tmp_path: Path, monkeypatch
 ) -> None:

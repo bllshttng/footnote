@@ -410,3 +410,30 @@ def test_an_unprovable_identity_does_not_ground_the_launch(
     )
 
     assert ov.lane == "managed-active"
+
+
+def test_codex_shell_env_args_renders_json_quoted_leaves() -> None:
+    """Each mesh pair becomes one config-set leaf; the JSON string is a valid
+    TOML basic string and merges with the config.toml set table."""
+    from fno.agents.codex_pane import codex_shell_env_args
+
+    args = codex_shell_env_args(["FNO_AGENT_SELF=w1", "FNO_NODE=x-1"])
+    assert args == [
+        "-c",
+        'shell_environment_policy.set.FNO_AGENT_SELF="w1"',
+        "-c",
+        'shell_environment_policy.set.FNO_NODE="x-1"',
+    ]
+
+
+def test_codex_shell_env_args_refuses_a_key_outside_the_leaf_shape() -> None:
+    """A dotted or quoted key would write a different config path."""
+    from fno.agents import codex_pane
+    from fno.agents.dispatch import DispatchAskError
+
+    codex_shell_env_args = codex_pane.codex_shell_env_args
+
+    with pytest.raises(DispatchAskError, match="A.B=1"):
+        codex_shell_env_args(["A.B=1"])
+    with pytest.raises(DispatchAskError, match="JUST_A_KEY"):
+        codex_shell_env_args(["JUST_A_KEY"])

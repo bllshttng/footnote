@@ -1536,22 +1536,24 @@ def build_pane_argv(
     raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
 
 
-def _mesh_env_wrapper(
+def _mesh_env_pairs(
     name: str,
     harness: str,
     role: Optional[str],
-    argv: list[str],
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
     route_env: Optional[dict[str, str]] = None,
     seed_provenance: Optional[dict[str, str]] = None,
     session_id: Optional[str] = None,
-) -> list[str]:
-    """Prefix ``argv`` with ``env(1)`` carrying the mesh identity the daemon
-    worker used to set on its PTY child (worker.rs), plus any role-routing env
-    (x-d2fe) and node provenance (x-84a8). ``pane run`` transports argv only, so
-    env rides the wrapper; the spawn-name validation already forbids
-    ``=``/newlines in ``name``.
+) -> tuple[list[str], list[str]]:
+    """The ``env(1)`` unset args and ``K=V`` pairs
+    :func:`_mesh_env_wrapper` formats, split out so the codex pane splice can
+    read the same pairs it renders as config-set leaves (x-a095).
+
+    The mesh identity the daemon worker used to set on its PTY child
+    (worker.rs), plus any role-routing env (x-d2fe) and node provenance
+    (x-84a8). ``pane run`` transports argv only, so env rides the wrapper;
+    the spawn-name validation already forbids ``=``/newlines in ``name``.
 
     ``provenance`` is an already-resolved map of provenance env vars (e.g.
     ``FNO_NODE``/``FNO_SLUG``/``FNO_PLAN``) for a node-driven spawn; empty values
@@ -1706,6 +1708,38 @@ def _mesh_env_wrapper(
         if _k not in resolved_seed:
             unset += ["-u", _k]
     pairs += [f"{k}={v}" for k, v in resolved_seed.items()]
+    return unset, pairs
+
+
+def _mesh_env_wrapper(
+    name: str,
+    harness: str,
+    role: Optional[str],
+    argv: list[str],
+    provenance: Optional[dict[str, str]] = None,
+    account_env: Optional[dict[str, str]] = None,
+    route_env: Optional[dict[str, str]] = None,
+    seed_provenance: Optional[dict[str, str]] = None,
+    session_id: Optional[str] = None,
+    precomputed: Optional[tuple[list[str], list[str]]] = None,
+) -> list[str]:
+    """Format :func:`_mesh_env_pairs` as one ``env(1)`` prefix on ``argv``.
+
+    ``precomputed`` reuses one pairs computation (the codex pane splice
+    renders the same pairs as config-set leaves); output is byte-identical
+    either way."""
+    if precomputed is None:
+        precomputed = _mesh_env_pairs(
+            name,
+            harness,
+            role,
+            provenance=provenance,
+            account_env=account_env,
+            route_env=route_env,
+            seed_provenance=seed_provenance,
+            session_id=session_id,
+        )
+    unset, pairs = precomputed
     return ["env", *unset, *pairs, *argv]
 
 
@@ -3844,6 +3878,20 @@ def dispatch_spawn_pane(
     # `--session-id` out of the argv it forwards, and it never wraps pi.
     pin_session = pin_session or provider == "pi"
     session_uuid = str(_uuid.uuid4()) if pin_session else None
+    # One pairs computation for the whole spawn (x-a095): the codex pane
+    # splice renders these same pairs as config-set leaves, and the env
+    # wrapper formats them for the TUI process itself.
+    seed_prov = _seed_provenance_env(message, provenance)
+    mesh_unset, mesh_pairs = _mesh_env_pairs(
+        name,
+        provider,
+        launch_role,
+        provenance=provenance,
+        account_env=account_env,
+        route_env=route_env,
+        seed_provenance=seed_prov,
+        session_id=session_uuid,
+    )
     if provider == "cursor-agent":
         # cursor-agent's create-chat mints the full UUID. It is a distinct
         # create verb, so there is no pi-style create claim to hold: read the
@@ -3872,6 +3920,16 @@ def dispatch_spawn_pane(
         passthrough=passthrough,
         computed_dirs=computed_writable_dirs,
     )
+    if provider == "codex":
+        # A daemon-run tool inherits the daemon's env, not the TUI's, so the
+        # worker identity rides into the tool shell as config-set leaves
+        # (x-a095). Same seam as the route splice below: after argv[0],
+        # passthrough-checked, so a `-c` on both sides is a named refusal.
+        from fno.agents.codex_pane import codex_shell_env_args
+
+        env_config_args = codex_shell_env_args(mesh_pairs)
+        pane_passthrough_tokens(passthrough, env_config_args)
+        argv = [argv[0], *env_config_args, *argv[1:]]
     if codex_route is not None:
         argv = [argv[0], *codex_route.config_args, *argv[1:]]
         # x-1caa: the route's config args splice AFTER build_pane_argv, so the
@@ -3916,7 +3974,6 @@ def dispatch_spawn_pane(
     # message as this launcher received it; the provider-specific respelling
     # `build_pane_argv` applies (`/fno:target` -> `$fno:target` for codex) is a
     # spelling of the same seed, and the sender is what the envelope is for.
-    seed_prov = _seed_provenance_env(message, provenance)
     wrapped = _mesh_env_wrapper(
         name,
         provider,
@@ -3927,6 +3984,7 @@ def dispatch_spawn_pane(
         route_env,
         seed_prov,
         session_id=session_uuid,
+        precomputed=(mesh_unset, mesh_pairs),
     )
 
     registry_path = paths.agents_registry_path()

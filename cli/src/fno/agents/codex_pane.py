@@ -9,14 +9,20 @@ Measured 2026-09-13 on codex-cli 0.154.0.
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from fno.agents.dispatch import DispatchAskError
 
 #: `daemon start` is a no-op when a daemon is already running, so the bound
 #: only has to cover a cold start.
 _CODEX_DAEMON_START_TIMEOUT_S = 15
+
+#: A key outside this shape would write a different config path: dotted or
+#: quoted keys are table paths in TOML, not one leaf.
+_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def ensure_codex_daemon(
@@ -70,3 +76,27 @@ def ensure_codex_daemon(
             f"{proc.returncode}: {stderr}",
             exit_code=2,
         )
+
+
+def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
+    """Render ``K=V`` pairs as config-set leaves the daemon delivers to tools.
+
+    A daemon-run tool inherits the daemon's environment, not the TUI's, so
+    the env(1) wrapper's worker identity stops at the TUI (measured
+    2026-09-13). Each pair becomes
+    ``-c shell_environment_policy.set.K="<V>"``; the JSON string is a valid
+    TOML basic string, and the leaf merges with the
+    ``[shell_environment_policy.set]`` table in config.toml (measured).
+    """
+    args: list[str] = []
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not _ENV_KEY_RE.fullmatch(key):
+            raise DispatchAskError(
+                f"refusing mesh pair {pair!r}: the key must match "
+                "[A-Za-z_][A-Za-z0-9_]* to name one "
+                "shell_environment_policy config path",
+                exit_code=2,
+            )
+        args += ["-c", f"shell_environment_policy.set.{key}={json.dumps(value)}"]
+    return args
