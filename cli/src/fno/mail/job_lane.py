@@ -37,7 +37,7 @@ def job_lane_send(
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.dispatch_flags import infer_invoking_harness
     from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
-    from fno.mail.envelope import harness_for_provider, wrap_fno_mail
+    from fno.mail.envelope import wrap_fno_mail
     from fno.mail.job_address import resolve_job_address
 
     job = resolve_job_address(token)
@@ -80,8 +80,6 @@ def job_lane_send(
         return wrap_fno_mail(
             message,
             from_=sender,
-            harness=harness_for_provider(sender_harness) if sender_harness else "cli",
-            model=sender_model,
             to=recipient,
             node=job.node_id,
             id=msg_id,

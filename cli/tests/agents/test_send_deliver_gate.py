@@ -1915,8 +1915,8 @@ def test_relay_loop_wraps_continuations_with_mail_ctxs(monkeypatch) -> None:
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
 
     ctxs = {
-        "alice": _MailCtx(from_="aaaa1111", harness="claude-code", model="unknown", to="bbbb2222"),
-        "bob": _MailCtx(from_="bbbb2222", harness="claude-code", model="unknown", to="aaaa1111"),
+        "alice": _MailCtx(from_="aaaa1111", model="unknown", to="bbbb2222"),
+        "bob": _MailCtx(from_="bbbb2222", model="unknown", to="aaaa1111"),
     }
     # seed = bob's reply; first continuation drives alice with bob's turn, so the
     # hop body is wrapped as BOB (the peer who just spoke).
@@ -1968,29 +1968,17 @@ def test_mail_context_uses_canonical_sender_handle(monkeypatch) -> None:
     assert context.from_ == "019fb417"
 
 
-def test_mail_context_null_provider_renders_harness_unknown_not_claude(monkeypatch) -> None:
-    # AC1-HP: the measured failure - provider_from=None alongside a
-    # codex model rendered harness="claude-code", aiming claude's verb spelling
-    # and resume form at a codex session. A null harness now renders the
-    # explicit unknown marker, and the model axis survives independently.
+def test_mail_context_model_resolves_regardless_of_provider_axis(monkeypatch) -> None:
+    # x-d7cf: the envelope no longer renders harness, so the ctx keeps only the
+    # model axis. The model resolves from the sender's own transcript whether or
+    # not a provider is provable (the old harness-axis pins retired with the
+    # attribute; harness_for_provider keeps its own tests in
+    # test_fno_mail_envelope.py for the bus-record and relay roundtrip readers).
     from fno.agents.dispatch import _build_mail_ctx
 
     monkeypatch.setattr("fno.agents.self_stamp.resolve_self_model", lambda: "gpt-5.6-luna")
-    context = _build_mail_ctx("sender-name", None, None)
-    assert context.harness == "unknown"
-    assert context.model == "gpt-5.6-luna"
-
-
-def test_mail_context_harness_follows_provider_axis_not_model(monkeypatch) -> None:
-    # AC1-ERR: negative control - changing ONLY provider_from changes
-    # only the harness. No model value supplies a harness (the axis-vocabulary
-    # rule: never infer one axis from another axis's value).
-    from fno.agents.dispatch import _build_mail_ctx
-
-    monkeypatch.setattr("fno.agents.self_stamp.resolve_self_model", lambda: "gpt-5.6-luna")
-    context = _build_mail_ctx("sender-name", None, "codex")
-    assert context.harness == "codex"
-    assert context.model == "gpt-5.6-luna"
+    assert _build_mail_ctx("sender-name", None, None).model == "gpt-5.6-luna"
+    assert _build_mail_ctx("sender-name", None, "codex").model == "gpt-5.6-luna"
 
 
 def test_first_hop_read_budget_covers_the_daemon_drive_ceiling() -> None:

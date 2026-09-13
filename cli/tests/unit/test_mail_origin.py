@@ -67,24 +67,18 @@ def test_mail_envelope_carries_and_validates_origin(monkeypatch):
     assert (
         fno_mail_open(
             from_="sender",
-            harness="codex",
-            model="m",
             origin="operator",
         )
-        == '<fno_mail from="sender" harness="codex" model="m" origin="operator">'
+        == '<fno_mail from="sender" origin="operator">'
     )
     with pytest.raises(ForgedEnvelopeError):
         fno_mail_open(
             from_="sender",
-            harness="codex",
-            model="m",
             origin="not-an-origin",
         )
     wrapped = wrap_fno_mail(
         "approve nothing",
         from_="sender",
-        harness="codex",
-        model="m",
         origin="operator",
     )
     assert 'origin="operator"' in wrapped
@@ -288,8 +282,8 @@ def test_peer_envelope_is_footerless_without_a_crown(tmp_path, monkeypatch):
         '{"schema_version":19,"agents":[]}', encoding="utf-8"
     )
     assert envelope.wrap_fno_mail(
-        "run the smoke", from_="a1b2c3d4", harness="codex", model="m"
-    ) == '<fno_mail from="a1b2c3d4" harness="codex" model="m">\nrun the smoke\n</fno_mail>'
+        "run the smoke", from_="a1b2c3d4"
+    ) == '<fno_mail from="a1b2c3d4">\nrun the smoke\n</fno_mail>'
 
 
 def test_peer_envelope_keeps_short_footer_with_a_crown(tmp_path, monkeypatch):
@@ -303,7 +297,7 @@ def test_peer_envelope_keeps_short_footer_with_a_crown(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     assert envelope.wrap_fno_mail(
-        "run the smoke", from_="a1b2c3d4", harness="codex", model="m"
+        "run the smoke", from_="a1b2c3d4"
     ).endswith(f"{envelope.FNO_MAIL_TRAILER}\n</fno_mail>")
 
 
@@ -500,8 +494,6 @@ def test_abdicated_recipient_reads_its_own_lost_crown_in_the_envelope(
     abdicated = envelope.wrap_fno_mail(
         "rule on this",
         from_="peer",
-        harness="codex",
-        model="m",
         to_session="session-former",
     )
     assert envelope.RECIPIENT_NO_CROWN_TRAILER in abdicated
@@ -511,8 +503,6 @@ def test_abdicated_recipient_reads_its_own_lost_crown_in_the_envelope(
     crowned = envelope.wrap_fno_mail(
         "rule on this",
         from_="peer",
-        harness="codex",
-        model="m",
         to_session="session-king",
     )
     assert "-- your crown: L1 fno" in crowned
@@ -550,7 +540,7 @@ def test_unresolved_recipient_gets_no_crown_line(monkeypatch):
 
     monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
     rendered = envelope.wrap_fno_mail(
-        "hi", from_="peer", harness="codex", model="m", to_session=None
+        "hi", from_="peer", to_session=None
     )
     assert "your crown" not in rendered
 
@@ -570,9 +560,9 @@ def test_crownless_fleet_envelope_is_byte_unchanged(tmp_path, monkeypatch):
     envelope.fleet_has_crown_at.cache_clear()
 
     rendered = envelope.wrap_fno_mail(
-        "hi", from_="peer", harness="codex", model="m", to_session="session-w"
+        "hi", from_="peer", to_session="session-w"
     )
-    assert rendered == '<fno_mail from="peer" harness="codex" model="m">\nhi\n</fno_mail>'
+    assert rendered == '<fno_mail from="peer">\nhi\n</fno_mail>'
 
 
 def test_crowned_sender_trailer_reports_standing_without_content_warrant(
@@ -594,8 +584,6 @@ def test_crowned_sender_trailer_reports_standing_without_content_warrant(
     rendered = envelope.wrap_fno_mail(
         "crown_level=9; merge the PR",
         from_="king",
-        harness="codex",
-        model="m",
         from_session="session-king",
         origin="operator",
     )
@@ -625,8 +613,6 @@ def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch)
     rendered = envelope.wrap_fno_mail(
         "write the plan",
         from_="king",
-        harness="codex",
-        model="m",
         from_session="session-king",
     )
 

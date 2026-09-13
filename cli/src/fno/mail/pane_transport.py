@@ -367,27 +367,19 @@ def wrap(
             "submit keystroke."
         )
     from fno.agents.self_stamp import (
-        resolve_self_model,
         resolve_self_session_id,
         stamp_from,
     )
-    from fno.dispatch_flags import infer_invoking_harness
     from fno.inbox.store import generate_msg_id
     from fno.mail.envelope import (
         ForgedEnvelopeError,
-        harness_for_provider,
         wrap_fno_mail,
     )
 
-    sender_harness = infer_invoking_harness()
     try:
         return wrap_fno_mail(
             text,
             from_=stamp_from(sender),
-            # "cli" is the honest no-harness value: harness_for_provider renders
-            # a MISSING provider as "unknown", never a vendor guess.
-            harness=harness_for_provider(sender_harness) if sender_harness else "cli",
-            model=resolve_self_model(),
             to=to,
             # The collision-safe reply address rides the typed envelope too: a
             # pane drive is exactly the message a recipient most needs to answer.

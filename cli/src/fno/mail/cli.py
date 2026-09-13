@@ -2147,7 +2147,7 @@ def _name_lane_send(
         generate_msg_id,
         write_new_thread,
     )
-    from fno.mail.envelope import harness_for_provider, wrap_fno_mail
+    from fno.mail.envelope import wrap_fno_mail
 
     self_send = False
     # The recipient's full session id when a lane resolved one; it stamps that
@@ -2246,15 +2246,9 @@ def _name_lane_send(
     # head-8 clock bucket. None when unprovable, and then omitted, never guessed.
     sender_session = _reply_session_for(from_name)
     def _envelope(to_session: Optional[str] = None) -> str:
-        # Through harness_for_provider like every other send path: the wire
-        # vocabulary is claude-code, and a raw "claude" here made the name lane
-        # the one producer disagreeing with dispatch, the relay, and the Rust
-        # contract. "cli" is the honest no-harness value.
         return wrap_fno_mail(
             message,
             from_=sender,
-            harness=harness_for_provider(sender_harness) if sender_harness else "cli",
-            model=sender_model,
             to=recipient,
             id=msg_id,
             reply_to=reply_to,

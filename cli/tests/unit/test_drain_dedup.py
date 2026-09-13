@@ -70,9 +70,7 @@ def test_seen_set_is_bounded(inbox_root):
 def _wrapped(msg_id: str) -> str:
     from fno.mail.envelope import wrap_fno_mail
 
-    return wrap_fno_mail(
-        "build done", from_="bob1234", harness="claude-code", model="opus", id=msg_id
-    )
+    return wrap_fno_mail("build done", from_="bob1234", id=msg_id)
 
 
 def test_dedup_drops_same_id_duplicate_exactly_once(inbox_root, repo_root):

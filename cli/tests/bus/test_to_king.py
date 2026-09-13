@@ -190,7 +190,5 @@ def test_durable_floor_carries_no_recipient_crown(env, tmp_path, monkeypatch):
     assert "-- your crown: L1 fno" in envelope.wrap_fno_mail(
         "ping",
         from_="peer",
-        harness="codex",
-        model="m",
         to_session="session-king",
     )

@@ -19,6 +19,26 @@ def test_extracts_from_of_matching_id_unescaped():
     assert sender_from_transcript_text(text, "msg-xyz") == "deadbeef"
 
 
+def test_compact_tag_resolves_beside_the_legacy_tag():
+    # AC1-LEGACY (x-d7cf): the compact tag drops harness/model but keeps id= and
+    # from_session=, so the order-agnostic resolver answers both shapes in one
+    # transcript. The legacy line is an input fixture, not a renderer output.
+    legacy = (
+        '<fno_mail from="deadbeef" harness="codex" model="gpt" '
+        'id="msg-old" from_session="11112222-3333-4444-5555-666677778888"> hi'
+    )
+    compact = (
+        '<fno_mail from="deadbeef" id="msg-new" '
+        'from_session="11112222-3333-4444-5555-666677778888"> hi'
+    )
+    assert sender_from_transcript_text(legacy, "msg-old") == (
+        "11112222-3333-4444-5555-666677778888"
+    )
+    assert sender_from_transcript_text(compact, "msg-new") == (
+        "11112222-3333-4444-5555-666677778888"
+    )
+
+
 def test_absent_id_returns_none():
     text = '<fno_mail from="deadbeef" id="msg-other"> hi'
     assert sender_from_transcript_text(text, "msg-live1") is None
