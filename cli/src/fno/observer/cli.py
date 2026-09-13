@@ -472,11 +472,9 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
 
 
 def _arg_value(args: list[str], flag: str) -> Optional[str]:
-    """The token after ``flag`` in a raw argv list, or None if absent or trailing."""
-    if flag not in args:
-        return None
-    i = args.index(flag) + 1
-    return args[i] if i < len(args) else None
+    """The token after ``flag``, or None if absent or trailing."""
+    i = args.index(flag) + 1 if flag in args else -1
+    return args[i] if 0 <= i < len(args) else None
 
 
 def _judge_via_rust(argv: list[str]) -> Optional[dict]:
@@ -497,8 +495,7 @@ def _judge_via_rust(argv: list[str]) -> Optional[dict]:
 
 
 def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[str, int]:
-    """("judged", fail_count), ("gap", 0) for no section, or ("fault", 0) for a
-    failed round-trip - a gap or a fault is coverage, never a fabricated fail."""
+    """("judged", n), ("gap", 0) for no section, or ("fault", 0) for a failed round-trip - never a fabricated fail."""
     pp = item.get("plan_path")
     try:
         text = Path(pp).read_text(encoding="utf-8") if pp else ""
