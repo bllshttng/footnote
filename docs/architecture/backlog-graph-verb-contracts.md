@@ -801,7 +801,13 @@ Union FTS5 and relatedness recall, ranked by relatedness score.
     vocabulary hit remains visible with its measured score.  ``domain`` is the
     incoming node's own domain: relatedness grants a same-domain bonus, so a
     caller that knows it must pass it rather than let every query read as
-    ``code``.
+    ``code``.  ``floor`` overrides the relatedness lane's 0.30 dedup default
+    for ranked-recall readers such as the think inspect duplicates payload;
+    ``fts_enabled=False`` skips the FTS lane with an explicit degraded warning
+    (injected entries have no graph file), and a missing graph file degrades
+    the lane the same way instead of raising.  ``filing_paths`` extracts the
+    paths a filing names after removing fenced blocks and quoted spans, so a
+    path quoted from a log line is not read as shared surface.
 
 ## assess
 

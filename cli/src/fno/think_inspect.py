@@ -201,6 +201,8 @@ def _graph_section(
     archive: list[dict[str, Any]],
     error: str | None,
     archive_error: str | None,
+    *,
+    graph_path: Path | None = None,
 ) -> dict[str, Any]:
     if entries is None:
         return {
@@ -214,8 +216,15 @@ def _graph_section(
             "detail": error or "graph unavailable",
         } | _no_decisions()
 
+    from fno.graph import discovery
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.relatedness import _DOMAIN_BONUS, _MIN_SCORE, _tokens, epic_candidates, similar_nodes
+    from fno.graph.relatedness import (
+        _DOMAIN_BONUS,
+        _MIN_SCORE,
+        _tokens,
+        epic_candidates,
+        lineage_ids,
+    )
 
     active_by_id = {
         row["id"]: row for row in entries if isinstance(row, dict) and isinstance(row.get("id"), str)
@@ -245,23 +254,44 @@ def _graph_section(
     # where the node lane would have required jac >= 0.15 with no bonus to
     # earn. Accepted: recall over precision is the point of this fix, and a
     # domain-less probe cannot tell which candidates it would have matched.
-    # The wider floor also widens how many candidates clear it, so a k=5 cap
-    # (right for the node lane's tighter 0.15 floor) can let cross-domain
-    # noise fill every slot and evict the true low-score family the floor
-    # widening exists to recover - the empty-list warning then never fires,
-    # because the returned list is not empty, just wrong. Take a wider k on
-    # the seed lane so the reader has enough of the ranked list to judge.
+    # The wider floor also widens how many candidates clear it, so a small k
+    # lets higher-Jaccard rows evict the fts-only family the lane exists to
+    # recover (x-80bd's own seed is the live specimen: its fold-offer top id
+    # ranked past k=15). The floor is the one threshold; the seed lane takes
+    # no cap. The node lane keeps k=5: a resolved node's dedup verdict is a
+    # bounded question.
     floor = _MIN_SCORE if resolved else _MIN_SCORE - _DOMAIN_BONUS
-    k = 5 if resolved else 15
-    scored = similar_nodes(probe, combined, k=k, floor=floor)
+    k = 5 if resolved else None
+    # One scorer with the idea fold offer: discovery.candidates unions the fts
+    # lane with the same relatedness lane, so the Consolidation Gate cannot
+    # see a different family than intake folds on (x-80bd). Probe tokens are
+    # title+details, matching what the fold offer scores.
+    probe_title = str(resolved.get("title") or "") if resolved else seed
+    probe_details = str(resolved.get("details") or "") if resolved else seed
+    probe_domain = str(resolved.get("domain") or "") if resolved else ""
+    ranked = discovery.candidates(
+        probe_title,
+        probe_details,
+        entries=combined,
+        graph_path=graph_path,
+        exclude_id=str(resolved.get("id")) if resolved else None,
+        limit=k,
+        floor=floor,
+        domain=probe_domain,
+        fts_enabled=graph_path is not None,
+    )
     duplicates = []
-    for node_id, score, reason in scored:
+    lineage = lineage_ids(resolved, {**archive_by_id, **active_by_id}) if resolved else set()
+    for candidate in ranked:
+        node_id = candidate.node_id
+        if node_id in lineage:
+            continue
         row = active_by_id.get(node_id) or archive_by_id.get(node_id)
         if row is None:
             continue
         duplicates.append(
             _node_summary(row, archived=node_id in archive_by_id and node_id not in active_by_id)
-            | {"score": score, "reason": reason}
+            | {"score": candidate.score, "reason": candidate.reason, "lanes": sorted(candidate.lanes)}
         )
     rollups = []
     for node_id, score, reason in epic_candidates(probe, combined, k=3, floor=floor):
@@ -315,6 +345,8 @@ def _graph_section(
             "lane": "node" if resolved else "seed",
             "seed_tokens": len(_tokens(probe)),
             "floor": floor,
+            "fts": "degraded" if ranked.degraded else "ok",
+            "fts_warning": ranked.warning if ranked.degraded else None,
         },
     } | _decisions_section(resolved.get("id") if resolved else None)
 
@@ -475,7 +507,8 @@ def build_receipt(
         project_root=repo,
         settings=settings,
     )
-    if graph_entries is _UNSET:
+    graph_from_file = graph_entries is _UNSET
+    if graph_from_file:
         graph_entries, graph_error = _load_graph(graph_path)
     archive_error = None
     if archive_entries is _UNSET:
@@ -490,6 +523,9 @@ def build_receipt(
         archive,
         graph_error,
         archive_error,
+        # injected entries own their pool; the fts lane indexes the graph file,
+        # so it runs only when the pool actually came from that file
+        graph_path=graph_path if graph_from_file else None,
     )
     from fno.paths import plans_content_dir
 

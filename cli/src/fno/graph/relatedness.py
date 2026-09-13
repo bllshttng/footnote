@@ -340,6 +340,21 @@ def epic_candidates(
     return scored[:k]
 
 
+def lineage_ids(entry: Entry, by_id: dict[str, Entry]) -> set[str]:
+    """Ancestor ids of ``entry`` following parent links inside ``by_id``.
+
+    Shared with readers that score through the same substrate but do not flag
+    a node's own lineage as a match (x-80bd: the think inspect duplicates
+    payload must not recommend superseding the node's own epic).
+    """
+    lineage: set[str] = set()
+    cur = entry.get("parent")
+    while isinstance(cur, str) and cur in by_id and cur not in lineage:
+        lineage.add(cur)
+        cur = by_id[cur].get("parent")
+    return lineage
+
+
 def similar_nodes(
     entry: Entry,
     entries: list[Entry],
@@ -374,20 +389,16 @@ def similar_nodes(
     cached_entry_tokens = token_cache.get(entry_id) if token_cache and isinstance(entry_id, str) else None
     ta = cached_entry_tokens if cached_entry_tokens is not None else _tokens(entry)
     nid = entry.get("id")
-    by_id = {
-        e.get("id"): e
+    by_id: dict[str, Entry] = {
+        node_id: e
         for e in entries
-        if isinstance(e, dict) and isinstance(e.get("id"), str)
+        if isinstance(e, dict) and isinstance((node_id := e.get("id")), str)
     }
     # Exclude the node's own lineage: a child legitimately resembles its parent
     # (rollup parented it there for exactly that reason), so flagging an
     # ancestor as a duplicate would cry wolf on most filings and recommend
     # superseding the node's own epic (codex P2).
-    lineage: set[str] = set()
-    cur = entry.get("parent")
-    while isinstance(cur, str) and cur in by_id and cur not in lineage:
-        lineage.add(cur)
-        cur = by_id[cur].get("parent")
+    lineage = lineage_ids(entry, by_id)
     scored: list[tuple[str, float, str]] = []
     for e in entries:
         if not isinstance(e, dict):

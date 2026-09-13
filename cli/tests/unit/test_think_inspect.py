@@ -370,6 +370,8 @@ def test_seed_lane_matches_node_lane_candidate_set(tmp_path: Path) -> None:
         "lane": "node",
         "seed_tokens": node_receipt["graph"]["recall"]["seed_tokens"],
         "floor": _MIN_SCORE,
+        "fts": "degraded",
+        "fts_warning": node_receipt["graph"]["recall"]["fts_warning"],
     }
     node_ids = sorted(row["id"] for row in node_receipt["graph"]["duplicates"])
     assert node_ids == ["bbb", "ccc"]
@@ -463,6 +465,128 @@ def test_seed_lane_empty_marks_incomplete_and_names_backlog_find(tmp_path: Path)
     assert receipt["graph"]["duplicates"] == []
     assert receipt["complete"] is False
     assert any("fno backlog find" in w for w in receipt["warnings"])
+
+
+def _seeded_graph_repo(tmp_path: Path, entries: list[dict]) -> tuple[Path, Path]:
+    """A repo whose config points graph_json at a tmp graph file.
+
+    build_receipt derives the graph path from settings; pointing the repo's
+    own config at the tmp file is the supported override, and it keeps the
+    fts lane live against bytes this test wrote instead of the real graph.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".fno").mkdir(parents=True)
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": entries}) + "\n", encoding="utf-8")
+    (repo / ".fno" / "config.toml").write_text(
+        f'[paths]\ngraph_json = "{graph}"\n', encoding="utf-8"
+    )
+    return repo, graph
+
+
+def _wombat_corpus() -> tuple[str, list[dict]]:
+    """Seed + graph where only the fts lane can see the true family.
+
+    fts.search is an implicit AND over every query token, so `fam` contains
+    all eight seed words plus 160 fillers: raw Jaccard 8/168 = 0.048, below
+    the 0.05 seed floor, so the relatedness lane drops it. Five noise nodes
+    each share five seed words (5/9 = 0.556) and outrank fam on Jaccard
+    alone. Without the fts lane fam is invisible; with it, the gate sees
+    what the fold offer sees.
+    """
+    animals = ["wombat", "burrow", "falcon", "heron", "ibex", "jaguar", "kraken", "lynx"]
+    seed = " ".join(animals)
+    fam = {
+        "id": "fam",
+        "slug": "fam",
+        "title": seed + " " + " ".join(f"filler{i:03d}" for i in range(1, 161)),
+        "status": "ready",
+        "domain": "code",
+    }
+    groups = [(0, 5), (1, 6), (2, 7), (3, 8), (0, 5)]
+    noise = [
+        {
+            "id": f"noise{n}",
+            "slug": f"noise{n}",
+            "title": " ".join(animals[lo:hi]) + f" noiseword{n}",
+            "status": "ready",
+            "domain": "code",
+        }
+        for n, (lo, hi) in enumerate(groups, start=1)
+    ]
+    return seed, [fam, *noise]
+
+
+def test_seed_lane_duplicates_carry_the_fts_lane(tmp_path: Path) -> None:
+    from fno.think_inspect import build_receipt
+
+    seed, entries = _wombat_corpus()
+    repo, _graph = _seeded_graph_repo(tmp_path, entries)
+
+    receipt = build_receipt(
+        seed,
+        repo=repo,
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+
+    rows = {row["id"]: row for row in receipt["graph"]["duplicates"]}
+    assert "fam" in rows, f"fts-only family missing from duplicates: {sorted(rows)}"
+    assert "fts" in rows["fam"]["lanes"]
+    assert receipt["graph"]["recall"]["fts"] == "ok"
+
+
+def test_fold_offer_ids_are_a_subset_of_gate_ids(tmp_path: Path) -> None:
+    from fno.graph import discovery, relatedness
+    from fno.think_inspect import build_receipt
+
+    seed, entries = _wombat_corpus()
+    repo, graph = _seeded_graph_repo(tmp_path, entries)
+
+    fold_pool, _source = relatedness.filing_candidates(entries, tmp_path / "sidecar.json")
+    fold = discovery.candidates(seed, "", entries=fold_pool, graph_path=graph, limit=5)
+
+    receipt = build_receipt(
+        seed,
+        repo=repo,
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+
+    assert fold, "the fold offer matched nothing; the parity read is vacuous"
+    gate_ids = {row["id"] for row in receipt["graph"]["duplicates"]}
+    assert {candidate.node_id for candidate in fold} <= gate_ids
+
+
+def test_injected_entries_name_the_degraded_fts_lane(tmp_path: Path) -> None:
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    node_b = {
+        "id": "bbb",
+        "slug": "bbb",
+        "title": "alpha bravo charlie india juliet",
+        "status": "ready",
+        "domain": "code",
+    }
+
+    receipt = build_receipt(
+        "alpha bravo charlie delta echo",
+        repo=repo,
+        graph_entries=[node_b],
+        archive_entries=[],
+        plans_path=tmp_path / "missing-plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+
+    recall = receipt["graph"]["recall"]
+    assert recall["fts"] == "degraded"
+    assert recall["fts_warning"]
+    assert [row["id"] for row in receipt["graph"]["duplicates"]] == ["bbb"]
 
 
 def test_cli_emits_machine_readable_receipt(monkeypatch, tmp_path: Path) -> None:
