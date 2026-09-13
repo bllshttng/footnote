@@ -108,7 +108,10 @@ def test_receipt_collects_grounding_without_writes(
     assert receipt["pitfalls"]["entries"] == ["Guards can lie"]
     assert receipt["pitfalls"]["retro_syntheses"] == [str(retro)]
     assert receipt["pitfalls"]["lesson_candidates"] == 2
-    assert receipt["complete"] is True
+    # The injected pool has no graph file behind it, so the fts lane of the
+    # duplicate recall did not run and the receipt refuses to read complete.
+    assert receipt["complete"] is False
+    assert any("without the fts lane" in w for w in receipt["warnings"])
 
 
 def test_receipt_exposes_unavailable_evidence(tmp_path: Path) -> None:

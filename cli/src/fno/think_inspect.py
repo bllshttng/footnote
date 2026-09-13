@@ -269,10 +269,15 @@ def _graph_section(
     probe_title = str(resolved.get("title") or "") if resolved else seed
     probe_details = str(resolved.get("details") or "") if resolved else seed
     probe_domain = str(resolved.get("domain") or "") if resolved else ""
+    # Lineage leaves the pool before the cap, not after it: the scorer's
+    # incoming row has no parent, so a post-cap filter would let an ancestor
+    # consume a node-lane slot and evict a legitimate duplicate.
+    lineage = lineage_ids(resolved, {**archive_by_id, **active_by_id}) if resolved else set()
+    pool = [row for row in combined if row.get("id") not in lineage] if lineage else combined
     ranked = discovery.candidates(
         probe_title,
         probe_details,
-        entries=combined,
+        entries=pool,
         graph_path=graph_path,
         exclude_id=str(resolved.get("id")) if resolved else None,
         limit=k,
@@ -281,11 +286,8 @@ def _graph_section(
         fts_enabled=graph_path is not None,
     )
     duplicates = []
-    lineage = lineage_ids(resolved, {**archive_by_id, **active_by_id}) if resolved else set()
     for candidate in ranked:
         node_id = candidate.node_id
-        if node_id in lineage:
-            continue
         row = active_by_id.get(node_id) or archive_by_id.get(node_id)
         if row is None:
             continue
@@ -565,6 +567,12 @@ def build_receipt(
         warnings.append(
             "seed lane returned no candidates; this is not a measured absence. "
             "Widen the seed to the design body, or run: fno backlog find '<2-3 salient terms>'"
+        )
+    recall = graph.get("recall") or {}
+    if recall.get("fts") == "degraded":
+        warnings.append(
+            "duplicate recall ran without the fts lane: "
+            f"{recall.get('fts_warning') or 'the lane did not run'}"
         )
     return {
         "version": 1,
