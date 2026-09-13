@@ -791,6 +791,24 @@ def test_heal_verb_bounces_when_enabled(monkeypatch):
     assert "pr-watch heal:" in result.stdout
 
 
+def test_heal_verb_defers_while_tick_holds_the_claim(monkeypatch):
+    """AC4-HP at the verb: the SessionStart heal passes
+    defer_when_ticking so the bounce cannot kill a live tick."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    monkeypatch.setattr(cli_mod, "_resolve_fno_binary", lambda: "/x/fno-py")
+    _patch_heal_claims(monkeypatch)
+    import fno.pr_watch._install as m
+    calls: list = []
+    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: calls.append(kw) or ("bounced; awaiting first tick", 0))
+
+    result = CliRunner().invoke(app, ["pr-watch", "heal"])
+    assert result.exit_code == 0
+    assert calls[0]["defer_when_ticking"] is True
+
+
 def test_heal_verb_single_flight_skips_when_held(monkeypatch):
     """Two concurrent SessionStarts reinstall at most once: the loser skips."""
     from typer.testing import CliRunner
@@ -1098,6 +1116,58 @@ def test_bounce_bootout_hang_is_fatal(tmp_launch_agents):
     )
     assert rc == 1 and "bootout" in msg and "timed out" in msg
     assert [c[0] for c in calls] == ["bootout"]  # stops at the hang
+
+
+def test_bounce_defers_while_tick_claim_is_young(tmp_launch_agents, monkeypatch):
+    """AC4-HP: a tick mid-flight (live claim under one interval) makes
+    the heal defer - no launchctl step runs, and the deferral is named."""
+    m = _install()
+    monkeypatch.setattr(m, "_tick_in_flight", lambda: 4242)
+    calls: list[tuple] = []
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "x.plist", uid=501,
+        run=_record_runner(calls),
+        defer_when_ticking=True,
+    )
+    assert (msg, rc) == ("tick in flight (pid 4242); bounce deferred", 0)
+    assert calls == []
+
+
+def test_bounce_proceeds_when_tick_claim_is_old(tmp_launch_agents, monkeypatch):
+    """AC5-EDGE: a live claim older than one interval is a hung tick,
+    so the bounce runs its bootout/bootstrap/kickstart cure as today."""
+    m = _install()
+    monkeypatch.setattr(m, "_tick_in_flight", lambda: None)
+    calls: list[tuple] = []
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "x.plist", uid=501,
+        run=_record_runner(calls),
+        defer_when_ticking=True,
+    )
+    assert rc == 0
+    assert [c[0] for c in calls] == ["bootout", "bootstrap", "kickstart"]
+
+
+def test_tick_in_flight_reads_claim_state_and_age(monkeypatch):
+    """Only a LIVE claim younger than 600s counts as in flight; a stale,
+    suspect, or old one never defers the cure."""
+    import time as _time
+
+    m = _install()
+    now_ms = int(_time.time() * 1000)
+
+    def _claim(state, acquired=None):
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, **kw: {"key": key, "state": state, "pid": 777,
+                               "acquired_at": acquired},
+        )
+        return m._tick_in_flight()
+
+    assert _claim("live", now_ms - 30_000) == 777
+    assert _claim("live", now_ms - 900_000) is None  # hung tick: bounce proceeds
+    assert _claim("stale", now_ms - 30_000) is None
+    assert _claim("live", None) is None
 
 
 def test_refresh_watcher_rerenders_then_bounces(tmp_launch_agents):

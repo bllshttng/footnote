@@ -259,6 +259,34 @@ def _run_launchctl_timed(*args: str, timeout_s: float = _LAUNCHCTL_TIMEOUT_S) ->
         return -1, False
 
 
+def _tick_in_flight() -> Optional[int]:
+    """PID of a live, young ``pr-watch:tick`` claim holder, else None.
+
+    A bounce bootouts the label and ``kickstart -k`` SIGTERMs any running
+    tick (eight ``why=killed`` tick_end rows in one hour, one per
+    SessionStart, while the dead verdict stood). A live claim younger than
+    one StartInterval (600s, above the 480s tick ceiling) is a tick mid-
+    flight; an older one is a hung tick and the bounce proceeds.
+    """
+    try:
+        from fno.claims.core import claim_status
+
+        info = claim_status("pr-watch:tick")
+    except Exception:  # noqa: BLE001 - an unread claim never blocks a cure
+        return None
+    if info.get("state") != "live":
+        return None
+    acquired = info.get("acquired_at")
+    try:
+        young = bool(acquired) and (int(time.time() * 1000) - int(acquired)) < 600_000
+    except (TypeError, ValueError):
+        return None
+    if not young:
+        return None
+    pid = info.get("pid")
+    return pid if isinstance(pid, int) else 0
+
+
 def bounce(
     *,
     plist_path: Path,
@@ -268,6 +296,7 @@ def bounce(
     sleep: Callable[[float], None] = time.sleep,
     timeout_s: float = _LAUNCHCTL_TIMEOUT_S,
     kickstart: bool = True,
+    defer_when_ticking: bool = False,
 ) -> tuple[str, int]:
     """bootout -> bootstrap -> kickstart to cure a wedged launchd job.
 
@@ -283,11 +312,20 @@ def bounce(
     harmless poll. The watcher's tick is idempotent, so forcing one is free
     liveness confirmation; a job that mutates shared state on each fire would
     instead perform that work at install time, against the plist's own schedule.
+
+    ``defer_when_ticking``: a self-heal fired while a tick is
+    mid-flight would kill the very tick the verdict wrongly called dead, so
+    the heal defers instead and runs no launchctl step. A refresh that loads
+    a new binary must not pass it.
     """
     if uid is None:
         uid = os.getuid()
     if run is None:
         run = _run_launchctl_timed
+    if defer_when_ticking:
+        pid = _tick_in_flight()
+        if pid is not None:
+            return (f"tick in flight (pid {pid}); bounce deferred", 0)
     domain = f"gui/{uid}"
     target = f"{domain}/{label}"
 
@@ -327,7 +365,9 @@ def bounce(
     return (f"bounced {target}; awaiting first tick", 0)
 
 
-def heal_watcher(*, launch_agents_dir: Path) -> tuple[str, int]:
+def heal_watcher(
+    *, launch_agents_dir: Path, defer_when_ticking: bool = False
+) -> tuple[str, int]:
     """Resolve the plist path and bounce the watcher. Doctor's --fix entrypoint.
 
     Returns ``(message, exit_code)``; nonzero when the plist is absent (nothing
@@ -336,7 +376,7 @@ def heal_watcher(*, launch_agents_dir: Path) -> tuple[str, int]:
     plist_path = launch_agents_dir / _PLIST_FILENAME
     if not plist_path.exists():
         return (f"no plist at {plist_path}; run `fno do pr watch install`", 1)
-    return bounce(plist_path=plist_path)
+    return bounce(plist_path=plist_path, defer_when_ticking=defer_when_ticking)
 
 
 def refresh_watcher(
@@ -345,6 +385,7 @@ def refresh_watcher(
     fno_binary: str,
     install_path: str,
     interval: int = 600,
+    defer_when_ticking: bool = False,
 ) -> tuple[str, int]:
     """Re-render the plist onto the current binary, then bounce. Post-update hook.
 
@@ -368,7 +409,7 @@ def refresh_watcher(
         plist_path.write_text(plist_text, encoding="utf-8")
     except OSError as exc:
         return (f"failed to write plist {plist_path}: {exc}", 1)
-    return bounce(plist_path=plist_path)
+    return bounce(plist_path=plist_path, defer_when_ticking=defer_when_ticking)
 
 
 def _launchctl_is_loaded() -> bool:
