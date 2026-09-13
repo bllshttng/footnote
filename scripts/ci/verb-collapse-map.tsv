@@ -37,6 +37,7 @@ agents distress-scan	T1	agents distress-scan	0
 agents distress-verdicts	T1	agents distress-verdicts	0
 agents gate-status	T1	agents gate-status	0
 agents drive-authority	T1	agents drive-authority	9
+agents evals-macro	T1	agents evals-macro	0
 agents finalize	T1	agents finalize	26
 agents fleet-incident	T1	agents fleet-incident	0
 agents gate	T1	agents gate	6
@@ -383,6 +384,7 @@ doctor bundle check	T1	doctor bundle check	8
 doctor bundle lint	T1	doctor bundle lint	1
 doctor codemap	T1	doctor codemap	18
 doctor evals grade	T1	doctor evals grade	11
+doctor evals macro	T1	doctor evals macro	0
 doctor evals graduate	T1	doctor evals graduate	2
 doctor evals report	T1	doctor evals report	1
 doctor evals run	T1	doctor evals run	3
@@ -411,6 +413,7 @@ doctor test	T1	doctor test	107
 doctor update	T1	doctor update	109
 done	KEEP	done	48	single-leaf group
 evals grade	T1	evals grade	11
+evals macro	T1	evals macro	0
 evals graduate	T1	evals graduate	2
 evals report	T1	evals report	1
 evals run	T1	evals run	3
