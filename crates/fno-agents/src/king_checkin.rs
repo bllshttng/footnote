@@ -320,7 +320,11 @@ fn fetch_fold(ctx: &Ctx) -> Result<Value, String> {
     Ok(json!({"fold": mine, "stuck": payload.get("stuck").cloned().unwrap_or(Value::Null)}))
 }
 
-fn r_board(board: &Result<Value, String>, court: &Result<Value, String>) -> Result<Value, String> {
+fn r_board(
+    board: &Result<Value, String>,
+    court: &Result<Value, String>,
+    open_prs: Result<i64, String>,
+) -> Result<Value, String> {
     let board = board.clone()?;
     let court = court.clone()?;
     let mut blocked_on: Vec<String> = Vec::new();
@@ -347,7 +351,7 @@ fn r_board(board: &Result<Value, String>, court: &Result<Value, String>) -> Resu
     }
     let undriven = board_queue(&board, "undriven_pr")?;
     Ok(json!({
-        "open_prs": open_pr_count()?,
+        "open_prs": open_prs?,
         "free_claim_no_driver": undriven.get("count").and_then(|c| c.as_i64()).unwrap_or(0),
         "blocked": blocked,
         "blocked_on": blocked_on,
@@ -614,7 +618,7 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
         };
     };
     take("user_notes", r_user_notes(ctx));
-    take("board", r_board(&beat.board, &beat.folded));
+    take("board", r_board(&beat.board, &beat.folded, open_pr_count()));
     take("blocked_child", r_blocked_child(&beat.board));
     take("court", r_court(&beat.folded));
     take("capacity", r_capacity());
@@ -1322,7 +1326,7 @@ mod tests {
     fn board_and_court_readings_reduce_the_payloads() {
         let board = Ok(board_payload());
         let folded = Ok(fold_payload());
-        let board_value = r_board(&board, &folded).unwrap();
+        let board_value = r_board(&board, &folded, Ok(7)).unwrap();
         assert_eq!(board_value["blocked"], json!(1));
         assert_eq!(board_value["blocked_on"], json!(["x-3 on x-1"]));
         assert_eq!(board_value["free_claim_no_driver"], json!(3));
