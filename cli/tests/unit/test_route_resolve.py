@@ -801,3 +801,76 @@ def test_routing_policy_payload_reads_the_opt_in_fields(tmp_path, monkeypatch):
     settings2 = config_mod.load_settings()
     assert rr._routing_policy_payload(settings2)["operator_access"] == "unknown"
     assert rr._routing_policy_payload(settings2)["enforce_inventory"] is False
+
+
+# --- the decider's verb set is the readout's verb set ------------------------ #
+
+
+def test_decider_slot_table_covers_every_readout_verb(tmp_path):
+    """The strict-routing decider and the slot readout read ONE verb set.
+
+    The decider table was built from the closed dispatched-verbs tuple, so a
+    configured profile outside it got no row and strict routing refused its
+    dispatch with 'declares no lanes' while config declared three. The table
+    now iterates slot_verbs, so the two sets are equal by construction. This
+    test covers both failure modes: a configured verb outside the tuple
+    (fix here) and a dispatched verb whose profile an operator removed
+    (pr-create here) - the latter must appear in the table with an empty
+    lane list, which is exactly what the Rust None arm builds.
+    """
+    from fno.config import settings_from_files
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[agents.profiles.target]\n"
+        'lanes = ["flash-x"]\n'
+        "\n"
+        "[agents.profiles.fix]\n"
+        'lanes = ["flash-x"]\n',
+        encoding="utf-8",
+    )
+    settings = settings_from_files([cfg])
+    assert "fix" in rr.slot_verbs(settings=settings)
+    assert "pr-create" in rr.slot_verbs(settings=settings)
+    table = rr._slot_profiles_table(settings)
+    assert set(rr.slot_verbs(settings=settings)) == set(table)
+    assert table["fix"]["lanes_raw"], "the fix row must carry its lanes, not only its key"
+
+
+@requires_rust
+def test_strict_routing_arms_a_configured_verb_outside_the_tuple(tmp_path):
+    """Strict routing arms a configured profile whatever its verb, and still
+    refuses a verb that truly declares nothing.
+
+    fix declares a lane in config; its dispatch was refused with 'slot
+    agents.profiles.fix declares no lanes' - false text from a decider table
+    that never read the slot. The refusal on tdd, which carries no profile,
+    is the true one and must survive.
+    """
+    from fno.config import settings_from_files
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[routing]\n"
+        "enforce_inventory = true\n"
+        "\n"
+        "[[routing.models]]\n"
+        'name = "flash-x"\n'
+        'harness = "claude"\n'
+        'model = "glm-5.3-flash[1m]"\n'
+        'band = "low"\n'
+        'operator_view = "claude-native"\n'
+        "\n"
+        "[agents.profiles.target]\n"
+        'lanes = ["flash-x"]\n'
+        "\n"
+        "[agents.profiles.fix]\n"
+        'lanes = ["flash-x"]\n',
+        encoding="utf-8",
+    )
+    settings = settings_from_files([cfg])
+    _payload, chain, verdict = rr.resolve_slot("fix", None, {}, settings=settings)
+    assert verdict == "armed"
+    assert any("agents.profiles.fix.lanes[0]" in step for step in chain)
+    _payload, _chain, verdict = rr.resolve_slot("tdd", None, {}, settings=settings)
+    assert verdict == "policy-held"

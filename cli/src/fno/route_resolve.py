@@ -485,14 +485,16 @@ def _account_record_vendors(settings: object) -> dict[str, str]:
 
 
 def _slot_profiles_table(settings: object) -> dict[str, Any]:
-    """Every dispatched verb's slot as JSON: the owner picks the EFFECTIVE
-    work kind's slot from this table (the derived verb owns the phase, x-ebd2)."""
+    """Every verb slot_verbs reports, as JSON: the owner picks the EFFECTIVE
+    work kind's slot from this table (the derived verb owns the phase, x-ebd2).
+    The readout and this table must read one verb set - a configured profile
+    the table omitted got strict-refused with 'declares no lanes' while its
+    lanes sat in config. A verb with no profile still gets a row: empty fields
+    and empty lanes, the same answer the slot lookup's None arm builds."""
     out: dict[str, Any] = {}
     try:
-        for verb in SLOT_VERBS:
+        for verb in slot_verbs(settings):
             _s, prof, lns = _slot_entry(settings, verb)
-            if prof is None and not lns:
-                continue
             by_diff = getattr(prof, "by_difficulty", None)
             out[verb] = {
                 "rung_base": f"agents.profiles.{verb}",
