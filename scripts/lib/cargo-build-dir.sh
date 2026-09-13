@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove a worktree's cargo build hash dir at worktree-removal time (x-4991).
+# Remove a worktree's cargo build hash dir at worktree-removal time.
 #
 # Cargo writes intermediates OUTSIDE the checkout, at
 # <build-base>/<h2>/<hash> under build.build-dir. Removing a worktree

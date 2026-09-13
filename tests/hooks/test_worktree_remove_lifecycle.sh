@@ -1373,7 +1373,7 @@ fi
 kill "$HOLD" 2>/dev/null
 rm -rf "$S" "$STUB"
 
-echo "== 9. disposable deletes + build-hash-dir removal at worktree teardown (x-4991) =="
+echo "== 9. disposable deletes + build-hash-dir removal at worktree teardown =="
 
 # A trash-alias stand-in: bare rm on a wrapped host relocates instead of
 # unlinking, so the stub records the call and deletes NOTHING. A green

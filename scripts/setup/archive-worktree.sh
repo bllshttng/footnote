@@ -718,7 +718,7 @@ if [[ "${_WT_RECOVERABLE_ONLY:-0}" -eq 1 ]]; then
     exit 2
   fi
 fi
-# Reclaim the build hash dir while the manifest can still answer (x-4991);
+# Reclaim the build hash dir while the manifest can still answer;
 # the sweep reaps what an unreadable resolution leaves behind.
 declare -F cargo_build_dir_remove_for_wt >/dev/null 2>&1 && cargo_build_dir_remove_for_wt "$TARGET" || true
 if ! git worktree remove $REMOVE_FLAGS "$TARGET"; then

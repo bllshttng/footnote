@@ -338,7 +338,7 @@ fn tree_unreachable_from_origin_main(worktree: &str) -> bool {
 /// does not touch refs, and the branch is the recovery path.
 fn remove_tree(worktree: &str, repo_root: &str) -> bool {
     // Reclaim the build hash dir while the workspace manifest can still
-    // answer (x-4991); the shared bash lib owns the ownership checks, and
+    // answer; the shared bash lib owns the ownership checks, and
     // the sweep reaps whatever an unreadable resolution leaves behind.
     let _ = std::process::Command::new("bash")
         .arg(format!("{repo_root}/scripts/lib/cargo-build-dir.sh"))

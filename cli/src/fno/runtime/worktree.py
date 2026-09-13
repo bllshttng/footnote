@@ -218,6 +218,17 @@ def remove_worktree(
     else:
         wt_path = legacy
 
+    # Reclaim the cargo build hash dir while the manifest can still answer;
+    # best-effort, the sweep reaps what resolution misses.
+    reclaim_script = Path(repo_root) / "scripts/lib/cargo-build-dir.sh"
+    if reclaim_script.exists():
+        subprocess.run(
+            ["bash", str(reclaim_script), "remove-for", str(wt_path)],
+            cwd=str(repo_root),
+            capture_output=True,
+            check=False,
+        )
+
     result = subprocess.run(
         ["git", "worktree", "remove", "--force", str(wt_path)],
         cwd=str(repo_root),

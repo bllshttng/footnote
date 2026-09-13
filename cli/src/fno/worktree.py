@@ -387,6 +387,15 @@ class WorktreeManager:
         If the path is already gone, this is a no-op.
         """
         if worktree.path.exists():
+            # Reclaim the cargo build hash dir while the manifest can still
+            # answer; best-effort, the sweep reaps what resolution misses.
+            reclaim_script = self.repo_root / "scripts/lib/cargo-build-dir.sh"
+            if reclaim_script.exists():
+                subprocess.run(
+                    ["bash", str(reclaim_script), "remove-for", str(worktree.path)],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                )
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree.path)],
                 cwd=self.repo_root,
