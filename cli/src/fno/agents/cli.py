@@ -4956,10 +4956,11 @@ def incident(ctx: typer.Context) -> None:
 
 @agents_app.command(
     "provider-cap",
+    hidden=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def provider_cap(ctx: typer.Context) -> None:
-    """The provider-cap actor (x-7e05).
+    """The provider-cap actor.
 
     status [--json] [--max-age-s N] | decide <lane> --answer all|some:<id,id>|wait.
     """
