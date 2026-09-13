@@ -394,6 +394,7 @@ doctor harness-matrix	T1	doctor harness-matrix	3
 doctor lanes	T1	doctor lanes	0
 doctor lint	T1	doctor lint	39
 doctor observer replay	T1	doctor observer replay	2
+doctor observer judge	T1	doctor observer judge	2	
 doctor observer sweep	T1	doctor observer sweep	4
 doctor plugin-file	T1	doctor plugin-file	2
 doctor route	T1	doctor route	6
@@ -473,6 +474,7 @@ mux workspace prune	T1	mux workspace prune	14
 notify	KEEP	notify	18	single-leaf group
 observer replay	T1	observer replay	1
 observer sweep	T1	observer sweep	4
+observer judge	T1	observer judge	0	
 paths emit-shell	T1	paths emit-shell	6
 paths handoff	T1	paths handoff	9
 paths shell-stub	T1	paths shell-stub	20
