@@ -410,11 +410,9 @@ def undeclared_dispatch_pin(
 ) -> dict[str, str]:
     """The env a dispatcher exports for a spawn into an UNDECLARED repo.
 
-    Identity is the git common dir, so a linked worktree of the caller's own
-    repo is not foreign. ``source == "default"`` means nothing anywhere named
-    the target repo; reached from elsewhere, that is the repo whose edits the
-    child's hooks would block, so pin ``never`` rather than write config into
-    somebody else's project. Everything else keeps the ambient posture.
+    Identity is the git common dir, so the caller's own worktree is not
+    foreign. ``source == "default"`` means nothing anywhere named the target
+    repo; pin ``never`` rather than write config into somebody else's project.
     """
     target = _repo_identity(target_cwd)
     caller = _repo_identity(caller_cwd)
