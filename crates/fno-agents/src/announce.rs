@@ -867,7 +867,7 @@ fn transcript_path(harness_home: &Path, session_key: &str, codex: bool) -> Optio
     }
     let root = std::env::var_os("FNO_CLAUDE_PROJECTS_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| harness_home.join(".claude").join("projects"));
+        .unwrap_or_else(|| crate::claude_ask::ClaudeHome::at(harness_home).projects_dir());
     // One level: projects keys a transcript dir by the session cwd slug.
     let dir = std::fs::read_dir(&root).ok()?;
     for entry in dir.flatten() {
@@ -1613,7 +1613,9 @@ mod tests {
 
         // s1 carries the id in its claude transcript; s2's transcript lacks
         // it; s3 has no resolvable store at all.
-        let proj = home.join(".claude").join("projects").join("-tmp-one");
+        let proj = crate::claude_ask::ClaudeHome::at(&home)
+            .projects_dir()
+            .join("-tmp-one");
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(
             proj.join(format!("{s1}.jsonl")),
@@ -1622,7 +1624,9 @@ mod tests {
             ),
         )
         .unwrap();
-        let proj2 = home.join(".claude").join("projects").join("-tmp-two");
+        let proj2 = crate::claude_ask::ClaudeHome::at(&home)
+            .projects_dir()
+            .join("-tmp-two");
         std::fs::create_dir_all(&proj2).unwrap();
         std::fs::write(proj2.join(format!("{s2}.jsonl")), "{\"x\":\"nothing\"}\n").unwrap();
 
