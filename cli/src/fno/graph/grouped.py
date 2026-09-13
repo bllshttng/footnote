@@ -10,7 +10,7 @@ from fno.graph.types import Entry
 
 GROUPED_FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Identity", ("id", "slug", "title", "type", "project")),
-    ("Lifecycle", ("status", "priority", "rank", "size", "batch", "deferred_kind")),
+    ("Lifecycle", ("status", "persisted_status", "priority", "rank", "size", "batch", "deferred_kind")),
     (
         "Timestamps",
         (

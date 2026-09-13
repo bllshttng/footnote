@@ -2290,7 +2290,7 @@ def test_open_pr_heal_rechecks_current_node_inside_graph_lock(cli_env, tmp_path,
     monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({99: "OPEN"}))
     from fno.graph import store as graph_store
 
-    real_locked_mutate_graph = graph_store.locked_mutate_graph
+    real_commit_rows = graph_store.commit_rows_via_store
 
     def race_before_mutator(path, mutator):
         def concurrent_bind(entries):
@@ -2299,9 +2299,9 @@ def test_open_pr_heal_rechecks_current_node_inside_graph_lock(cli_env, tmp_path,
             node["pr_url"] = "https://github.com/test-owner/test-repo/pull/99"
             return mutator(entries)
 
-        return real_locked_mutate_graph(path, concurrent_bind)
+        return real_commit_rows(path, concurrent_bind)
 
-    monkeypatch.setattr(graph_store, "locked_mutate_graph", race_before_mutator)
+    monkeypatch.setattr(graph_store, "commit_rows_via_store", race_before_mutator)
 
     result = runner.invoke(app, ["backlog", "reconcile", "--json"])
 
