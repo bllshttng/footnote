@@ -215,11 +215,13 @@ def test_claude_resume_refuses_a_stale_cwd_without_waking() -> None:
     assert "fno agents adopt <id>" in res.stderr
 
 
-def test_resume_cwd_override_wins_over_the_registrys_recorded_cwd() -> None:
+def test_resume_cwd_override_wins_over_the_registrys_recorded_cwd(monkeypatch) -> None:
     """The Rust binary resolves a claude row's EnterWorktree-moved transcript
     dir before delegating here (`resolve_resume_cwd`); --cwd carries that
     resolved value through so this fallback doesn't re-derive the stale
     pre-EnterWorktree cwd from the registry entry itself."""
+    import fno.agents.watchdog as watchdog_mod
+
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
@@ -229,6 +231,12 @@ def test_resume_cwd_override_wins_over_the_registrys_recorded_cwd() -> None:
 
     def _wake(short_id, *, message, route_env, cwd, account_env=None):
         seen_cwd.append(cwd)
+
+    class _Facts:
+        last_event_epoch = 100.0
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: True)
 
     states = iter(["Needs input", "Working"])
     res = resume_logic(
@@ -480,14 +488,19 @@ def test_claude_print_command_uses_short_id_attach_form() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_claude_resume_wakes_and_verifies_working() -> None:
-    """A claude row with a live short_id is woken, not exec'd into attach."""
+def test_claude_resume_wakes_and_verifies_working(monkeypatch) -> None:
+    """A claude row with a live short_id is woken, not exec'd into attach.
+    AC1-HP (x-6ac3): the wake writes the message into the transcript after
+    the pre-wake marker, so resume exits 0."""
+    import fno.agents.watchdog as watchdog_mod
+
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
         name="alpha", harness="claude",
         cwd="/cwd",
         short_id="deadbeef",
+        harness_session_id="sess-uuid-1",
     )
     wake_calls: list[dict] = []
 
@@ -499,6 +512,18 @@ def test_claude_resume_wakes_and_verifies_working() -> None:
     def _state():
         current = next(states)
         return {"deadbeef": {"live_status": current}}
+
+    seen: dict = {}
+
+    class _Facts:
+        last_event_epoch = 100.0
+
+    def _confirm(row_id, cwd, message, before_epoch, **kw):
+        seen["confirm"] = (row_id, cwd, message, before_epoch)
+        return True
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", _confirm)
 
     res = resume_logic(
         name="alpha",
@@ -516,6 +541,10 @@ def test_claude_resume_wakes_and_verifies_working() -> None:
     assert res.output == "alpha (deadbeef): Needs input -> Working\n"
     assert len(wake_calls) == 1
     assert wake_calls[0] == {"short_id": "deadbeef", "message": "continue", "route_env": None}
+    # The confirm runs against the full transcript uuid, never the transport
+    # short_id: the transcript file is named by the uuid (x-6ac3).
+    assert seen["confirm"][0] == "sess-uuid-1"
+    assert seen["confirm"][2] == "continue"
 
 
 def test_claude_resume_retries_once_before_giving_up() -> None:
@@ -667,7 +696,7 @@ def test_claude_resume_emits_no_event_on_a_skipped_already_working_row() -> None
     assert events_seen == []
 
 
-def test_claude_resume_passes_the_agents_cwd_to_wake_fn() -> None:
+def test_claude_resume_passes_the_agents_cwd_to_wake_fn(monkeypatch) -> None:
     """The wake subprocess must run from the agent's own recorded cwd,
     matching the non-claude exec path's os.chdir(cwd) and the Rust exec
     fallback's set_current_dir(cwd) -- claude attach finds the session by
@@ -682,6 +711,14 @@ def test_claude_resume_passes_the_agents_cwd_to_wake_fn() -> None:
 
     def _wake(short_id, *, message, route_env, cwd, account_env=None):
         seen_cwd.append(cwd)
+
+    import fno.agents.watchdog as watchdog_mod
+
+    class _Facts:
+        last_event_epoch = 100.0
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: True)
 
     states = iter(["Needs input", "Working"])
     res = resume_logic(
@@ -699,8 +736,10 @@ def test_claude_resume_passes_the_agents_cwd_to_wake_fn() -> None:
     assert seen_cwd == ["/the/agents/worktree"]
 
 
-def test_claude_resume_restores_routed_env() -> None:
+def test_claude_resume_restores_routed_env(monkeypatch) -> None:
     """A routed row's env must reach the wake attempt."""
+    import fno.agents.watchdog as watchdog_mod
+
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
@@ -719,6 +758,12 @@ def test_claude_resume_restores_routed_env() -> None:
         return {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/paas/v4"}
 
     import fno.agents.model_routing as model_routing_mod
+
+    class _Facts:
+        last_event_epoch = 100.0
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: True)
 
     orig = model_routing_mod.read_route_settings
     model_routing_mod.read_route_settings = _read_route_settings
@@ -1198,29 +1243,120 @@ def test_claude_resume_wakes_an_idle_row_confirmed_by_transcript(monkeypatch) ->
     )
     assert res.exit_code == 0
     assert wake_calls == [1]
-    # The wake lane's session id IS the claude transport short id
-    # (HARNESS_SESSION_ID_FIELDS); the transcript resolver takes an 8-hex
-    # prefix, so content confirmation runs on the same key the wake did.
-    assert seen["confirm"][0] == "deadbeef"
+    # The confirm runs on the row's full transcript uuid, never the
+    # transport short_id the wake attaches through: the transcript FILE is
+    # named by the uuid, so a short-id confirm could never resolve a
+    # transcript (x-6ac3). The wake and the confirm legitimately key on
+    # different ids - pty transport vs transcript store.
+    assert seen["confirm"][0] == "sess-uuid-1"
     assert seen["confirm"][3] == 100.0
     assert res.output == "alpha (deadbeef): Idle -> Idle\n"
 
 
-def test_claude_resume_rechecks_state_after_a_timed_out_attempt() -> None:
-    """A wake that lands but whose subprocess outlives the timeout must not
-    be scored a failure: the post-attempt state read must run even when
-    wake_fn raised TimeoutExpired."""
-    import subprocess as subprocess_mod
+def test_claude_resume_exit_16_when_status_reads_working_but_no_marker_lands(
+    monkeypatch,
+) -> None:
+    """AC1-ERR (x-6ac3): the status word is not evidence. A row that flips
+    to Working on its own (an API retry succeeding) with no `continue`
+    record after the pre-wake marker must refuse, not report a landed
+    wake."""
+    import fno.agents.watchdog as watchdog_mod
 
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
         name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+        harness_session_id="sess-uuid-1",
     )
     states = iter(["Needs input", "Working"])
 
+    class _Facts:
+        last_event_epoch = 100.0
+
+    confirm_calls: list[tuple] = []
+
+    def _confirm(row_id, cwd, message, before_epoch, **kw):
+        confirm_calls.append((row_id, message))
+        return False
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", _confirm)
+
+    res = resume_logic(
+        name="alpha",
+        message="continue",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: None,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": next(states)}},
+    )
+    assert res.exit_code == 16
+    assert confirm_calls == [("sess-uuid-1", "continue")]
+    assert "'continue' is not in the transcript" in res.stderr
+    assert "after='Working'" in res.stderr
+
+
+def test_claude_resume_skip_with_explicit_message_refuses_exit_16() -> None:
+    """AC2-ERR (x-6ac3): a Working row is never injected into, and an
+    explicit --message that was therefore NOT delivered must not read as a
+    green no-op. Only a bare resume (no --message) keeps the exit-0
+    no-op."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+    claim_calls: list[int] = []
+
+    res = resume_logic(
+        name="alpha",
+        message="ship it",
+        message_explicit=True,
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: claim_calls.append(1) or None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: wake_calls.append(1),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+    )
+    assert res.exit_code == 16
+    assert wake_calls == [], "a skip-eligible row is never injected into"
+    assert claim_calls == [], "the refusal fires before any claim"
+    assert "'ship it' was NOT delivered" in res.stderr
+    assert "Working" in res.stderr
+
+
+def test_claude_resume_rechecks_state_after_a_timed_out_attempt(monkeypatch) -> None:
+    """A wake that lands but whose subprocess outlives the timeout must not
+    be scored a failure: the post-attempt state read must run even when
+    wake_fn raised TimeoutExpired."""
+    import subprocess as subprocess_mod
+
+    import fno.agents.watchdog as watchdog_mod
+
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+        harness_session_id="sess-uuid-1",
+    )
+    states = iter(["Needs input", "Working"])
+
+    class _Facts:
+        last_event_epoch = 100.0
+
     def _wake(short_id, *, message, route_env, cwd, account_env=None):
         raise subprocess_mod.TimeoutExpired(cmd="bash", timeout=60.0)
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: True)
 
     res = resume_logic(
         name="alpha",
@@ -1439,7 +1575,7 @@ def test_claude_resume_exit_16_when_nothing_answered_the_wake(monkeypatch) -> No
         agents_state_fn=lambda: {"deadbeef": {"live_status": "Idle"}},
     )
     assert res.exit_code == 16
-    assert "did not reach" in res.stderr
+    assert "is not in the transcript" in res.stderr
     assert "No process answered" not in res.stderr
 
 
@@ -1520,7 +1656,10 @@ def test_claude_resume_skip_check_is_case_insensitive(monkeypatch) -> None:
     )
     wake_calls: list[int] = []
 
-    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: None)
+    class _Facts:
+        last_event_epoch = 100.0
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
     monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: True)
 
     res = resume_logic(
@@ -1632,9 +1771,11 @@ def test_non_codex_resume_argv_is_untouched_by_the_codex_modal_flags() -> None:
 # --- x-d285: the account axis rides the wake (task 2.1) ----------------------
 
 
-def test_claude_resume_wake_carries_the_recorded_account_env() -> None:
+def test_claude_resume_wake_carries_the_recorded_account_env(monkeypatch) -> None:
     """A pinned-account row wakes under its own CLAUDE_CONFIG_DIR, not the
     caller's ambient namespace."""
+    import fno.agents.watchdog as watchdog_mod
+
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
@@ -1655,6 +1796,12 @@ def test_claude_resume_wake_carries_the_recorded_account_env() -> None:
 
     orig = account_env_mod.resolve_account_overlay
     account_env_mod.resolve_account_overlay = lambda _id: _Overlay()
+
+    class _Facts:
+        last_event_epoch = 100.0
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: True)
     states = iter(["Needs input", "Working"])
     try:
         res = resume_logic(
