@@ -30,6 +30,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ask",
     "attach",
     "authorized-merge",
+    "backlog-note",
+    "backlog-notes",
     "bash-census",
     "blueprint-feed",
     "board",
