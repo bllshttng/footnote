@@ -141,15 +141,23 @@ impl PaneSendAudit {
 
 /// A submit key is a control byte, not a dispatch: the CRs, Tabs and ESC
 /// sequences the mail lane issues one per submit key ride this same verb but
-/// write no row. A prompt write is never made only of these.
+/// write no row. A prompt write is never made only of these. The ESC family
+/// is bounded to terminal-sequence shape (short, ESC + `[` + alphanumerics),
+/// so a payload with any other printable byte is a prompt write and is
+/// audited.
 pub(crate) fn pane_send_is_control_only(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
     }
-    if bytes.first() == Some(&0x1b) {
-        return true; // an escape sequence (an arrow key, a bare Esc)
+    if bytes.iter().all(|b| b.is_ascii_control()) {
+        return true;
     }
-    bytes.iter().all(|b| b.is_ascii_control())
+    bytes.len() <= 4
+        && bytes.first() == Some(&0x1b)
+        && bytes
+            .iter()
+            .skip(1)
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'[')
 }
 
 /// The audit outcome vocabulary. Every pane-send exit code is representable,
@@ -364,12 +372,14 @@ mod tests {
             1,
             "the CR send reached the socket"
         );
-        // ESC + '[' + 'D' (a left-arrow) is control-only by the ESC-prefix
-        // rule, though '[' and 'D' are printable bytes.
+        // ESC + '[' + 'D' (a left-arrow) is control-only by the sequence
+        // rule, though '[' and 'D' are printable bytes. ESC followed by
+        // printable PROSE is a prompt write and is audited.
         assert!(pane_send_is_control_only(b"\x1b[D"));
         assert!(pane_send_is_control_only(b"\t"));
         assert!(!pane_send_is_control_only(b"1"));
         assert!(!pane_send_is_control_only(b""));
+        assert!(!pane_send_is_control_only(b"\x1bhello world"));
 
         let rows = read_audit_rows(&events, "pane-send");
         assert!(
