@@ -10,7 +10,7 @@ previous tip (FLAG_BASE_SHA = github.event.before) on a push - over only the
 files the change touched, and refuses any growth. There is no stored count:
 a checked-in total made every count-changing PR edit one shared
 line, and on 2026-09-13 two pairs of PRs merged green on stale bases and
-left main red, once growing and once shrinking (node x-2986). Removals bank
+left main red, once growing and once shrinking. Removals bank
 no credit either: the base is always the live tree on main, so an earlier
 removal never leaves spare count for a later PR.
 
@@ -175,6 +175,14 @@ def selftest() -> int:
     Always passes run() an explicit base sha, never env."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
+        ident = (
+            "-c",
+            "user.name=selftest",
+            "-c",
+            "user.email=selftest@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        )
 
         def sh(*args: str) -> str:
             out = git(root, *args)
@@ -183,18 +191,7 @@ def selftest() -> int:
 
         def commit(msg: str) -> str:
             sh("add", "-A")
-            sh(
-                "-c",
-                "user.name=selftest",
-                "-c",
-                "user.email=selftest@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-q",
-                "-m",
-                msg,
-            )
+            sh(*ident, "commit", "-q", "-m", msg)
             return sh("rev-parse", "HEAD")
 
         def write_opts(name: str, count: int) -> None:
@@ -241,10 +238,8 @@ def selftest() -> int:
             print("selftest: shrink case did not pass", file=sys.stderr)
             return 2
         sh("checkout", "-q", "main")
-        sh("-c", "user.name=selftest", "-c", "user.email=selftest@example.invalid",
-           "-c", "commit.gpgsign=false", "merge", "-q", "--no-edit", "x")
-        sh("-c", "user.name=selftest", "-c", "user.email=selftest@example.invalid",
-           "-c", "commit.gpgsign=false", "merge", "-q", "--no-edit", "y")
+        sh(*ident, "merge", "-q", "--no-edit", "x")
+        sh(*ident, "merge", "-q", "--no-edit", "y")
         # The merged tip against x's tip (the push-alarm base) is clean: the
         # two removals composed, and no stored count existed to race on.
         if run(root, tip_x) != 0:
