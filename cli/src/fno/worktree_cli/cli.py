@@ -598,11 +598,9 @@ def policy(
 ) -> None:
     """Print the resolved worktree policy for <repo>. Read-only.
 
-    Line 1 is the policy (never|harness-native|external); for a non-never result
-    line 2 is `base=<worktrees-base>`. Later lines name where the answer came
-    from, in `ensure`'s receipt vocabulary: `source=<per-project|global|default|env>`
-    always, plus `requested=<r> degraded=true` when the harness could not
-    allocate what was asked. Shares the SAME resolver `ensure` uses, so
+    Line 1 is the policy (never|harness-native|external); later lines carry
+    `base=` (non-never), `source=`, and a `requested=/degraded=true` clause in
+    `ensure`'s vocabulary. Shares the SAME resolver `ensure` uses, so
     bash callers get the identical verdict with no second precedence impl. A
     parse error / out-of-enum value exits 1 with the reason on stderr.
     """

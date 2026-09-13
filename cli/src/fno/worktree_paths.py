@@ -289,12 +289,12 @@ def resolve_worktree_policy(
 ) -> WorktreePolicy:
     """Resolve the worktree policy for ``repo_root`` under ``harness``.
 
-    Precedence: ``FNO_WORKTREE_POLICY`` > per-project
+    Precedence: ``FNO_WORKTREE_POLICY`` (how a dispatcher pins an undeclared
+    target's policy for its child) > per-project
     ``work.workspaces.<slug>.projects[].worktree`` > global ``worktree.policy`` >
-    built-in ``harness-native``. The env var is how a dispatcher pins an
-    undeclared target's policy for its child without writing config into that
-    repo. A config file that exists but fails to parse RAISES (fail closed); an
-    absent key is not an error. ``harness-native`` degrades to ``external`` when the harness has no
+    built-in ``harness-native``. A config file that exists but fails to parse
+    RAISES (fail closed); an absent key is not an error.
+    ``harness-native`` degrades to ``external`` when the harness has no
     native mechanism (anything but claude), when ``paths.worktrees_base`` is
     explicitly set (x-f96e: the key alone relocates; setting it AND
     ``worktree.policy`` is no longer required), and under the deprecated
@@ -327,8 +327,7 @@ def resolve_worktree_policy(
     # The env value flows into the SAME validation below: out-of-enum refuses.
     env_policy = os.environ.get("FNO_WORKTREE_POLICY")
     if env_policy:
-        raw_policy = env_policy
-        source = "env"
+        raw_policy, source = env_policy, "env"
     if raw_policy is None:
         entry = _match_project_entry(merged, repo_root, project_id)
         entry_policy = entry.get("worktree") if entry is not None else None
@@ -388,10 +387,7 @@ def resolve_worktree_policy(
 
 
 def _repo_identity(path: Path) -> Optional[tuple[Path, Path]]:
-    """``(top, common dir)`` for ``path``; None outside a git repo / on failure.
-
-    The resolver reads config against the top; identity is the common dir.
-    """
+    """``(top, common dir)``; None outside a git repo. Config reads the top; identity is the common dir."""
     try:
         proc = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--show-toplevel", "--git-common-dir"],
@@ -423,11 +419,10 @@ def undeclared_dispatch_pin(
     Identity is the git common dir, so a linked worktree of the caller's own
     repo is not foreign. ``source == "default"`` means nothing anywhere named
     the target repo; reached from elsewhere, that is the repo whose edits the
-    child's hooks would block, so the dispatcher pins ``never`` instead of
-    writing config into somebody else's project. A declared repo, a non-git
-    target, an ambient ``FNO_WORKTREE_POLICY`` (source ``env``), and an
-    undecidable resolve (the child's hooks refuse with the reason) keep the
-    ambient posture.
+    child's hooks would block, so pin ``never`` rather than write config into
+    somebody else's project. Declared repos, non-git targets, an ambient
+    ``FNO_WORKTREE_POLICY`` (source ``env``), and undecidable resolves keep the
+    ambient posture (the child's hooks refuse with the reason).
     """
     target = _repo_identity(target_cwd)
     caller = _repo_identity(caller_cwd)
