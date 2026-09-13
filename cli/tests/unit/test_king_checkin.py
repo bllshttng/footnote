@@ -202,3 +202,38 @@ def test_checkin_is_registered_on_agents_king_app():
 
     names = [cmd.name for cmd in agents_king_app.registered_commands]
     assert "checkin" in names
+
+
+def test_r_court_rejects_unresolved_fold():
+    from fno.king import checkin
+
+    court = {"crowns": [{"scope": "x-s", "scope_nodes": {"status": "unresolved", "reason": "graph unreadable"}}]}
+    with pytest.raises(checkin.ReaderError):
+        checkin._r_court("x-s", lambda s: court)
+
+
+def test_r_court_counts_active_rows_only():
+    from fno.king import checkin
+
+    court = {"crowns": [{"scope": "x-s", "scope_nodes": {"status": "ok", "total": 5, "nodes": [
+        {"id": "a", "status": "in_progress"}, {"id": "b", "status": "blocked"},
+    ]}}]}
+    value, _ = checkin._r_court("x-s", lambda s: court)
+    assert value["active_nodes"] == 2
+    assert value["total_nodes"] == 5
+
+
+def test_unexpected_reader_error_becomes_failed_reading(checkin_env):
+    from fno.king import checkin
+
+    def boom(scope):
+        raise FileNotFoundError("gh")
+
+    payload = checkin.run_checkin(
+        "x-37af", emit=False,
+        readers=_fake_readers(overrides={"main_ci": boom}),
+        events_path=checkin_env,
+    )
+    assert payload["data"]["readers_failed"] == ["main_ci"]
+    assert payload["data"]["coverage"] == 8
+    assert "READER FAILED main_ci: FileNotFoundError: gh" in payload["lines"]

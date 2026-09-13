@@ -76,6 +76,20 @@ def _handoff_doc(scope: str) -> Path:
 
 
 def _r_user_notes(scope: str) -> tuple[Any, str]:
+    # The check-in body refreshes the doc before reading it, so a direct
+    # verb call sees this beat's notes. Best-effort: a failed refresh leaves
+    # the previous doc readable.
+    from fno.paths import resolve_plugin_script
+
+    refresh = resolve_plugin_script("hooks/precompact-canon-doc.sh")
+    if refresh.is_file():
+        # Devnull both output pipes: a child that inherits them would hold
+        # this run open past the script's own exit.
+        subprocess.run(
+            ["bash", str(refresh)], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False, timeout=120,
+        )
     doc = _handoff_doc(scope)
     lib = _marker_lib()
     proc = subprocess.run(
@@ -96,7 +110,10 @@ def _r_user_notes(scope: str) -> tuple[Any, str]:
     return text, ""
 
 
-def _fetch_board(scope: str) -> dict:
+def _fetch_board(scope: str, manifest_path: str | None = None) -> dict:
+    """The board payload, bound to the manifest given (else the caller's own
+    crown, else fleet-wide). The requested scope's own manifest wins, so a
+    `--scope B` beat never journals scope A's queues."""
     import subprocess as _sp
 
     from fno.rust_binary import resolve_binary
@@ -104,17 +121,18 @@ def _fetch_board(scope: str) -> dict:
     binary = resolve_binary()
     if binary is None:
         raise ReaderError("the fno-agents binary was not found")
-    state = None
-    try:
-        from fno.agents.crown import calling_agent_row
-        from fno.king.state import resolve_king_manifest_path
+    state: Any = manifest_path
+    if state is None:
+        try:
+            from fno.agents.crown import calling_agent_row
+            from fno.king.state import resolve_king_manifest_path
 
-        caller = calling_agent_row()
-        sid = getattr(caller, "harness_session_id", None) or getattr(caller, "cc_session_id", None) or ""
-        if sid:
-            state, _ = resolve_king_manifest_path(sid, getattr(caller, "harness", None))
-    except Exception:  # noqa: BLE001 - an unresolvable crown reads the fleet board
-        state = None
+            caller = calling_agent_row()
+            sid = getattr(caller, "harness_session_id", None) or getattr(caller, "cc_session_id", None) or ""
+            if sid:
+                state, _ = resolve_king_manifest_path(sid, getattr(caller, "harness", None))
+        except Exception:  # noqa: BLE001 - an unresolvable crown reads the fleet board
+            state = None
     cmd = [str(binary), "board", "--json"]
     if state is not None:
         cmd += ["--state", str(state)]
@@ -151,10 +169,24 @@ def _open_pr_count() -> int:
         raise ReaderError(f"open PR listing did not parse: {exc}") from exc
 
 
+def _scope_court_row(scope: str, court: dict) -> dict | None:
+    return next(
+        (c for c in court.get("crowns") or [] if c.get("scope") == scope),
+        None,
+    )
+
+
 def _r_board(scope: str, board_fn: Callable, court_fn: Callable) -> tuple[Any, str]:
-    board = board_fn(scope)
     court = court_fn(scope)
-    stuck = ((court.get("summary") or {}).get("stuck") or {}).get("blocked") or []
+    mine = _scope_court_row(scope, court) or {}
+    board = board_fn(scope, mine.get("manifest_path"))
+    # Blocked rows come from the requested crown's own fold, never the
+    # court-wide stuck summary: another crown's blocked node is not this
+    # beat's evidence.
+    stuck = [
+        n for n in (mine.get("scope_nodes") or {}).get("nodes") or []
+        if n.get("blocked_by")
+    ]
     blocked_on = [
         f"{row.get('id')} on {','.join(row.get('blocked_by') or [])}"
         for row in stuck
@@ -193,16 +225,18 @@ def _fetch_court(scope: str) -> dict:
 
 def _r_court(scope: str, court_fn: Callable) -> tuple[Any, str]:
     court = court_fn(scope)
-    mine = [c for c in court.get("crowns") or [] if c.get("scope") == scope]
-    if not mine:
+    mine = _scope_court_row(scope, court)
+    if mine is None:
         raise ReaderError(f"the court names no crown for scope {scope}")
-    nodes = mine[0].get("scope_nodes") or {}
-    counts = nodes.get("counts") or {}
-    total = nodes.get("total") or 0
+    fold = mine.get("scope_nodes") or {}
+    if fold.get("status") not in (None, "ok"):
+        # An unresolved fold carries no rows: reporting zero active nodes
+        # would read the failed instrument as an empty territory.
+        raise ReaderError(f"scope fold {fold.get('status')}: {fold.get('reason', '')}")
     rows = []
-    for n in nodes.get("nodes") or []:
-        if n.get("status") in ("done", "superseded"):
-            continue
+    for n in fold.get("nodes") or []:
+        # The fold lists ACTIVE rows only (its own status vocabulary); the
+        # count is the fold's, never total minus done.
         sessions = n.get("sessions") or []
         first = sessions[0] if sessions else None
         rows.append({
@@ -212,7 +246,7 @@ def _r_court(scope: str, court_fn: Callable) -> tuple[Any, str]:
             "pr_number": n.get("pr_number"),
             "session": first.get("id") if isinstance(first, dict) else first,
         })
-    return {"active_nodes": total - counts.get("done", 0), "total_nodes": total, "rows": rows}, ""
+    return {"active_nodes": len(rows), "total_nodes": fold.get("total") or 0, "rows": rows}, ""
 
 
 def _r_capacity(scope: str) -> tuple[Any, str]:
@@ -268,10 +302,10 @@ def _r_crown(scope: str, court_fn: Callable) -> tuple[Any, str]:
         if c.get("status") != "live" or c.get("agree") is not True
     ]
     return {
-        "total": summary.get("total"),
-        "splits": summary.get("splits"),
-        "disagreements": summary.get("disagreements"),
-        "anomalies": anomalies,
+        "crown_total": summary.get("total"),
+        "crown_splits": summary.get("splits"),
+        "crown_disagreements": summary.get("disagreements"),
+        "crown_anomalies": anomalies,
     }, ""
 
 
@@ -321,9 +355,20 @@ def _r_main_ci(scope: str) -> tuple[Any, str]:
 
     sha = git(["git", "rev-parse", "origin/main"])
     owner_repo = _owner_repo(git(["git", "remote", "get-url", "origin"]))
-    runs = _gh_json(["gh", "api", f"repos/{owner_repo}/commits/{sha}/check-runs"])
+    # Page through every check run before reducing: a failing or pending run
+    # on page two must not read green from a completed page one.
+    check_runs: list[dict[str, Any]] = []
+    for page in range(1, 6):
+        payload = _gh_json([
+            "gh", "api",
+            f"repos/{owner_repo}/commits/{sha}/check-runs?per_page=100&page={page}",
+        ])
+        batch = payload.get("check_runs") or []
+        check_runs.extend(batch)
+        total = payload.get("total_count") or 0
+        if not batch or len(check_runs) >= total:
+            break
     status = _gh_json(["gh", "api", f"repos/{owner_repo}/commits/{sha}/status"])
-    check_runs = runs.get("check_runs") or []
     combined = (status.get("state") or "").lower()
     red = any(r.get("conclusion") in _RED_CONCLUSIONS for r in check_runs) or combined in ("failure", "error")
     if red:
@@ -346,15 +391,16 @@ def _readers() -> list[tuple[str, Callable]]:
     """
     shared: dict[str, Any] = {}
 
-    def once(kind: str, fetch: Callable) -> Callable:
-        def read(scope: str) -> Any:
-            if kind not in shared:
-                shared[kind] = fetch(scope)
-            return shared[kind]
-        return read
+    def court_fn(scope: str) -> dict:
+        if "court" not in shared:
+            shared["court"] = _fetch_court(scope)
+        return shared["court"]
 
-    board_fn = once("board", _fetch_board)
-    court_fn = once("court", _fetch_court)
+    def board_fn(scope: str, manifest_path: str | None = None) -> dict:
+        if "board" not in shared:
+            shared["board"] = _fetch_board(scope, manifest_path)
+        return shared["board"]
+
     return [
         ("user_notes", _r_user_notes),
         ("board", lambda s: _r_board(s, board_fn, court_fn)),
@@ -376,6 +422,8 @@ def collect_readings(scope: str, readers: list[tuple[str, Callable]] | None = No
             readings.append(Reading(name=name, ok=True, value=value, detail=detail))
         except ReaderError as exc:
             readings.append(Reading(name=name, ok=False, error=str(exc)))
+        except Exception as exc:  # noqa: BLE001 - one reader's crash is a failed reading, never a dead beat
+            readings.append(Reading(name=name, ok=False, error=f"{type(exc).__name__}: {exc}"))
     return readings
 
 
@@ -384,13 +432,25 @@ def collect_readings(scope: str, readers: list[tuple[str, Callable]] | None = No
 
 
 #: reading name -> {emit key: subkey inside the reading's value}; a None
-#: subkey stores the value whole.
+#: subkey stores the value whole. Every printed reading lands here, so the
+#: stored row carries the same evidence the lines show.
 _DATA_SPEC: dict[str, dict[str, str | None]] = {
-    "board": {"open_prs": "open_prs", "free_claim_no_driver": "free_claim_no_driver", "blocked": "blocked"},
+    "user_notes": {"user_notes": None},
+    "board": {
+        "open_prs": "open_prs", "free_claim_no_driver": "free_claim_no_driver",
+        "blocked": "blocked", "blocked_on": "blocked_on",
+    },
     "blocked_child": {"blocked_children": "rows", "blocked_children_total": "total"},
-    "court": {"active_nodes": "active_nodes"},
+    "court": {"active_nodes": "active_nodes", "total_nodes": "total_nodes", "active_rows": "rows"},
     "workers": {"live_workers": "live_workers", "oldest_worker_seen": "oldest_worker_seen"},
-    "capacity": {"capacity_footprint": "footprint", "capacity_gate": "gate", "capacity_disagree": "disagree"},
+    "capacity": {
+        "capacity_footprint": "footprint", "capacity_gate": "gate",
+        "capacity_disagree": "disagree", "capacity_unparsed_lines": "unparsed_lines",
+    },
+    "crown": {
+        "crown_total": "crown_total", "crown_splits": "crown_splits",
+        "crown_disagreements": "crown_disagreements", "crown_anomalies": "crown_anomalies",
+    },
     "drain": {"undelivered": None},
     "main_ci": {"main_ci": None},
 }
@@ -404,6 +464,10 @@ def build_data(readings: list[Reading], scope: str) -> dict[str, Any]:
         if reading.ok and spec:
             for key, sub in spec.items():
                 data[key] = reading.value.get(sub) if sub else reading.value
+    # The stored active rows are exactly the rows the lines print; the count
+    # above stays whole.
+    if isinstance(data.get("active_rows"), list):
+        data["active_rows"] = data["active_rows"][:MAX_COURT_ROWS]
     failed = [r.name for r in readings if not r.ok]
     data["coverage"] = len(readings) - len(failed)
     data["readers_failed"] = failed
@@ -483,7 +547,6 @@ def render_lines(
     previous_error: str,
     change: str,
 ) -> list[str]:
-    by_name = {r.name: r for r in readings}
     failed = {r.name: r.error for r in readings if not r.ok}
     lines: list[str] = []
 
@@ -493,15 +556,14 @@ def render_lines(
         else:
             lines.append(text)
 
-    user_notes = by_name.get("user_notes")
-    if user_notes is not None and user_notes.ok and user_notes.value:
+    notes = data.get("user_notes")
+    if notes:
         lines.append("User notes:")
-        lines.extend(str(user_notes.value).rstrip("\n").splitlines())
+        lines.extend(str(notes).rstrip("\n").splitlines())
     elif "user_notes" in failed:
         lines.append(f"READER FAILED user_notes: {failed['user_notes']}")
 
-    board = by_name["board"]
-    on = (board.value.get("blocked_on") or []) if board.ok else []
+    on = data.get("blocked_on") or []
     emit("board",
          f"board: open_prs {data.get('open_prs')}, free_claim_no_driver {data.get('free_claim_no_driver')}, "
          f"blocked {data.get('blocked')}" + (f" (on: {'; '.join(on)})" if on else ""))
@@ -518,16 +580,16 @@ def render_lines(
         if total > len(rows):
             lines.append(f"  ... and {total - len(rows)} more not shown")
 
-    court = by_name["court"]
-    if court.ok:
-        emit("court", f"scope {scope}: {data.get('active_nodes')} active of {court.value['total_nodes']} nodes")
-        for row in court.value["rows"][:MAX_COURT_ROWS]:
+    if "court" in failed:
+        lines.append(f"READER FAILED court: {failed['court']}")
+    else:
+        emit("court", f"scope {scope}: {data.get('active_nodes')} active of {data.get('total_nodes')} nodes")
+        shown = data.get("active_rows") or []
+        for row in shown:
             lines.append(f"  {row['id']} {row['status']} worker {_dash(row['worker'])} pr {_dash(row['pr_number'])} session {_dash(row['session'])}")
-        hidden = len(court.value["rows"]) - MAX_COURT_ROWS
+        hidden = (data.get("active_nodes") or 0) - len(shown)
         if hidden > 0:
             lines.append(f"  ... {hidden} more not shown")
-    else:
-        emit("court", "")
 
     if "capacity" in failed:
         lines.append(f"READER FAILED capacity: {failed['capacity']}")
@@ -535,7 +597,7 @@ def render_lines(
         text = f"capacity: footprint {data.get('capacity_footprint')} / gate {data.get('capacity_gate')}"
         if data.get("capacity_disagree"):
             text += " DISAGREE"
-        unparsed = by_name["capacity"].value.get("unparsed_lines") or 0
+        unparsed = data.get("capacity_unparsed_lines") or 0
         if unparsed:
             text += f" (unparsed_lines {unparsed})"
         lines.append(text)
@@ -549,9 +611,9 @@ def render_lines(
     if "crown" in failed:
         lines.append(f"READER FAILED crown: {failed['crown']}")
     else:
-        crown = by_name["crown"].value
-        lines.append(f"crown: {crown['total']} crowns, splits {crown['splits']}, disagreements {crown['disagreements']}")
-        for anomaly in crown["anomalies"]:
+        lines.append(f"crown: {data.get('crown_total')} crowns, splits {data.get('crown_splits')}, "
+                     f"disagreements {data.get('crown_disagreements')}")
+        for anomaly in data.get("crown_anomalies") or []:
             lines.append(f"  {anomaly}")
 
     emit("drain", f"drain: undelivered {data.get('undelivered')}")
