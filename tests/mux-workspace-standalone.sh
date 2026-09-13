@@ -170,11 +170,14 @@ FNO_SERVER="$S1" "$FNO" mux kill-server >/dev/null 2>&1
 # ── Leg 2: missing backends, diagnostic is advisory ─────────────────────────
 step "leg 2: doctor names missing backends, exit stays 0 (components=none)"
 (
-  # A dev checkout's paired-binary climb finds built siblings, so absence is
-  # forced through the documented override seam as well as a strict PATH.
+  # A dev checkout's paired-binary climb finds built siblings, and a smoke
+  # harness may pin FNO_AGENTS_FRONT (the resolver's second seam) at the real
+  # runtime dir, so absence is forced through BOTH override seams plus a
+  # strict PATH.
   export PATH="/usr/bin:/bin"
   export FNO_AGENTS_BIN="/nonexistent/fno-agents"
   export FNO_AGENTS_WORKER="/nonexistent/fno-agents-worker"
+  export FNO_AGENTS_FRONT="/nonexistent/fno-agents"
   cd "$TMP_ROOT/work"
   OUT=$("$FNO" mux doctor 2>/dev/null)
   RC=$?
