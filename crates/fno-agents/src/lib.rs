@@ -190,6 +190,8 @@ pub mod session_start_bytes;
 pub mod single_flight;
 pub mod spawn_axes;
 pub mod spawn_gate;
+pub mod spawn_gate_lanes;
+pub mod spawn_gate_verb;
 pub mod spawn_overlay;
 pub mod spawn_payload;
 pub mod state;

@@ -1158,9 +1158,12 @@ async fn run(args: Vec<String>) -> i32 {
         match fno_agents::spawn_gate::run_gate(
             &config_cwd,
             &home.registry_json(),
-            &agent_name,
-            "bg",
-            daemon_gate_flags,
+            fno_agents::spawn_gate::GateInput {
+                name: agent_name.clone(),
+                substrate: "bg".into(),
+                flags: daemon_gate_flags,
+                ..Default::default()
+            },
         ) {
             Ok(guard) => Some(guard),
             Err(refusal) => {
@@ -1934,9 +1937,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         match fno_agents::spawn_gate::run_gate(
             &config_cwd,
             &home.registry_json(),
-            name,
-            substrate,
-            flags,
+            fno_agents::spawn_gate::GateInput {
+                name: name.to_string(),
+                substrate: substrate.to_string(),
+                flags,
+                ..Default::default()
+            },
         ) {
             Ok(g) => Some(g),
             Err(refusal) => {
