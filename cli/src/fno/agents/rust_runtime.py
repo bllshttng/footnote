@@ -758,8 +758,7 @@ def _worktree_policy_pin_at_seam(args: "Sequence[str]") -> dict:
 
     The caller hands the pin to :func:`route_to_rust`, which merges it into
     the environment immediately before the exec, so nothing that survives the
-    call sees it."""
-    Only an explicit ``--cwd`` can name a foreign repo."""
+    call sees it. Only an explicit ``--cwd`` can name a foreign repo."""
 
     try:
         if os.environ.get("FNO_WORKTREE_POLICY"):
