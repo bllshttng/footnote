@@ -1893,6 +1893,80 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     assert ' session="' not in framed
 
 
+def test_relay_continuation_into_crowned_session_carries_its_crown(monkeypatch) -> None:
+    # AC4-HP (x-3dcc via x-d7cf): the recipient-side relay ctx wraps B's replies,
+    # which are injected into A, so its to_session is A's session and A reads its
+    # own live crown on every continuation hop, not only the first message.
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _MailCtx, _run_relay_loop
+
+    calls: list = []
+
+    def _rpc(method, params, **kw):
+        calls.append(params)
+        return {
+            "delivered": True,
+            "identity_verified": True,
+            "reply": "",  # ends the loop after this hop
+        }
+
+    monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
+    monkeypatch.setattr(
+        envelope,
+        "crown_at",
+        lambda _path, session: "L1 fno" if session == "session-alice" else None,
+    )
+
+    ctxs = {
+        "alice": _MailCtx(
+            from_="aaaa1111", model="unknown", to="bbbb2222",
+            from_session="session-alice", to_session="session-bob",
+        ),
+        "bob": _MailCtx(
+            from_="bbbb2222", model="unknown", to="aaaa1111",
+            from_session="session-bob", to_session="session-alice",
+        ),
+    }
+    # seed = bob's reply; the first continuation drives alice with it, so the
+    # hop body is wrapped as BOB and crowned for ALICE's reading.
+    _run_relay_loop(
+        "bob",
+        "alice",
+        "bob says hi",
+        ceiling=3,
+        mail_ctxs=ctxs,
+        recipient_identities=_sb_identities("alice", "bob"),
+    )
+    body = calls[0]["body"]
+    assert body.startswith('<fno_mail from="bbbb2222"'), body
+    assert "-- your crown: L1 fno" in body, body
+
+
+def test_relay_continuation_with_unresolved_session_renders_no_crown_line(
+    monkeypatch,
+) -> None:
+    # AC4-ERR (x-3dcc): a peer whose session id never resolved gets a raw
+    # envelope, never "none right now" -- that line is a positive claim about a
+    # reader whose address nobody measured.
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _MailCtx, _wrap_relay_body
+
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
+
+    ctx = _MailCtx(
+        from_="bbbb2222", model="unknown", to="aaaa1111",
+        from_session=None, to_session=None,
+    )
+    wrapped = _wrap_relay_body("bob says hi", ctx)
+    assert wrapped.startswith('<fno_mail from="bbbb2222"'), wrapped
+    assert "your crown" not in wrapped, wrapped
+
+
 # ---------------------------------------------------------------------------
 # node x-1f23: the autonomous relay continuations carry <fno_mail>, not just
 # the seed (codex P2). Chat (no mail ctxs) stays raw.
