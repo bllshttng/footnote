@@ -1959,7 +1959,7 @@ def lint(
     ),
     surface: str = typer.Option(
         "mail", "--surface",
-        help="style: where the text is read - mail, pr-body, or markdown.",
+        help="style: where the text is read - mail, encounter, pr-body, markdown, or comment.",
     ),
     stdin: bool = typer.Option(False, "--stdin", help="style: read the body from standard input."),
     files: Optional[list[Path]] = typer.Option(
