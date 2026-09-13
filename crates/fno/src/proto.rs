@@ -320,7 +320,9 @@ fn default_true() -> bool {
 /// derives the age at render. Same decode both ways; floor stays 58.
 /// v78 : `ControlVerb::ServerStats` + `ServerMsg::ServerStats`, the
 /// scoreboard's read-only emission-failure counter read; floor stays 58.
-pub const PROTO_VERSION: u32 = 78;
+/// v79 : `ServerMsg::Layout.missions` carries the active-mission headers, so
+/// `squads` holds only real workspaces; additive, floor stays 58.
+pub const PROTO_VERSION: u32 = 79;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -2087,6 +2089,12 @@ pub enum ServerMsg {
         /// classifier, used by the sideline menu label.
         #[serde(default)]
         sweep_dead_count: usize,
+        /// (v79) Active-mission progress headers, in their own lane so `squads`
+        /// carries only real workspaces. A mission is a header the client draws
+        /// as the `~ missions` band, never a workspace section, so a row grouped
+        /// under one would be drawn by no section at all and vanish.
+        #[serde(default)]
+        missions: Vec<SquadMeta>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -4118,7 +4126,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 78);
+        assert_eq!(PROTO_VERSION, 79);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4533,6 +4541,7 @@ mod tests {
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
                 backlog_stale: false,
                 sweep_dead_count: 0,
+                missions: Vec::new(),
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),

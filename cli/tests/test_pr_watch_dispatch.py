@@ -4346,3 +4346,302 @@ class TestScanResumesLeastRecentlyPolled:
             if e["type"] == "pr_watch_skipped" and e["data"].get("reason") == "tick-budget"
         ]
         assert budget_events == [], "no tick-budget may fire on cheap disposals"
+
+
+# ---------------------------------------------------------------------------
+# Candidate read discipline: the candidate path stops re-reading merged PRs
+# every tick, and the open count reads the listing's answer, not stale rows.
+# ---------------------------------------------------------------------------
+
+
+class TestCandidateReadDiscipline:
+    """The listing's terminal answer lands on cached candidate rows, OPEN
+    candidates read first, and a recorded terminal outcome skips the read."""
+
+    @staticmethod
+    def _listing(not_open: set, open_keys: set = frozenset()):
+        def read(keys):
+            states = {}
+            for key in keys:
+                if key in not_open:
+                    states[key] = "NOT_OPEN"
+                elif key in open_keys:
+                    states[key] = "OPEN"
+                else:
+                    states[key] = "MERGED"
+            return states, 0
+
+        return read
+
+    def _tick(
+        self, tmp_path, deps, store_path, *, listing, deadline=None, ritual_fn=None,
+    ):
+        from fno.pr_watch._dispatch import tick
+
+        return tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=listing,
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            dispatch_deadline=deadline,
+            dispatch_ritual_fn=ritual_fn,
+        )
+
+    @staticmethod
+    def _counting_reads(deps, clock):
+        base_read = deps["read_pr_state"]
+        reads: list[int] = []
+
+        def counting_read(candidate, **kw):
+            reads.append(candidate.pr_number)
+            clock["t"] += 1.0
+            return base_read(candidate, **kw)
+
+        deps["read_pr_state"] = counting_read
+        return reads
+
+    def test_listing_answer_lands_on_cached_candidate_row(self, tmp_path):
+        """A candidate row frozen OPEN adopts the listing's NOT_OPEN, so the
+        receipt's open_prs stops counting a PR that merged weeks ago."""
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(tmp_path, candidates=[candidate])
+
+        result = self._tick(
+            tmp_path, deps, store_path,
+            listing=self._listing({"owner/repo#1"}),
+            deadline=time.monotonic() - 1,
+        )
+
+        row = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert row["last_seen_state"] == "NOT_OPEN"
+        assert result.open_prs == 0
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["open_prs"] == 0
+
+    def test_failed_listing_preserves_cached_candidate_rows(self, tmp_path):
+        """sweep_failures 1: UNKNOWN writes nothing; rows keep the old answer
+        until a healthy sweep corrects them."""
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(tmp_path, candidates=[candidate])
+
+        result = self._tick(
+            tmp_path, deps, store_path,
+            listing=lambda keys: ({key: "UNKNOWN" for key in keys}, 1),
+            deadline=time.monotonic() - 1,
+        )
+
+        row = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert row["last_seen_state"] == "OPEN"
+        assert result.open_prs == 1
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["sweep_failures"] == 1
+
+    def test_open_candidate_jumps_the_merged_queue_under_budget(self, tmp_path, monkeypatch):
+        """20 merged candidates ahead of 1 OPEN in discovery order, budget one
+        read: the OPEN candidate is the one that gets it."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+
+        merged = [
+            _make_candidate(pr_number=n, node_id=f"x-{n:08d}", repo_dir=tmp_path)
+            for n in range(1, 21)
+        ]
+        open_cand = _make_candidate(pr_number=99, node_id="x-00000063", repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[*merged, open_cand],
+            obs_map={
+                **{n: _make_obs(n, "MERGED") for n in range(1, 21)},
+                99: _make_obs(99, "OPEN"),
+            },
+            merge_ready=False,
+        )
+        reads = self._counting_reads(deps, clock)
+
+        # The OPEN PR is already tracked; a first-seen OPEN row would be
+        # baselined in the batch loop and never rich-read this tick.
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#99", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+
+        self._tick(
+            tmp_path, deps, store_path,
+            listing=self._listing({f"owner/repo#{n}" for n in range(1, 21)},
+                                  open_keys={"owner/repo#99"}),
+            # read floor is 15s, each read costs 1s: exactly one read fits.
+            deadline=clock["t"] + 15.5,
+        )
+
+        assert reads == [99]
+
+    def test_budget_break_advances_cursor_across_ticks(self, tmp_path, monkeypatch):
+        """4 unhandled NOT_OPEN candidates, 2 reads per tick: the second tick
+        reads the two candidates the first could not reach."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+
+        candidates = [
+            _make_candidate(pr_number=n, node_id=f"x-{n:08d}", repo_dir=tmp_path)
+            for n in range(1, 5)
+        ]
+        deps = _make_tick_deps(
+            tmp_path, candidates=candidates,
+            obs_map={n: _make_obs(n, "MERGED") for n in range(1, 5)},
+            merge_ready=False,
+        )
+        reads = self._counting_reads(deps, clock)
+        listing = self._listing({f"owner/repo#{n}" for n in range(1, 5)})
+        store_path = tmp_path / "state.json"
+
+        # Two reads per tick: read floor 15s, each read 1s on the fake clock.
+        self._tick(tmp_path, deps, store_path, listing=listing,
+                   deadline=clock["t"] + 16.5)
+        self._tick(tmp_path, deps, store_path, listing=listing,
+                   deadline=clock["t"] + 16.5)
+
+        assert reads == [1, 2, 3, 4]
+
+    def test_handled_candidate_skips_the_rich_read(self, tmp_path):
+        """A merged candidate whose ritual already ran is read once; the memo
+        then silences it while the listing keeps saying NOT_OPEN."""
+        from fno.post_merge_route import PostMergeDispatchResult
+        from fno.pr_watch._dispatch import _delivery_state_path
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[candidate], obs_map={1: _make_obs(1, "MERGED")},
+        )
+        reads = self._counting_reads(deps, {"t": 0.0})
+
+        def fake_ritual(cand, obs, fire):
+            return PostMergeDispatchResult(
+                "already-dispatched", cand.pr_number,
+                short_id="abcd1234", detail="marker-exists",
+            )
+
+        listing = self._listing({"owner/repo#1"})
+        self._tick(tmp_path, deps, store_path, listing=listing, ritual_fn=fake_ritual)
+        self._tick(tmp_path, deps, store_path, listing=listing, ritual_fn=fake_ritual)
+
+        assert reads == [1]
+        rec = json.loads(_delivery_state_path(store_path).read_text())["owner/repo#1"]
+        assert rec["handled"] == "MERGED"
+        second_tick_skips = [
+            e["data"]["reason"] for e in deps["events"]
+            if e["type"] == "pr_watch_skipped"
+        ]
+        assert second_tick_skips.count("already-dispatched") == 1, (
+            "the memo skip must be silent; the one receipt came from tick one"
+        )
+
+    def test_merge_not_ready_is_not_terminal_and_is_read_again(self, tmp_path):
+        """A merged candidate whose readiness said not-ready keeps the retry
+        path: no memo, and the next tick reads it again."""
+        from fno.pr_watch._dispatch import _delivery_state_path
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[candidate], obs_map={1: _make_obs(1, "MERGED")},
+            merge_ready=False,
+        )
+        reads = self._counting_reads(deps, {"t": 0.0})
+
+        listing = self._listing({"owner/repo#1"})
+        self._tick(tmp_path, deps, store_path, listing=listing)
+        self._tick(tmp_path, deps, store_path, listing=listing)
+
+        assert reads == [1, 1]
+        rec = json.loads(_delivery_state_path(store_path).read_text())["owner/repo#1"]
+        assert "handled" not in rec
+
+    def test_reopened_candidate_gets_a_fresh_read(self, tmp_path):
+        """A handled candidate the listing now calls OPEN falls through the
+        memo skip and gets the rich read."""
+        from fno.pr_watch._dispatch import _delivery_state_path
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        _delivery_state_path(store_path).write_text(json.dumps(
+            {"owner/repo#1": {"handled": "MERGED", "retries": 0, "parked": None}}
+        ))
+        # A row already tracks the PR; a first-seen OPEN row would be
+        # baselined in the batch loop and never rich-read this tick.
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[candidate], obs_map={1: _make_obs(1, "OPEN")},
+        )
+        reads = self._counting_reads(deps, {"t": 0.0})
+
+        self._tick(tmp_path, deps, store_path,
+                   listing=self._listing(set(), open_keys={"owner/repo#1"}))
+
+        assert reads == [1]
+        row = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert row["last_seen_state"] == "OPEN"

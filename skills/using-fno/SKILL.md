@@ -57,7 +57,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | `fno backlog carveout add` | Last resort: work too big for this PR. Else fix it here. |
 | `fno outstanding` / `fno backlog` | Awaiting a human: carve-outs + questions; `ask`/`clear`. `clear --answer` delivers the answer to the asker over mail, or states why it cannot. `backlog decide` records a ruling; `backlog decisions` recovers it (no subject = recent). |
 
-**Replying to a2a mail (the one rule).** Answer any `<fno_mail ... id="X">` with `fno agents mail reply --to X "..."`: it threads the reply and resolves the sender itself, live or drained, so never re-type a handle or inspect `harness`/`model`. Optional for FYIs.
+**Replying to a2a mail (the one rule).** Answer any `<fno_mail from="H" id="X">` with `fno agents mail reply --to X "..."`: it threads the reply and resolves the sender itself, live or drained, so never re-type a handle. Optional for FYIs.
 
 **Read send evidence literally.** `delivered (hosted)` is confirmed. `queued (durable)` can sit undrained - no receipt is no coordination. Before re-sending, `peek` (busy can still receive), then `resume`/`attach`. A `[DND (bus-only)]` queue drains. The recipient's turn-boundary `notify-self` surfaces it. A bus-only receipt IS coordination, never a stranded message.
 

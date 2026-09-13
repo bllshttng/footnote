@@ -129,6 +129,19 @@ def _drop_cached_terminal(
         dropped.append({"key": key, "reason": current.lower(), "state": current})
 
 
+def _mark_handled(delivery_state: dict[str, dict], key: str, obs_state: str) -> None:
+    """Record a terminal outcome on the delivery record.
+
+    Candidate rows never persist as cache entries once terminal, so without
+    this memo every tick re-rich-reads the same merged candidates. Keeps any
+    retries/parked the record already holds.
+    """
+    rec = delivery_state.get(key)
+    rec = rec if isinstance(rec, dict) else {}
+    rec["handled"] = obs_state
+    delivery_state[key] = rec
+
+
 def _finish_queue_merge(repo_dir: Path, pr: int, emit: Callable) -> None:
     """Finish a queue-armed merge through the existing post-merge cleanup owner.
 
@@ -679,23 +692,6 @@ def _run_tick(
     # Load once up-front; resets to {} on corruption (baseline discipline)
     state = store.load()
 
-    # x-d211: least-recently-polled first (missing cursor, then oldest stamp,
-    # discovery order breaking ties; corrupt stamps sort as missing) so a
-    # budget break resumes where the last tick stopped.
-    def _poll_order(indexed):
-        idx, cand = indexed
-        try:
-            key = make_watermark_key(repo_slug=cand.repo_slug, pr_number=cand.pr_number)
-        except ValueError:
-            return (2, "", idx)
-        entry = state.get(key)
-        stamp = entry.get("last_polled_at") if isinstance(entry, dict) else None
-        if isinstance(stamp, str) and stamp:
-            return (1, stamp, idx)
-        return (0, "", idx)
-
-    candidates = [cand for _, cand in sorted(enumerate(candidates), key=_poll_order)]
-
     candidate_keys: set[str] = set()
     for cand in candidates:
         try:
@@ -738,6 +734,7 @@ def _run_tick(
     batch_baselined: set[str] = set()
     query_keys = batch_keys | candidate_keys
     sweep_failures = 0
+    batch_states: dict[str, str] = {}
     set_tick_phase("sweep")
     if query_keys:
         try:
@@ -785,6 +782,41 @@ def _run_tick(
                 }
                 swept.add(key)
                 batch_baselined.add(key)
+        # Write the listing's answer onto candidate rows that still carry one.
+        # Both open-count readers (status line, tick receipt) count
+        # last_seen_state, so a row frozen at a weeks-old OPEN read inflates
+        # the count forever. decide() never reads this field, so no dispatch
+        # verdict changes. A failed or UNKNOWN listing writes nothing.
+        for key in sorted(candidate_keys & batch_states.keys()):
+            current = batch_states[key]
+            if current not in ("OPEN", "NOT_OPEN"):
+                continue
+            row = state.get(key)
+            if isinstance(row, dict):
+                row["last_seen_state"] = current
+
+    # Order after the sweep so the listing's answer can lead the queue: OPEN
+    # candidates first (a merge among them is what the ritual is for), then
+    # least-recently-read (cache cursor, else the delivery record's; missing
+    # stamp first), discovery order breaking ties. The dispatch loop stamps
+    # each read, so a budget break resumes where the last tick stopped.
+    def _poll_order(indexed):
+        idx, cand = indexed
+        try:
+            key = make_watermark_key(repo_slug=cand.repo_slug, pr_number=cand.pr_number)
+        except ValueError:
+            return (2, "", idx)
+        head = 0 if batch_states.get(key) == "OPEN" else 1
+        row = state.get(key)
+        stamp = row.get("last_polled_at") if isinstance(row, dict) else None
+        if not (isinstance(stamp, str) and stamp):
+            drec = delivery_state.get(key)
+            stamp = drec.get("last_polled_at") if isinstance(drec, dict) else None
+            if not (isinstance(stamp, str) and stamp):
+                stamp = ""
+        return (head, stamp, idx)
+
+    candidates = [cand for _, cand in sorted(enumerate(candidates), key=_poll_order)]
 
     acted = 0
     skipped = 0
@@ -846,6 +878,20 @@ def _run_tick(
         if key in batch_keys and isinstance(batched_entry, dict) and batched_entry.get("parked"):
             continue
 
+        # Terminal memo: the listing called this candidate NOT_OPEN and a past
+        # tick already recorded the outcome (handled) or parked it. The rich
+        # read would return the same terminal state again, so skip it. A
+        # candidate the listing now calls OPEN (reopened) falls through and
+        # gets the read.
+        drec = delivery_state.get(key)
+        if (
+            batch_states.get(key) == "NOT_OPEN"
+            and isinstance(drec, dict)
+            and (drec.get("handled") or drec.get("parked"))
+        ):
+            skipped += 1
+            continue
+
         # x-d211: only a candidate owing the rich read may break the tick.
         if (
             dispatch_deadline is not None
@@ -865,6 +911,16 @@ def _run_tick(
             continue
 
         try:
+            # Stamp the poll cursor on the delivery record before the read:
+            # a merged candidate has no cache row to stamp, so this is what
+            # moves it to the back of the order. persist() in finally carries
+            # the stamp across a budget break.
+            if batch_states.get(key) == "NOT_OPEN":
+                drec = delivery_state.get(key)
+                drec = drec if isinstance(drec, dict) else {}
+                drec["last_polled_at"] = now_iso
+                delivery_state[key] = drec
+
             # Fetch current state
             try:
                 reviewers = reviewers_for(cand.repo_dir) if cand.repo_dir else []
@@ -978,12 +1034,21 @@ def _run_tick(
             )
 
             if decision.kind == "noop":
-                pass  # nothing to do; no event
+                # A merged candidate whose ritual already ran is terminal; the
+                # memo is what stops the next tick re-reading it. Not
+                # merge-not-ready: that one retries by design.
+                if decision.reason == "merge-already-dispatched" and obs.state in (
+                    "MERGED",
+                    "CLOSED",
+                ):
+                    _mark_handled(delivery_state, key, obs.state)
 
             elif decision.kind == "park":
                 entry["parked"] = decision.reason
                 if obs.state not in ("MERGED", "CLOSED"):
                     store.set(key, entry)
+                elif decision.reason == "closed":
+                    _mark_handled(delivery_state, key, obs.state)
                 emit("pr_watch_parked", {"pr": pr, "reason": decision.reason})
 
             elif decision.kind in ("merge", "review") and _ritual_timeout() >= _FIRE_FLOOR_S:
@@ -1013,7 +1078,7 @@ def _run_tick(
                             emit("pr_watch_skipped", {"pr": pr, "reason": "dispatch-in-flight"})
                         else:
                             entry["merge_dispatched"] = True
-                            delivery_state.pop(key, None)
+                            _mark_handled(delivery_state, key, obs.state)
                             emit("pr_watch_skipped", {"pr": pr, "reason": "already-dispatched"})
                         skipped += 1
                         _drop_cached_terminal(state, dropped, key, "MERGED")
@@ -1028,6 +1093,7 @@ def _run_tick(
                         delivery_state[key] = {
                             "retries": entry.get("retries", 0),
                             "parked": "auto-run-disabled",
+                            "handled": obs.state,
                         }
                         emit("pr_watch_skipped", {"pr": pr, "reason": "auto-run-disabled"})
                         skipped += 1
@@ -1059,7 +1125,7 @@ def _run_tick(
                         entry["last_review_ts"] = obs.latest_review_ts
                     entry["retries"] = 0
                     if obs.state in ("MERGED", "CLOSED"):
-                        delivery_state.pop(key, None)
+                        _mark_handled(delivery_state, key, obs.state)
                     else:
                         store.set(key, entry)
                     emit("pr_watch_dispatched", {"kind": decision.kind, "pr": pr, **dispatch_extra})

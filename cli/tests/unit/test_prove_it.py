@@ -284,6 +284,17 @@ def test_the_router_names_prove_it_and_its_validator():
     assert "REFUSES a PASS whose Steps list carries no marked probe" in text
 
 
+def test_the_gate_integration_names_where_an_ad_hoc_fail_lands():
+    """AC4-HP (x-6d64): the contract text names the reader an ad-hoc report gets."""
+    text = REFERENCE.read_text(encoding="utf-8")
+    gate = text.split("## Gate integration", 1)[1]
+    assert "<plan>.artifacts/" in gate, "the ad-hoc report home must be named"
+    assert "fno-agents prove-it-verdicts" in gate, "the reader verb must be named"
+    assert "fno inbox outstanding" in gate, "the surface must be named"
+    assert "never reopens a done node" in gate
+    assert "A newer PASS record or a decision that names the report retires" in gate
+
+
 def test_a_code_plan_without_probes_warns_advisory(tmp_path):
     """The advisory names the absence and records the reason it is not a gate."""
     plan = tmp_path / "plan.md"

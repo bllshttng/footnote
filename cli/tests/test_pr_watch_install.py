@@ -1550,3 +1550,78 @@ def test_liveness_report_carries_interval_and_merge_scan(
     assert report["merge_scan"]["completed"] is True
     assert report["merge_scan"]["completed_at"] == tick_iso
     assert report["merge_scan"]["eligible"] == 0
+
+
+def test_tick_watermarks_copy_scanned_into_merge_scan(tmp_path):
+    """The status line renders scanned from the marks copy, so the copy must
+    carry the receipt's scanned count the way it already carries eligible."""
+    from fno.pr_watch._install import _tick_watermarks
+
+    events_file = tmp_path / "events.jsonl"
+    _write_tick_events(
+        events_file, tick_ts="2026-08-17T06:12:01Z",
+        tick_data={
+            "open_prs": 3, "acted": 0, "swept_count": 13, "swept": {},
+            "dropped_count": 0, "dropped": {},
+            "merge_scan": {"completed": True, "scanned": 13,
+                           "eligible": 0, "attempted": 0},
+        },
+    )
+
+    marks = _tick_watermarks(events_file)
+
+    assert marks["merge_scan"]["scanned"] == 13
+
+
+def test_tick_watermarks_scanned_none_without_the_field(tmp_path):
+    """A receipt from a binary older than the scanned field renders as None,
+    the same honest absence the pre-merge_scan key gap gives."""
+    from fno.pr_watch._install import _tick_watermarks
+
+    events_file = tmp_path / "events.jsonl"
+    _write_tick_events(
+        events_file, tick_ts="2026-08-17T06:12:01Z",
+        tick_data={
+            "open_prs": 3, "acted": 0, "swept_count": 13, "swept": {},
+            "dropped_count": 0, "dropped": {},
+            "merge_scan": {"completed": True, "eligible": 0, "attempted": 0},
+        },
+    )
+
+    marks = _tick_watermarks(events_file)
+
+    assert marks["merge_scan"]["scanned"] is None
+
+
+def test_status_prints_scanned_in_merge_scan_line(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch
+):
+    """Given a pr_watch_tick receipt whose merge_scan.scanned is 13, status
+    renders the line with scanned=13 (was hardcoded None before)."""
+    import os as _os
+    import re
+    from datetime import datetime, timezone
+    import fno.pr_watch._install as m
+
+    (tmp_home / ".fno" / "config.toml").write_text("[pr_watch]\nenabled = true\n")
+    plist_path = tmp_launch_agents / m._PLIST_FILENAME
+    plist_path.write_text("<plist/>")
+    old = _os.path.getmtime(plist_path) - 60
+    _os.utime(plist_path, (old, old))
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    _write_tick_events(
+        events_file, tick_ts=now,
+        tick_data={
+            "open_prs": 3, "acted": 0, "swept_count": 13, "swept": {},
+            "dropped_count": 0, "dropped": {},
+            "merge_scan": {"completed": True, "scanned": 13,
+                           "eligible": 0, "attempted": 0},
+        },
+    )
+
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
+    out = capsys.readouterr().out
+    assert re.search(r"^Merge scan: +.*scanned=13", out, re.M), out

@@ -4053,12 +4053,12 @@ mod tests {
     #[test]
     fn build_tree_marker_detection_covers_the_build_dir_layout() {
         // Under build.build-dir (measured 2026-09-10) a test binary lives at
-        // <build-base>/<h2>/<h2>/<hash>/debug/deps/<name>; the markers sit on
+        // <build-base>/<h2>/<hash>/debug/deps/<name>; the markers sit on
         // the hash dir and no ancestor is named `target`. The nearest tagged
         // ancestor is the build tree, whatever its name.
         let tmp = std::env::temp_dir().join(format!("fno-guard-bd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        let hash = tmp.join("bd/ef/bac4721f2d16ec");
+        let hash = tmp.join("bd/bac4721f2d16ec");
         let exe = hash.join("debug/deps/probe-0123456789abcdef");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
 
