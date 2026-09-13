@@ -3449,7 +3449,7 @@ class ModelProvider(BaseModel):
 
     @field_validator("tier_models")
     @classmethod
-    def _validate_tier_models(cls, v):  # rules live beside TIER_ALIASES
+    def _validate_tier_models(cls, v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
         from fno.agents.model_routing import validate_tier_models
         return validate_tier_models(v)
     # Codex/OpenAI-lane only (protocol == "openai"): the codex wire protocol
