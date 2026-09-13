@@ -4457,12 +4457,10 @@ def cmd_watchdog(
 
     lanes = "all" if apply_all else "wake"
     results = []
-    # One global provider rotation per sweep, shared across every row.
-    rotation = wd.RotationBudget()
     for v, row in pairs:
         try:
             outcome, detail = wd.apply_verdict(
-                v, lanes=lanes, cwd=row.cwd, node=row.node, rotation=rotation
+                v, lanes=lanes, cwd=row.cwd, node=row.node
             )
         except Exception as exc:  # noqa: BLE001 - one broken row never aborts the rest
             outcome, detail = "refused", f"{v.verdict} action crashed: {exc!r}"
@@ -4953,4 +4951,29 @@ def incident(ctx: typer.Context) -> None:
         )
         raise typer.Exit(code=1)
     proc = subprocess.run([str(binary), "fleet-incident", *ctx.args])
+    raise typer.Exit(code=proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)
+
+
+@agents_app.command(
+    "provider-cap",
+    hidden=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def provider_cap(ctx: typer.Context) -> None:
+    """The provider-cap actor.
+
+    status [--json] [--max-age-s N] | decide <lane> --answer all|some:<id,id>|wait.
+    """
+    import subprocess
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        typer.secho(
+            "fno agents provider-cap: fno-agents binary not found; `fno doctor update --rust` or set FNO_AGENTS_BIN",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    proc = subprocess.run([str(binary), "provider-cap", *ctx.args])
     raise typer.Exit(code=proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)

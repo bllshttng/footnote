@@ -180,8 +180,10 @@ def test_map_covers_current_surface_once():
     # from the merged file, 613 -> 614. `agents king checkin`, the one verb
     # that runs the reign check-in body and journals its row, plus its
     # direct-dispatch alias `agents king-checkin` beside king-history's:
-    # 614 -> 616.
-    assert len(mapped) == 616, (
+    # 614 -> 616. `agents provider-cap`, the relay that reads and answers the
+    # provider-cap actor's questions: 616 -> 617. `agents compaction`, the
+    # hidden relay over the PreCompact stamp the hook writes: 617 -> 618.
+    assert len(mapped) == 618, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

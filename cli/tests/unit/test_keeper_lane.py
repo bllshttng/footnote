@@ -682,7 +682,6 @@ def test_a_filtered_apply_all_never_collects_keepers(monkeypatch) -> None:
     monkeypatch.setattr(wd, "write_sweep_file", lambda *a, **k: None)
     monkeypatch.setattr(wd, "fresh_non_leave", lambda *a, **k: set())
     monkeypatch.setattr(wd, "emit_event", lambda *a, **k: None)
-    monkeypatch.setattr(wd, "RotationBudget", lambda: object())
     runner = CliRunner()
 
     filtered = runner.invoke(agents_app, ["watchdog", "--only", "ghost", "--apply-all"])
