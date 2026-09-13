@@ -3449,11 +3449,8 @@ class ModelProvider(BaseModel):
 
     @field_validator("tier_models")
     @classmethod
-    def _tier_models_keys_are_tier_aliases(
-        cls, v: Optional[dict[str, str]]
-    ) -> Optional[dict[str, str]]:
+    def _validate_tier_models(cls, v):  # rules live beside TIER_ALIASES
         from fno.agents.model_routing import validate_tier_models
-
         return validate_tier_models(v)
     # Codex/OpenAI-lane only (protocol == "openai"): the codex wire protocol
     # for this provider's endpoint ("chat" for Chat Completions, the default;
