@@ -4,8 +4,8 @@ The guarantee under test is "zero API calls", proved with a positive-failure
 instrument rather than an absence: subprocess.run is monkeypatched to RAISE
 on any invocation, so a network read becomes a loud failure with a traceback
 naming the caller. A test that merely counts calls and asserts zero cannot
-tell "nothing ran" from "the instrument was never wired" (AGENTS.md pitfalls
-corpus, "assert a positive marker, never an absence").
+tell "nothing ran" from "the instrument was never wired"
+(scripts/lib/assert-absent.sh: 'assert a positive marker, never an absence').
 
 Filter: `uv run --project cli pytest cli/tests/graph/test_board.py -q`
 """

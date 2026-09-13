@@ -31,6 +31,10 @@
 #
 # Historical artifacts that legitimately contain /spec (CHANGELOG, memory files,
 # internal/ plan docs, git log output) are out of scan scope by construction.
+# The scan runs `git grep` (tracked files only, no descent into cargo caches)
+# through scripts/lib/assert-absent.sh: a zero is a verdict only when a
+# /blueprint-shaped control (the probe's own syntax) hit in the same tool and
+# scope.
 
 set -euo pipefail
 
@@ -44,22 +48,33 @@ SCAN_PATHS=(skills agents commands docs AGENTS.md CLAUDE.md)
 # or quote. The shape MUST stop right after `spec` so we don't pick up
 # /specs/, /specific, /specification, /speculate, etc.
 PATTERN='(`/spec`)|(/spec[[:space:],.?\)"'\''!]|/spec$)'
+# Control in the probe's own syntax: /spec -> /blueprint, same terminator
+# shape. 253 hits on a clean checkout (measured 2026-09-12); a control that
+# misses means the instrument is broken and a zero is unreadable.
+CONTROL='(`/blueprint`)|(/blueprint[[:space:],.?\)"'\''!]|/blueprint$)'
+ASSERT_ABSENT="$REPO_ROOT/scripts/lib/assert-absent.sh"
 
 set +e
-raw=$(grep -IrEn "$PATTERN" "${SCAN_PATHS[@]}" 2>/dev/null)
-rc=$?
+helper_out=$(bash "$ASSERT_ABSENT" --control "$CONTROL" --probe "$PATTERN" -- \
+    git grep -IEn -e {} -- "${SCAN_PATHS[@]}")
+helper_rc=$?
 set -e
-if [[ $rc -gt 1 ]]; then
-  echo "AUDIT ERROR: grep failed with rc=$rc on /spec scan" >&2
-  echo "  pattern: $PATTERN" >&2
-  echo "  scan_paths: ${SCAN_PATHS[*]}" >&2
-  exit 2
-fi
-
-if [[ -z "$raw" ]]; then
-  echo "AUDIT PASS: no stale /spec slash-command references in scope."
-  exit 0
-fi
+case $helper_rc in
+  0)
+    echo "AUDIT PASS: no stale /spec slash-command references in scope."
+    printf '%s\n' "$helper_out"
+    exit 0
+    ;;
+  1)
+    raw=$helper_out
+    ;;
+  *)
+    echo "AUDIT ERROR: assert-absent refused the /spec scan (rc=$helper_rc)" >&2
+    echo "  pattern: $PATTERN" >&2
+    echo "  scan_paths: ${SCAN_PATHS[*]}" >&2
+    exit 2
+    ;;
+esac
 
 count=$(printf '%s' "$raw" | grep -c '^' || true)
 echo "AUDIT FAIL: $count stale /spec reference(s) in:"

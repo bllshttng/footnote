@@ -246,6 +246,13 @@ jobs:
         timeout-minutes: 5
         run: bash tests/lib/test_cargo_rustc_wrapper.sh
 
+      # A zero is never a verdict: the helper refuses a probe zero whose
+      # control missed (broken instrument) or a caller that sent no control.
+      - name: assert-absent lib test (positive control on the zero-verdict helper)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/lib/test_assert_absent.sh
+
       # From disposable-rm.yml.
       - name: Bare rm in disposable-delete files + self-test
         if: ${{ !cancelled() }}
