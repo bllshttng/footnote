@@ -84,6 +84,14 @@ else
     _event_process_identity() { :; }
 fi
 
+# The build hash dir outlives git's removal; reclaim it while the manifest
+# can still answer. A partial deploy without the lib leaves the dir to the
+# sweep.
+if [[ -f "${_WT_LIFECYCLE_DIR}/cargo-build-dir.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/cargo-build-dir.sh"
+fi
+
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
 
 # Live target session? The manifest's `status:` field (legacy era) was once
@@ -1396,6 +1404,7 @@ case "${1:-status}" in
                     echo "  WOULD REMOVE: $wt ($AGE_DAYS days old, branch: $BRANCH)"
                     WOULD=$((WOULD + 1))
                 else
+                    declare -F cargo_build_dir_remove_for_wt >/dev/null 2>&1 && cargo_build_dir_remove_for_wt "$wt" || true
                     if git worktree remove --force "$wt" 2>/dev/null; then
                         echo "  REMOVED: $wt (branch $BRANCH preserved)"
                         REMOVED=$((REMOVED + 1))
