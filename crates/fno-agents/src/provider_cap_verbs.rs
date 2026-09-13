@@ -414,6 +414,34 @@ fn real_deps() -> crate::provider_cap::LeaveDeps {
                 Err(format!("stop {} failed", member.name))
             }
         }),
+        resume: Box::new(|member| {
+            let who = member
+                .session_id
+                .as_deref()
+                .and_then(|sid| sid.get(0..8))
+                .map(String::from)
+                .unwrap_or_else(|| member.name.clone());
+            if run_fno(
+                &["agents", "resume", &who],
+                None,
+                std::time::Duration::from_secs(180),
+            ) {
+                Ok(())
+            } else {
+                Err(format!("resume {} failed", member.name))
+            }
+        }),
+        announce: Box::new(|body| {
+            if run_fno(
+                &["agents", "mail", "team", "--scope", "all", body],
+                None,
+                std::time::Duration::from_secs(60),
+            ) {
+                Ok(())
+            } else {
+                Err("team mail refused".into())
+            }
+        }),
     }
 }
 
@@ -426,12 +454,31 @@ fn run_armed(
     cfg: &crate::agents_config::ProviderCapConfig,
     now: i64,
 ) -> String {
-    let deps = real_deps();
+    run_armed_with(home, scan, snap, cfg, now, &real_deps())
+}
+
+/// Same routing with injected deps (tests). Order: mark reopened canaries on
+/// open lanes, leave ladder per open lane, return ladder per returning lane.
+pub(crate) fn run_armed_with(
+    home: &crate::paths::AgentsHome,
+    scan: &crate::provider_cap::CapScan,
+    snap: &CapSnapshot,
+    cfg: &crate::agents_config::ProviderCapConfig,
+    now: i64,
+    deps: &crate::provider_cap::LeaveDeps,
+) -> String {
+    for lane in snap.open_lanes() {
+        crate::provider_cap::mark_reopened_if_pending(home, &lane.lane, now);
+    }
     let mut parts: Vec<String> = Vec::new();
     for lane in snap.open_lanes() {
         let answer = crate::provider_cap::read_decision(home, &lane.lane);
         let outcome =
             crate::provider_cap::run_leave_lane(home, scan, lane, answer.as_ref(), cfg, now, &deps);
+        parts.push(format!("{}: {outcome}", lane.lane));
+    }
+    for lane in snap.lanes.iter().filter(|l| l.state == "returning") {
+        let outcome = crate::provider_cap::run_return_lane(home, lane, cfg, now, deps);
         parts.push(format!("{}: {outcome}", lane.lane));
     }
     if parts.is_empty() {
