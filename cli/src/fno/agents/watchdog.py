@@ -3060,6 +3060,14 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str) -> tuple[
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return "refused", f"resume exit {proc.returncode}: {tail[-1] if tail else ''}"
+    if agent != "claude":
+        # Resume's own exit code is the receipt on every non-claude harness
+        # (x-6ac3): a codex thread row exits 0 only when the daemon accepted
+        # the turn - the same receipt mail delivery trusts - and every exec
+        # arm cannot exit 0 under a captured stdin at all. The transcript
+        # marker is the claude contract; re-checking it here would read a
+        # lagging rollout write as a refusal on a delivered wake.
+        return "applied", f"woke {v.name}; resume exit 0 is the delivery receipt ({agent})"
     if not confirm_wake_landed(v.row_id, cwd, WAKE_MESSAGE, before_epoch, agent=agent):
         # Carry resume's own last line into the refusal: exit 0 is exactly
         # the receipt that lied here (x-6ac3), so its before -> after line
