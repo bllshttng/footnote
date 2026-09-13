@@ -34,6 +34,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
@@ -43,6 +44,10 @@ from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence, T
 from fno.pr._proc import run
 
 _PR_RE = re.compile(r"^[1-9][0-9]*$")
+
+# The post-merge reconcile bound (merge child and the ritual's leg alike):
+# above reconcile's own 240s close-probe budget (graph/_reconcile.py).
+POST_MERGE_RECONCILE_TIMEOUT_S = 300.0
 
 # Merge serialization (parallel mode, epic x-42d5 G4, Locked Decision #9):
 # builds run parallel, merges run ONE AT A TIME. The lock is held across the
@@ -1010,11 +1015,23 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
 
         from fno import _subprocess_util
 
-        res = run(
-            [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile",
-             "--pr-number", str(pr_number), "--repo", repo, "--json"],
-            cwd=cwd or os.getcwd(),
-        )
+        # Bounded above the 240s probe budget; parent-bound so a killed merge
+        # cannot orphan the child (x-626f).
+        try:
+            res = run(
+                [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile",
+                 "--pr-number", str(pr_number), "--repo", repo, "--json"],
+                cwd=cwd or os.getcwd(),
+                timeout=POST_MERGE_RECONCILE_TIMEOUT_S,
+                env=dict(os.environ, FNO_DIE_WITH_PARENT=str(os.getpid())),
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"fno do pr merge: reconcile for PR #{pr_number} timed out after "
+                f"{int(POST_MERGE_RECONCILE_TIMEOUT_S)}s; a later sweep closes the merged nodes",
+                file=sys.stderr,
+            )
+            return []
         if not res.ok:
             # A non-zero reconcile (gh query down, evidence refused) leaves the
             # node(s) OPEN - the exact gap this closes. run() returns rather
@@ -1488,8 +1505,13 @@ def _finish_confirmed_merge(
     success_reason: str,
     *,
     prior_cleanup_failure: str = "",
+    release_lock: Optional[Callable[[], None]] = None,
 ) -> int:
     """Emit and finalize one confirmed merge, including remote cleanup truth."""
+    # The race the lock closes ended at the merged receipt; release first so
+    # a peer never queues behind the post-merge work (x-626f).
+    if release_lock is not None:
+        release_lock()
     cleanup_parts = [prior_cleanup_failure] if prior_cleanup_failure else []
     remote_cleanup = _post_merge_remote_delete(pr_number, repo, auto_merge)
     if remote_cleanup:
@@ -1530,8 +1552,8 @@ _MergeLockState = Literal["acquired", "held", "unavailable"]
 
 
 @contextmanager
-def _merge_lock() -> Iterator[_MergeLockState]:
-    """Serialize merges repo-wide; yield ``acquired`` | ``held`` | ``unavailable``.
+def _merge_lock() -> Iterator[tuple[_MergeLockState, Optional[Callable[[], None]]]]:
+    """Serialize merges repo-wide; yield ``(state, release_now)``.
 
     One ``merge:<canonical-root>`` claim per project (repo-local routing, so
     every worktree lane contends on the SAME lock - like ``walker:<root>``),
@@ -1539,7 +1561,9 @@ def _merge_lock() -> Iterator[_MergeLockState]:
     polls for up to ``_MERGE_LOCK_WAIT_S`` (a merge holds it for seconds), then
     yields ``held``. A claims-layer error yields ``unavailable`` and the merge
     proceeds unserialized: the lock is coordination, GitHub stays the merge
-    authority, and our own tooling failing must never block a merge.
+    authority, and our own tooling failing must never block a merge. Yields
+    ``(state, release_now)``; the early fire and the finally release are the
+    same idempotent call, so both firing is safe.
     """
     state: Literal["acquired", "held", "unavailable"] = "acquired"
     key = holder = release = None
@@ -1552,6 +1576,13 @@ def _merge_lock() -> Iterator[_MergeLockState]:
 
         key = f"merge:{resolve_canonical_repo_root()}"
         holder = f"pr-merge:{os.getpid()}"
+
+        def _release_now() -> None:
+            try:
+                release_claim(key, holder)
+            except Exception:  # noqa: BLE001 - pid-liveness frees it anyway
+                pass
+
         deadline = time.monotonic() + _MERGE_LOCK_WAIT_S
         while True:
             try:
@@ -1572,7 +1603,7 @@ def _merge_lock() -> Iterator[_MergeLockState]:
         sys.stderr.write(f"pr-merge: merge lock unavailable ({exc}); proceeding\n")
         state = "unavailable"
     try:
-        yield state
+        yield state, (_release_now if state == "acquired" else None)
     finally:
         if release is not None and state == "acquired":
             assert key is not None and holder is not None  # set together before release
@@ -2079,7 +2110,7 @@ def run_merge(
     # between the freshness read and our merge is exactly the race the lock
     # exists to close. Sequential runs (no live lanes) skip the freshness hold
     # and see only an uncontended lock - behavior unchanged.
-    with _merge_lock() as lock:
+    with _merge_lock() as (lock, release_now):
         if lock == "held":
             _emit(
                 pr_number,
@@ -2156,6 +2187,7 @@ def run_merge(
             (state, refusal, covered_head, note),
             approved=posture_approved,
             auto_merge_source=posture_source,
+            release_lock=release_now,
         )
 
 
@@ -2265,6 +2297,7 @@ def _do_merge(
     gate_verdict: Optional[tuple] = None,
     approved: Optional[bool] = None,
     auto_merge_source: str = "",
+    release_lock: Optional[Callable[[], None]] = None,
 ) -> int:
     """Steps (3)-(4): authorize through the one owner, then run the effect.
 
@@ -2334,5 +2367,6 @@ def _do_merge(
             auto_merge,
             note or "merged immediately",
             prior_cleanup_failure=(f"failed: {cleanup_failure}" if cleanup_failure else ""),
+            release_lock=release_lock,
         )
     return _emit_authorized_outcome(pr_number, receipt, strategy)

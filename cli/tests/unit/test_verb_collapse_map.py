@@ -142,8 +142,10 @@ def test_map_covers_current_surface_once():
     # king ledger + reign-ledger, dispatch next (one stays as a hidden
     # alias), publish-review pair, prove-it-verdicts, retract, announce,
     # bash-census, ask, drive-authority, probe-run, verify-evidence, the
-    # deleted cargo-offload pair, and the workers' alias rows - each branch's
-    # full running ledger stays in its own git history.
+    # deleted cargo-offload pair, king checkin + king-checkin, the
+    # task-context verbs with their retired resume-receipt rows, and
+    # canonical-check - each branch's full running ledger stays in its own
+    # git history.
     assert len(mapped) == 618, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"

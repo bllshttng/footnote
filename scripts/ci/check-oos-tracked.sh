@@ -9,7 +9,7 @@
 # again, so the deferred work silently evaporates.
 #
 # NARROW by design: it fires ONLY when the body has an explicit "Out of scope"
-# (or "Not touched here") heading. Incidental prose elsewhere is never scanned -
+# (or "Not touched here" / "Not in this PR") heading. Incidental prose elsewhere is never scanned -
 # the section heading is the smell; free-text deferral phrasing is not gated.
 #
 # Rule inside that section:
@@ -22,7 +22,11 @@
 #
 # Input (via env ONLY; a workflow must NEVER interpolate PR-controlled text
 # inline into a `run:` block - that is a shell-injection vector):
-#   PR_BODY   the PR body
+#   PR_BODY          the PR body
+#   PLAN_CARVEOUTS   optional; `forbidden` refuses ANY exclusion item, tracked or
+#                    waived, because the plan said nothing leaves this PR. Set by
+#                    fno.plan.fidelity from the plan's `carveouts:` key. CI never
+#                    sets it; unset or any other value keeps the rule below.
 #
 # Exit 0 when clean (or no OOS section, or empty body); exit 1 on an untracked
 # item. Absent/empty PR_BODY = nothing to gate = pass (mirrors the former gate's
@@ -34,6 +38,8 @@
 set -uo pipefail
 
 BODY="${PR_BODY:-}"
+FORBIDDEN=0
+[[ "${PLAN_CARVEOUTS:-}" == forbidden ]] && FORBIDDEN=1
 
 # A tracked reference. A backlog node id is <prefix>-<hex>: the prefix grammar
 # mirrors config.backlog.id_prefix (BacklogBlock.validate_id_prefix: a letter-led
@@ -61,7 +67,8 @@ match() {
 
 # --- 1. locate the "Out of scope" section ------------------------------------
 # Heading forms (case-insensitive, markdown ATX heading only): "Out of scope",
-# "Out-of-scope", "Not touched here". Section body runs to the next ATX heading
+# "Out-of-scope", "Not touched here", "Not in this PR", each with an optional
+# leading "Explicitly". Section body runs to the next ATX heading
 # or EOF. bash 3.2 safe: line-by-line, no mapfile.
 in_section=0
 section_lines=()
@@ -69,7 +76,7 @@ found_heading=0
 while IFS= read -r line; do
   if match '^#{1,6}[[:space:]]' "$line"; then
     # a heading: does it open, or (if we were inside) close, the OOS section?
-    if match '^#{1,6}[[:space:]]*(out.?of.?scope|not touched here)' "$line" i; then
+    if match '^#{1,6}[[:space:]]*(explicitly[[:space:]]+)?(out.?of.?scope|not touched here|not in this pr)' "$line" i; then
       in_section=1; found_heading=1; continue
     elif [[ "$in_section" -eq 1 ]]; then
       in_section=0   # next heading ends the section
@@ -88,6 +95,7 @@ fi
 # Guarded expansion (${a[@]+"${a[@]}"}): an empty array under `set -u` on bash
 # 3.2 errors on a plain "${a[@]}" (gemini review) - an OOS heading at EOF.
 for line in ${section_lines[@]+"${section_lines[@]}"}; do
+  [[ "$FORBIDDEN" -eq 1 ]] && break
   if match "$OOSOK" "$line" && ! match '^[[:space:]]*([-*+]|[0-9]+\.)[[:space:]]' "$line"; then
     echo "check-oos-tracked: section waived by 'oos-ok:' - ok"
     exit 0
@@ -112,6 +120,15 @@ if [[ "$has_list" -eq 0 ]]; then
   # no bullets: the whole prose block is one item (empty -> nothing to gate)
   [[ -z "${prose//[[:space:]]/}" ]] && { echo "check-oos-tracked: empty 'Out of scope' section - ok"; exit 0; }
   items+=("$prose")
+fi
+
+if [[ "$FORBIDDEN" -eq 1 ]]; then
+  {
+    echo "check-oos-tracked: plan forbids carve-outs; this PR declares ${#items[@]} exclusion item(s)"
+    echo "Do the work in this PR and delete the section, or amend the plan's"
+    echo "'carveouts:' key with the operator before merge."
+  } >&2
+  exit 1
 fi
 
 # --- 4. every item needs a tracked ref or inline oos-ok ----------------------

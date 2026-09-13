@@ -2998,3 +2998,130 @@ def test_an_unrelated_additional_pr_number_stamps_nothing(monkeypatch, tmp_path)
 
     saved = json.loads(graph.read_text())["entries"][0]
     assert "merge_status" not in saved["additional_prs"][0]
+
+
+# ---- x-626f: the lock releases when the merge lands; the reconcile child is
+# bounded and parent-bound ----
+
+
+def test_lock_released_before_post_merge_reconcile(enabled, monkeypatch, tmp_path, capsys):
+    """AC2-HP: while the first merge is inside its post-merge work (the
+    unbounded reconcile), a second merger can already take the lock - the
+    race the lock closes ended at the merged receipt."""
+    seen = {}
+
+    def fake_on_confirmed(pr, cwd=""):
+        from fno.claims.core import acquire_claim
+
+        # Raises CLAIM_UNAVAILABLE (and fails the merge) if the first merge
+        # still held the lock here - the pre-x-626f behavior.
+        acquire_claim(_lock_key(), "pr-merge:second", reason="peer waiting behind us")
+        seen["second_acquired"] = True
+        return []
+
+    monkeypatch.setattr(_merge, "_on_confirmed_merge", fake_on_confirmed)
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert seen.get("second_acquired"), "the lock must free before post-merge work runs"
+
+
+def test_early_release_frees_the_lock_for_a_successor(enabled, monkeypatch, tmp_path):
+    """AC2-ERR: after the early fire, a successor takes the lock, and the
+    with-block's finally release (the same holder-checked call) leaves the
+    successor's claim on disk untouched - the double-release is release_claim's
+    own documented silent-success contract."""
+    from fno.claims.core import acquire_claim
+    from fno.claims.io import claim_path
+
+    with _merge._merge_lock() as (state, release_now):
+        assert state == "acquired" and release_now is not None
+        release_now()
+        # the freed lock is takeable right now, before the merge verb returns
+        acquire_claim(_lock_key(), "pr-merge:successor", reason="next merger")
+    successor_file = claim_path(_lock_key(), root=None)
+    assert successor_file.exists(), "the finally release must not free the successor's claim"
+    from fno.claims.core import release_claim
+
+    release_claim(_lock_key(), "pr-merge:successor")
+    assert not successor_file.exists()
+
+
+def test_merge_lock_released_when_outcome_is_not_merged(enabled, monkeypatch, tmp_path):
+    """AC2-ERR: a non-merged authorized outcome releases via the with-block's
+    finally; the next merger takes the lock immediately."""
+    import fno.claims.core as claims
+
+    def _refused(pr_number, repo, **kwargs):
+        return {"outcome": "refused", "reason": "not authorized"}
+
+    monkeypatch.setattr(_merge, "_authorized_merge", _refused)
+    fake = FakeRun(toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    claims.acquire_claim(_lock_key(), "pr-merge:next", reason="post-release probe")
+
+
+def test_reconcile_child_is_bounded_and_parent_bound(enabled, monkeypatch, tmp_path):
+    """AC3: the merge's reconcile child carries the timeout and the
+    FNO_DIE_WITH_PARENT binding, so a killed merge never orphans it."""
+    import os
+
+    captured = []
+    inner = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        toplevel=str(tmp_path),
+        # a resolvable github url: the repo slug from it scopes the reconcile
+        view_url="https://github.com/owner/repo/pull/42",
+    )
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": []}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+    # read_graph runs through the keeper; the unit stub reads the file instead
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda *a, **k: [])
+
+    def fake(cmd, **kwargs):
+        if "reconcile" in cmd:
+            captured.append((list(cmd), kwargs))
+            return Result(0, "{}", "")
+        return inner(cmd, **kwargs)
+
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    hits = [kw for cmd, kw in captured if "reconcile" in cmd]
+    assert hits, "the merge must run its post-merge reconcile"
+    kw = hits[0]
+    assert kw.get("timeout") == 300.0
+    assert kw.get("env", {}).get("FNO_DIE_WITH_PARENT") == str(os.getpid())
+
+
+def test_reconcile_timeout_reports_and_keeps_merge_exit(enabled, monkeypatch, tmp_path, capsys):
+    """AC3-ERR: a wedged reconcile times out with a line naming the PR; the
+    merge's own receipt and exit code are untouched."""
+    import subprocess
+
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": []}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda *a, **k: [])
+
+    inner = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        toplevel=str(tmp_path),
+        view_url="https://github.com/owner/repo/pull/42",
+    )
+
+    def fake(cmd, **kwargs):
+        if "reconcile" in cmd:
+            raise subprocess.TimeoutExpired(cmd, 300)
+        return inner(cmd, **kwargs)
+
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    # one readouterr: a second read returns only the post-consumption capture
+    cap = capsys.readouterr()
+    assert "timed out after 300s" in cap.err
+    assert "#42" in cap.err
+    assert json.loads(cap.out.strip().splitlines()[-1])["outcome"] == "merged"

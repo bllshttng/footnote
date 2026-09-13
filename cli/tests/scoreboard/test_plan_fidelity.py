@@ -539,6 +539,104 @@ def test_fidelity_refusal_passes_when_there_is_no_shortfall():
     assert decision["refused"] is False
 
 
+def test_fidelity_refusal_refuses_any_carveout_when_forbidden():
+    """A carveout no longer covers anything when the plan said none may exist."""
+    from fno.plan.fidelity import fidelity_refusal
+
+    decision = fidelity_refusal(unjoined_rows=[], carveouts=[{"id": "c1"}], forbidden=True)
+    assert decision["refused"] is True
+    assert "plan forbids carve-outs" in decision["reason"]
+
+
+# --- carveouts: forbidden (x-ee91) -------------------------------------------
+
+_REPO = Path(__file__).resolve().parents[3]
+_SPECIMEN_BODY = (
+    "## What\nretire rows\n\n## Explicitly not in this PR\n"
+    "- a - x-7649\n- b - x-63be\n- c - x-ea5b\n- d - x-65b5\n- e - x-d2ba\n"
+)
+
+
+def _forbidden_setup(monkeypatch, tmp_path, *, carveouts_line, body_reader):
+    import fno.paths as paths
+    import fno.plan.fidelity as fid
+    import fno.scoreboard.fold as fold
+
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        f"---\nnode: x-1\nstatus: ready\ncreated: 2026-09-12\n{carveouts_line}---\n\n# plan\n"
+    )
+    monkeypatch.setattr(fold, "load_ledger_rows", lambda *a, **k: [])
+    monkeypatch.setattr(paths, "_slug_from_git_remote", lambda root=None: "footnote")
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: _REPO / rel)
+    monkeypatch.setattr(
+        fid, "_load_graph_nodes",
+        # A relative path, as ledger rows carry it: the lookup keys on the node id.
+        lambda: [{"id": "x-1", "plan_path": "internal/fno/plans/plan.md", "pr_number": 1599}],
+    )
+    monkeypatch.setattr(fid, "_read_pr_body", body_reader)
+    return fid, plan
+
+
+def test_compute_plan_fidelity_refuses_declared_exclusions_when_plan_forbids(monkeypatch, tmp_path):
+    """AC4-HP: the real bash gate runs (the positive control that the parser
+    fired) and its first stderr line is the reason, with no ledger rows."""
+    fid, plan = _forbidden_setup(
+        monkeypatch, tmp_path, carveouts_line="carveouts: forbidden\n",
+        body_reader=lambda pr, root: _SPECIMEN_BODY,
+    )
+    decision = fid.compute_plan_fidelity(plan_path=str(plan))
+    assert decision["refused"] is True
+    assert "declares 5 exclusion item(s)" in decision["reason"], decision["reason"]
+    assert decision["carveouts_policy"] == "forbidden"
+    assert decision["carveouts_pr"] == 1599
+
+
+def test_compute_plan_fidelity_refuses_when_the_body_parser_is_absent(monkeypatch, tmp_path):
+    """A bare install ships no check-oos-tracked.sh: the gate refuses, never passes."""
+    import fno.paths as paths
+
+    fid, plan = _forbidden_setup(
+        monkeypatch, tmp_path, carveouts_line="carveouts: forbidden\n",
+        body_reader=lambda pr, root: _SPECIMEN_BODY,
+    )
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: tmp_path / "absent" / rel)
+    decision = fid.compute_plan_fidelity(plan_path=str(plan))
+    assert decision["refused"] is True
+    assert "carve-out check unreadable" in decision["reason"], decision["reason"]
+
+
+def test_compute_plan_fidelity_treats_a_typoed_carveouts_value_as_forbidden(monkeypatch, tmp_path):
+    fid, plan = _forbidden_setup(
+        monkeypatch, tmp_path, carveouts_line="carveouts: forbiden\n",
+        body_reader=lambda pr, root: _SPECIMEN_BODY,
+    )
+    assert fid.compute_plan_fidelity(plan_path=str(plan))["refused"] is True
+
+
+def test_compute_plan_fidelity_ignores_exclusions_when_plan_is_silent(monkeypatch, tmp_path):
+    """AC5-EDGE: no key, no body read, today's decision."""
+    import pytest
+
+    def _never(pr, root):
+        pytest.fail("a plan with no carveouts key must not read the PR body")
+
+    fid, plan = _forbidden_setup(monkeypatch, tmp_path, carveouts_line="", body_reader=_never)
+    decision = fid.compute_plan_fidelity(plan_path=str(plan))
+    assert decision["refused"] is False
+    assert "carveouts_policy" not in decision
+
+
+def test_compute_plan_fidelity_refuses_on_unreadable_body_when_forbidden(monkeypatch, tmp_path):
+    fid, plan = _forbidden_setup(
+        monkeypatch, tmp_path, carveouts_line="carveouts: forbidden\n",
+        body_reader=lambda pr, root: None,
+    )
+    decision = fid.compute_plan_fidelity(plan_path=str(plan))
+    assert decision["refused"] is True
+    assert "PR body unreadable" in decision["reason"]
+
+
 def test_compute_plan_fidelity_scopes_selection_to_this_repo(monkeypatch, tmp_path):
     """The ledger is global and two projects can share a plan-path tail.
     compute_plan_fidelity selects only this repo's rows via the same remote-slug
