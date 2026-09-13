@@ -1154,7 +1154,10 @@ const RM_SUBPROCESS_TIMEOUT_SECS: u64 = 60;
 /// not park the daemon's rm handler forever. Past the deadline the child is
 /// killed and the killed status returned, so a "kept" receipt can never be
 /// contradicted by a removal finishing in the background.
-fn output_with_timeout(mut cmd: std::process::Command, secs: u64) -> Option<std::process::Output> {
+pub(crate) fn output_with_timeout(
+    mut cmd: std::process::Command,
+    secs: u64,
+) -> Option<std::process::Output> {
     use std::io::Read;
     let mut child = cmd
         .stdin(std::process::Stdio::null())
