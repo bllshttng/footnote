@@ -9,14 +9,11 @@ from typing import Mapping, Optional
 def _codex_session_ids_for_pid(pid: int, *, psutil_mod=None) -> frozenset:
     """Every distinct codex session id open as a rollout in pid's tree.
 
-    Each pane's tree holds a distinct rollout fd, so a same-cwd sibling can
-    never be mis-identified (Codex P1, #603); the pid and its descendants are
-    inspected because a wrapper launcher holds the pane pid while its native
-    child opens the rollout. The id is session_meta.payload.id, not the
-    filename UUID, which is not always the session id (Codex P2, #603 r5).
-
-    Empty set when psutil is unavailable, the process is gone, or no rollout
-    is open yet; more than one distinct session returns all of them.
+    Each pane's tree holds a distinct rollout fd, so a same-cwd sibling is
+    never mis-identified (Codex P1, #603); descendants are inspected because
+    a wrapper launcher holds the pane pid. The id is session_meta.payload.id,
+    not the filename UUID (Codex P2, #603 r5). Empty on any failure; more
+    than one distinct session returns all of them.
     """
     psu = psutil_mod
     if psu is None:
@@ -69,13 +66,11 @@ def codex_rollout_witness(
 ) -> frozenset:
     """Session ids a live codex rollout witnesses for THIS process (x-a409).
 
-    Injected into claims.resolve_self_identity: a rollout fd is process ground
-    a leaked env marker cannot forge. Strong oracle first (the tree scan);
-    when it is empty - the post-x-a095 shape, where the shared app-server
-    daemon holds the fd - the daemon oracle requires the present
-    CODEX_THREAD_ID to match a row's session_id at this process's cwd,
-    uniquely. Any other answer, any non-codex harness, any failure: empty set.
-    Never raises.
+    Injected into claims.resolve_self_identity: an fd is process ground a
+    leaked env marker cannot forge. Tree scan first; when empty (the post-
+    x-a095 shape, where the app-server daemon holds the fd), the daemon
+    oracle requires the present CODEX_THREAD_ID to match a row's session_id
+    at this cwd, uniquely. Anything else: empty set. Never raises.
     """
     try:
         if harness != "codex":

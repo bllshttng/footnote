@@ -50,7 +50,7 @@ from fno.agents.dispatch import (
     _touch_log_path,
     validate_spawn_name,
 )
-from fno.agents.codex_rollout import (  # noqa: F401 - re-export; dispatch and tests bind mux_spawn._codex_session_id_for_pid
+from fno.agents.codex_rollout import (  # noqa: F401 - re-export: dispatch and tests bind it here
     _codex_session_id_for_pid,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command, render_seed
