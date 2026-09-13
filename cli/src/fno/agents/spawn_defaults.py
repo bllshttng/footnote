@@ -628,6 +628,8 @@ def _default_resolver(short_id: str) -> Optional[str]:
 _PROFILE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # Keep the old spelling on the canonical profile key for one release.
 _VERB_ALIASES = {"do": "execute"}
+# King work walks the crown slot whichever verb opens its seed.
+_CROWN_VERBS = frozenset({"reign", "king-for-a-day", "fno-me"})
 
 # The one built-in answer to "what permission mode does an unattended worker
 # get". Formerly config.agents.spawn_permission_mode's default; a constant now,
@@ -787,8 +789,10 @@ def _carries_fno_namespace(seed: Optional[str], tok: str) -> bool:
 def _profile_key(seed: Optional[str], known: Optional[Set[str]] = None) -> Optional[str]:
     """Classify a seed into its profile key. THREE outcomes (x-413d): a
     verb-shaped token that resolves (either sigil, anywhere, via
-    ``_VERB_ALIASES``) returns the canonical key; NO verb-shaped token -
-    every king seed, seedless spawn, path, plain prose - returns ``crown``,
+    ``_VERB_ALIASES``) returns the canonical key, except a king verb
+    (``reign``, ``king-for-a-day``, ``fno-me``), which returns ``crown``
+    like a verbless seed; NO verb-shaped token - every king seed, seedless
+    spawn, path, plain prose - returns ``crown``,
     so ``[agents.profiles.crown]`` reaches crown spawns like every other
     stage row; an ``fno:``-namespaced token ``known`` rejects returns None
     (the caller refuses naming ``_verb_token(seed)``). The namespace proves
@@ -802,6 +806,8 @@ def _profile_key(seed: Optional[str], known: Optional[Set[str]] = None) -> Optio
     if tok is None:
         return "crown"
     key = _VERB_ALIASES.get(tok, tok)
+    if key in _CROWN_VERBS:
+        return "crown"
     if known is None or tok in known or key in known:
         return key
     if _carries_fno_namespace(seed, tok):
