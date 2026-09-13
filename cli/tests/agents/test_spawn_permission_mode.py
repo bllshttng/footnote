@@ -88,8 +88,10 @@ def test_codex_pane_colon_two_axis_form():
     argv = build_pane_argv(
         "codex", "hi", CWD, False, None, None, "workspace-write:on-request"
     )
-    assert argv[:6] == [
+    assert argv[:8] == [
         "codex",
+        "--remote",
+        "unix://",
         "-C",
         str(CWD),
         "--sandbox",

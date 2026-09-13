@@ -69,6 +69,8 @@ class _MuxRunner:
 
     def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(argv))
+        if argv[:4] == ["codex", "app-server", "daemon", "start"]:
+            return subprocess.CompletedProcess(argv, 0, '{"status":"alreadyRunning"}', "")
         if argv[1:4] == ["mux", "pane", "run"]:
             return subprocess.CompletedProcess(argv, 0, "7\n", "")
         if argv[1:4] == ["mux", "pane", "ls"]:
