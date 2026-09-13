@@ -144,6 +144,18 @@ def _mark_handled(delivery_state: dict[str, dict], key: str, obs_state: str) -> 
     delivery_state[key] = rec
 
 
+def _notify_parked_pr(notify, pr: int, slug: str, retries: int, why: str) -> None:
+    """One operator notice for a retries-exhausted park; never raises."""
+    try:
+        notify(
+            f"PR #{pr} ({slug}) parked after {retries} failed {why} attempts",
+            pr=pr,
+            repo_slug=slug,
+        )
+    except Exception as exc:
+        log.warning("pr-watch: notify failed: %s", exc)
+
+
 def _finish_queue_merge(repo_dir: Path, pr: int, emit: Callable) -> None:
     """Finish a queue-armed merge through the existing post-merge cleanup owner.
 
@@ -1154,14 +1166,9 @@ def _run_tick(
                         else:
                             store.set(key, entry)
                         emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
-                        try:
-                            notify(
-                                f"PR #{pr} ({slug}) parked after {retries} failed dispatch attempts",
-                                pr=pr,
-                                repo_slug=slug,
-                            )
-                        except Exception as exc:
-                            log.warning("pr-watch: notify failed: %s", exc)
+                        _notify_parked_pr(
+                            notify, pr, slug, retries, "dispatch"
+                        )
 
             elif decision.kind in ("merge", "review"):
                 # No room for one bounded fire in the phase slice: skip the
@@ -1174,13 +1181,14 @@ def _run_tick(
             elif decision.kind == "execute":
                 # Queue for the merge phase: a ~120s attempt inside this
                 # slice hit the SIGALRM before the receipt (see run_execute_queue).
-                grant_fields: dict[str, Any] = {}
-                if grant_verdict is not None and isinstance(grant_verdict.grant, dict):
-                    grant_fields = {
-                        "source": grant_verdict.grant.get("source"),
-                        "recorded_by": grant_verdict.grant.get("recorded_by"),
-                        "recorded_at": grant_verdict.grant.get("recorded_at"),
-                    }
+                grant = (
+                    grant_verdict.grant
+                    if grant_verdict is not None and isinstance(grant_verdict.grant, dict)
+                    else {}
+                )
+                grant_fields = {
+                    k: grant.get(k) for k in ("source", "recorded_by", "recorded_at")
+                }
                 execute_queue.append((cand, key, grant_fields))
                 merge_scan_attempted += 1
                 entry["last_polled_at"] = now_iso
@@ -1251,13 +1259,11 @@ def run_execute_queue(
     notify: Optional[Callable] = None,
     max_retries: Optional[int] = None,
     claim: Optional[Any] = None,
-    holder: Optional[str] = None,
 ) -> tuple[int, int]:
     """Run the sweep's queued durable-grant merges under the merge phase's own
     slice; returns ``(executed, skipped)``. One retry is persisted BEFORE each
     call, so an alarm cut parks at ``max_retries`` instead of replaying the
-    same PR at the head of every tick; the canonical merge core owns every
-    safety judgment."""
+    same PR at the head of every tick."""
     from fno.pr_watch._state import WatermarkStore
 
     queue = getattr(result, "execute_queue", None) or []
@@ -1267,8 +1273,7 @@ def run_execute_queue(
     _notify = notify if notify is not None else (lambda *a, **kw: None)
     _max_retries = max_retries if max_retries is not None else _MAX_RETRIES
     _claim = claim if claim is not None else _NullClaim()
-    if holder is None:
-        holder = f"pr-watch-merge:{os.getpid()}"
+    holder = f"pr-watch-merge:{os.getpid()}"
 
     def _grant(phase: str, pr: int, cand: Any, grant: dict, **extra: Any) -> None:
         _emit("merge_grant_execution",
@@ -1334,14 +1339,10 @@ def run_execute_queue(
                     entry["parked"] = "retries-exhausted"
                     store.set(key, entry)
                     _emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
-                    try:
-                        _notify(
-                            f"PR #{pr} ({cand.repo_slug}) parked after "
-                            f"{prior_retries + 1} failed durable-grant merge attempts",
-                            pr=pr, repo_slug=cand.repo_slug,
-                        )
-                    except Exception as exc:
-                        log.warning("pr-watch: notify failed: %s", exc)
+                    _notify_parked_pr(
+                        _notify, pr, cand.repo_slug, prior_retries + 1,
+                        "durable-grant merge",
+                    )
         finally:
             try:
                 _claim.release_pr_lock(pr_lock_key, holder)

@@ -1086,8 +1086,7 @@ def tick() -> None:
 
         def _phase_merge(_slice_s: float) -> None:
             nonlocal result
-            set_tick_phase("merge")
-            if result is None or not getattr(result, "execute_queue", None):
+            if result is None or not result.execute_queue:
                 return
             from fno.pr_watch._dispatch import run_execute_queue
 
