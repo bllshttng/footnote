@@ -20779,9 +20779,9 @@ mod tests {
     }
 
     #[test]
-    fn active_mission_groups_workers_and_header_shows_done_total() {
-        // An active mission's two children render under a synthetic squad
-        // header, name carrying done/total.
+    fn an_active_mission_header_renders_but_never_groups_worker_rows() {
+        // The header renders with done/total, and its synthetic id reaches no
+        // agent row: no section draws mission ids, so a row there vanishes.
         let mut core = empty_core();
         core.missions = backlog_view::MissionMap {
             missions: vec![backlog_view::Mission {
@@ -20809,7 +20809,7 @@ mod tests {
         assert_eq!(header.name, "mux-squad  1/2");
         let rows = core.agent_rows();
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.squad == Some(sid)));
+        assert!(rows.iter().all(|r| r.squad != Some(sid)));
     }
 
     #[test]
