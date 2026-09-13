@@ -142,8 +142,7 @@ class Outstanding:
     capture_row_total: int = 0
     lane: "list[LaneItem]" = field(default_factory=list)
     lane_parked: int = 0
-    #: Open prove-it FAIL verdicts from the plan artifacts walk, plus the
-    #: reader's failure: a failed read is surfaced, never folded into a zero.
+    #: Open prove-it FAIL verdicts, plus the reader's failure: surfaced, never a silent zero.
     verdicts: "list[VerdictRow]" = field(default_factory=list)
     verdicts_error: Optional[str] = None
     #: The one project-scoped leg names its root; the machine-wide legs name

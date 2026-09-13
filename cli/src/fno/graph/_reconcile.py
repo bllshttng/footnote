@@ -924,10 +924,9 @@ def _close_probe_runner_shellout(
 
 def _verdict_reader_shellout(plan_path: str) -> "dict[str, Any]":
     """Default ``verdict_reader``: one round-trip with ``fno-agents
-    prove-it-verdicts``. Returns {read_at, rows, unreadable}; raises
-    ``VerbUnavailable`` on a missing/failed verb, which the caller degrades to
-    a warning, the same posture a plan read failure takes.
-    """
+    prove-it-verdicts`` returning {read_at, rows, unreadable}. Raises
+    ``VerbUnavailable``, which the caller degrades to a warning, the same
+    posture a plan read failure takes."""
     from fno.rust_binary import verb_call
 
     return verb_call("prove-it-verdicts", {})
@@ -1027,8 +1026,7 @@ def resolve_promise_evidence(
                 warning=f"prove-it verdict read failed ({exc}); gate skipped for this close",
             )
         fail_rows = [
-            r
-            for r in (payload.get("rows") or [])
+            r for r in (payload.get("rows") or [])
             if isinstance(r, dict) and r.get("node") == node_id and r.get("open")
         ]
         if fail_rows:
@@ -1037,8 +1035,8 @@ def resolve_promise_evidence(
                 outcome="promise_unmet",
                 reason=(
                     f"{node_id}: prove-it FAIL on its own plan artifacts "
-                    f"({row.get('report')}): {row.get('claim')}. Fix and re-run "
-                    f"prove-it, rule with fno inbox decide, or close with --force --reason."
+                    f"({row.get('report')}): {row.get('claim')}. Fix and re-run prove-it, "
+                    f"rule with fno inbox decide, or close with --force --reason."
                 ),
             )
 
