@@ -248,3 +248,49 @@ def test_a_live_launch_window_holder_still_hands_over(tmp_path):
     )
     assert mode == "handover"
     assert claim.holder == "target-session:sid-worker"
+
+
+def test_a_handover_records_the_dispatched_session_in_metadata(tmp_path):
+    """The worker's session replaces the dispatcher's on takeover; the
+    dispatcher's survives in metadata, so auditing how the node was
+    dispatched still finds the session that ran the dispatch."""
+    prior = _claim(os.getpid(), now_ms(), expires_at=now_ms() + 60_000,
+                   holder="spawn-handover:t-worker")
+    prior = prior.model_copy(update={"session_id": "sess-advance"})
+    _write(tmp_path, prior)
+    claim, mode = compare_and_rebind(
+        KEY, "spawn-handover:t-worker", new_holder="target-session:sid-worker",
+        new_pid=os.getpid(), root=tmp_path, emit=False,
+        harness_session_id="sess-worker",
+    )
+    assert mode == "handover"
+    assert claim.session_id == "sess-worker"
+    assert claim.metadata["dispatched_by_session"] == "sess-advance"
+
+
+def test_a_handover_never_overwrites_a_caller_dispatched_session(tmp_path):
+    """An explicit caller metadata key wins over the carried prior session."""
+    prior = _claim(os.getpid(), now_ms(), expires_at=now_ms() + 60_000,
+                   holder="spawn-handover:t-worker")
+    prior = prior.model_copy(update={"session_id": "sess-advance"})
+    _write(tmp_path, prior)
+    claim, mode = compare_and_rebind(
+        KEY, "spawn-handover:t-worker", new_holder="target-session:sid-worker",
+        new_pid=os.getpid(), root=tmp_path, emit=False,
+        harness_session_id="sess-worker",
+        new_metadata={"dispatched_by_session": "sess-explicit", "via": "init"},
+    )
+    assert mode == "handover"
+    assert claim.metadata["dispatched_by_session"] == "sess-explicit"
+    assert claim.metadata["via"] == "init"
+
+
+def test_a_resume_rebind_leaves_metadata_alone(tmp_path):
+    """Only a handover rewrites ownership, so only a handover carries the
+    prior session into metadata."""
+    prior = _claim(_DEAD_PID, now_ms() - 200_000, expires_at=now_ms() - 100_000)
+    prior = prior.model_copy(update={"session_id": "sess-advance"})
+    _write(tmp_path, prior)
+    claim, mode = compare_and_rebind(KEY, HOLDER, new_pid=os.getpid(), root=tmp_path, emit=False)
+    assert mode == "rebound"
+    assert "dispatched_by_session" not in claim.metadata
