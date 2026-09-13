@@ -37,7 +37,7 @@ One binding per attempt. The file slot is `.fno/artifacts/handoff/task-context-<
 - **Init gate** (`fno do target init`): a DECLARED binding revalidates through the native gate before the node claim is acquired. A refusal (or a missing binary) exits 2 and writes no state. An existing owner stays intact.
 - **Handoff** (`skills/target/scripts/handoff.sh`, receipt-write step): the binding revalidates while the parent still holds authority. It then embeds into the immutable resume receipt. A refusal parks the handoff (`reason="context_revalidation: ..."`) before any delegation commits. The child's claim/manifest proof still gates the delegation itself.
 - **Prepare** (`fno-agents task-context-prepare`, stdin JSON: `binding`, optional `out`): mints and digests a binding. With `out`, it writes the bound file straight to the artifact slot (parents created). The former `fno do resume receipt context-prepare` leaf was retired by this port. This is the one prepare door.
-- **Receipt validate** (`fno do resume receipt validate --attempt <own>`): a receipt-carried binding revalidates against live sources. This door also checks wrong-attempt and foreign-session.
+- **Receipt validate** (`fno do resume receipt validate`): a receipt-carried binding revalidates against live sources. This door checks wrong-node and, when the session is named, foreign-session. Wrong-attempt checking is the native gate's verdict at the init and handoff doors.
 - **Compaction** (`hooks/target-postcompact-reinject.sh`): re-emits goal, node, the plan reference for both shapes, and the binding pointer with its declared constraints. The old `-d` gate used to drop single-FILE plans. The session is not replaced. A pointer in context is not a read.
 - **Spawn payloads** (`fno.agents.spawn_payload.prepare_spawn_payload`): both launch substrates go through ONE entry. The block carries identity, digest, stage, and at most 10 declared constraints. Source contents never ride. The spawner arms it with `FNO_TASK_CONTEXT_FILE`.
 
@@ -45,14 +45,14 @@ One binding per attempt. The file slot is `.fno/artifacts/handoff/task-context-<
 
 Content decides staleness. Revalidation re-reads each required source under the worktree and compares sha256. A code HEAD that moved without touching a required source never stales the binding. A cosmetic HEAD change is not a task revision. An authorized task revision re-prepares: the new binding gets a new digest and replaces the file slot. Receipts keep the old digest as history. Changed constraints never auto-override. A required source that changed must revalidate through a new binding.
 
-Identity expectations are per-door. A door checks the identities it knows. The init gate knows node + root. The receipt door passes attempt + session. The journey fixtures pass all three. An absent expectation key is unchecked at that door. It is never a silent pass elsewhere.
+Identity expectations are per-door. A door checks the identities it knows. The init gate knows node + root. The receipt door passes session when named. The journey fixtures pass all three. An absent expectation key is unchecked at that door. It is never a silent pass elsewhere.
 
 ## Inspect a binding
 
 ```bash
 cat .fno/artifacts/handoff/task-context-<node>.json
 fno do resume receipt show --node <node>
-fno do resume receipt validate --node <node> --attempt <own attempt>
+fno do resume receipt validate --node <node> --session-id <own session>
 ```
 
 ## Tests

@@ -13,6 +13,7 @@ read-only revalidate gate, and prints a verdict. It never mutates claims.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -102,7 +103,6 @@ def write_cmd(
     watchers: Optional[str] = typer.Option(None, "--watchers", help="Newline-separated watcher ids"),
     idempotency_keys: Optional[str] = typer.Option(None, "--idempotency-keys", help="Newline-separated external-effect keys"),
     written_at: Optional[str] = typer.Option(None, "--written-at", help="Override UTC timestamp (default: now)"),
-    task_context: Optional[str] = typer.Option(None, "--task-context", help="Path to a bound binding JSON (embedding marks the receipt bound)"),
 ) -> None:
     """Write an immutable versioned resume receipt (producer).
 
@@ -115,8 +115,11 @@ def write_cmd(
         session_id, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
     )
     try:
+        # The binding rides the declared env path, the same carrier the gate
+        # and the spawner read; embedding it marks the receipt bound.
+        declared = os.environ.get("FNO_TASK_CONTEXT_FILE", "").strip()
         try:
-            binding = json.loads(Path(task_context).read_text(encoding="utf-8")) if task_context else None
+            binding = json.loads(Path(declared).read_text(encoding="utf-8")) if declared else None
         except (OSError, ValueError) as exc:
             raise MalformedReceiptError(f"task_context file unreadable: {exc}") from exc
         receipt = build_receipt(
@@ -224,7 +227,6 @@ def validate_cmd(
     events_file: Optional[str] = typer.Option(None, "--events", help="Override events.jsonl path (default: <worktree>/.fno/events.jsonl)"),
     harness: Optional[str] = typer.Option(None, "--harness", help="Owning harness for generation scoping"),
     claims_root: Optional[str] = typer.Option(None, "--claims-root", help="Override claims root (default: ~/.fno)"),
-    attempt: Optional[str] = typer.Option(None, "--attempt", help="Executing attempt the binding's gate expects, when the receipt carries one"),
 ) -> None:
     """Revalidate the latest receipt for a node against live state (consumer).
 
@@ -258,7 +260,7 @@ def validate_cmd(
     if receipt.task_context is not None:
         from fno.rust_binary import VerbUnavailable, verb_call
 
-        expect = {"node": node, **({"attempt": attempt} if attempt else {}), **({"session": session} if session_id else {})}
+        expect = {"node": node, **({"session": session} if session_id else {})}
         try:
             answer = verb_call("task-context-gate", {"node": node, "root": str(wt), "binding": receipt.task_context, "expect": expect})
         except VerbUnavailable as exc:

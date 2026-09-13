@@ -223,8 +223,8 @@ def test_write_with_malformed_task_context_file_refuses_by_name(tmp_path, monkey
             "--head", "b48ba4b8cfff",
             "--next-verb", "/fno:target",
             "--next-target", "x-59b0",
-            "--task-context", str(bad),
         ],
+        env={"FNO_TASK_CONTEXT_FILE": str(bad)},
     )
     assert result.exit_code == 2, result.output
     assert "invalid_input" in result.output

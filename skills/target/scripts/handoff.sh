@@ -568,7 +568,7 @@ _RECEIPT_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
 _RECEIPT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 _RECEIPT_REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || true)"
 _TMP_RECEIPT_ERR="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/fno-receipt-err.$$")"
-if fno do resume receipt write \
+if ${_TC_EMBED:+FNO_TASK_CONTEXT_FILE="$_TASK_CONTEXT_FILE"} fno do resume receipt write \
       --node "$NODE_ID" \
       --session "$SESSION_ID" \
       --phase "$BOUNDARY" \
@@ -579,7 +579,6 @@ if fno do resume receipt write \
       --head "${_RECEIPT_HEAD:-}" \
       --next-verb "/fno:target" \
       --next-target "$NODE_ID" \
-      ${_TC_EMBED:+"--task-context" "$_TASK_CONTEXT_FILE"} \
       >/dev/null 2>"$_TMP_RECEIPT_ERR"; then
   :
 else

@@ -660,8 +660,6 @@ pub fn gate_request(req: &Value) -> Value {
             serde_json::json!({"ok": false, "reason": reason, "detail": detail})
         }
         Ok(None) => serde_json::json!({"ok": true, "declared": false}),
-        Err(reason) => serde_json::json!({"ok": false, "reason": reason}),
-        Ok(None) => serde_json::json!({"ok": true, "declared": false}),
         Ok(Some(binding)) => {
             let inner = revalidate_request(&serde_json::json!({
                 "binding": binding,
