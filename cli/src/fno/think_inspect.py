@@ -289,8 +289,19 @@ def _graph_section(
         row = active_by_id.get(node_id) or archive_by_id.get(node_id)
         if row is None:
             continue
+        # Lean rows: the seed lane is floor-bounded, not capped, and a full
+        # node summary per row would make the receipt carry hundreds of
+        # fields the gate never reads. The gate reads id, score, reason,
+        # superseded_by; title/status/lanes let it judge liveness.
+        summary = {
+            key: row[key]
+            for key in ("id", "slug", "title", "status", "superseded_by", "deferred_kind", "domain")
+            if row.get(key) is not None
+        }
+        if node_id in archive_by_id and node_id not in active_by_id:
+            summary["archived"] = True
         duplicates.append(
-            _node_summary(row, archived=node_id in archive_by_id and node_id not in active_by_id)
+            summary
             | {"score": candidate.score, "reason": candidate.reason, "lanes": sorted(candidate.lanes)}
         )
     rollups = []
