@@ -53,10 +53,6 @@ _SYNC_COMMAND_TIMEOUT_S = 600.0
 # gh page size. The window filter is what actually bounds the sweep; this only
 # caps the wire payload for a very busy week.
 _CATCHUP_GH_LIMIT = 50
-# How many dirty paths one report names before it collapses into "+N more".
-# The recovery line still carries every blocking path; only the display list
-# is capped, so a 40-path pileup stays paste-ready.
-_DIRTY_SHOW_CAP = 5
 
 _REMOTE_SLUG_RE = re.compile(
     r"(?:github\.com[:/])([^/]+)/(.+?)(?:\.git)?/?$"
@@ -83,34 +79,22 @@ def _synced_marker(canonical: Path, sha: str) -> Path:
     return canonical / ".fno" / "post-merge-synced" / sha
 
 
-def _porcelain_path(raw: str) -> str:
-    """The path a ``git status --porcelain`` line carries (rename new side)."""
-    path = raw[3:]
-    if " -> " in path:
-        path = path.split(" -> ", 1)[1]
-    return path
+def _canonical_check(payload: dict) -> dict:
+    """One round-trip to the `fno-agents canonical-check` verb, fail-open.
 
-
-def _dirty_paths(canonical: Path, runner: Callable[..., Result]) -> list[str]:
-    """Uncommitted paths in the canonical working tree, or [] when unanswerable.
-
-    Fail-open: a probe that cannot answer (git missing, non-zero, timeout) must
-    not refuse every future sync, so it reads as "no dirt found" and the old raw
-    sync_command failure is what a worker sees. A C-quoted special-char path
-    cannot string-match the merge's file list, so it reads as non-blocking and
-    the raw failure surfaces as before - the fail-safe direction.
+    An empty answer proceeds: a probe that cannot answer must not refuse every
+    future sync, so it reads as "no dirt, not ahead" and the old raw
+    sync_command failure is what a worker sees.
     """
+    from fno.rust_binary import VerbUnavailable, verb_call
+
     try:
-        res = runner(
-            ["git", "status", "--porcelain"],
-            cwd=str(canonical),
-            timeout=_CATCHUP_PROBE_TIMEOUT_S,
-        )
-    except Exception:  # noqa: BLE001 - ToolMissing/OSError/timeout all read "unknown"
-        return []
-    if not res.ok:
-        return []
-    return [_porcelain_path(raw) for raw in res.stdout.splitlines() if len(raw) >= 4]
+        # The verb's own budget is a 30s fetch plus 10s per probe; the door
+        # must outlast the verb's worst case, not report it unreachable.
+        return verb_call("canonical-check", payload, timeout=120)
+    except VerbUnavailable as exc:
+        typer.echo(f"post-merge sync: canonical check unavailable ({exc}); proceeding", err=True)
+        return {}
 
 
 def run_sync_canonical(
@@ -121,11 +105,13 @@ def run_sync_canonical(
     runner: Callable[..., Result] = _run,
     gh_json: Optional[Callable[[list[str], Optional[str]], dict[str, Any]]] = None,
     shell_runner: Optional[Callable[[str, str], Result]] = None,
+    check: Optional[Callable[[dict], dict]] = None,
 ) -> int:
     """Run the canonical-sync for a merged PR. Returns a process exit code.
 
     Seams (``settings`` / ``canonical_root`` / ``runner`` / ``gh_json`` /
-    ``shell_runner``) let unit tests exercise every branch without shelling out.
+    ``shell_runner`` / ``check``) let unit tests exercise every branch without
+    shelling out.
     """
     from fno.config import load_settings
 
@@ -239,34 +225,20 @@ def run_sync_canonical(
             )
             return 0
 
-        # 6.5 Dirty-canonical gate: git refuses to merge over locally modified
-        #    or untracked paths the merge touches, so the pull inside
-        #    sync_command would die raw (ff-only / "would be overwritten") with
-        #    no owner named - the wedge this gate exists to pre-empt. Name the
-        #    checkout, the blocking paths, and the attributed-stash recovery
-        #    line; report, never an auto-stash (stashing someone's WIP silently
-        #    is the exact move the specimens were recovered from by hand).
-        #    Fail-open: a probe that cannot answer must not refuse every sync.
-        dirty = _dirty_paths(canonical, runner)
-        blocking = sorted(set(files) & set(dirty))
-        if blocking:
-            shown = ", ".join(blocking[:_DIRTY_SHOW_CAP])
-            if len(blocking) > _DIRTY_SHOW_CAP:
-                shown += f" (+{len(blocking) - _DIRTY_SHOW_CAP} more)"
-            date = datetime.now(timezone.utc).date().isoformat()
-            paths = " ".join(f"'{p}'" for p in blocking)
-            recovery = (
-                f"git -C {canonical} stash push -u -m \"fno post-merge sync {date} "
-                f"PR #{pr_number} {sha[:12]}\" -- {paths}"
-            )
-            typer.echo(
-                "post-merge sync: canonical checkout is dirty - the pull would refuse:\n"
-                f"  checkout: {canonical}\n"
-                f"  blocking (uncommitted + touched by this merge): {shown}\n"
-                f"  recovery: {recovery}\n"
-                "  marker withheld, will retry once the blocking paths are committed or stashed",
-                err=True,
-            )
+        # 6.5 Divergence gate (x-a150): `canonical-check` owns the read - the
+        #    dirty-overlap refusal (a pull dies over locally modified paths the
+        #    merge touches) and the ahead refusal (a clean canonical that is AHEAD
+        #    of origin is the wedge x-f066 recorded: the pull cannot fast-forward,
+        #    the marker stays withheld, and the retry loop has no owner). Report,
+        #    never an auto-stash or auto-reset. Fail-open: an answer that cannot
+        #    be had must not refuse every sync.
+        check = check or _canonical_check
+        answer = check(
+            {"canonical": str(canonical), "files": files, "pr": pr_number, "sha": sha}
+        )
+        refusal = answer.get("refusal")
+        if refusal:
+            typer.echo(refusal, err=True)
             return 1
 
         # 7. Run sync_command in the canonical via a login shell so uv/cargo/npm
@@ -399,69 +371,20 @@ def _parse_iso(raw: object) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _behind_count(
-    canonical: Path, runner: Callable[..., Result], *, fetch: bool = False
-) -> Optional[int]:
-    """Commits the default branch is behind its origin counterpart, or None.
-
-    Without ``fetch`` the answer is only as fresh as the last fetch, which
-    under-reports rather than inventing an alarm. That is wrong for the one case
-    this number exists to catch: a merge that has aged out of the gh window
-    leaves no markerless row, so a stale remote-tracking ref would read as zero
-    behind and the outage would be invisible forever. Callers that report to a
-    human (doctor) therefore fetch; the 5-minute tick does not.
-    """
-    if fetch:
-        try:
-            runner(
-                ["git", "fetch", "--quiet", "origin"],
-                cwd=str(canonical),
-                timeout=_CATCHUP_PROBE_TIMEOUT_S,
-            )
-        except Exception:  # noqa: BLE001 - a failed fetch just means a staler answer
-            pass
-    try:
-        head = runner(
-            ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-            cwd=str(canonical),
-            timeout=_CATCHUP_PROBE_TIMEOUT_S,
-        )
-    except Exception:  # noqa: BLE001 - a missing git is "unknown", not "behind 0"
-        return None
-    # A zero exit with empty stdout is not an answer: it would make `remote` an
-    # empty string and the rev-list range malformed.
-    remote = head.stdout.strip() if (head.ok and head.stdout.strip()) else "origin/main"
-    local = remote.split("/", 1)[1] if "/" in remote else "main"
-    try:
-        res = runner(
-            ["git", "rev-list", "--count", f"{local}..{remote}"],
-            cwd=str(canonical),
-            timeout=_CATCHUP_PROBE_TIMEOUT_S,
-        )
-    except Exception:  # noqa: BLE001
-        return None
-    if not res.ok:
-        return None
-    try:
-        return int(res.stdout.strip())
-    except ValueError:
-        return None
-
-
 def sync_staleness(
     *,
     settings: Any = None,
     canonical_root: Optional[Path] = None,
-    runner: Callable[..., Result] = _run,
+    check: Optional[Callable[[dict], dict]] = None,
     gh_list: Optional[Callable[[Path, int], Optional[list[dict]]]] = None,
     fetch: bool = False,
 ) -> SyncStaleness:
     """Is the canonical checkout current with recently-merged PRs?
 
     Read-only, so it is safe for ``fno doctor`` to call regardless of
-    ``post_merge.auto_run`` - reporting is not acting. ``fetch`` refreshes the
-    remote-tracking ref first; see :func:`_behind_count` for why a human-facing
-    caller wants it and the tick does not.
+    ``post_merge.auto_run`` - reporting is not acting. ``fetch`` rides the
+    payload so the divergence read refreshes the remote-tracking ref first; a
+    human-facing caller wants that, the 5-minute tick does not.
     """
     from fno.config import load_settings
 
@@ -482,7 +405,10 @@ def sync_staleness(
     markerless = tuple(
         r for r in rows if not _synced_marker(canonical, r["sha"]).exists()
     )
-    behind = _behind_count(canonical, runner, fetch=fetch)
+    check = check or _canonical_check
+    answer = check({"canonical": str(canonical), "fetch": fetch})
+    behind = answer.get("behind")
+    ahead = answer.get("ahead")
 
     # ANY markerless merge past the threshold is stale, not just the newest one.
     # Keying on the newest alone would call the older ones cosmetic on the theory
@@ -502,21 +428,13 @@ def sync_staleness(
         detail = f"PR #{oldest['number']} merged {age_h:.0f}h ago, never synced"
         if len(overdue) > 1:
             detail += f" (+{len(overdue) - 1} more)"
-    if behind:
+    if behind or ahead:
         stale = True
-        detail = (detail + "; " if detail else "") + f"local default branch {behind} behind origin"
-
-    # Naming the dirt is doctor's job even when the sync currency reads fresh:
-    # the specimens sat for weeks before an overlapping merge tripped the gate.
-    # The note rides in detail and never sets stale by itself - uncommitted WIP
-    # that blocks no merge is not an outage, and a daemon alarm nobody can
-    # clear from the CLI is how an alarm gets ignored.
-    dirty = _dirty_paths(canonical, runner)
-    if dirty:
-        shown = ", ".join(dirty[:_DIRTY_SHOW_CAP])
-        if len(dirty) > _DIRTY_SHOW_CAP:
-            shown += f" (+{len(dirty) - _DIRTY_SHOW_CAP} more)"
-        detail = (detail + "; " if detail else "") + f"canonical dirty: {shown}"
+    # The verb's notes ride even when the verdict stays fresh (naming the dirt
+    # is doctor's job); they never flip it by themselves.
+    notes = [note for note in (answer.get("notes") or []) if note]
+    if notes:
+        detail = (detail + "; " if detail else "") + "; ".join(notes)
 
     return SyncStaleness(
         "stale" if stale else "fresh", markerless, behind, detail
@@ -527,7 +445,7 @@ def run_sync_catchup(
     *,
     settings: Any = None,
     canonical_root: Optional[Path] = None,
-    runner: Callable[..., Result] = _run,
+    check: Optional[Callable[[dict], dict]] = None,
     gh_list: Optional[Callable[[Path, int], Optional[list[dict]]]] = None,
     sync: Optional[Callable[..., int]] = None,
 ) -> CatchupResult:
@@ -553,7 +471,7 @@ def run_sync_catchup(
     canonical = Path(canonical_root)
 
     st = sync_staleness(
-        settings=settings, canonical_root=canonical, runner=runner, gh_list=gh_list
+        settings=settings, canonical_root=canonical, check=check, gh_list=gh_list
     )
     if st.state == "unknown":
         typer.echo(f"post-merge sync catch-up: {st.detail}; skipping", err=True)

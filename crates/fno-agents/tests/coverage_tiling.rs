@@ -828,7 +828,7 @@ fn round_budget_pass_no_longer_refunds_the_budget() {
     use fno_agents::loopcheck::rounds_since_last_pass;
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
-    let (_base, shas, head) = repo_with(repo, 4);
+    let (_base, shas, _head) = repo_with(repo, 4);
     // AC6: the chain pass, round, round is THREE rounds. The pass used to
     // zero the counter and answer 1-and-change for the rounds after it; a
     // self-signed pass refreshed the whole budget on demand (measured on

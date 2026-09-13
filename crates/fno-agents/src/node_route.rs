@@ -88,7 +88,7 @@ const BACKWARD_CHUNK_BYTES: u64 = 1024 * 1024;
 /// and `limit` only bounds pathological files.
 fn head_lines(path: &Path, limit: u64) -> Vec<String> {
     use std::io::Read;
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
     };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);

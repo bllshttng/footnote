@@ -36,10 +36,6 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
-fn has_flag(args: &[String], flag: &str) -> bool {
-    args.iter().any(|a| a == flag)
-}
-
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -117,7 +113,7 @@ pub fn run_flight_acquire(args: &[String]) -> i32 {
     // die with the work, not with the messenger.
     let pid = arg_value(args, "--pid").and_then(|v| v.parse::<u32>().ok());
 
-    let mut opts = claims::AcquireOpts {
+    let opts = claims::AcquireOpts {
         pid,
         ttl_ms: Some(ttl_ms),
         reason: Some(format!("backlog single-flight: {scope}")),

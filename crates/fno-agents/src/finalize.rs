@@ -645,7 +645,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // one it gets. A dirty worktree here is one GC/orphan sweep from gone
     // (measured: 950 insertions across 11 files, zero commits, rescued by
     // hand). `git commit` is cheap and reversible; losing the diff is not.
-    let wip_commit_sha = commit_wip_if_dirty(&cwd, &reason);
+    let wip = commit_wip_if_dirty(&cwd, &reason, &session_id);
 
     // ── SHIP ONLY: stamp (+ graduate for advisory) + handoff ───────────────
     // For a CODE ship (DonePRGreen) the plan is stamped `in_review` only: done now
@@ -965,8 +965,10 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // posture - or that the manifest cannot say.
         "auto_merge_source": m.auto_merge_source.as_deref().unwrap_or("unknown"),
         // x-cdc7 HALF ONE: the sha of the rescue commit, or null on a clean
-        // tree / non-git dir / commit failure.
-        "wip_commit_sha": wip_commit_sha,
+        // tree / non-git dir / commit failure. `wip_branch` names the side
+        // branch when the rescue refused to move the checked-out branch.
+        "wip_commit_sha": wip.as_ref().map(|r| r.sha.clone()),
+        "wip_branch": wip.as_ref().and_then(|r| r.branch.clone()),
         // x-32f3 HALF TWO: whether an operator question was auto-filed this fire.
         "outstanding_filed": outstanding_filed,
     });
@@ -2493,9 +2495,15 @@ pub(crate) fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
 
 // ── WIP rescue commit (x-cdc7 HALF ONE) ────────────────────────────────────
 
-/// If `cwd`'s worktree is dirty, commit everything as a clearly-labeled WIP
-/// commit naming the terminal reason and what landed. Returns the new commit
-/// sha, or `None` on a clean tree / non-git dir / commit failure.
+/// If `cwd`'s worktree is dirty, rescue the uncommitted work. A linked
+/// worktree on a named feature branch gets today's WIP commit on that branch.
+/// The canonical checkout, a HEAD on the default branch, or a detached HEAD
+/// gets the work written to a `wip/<session>-<reason>-<sha8>` branch instead,
+/// leaving the checked-out branch, the index and the working tree untouched
+/// (x-a150: the canonical-main WIP commit that left canonical 1 ahead of
+/// origin and blocked every fast-forward). Returns the rescue sha plus, for a
+/// branch rescue, its branch name; `None` on a clean tree / non-git dir /
+/// commit failure.
 ///
 /// `git add -A` is deliberate here, unlike the stale-base-rebase case this
 /// repo otherwise warns off `-A` for (AGENTS.md pitfalls corpus): this is the
@@ -2503,7 +2511,7 @@ pub(crate) fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
 /// not assumed), and only `-A` reliably captures new untracked files alongside
 /// modifications - the exact shape of the measured near-miss (950 insertions,
 /// 11 files, none staged).
-fn commit_wip_if_dirty(cwd: &Path, reason: &str) -> Option<String> {
+fn commit_wip_if_dirty(cwd: &Path, reason: &str, session_id: &str) -> Option<WipRescue> {
     if !cwd.join(".git").exists() {
         return None; // not a git worktree at all
     }
@@ -2541,6 +2549,136 @@ fn commit_wip_if_dirty(cwd: &Path, reason: &str) -> Option<String> {
     if files.len() > shown.len() {
         landed.push_str(&format!("; +{} more", files.len() - shown.len()));
     }
+
+    let head_branch = git_capture(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    let on_default = head_branch
+        .as_deref()
+        .is_some_and(|b| b == crate::canonical_check::default_branch(cwd));
+    if crate::canonical_check::is_canonical_checkout(cwd) || head_branch.is_none() || on_default {
+        rescue_wip_to_branch(cwd, reason, session_id, &landed)
+    } else {
+        commit_wip_in_place(cwd, reason, &landed)
+    }
+}
+
+/// The rescue's outcome: the WIP commit sha and, when the work was rescued to
+/// a side branch instead of the checked-out one, that branch's name.
+pub(crate) struct WipRescue {
+    pub sha: String,
+    pub branch: Option<String>,
+}
+
+/// Branch-name-safe token: `[A-Za-z0-9._-]` only, capped at 40 chars.
+fn branch_token(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .take(40)
+        .collect()
+}
+
+/// Run git against a temporary index: a branch rescue must capture untracked
+/// files without staging anything in the real index.
+fn git_with_temp_index(cwd: &Path, index: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_INDEX_FILE", index)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+/// Write the rescue to a `wip/` branch via `commit-tree`, leaving HEAD, the
+/// index and the working tree untouched. The commit-tree path also bypasses
+/// hooks and signing config - the same failure modes the in-place path
+/// retries around - and the unsigned `-c commit.gpgsign=false` retry is kept
+/// for parity anyway.
+fn rescue_wip_to_branch(
+    cwd: &Path,
+    reason: &str,
+    session_id: &str,
+    landed: &str,
+) -> Option<WipRescue> {
+    let session = branch_token(session_id);
+    let reason_token = branch_token(reason);
+    let parent = git_capture(cwd, &["rev-parse", "--verify", "-q", "HEAD"]);
+    let index_path = std::env::temp_dir().join(format!(
+        "fno-wip-index-{}-{}.idx",
+        branch_token(&format!("{session_id}-{reason}")),
+        std::process::id()
+    ));
+    let message = format!(
+        "WIP: session terminated ({reason}) with uncommitted work\n\n\
+         Auto-committed by the terminal WIP-commit gate (x-cdc7) so a killed \
+         worker never loses in-flight work. Not reviewed, not tested - treat \
+         as a checkpoint, not a finished change.\n\n\
+         Landed:\n{landed}"
+    );
+    let outcome = (|| -> Option<(String, String)> {
+        // The provisional commit only NAMES the branch; the branch itself
+        // points at the final commit whose message carries that name.
+        if parent.is_some()
+            && git_with_temp_index(cwd, &index_path, &["read-tree", "HEAD"]).is_none()
+        {
+            eprintln!("finalize: WIP rescue read-tree failed");
+            return None;
+        }
+        if git_with_temp_index(cwd, &index_path, &["add", "-A"]).is_none() {
+            eprintln!("finalize: WIP rescue git add failed");
+            return None;
+        }
+        let Some(tree) = git_with_temp_index(cwd, &index_path, &["write-tree"]) else {
+            eprintln!("finalize: WIP rescue write-tree failed");
+            return None;
+        };
+        let commit_tree = |msg: &str| -> Option<String> {
+            let mut args: Vec<&str> = vec!["commit-tree", &tree];
+            if let Some(p) = parent.as_deref() {
+                args.extend(["-p", p]);
+            }
+            args.extend(["-m", msg]);
+            git_with_temp_index(cwd, &index_path, &args).or_else(|| {
+                let mut retry: Vec<&str> = vec!["-c", "commit.gpgsign=false"];
+                retry.extend(args);
+                git_with_temp_index(cwd, &index_path, &retry)
+            })
+        };
+        let Some(provisional) = commit_tree(&message) else {
+            eprintln!("finalize: WIP rescue commit-tree failed");
+            return None;
+        };
+        let tip8 = provisional.get(..8).unwrap_or(&provisional);
+        let name = format!("wip/{session}-{reason_token}-{tip8}");
+        let full_message =
+            format!("{message}\n\nRescued to branch {name}; the checked-out branch was not moved.");
+        let Some(sha) = commit_tree(&full_message) else {
+            eprintln!("finalize: WIP rescue commit-tree failed");
+            return None;
+        };
+        if git_capture(cwd, &["branch", &name, &sha]).is_none() {
+            eprintln!("finalize: WIP rescue branch {name} create failed");
+            return None;
+        }
+        Some((sha, name))
+    })();
+    let _ = std::fs::remove_file(&index_path);
+    let (sha, name) = outcome?;
+    eprintln!(
+        "finalize: rescued uncommitted work to branch {name}; {} left unmoved ({reason})",
+        cwd.display()
+    );
+    Some(WipRescue {
+        sha,
+        branch: Some(name),
+    })
+}
+
+/// Today's in-place WIP commit, kept for a linked worktree on a named feature
+/// branch - the one branch a session owns, where committing is safe.
+fn commit_wip_in_place(cwd: &Path, reason: &str, landed: &str) -> Option<WipRescue> {
     let message = format!(
         "WIP: session terminated ({reason}) with uncommitted work\n\n\
          Auto-committed by the terminal WIP-commit gate (x-cdc7) so a killed \
@@ -2587,11 +2725,13 @@ fn commit_wip_if_dirty(cwd: &Path, reason: &str) -> Option<String> {
         eprintln!("finalize: WIP git commit failed");
         return None;
     }
-    let sha = git_capture(cwd, &["rev-parse", "HEAD"]);
-    if let Some(sha) = &sha {
-        eprintln!("finalize: WIP commit {sha} saved uncommitted work ({reason})");
+    match git_capture(cwd, &["rev-parse", "HEAD"]) {
+        Some(sha) => {
+            eprintln!("finalize: WIP commit {sha} saved uncommitted work ({reason})");
+            Some(WipRescue { sha, branch: None })
+        }
+        None => None,
     }
-    sha
 }
 
 // ── unanswered-question filing (x-32f3 HALF TWO) ────────────────────────────
@@ -3088,29 +3228,128 @@ mod tests {
     fn commit_wip_if_dirty_rescues_a_dirty_tree() {
         // The specimen this fix exists for: a worker dies mid-flight holding
         // uncommitted work. Assert the work is ON THE BRANCH afterward, not
-        // just that the function returns something.
+        // just that the function returns something. Runs in a LINKED worktree
+        // on a feature branch: a bare `git init` dir is its own canonical
+        // checkout, so committing in place there is the x-a150 bug itself.
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        git_fixture(&base);
+        commit_at(&base, "base", 1000, 1000);
+        let wt = tmp.path().join("wt");
+        Command::new("git")
+            .arg("-C")
+            .arg(&base)
+            .args(["worktree", "add", "-q", "-b", "feature/x"])
+            .arg(&wt)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        std::fs::write(wt.join("in_flight.txt"), "950 insertions worth").unwrap();
+        std::fs::write(wt.join("new_untracked.txt"), "never staged").unwrap();
+
+        let rescue = commit_wip_if_dirty(&wt, "NoProgress", "sess-1").unwrap();
+
+        assert!(
+            rescue.branch.is_none(),
+            "a feature-branch rescue commits in place"
+        );
+        assert_eq!(
+            git_capture(&wt, &["rev-parse", "HEAD"]),
+            Some(rescue.sha.clone())
+        );
+        assert_eq!(
+            git_capture(&wt, &["status", "--porcelain"]),
+            Some(String::new())
+        );
+        let log = git_capture(&wt, &["log", "-1", "--format=%s"]).unwrap();
+        assert!(log.contains("WIP") && log.contains("NoProgress"));
+        // The untracked file must be captured too - that is the whole point
+        // of `git add -A` over a partial `git add -u`.
+        let tracked = git_capture(&wt, &["show", "--stat", "HEAD"]).unwrap_or_default();
+        assert!(tracked.contains("new_untracked.txt"));
+    }
+
+    #[test]
+    fn commit_wip_if_dirty_rescues_canonical_main_to_a_branch() {
+        // x-a150's own specimen: a session terminating with cwd at the
+        // canonical checkout committed 0134c5910 straight onto `main` and
+        // blocked every fast-forward. The rescue must leave `main` unmoved.
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         git_fixture(d);
         commit_at(d, "base", 1000, 1000);
         let before = head_of(d);
-        std::fs::write(d.join("in_flight.txt"), "950 insertions worth").unwrap();
-        std::fs::write(d.join("new_untracked.txt"), "never staged").unwrap();
+        std::fs::write(d.join("err.tmp"), "").unwrap();
 
-        let sha = commit_wip_if_dirty(d, "NoProgress");
+        commit_wip_if_dirty(d, "DonePRGreen", "sess-1").unwrap();
 
-        assert!(sha.is_some(), "a dirty tree must produce a rescue commit");
-        assert_ne!(sha.as_deref(), Some(before.as_str()));
-        assert_eq!(
-            git_capture(d, &["status", "--porcelain"]),
-            Some(String::new())
+        assert_eq!(head_of(d), before, "canonical main must not move");
+        assert!(
+            git_capture(d, &["status", "--porcelain"])
+                .unwrap()
+                .contains("err.tmp"),
+            "the working tree stays untouched"
         );
-        let log = git_capture(d, &["log", "-1", "--format=%s"]).unwrap();
-        assert!(log.contains("WIP") && log.contains("NoProgress"));
-        // The untracked file must be captured too - that is the whole point
-        // of `git add -A` over a partial `git add -u`.
-        let tracked = git_capture(d, &["show", "--stat", "HEAD"]).unwrap_or_default();
-        assert!(tracked.contains("new_untracked.txt"));
+        let branches = git_capture(d, &["branch", "--list", "wip/*"]).unwrap();
+        assert!(branches.contains("wip/sess-1-DonePRGreen-"), "{branches}");
+        let name = branches
+            .lines()
+            .next()
+            .unwrap()
+            .trim()
+            .trim_start_matches("* ");
+        assert!(
+            git_capture(d, &["show", "--stat", name])
+                .unwrap_or_default()
+                .contains("err.tmp"),
+            "the rescue branch holds the rescued file"
+        );
+        assert_eq!(
+            git_capture(d, &["rev-parse", &format!("{name}^")]),
+            Some(before),
+            "the rescue branches off the prior main"
+        );
+    }
+
+    #[test]
+    fn commit_wip_if_dirty_rescues_a_detached_head_to_a_branch() {
+        // AC1-EDGE: a linked worktree on a detached HEAD has no branch to
+        // own, so the rescue writes a `wip/` branch instead of moving HEAD.
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        git_fixture(&base);
+        commit_at(&base, "base", 1000, 1000);
+        let wt = tmp.path().join("wt");
+        Command::new("git")
+            .arg("-C")
+            .arg(&base)
+            .args(["worktree", "add", "-q", "--detach"])
+            .arg(&wt)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        std::fs::write(wt.join("in_flight.txt"), "detached work").unwrap();
+        let before = head_of(&wt);
+
+        let rescue = commit_wip_if_dirty(&wt, "NoProgress", "sess-9").unwrap();
+
+        assert!(rescue.branch.as_deref().unwrap_or("").starts_with("wip/"));
+        assert_eq!(head_of(&wt), before, "detached HEAD must not move");
+        assert!(
+            git_capture(&wt, &["status", "--porcelain"])
+                .unwrap()
+                .contains("in_flight.txt"),
+            "the working tree stays untouched"
+        );
+        let name = rescue.branch.unwrap();
+        assert!(
+            git_capture(&wt, &["show", "--stat", &name])
+                .unwrap_or_default()
+                .contains("in_flight.txt"),
+            "the wip branch holds the rescued work"
+        );
     }
 
     #[test]
@@ -3121,14 +3360,14 @@ mod tests {
         commit_at(d, "base", 1000, 1000);
         let before = head_of(d);
 
-        assert_eq!(commit_wip_if_dirty(d, "DonePRGreen"), None);
+        assert!(commit_wip_if_dirty(d, "DonePRGreen", "s1").is_none());
         assert_eq!(head_of(d), before, "a clean tree must not gain a commit");
     }
 
     #[test]
     fn commit_wip_if_dirty_is_a_noop_outside_a_git_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(commit_wip_if_dirty(tmp.path(), "Budget"), None);
+        assert!(commit_wip_if_dirty(tmp.path(), "Budget", "s1").is_none());
     }
 
     #[test]
@@ -3165,9 +3404,12 @@ mod tests {
         );
         let before = head_of(d);
 
-        let sha = commit_wip_if_dirty(d, "NoProgress");
+        let sha = commit_wip_if_dirty(d, "NoProgress", "s1");
 
-        assert_eq!(sha, None, "a mid-merge tree must never be auto-committed");
+        assert!(
+            sha.is_none(),
+            "a mid-merge tree must never be auto-committed"
+        );
         assert_eq!(head_of(d), before, "HEAD must not move");
         assert!(
             d.join(".git/MERGE_HEAD").exists(),

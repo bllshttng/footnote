@@ -142,7 +142,6 @@ fn fold_into(r: &mut state::Registry, pairs: &[(String, String)]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn row(name: &str, sid: Option<&str>, short: &str) -> state::RegistryEntry {
         let mut e = state::RegistryEntry::default();

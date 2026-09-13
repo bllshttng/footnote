@@ -93,6 +93,67 @@ if [[ -n "$PLAN_PATH" && -d "$PLAN_PATH" ]]; then
     TOTAL_TASKS=$(grep -c '### Task' "$PLAN_PATH"/*.md 2>/dev/null | awk -F: '{s+=$NF}END{print s+0}')
     CONTEXT="${CONTEXT}
 **Plan:** $PLAN_PATH ($TOTAL_TASKS tasks)"
+elif [[ -n "$PLAN_PATH" && -f "$PLAN_PATH" ]]; then
+    # A single-FILE plan used to vanish here: only -d was tested, so compaction
+    # lost the plan path exactly when a flat quick plan was in play (x-59b0).
+    CONTEXT="${CONTEXT}
+**Plan:** $PLAN_PATH (single file)"
+fi
+
+# Task-context binding pointer (x-59b0): the current attempt's bound binding
+# lives under the existing handoff artifact root, one slot per node
+# (task-context-<node>.json); each attempt's binding is immutable through its
+# digest, and receipts embed their own copies. The pointer and its declared
+# constraints ride once; source CONTENTS never ride. A pointer in context is
+# not a read - the stage field stays the only honest observation record.
+BINDING_FILE=""
+if [[ -n "$NODE" ]]; then
+    CANDID=".fno/artifacts/handoff/task-context-${NODE}.json"
+    [[ -f "$CANDID" ]] && BINDING_FILE="$CANDID"
+fi
+if [[ -n "$BINDING_FILE" ]]; then
+    # The verifier decides what may be re-emitted: an edited digest, stage, or
+    # constraint set is a corrupt declared binding and renders NOTHING (the
+    # fields below are the verifier's answer, never the raw file's).
+    VERIFIED="$(python3 - "$BINDING_FILE" <<'PY' 2>/dev/null
+import json, subprocess, sys
+try:
+    with open(sys.argv[1]) as fh:
+        binding = json.load(fh)
+except Exception:
+    sys.exit(0)
+try:
+    out = subprocess.run(
+        ["fno-agents", "task-context-show"],
+        input=json.dumps({"binding": binding}),
+        capture_output=True, text=True, timeout=20,
+    )
+    answer = json.loads(out.stdout)
+except Exception:
+    sys.exit(0)
+if not answer.get("ok"):
+    sys.exit(0)
+print(str(binding.get("binding_digest", "unknown")))
+print(str(binding.get("stage", "unknown")))
+for c in binding.get("required_constraints", [])[:10]:
+    if isinstance(c, str) and c.strip():
+        print("- " + c)
+PY
+)"
+    if [[ -n "$VERIFIED" ]]; then
+        BDIGEST="$(printf '%s\n' "$VERIFIED" | sed -n 1p)"
+        BSTAGE="$(printf '%s\n' "$VERIFIED" | sed -n 2p)"
+        BCONSTRAINTS="$(printf '%s\n' "$VERIFIED" | sed -n '3,$p')"
+        CONTEXT="${CONTEXT}
+**Task context:** $BINDING_FILE (binding_digest $BDIGEST, stage $BSTAGE)"
+        if [[ -n "$BCONSTRAINTS" ]]; then
+            CONTEXT="${CONTEXT}
+**Required constraints:**
+$BCONSTRAINTS"
+        fi
+        CONTEXT="${CONTEXT}
+The binding pointer is not a read; required sources revalidate through the resume receipt context gate."
+    fi
 fi
 
 CONTEXT="${CONTEXT}

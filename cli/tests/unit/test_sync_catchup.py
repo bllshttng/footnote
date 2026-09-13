@@ -42,17 +42,22 @@ def _gh(rows):
     return lambda _canonical, _window: rows
 
 
-def _git(behind: int | None):
-    """A runner standing in for git: symbolic-ref then rev-list."""
+def _check(behind: int = 0, ahead: int = 0, notes=None):
+    """A `canonical-check` verb stand-in: payload in, answer out."""
+    built = notes
+    if built is None:
+        built = []
+        if behind:
+            built.append(f"local default branch {behind} behind origin")
+        if ahead:
+            built.append(f"local default branch {ahead} ahead of origin")
 
-    def runner(cmd, **_kw):
-        if behind is None:
-            return sc.Result(returncode=1, stdout="", stderr="no upstream")
-        if cmd[:2] == ["git", "symbolic-ref"]:
-            return sc.Result(returncode=0, stdout="origin/main\n", stderr="")
-        return sc.Result(returncode=0, stdout=f"{behind}\n", stderr="")
+    def fake(payload):
+        fake.payloads.append(dict(payload))
+        return {"behind": behind, "ahead": ahead, "notes": built}
 
-    return runner
+    fake.payloads = []
+    return fake
 
 
 def _marker(root: Path, sha: str) -> Path:
@@ -73,7 +78,7 @@ def test_staleness_fresh_when_every_merge_is_marked(tmp_path):
     _stamp(tmp_path, "aaa")
     _stamp(tmp_path, "bbb")
     st = sc.sync_staleness(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0), gh_list=_gh(rows)
+        settings=_pm(), canonical_root=tmp_path, check=_check(), gh_list=_gh(rows)
     )
     assert st.state == "fresh"
     assert st.markerless == ()
@@ -89,7 +94,7 @@ def test_staleness_stale_on_an_older_markerless_merge(tmp_path):
     rows = [_merged(50, "aaa", 1), _merged(49, "bbb", 72)]
     _stamp(tmp_path, "aaa")  # newest marked - possibly by a path-gate skip
     st = sc.sync_staleness(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0), gh_list=_gh(rows)
+        settings=_pm(), canonical_root=tmp_path, check=_check(), gh_list=_gh(rows)
     )
     assert st.state == "stale"
     assert "#49" in st.detail
@@ -98,29 +103,24 @@ def test_staleness_stale_on_an_older_markerless_merge(tmp_path):
 
 def test_staleness_fetches_only_when_asked(tmp_path):
     """The 5-minute tick must not fetch; the human-facing doctor must."""
-    seen: list[list[str]] = []
-
-    def runner(cmd, **_kw):
-        seen.append(list(cmd))
-        return sc.Result(returncode=0, stdout="origin/main\n0\n", stderr="")
-
+    tick = _check()
     sc.sync_staleness(
-        settings=_pm(), canonical_root=tmp_path, runner=runner, gh_list=_gh([])
+        settings=_pm(), canonical_root=tmp_path, check=tick, gh_list=_gh([])
     )
-    assert not any("fetch" in c for cmd in seen for c in cmd)
+    assert all(p.get("fetch") is False for p in tick.payloads)
 
-    seen.clear()
+    doctor = _check()
     sc.sync_staleness(
-        settings=_pm(), canonical_root=tmp_path, runner=runner,
+        settings=_pm(), canonical_root=tmp_path, check=doctor,
         gh_list=_gh([]), fetch=True,
     )
-    assert any("fetch" in c for cmd in seen for c in cmd)
+    assert any(p.get("fetch") is True for p in doctor.payloads)
 
 
 def test_staleness_stale_when_newest_merge_is_old_and_unmarked(tmp_path):
     rows = [_merged(50, "aaa", 48)]
     st = sc.sync_staleness(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0), gh_list=_gh(rows)
+        settings=_pm(), canonical_root=tmp_path, check=_check(), gh_list=_gh(rows)
     )
     assert st.state == "stale"
     assert "#50" in st.detail  # AC2: the offending PR is named
@@ -131,7 +131,7 @@ def test_staleness_fresh_when_newest_merge_is_recent(tmp_path):
     st = sc.sync_staleness(
         settings=_pm(),
         canonical_root=tmp_path,
-        runner=_git(0),
+        check=_check(),
         gh_list=_gh([_merged(50, "aaa", 0.03)]),
     )
     assert st.state == "fresh"
@@ -143,16 +143,29 @@ def test_staleness_stale_when_behind_origin(tmp_path):
     st = sc.sync_staleness(
         settings=_pm(),
         canonical_root=tmp_path,
-        runner=_git(7),
+        check=_check(behind=7),
         gh_list=_gh([_merged(50, "aaa", 1)]),
     )
     assert st.state == "stale"
     assert "7 behind" in st.detail
 
 
+def test_staleness_stale_when_ahead_of_origin(tmp_path):
+    """A clean canonical that is AHEAD blocks every fast-forward (x-a150)."""
+    _stamp(tmp_path, "aaa")
+    st = sc.sync_staleness(
+        settings=_pm(),
+        canonical_root=tmp_path,
+        check=_check(ahead=1),
+        gh_list=_gh([_merged(50, "aaa", 1)]),
+    )
+    assert st.state == "stale"
+    assert "1 ahead" in st.detail
+
+
 def test_staleness_unknown_when_gh_unavailable(tmp_path):  # AC3-ERR
     st = sc.sync_staleness(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0), gh_list=_gh(None)
+        settings=_pm(), canonical_root=tmp_path, check=_check(), gh_list=_gh(None)
     )
     assert st.state == "unknown"
     assert st.markerless == ()
@@ -160,23 +173,18 @@ def test_staleness_unknown_when_gh_unavailable(tmp_path):  # AC3-ERR
 
 def test_staleness_fresh_on_zero_merges(tmp_path):
     st = sc.sync_staleness(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0), gh_list=_gh([])
+        settings=_pm(), canonical_root=tmp_path, check=_check(), gh_list=_gh([])
     )
     assert st.state == "fresh"
 
 
-def test_staleness_never_fetches(tmp_path):
+def test_staleness_never_fetches_on_the_tick(tmp_path):
     """A predicate that mutates the repo is not a predicate."""
-    seen: list[list[str]] = []
-
-    def runner(cmd, **_kw):
-        seen.append(list(cmd))
-        return sc.Result(returncode=0, stdout="origin/main\n0\n", stderr="")
-
+    tick = _check()
     sc.sync_staleness(
-        settings=_pm(), canonical_root=tmp_path, runner=runner, gh_list=_gh([])
+        settings=_pm(), canonical_root=tmp_path, check=tick, gh_list=_gh([])
     )
-    assert not any("fetch" in c for cmd in seen for c in cmd)
+    assert all(not p.get("fetch") for p in tick.payloads)
 
 
 def test_gh_list_filters_by_window(tmp_path, monkeypatch):
@@ -205,18 +213,17 @@ def test_parse_iso_is_always_tz_aware():
     assert sc._parse_iso(None) is None
 
 
-def test_behind_count_ignores_empty_symbolic_ref(tmp_path):
-    """A zero exit with empty stdout is not an answer; it would malform the range."""
-    ranges: list[str] = []
+def test_canonical_check_unavailable_reads_as_clean(tmp_path, capsys, monkeypatch):
+    """Fail-open: an unavailable verb reads as "not dirty, not ahead", with
+    one stderr line and never a refusal."""
+    import fno.rust_binary as rb
 
-    def runner(cmd, **_kw):
-        if cmd[:2] == ["git", "symbolic-ref"]:
-            return sc.Result(returncode=0, stdout="   \n", stderr="")
-        ranges.append(cmd[-1])
-        return sc.Result(returncode=0, stdout="3\n", stderr="")
+    def boom(*_a, **_k):
+        raise rb.VerbUnavailable("fno-agents canonical-check exited 2: unknown verb")
 
-    assert sc._behind_count(tmp_path, runner) == 3
-    assert ranges == ["main..origin/main"]
+    monkeypatch.setattr(rb, "verb_call", boom)
+    assert sc._canonical_check({"canonical": str(tmp_path)}) == {}
+    assert "canonical check unavailable" in capsys.readouterr().err
 
 
 def _iso(hours_ago: float) -> str:
@@ -239,7 +246,7 @@ def test_catchup_syncs_newest_and_stamps_the_rest(tmp_path):  # AC1-HP
         return 0
 
     res = sc.run_sync_catchup(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0),
+        settings=_pm(), canonical_root=tmp_path, check=_check(),
         gh_list=_gh(rows), sync=sync,
     )
     assert calls == [52]  # newest only, one pull covers the rest
@@ -257,7 +264,7 @@ def test_catchup_failure_stamps_nothing_and_retries(tmp_path):  # AC4-ERR
         return 1
 
     kw = dict(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0),
+        settings=_pm(), canonical_root=tmp_path, check=_check(),
         gh_list=_gh(rows), sync=sync,
     )
     assert sc.run_sync_catchup(**kw).outcome == "failed"
@@ -272,7 +279,7 @@ def test_catchup_declined_sync_stamps_nothing(tmp_path):  # AC7-EDGE
     """A claim-held loser exits 0 without syncing; it must not backdate markers."""
     rows = [_merged(52, "ccc", 30), _merged(51, "bbb", 40)]
     res = sc.run_sync_catchup(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0),
+        settings=_pm(), canonical_root=tmp_path, check=_check(),
         gh_list=_gh(rows), sync=lambda pr, **_kw: 0,  # exits 0, writes no marker
     )
     assert res.outcome == "skipped"
@@ -297,7 +304,7 @@ def test_catchup_does_not_stamp_when_newest_merge_needed_no_pull(tmp_path):
 
     res = sc.run_sync_catchup(
         settings=_pm(sync_paths=["cli/**"]), canonical_root=tmp_path,
-        runner=_git(0), gh_list=_gh(rows), sync=path_gated_sync,
+        check=_check(), gh_list=_gh(rows), sync=path_gated_sync,
     )
     assert res.outcome == "marked"
     assert not _marker(tmp_path, "code").exists()
@@ -310,7 +317,7 @@ def test_catchup_does_not_stamp_when_newest_merge_needed_no_pull(tmp_path):
 
     res2 = sc.run_sync_catchup(
         settings=_pm(sync_paths=["cli/**"]), canonical_root=tmp_path,
-        runner=_git(0), gh_list=_gh(rows), sync=real_sync,
+        check=_check(), gh_list=_gh(rows), sync=real_sync,
     )
     assert res2.outcome == "synced" and res2.pr_number == 51
 
@@ -320,7 +327,7 @@ def test_catchup_reports_a_lying_marker_set(tmp_path):
     the outcome has to carry the reason rather than read as a flat 'fresh'."""
     _stamp(tmp_path, "aaa")
     res = sc.run_sync_catchup(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(4),
+        settings=_pm(), canonical_root=tmp_path, check=_check(behind=4),
         gh_list=_gh([_merged(50, "aaa", 30)]),
         sync=lambda pr, **_kw: pytest.fail("nothing markerless to sync"),
     )
@@ -331,7 +338,7 @@ def test_catchup_reports_a_lying_marker_set(tmp_path):
 def test_catchup_inert_when_auto_run_off(tmp_path):  # AC6-EDGE
     calls: list[int] = []
     res = sc.run_sync_catchup(
-        settings=_pm(auto_run=False), canonical_root=tmp_path, runner=_git(0),
+        settings=_pm(auto_run=False), canonical_root=tmp_path, check=_check(),
         gh_list=_gh([_merged(52, "ccc", 30)]),
         sync=lambda pr, **_kw: calls.append(pr) or 0,
     )
@@ -342,7 +349,7 @@ def test_catchup_inert_when_auto_run_off(tmp_path):  # AC6-EDGE
 def test_catchup_skips_on_gh_failure(tmp_path, capsys):  # AC3-ERR
     calls: list[int] = []
     res = sc.run_sync_catchup(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0),
+        settings=_pm(), canonical_root=tmp_path, check=_check(),
         gh_list=_gh(None), sync=lambda pr, **_kw: calls.append(pr) or 0,
     )
     assert res.outcome == "unknown"
@@ -353,7 +360,7 @@ def test_catchup_skips_on_gh_failure(tmp_path, capsys):  # AC3-ERR
 def test_catchup_fresh_when_all_marked(tmp_path):
     _stamp(tmp_path, "ccc")
     res = sc.run_sync_catchup(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0),
+        settings=_pm(), canonical_root=tmp_path, check=_check(),
         gh_list=_gh([_merged(52, "ccc", 30)]),
         sync=lambda pr, **_kw: pytest.fail("must not sync a current canonical"),
     )
@@ -370,7 +377,7 @@ def test_catchup_survives_a_wedged_events_bus(tmp_path, monkeypatch):  # AC5-FR
         raising=False,
     )
     res = sc.run_sync_catchup(
-        settings=_pm(), canonical_root=tmp_path, runner=_git(0),
+        settings=_pm(), canonical_root=tmp_path, check=_check(),
         gh_list=_gh([_merged(52, "ccc", 30), _merged(51, "bbb", 40)]),
         sync=lambda pr, shell_runner=None, **_kw: (
             shell_runner("git pull", str(tmp_path)), _stamp(tmp_path, "ccc"), 0

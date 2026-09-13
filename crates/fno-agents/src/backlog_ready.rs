@@ -368,7 +368,6 @@ fn has_intake_difficulty(e: &Value) -> bool {
 /// A non-ABSENT hold on a plan: HELD or INVALID, both of which PARK the node
 /// (the one fail-closed policy in this selector).
 struct HoldVerdict {
-    owner_id: String,
     guard_reason: String,
 }
 
@@ -459,7 +458,6 @@ fn dispatch_hold_verdict(entry: &Value, by_id: &BTreeMap<String, Value>) -> Opti
                 _ => "dispatch-hold-invalid",
             };
             return Some(HoldVerdict {
-                owner_id: node_id.clone(),
                 guard_reason: format!("{prefix}:{node_id}"),
             });
         }

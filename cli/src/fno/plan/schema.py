@@ -396,6 +396,9 @@ class PlanFrontmatter(BaseModel):
     # gates: `orchestration` already does four unrelated jobs in this repo, so
     # a grep for the key returned mostly noise.
     join: str = "manual"
+    # Whether the PR may declare an exclusion section at all. Absent means
+    # allowed; `forbidden` makes fno.plan.fidelity refuse a PR that does.
+    carveouts: str | None = None
     blocked_by: list[str] = []
     project: str | None = None
     executor: str | None = None
@@ -490,6 +493,16 @@ class PlanFrontmatter(BaseModel):
         mode = str(v).strip().lower()
         if mode not in {"manual", "auto"}:
             raise ValueError("join must be one of: manual, auto")
+        return mode
+
+    @field_validator("carveouts", mode="before")
+    @classmethod
+    def _validate_carveouts(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        mode = str(v).strip().lower()
+        if mode not in {"allowed", "forbidden"}:
+            raise ValueError("carveouts must be one of: allowed, forbidden")
         return mode
 
     @model_validator(mode="after")

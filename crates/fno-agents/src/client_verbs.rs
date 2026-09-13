@@ -30,7 +30,7 @@ use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
 use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1865,7 +1865,6 @@ pub(crate) use crate::codex_store::{codex_home, codex_rollout_index, codex_rollo
 
 // sessions_socket_index and the row_liveness family moved to
 // `claude_sessions.rs`; the re-export keeps every existing caller.
-pub(crate) use crate::claude_sessions::row_liveness_indexed;
 pub use crate::claude_sessions::{row_liveness, sessions_socket_index};
 
 /// Rung 4's freshness read against a prebuilt [`codex_rollout_index`]: any

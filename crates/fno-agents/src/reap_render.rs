@@ -5,7 +5,9 @@
 //! and its tests are the bulk of what it costs. Keeping it here lets the
 //! dispatcher stay a dispatcher.
 
-use crate::gc_sweep::{GcSummary, StateFilesReapSummary, StateReapFamilySummary, UnresolvedHold};
+#[cfg(test)]
+use crate::gc_sweep::UnresolvedHold;
+use crate::gc_sweep::{GcSummary, StateFilesReapSummary, StateReapFamilySummary};
 use serde_json::{json, Value};
 
 /// Render the file-only reap receipt independently from row retirement.
@@ -852,7 +854,7 @@ mod tests {
 
     #[test]
     fn the_ran_state_names_the_tabs_it_closed_with_their_labels() {
-        for (dry, count) in [(false, 2), (true, 0)] {
+        for (dry, _count) in [(false, 2), (true, 0)] {
             let out =
                 render_reap_with_inventory(&summary(&[]), None, Some(&ran_receipt()), true, dry);
             let v: Value = serde_json::from_str(out.trim()).expect("valid json");

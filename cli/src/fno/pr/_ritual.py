@@ -404,7 +404,10 @@ class Ritual:
                 err=True,
             )
         try:
-            r = self._sh(argv)
+            # Above reconcile's 240s close-probe budget, same as the merge.
+            from fno.pr._merge import POST_MERGE_RECONCILE_TIMEOUT_S
+
+            r = self._sh(argv, timeout=POST_MERGE_RECONCILE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             self._emit("reconcile", _FAILED, "timeout")
             return

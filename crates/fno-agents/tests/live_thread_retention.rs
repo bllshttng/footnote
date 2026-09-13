@@ -1,4 +1,4 @@
-use fno::agents_view::{Liveness, RegistryAgent};
+use fno::agents_view::RegistryAgent;
 use fno::proto::AgentRow;
 use fno::squad_store::{MemberEvidence, MemberLiveness, StoredMember};
 use fno_agents::gc::{gc_decide, GcAction, GcRow, KeepReason};

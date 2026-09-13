@@ -60,7 +60,7 @@ def _stub_run(calls, *, ok=True, stderr=""):
             self.stdout = ""
             self.stderr = stderr
 
-    def _run(argv, cwd=None):
+    def _run(argv, cwd=None, **kwargs):
         calls.append(argv)
         return _R()
 

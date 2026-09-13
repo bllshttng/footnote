@@ -68,21 +68,6 @@ pub(crate) struct MergeCleanupRequest {
     harness: Option<String>,
 }
 
-/// The pending set for one repo: every request minus the ones a tombstone
-/// already settled. `merge_cleanup_completed` / `_refused` / `_expired` all
-/// finish a request; a held request stays pending and is re-read every pass.
-/// One journal read per call; the reaper pass calls the `_all` variant once
-/// and partitions in memory, so N roots cost one read, not N.
-pub(crate) fn pending_merge_cleanup_requests(
-    home: &AgentsHome,
-    repo: &str,
-) -> Vec<MergeCleanupRequest> {
-    pending_merge_cleanup_requests_all(home)
-        .into_iter()
-        .filter(|request| request.repo == repo)
-        .collect()
-}
-
 /// Every pending request across repos, in one journal read spanning one
 /// rotation: the `.1` generation is read before the active file, so a request
 /// minted shortly before a rotation stays pending across it instead of
@@ -836,6 +821,22 @@ pub(crate) fn consume_merge_cleanup_requests(
     );
 }
 
+/// The pending set for one repo: every request minus the ones a tombstone
+/// already settled. `merge_cleanup_completed` / `_refused` / `_expired` all
+/// finish a request; a held request stays pending and is re-read every pass.
+/// One journal read per call; the reaper pass calls the `_all` variant once
+/// and partitions in memory, so N roots cost one read, not N.
+#[cfg(test)]
+pub(crate) fn pending_merge_cleanup_requests(
+    home: &AgentsHome,
+    repo: &str,
+) -> Vec<MergeCleanupRequest> {
+    pending_merge_cleanup_requests_all(home)
+        .into_iter()
+        .filter(|request| request.repo == repo)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1466,7 +1467,7 @@ mod tests {
             tree_holds: &|_wt| true,
             take_tree: &|_wt, _root| true,
         };
-        let (acted, held) = run_request(
+        let (acted, _held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1778,7 +1779,7 @@ mod tests {
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_registry(&home, &[claude_row("t-1-writing-glm", false)]);
         let states = merged_states();
-        let mut request = settled_request("/no-such-worktree");
+        let request = settled_request("/no-such-worktree");
         let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let stop_calls = std::rc::Rc::clone(&calls);
         let seams = RequestSeams {

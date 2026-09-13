@@ -108,6 +108,10 @@ RUST_CLIENT_VERBS = frozenset(
         # tick, on demand. Dispatched directly in client.rs before build_request
         # (operates on the registry under the shared flock; no daemon RPC).
         "reap",
+        # The ONE spawn gate (spawn_gate_verb.rs): dispatched directly before
+        # build_request, no daemon RPC. The Python gate transport shells it
+        # with a stdin JSON payload and reads the answer envelope.
+        "spawn-gate",
         # `drive` and `grid` (the WebSocket drive surface + the TUI compositor)
         # were retired at G4 (x-f54c) when the mux became the agent-PTY
         # substrate; the binary intercepts them with a mux pointer.

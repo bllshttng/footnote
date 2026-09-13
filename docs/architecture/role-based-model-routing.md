@@ -243,7 +243,7 @@ The optional OpenRouter snapshot can supply a percentile for a row whose `band` 
 
 **Effort is the third grid coordinate.** The grid injects an atomic harness/model/effort triple. A row whose harness has no effort surface omits it, and nothing is injected. An explicit `--effort` wins.
 
-**A crown spawn gets a profile key.** A seed with no leading slash-verb is every king seed, and it resolves the profile key `crown`. `[agents.profiles.crown]` reaches a crown spawn exactly like every other stage row. The attended/unattended axis is declared this way, never inferred. The response-time instrument was retracted because fno mail is injected as user-shaped text.
+**A crown spawn gets a profile key.** A seed with no leading slash-verb, or one opening with `reign`, `king-for-a-day` or `fno-me`, resolves `crown`. King work walks the crown slot whichever verb opens its seed, and an `[agents.profiles.reign]` table is never read. `[agents.profiles.crown]` reaches a crown spawn exactly like every other stage row. The attended/unattended axis is declared this way, never inferred. The response-time instrument was retracted because fno mail is injected as user-shaped text.
 
 `fno config doctor` checks the resolved posture before a worker is launched. It reports a substrate/provider pair the spawn seam cannot honor. It also probes whether THIS session can write the claim store, by writing a real file there and removing it. A hand-started session cannot receive a per-spawn grant, so that probe is the only thing covering it. A spawned worker is covered instead by the computed `--add-dir` set (see [coordination.md](coordination.md)).
 

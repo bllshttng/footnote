@@ -230,7 +230,6 @@ pub fn run_claim_long_holds(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use crate::claims::{basis, hostname, machine_id, SessionLiveness, SCHEMA_VERSION};
-    use serde_json::Value;
     use tempfile::TempDir;
 
     fn dead_pid() -> u32 {
