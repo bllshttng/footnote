@@ -219,8 +219,11 @@ def remove_worktree(
         wt_path = legacy
 
     # Reclaim the cargo build hash dir while the manifest can still answer;
-    # best-effort, the sweep reaps what resolution misses.
-    reclaim_script = Path(repo_root) / "scripts/lib/cargo-build-dir.sh"
+    # best-effort, the sweep reaps what resolution misses. The helper ships
+    # with the plugin, not the managed project.
+    from fno.paths import resolve_plugin_script
+
+    reclaim_script = resolve_plugin_script("scripts/lib/cargo-build-dir.sh")
     if reclaim_script.exists():
         subprocess.run(
             ["bash", str(reclaim_script), "remove-for", str(wt_path)],

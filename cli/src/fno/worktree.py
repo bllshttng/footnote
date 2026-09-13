@@ -389,7 +389,10 @@ class WorktreeManager:
         if worktree.path.exists():
             # Reclaim the cargo build hash dir while the manifest can still
             # answer; best-effort, the sweep reaps what resolution misses.
-            reclaim_script = self.repo_root / "scripts/lib/cargo-build-dir.sh"
+            # The helper ships with the plugin, not the managed project.
+            from fno.paths import resolve_plugin_script
+
+            reclaim_script = resolve_plugin_script("scripts/lib/cargo-build-dir.sh")
             if reclaim_script.exists():
                 subprocess.run(
                     ["bash", str(reclaim_script), "remove-for", str(worktree.path)],
