@@ -174,8 +174,10 @@ def test_map_covers_current_surface_once():
     # one-act defer + retracted-kind stamp the blueprint consolidation gate
     # halts on: 612 -> 613. `doctor observer judge` and `observer judge`,
     # the blueprint five-question judge and its bare-form leaf (refs 2 and
-    # 0, swept): counted from the merged file, 613 -> 615.
-    assert len(mapped) == 615, (
+    # 0, swept): counted from the merged file, 613 -> 615. `agents judge`,
+    # the Rust-client help entry the judge port's RUST_ONLY_VERB_HELP
+    # registration surfaces under `fno agents --help` (refs 0): 615 -> 616.
+    assert len(mapped) == 616, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

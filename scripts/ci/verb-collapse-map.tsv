@@ -41,6 +41,7 @@ agents graph-get	T1	agents graph-get	0
 agents heal-token	T1	agents heal-token	8
 agents history	T1	agents history	3
 agents incident	T1	agents incident	0
+agents judge	T1	agents judge	0
 agents kill-check	T1	agents kill-check	4
 agents king cancel	T1	agents king cancel	0
 agents king done	T1	agents king done	5

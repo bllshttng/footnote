@@ -236,6 +236,11 @@ RUST_CLIENT_VERBS = frozenset(
         "graph-get",
         "bash-census",
         "session-start-bytes",
+        # Blueprint judge verb (x-9983): daemon-free grading read, dispatched
+        # directly in client.rs before build_request (no daemon RPC); Python
+        # calls it via fno.rust_binary.verb_call, not `fno agents` routing.
+        # This entry keeps the client.rs<->router parity test in sync.
+        "judge",
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
         "court-orphans",
         # Crown scope fold for `fno agents court --nodes`: daemon-free read,
@@ -482,6 +487,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "graph-get": "Batch graph.json read by id (x-997a); invoked directly by `fno backlog get`'s forwarder, not `fno agents` routing.",
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts (x-997a); invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total (x-997a); invoked directly by `fno doctor`'s session-start byte report.",
+    "judge": "Blueprint judge: grade a plan against the five product questions, or --labels/--split to calibrate against evals/blueprint-judge/labels.yaml; invoked by fno.observer.cli's judge_cmd/sweep via fno.rust_binary.verb_call, not `fno agents` routing.",
     "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
     "court-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json|html-section; invoked directly by `fno agents court`, not `fno agents` routing.",
     "king-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; invoked directly by `fno agents king history`, which passes every journal paths.event_journals resolves.",

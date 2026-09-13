@@ -47,6 +47,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "grid",
     "help",
     "host",
+    "judge",
     "kill-check",
     "king-history",
     "reign-ledger",

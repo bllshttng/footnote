@@ -9,6 +9,12 @@ crossing	crates/fno-agents/src/bin/client.rs	1510	let out = std::process::Comman
 crossing	crates/fno-agents/src/bin/client.rs	1565	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
 crossing	crates/fno-agents/src/bin/client.rs	3005	match std::process::Command::new(fno_agents::scrape::fno_bin())
 crossing	crates/fno-agents/src/bin/client.rs	4262	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
+# owner: x-9983 - blueprint judge (Rust port): fno help --all for surface_fit
+# context, and fno agents spawn --substrate headless to grade a plan. Drains
+# if judge gains an in-process daemon-RPC spawn path and a non-porcelain
+# CLI-surface read.
+crossing	crates/fno-agents/src/blueprint_judge.rs	71	return match Command::new("fno").args(["help", "--all"]).output() {
+crossing	crates/fno-agents/src/blueprint_judge.rs	167	let out = Command::new("fno")
 crossing	crates/fno-agents/src/client_verbs.rs	1279	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	2877	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	2953	let mut pane_command = std::process::Command::new("fno");
