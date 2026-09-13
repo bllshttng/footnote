@@ -1945,7 +1945,7 @@ def _admission_run(
         "mode": mode,
         "policy": policy.model_dump(),
         "policy_unknown_fields": sorted(getattr(policy, "model_extra", None) or {}),
-        "record": {"id": record.id},
+        "provider_id": record.id,
         "pool": pool,
         "identity_error": identity_error,
         "verb": verb,
@@ -1955,8 +1955,7 @@ def _admission_run(
         "ttl_seconds": ttl_seconds,
         "now": now,
         "dispatch_id": dispatch_id,
-        "state_path": None if mode == "preview" else str(state_path),
-        "state": _read_disk_payload(state_path) or {} if mode == "preview" else None,
+        "state_path": str(state_path),
     }
     try:
         from fno.rust_binary import VerbUnavailable, verb_call

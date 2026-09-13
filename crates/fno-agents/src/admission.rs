@@ -270,14 +270,19 @@ impl Receipt {
     }
 
     fn to_json(self) -> Value {
-        json!({
+        let refusal = matches!(
+            self.status,
+            "reserved_capacity"
+                | "exhausted"
+                | "inflight_cap"
+                | "unknown_identity"
+                | "invalid_policy"
+        );
+        let mut answer = json!({
             "status": self.status,
             // The owner classifies the verdict: a launch seam never
             // re-spells the refusal vocabulary to make its own decision.
-            "refusal": matches!(
-                self.status,
-                "reserved_capacity" | "exhausted" | "inflight_cap" | "unknown_identity" | "invalid_policy"
-            ),
+            "refusal": refusal,
             "pool": self.pool,
             "reservation_id": self.reservation_id,
             "binding_window": self.binding_window,
@@ -288,7 +293,26 @@ impl Receipt {
             "units": "subscription-percent",
             "demand_applied": self.demand_applied,
             "reserve_applied": self.reserve_applied,
-        })
+        });
+        // The launch seam's refusal payload is the owner's composition too:
+        // the seam adds only the account it was launching and raises.
+        if refusal {
+            if let Some(o) = answer.as_object_mut() {
+                o.insert(
+                    "gate_refusal".into(),
+                    json!({
+                        "status": "refused",
+                        "reason": "account_admission_refused",
+                        "admission_status": self.status,
+                        "pool": self.pool,
+                        "detail": self.reason,
+                        "resets_at": self.retry_at,
+                        "units": "subscription-percent",
+                    }),
+                );
+            }
+        }
+        answer
     }
 }
 
@@ -581,13 +605,14 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
             .to_json());
         }
     }
-    let record = payload.get("record").cloned().unwrap_or_else(|| json!({}));
     // The mutate modes act on the reservation ROW, which carries its own
-    // provider, so they never need the request's record id.
-    let provider_id = match str_of(record.get("id")) {
+    // provider, so they never need the request's provider id.
+    let provider_id = match str_of(payload.get("provider_id"))
+        .or_else(|| payload.get("record").and_then(|r| str_of(r.get("id"))))
+    {
         Some(p) if !p.is_empty() => p.to_string(),
         _ if matches!(mode, "commit" | "release" | "refresh") => String::new(),
-        _ => return Err("payload needs record.id".into()),
+        _ => return Err("payload needs provider_id".into()),
     };
     let verb = str_of(payload.get("verb")).unwrap_or("do");
     let difficulty = str_of(payload.get("difficulty")).unwrap_or("high");
@@ -620,7 +645,8 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
     };
 
     // Preview: no lock, no write, no idempotency. The inline `state` object
-    // (tests) wins over the file, the fallback_chain.rs idiom.
+    // (tests) wins over the file, the fallback_chain.rs idiom; the file read
+    // is the owner's job now, so the Python caller ships no document.
     if mode == "preview" {
         let doc = payload
             .get("state")

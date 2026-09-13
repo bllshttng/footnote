@@ -1183,16 +1183,10 @@ def _reserve_account_budget(
         f"{route_provider}: {receipt['reason']}"
     )
     guard.release()
-    _refuse(EXIT_PROVIDER_CAP, {
-        "status": "refused",
-        "reason": "account_admission_refused",
-        "admission_status": receipt["status"],
-        "pool": receipt["pool"],
-        "account": route_provider,
-        "detail": receipt["reason"],
-        "resets_at": receipt["retry_at"],
-        "units": receipt["units"],
-    })
+    # The refusal payload is the owner's composition (gate_refusal); this
+    # seam names only the account it was launching.
+    receipt["gate_refusal"]["account"] = route_provider
+    _refuse(EXIT_PROVIDER_CAP, receipt["gate_refusal"])
 
 
 def _emit_gate_event(kind: str, **data: Any) -> None:
