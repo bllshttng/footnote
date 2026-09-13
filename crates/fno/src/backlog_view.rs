@@ -59,13 +59,21 @@ pub fn graph_path() -> PathBuf {
 /// states, never a liveness verdict (a merged node stays done when its
 /// sessions die). Pure so the restore gate is testable without files.
 pub fn done_session_ids_from(raw: &str) -> HashSet<(String, String)> {
-    let mut done = HashSet::new();
+    let done = HashSet::new();
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
         return done;
     };
     let Some(entries) = value.get("entries").and_then(|v| v.as_array()) else {
         return done;
     };
+    done_session_ids_in(entries)
+}
+
+/// The pure fold over node rows: every `(harness, session_id)` pair a done
+/// row carries. Shared by the document fold and the store read so both
+/// answers stay identical by construction.
+fn done_session_ids_in(entries: &[serde_json::Value]) -> HashSet<(String, String)> {
+    let mut done = HashSet::new();
     for node in entries {
         // The same `_status` pre-rename tolerance `node_status` gives the
         // sideline reader, so an unrewritten document classifies the same.
@@ -98,13 +106,15 @@ pub fn done_session_ids_from(raw: &str) -> HashSet<(String, String)> {
     done
 }
 
-/// The live done set. An unreadable or malformed graph reads as EMPTY, not
-/// as "nothing is done" being asserted positively - restore keeps every
-/// worker (today's behavior) when the instrument cannot read (fail open,
-/// x-9052 AC2-EDGE).
+/// The live done set, read through the store keeper (`store_client::nodes`),
+/// never the file: after the flip graph.json freezes, so a file read would
+/// assert a done set that stopped growing. An unreachable store reads as
+/// EMPTY, not as "nothing is done" being asserted positively - restore keeps
+/// every worker (today's behavior) when the instrument cannot read (fail
+/// open, x-9052 AC2-EDGE).
 pub fn done_session_ids() -> HashSet<(String, String)> {
-    match std::fs::read_to_string(graph_path()) {
-        Ok(raw) => done_session_ids_from(&raw),
+    match crate::store_client::nodes(&graph_path(), serde_json::json!({}), None, None, true, None) {
+        Ok(conn) => done_session_ids_in(&conn.nodes),
         Err(_) => HashSet::new(),
     }
 }
@@ -1027,7 +1037,7 @@ impl SweepLogGate {
 #[derive(Default)]
 pub struct ReaderState {
     cached_raw: Option<String>,
-    cached_stamp: Option<(std::time::SystemTime, u64)>,
+    cached_stamp: Option<(i64, u64)>,
     last_sent: Option<Queue>,
     /// The live-claims map as of the last publish. Holders ride the publish
     /// (they feed the server's `where_hint` join), so a holder-only change -
@@ -1072,9 +1082,11 @@ impl ReaderState {
         }
     }
 
-    /// The stamp of the currently-cached document (mtime+len gate: the caller
-    /// skips the file read when this matches a fresh stat).
-    pub fn cached_stamp(&self) -> Option<(std::time::SystemTime, u64)> {
+    /// The stamp of the currently-cached document (the store's mutation
+    /// counter in graph mode, a monotonically minted window counter in
+    /// snapshot mode: the caller skips the read when this matches a fresh
+    /// stamp).
+    pub fn cached_stamp(&self) -> Option<(i64, u64)> {
         self.cached_stamp
     }
 
@@ -1089,7 +1101,7 @@ impl ReaderState {
     /// when the graph file itself is untouched (x-54fa AC1-HP / AC1-EDGE).
     pub fn tick(
         &mut self,
-        stamp: Option<(std::time::SystemTime, u64)>,
+        stamp: Option<(i64, u64)>,
         read_if_changed: impl FnOnce() -> Option<String>,
         live: Option<&HashMap<String, String>>,
     ) -> Option<(Queue, HashMap<String, u64>, MissionMap)> {
@@ -1679,7 +1691,7 @@ mod tests {
         // landed read clears it (Risk 4: a backend outage is never a blank
         // mux, and recovery is immediate).
         let mut state = ReaderState::default();
-        let stamp = Some((std::time::SystemTime::UNIX_EPOCH, 0u64));
+        let stamp = Some((0, 0u64));
         let first = state.tick(
             stamp,
             || {
@@ -1699,7 +1711,7 @@ mod tests {
         // marker reaches the UI while the cards stay last-good.
         let mut stale_publish: Option<Queue> = None;
         for i in 1..=3u64 {
-            let s = Some((std::time::UNIX_EPOCH + std::time::Duration::from_secs(i), 0));
+            let s = Some((i as i64, 0));
             let out = state.tick(s, || None, None);
             if i < 3 {
                 assert!(out.is_none(), "failures below the threshold never publish");
@@ -1715,7 +1727,7 @@ mod tests {
         }
         assert!(stale_publish.is_some());
         let recovered = state.tick(
-            Some((std::time::UNIX_EPOCH + std::time::Duration::from_secs(9), 0)),
+            Some((9, 0)),
             || {
                 Some(
                     r#"{"entries":[{"id":"E","slug":"e","status":"ready","priority":"p1"}]}"#
@@ -1839,7 +1851,7 @@ mod tests {
         // last-good is kept across a torn write by ReaderState.
         let mut st = ReaderState::default();
         let good = graph(r#"{"id":"a","slug":"s","priority":"p1","status":"ready"}"#);
-        let s1 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
+        let s1 = Some((0, good.len() as u64));
         assert_eq!(
             st.tick(s1, || Some(good.clone()), None)
                 .unwrap()
@@ -1850,7 +1862,7 @@ mod tests {
         );
         // A changed stamp but a torn (None) read keeps the last-good card AND
         // does not commit the new stamp, so the read is retried next tick.
-        let s2 = Some((std::time::SystemTime::UNIX_EPOCH, 999));
+        let s2 = Some((0, 999));
         assert!(st.tick(s2, || None, None).is_none()); // last-good unchanged -> no republish
                                                        // Retry at the same stamp now succeeds with two cards -> republished
                                                        // (proves the torn read did not pin the stale set).
@@ -2010,7 +2022,7 @@ mod tests {
             r#"{"id":"x-r1","slug":"r1","priority":"p1","status":"ready","project":"fno"},
                {"id":"x-r2","slug":"r2","priority":"p2","status":"ready","project":"fno"}"#,
         );
-        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let s = Some((0, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
         assert!(first.cards[0].head && !first.cards[1].head);
         let claimed = live(&[("x-r1", "target-session:abc")]);
@@ -2080,12 +2092,12 @@ mod tests {
         // write race and must NOT trip it.
         let mut st = ReaderState::default();
         let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
-        let s0 = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let s0 = Some((0, raw.len() as u64));
         assert!(!st.tick(s0, || Some(raw.clone()), None).unwrap().0.stale);
 
         // Each failing tick presents a new stamp (the file keeps changing) but
         // no content. The first is just a race.
-        let bump = |n: u64| Some((std::time::SystemTime::UNIX_EPOCH, 900 + n));
+        let bump = |n: u64| Some((0, 900 + n));
         st.tick(bump(1), || None, None);
         assert!(
             !st.last_sent.as_ref().unwrap().stale,
@@ -2115,12 +2127,12 @@ mod tests {
         // for.
         let mut st = ReaderState::default();
         let good = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
-        let s0 = Some((std::time::SystemTime::UNIX_EPOCH, good.len() as u64));
+        let s0 = Some((0, good.len() as u64));
         assert!(!st.tick(s0, || Some(good.clone()), None).unwrap().0.stale);
 
         // Successive reads land, but the document is garbage each time.
         for i in 1..=STALE_AFTER_FAILED_READS as u64 {
-            let stamp = Some((std::time::SystemTime::UNIX_EPOCH, 800 + i));
+            let stamp = Some((0, 800 + i));
             st.tick(stamp, || Some("{ not json".to_string()), None);
         }
         let held = st.last_sent.clone().unwrap();
@@ -2131,7 +2143,7 @@ mod tests {
         assert_eq!(held.cards.len(), 1, "and the last-good cards are kept");
 
         // A parseable read clears it in place.
-        let ok = Some((std::time::SystemTime::UNIX_EPOCH, 999));
+        let ok = Some((0, 999));
         assert!(!st.tick(ok, || Some(good.clone()), None).unwrap().0.stale);
     }
 
@@ -2143,7 +2155,7 @@ mod tests {
         reset_derive_queue_calls();
         let mut st = ReaderState::default();
         let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
-        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let s = Some((0, raw.len() as u64));
         let no_claims = live(&[]);
         let first = st.tick(s, || Some(raw.clone()), Some(&no_claims));
         assert!(first.is_some(), "the first tick publishes");
@@ -2177,7 +2189,7 @@ mod tests {
         reset_derive_queue_calls();
         let mut st = ReaderState::default();
         let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
-        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let s = Some((0, raw.len() as u64));
         let no_claims = live(&[]);
         let claimed = live(&[("x-a", "target-session:abc")]);
         assert!(st.tick(s, || Some(raw.clone()), Some(&no_claims)).is_some());
@@ -2200,7 +2212,7 @@ mod tests {
         reset_derive_queue_calls();
         let mut st = ReaderState::default();
         let garbage = "{ not json";
-        let s = Some((std::time::SystemTime::UNIX_EPOCH, garbage.len() as u64));
+        let s = Some((0, garbage.len() as u64));
         st.tick(s, || Some(garbage.to_string()), None);
         for _ in 1..STALE_AFTER_FAILED_READS {
             st.tick(s, || panic!("must not re-read"), None);
@@ -2234,13 +2246,13 @@ mod tests {
         // republish so the PR label is not stale until an unrelated flip.
         let mut st = ReaderState::default();
         let raw0 = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"claimed"}"#);
-        let s0 = Some((std::time::SystemTime::UNIX_EPOCH, raw0.len() as u64));
+        let s0 = Some((0, raw0.len() as u64));
         assert!(st.tick(s0, || Some(raw0.clone()), None).is_some());
         // Same claimed card, now with a pr_number: a new stamp (mtime bumped),
         // same card state -> still republishes because the pr map changed.
         let raw1 =
             graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"claimed","pr_number":42}"#);
-        let s1 = Some((std::time::SystemTime::UNIX_EPOCH, raw1.len() as u64));
+        let s1 = Some((0, raw1.len() as u64));
         let out = st.tick(s1, || Some(raw1.clone()), None);
         assert!(out.is_some(), "pr-only change republishes");
         assert_eq!(out.unwrap().1.get("x-a"), Some(&42));
@@ -2288,7 +2300,7 @@ mod tests {
         // card within a tick even though the graph stamp never moves.
         let mut st = ReaderState::default();
         let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"ready"}"#);
-        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let s = Some((0, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
         assert_eq!(first.cards[0].state, CardState::Ready);
         // Claim appears: same stamp, no re-read, card republishes InFlight.
@@ -2311,7 +2323,7 @@ mod tests {
         // failing sweep retaining last-good) must NOT churn publishes.
         let mut st = ReaderState::default();
         let raw = graph(r#"{"id":"x-a","slug":"s","priority":"p1","status":"claimed"}"#);
-        let s = Some((std::time::SystemTime::UNIX_EPOCH, raw.len() as u64));
+        let s = Some((0, raw.len() as u64));
         let first = st.tick(s, || Some(raw.clone()), None).unwrap().0;
         assert_eq!(
             first.cards[0].state,

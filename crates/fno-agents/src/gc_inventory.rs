@@ -939,7 +939,7 @@ pub fn recover_assignment(
 /// Every graph entry id (working graph plus archive), the verification set
 /// for candidate links.
 pub fn graph_ids(home: &AgentsHome) -> Option<Vec<String>> {
-    crate::gc_sweep::read_graph_entries_raw(home).map(|entries| {
+    crate::gc_sweep::read_graph_rows(home).map(|entries| {
         entries
             .iter()
             .filter_map(crate::graph_store::entry_id)

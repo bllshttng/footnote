@@ -730,3 +730,31 @@ fn page_two_asserts(store: &Store) {
     .unwrap();
     assert_eq!(page_two.nodes[0].body.as_deref(), Some("note two"));
 }
+
+// -- wave-8 reader seam -----------------------------------------------------
+
+/// The rows seam the wave-8 board readers share: every defaulted row comes
+/// back in ordinal order (archived included), and a mutation through the api
+/// is visible to the next read (AC7).
+#[test]
+fn readers_follow_store_rows_reflect_mutations() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        let all = rows(store).unwrap();
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0]["id"], "ab-one");
+        assert_eq!(all[3]["id"], "ab-four"); // archived rows ride along
+        node_update(
+            store,
+            "ab-two",
+            NodeUpdateInput {
+                status: Some("in_progress".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let after = rows(store).unwrap();
+        assert_eq!(after[1]["id"], "ab-two");
+        assert_eq!(after[1]["status"], "in_progress");
+    }
+}

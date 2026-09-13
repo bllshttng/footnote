@@ -118,22 +118,23 @@ pub fn run_graph_get(args: &[String]) -> i32 {
         eprintln!("fno-agents graph-get: needs at least one <id>");
         return 2;
     }
-    // An explicit --graph names a real file (a test fixture, an operator
+    // An explicit --graph names a real store (a test fixture, an operator
     // override) and is trusted as given; only the DEFAULT store is unsafe to
     // read blind, because an external tracker backend makes it stale.
     if !graph_overridden && external_backend_selected() {
         eprintln!(
-            "fno-agents graph-get: this reads graph.json directly; under an \
-             external tracker backend that store is not authoritative. Pass \
-             one id at a time to `fno backlog get` instead."
+            "fno-agents graph-get: the graph store is not the authoritative \
+             backend under the selected external tracker. Pass one id at a \
+             time to `fno backlog get` instead."
         );
         return 1;
     }
 
-    let mut entries = match graph_store::read_defaulted(&graph_path, false) {
+    let mut entries = match crate::backlog::api::rows(&crate::backlog::api::Store::new(&graph_path))
+    {
         Ok(e) => e,
         Err(err) => {
-            eprintln!("fno-agents graph-get: {err}");
+            eprintln!("fno-agents graph-get: {}", err.0);
             return 1;
         }
     };
@@ -232,5 +233,18 @@ mod tests {
             graph,
         ];
         assert_eq!(run_graph_get(&args), 0);
+    }
+
+    /// The run path asks the store (`backlog::api::rows`): a seeded fixture
+    /// answers and a missing id still flags. The rows seam after a mutation
+    /// is covered in backlog::api::tests.
+    #[test]
+    fn readers_follow_store_run_reads_the_store() {
+        let dir = write_graph(&[node("x-997a", "fewer-gated")]);
+        let graph = dir.path().join("graph.json").display().to_string();
+        let found = vec!["x-997a".to_string(), "--graph".to_string(), graph.clone()];
+        assert_eq!(run_graph_get(&found), 0);
+        let missing = vec!["x-0000".to_string(), "--graph".to_string(), graph];
+        assert_eq!(run_graph_get(&missing), 1);
     }
 }

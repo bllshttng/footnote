@@ -92,7 +92,7 @@ fn is_valid_uuid(uuid: &str) -> bool {
 /// strands a PR.
 pub fn open_pr_label(home: &AgentsHome, node: Option<&str>, cwd: &Path) -> Option<String> {
     if let Some(id) = node.map(str::trim).filter(|s| !s.is_empty()) {
-        let entries = crate::gc_sweep::read_graph_entries_raw(home);
+        let entries = crate::gc_sweep::read_graph_rows(home);
         if let Some(entries) = entries {
             if let Some(entry) = entries
                 .iter()

@@ -2,8 +2,8 @@
 //! local board's court section (x-52d2).
 //!
 //! Python passes the crowns `gather_court` already adjudicated; this verb
-//! reads graph.json and the claims dir directly (the same files the keeper
-//! serves, one direct read instead of a second keeper round-trip), compiles
+//! reads the graph store (in-process, `backlog::api::rows`) and the claims
+//! dir directly, compiles
 //! each crown's scope with the same rules `king_board/scope.rs` applies, and
 //! returns the per-scope fold as JSON or as the board's HTML section. The
 //! worker column names live/suspect claim holders through the same native
@@ -629,8 +629,9 @@ pub fn court_fold(
     crowns: &[Value],
     format: &str,
 ) -> Result<Value, String> {
-    let entries: Vec<Value> = crate::graph_store::read_defaulted_opts(graph_path, false, false)
-        .map_err(|e| format!("graph unreadable: {e}"))?;
+    let entries: Vec<Value> =
+        crate::backlog::api::rows(&crate::backlog::api::Store::new(graph_path))
+            .map_err(|e| format!("graph unreadable: {}", e.0))?;
     let projects = crate::king_board::project_map(cwd);
     let now_secs = (crate::claims::now_ms() / 1000).max(0) as u64;
     // Pass 1: fold with no workers named, collecting the node ids the worker
@@ -1201,5 +1202,30 @@ mod tests {
         assert!(html.contains("<th>age</th>"));
         assert!(html.contains("worker-a"));
         assert!(html.contains("<td>live</td>"));
+    }
+
+    /// The verb's graph read asks the store (`backlog::api::rows`), so a
+    /// seeded store folds the same way a hand-written file did.
+    #[test]
+    fn readers_follow_store_fold_reads_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            serde_json::to_string(&json!({"entries": [
+                {"id": "e-1", "type": "epic", "status": "in_progress", "title": "Epic",
+                 "slug": "e-1", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"},
+                {"id": "x-1", "parent": "e-1", "status": "in_progress", "title": "Child",
+                 "slug": "x-1", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let cwd = dir.path().to_path_buf();
+        let crowns = vec![json!({"scope": "e-1", "level": 2})];
+        let fold = court_fold(&graph, &cwd, None, &crowns, "json").unwrap();
+        let nodes = fold["scope_nodes"]["e-1"]["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[1]["id"], "x-1");
     }
 }

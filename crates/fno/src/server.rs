@@ -14076,21 +14076,23 @@ async fn serve(
         });
     }
 
-    // The off-loop work-queue reader (x-6f77): the same 1s mtime-gated shape as
-    // the registry reader above, over ~/.fno/graph.json. graph.json's mtime
-    // bumps on every backlog mutation (claim/close), so a card flips to
-    // in-flight on the next tick with no separate subscribe stream. The 4M read
-    // is skipped whenever the stamp is unchanged.
+    // The off-loop work-queue reader (x-6f77): the same 1s change-gated shape
+    // as the registry reader above, over the graph store. The gate is the
+    // keeper's mutation counter (`store_client::version`), which bumps on
+    // every backlog mutation (claim/close) and keeps moving after the SQLite
+    // flip, where a file mtime would freeze (Risk 5). The 4M document read is
+    // skipped whenever the stamp is unchanged.
     //
-    // External tracker backend: the graph FILE is not the store anymore, so
-    // there is no mtime to gate on. The reader instead executes the
-    // backend-neutral snapshot verb (`fno backlog status --snapshot`) on a
-    // bounded refresh clock and caches its payload; both modes feed the SAME
-    // ReaderState, so the last-good retention, the stale-after-3-failures
-    // marker, and the pure derivations (cards, lanes, prs, missions) are
-    // unchanged. A snapshot exec failure is a read failure like any other -
-    // never a fallback to graph.json (which would resurrect stale graph-only
-    // rows the external backend no longer owns).
+    // External tracker backend: the graph store is not the authoritative
+    // backend there, so there is no counter to gate on. The reader instead
+    // executes the backend-neutral snapshot verb (`fno backlog status
+    // --snapshot`) on a bounded refresh clock and caches its payload; both
+    // modes feed the SAME ReaderState, so the last-good retention, the
+    // stale-after-3-failures marker, and the pure derivations (cards, lanes,
+    // prs, missions) are unchanged. A snapshot exec failure is a read
+    // failure like any other - never a fallback to the graph store (which
+    // would resurrect stale graph-only rows the external backend no longer
+    // owns).
     {
         let core_tx = core_tx.clone();
         let path = backlog_view::graph_path();
@@ -14120,13 +14122,14 @@ async fn serve(
             // failed read never commits its stamp to ReaderState, so without
             // the attempted flag every 1s tick would re-exec during an
             // outage - the hot loop SNAPSHOT_REFRESH_SECS exists to bound).
-            let mut snapshot_stamp: Option<(std::time::SystemTime, u64)> = None;
+            let mut snapshot_seq: i64 = 0;
+            let mut snapshot_stamp: Option<(i64, u64)> = None;
             let mut next_refresh = tokio::time::Instant::now();
             let mut snapshot_attempted = false;
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                // Gate the per-tick claim-sweep SUBPROCESS + graph.json read on
+                // Gate the per-tick claim-sweep SUBPROCESS + store read on
                 // an attached client (x-4e30). This is the idle-CPU root fix:
                 // an orphaned server with no viewer stops fork/exec'ing a whole
                 // `fno-agents claim sweep` process every second. The
@@ -14163,20 +14166,26 @@ async fn serve(
                         }
                     }
                 }
-                // Mode split. Graph mode: stat + conditional file read (the
-                // historical mtime+len gate). Snapshot mode: mint a fresh
-                // stamp on the refresh clock, exec the snapshot verb when the
-                // stamp differs from the cached one. `stamp != cached` is the
-                // single changed-signal both modes share.
+                // Mode split. Graph mode: the store's mutation counter, read
+                // through the keeper (`store_client::version`) instead of the
+                // file's mtime+len - after the flip graph.json freezes, so
+                // the counter is the signal that still moves (Risk 5). The
+                // board document read rides the same keeper. Snapshot mode:
+                // mint a fresh stamp on the refresh clock, exec the snapshot
+                // verb when the stamp differs from the cached one.
+                // `stamp != cached` is the single changed-signal both modes
+                // share.
                 let (stamp, raw) = if external {
                     let now = tokio::time::Instant::now();
                     if now >= next_refresh {
                         next_refresh =
                             now + Duration::from_secs(backlog_view::SNAPSHOT_REFRESH_SECS);
-                        // A clock-derived stamp: SystemTime::now() advances
-                        // past every previously minted (and cached) stamp, so
-                        // each refresh window reads as changed exactly once.
-                        snapshot_stamp = Some((std::time::SystemTime::now(), 0));
+                        // A monotonically minted window counter: each
+                        // increment differs from every previously minted
+                        // (and cached) stamp, so each refresh window reads
+                        // as changed exactly once.
+                        snapshot_seq += 1;
+                        snapshot_stamp = Some((snapshot_seq, 0));
                         snapshot_attempted = false;
                     }
                     let stamp = snapshot_stamp;
@@ -14192,11 +14201,11 @@ async fn serve(
                     };
                     (stamp, raw)
                 } else {
-                    let stat_path = path.clone();
+                    let version_path = path.clone();
                     let stamp = tokio::task::spawn_blocking(move || {
-                        std::fs::metadata(&stat_path)
+                        crate::store_client::version(&version_path)
                             .ok()
-                            .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
+                            .map(|v| (v, 0))
                     })
                     .await
                     .ok()
@@ -14205,7 +14214,22 @@ async fn serve(
                     let changed = stamp != state.cached_stamp();
                     let raw = if changed {
                         tokio::task::spawn_blocking(move || {
-                            std::fs::read_to_string(&read_path).ok()
+                            crate::store_client::nodes(
+                                &read_path,
+                                serde_json::json!({}),
+                                None,
+                                None,
+                                true,
+                                None,
+                            )
+                            .ok()
+                            .map(|conn| {
+                                serde_json::to_string(&serde_json::json!({
+                                    "entries": conn.nodes
+                                }))
+                                .ok()
+                            })
+                            .flatten()
                         })
                         .await
                         .ok()
