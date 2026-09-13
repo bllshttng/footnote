@@ -247,6 +247,11 @@ RUST_CLIENT_VERBS = frozenset(
         # passes every journal paths.event_journals resolves, then invokes
         # the binary directly (not via `fno agents` routing).
         "king-history",
+        # Failure-pattern leaderboard fold for `fno doctor evals macro`:
+        # daemon-free read; Python resolves the journal list and forwards the
+        # flags, then invokes the binary directly (not via `fno agents`
+        # routing).
+        "evals-macro",
         # The reign check-in beat for `fno agents king checkin`: daemon-free
         # read; Python resolves the caller's crown scope and the paths Python
         # owns, then invokes the binary directly (not via `fno agents`

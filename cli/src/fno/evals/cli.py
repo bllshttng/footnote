@@ -237,15 +237,11 @@ def report_command(
     raise typer.Exit(code=4 if report["regression_alarm"] else 0)
 
 
-@evals_app.command("macro")
-def macro_command(
-    since: str = typer.Option("30d", "--since", help="Time window: Nd, Nh, Nm, Ns, or ISO-8601."),
-    topic: Optional[str] = typer.Option(None, "--topic", help="Drill into TYPE:LABEL."),
-    window: int = typer.Option(20, "--window", min=1, help="Events to inspect before each pattern."),
-    include_all: bool = typer.Option(False, "--all", "-A", help="Include healthy labels and noise event types."),
-    json_output: bool = typer.Option(False, "--json", "-J", help="Emit one structured result."),
-    events: Optional[list[Path]] = typer.Option(None, "--events", help="Event journal path (repeatable)."),
-) -> None:
+@evals_app.command(
+    "macro",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def macro_command(ctx: typer.Context) -> None:
     """Find recurring labelled failure patterns in existing event journals."""
     import subprocess
 
@@ -253,6 +249,11 @@ def macro_command(
     from fno.paths import event_journals
     from fno.rust_binary import resolve_binary
 
+    # A pure argv forwarder: the flags are the binary's (operator ruling on
+    # x-72fc - the Python flag surface never grows), so this arm declares no
+    # typer.Options of its own. It only resolves the journal defaults the
+    # verb needs when the caller passed no --events.
+    args = list(ctx.args)
     binary = resolve_binary()
     if binary is None:
         typer.echo(
@@ -263,15 +264,10 @@ def macro_command(
         )
         raise typer.Exit(code=2)
 
-    argv = [str(binary), "evals-macro", "--since", since, "--window", str(window)]
-    if topic is not None:
-        argv += ["--topic", topic]
-    if include_all:
-        argv.append("--all")
-    if json_output:
-        argv.append("--json")
-    for path in events if events else event_journals():
-        argv += ["--events", str(path)]
+    argv = [str(binary), "evals-macro", *args]
+    if not any(a == "--events" or a.startswith("--events=") for a in args):
+        for path in event_journals():
+            argv += ["--events", str(path)]
     result = subprocess.run(argv, check=False)
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
