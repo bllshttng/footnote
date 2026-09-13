@@ -7,10 +7,33 @@ from types import SimpleNamespace
 
 import pytest
 
+from fno.agents import naming
 from fno.agents.registry import AgentEntry
 
 # The mint is a real pre-spawn subprocess (x-84b2); fakes route it here.
 _REAL_SUBPROCESS_RUN = _subprocess.run
+
+_NAME_VERBS = frozenset({"name-mint", "name-codes", "name-parse"})
+
+
+def _is_name_verb(command) -> bool:
+    return bool(_NAME_VERBS & {str(p) for p in command})
+
+
+@pytest.fixture(autouse=True)
+def _cold_name_codes_cache():
+    """A fake that answers name-codes with pane text must fail on every run.
+
+    ``naming._codes`` is an lru_cache'd shellout, so a fake that skips the
+    name-verb route passes only when an earlier test in the same xdist worker
+    already warmed the cache. Clearing it around every test makes that fake
+    fail deterministically; routing through ``_is_name_verb`` is the fix, this
+    fixture is the detector. The routed fake still reaches the real binary,
+    which is what the sibling fakes already pay.
+    """
+    naming._codes.cache_clear()
+    yield
+    naming._codes.cache_clear()
 
 
 def _row(**overrides) -> AgentEntry:
@@ -507,9 +530,7 @@ def test_run_retask_parses_codex_clear_receipt_before_accepting_successor(monkey
     )
 
     def run(command, **_kwargs):
-        # The mint is a real pre-spawn subprocess (x-84b2); route it to the
-        # real binary so it never consumes a scripted read.
-        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in command}:
+        if _is_name_verb(command):
             return _REAL_SUBPROCESS_RUN(command, **_kwargs)
         if "read" in command:
             return SimpleNamespace(returncode=0, stdout=next(reads), stderr="")
@@ -562,9 +583,7 @@ def test_run_retask_succession_verdict_rides_the_shared_classifier(monkeypatch):
     )
 
     def run(command, **_kwargs):
-        # The mint is a real pre-spawn subprocess (x-84b2); route it to the
-        # real binary so it never consumes a scripted read.
-        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in command}:
+        if _is_name_verb(command):
             return _REAL_SUBPROCESS_RUN(command, **_kwargs)
         if "read" in command:
             return SimpleNamespace(returncode=0, stdout=next(reads), stderr="")
@@ -999,6 +1018,8 @@ def test_run_retask_retasks_a_claude_thread_worker_whose_title_is_none(monkeypat
     )
 
     def run(command, **_kwargs):
+        if _is_name_verb(command):
+            return _REAL_SUBPROCESS_RUN(command, **_kwargs)
         if "send" in command:
             sends.append(command[command.index("--text") + 1])
         if "ls" in command:
@@ -1131,6 +1152,8 @@ def test_run_retask_exit_23_after_clear_keeps_the_partial_state_truthful(monkeyp
     )
 
     def run(command, **_kwargs):
+        if _is_name_verb(command):
+            return _REAL_SUBPROCESS_RUN(command, **_kwargs)
         if "send" in command:
             text = command[command.index("--text") + 1]
             if text == "/clear":
