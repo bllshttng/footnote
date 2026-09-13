@@ -20,6 +20,8 @@ import pytest
 
 from fno.backlog import advance
 
+_REAL_SUBPROCESS_RUN = advance.subprocess.run
+
 
 def _settings(*, stage_harness: str = "", legacy_harness: str = ""):
     """A settings stub whose stage table names `stage_harness` for /target."""
@@ -41,6 +43,11 @@ def _capture(monkeypatch, settings):
     captured: dict = {}
 
     def fake_run(cmd, **kwargs):
+        # The mint is a real pre-spawn subprocess (x-84b2): serve it with the
+        # real binary and keep it out of the capture, which pins the SPAWN argv.
+        parts = [str(part) for part in cmd]
+        if {"name-mint", "name-codes", "name-parse"} & set(parts):
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
         captured["cmd"] = cmd
         # A full session id, not a head-8: a bare 8-hex aimed at codex is a
         # 65.5-second timestamp bucket and the spawn seam refuses it by shape.
@@ -191,6 +198,9 @@ def test_failed_spawn_emits_no_receipt(monkeypatch, tmp_path):
     """A receipt is proof of a launch, so a non-zero exit leaves none."""
 
     def fake_run(cmd, **kwargs):
+        parts = [str(part) for part in cmd]
+        if {"name-mint", "name-codes", "name-parse"} & set(parts):
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
         return SimpleNamespace(returncode=1, stdout="", stderr="boom")
 
     monkeypatch.setattr(advance.subprocess, "run", fake_run)
@@ -239,6 +249,9 @@ def test_failed_spawn_captures_the_refusal_tail(monkeypatch):
     captured = _capture(monkeypatch, _settings())
 
     def fake_run(cmd, **kwargs):
+        parts = [str(part) for part in cmd]
+        if {"name-mint", "name-codes", "name-parse"} & set(parts):
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
         return SimpleNamespace(
             returncode=79,
             stdout="",
@@ -266,6 +279,9 @@ def test_failed_spawn_single_line_stderr_is_captured_whole(monkeypatch):
     _capture(monkeypatch, _settings())
 
     def fake_run(cmd, **kwargs):
+        parts = [str(part) for part in cmd]
+        if {"name-mint", "name-codes", "name-parse"} & set(parts):
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
         return SimpleNamespace(returncode=79, stdout="", stderr="boom: no spawn\n")
 
     monkeypatch.setattr(advance.subprocess, "run", fake_run)

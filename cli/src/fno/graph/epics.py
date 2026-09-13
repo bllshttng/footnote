@@ -4,10 +4,11 @@ The measurement behind this module (2026-09-01): six epics report
 in_progress forever because every incomplete child is deferred or superseded,
 and nothing can raise them. Three rules fix the arithmetic WITHOUT touching a
 row: done children never hold an epic open, superseded children never do (the
-work moved, it is not outstanding), and a ``wont_do`` deferral never does
-(either - it is a decision, not a delay). Every other deferral (unclassified,
-contingent, blocked, ...) still holds its epic open and still needs a human
-ruling, which is the correct residue: this module surfaces, it never closes.
+work moved, it is not outstanding), and a ``wont_do`` or ``retracted``
+deferral never does (either - it is a decision, not a delay). Every other
+deferral (unclassified, contingent, blocked, ...) still holds its epic open
+and still needs a human ruling, which is the correct residue: this module
+surfaces, it never closes.
 
 Read-only by construction: pure functions over reader-tier entries. The
 ``stuck-epics`` verb is the operator surface.
@@ -16,8 +17,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# A child in one of these statuses is resolved for closure purposes.
-_RESOLVED_STATUSES = frozenset({"done", "superseded"})
 # Epic statuses that are themselves terminal - a superseded epic is not stuck.
 _EPIC_TERMINAL_STATUSES = frozenset({"done", "superseded"})
 
@@ -26,16 +25,16 @@ def holds_epic_open(child: dict) -> bool:
     """True when ``child`` still represents outstanding epic work.
 
     The two exception rules: ``superseded`` never holds an epic open, and a
-    ``wont_do`` deferral never does. Everything else deferred does - most
-    importantly an UNCLASSIFIED deferral, because classifying it is the
-    operator's judgment call, not this module's.
+    ``wont_do`` or ``retracted`` deferral never does. Everything else deferred
+    does - most importantly an UNCLASSIFIED deferral, because classifying it is
+    the operator's judgment call, not this module's.
     """
     status = child.get("status")
     if status == "done":
         return False
     if status == "superseded":
         return False
-    if status == "deferred" and child.get("deferred_kind") == "wont_do":
+    if status == "deferred" and child.get("deferred_kind") in ("wont_do", "retracted"):
         return False
     return True
 

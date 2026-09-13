@@ -388,9 +388,112 @@ def test_crown_profile_injects_on_a_non_verb_seed():
     assert "crown-model" in result
 
 
-def test_plan_presence_selects_planning_or_execution_band(monkeypatch):
-    """AC13-HP: a /target on an unplanned node bills planning (band floored
-    high); the same node WITH a plan_path bills execution (stamped band)."""
+def test_verb_seed_resolves_either_sigil_table():
+    """x-413d: `$fno:x` and `/fno:x` resolve the same profile, whichever
+    sigil carried the verb, table-driven over the shipped dispatch verbs."""
+    from fno.agents.spawn_defaults import _profile_key
+
+    for verb in ("target", "blueprint", "think", "review"):
+        assert _profile_key(f"$fno:{verb} x-caf8") == verb
+        assert _profile_key(f"/fno:{verb} x-caf8") == verb
+
+
+def test_is_verb_seed_is_the_first_token_fire_test_over_both_sigils():
+    """x-413d: the fire test accepts both sigils at index 0 and still reads a
+    verb inside prose as a conversation."""
+    from fno.agents.spawn_defaults import is_verb_seed
+
+    assert is_verb_seed("$fno:target x-caf8") is True
+    assert is_verb_seed("/fno:target x-caf8") is True
+    assert is_verb_seed("do a /fno:blueprint") is False
+    assert is_verb_seed("/absolute/path/to/thing") is False
+
+
+def test_prose_verb_resolves_profile_but_stays_a_conversation():
+    """x-413d: routing scans anywhere in the seed; the fire test stays index
+    0. ``do a /fno:blueprint`` gets the blueprint profile without reading as
+    unattended work."""
+    from fno.agents.spawn_defaults import _profile_key, is_verb_seed
+
+    assert _profile_key("do a /fno:blueprint") == "blueprint"
+    assert is_verb_seed("do a /fno:blueprint") is False
+
+
+def test_unresolvable_verb_token_is_the_third_outcome():
+    """x-413d: an fno-namespaced verb-shaped token `known` rejects returns
+    None - never a profile, never crown. A path and a king seed keep the
+    crown answer, and so does a BARE unknown verb: a foreign command is not
+    an fno stage."""
+    from fno.agents.spawn_defaults import _profile_key
+
+    known = frozenset({"target", "blueprint"})
+    assert _profile_key("/fno:taget x", known=known) is None
+    assert _profile_key("$fno:taget x", known=known) is None
+    assert _profile_key("/taget x", known=known) == "crown"
+    assert _profile_key("/absolute/path/to/thing", known=known) == "crown"
+    assert _profile_key("king: shrink the board", known=known) == "crown"
+
+
+def test_unknown_verb_seed_refuses_naming_the_token(monkeypatch):
+    import fno.agents.harness_map as hm
+
+    monkeypatch.setattr(
+        hm, "footnote_verbs", lambda: frozenset({"target", "blueprint", "think", "review"})
+    )
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(["spawn", "--name", "w", "/fno:taget x-caf8"], err=err)
+    assert exc.value.code == 2
+    assert "taget" in err.getvalue()
+
+
+def test_unresolvable_roster_degrades_open(monkeypatch):
+    """An unresolvable verb roster proves nothing about which verbs exist, so
+    the namespaced refusal stands down: the spawn proceeds on the pre-fix
+    fallback instead of refusing a good verb the environment cannot resolve
+    (the CI smoke shape: bare checkout, fixture profiles, /fno:target seed)."""
+    import fno.agents.harness_map as hm
+
+    monkeypatch.setattr(hm, "footnote_verbs", lambda: frozenset())
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-81ad"],
+        profiles={"crown": {"model": "crown-model"}},
+    )
+    assert "/fno:target x-81ad" in out
+    assert "--permission-mode" in out  # still a fire-and-forget verb command
+
+
+def test_bare_foreign_verb_seed_spawns_without_a_profile():
+    """/code-review ships in no fno roster and is still a real dispatch: a
+    bare unknown verb must deliver (no refusal) and must not fire an fno
+    stage profile. Regression for the CI smoke run that refused the
+    operator's review-dispatch vocabulary."""
+    out = _inject(
+        ["spawn", "--name", "w", "/code-review this diff"],
+        profiles={"target": {"model": "opus"}},
+    )
+    assert "--model" not in out
+    assert out[out.index("--permission-mode") + 1] == "bypassPermissions"  # fire-and-forget
+    assert "/code-review this diff" in out
+
+
+def test_dollar_seed_injects_target_profile_effort_not_crown():
+    """x-413d: the silent axes follow the verb. A bare codex-shaped seed
+    resolves the target profile's config-sourced effort, not the crown
+    profile's."""
+    result = _inject(
+        ["spawn", "--name", "w", "$fno:target ship it"],
+        profiles={"target": {"effort": "xhigh"}, "crown": {"effort": "high"}},
+    )
+    assert "--effort" in result
+    assert result[result.index("--effort") + 1] == "xhigh"
+
+
+def test_target_verb_ignores_plan_presence_blueprint_bills_planning(monkeypatch):
+    """x-ebd2: the resolved leading verb is the phase authority. A /target
+    never acquires the planning band merely because its node has no plan -
+    that model-only plan-presence inference is gone - while /blueprint still
+    bills planning on its own profile."""
     rows = [
         {"name": "cheap-x", "harness": "codex", "model": "gpt-cheap", "band": "low"},
         {"name": "strong-x", "harness": "codex", "model": "gpt-strong", "band": "high"},
@@ -406,12 +509,17 @@ def test_plan_presence_selects_planning_or_execution_band(monkeypatch):
         "fno.agents.spawn_defaults._grid_node", lambda *a, **k: dict(node)
     )
     out = _inject(["spawn", "--node", "x-1", "/target x-1"])
-    assert "gpt-strong" in out and "gpt-cheap" not in out
+    assert "gpt-cheap" in out and "gpt-strong" not in out
     monkeypatch.setattr(
         "fno.agents.spawn_defaults._grid_node", lambda *a, **k: dict(planned)
     )
     out = _inject(["spawn", "--node", "x-1", "/target x-1"])
     assert "gpt-cheap" in out and "gpt-strong" not in out
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node", lambda *a, **k: dict(node)
+    )
+    out = _inject(["spawn", "--node", "x-1", "/blueprint x-1"])
+    assert "gpt-strong" in out and "gpt-cheap" not in out
 
 
 def test_ac3_bare_spawn_inherits_provider_and_model():
@@ -569,15 +677,19 @@ def test_do_shim_seed_uses_execute_profile():
     assert out[out.index("--model") + 1] == "execute-model"
 
 
-def test_config_default_substrate_refuses_passthrough_after_injection():
+def test_config_default_substrate_demotes_uncarried_passthrough_after_injection():
     # x-1caa AC7: a substrate that arrives by CONFIG default reroutes to the
-    # Rust lane before the Python CLI's own refusal can run, so the gate
-    # re-runs on the post-injection argv at the seam.
+    # Rust lane before the seam's own gate runs, so the gate re-runs on the
+    # post-injection argv at the seam. The codex thread lane cannot carry
+    # --verbose, so the seam demotes the spawn to the pane, loudly.
     err = io.StringIO()
-    with pytest.raises(SystemExit) as exc:
-        _inject(["spawn", "hi", "--", "--verbose"], substrate="headless", err=err)
-    assert exc.value.code == 2
-    assert "pane-only" in err.getvalue()
+    out = _inject(
+        ["spawn", "-H", "codex", "hi", "--", "--verbose"],
+        substrate="thread",
+        err=err,
+    )
+    assert "--substrate" in out and "pane" in out
+    assert "has no carrier for --verbose" in err.getvalue()
 
 
 def test_value_flag_value_not_misread_as_our_flag():
@@ -921,10 +1033,25 @@ def test_ac5_err_nonmatching_seed_spawns_normally_under_bad_profile():
     ]
 
 
-def test_ac6_edge_verb_not_first_token_no_profile():
-    # AC6-EDGE: verb not first -> no key; only defaults inject.
+def test_ac6_verb_anywhere_fires_profile_but_stays_a_conversation():
+    # x-413d retired the first-token limit for ROUTING: routing a profile
+    # never executes anything, so the scan finds the verb anywhere in the
+    # seed. The fire test stays index 0 - no permission-mode injection here.
     out = _inject(
         ["spawn", "--name", "w", "fix the /target docs"],
+        provider="claude",
+        profiles={"target": {"model": "opus"}},
+    )
+    assert out[out.index("--model") + 1] == "opus"  # target profile fired
+    assert "--harness" in out  # defaults still applied
+    assert "--permission-mode" not in out  # prose seed stays a conversation
+
+
+def test_ac6_edge_no_verb_token_no_profile():
+    # A seed with no verb-shaped token keeps the crown answer: only defaults
+    # (and a configured crown row) inject.
+    out = _inject(
+        ["spawn", "--name", "w", "fix the docs"],
         provider="claude",
         profiles={"target": {"model": "opus"}},
     )
@@ -2081,10 +2208,12 @@ def test_config_pane_group_skips_on_a_glued_short_placement_flag(monkeypatch):
 
 
 @requires_rust
-def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
-    """A cap names a VENDOR, and -P names the vendor, so a caller who typed it is
-    not spending a capped lane's budget. Both this function's docstring and the
-    shipped routing doc promise -P alongside --harness."""
+def test_explicit_vendor_pin_outranks_the_lanes_regardless_of_cap(monkeypatch):
+    """A typed -P is an operator pin (law d-dd8e2743): it outranks the lanes
+    outright, so a caller who typed it is never spending a capped lane's
+    budget - the pin never reaches the capacity walk that the cap lives in.
+    This supersedes the older, narrower 'escapes its own capped lane' shape:
+    the pin now wins even without a matching declared lane."""
     import fno.agents.spawn_defaults as spawn_defaults
     import fno.agents.spawn_gate as spawn_gate
 
@@ -2100,7 +2229,7 @@ def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
             _lane("claude", route="zai/glm-5.3[1m]"),
         ]}},
     )
-    assert "already names the lane" in err.getvalue()
+    assert "slot=operator-pin-override" in err.getvalue()
     assert out  # the spawn continues rather than exiting 2
 
 
@@ -2436,6 +2565,7 @@ def test_proven_account_owns_the_harness_aggregate(monkeypatch):
             self.state = type("S", (), {"value": state})()
             self.resets_at = None
             self.source = "window"
+            self.observed_at = None
 
     monkeypatch.setattr(
         "fno.adapters.providers.runtime_state.headrooms",
@@ -2507,9 +2637,9 @@ def test_explicit_model_pin_overrides_the_lanes(monkeypatch):
         env={},
     )
     assert out[out.index("--model") + 1] == "gpt-5.6-luna"
-    assert "slot=model-pin-override" in err.getvalue()
+    assert "slot=operator-pin-override" in err.getvalue()
     applied = err.getvalue()
-    assert "applied slot=" not in applied or "model-pin-override" in applied
+    assert "applied slot=" not in applied or "operator-pin-override" in applied
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -46,9 +47,11 @@ from typing import Callable, Optional
 import typer
 
 from fno._subprocess_util import fno_py_cmd
+from fno.agents.naming import AgentNameError, dispatch_agent_name
 from fno.agents.events import (
     emit_merge_cleanup_requested,
     merge_cleanup_request_id,
+    pr_node_ids,
     rows_for_cleanup,
 )
 from fno.config import load_settings_for_repo
@@ -177,30 +180,6 @@ def _parse_origin_slug(url: str) -> Optional[str]:
         return None
     owner, repo = rest.split("/")
     return rest if owner and repo else None
-
-
-def _scan_nodes(entries, pr: int, slug: Optional[str]) -> list[str]:
-    """Graph-derived node ids whose pr_url matches this PR's repo.
-
-    Repo-scoped because pr_number is unique only within a repo (cross-project
-    graph): a foreign repo sharing the number is excluded. A url-less or
-    non-string pr_url is skipped, never fatal (a corrupt entry cannot drop the
-    legitimate nodes after it). Pure so the harness ACs test it directly.
-    """
-    if not slug:
-        return []
-    needle = f"/{slug.lower()}/pull/"
-    out: list[str] = []
-    for e in entries or []:
-        if not isinstance(e, dict) or e.get("pr_number") != pr:
-            continue
-        url = e.get("pr_url")
-        if not isinstance(url, str) or needle not in url.lower():
-            continue
-        nid = e.get("id")
-        if nid and nid not in out:
-            out.append(nid)
-    return out
 
 
 def _session_holder() -> str:
@@ -446,7 +425,19 @@ class Ritual:
                 sync_obj = obj.get("sync_catchup") or {}
                 sync_outcome = sync_obj.get("outcome") if isinstance(sync_obj, dict) else None
                 closure_refused = obj.get("closure_refused")
-                if held:
+                if obj.get("held"):
+                    # A held sweep (one-in-flight gate): another reconcile was
+                    # still running, so this one stood down without scanning.
+                    # The merged nodes close on that pass or the next; DEFERRED
+                    # keeps the work visibly owed rather than reading as the
+                    # no-drift fall-through below.
+                    self._emit(
+                        "reconcile",
+                        _DEFERRED,
+                        "held, a sweep was already in flight "
+                        f"(requests={obj.get('requests')}, holder={obj.get('holder')})",
+                    )
+                elif held:
                     # Held open, not clean: the PR merged but the promise gate
                     # did not clear the close (x-40be). status=ok detail=closed=0
                     # covered "held seven nodes open"; deferred keeps the work
@@ -511,7 +502,8 @@ class Ritual:
 
     def leg_advance(self) -> None:
         """Step 3b: merge-triggered next dispatch, bounded + progress (x-0d66)."""
-        argv = ["backlog", "advance", "-J", "--verbose"]
+        # --source ac (x-84b2): the merge continuation origin rides the name.
+        argv = ["backlog", "advance", "-J", "--verbose", "--source", "ac"]
         # x-59a6: no --closed here. `leg_stamp`'s reconcile call already ran
         # `_advance`/`advance_dependents` per CLOSED RECORD for every node this
         # PR's trailer bound, not only the first - `--closed` takes a SINGLE
@@ -615,10 +607,10 @@ class Ritual:
             session_id=None,
             harness=None,
             merged_at=self._merged_state()[2],
-            candidate_row_names=(
-                rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh)
-                if worktree
-                else []
+            # x-84b2: always emit the exact candidates - a PR whose worktree
+            # path is gone still carries name-matched rows for the reaper.
+            candidate_row_names=rows_for_cleanup(
+                worktree, self.ctx.node_ids, runner=self._sh
             ),
         )
         # Minting makes the next idle tick the request's first payment window.
@@ -630,8 +622,14 @@ class Ritual:
     ) -> bool:
         if Path(worktree).exists():
             return False
+        names = rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh)
+        if not names:
+            # An empty candidate set is not a successful removal: True here
+            # would emit the daemon's completion and tombstone an order that
+            # removed nothing.
+            return False
         removed = True
-        for name in rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh):
+        for name in names:
             result = self._sh(
                 [
                     "agents",
@@ -720,9 +718,7 @@ class Ritual:
             )
             return
         if r.ok:
-            request_id = merge_cleanup_request_id(
-                self.ctx.project, self.ctx.pr, branch, wt, self.ctx.node_ids
-            )
+            request_id = merge_cleanup_request_id(self.ctx.project, self.ctx.pr, branch)
             rows_removed = self._remove_rows_after_archive(wt, request_id, worktree_bytes)
             if rows_removed:
                 from fno.agents.events import _emit_daemon_envelope
@@ -841,17 +837,34 @@ class Ritual:
     def _spawn_judgment(self, deferred: int, files: int, lines: int) -> bool:
         """ONE headless one-shot carrying only the two judgment steps.
 
-        ``agents spawn`` takes ONE positional - the MESSAGE - and the agent name
-        rides ``--name``; a second positional is refused ("takes one positional;
-        the agent name moved to --name"). So the prompt is the sole positional
-        and ``judgment-pr-<n>`` is passed via ``--name``. (Before the axis
-        redesign the grammar was ``[name] [message]`` and the two were swapped
-        positionals; a stale two-positional call fails closed here, which is
-        exactly how the redesign's refusal caught this leg.) The headless worker
-        reads a diff and updates the backlog, which routinely exceeds a minute,
-        so it gets spawn's own ``--timeout`` and the outer bound matches it
-        rather than killing the worker early.
+        The prompt is the sole positional; ``pm-r-<node>-pr-<n>`` rides
+        ``--name`` (x-84b2; the old ``judgment-pr-<n>`` carried neither source
+        nor node). A merged PR with no recovered node binding refuses the
+        spawn rather than substituting the PR number as a fake node. The
+        worker reads a diff and updates the backlog - routinely over a minute -
+        so spawn's own ``--timeout`` bounds it.
         """
+        node_ids = [str(node) for node in self.ctx.node_ids if str(node)]
+        if not node_ids:
+            # The PR merged but binds no graph node: spawning a judgment under
+            # a fabricated identity would orphan its own provenance.
+            print(
+                f"post-merge judgment: skipped, PR {self.ctx.pr} binds no node; "
+                "no pm-r worker spawned (x-84b2)",
+                file=sys.stderr,
+            )
+            return False
+        try:
+            name = dispatch_agent_name("pm", "r", node_ids[0], qualifier=f"pr-{self.ctx.pr}")
+        except AgentNameError as exc:
+            # A stale/missing binary must fail this leg, not abort the ritual
+            # legs after it (run() has no per-leg guard).
+            print(
+                f"post-merge judgment: skipped, worker name unmintable ({exc}); "
+                "no pm-r worker spawned",
+                file=sys.stderr,
+            )
+            return False
         prompt = self._judgment_prompt(deferred, files, lines)
         argv = [*fno_py_cmd(), "agents", "spawn", "--substrate", "headless",
                 "--timeout", str(int(_JUDGMENT_TIMEOUT_S)),
@@ -868,7 +881,7 @@ class Ritual:
             argv += ["--harness", "claude", "--model", model]
         # Behind `--` (fno's own click parser honors it, verified both
         # directions): a leading-flag seed must be the prompt positional.
-        argv += ["--name", f"judgment-pr-{self.ctx.pr}", "--", prompt]
+        argv += ["--name", name, "--", prompt]
         try:
             r = self.runner(argv, timeout=_JUDGMENT_TIMEOUT_S + 60.0)
         except (ToolMissing, subprocess.SubprocessError):
@@ -942,25 +955,12 @@ class Ritual:
         """Sidecar-derived node id(s) for this PR when reconcile closed nothing.
 
         The dominant path closes + stamps the node at the ship gate, so
-        ``backlog reconcile`` no-ops and ``.closed[]`` is empty. Recover the
-        PR's node from the sidecar store (repo-scoped; PR links are
-        footnote-owned ship evidence, so the scan works on any tracker
-        backend) so the row reap still finds it - the replaced bash Step 2 did
-        this scan inline (codex P2).
+        ``backlog reconcile`` no-ops and ``.closed[]`` is empty. The shared
+        helper (the merge mint recovers through it too) scans the sidecar
+        store repo-scoped; PR links are footnote-owned ship evidence, so the
+        scan works on any tracker backend.
         """
-        slug = self._resolve_origin_slug()
-        if not slug:
-            return []
-        try:
-            from fno.tracker import sidecar as sidecar_store
-
-            rows = [
-                {"id": nid, "pr_number": sc.pr_number, "pr_url": sc.pr_url}
-                for nid, sc in sidecar_store.load_all().items()
-            ]
-        except Exception:  # noqa: BLE001 - unreadable store degrades to no recovery
-            return []
-        return _scan_nodes(rows, self.ctx.pr, slug)
+        return pr_node_ids(self.ctx.pr, self._resolve_origin_slug())
 
     def leg_reap_rows(self) -> None:
         """Step 8a: reap the merged node's lingering build-worker rows."""
@@ -1001,7 +1001,11 @@ class Ritual:
         self._emit("reap-rows", _OK, f"reaped {removed}/{len(rows)}")
 
     def _dead_target_rows(self) -> list[str]:
-        ids = {str(n) for n in self.ctx.node_ids}
+        """Non-live rows for the nodes this ritual closed, by canonical parse
+        (x-84b2) with the legacy ``target-<node>-`` fallback. Delegates to
+        rows_for_cleanup, then keeps only non-live rows."""
+        ids = [str(n) for n in self.ctx.node_ids]
+        candidates = set(rows_for_cleanup(None, ids, runner=self._sh))
         try:
             r = self._sh(["agents", "list", "--json"])
         except (ToolMissing, subprocess.SubprocessError):
@@ -1017,12 +1021,9 @@ class Ritual:
             if not isinstance(a, dict):
                 continue
             name = a.get("name") or ""
-            if not name.startswith("target-"):
+            if name not in candidates:
                 continue
             if a.get("status") == "live":
-                continue
-            # target-<node>-<slug>: reap only rows for nodes this ritual closed.
-            if not any(name.startswith(f"target-{nid}-") for nid in ids):
                 continue
             out.append(name)
         return out

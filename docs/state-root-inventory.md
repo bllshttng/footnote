@@ -21,7 +21,7 @@ One file per install. These belong at the root.
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `graph.json`, `.lock`, `.sha256` | `graph/store.py` via `paths.graph_json()` | permanent |
-| `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/graph_sqlite.rs` | durable row store; WAL sidecars are SQLite-managed |
+| `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/backlog/` (schema in `mod.rs`, one owning module per aggregate) | durable row store; WAL sidecars are SQLite-managed |
 | `graph.md` | `graph/_constants.py` | regenerated per write |
 | `graph.html` | `graph/render_html.py` | regenerated |
 | `graph-archive.json` | `graph/archive.py` via `paths.graph_archive_json()` | permanent |
@@ -49,8 +49,10 @@ One file per install. These belong at the root.
 | `<plan>.artifacts/target-state-*.md` | `state/outage_handoff.py` | permanent immutable handoff archive beside the plan; contains the pre-handoff session manifest but no credential or transcript payload |
 | `git-protection.json` | `hooks/git-protection.py` | permanent |
 | `squads.json`, `.lock`, `squads.json.tmp.*` | `crates/fno/src/squad_store.rs` (follows the mux state root; `FNO_AGENTS_HOME` overrides) | permanent; the pid-suffixed tmp is replaced on every locked write and a stale one is safe to remove |
+| `agents/squads.json` | no writer in this build: a historical store location beside the live agent files (`registry.json` there IS authoritative, which is what makes the dead file read as real). `fno mux doctor` names it and its live replacement. | dead: nothing reads it, so it can only mislead; delete on sight (`fno mux doctor` prints the `rm`) |
 | `session-names.json`, `.lock` | `agents/discover.py` | legacy alias overlay: registry rows' `aliases` are the primary name store and `reconcile` migrates file entries into rows; external roster rows (no fno row) keep the file as their alias home until the mail-address surface retires it |
 | `agents/reap-receipts/<harness>-<session id>.json` | `crates/fno-agents/src/receipt.rs` (`write_reap_receipt`, called by the GC sweep in `gc_sweep.rs`; `FNO_AGENTS_HOME` overrides) | retained `config.agents.reap_receipts.retain_days` days (default 7); past the window the sweep strips the EXPENDABLE detail (ledger copy, per-effect rows, log path) and keeps the identity core (who, native locator, resume argv) forever, because deleting it would strand the only recovery record for a resumable session. Receipts carry a schema version, the writer build, and per-effect outcomes; `fno agents reap --verify --since 24h --json` audits them against the current build. A receipt whose `reaped_at` cannot be read is kept and named in the sweep summary, never deleted on a failed read |
+| `agents/fleet-stop.json` | `crates/fno-agents/src/fleet_incident.rs` via `AgentsHome::fleet_stop_json()` (written by `fno agents incident stop|clear`; `FNO_AGENTS_HOME` overrides) | permanent machine-wide circuit breaker: `{version, state: stopped|clear, generation, changed_at, changed_by, reason}`, temp-plus-rename atomic. `clear` is a positive record, never a deletion; every stop and clear increments `generation`. Read by the spawn gates, the active-backlog daemon, and the test-run owner BEFORE their bypass branches; a present-but-unreadable file refuses admission (`fleet-stop-unavailable`), and a writer refuses to replace an unreadable record - remove it by hand to start a fresh generation. Mail is deliberately never gated |
 | `mux/` (`<session>.sock`, `.ver`, `.pid`, `.detach`, `.log`) | `crates/fno/src/proto.rs::mux_dir()`, following `config.state_dir` (`FNO_MUX_DIR` overrides) | server-managed; `kill-server` owns socket removal |
 | `mux/panes/<session>-<pane>.sock` | `crates/fno/src/pty.rs::keeper_dir()`, written by each `fno-agents-worker --pane` keeper | unlinked by the keeper when its child exits; a server-start sweep unlinks leftovers whose keeper is gone, and `fno mux pane keeper list` names them |
 | `mux/threads/<agent>.sock` | `cli/src/fno/agents/dispatch.py::_lane_b_keeper_socket()`, written by each `fno-agents-worker --keeper` it launches (the pane-less lane-B thread keeper; a session-keyed subfolder, never a top-level write) | unlinked by the keeper when its child exits; no server-start sweep yet - the restart journey that owns re-adoption is a later group of the same epic, so until then a crashed keeper's leftover is named by the registry row's `messaging_socket_path` |
@@ -75,7 +77,7 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `backups/`, `graph.json.bak` | `crates/fno-agents/src/graph_store.rs::create_backup` (rotation, pruned to `GRAPH_BACKUP_KEEP`), the corrupt-read `.json.bak` copy, and `cli/src/fno/setup/migrate_paths.py` (`settings.yaml.bak.<ts>`) | graph rotation prunes itself; migration backups are one-shot per install. `graph.json.bak` is the pre-relocation sibling only builds older than this row write. |
 | `briefs/` | `paths.briefs_dir()` | permanent sidecar discovery briefs |
 | `bus/` | `paths.bus_dir()`, written by `cli/src/fno/bus/` (`messages.jsonl`, `cursors/`) | append-only mail log; each consumer's cursor is overwritten |
-| `cache/` | `cli/src/fno/pr/_cache.py` (`cache/pr-status`) | regenerated PR-status cache |
+| `cache/` | `cli/src/fno/pr/_cache.py` (`cache/pr-status`), `cli/src/fno/king/drain_cache.py` (`cache/king-drain.json`) | regenerated PR-status cache; king-drain counts keyed on graph stat identity, rewritten per fresh drain read |
 | `events.jsonl.ephemeral` | `crates/fno-agents/src/claims.rs` (ephemeral retention class) | claim events whose retention class is ephemeral |
 | `events.jsonl.shell-writers.d/` | `cli/src/fno/events/gc.py` | writer-liveness markers, GC'd with the journal |
 | `failover-state.json`, `.lock` | `cli/src/fno/adapters/providers/failover.py`, `runtime_state.py` | permanent breaker state: storm-cap and no-swap-back phases |
@@ -90,11 +92,15 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `MOVED-TO` | `cli/src/fno/paths.py`, `crates/fno-agents/src/paths.rs`, `state_path.rs` | migration pointer; permanent until an operator confirms the old path is gone |
 | `notes/` | `cli/src/fno/research/core.py` (`notes/research`) | permanent research notes |
 | `nudge-cursors/` | `cli/src/fno/agents/nudge.py` | one cursor per nudge target, overwritten |
+| `announce-cursors/` | `fno-agents announce` (`crates/fno-agents/src/announce.rs`) | one seen-id set per session; pruned to ids still on retained bus segments |
 | `observer-reports/` | the observer fold, via the `paths` accessor | one report per observation run |
 | `operator-capture/` | `cli/src/fno/inbox/operator_turns.py` | raw operator turns awaiting `fno inbox operator ack` |
 | `postmortems/` | the retro routine and stuck-terminal postmortem writer, via the `paths` accessor | permanent |
 | `provider-runtime-state.json`, `.update.lock` | `cli/src/fno/adapters/providers/runtime_state.py` via the `paths` accessor | permanent; the update lock lives for one write |
 | `providers/` | `cli/src/fno/adapters/providers/managed.py`, `staging.py` | permanent managed provider configs |
+| `cargo-build/<h2>/<hash>/` | cargo itself, via the tracked `build.build-dir` and the `CARGO_BUILD_BUILD_DIR` value `fno.paths.cargo_build_dir_value()` exports | per-workspace intermediates, one hash dir per workspace root; final binaries stay in the checkout's `crates/*/target`; reclaimed by `worktree cleanup --cargo-targets` (live workspaces' hash dirs are protected via `cargo metadata`) |
+| `plugin-stage/fno/` | `fno config plugin install` via the `fno-agents plugin-install` verb (`crates/fno-agents/src/plugin_install.rs::build_stage`) | a filtered copy of the checkout (git-tracked + untracked-but-not-ignored files only, no target/, worktrees or venvs); rebuilt wholesale on every install, so nothing in it outlives the next one |
+| `reclaim/last-run.json` | `fno doctor reclaim` via `crates/fno-agents/src/reclaim.rs::write_receipt` (the Python doctor verb shells to `fno-agents reclaim`) | overwritten per `--apply` run; records bytes reclaimed per lane; the daemon's daily sweep gates on its mtime |
 | `push-stamps/` | `hooks/git-protection.py` | one stamp per protected push |
 | `relay-claude/` | Claude Code itself, via a `CLAUDE_CONFIG_DIR` account alias | operator-managed harness home. Never fno state, never swept. |
 | `retro-pending/` | `paths.retro_pending_dir()`, written by `cli/src/fno/retro/sweep.py` | per-PR retro evidence awaiting harvest |
@@ -143,12 +149,13 @@ One file per session, per day, or per throttle window.
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `latches/.context-nudge-*` | `hooks/context-nudge.sh` | pruned by the same hook at `-mtime +2` |
+| `latches/.worktree-create-<session-id>` | `hooks/worktree-setup.sh` (and its /speculate copy) | create-attempt counter, deleted by the same hook on a successful create, stale copies pruned at `-mtime +2` |
 | `.a2a-confirmed` | `agents/dispatch.py` | single file, overwritten |
 | `.active-backlog-nudge` | `active_backlog.py`, `crates/fno-agents/src/active_backlog.rs` | single file |
 | `.worktree-hook-root` | `hooks/session-start.sh` | single file |
 | `.think-spawn-daily.json` | `provenance/spawn_think.py` | daily, overwritten |
 | `.think-offer-cursor` | `hooks/born-with-why-offer-inject.sh` | single file |
-| `.target-cancelled` | `hooks/helpers/init-target-state.sh`, `crates/fno-agents/src/loop_target.rs`, `crates/fno-agents/src/loopcheck.rs` | consumed by the target reader |
+| `.target-cancelled` | `hooks/helpers/init-target-state.sh`, `crates/fno-agents/src/cancel_sentinel.rs`, `crates/fno-agents/src/loop_target.rs`, `crates/fno-agents/src/loopcheck.rs` | one-shot: carries `author:`/`reason:` lines, deleted by the reader once it has terminated a run; stale copies wiped by init |
 | `.preflight-cancel` | `scripts/ci/preflight.sh` | consumed by the reader (one-shot; stale after one hour) |
 | `.reconcile-stamp`, `.reconcile-result.json`, `.shown`, `.reconcile-result.json.tmp`, `.reconcile-result.json.shown` | `scripts/lib/reconcile-throttle.sh`, `hooks/reconcile-session-start.sh` (the hook's consume-after-show move creates the `.shown` rename; the throttle's `mv -f` creates the `.tmp` mid-write) | throttle window |
 | `.plan-sync-watermark` | `plan/cli.py` | single file |

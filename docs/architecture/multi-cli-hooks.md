@@ -5,6 +5,12 @@ status: accepted
 
 # Multi-CLI Hook Integration
 
+## Is this page for you?
+
+You port a footnote skill or hook to a second CLI, or you debug why a Stop hook fires on claude and not on codex. This page owns the per-CLI hook mapping and its porting cost. Misreading it ships a hook contract one harness silently ignores.
+
+Not for: which CLIs footnote supports at all. That is [../HARNESSES.md](../HARNESSES.md).
+
 ## Overview
 
 footnote' stop hook (target loop) and session-start hooks support Claude Code, Gemini CLI, and Codex CLI as lifecycle enhancers. The static per-provider capability matrix that previously declared hook/subagent/custom-agent/parallel-dispatch support was removed (multi-CLI adapters superseded by hooks); provider behavior is now hook-driven. The hooks layer handles session hydration, stop-gate enforcement, and accounting directly.

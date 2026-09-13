@@ -134,7 +134,6 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                 canonical_path: None,
                 base_version: Some(base),
                 plan_rungs: Some(rungs),
-                sqlite_authoritative: false,
             },
             std::time::Duration::from_secs(5),
         )
@@ -364,6 +363,17 @@ fn run_case(name: &str, fixture: String, ops: serde_json::Value) {
     std::fs::write(&graph, &fixture).unwrap();
     let rs = rust_probe(&graph, &ops);
 
+    // Schema-change regeneration: with REGENERATE_GOLDENS=1 the live probe
+    // output replaces the frozen golden instead of asserting against it. A
+    // run's delta must be reviewed (diff the regenerated files); the mode
+    // exists so a schema addition does not have to hand-encode payload
+    // strings at every escaping layer.
+    if std::env::var("REGENERATE_GOLDENS").as_deref() == Ok("1") {
+        std::fs::write(&golden_path, serde_json::to_vec_pretty(&rs).unwrap())
+            .expect("write regenerated golden");
+        return;
+    }
+
     assert_frozen(
         name,
         "read",
@@ -518,6 +528,13 @@ fn characterization_session_lifecycle_matches() {
             {"name": "session_reap_open", "node_id": "ab-00aa", "phase": "review",
              "harness": "codex", "session_id": "0123abcd-0000-0000-0000-00000000bbbb",
              "ended_at": "2026-08-02T07:00:00Z"},
+            {"name": "session_append", "node_id": "ab-00aa", "phase": "review", "harness": "codex",
+             "session_id": "0123abcd-0000-0000-0000-00000000cccc",
+             "started_at": "2026-08-02T08:00:00Z",
+             "observed": {"kind": "not-file-backed"}},
+            {"name": "session_reap_open", "phase": "all",
+             "harness": "codex", "session_id": "0123abcd-0000-0000-0000-00000000cccc",
+             "ended_at": "2026-08-02T09:00:00Z"},
             {"name": "read_after"}
         ]),
     );
@@ -613,7 +630,6 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
                         canonical_path: None,
                         base_version: Some(base),
                         plan_rungs: None, // concurrent-writer probe: statuses stay stored
-                        sqlite_authoritative: false,
                     },
                     std::time::Duration::from_secs(10),
                 ) {

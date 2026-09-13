@@ -534,3 +534,20 @@ def test_manifest_arm_ignores_the_durable_receipt(tmp_path, monkeypatch, capsys)
     # The session lane hands its OWN manifest down, never the durable receipt:
     # one posture per caller, never a shared shortcut.
     assert seen["approved"] is False
+
+
+def test_held_when_claim_really_live_at_global_root(tmp_path, monkeypatch):
+    """Regression (x-74aa): the resolver's own claim read routes by key, so a
+    claim live at the global root holds an otherwise-granted receipt."""
+    from fno.claims import acquire_claim
+
+    _grant_node(tmp_path, monkeypatch, [_do_row(_receipt())])
+    _config(monkeypatch)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+    monkeypatch.setattr("fno.paths.space_dir", lambda: tmp_path / "space")
+    acquire_claim(f"node:{NODE}", holder="target-session:sid-live")
+
+    verdict = resolve_durable_grant(PR, str(tmp_path))
+
+    assert verdict.state == HELD
+    assert verdict.claim_state == "live"

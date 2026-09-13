@@ -93,7 +93,14 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
     assert "source: claude-plan-mode" in blueprint
     assert "skip the nudge entirely" in blueprint
     assert '"backlog",\n                "advance",' in active_backlog
-    assert "harness_map.resolve_dispatch(**resolve_kwargs)" in advance
+    # x-e53e: the resolve lives in the ONE resolver every node-dispatching
+    # caller shares; advance reads it instead of inlining the call.
+    assert "resolve_node_spawn(" in advance
+    node_dispatch = _read_with_positive_control(
+        "cli/src/fno/agents/node_dispatch.py",
+        "def resolve_node_spawn",
+    )
+    assert "harness_map.resolve_dispatch(**resolve_kwargs)" in node_dispatch
     assert "resolved = resolve_dispatch(" in context_think
     assert 'verb="/think"' in context_think
     assert 'trigger="autonomous"' in context_think

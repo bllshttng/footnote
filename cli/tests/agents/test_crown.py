@@ -334,6 +334,79 @@ def test_pane_spawn_clears_a_terminal_holder_before_reclaiming_its_scope(
     assert [row.name for row in load_registry() if row.crown_scope == "epic-x"] == [
         "king-epic"
     ]
+    # The reclaim is journaled from the committed write: holder_terminal for
+    # the dead row, the grant for the new one.
+    from fno import paths
+
+    journal = paths.state_dir() / "events.jsonl"
+    events = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    vacates = [e for e in events if e["kind"] == "agent_crown_vacated"]
+    assert len(vacates) == 1
+    assert vacates[0]["cause"] == "holder_terminal"
+    assert vacates[0]["holder"] == "dead-king"
+    assert vacates[0]["holder_session"] == "dead-session"
+    assert vacates[0]["scope"] == "epic-x"
+    crowns = [e for e in events if e["kind"] == "agent_crowned"]
+    assert [c["name"] for c in crowns] == ["king-epic"]
+
+
+def _crown_row(name: str, *, status: str = "busy", scope="epic-x"):
+    from fno.agents.registry import AgentEntry
+
+    return AgentEntry(
+        name=name,
+        cwd="/w",
+        log_path="",
+        harness="claude",
+        harness_session_id=f"{name}-sess",
+        status=status,
+        crown_level=2 if scope else None,
+        crown_scope=scope,
+        crown_grantor="human" if scope else None,
+    )
+
+
+def test_settle_spawn_crown_outcomes() -> None:
+    """The four answers the guard can give, with no spawn at all: granted,
+    succeeded, declined, and the terminal clear that rides a reclaim."""
+    from fno.agents.crown import settle_spawn_crown
+
+    rows, outcome, vacated = settle_spawn_crown(
+        [_crown_row("a", scope=None)],
+        scope="epic-x",
+        succession=False,
+        succession_caller_name=None,
+    )
+    assert outcome == "granted"
+    assert vacated == []
+
+    caller = _crown_row("caller")
+    rows, outcome, vacated = settle_spawn_crown(
+        [caller], scope="epic-x", succession=True, succession_caller_name="caller"
+    )
+    assert outcome == "succeeded"
+    assert [r.crown_scope for r in rows] == [None]
+    assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession")]
+
+    stranger = _crown_row("stranger")
+    rows, outcome, vacated = settle_spawn_crown(
+        [stranger], scope="epic-x", succession=True, succession_caller_name="caller"
+    )
+    assert outcome == "declined"
+    assert rows[0].crown_scope == "epic-x", "a declined spawn leaves the holder alone"
+    assert vacated == []
+
+    dead = _crown_row("dead", status="exited")
+    rows, outcome, vacated = settle_spawn_crown(
+        [dead], scope="epic-x", succession=False, succession_caller_name=None
+    )
+    assert outcome == "granted"
+    assert [(r.name, cause) for r, cause in vacated] == [("dead", "holder_terminal")]
+    assert rows[0].crown_scope is None
 
 
 def test_uncrowned_spawn_leaves_crown_none(tmp_path: Path, monkeypatch) -> None:
@@ -548,6 +621,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "vacated_scope": None,
         "vacated_level": None,
         "stranded_subordinates": [],
+        "missions_armed": [],
         "king_loop_armed": True,
         "reign_delivery": "msg-t delivered (hosted)",
     }
@@ -1916,3 +1990,241 @@ def test_send_reign_verb_reports_subprocess_failure(monkeypatch) -> None:
     monkeypatch.setattr(real_subprocess, "run", lambda *a, **k: _Proc())
     verdict = crown_mod._send_reign_verb("worker", "/fno:reign alpha")
     assert verdict == "not delivered (rc=16: resolve failed: no such agent)"
+
+
+# --- a crown grant arms the epic's mission -----------------------------------
+#
+# Operator rule 2026-09-09: every epic with an owner is a mission. The drain
+# keys one loop per epic with mission_active=true, so a crown that left the
+# flag unset ruled a territory no drain loop could see.
+
+
+def _seed_crown_graph(monkeypatch, tmp_path: Path, epics: list[dict]) -> None:
+    # Pin the events journal into the tmp root: use_tmpdir redirects
+    # state_dir but not project_events_json, and an unpinned journal is
+    # shared by every test in the process.
+    monkeypatch.setenv(
+        "FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl")
+    )
+    from fno.paths import graph_json
+
+    graph_path = graph_json()
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    graph_path.write_text(json.dumps({"entries": epics}), encoding="utf-8")
+
+
+def _graph_entries() -> list[dict]:
+    from fno.paths import graph_json
+
+    return json.loads(graph_json().read_text(encoding="utf-8"))["entries"]
+
+
+def _mission_events() -> list[dict]:
+    """The journal's mission_activated rows (the pinned journal also carries
+    agent_* rows from the crown telemetry, which share the tmp root)."""
+    from fno.paths import project_events_json
+
+    path = project_events_json()
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("type") == "mission_activated"
+    ]
+
+
+def test_a_spawn_grant_over_an_unflagged_epic_arms_its_mission(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"},
+            {"id": "c-1", "type": "task", "parent": "e-1"},
+        ],
+    )
+
+    journal_spawn_crown(
+        "granted", [], name="w", level=2, scope="e-1", grantor="human"
+    )
+
+    entry = _graph_entries()[0]
+    assert entry["mission_active"] is True
+    events = [
+        e for e in _mission_events() if e.get("type") == "mission_activated"
+    ]
+    assert len(events) == 1
+    assert events[0]["data"] == {"epic_id": "e-1", "source": "crown"}
+
+
+def test_a_declined_spawn_arms_nothing(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"},
+            {"id": "c-1", "type": "task", "parent": "e-1"},
+        ],
+    )
+
+    journal_spawn_crown(
+        "declined", [], name="w", level=2, scope="e-1", grantor="human"
+    )
+
+    assert "mission_active" not in _graph_entries()[0]
+    assert _mission_events() == []
+
+
+def test_a_project_scope_and_a_done_epic_arm_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "done"},
+            {"id": "p-1", "type": "project", "status": "in_progress"},
+        ],
+    )
+
+    journal_spawn_crown(
+        "granted", [], name="w", level=1, scope="e-1,p-1,alpha", grantor="human"
+    )
+
+    by_id = {e["id"]: e for e in _graph_entries()}
+    assert "mission_active" not in by_id["e-1"]
+    assert "mission_active" not in by_id["p-1"]
+    assert _mission_events() == []
+
+
+def test_a_two_epic_scope_arms_both(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"},
+            {"id": "c-1", "type": "task", "parent": "e-1"},
+            {"id": "e-2", "type": "epic", "project": "beta", "status": "in_progress"},
+            {"id": "c-2", "type": "task", "parent": "e-2"},
+        ],
+    )
+
+    journal_spawn_crown(
+        "granted", [], name="w", level=2, scope="e-2,e-1", grantor="human"
+    )
+
+    by_id = {e["id"]: e for e in _graph_entries()}
+    assert by_id["e-1"]["mission_active"] is True
+    assert by_id["e-2"]["mission_active"] is True
+    armed = {
+        e["data"]["epic_id"]
+        for e in _mission_events()
+        if e.get("type") == "mission_activated"
+    }
+    assert armed == {"e-1", "e-2"}
+
+
+def test_a_graph_fault_leaves_the_crown_committed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.backlog.advance as advance_mod
+    from fno.agents.crown import journal_spawn_crown, promote_existing_session
+    from fno.agents.registry import load_registry
+
+    def _raisers(epic_id, active):
+        raise RuntimeError("graph write refused")
+
+    monkeypatch.setattr(advance_mod, "_set_mission_active", _raisers)
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                status="idle",
+            )
+        ],
+    )
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"},
+            {"id": "c-1", "type": "task", "parent": "e-1"},
+        ],
+    )
+
+    # The spawn leg returns normally even though the arming write raised.
+    journal_spawn_crown(
+        "granted", [], name="w", level=2, scope="e-1", grantor="human"
+    )
+
+    receipt = promote_existing_session("worker", ["e-1"])
+    assert receipt["missions_armed"] is None
+    # The crown row still stands.
+    row = next(r for r in load_registry() if r.name == "worker")
+    assert (row.crown_level, row.crown_scope) == (2, "e-1")
+
+
+def test_recrowning_an_armed_epic_emits_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "id": "e-1",
+                "type": "epic",
+                "project": "alpha",
+                "status": "in_progress",
+                "mission_active": True,
+            },
+            {"id": "c-1", "type": "task", "parent": "e-1"},
+        ],
+    )
+
+    journal_spawn_crown(
+        "granted", [], name="w", level=2, scope="e-1", grantor="human"
+    )
+
+    assert _mission_events() == []
+
+
+def test_a_childless_epic_is_not_armed(tmp_path: Path, monkeypatch) -> None:
+    """advance_epic refuses a childless epic as not-a-container and leaves the
+    flag standing, which the drain would poll forever; arming waits for
+    children, where the dispatch lever takes over."""
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [{"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"}],
+    )
+
+    journal_spawn_crown(
+        "granted", [], name="w", level=2, scope="e-1", grantor="human"
+    )
+
+    assert "mission_active" not in _graph_entries()[0]
+    assert _mission_events() == []

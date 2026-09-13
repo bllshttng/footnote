@@ -76,9 +76,20 @@ def test_ac3hp_render_plist_contains_required_keys(tmp_home, plist_kwargs):
 
     assert "sh.fno.pr-watcher" in rendered
     assert "fno" in rendered
-    assert "pr-watch" in rendered
-    assert "tick" in rendered
+    # AC4-HP: the argv carries the current verb spelling; the retired
+    # pr-watch token must not appear as a bare argv string.
+    assert (
+        "<string>do</string>\n"
+        "    <string>pr</string>\n"
+        "    <string>watch</string>\n"
+        "    <string>tick</string>"
+    ) in rendered
+    assert "<string>pr-watch</string>" not in rendered
     assert "<false/>" in rendered  # RunAtLoad false
+    # ProcessType Standard (x-c79d): the positive read is the control for the
+    # negative one below.
+    assert "<key>ProcessType</key>\n  <string>Standard</string>" in rendered
+    assert "<string>Background</string>" not in rendered
 
 
 def test_ac3hp_install_prints_plist_before_writing(
@@ -642,6 +653,30 @@ def test_tick_watermarks_single_pass(tmp_path):
     assert marks["last_attempt"] == "2026-08-17T06:12:00Z"
     assert marks["last_end"]["outcome"] == "ok"
     assert spy.reads == 1
+
+
+def test_saturated_phases_reach_the_status_bits(tmp_path):
+    """The saturated marker survives the watermark pass and reads as one
+    status bit; a tick with nothing saturated carries no bit."""
+    from fno.pr_watch._install import _tick_watermarks, tick_end_bits
+
+    events_file = tmp_path / "events.jsonl"
+    _write_tick_events(
+        events_file, tick_ts="2026-08-17T06:12:01Z", attempt_ts="2026-08-17T06:12:00Z",
+        end={"outcome": "timeout", "duration_s": 479.4, "phase": "sweep",
+             "sweep_failures": 0, "why": "deadline_exceeded",
+             "saturated": ["sweep", "king_wake"]},
+    )
+
+    marks = _tick_watermarks(events_file)
+
+    assert marks["last_end"]["saturated"] == ["sweep", "king_wake"]
+    bits = tick_end_bits(marks["last_end"])
+    assert "saturated: sweep, king_wake" in bits, bits
+    assert not [b for b in tick_end_bits(
+        {"outcome": "ok", "duration_s": 1.0, "phase": "catchup", "sweep_failures": 0}
+    ) if b.startswith("saturated")]
+    assert tick_end_bits({"saturated": []}) == []
 
 
 def test_status_reads_the_event_log_once(tmp_home, tmp_launch_agents, capsys, monkeypatch):
@@ -1269,6 +1304,205 @@ def test_liveness_old_tick_and_old_plist_still_dead():
 
 
 # ---------------------------------------------------------------------------
+# A broken post-install tick end defeats the fresh-install grace
+# ---------------------------------------------------------------------------
+
+
+def _end_at(epoch, outcome="timeout", phase="recovery", duration_s=484.6):
+    """A pr_watch_tick_end watermark shaped like _tick_watermarks writes it."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    ts = _dt.fromtimestamp(epoch, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"ts": ts, "outcome": outcome, "phase": phase,
+            "duration_s": duration_s, "sweep_failures": None}
+
+
+def test_liveness_broken_post_install_end_defeats_grace():
+    # AC1-HP: plist 600s old and newer than the last tick (3300s old) - a
+    # bare grace read - but the post-install tick ended timeout -> dead.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 2700
+    v = _live(plist_mtime=plist, now=tick + 3300,
+              last_end=_end_at(plist + 595))
+    assert v["verdict"] == "dead"
+
+
+def test_liveness_benign_or_old_end_keeps_grace():
+    # AC1-EDGE: ok/lock_held/quota_skip never defeat the grace; neither does
+    # a broken end OLDER than the plist (it predates this install).
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 2700
+    now = tick + 3300
+    for outcome in ("ok", "lock_held", "quota_skip"):
+        v = _live(plist_mtime=plist, now=now,
+                  last_end=_end_at(plist + 595, outcome=outcome))
+        assert v["verdict"] == "healthy-pending", outcome
+    v = _live(plist_mtime=plist, now=now, last_end=_end_at(tick + 10))
+    assert v["verdict"] == "healthy-pending"
+
+
+def test_liveness_malformed_last_end_keeps_grace():
+    # AC1-ERR: None, not a dict, or an unparseable/absent ts -> no raise,
+    # and the same verdict as today.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 2700
+    now = tick + 3300
+    for bad in (None, "timeout", {"outcome": "timeout", "ts": "not-a-ts"},
+                {"outcome": "timeout", "ts": 1789138947},
+                {"outcome": "timeout"}):
+        v = _live(plist_mtime=plist, now=now, last_end=bad)
+        assert v["verdict"] == "healthy-pending", bad
+
+
+def test_liveness_defeated_grace_no_tick_names_broken_end():
+    # AC2-HP: grace defeated with no completed tick -> the dead detail names
+    # the broken end and never advises a reinstall.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 2700
+    v = _live(last_tick_ts=None, plist_mtime=plist, now=tick + 3300,
+              last_end=_end_at(plist + 595))
+    assert v["verdict"] == "dead"
+    assert "installed 600s ago" in v["detail"]
+    assert "timeout" in v["detail"]
+    assert "phase: recovery" in v["detail"]
+    assert "more than 2x interval" not in v["detail"]
+    assert v["fix"] == "fno agents status"
+
+
+def test_liveness_no_tick_old_install_unchanged_without_last_end():
+    # AC2-EDGE: no last_end -> the legacy no-tick detail and fix are unchanged.
+    v = _live(last_tick_ts=None, plist_mtime=0.0, now=5000.0)
+    assert v["detail"] == "no tick recorded and installed more than 2x interval (1200s) ago"
+    assert v["fix"] == "fno do pr watch install"
+
+
+def test_liveness_broken_end_stale_tick_detail_gets_suffix():
+    # The stale-tick dead arm carries the same broken-end suffix and fix.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 2700
+    v = _live(plist_mtime=plist, now=tick + 3300,
+              last_end=_end_at(plist + 595))
+    assert v["verdict"] == "dead"
+    assert v["detail"].endswith("without completing")
+    assert v["fix"] == "fno agents status"
+
+
+def test_liveness_live_passes_last_end_to_the_verdict(tmp_path, monkeypatch):
+    # AC2-LIVE: liveness_report_live feeds marks["last_end"] into the verdict,
+    # so a broken post-install end can no longer read healthy-pending.
+    import os as _os
+    import time as _time
+    import types
+
+    m = _install()
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: types.SimpleNamespace(
+            pr_watch=types.SimpleNamespace(
+                enabled=True, interval_seconds=600, wedged_after_ticks=3
+            ),
+        ),
+    )
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+    plist = tmp_path / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    now = _time.time()
+    _os.utime(plist, (now - 100, now - 100))  # fresh: inside the grace window
+
+    report = m.liveness_report_live(
+        launch_agents_dir=tmp_path,
+        marks={"last_tick": None, "last_attempt": None,
+               "last_end": _end_at(now - 50), "completed_tick": None},
+    )
+    assert report["verdict"] == "dead"
+    assert report["fix"] == "fno agents status"
+
+
+# ---------------------------------------------------------------------------
+# A fresh watermark with consecutive broken ends reads wedged, not healthy
+# ---------------------------------------------------------------------------
+
+
+def test_liveness_fresh_watermark_three_broken_ends_is_wedged():
+    # The sweep completes, so the watermark stays fresh, while every tick
+    # still dies: recency alone read this "healthy" at 26% success. The
+    # streak is what liveness was missing; the cure is a re-render, not a
+    # reinstall.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    ends = [_end_at(tick - 1800), _end_at(tick - 1200), _end_at(tick - 600)]
+    v = _live(now=tick, recent_ends=ends)
+    assert v["verdict"] == "wedged"
+    assert v["fix"] == "fno do pr watch refresh"
+    assert "3" in v["detail"]
+
+
+def test_liveness_one_broken_end_among_ok_stays_healthy():
+    # One broken tick is transient; only a CONSECUTIVE tail bounces the job.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    ends = [_end_at(tick - 1800, outcome="timeout"),
+            _end_at(tick - 1200, outcome="ok"),
+            _end_at(tick - 600, outcome="ok")]
+    v = _live(now=tick, recent_ends=ends)
+    assert v["verdict"] == "healthy"
+
+
+def test_liveness_wedged_knob_is_honored():
+    # pr_watch.wedged_after_ticks lowers the threshold; 2 broken ends at a
+    # knob of 2 already read wedged.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    ends = [_end_at(tick - 1200), _end_at(tick - 600)]
+    v = _live(now=tick, recent_ends=ends, wedged_after_ticks=2)
+    assert v["verdict"] == "wedged"
+    v = _live(now=tick, recent_ends=ends, wedged_after_ticks=3)
+    assert v["verdict"] == "healthy"
+
+
+def test_liveness_wedged_streak_never_defeats_the_install_grace():
+    # A just-refreshed plist awaits its first tick; ends that predate it are
+    # the OLD install's failures. Grace holds until the watcher has had its
+    # chance, else a refresh could never clear the verdict.
+    v = _live(last_tick_ts=None, plist_mtime=100.0, now=200.0,
+              recent_ends=[_end_at(50), _end_at(80), _end_at(95)])
+    assert v["verdict"] == "healthy-pending"
+
+
+def test_liveness_live_passes_recent_ends_to_the_verdict(tmp_path, monkeypatch):
+    # The live surface feeds marks["recent_ends"] in, so a wedged streak
+    # survives the real read path, not only the pure function.
+    import os as _os
+    import time as _time
+    import types
+
+    m = _install()
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: types.SimpleNamespace(
+            pr_watch=types.SimpleNamespace(
+                enabled=True, interval_seconds=600, wedged_after_ticks=3
+            ),
+        ),
+    )
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+    plist = tmp_path / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    now = _time.time()
+    _os.utime(plist, (now - 5000, now - 5000))  # old plist: no grace arm
+    from datetime import datetime as _dt, timezone as _tz
+
+    tick_iso = _dt.fromtimestamp(now - 25, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ends = [_end_at(now - 1800), _end_at(now - 1200), _end_at(now - 600)]
+
+    report = m.liveness_report_live(
+        launch_agents_dir=tmp_path,
+        marks={"last_tick": tick_iso, "last_attempt": None,
+               "last_end": ends[-1], "completed_tick": None,
+               "recent_ends": ends},
+    )
+    assert report["verdict"] == "wedged"
+    assert report["fix"] == "fno do pr watch refresh"
+
+
+# ---------------------------------------------------------------------------
 # The completed-merge-scan receipt on the status surface
 # ---------------------------------------------------------------------------
 
@@ -1285,7 +1519,9 @@ def test_liveness_report_carries_interval_and_merge_scan(
     monkeypatch.setattr(
         "fno.config.load_settings",
         lambda: types.SimpleNamespace(
-            pr_watch=types.SimpleNamespace(enabled=True, interval_seconds=600),
+            pr_watch=types.SimpleNamespace(
+                enabled=True, interval_seconds=600, wedged_after_ticks=3
+            ),
         ),
     )
     monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
@@ -1314,3 +1550,78 @@ def test_liveness_report_carries_interval_and_merge_scan(
     assert report["merge_scan"]["completed"] is True
     assert report["merge_scan"]["completed_at"] == tick_iso
     assert report["merge_scan"]["eligible"] == 0
+
+
+def test_tick_watermarks_copy_scanned_into_merge_scan(tmp_path):
+    """The status line renders scanned from the marks copy, so the copy must
+    carry the receipt's scanned count the way it already carries eligible."""
+    from fno.pr_watch._install import _tick_watermarks
+
+    events_file = tmp_path / "events.jsonl"
+    _write_tick_events(
+        events_file, tick_ts="2026-08-17T06:12:01Z",
+        tick_data={
+            "open_prs": 3, "acted": 0, "swept_count": 13, "swept": {},
+            "dropped_count": 0, "dropped": {},
+            "merge_scan": {"completed": True, "scanned": 13,
+                           "eligible": 0, "attempted": 0},
+        },
+    )
+
+    marks = _tick_watermarks(events_file)
+
+    assert marks["merge_scan"]["scanned"] == 13
+
+
+def test_tick_watermarks_scanned_none_without_the_field(tmp_path):
+    """A receipt from a binary older than the scanned field renders as None,
+    the same honest absence the pre-merge_scan key gap gives."""
+    from fno.pr_watch._install import _tick_watermarks
+
+    events_file = tmp_path / "events.jsonl"
+    _write_tick_events(
+        events_file, tick_ts="2026-08-17T06:12:01Z",
+        tick_data={
+            "open_prs": 3, "acted": 0, "swept_count": 13, "swept": {},
+            "dropped_count": 0, "dropped": {},
+            "merge_scan": {"completed": True, "eligible": 0, "attempted": 0},
+        },
+    )
+
+    marks = _tick_watermarks(events_file)
+
+    assert marks["merge_scan"]["scanned"] is None
+
+
+def test_status_prints_scanned_in_merge_scan_line(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch
+):
+    """Given a pr_watch_tick receipt whose merge_scan.scanned is 13, status
+    renders the line with scanned=13 (was hardcoded None before)."""
+    import os as _os
+    import re
+    from datetime import datetime, timezone
+    import fno.pr_watch._install as m
+
+    (tmp_home / ".fno" / "config.toml").write_text("[pr_watch]\nenabled = true\n")
+    plist_path = tmp_launch_agents / m._PLIST_FILENAME
+    plist_path.write_text("<plist/>")
+    old = _os.path.getmtime(plist_path) - 60
+    _os.utime(plist_path, (old, old))
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    _write_tick_events(
+        events_file, tick_ts=now,
+        tick_data={
+            "open_prs": 3, "acted": 0, "swept_count": 13, "swept": {},
+            "dropped_count": 0, "dropped": {},
+            "merge_scan": {"completed": True, "scanned": 13,
+                           "eligible": 0, "attempted": 0},
+        },
+    )
+
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
+    out = capsys.readouterr().out
+    assert re.search(r"^Merge scan: +.*scanned=13", out, re.M), out

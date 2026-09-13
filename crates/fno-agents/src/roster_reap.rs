@@ -37,7 +37,6 @@ use std::path::PathBuf;
 
 use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
 use crate::daemon::CascadeOutcome;
-use crate::gc::transcript_age_s;
 use crate::gc_sweep::{provenance_verdict, GraphRead};
 use crate::graph_store::WorkState;
 use crate::state::RegistryEntry;
@@ -155,6 +154,7 @@ pub fn run(
     registry: &[RegistryEntry],
     read_graph: &dyn Fn() -> Option<GraphRead>,
     transcripts: &dyn Fn(&RegistryEntry) -> Option<Vec<PathBuf>>,
+    age: &dyn Fn(&RegistryEntry) -> Option<i64>,
     now: i64,
     remove: &dyn Fn(&RegistryEntry) -> CascadeOutcome,
 ) -> RosterReapSummary {
@@ -287,12 +287,16 @@ pub fn run(
             .source
             .map(|s| s.as_str())
             .unwrap_or("sessions");
+        // x-b7f8: the terminal read hoisted out of the Open arm. Every row
+        // here is claude by construction, so `row.state` is in hand, and
+        // recency must be able to yield to it exactly as the registry
+        // sweep's grace_gate does.
+        let terminal = row
+            .state
+            .as_deref()
+            .filter(|s| crate::claude_roster::is_terminal_roster_state(s));
         let open_release: Option<String> = match &verdict.work {
             WorkState::Open { node: n, status } => {
-                let terminal = row
-                    .state
-                    .as_deref()
-                    .filter(|s| crate::claude_roster::is_terminal_roster_state(s));
                 let inactive = crate::gc::INACTIVE_NODE_STATUSES.contains(&status.as_str());
                 let merged = verdict.merged_but_open.is_some();
                 if terminal.is_some() || inactive || merged {
@@ -365,8 +369,11 @@ pub fn run(
         // age rides the reason so a keep is auditable. x-2774 change 8: a
         // provably dead pid (ESRCH) overrides recency here too, the same
         // override the registry sweep makes in grace_gate - recency without
-        // a living writer is not liveness.
-        let age = transcript_age_s(hits.as_deref(), now);
+        // a living writer is not liveness. x-b7f8: a terminal harness state
+        // overrides it the same way. The age rides the injected seam
+        // (x-54cf; production wires the shared probe): the newest timestamped
+        // entry, not a file stat.
+        let age = age(&entry);
         let pid_gone = row.pid.is_some_and(crate::daemon::pid_is_gone);
         match age {
             None => summary.kept.push(judgement(
@@ -375,13 +382,26 @@ pub fn run(
                 "transcript unresolved".into(),
                 false,
             )),
-            Some(age) if age <= grace_secs && !pid_gone => summary.kept.push(judgement(
-                &ident,
-                node,
-                format!("active: transcript written {age}s ago"),
-                false,
-            )),
-            Some(_) => {
+            Some(age) if age <= grace_secs && !pid_gone && terminal.is_none() => {
+                summary.kept.push(judgement(
+                    &ident,
+                    node,
+                    format!("active: transcript written {age}s ago"),
+                    false,
+                ))
+            }
+            Some(age) => {
+                // Name the early fire: a retirement INSIDE the grace window
+                // went because the harness says the session finished, not
+                // because the transcript aged out.
+                let basis = if terminal.is_some() && age <= grace_secs {
+                    format!(
+                        "{basis}; session terminal: harness state {}",
+                        terminal.unwrap_or_default()
+                    )
+                } else {
+                    basis
+                };
                 let basis = if pid_gone {
                     format!("{basis}; pid {} is gone", row.pid.unwrap_or(0))
                 } else {
@@ -476,6 +496,7 @@ pub fn roster_reap(
         &registry.entries,
         &|| crate::gc_sweep::read_graph_entries(home),
         &|e| store.borrow_mut().matches(e),
+        &crate::gc::probe_row_age,
         crate::daemon::now_epoch_secs(),
         &crate::gc_native::apply_active_surface_removal,
     )
@@ -537,6 +558,25 @@ mod tests {
         dir
     }
 
+    /// The test age seam (x-54cf): the age answers from the staged transcript
+    /// files' mtimes, exactly what the pre-probe stat read.
+    fn mtime_age(paths: &[PathBuf]) -> Option<i64> {
+        paths
+            .iter()
+            .filter_map(|p| {
+                let t = std::fs::metadata(p).ok()?.modified().ok()?;
+                Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64)
+            })
+            .max()
+            .map(|newest| {
+                (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64)
+                    .saturating_sub(newest)
+            })
+    }
+
     fn no_home() -> crate::paths::AgentsHome {
         crate::paths::AgentsHome::at(std::path::Path::new("/nonexistent-roster-reap"))
     }
@@ -557,6 +597,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -585,6 +626,7 @@ mod tests {
             &[entry],
             &|| Some(graph_done("x-aaaa")),
             &|_| None,
+            &|_| None,
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -608,6 +650,7 @@ mod tests {
             "sid-1".to_string(),
             vec![("x-bbbb".to_string(), "in_review".to_string())],
         );
+        g.work_index = g.index.clone();
         let summary = run(
             &no_home(),
             900,
@@ -617,6 +660,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -643,6 +687,7 @@ mod tests {
             "sid-1".to_string(),
             vec![("x-bbbb".to_string(), "in_review".to_string())],
         );
+        g.work_index = g.index.clone();
         let summary = run(
             &no_home(),
             900,
@@ -652,6 +697,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -683,6 +729,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_| None,
+            &|_| None,
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -704,6 +751,7 @@ mod tests {
             &[],
             &|| Some(GraphRead::default()),
             &|_| None,
+            &|_| None,
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -714,12 +762,16 @@ mod tests {
         );
     }
 
-    // A fresh transcript keeps the row: liveness outranks doneness.
+    // A fresh transcript does NOT save a row whose harness state reads
+    // terminal: the roster's done is a finish line, not a turn boundary
+    // (x-b7f8). A working row inside grace still keeps.
     #[test]
-    fn fresh_transcript_keeps_a_done_node_row() {
+    fn fresh_transcript_does_not_save_a_terminal_roster_row() {
         let dir = tmpdir("fresh");
         let transcript = dir.join("sid-1.jsonl");
         std::fs::write(&transcript, "{\"message\":{}}\n").unwrap();
+        // The row() helper defaults to state done: the terminal fact wins
+        // over the fresh transcript, and the basis names the early fire.
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
         let summary = run(
             &no_home(),
@@ -730,11 +782,17 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
-        assert!(summary.retired.is_empty());
-        assert!(summary.kept[0].reason.contains("active"), "{summary:?}");
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        assert!(
+            summary.retired[0]
+                .reason
+                .contains("session terminal: harness state done"),
+            "{summary:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -749,6 +807,7 @@ mod tests {
             &ClaudeAgentsSnapshot::unknown("claude exited 1"),
             &[],
             &|| Some(graph_done("x-aaaa")),
+            &|_| None,
             &|_| None,
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
@@ -772,6 +831,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::Failed("rm exited 3".into()),
         );
@@ -800,6 +860,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::Removed,
         );
@@ -839,6 +900,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::Failed("injected refusal".into()),
         );
@@ -890,6 +952,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -918,6 +981,7 @@ mod tests {
                 &roster(rows.clone()),
                 &[],
                 &|| Some(GraphRead::default()),
+                &|_| None,
                 &|_| None,
                 crate::daemon::now_epoch_secs(),
                 &|_| CascadeOutcome::NotApplicable,
@@ -951,6 +1015,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -980,6 +1045,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -998,6 +1064,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1025,6 +1092,7 @@ mod tests {
         g.pr_state.insert("x-aaaa".into(), (None, 0, 0));
         g.index
             .insert("sid-1".into(), vec![("x-aaaa".into(), "do".into())]);
+        g.work_index = g.index.clone();
         let at_all = run(
             &no_home(),
             900,
@@ -1034,6 +1102,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1056,6 +1125,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1082,6 +1152,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1114,12 +1185,80 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
         assert!(summary.retired.is_empty(), "{summary:?}");
         assert!(
             summary.kept[0].reason.contains("pr state contradicts"),
+            "{summary:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A fresh transcript (inside grace, unlike `quiet_transcript`).
+    fn fresh_transcript(dir: &std::path::Path, sid: &str) -> PathBuf {
+        let path = dir.join(format!("{sid}.jsonl"));
+        std::fs::write(&path, "{\"message\":{}}\n").unwrap();
+        let f = std::fs::File::options().append(true).open(&path).unwrap();
+        f.set_modified(std::time::SystemTime::now()).unwrap();
+        path
+    }
+
+    /// x-b7f8: the roster-side twin of the grace_gate conjunct. An AllDone
+    /// row reading done with a transcript 60s old retires and names the
+    /// early fire; reading working it keeps with the active line.
+    #[test]
+    fn xb7f8_terminal_state_overrides_recency_at_the_roster_sweep() {
+        let dir = tmpdir("term-recency");
+        let transcript = fresh_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done("x-aaaa")),
+            &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        assert!(
+            summary.retired[0]
+                .reason
+                .contains("session terminal: harness state done"),
+            "{summary:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        let dir = tmpdir("term-recency-keep");
+        let transcript = fresh_transcript(&dir, "sid-1");
+        let mut working = row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"));
+        working.state = Some("working".into());
+        let rows = vec![working];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done("x-aaaa")),
+            &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(summary.retired.is_empty(), "{summary:?}");
+        assert!(
+            summary.kept[0]
+                .reason
+                .starts_with("active: transcript written "),
             "{summary:?}"
         );
         std::fs::remove_dir_all(&dir).ok();

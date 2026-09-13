@@ -45,7 +45,6 @@ from fno.backlog.advance import (
     _safe_release,
     _spawn_worker,
     _walker_key,
-    _worker_agent_name,
     gate_refusal,
 )
 
@@ -233,6 +232,7 @@ def _dispatch_reconcile(
         return skip("claim-error", detail=str(exc))
 
     try:
+        spawn_receipt: dict = {}
         short_id = _spawn_worker(
             node_id,
             root,
@@ -246,6 +246,7 @@ def _dispatch_reconcile(
             dispatch_reservation=(dispatch_key, holder, dispatch_root),
             caller="reconcile_dispatch",
             events_path=ev_path,
+            receipt=spawn_receipt,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -266,7 +267,9 @@ def _dispatch_reconcile(
         "node_id": node_id,
         "short_id": short_id,
         "kind": "reconcile",
-        "agent_name": _worker_agent_name(node_id, dep.get("slug"), prefix="reconcile"),
+        # The exact registered rd-t-* name from the spawn receipt (x-84b2).
+        "agent_name": spawn_receipt.get("agent_name", ""),
+        "notes": list(spawn_receipt.get("notes") or ()),
     }
     if rank:
         dispatched_data["rank"] = rank
@@ -275,7 +278,13 @@ def _dispatch_reconcile(
         import sys
 
         print(f"reconcile: dispatched {node_id} -> worker {short_id}", file=sys.stderr)
-    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+    return AdvanceResult(
+        "dispatched",
+        EVENT_DISPATCHED,
+        node_id=node_id,
+        short_id=short_id,
+        notes=tuple(spawn_receipt.get("notes") or ()),
+    )
 
 
 def _route_one(

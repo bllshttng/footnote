@@ -2,7 +2,7 @@
 
 Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical source; `CLAUDE.md` / `GEMINI.md` are stubs that import it. Quick reference + index: deep subsystem mechanics live in `docs/` (see [Deep-dive docs](#deep-dive-docs)).
 
-**footnote** is a Claude Code plugin: an autonomous delivery pipeline that takes a feature from idea to shipped PR (think -> plan -> do -> review -> ship). First time here? `fno config setup wizard` (terminal) or `/fno:setup` (in-session). Defaults work without config.
+****footnote** is a Claude Code plugin: an autonomous pipeline from idea to shipped PR (think -> plan -> do -> review -> ship). First time here? `fno config setup wizard` (terminal) or `/fno:setup` (in-session).
 
 ## Precedence and output style
 
@@ -25,21 +25,13 @@ Lead responses with the next action, number multi-step work, give concrete time 
 
 ## Pitfalls corpus (capped)
 
-Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. Inlined, not linked: AGENTS.md is the one channel proven to reach every harness at session start, and codex sees this body, not linked rule bodies.
+Traps a fresh agent re-hits because no lint, guard or refusal catches them yet. Inlined, not linked: this file is the one channel proven to reach every harness at session start.
 
-**Cap: bytes, not count.** Every entry is paid at session start. `check-pitfalls.sh` fails on an 11th entry, a missing field or one over 60 days. The byte budget binds first near 5. This prose is at its floor; funding growth is unsolved.
+**Cap: bytes, not count.** Every entry is paid at session start. `check-pitfalls.sh` fails on an 11th entry, a missing field or one over 60 days. The byte budget binds first near 5.
 
 **Format:** one `###` block each: imperative trap (1-3 sentences), `specimens:` file:line refs, `graduates-to:` the guard that retires it, `added:` YYYY-MM-DD. Remove an entry in the PR where its guard lands.
 
-AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read, proving this corpus reached its harness. A unit test asserts it: `kdc-delivery-sentinel-1932`.
-
-### Assert a positive marker, never an absence
-
-An absence has three explanations: the real outcome, "the instrument never ran", or a pipeline loss. In the third case, the instrument ran, it HIT, and the pipeline ate the output before anything read it. Require a marker only the outcome produces, pinned to the measured thing, not a matching word. A positive control validates the TOOL, not the TARGET. A green control aimed at the wrong SYMBOL still reads as proof. Before trusting a zero, name the behavior's symbol: for a Python capability, use the function name, not the CLI spelling. Never truncate or post-process a search whose zero you intend to trust.
-
-- specimens: 2026-08-23 to 08-30. Five false zeros, five causes: `head -6` truncation; the rtk wrapper; a quoted-token regex against bare tokens; zsh eating `:c` in an unquoted `$SHA:path`, so `git show` failed and `grep -c` printed a clean 0; and `stat` printing LOCAL time, where a hand-appended Z aged a 3-minute write to seven hours (print `%z`). 2026-09-06. A diff-RANGE fault, not a search fault: `git show <merge> -- path` returned 0 for a symbol its patch adds 3x, because a merge's combined diff drops hunks matching one parent, while `--stat` showed 112 changed lines in that file. Use `git diff <merge>^1 <merge>`. Control: grep the same fetch for a token you expect present.
-- graduates-to: An assert helper rejects absence-only success and zero-hit probes without a positive control. Honest exit codes answering the wrong question still need a verdict verb.
-- added: 2026-07-27
+AC9 delivery sentinel (echoed verbatim by a fresh worker, asserted by unit test): `kdc-delivery-sentinel-1932`.
 
 ### A capability probe delivered over the mail bus can only ever return yes
 
@@ -62,22 +54,22 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 ```
 footnote/
 ├── .claude-plugin/   # Plugin manifest
-├── skills/           # Skills (advertised set in using-fno)
-├── agents/           # Subagents (target, code-reviewer, hunters)
+├── skills/           # Skills
+├── agents/           # Subagents
 ├── commands/         # Slash commands
 ├── hooks/            # Stop hooks, session-start, context monitor
 ├── scripts/          # Validation, metrics, orchestration, diagnostics
 ├── cli/              # `fno` CLI (Python + uv) + tests
 ├── crates/           # Rust runtime (fno-agents)
-└── internal ->       # Obsidian vault symlink (plans/docs; not git-tracked)
+└── internal ->       # Obsidian vault symlink (not git-tracked)
 ```
 
 ### Conventions
 
 - **Worktrees:** worktree-first for all repo work. `claude --worktree <name>` is intercepted by `hooks/worktree-setup.sh`; after creation run `bash scripts/setup/setup-worktree.sh`. Full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
-- **Search:** prefer `rg` / Grep over `grep -r` (which descends into nested worktrees). Scope any `grep -r` to a path. For a load-bearing sweep use `RIPGREP_CONFIG_PATH= rg -uu`, not a bare `rg -uu` (`-u` ignores files, not globs).
+- **Search:** prefer `rg` / Grep over `grep -r` (descends into nested worktrees). Scope any `grep -r` to a path. Load-bearing sweep: `RIPGREP_CONFIG_PATH= rg -uu`, never a bare `rg -uu` (`-u` ignores files, not globs).
 - **Prose style:** a paragraph is ONE physical line. A newline starts the next block. House style, and the gate: [docs/style-rules.md](docs/style-rules.md).
-- **File budget:** a source file over 5,000 lines is shrink-only. The refusal in `scripts/ci/check-file-budget.sh` names the remedy.
+- **File budget:** a source file over 5,000 lines, or `cli/src/fno` Python past net +100 per change, is shrink-only. The Python cap counts the whole tree, net. A feature lands in `crates/`. `scripts/ci/check-file-budget.sh` names the remedy.
 - **Large files:** a source file over 1,000 lines gets read the exact range, edit, re-read, and a test count proved with `rg -c '#\[test\]'` (or `def test_`) before and after.
 - **Multi-CLI:** skills are portable. Orchestration needs per-CLI hook config. See `docs/HARNESSES.md`, `docs/architecture/multi-cli-hooks.md`, `docs/SKILL-COMPAT-MATRIX.md`.
 
@@ -120,7 +112,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 **Looping.**
 - *In-session:* `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop/allow from external truth only: `<promise>` intent, done() reads (PR exists, CI green, every `config.review.required_bots` bot reviewed with no unaddressed blocking finding, and either no open finding or the configured rounds spent), any plan-declared `done_probes`, a backstop fingerprint, and budget. Terminal-allow invokes `fno-agents finalize` (idempotent).
 - *Cross-session:* `fno-agents loop run` drives `--driver target`, stopping on a `TerminationReason` (DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, Interrupted). [unified-loop](docs/architecture/unified-loop.md).
-- Distress: `<help reason="..." evidence="...">...</help>`. Cancel target: `touch .fno/.target-cancelled`; king: `fno agents king cancel --scope <scope>`. Subprocess agents return `RESULT: BLOCKED`.
+- Distress: `<help reason="..." evidence="...">...</help>`. Cancel target: `/fno:cancel-target` (attributed). King: `fno agents king cancel --scope <scope>`. Subprocess agents return `RESULT: BLOCKED`.
 - Shared iteration protocol: do ONE thing -> verify mechanically -> keep or discard -> repeat ([iteration-loop](skills/target/references/iteration-loop.md)).
 
 ### State files & forbidden surfaces
@@ -194,16 +186,20 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **TDD:** failing test -> red -> minimal code -> green -> verify -> atomic commit.
 - **Testing:** `python skills/execute/orchestrator.py --help`; `./scripts/validate-test-first.sh`.
 
+## graphify
+
+Query `graphify-out/graph.json` before source reads. `/graphify` loads the skill first. Prefer `query`/`path`/`explain`, wiki for navigation, report as fallback. Dirty output expected. Skip on explicit opt-out or graph debugging. After edits run `graphify update .`.
+
 ## Deep-dive docs
 
-Everything the body already links is reachable from the paragraph that explains it. These are the docs nothing above points at:
+The docs nothing above already points at:
 
-Backlog: [usage](docs/backlog-usage.md) · [board ordering](docs/architecture/backlog-board-ordering.md) · [triage](docs/backlog-triage.md)
+Backlog: [usage](docs/backlog-usage.md), [board ordering](docs/architecture/backlog-board-ordering.md), [triage](docs/backlog-triage.md)
 
-Loop & target: [control-plane loop](docs/architecture/control-plane-loop.md) · [target reliability](docs/architecture/target-reliability-core.md)
+Loop & target: [control-plane loop](docs/architecture/control-plane-loop.md), [target reliability](docs/architecture/target-reliability-core.md)
 
-Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md) · [plan completion stamp](docs/architecture/plan-completion-stamp.md) · [post-merge ritual](docs/architecture/auto-post-merge-ritual.md)
+Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md), [plan completion stamp](docs/architecture/plan-completion-stamp.md), [post-merge ritual](docs/architecture/auto-post-merge-ritual.md)
 
-Coordination & providers: [coordination](docs/architecture/coordination.md) · [mux selector resolution](docs/architecture/mux-selector-resolution.md) · [provider rotation](docs/provider-rotation.md) · [cross-model review](docs/architecture/cross-model-review.md)
+Coordination & providers: [coordination](docs/architecture/coordination.md), [mux selector resolution](docs/architecture/mux-selector-resolution.md), [provider rotation](docs/provider-rotation.md), [cross-model review](docs/architecture/cross-model-review.md)
 
-Platform & ops: [fleet FAQ](docs/fleet-faq.md) · [harnesses](docs/HARNESSES.md) · [multi-CLI hooks](docs/architecture/multi-cli-hooks.md) · [path config](docs/path-config.md) · [workspace restore](docs/architecture/workspace-restore.md) · [disposable deletes](docs/architecture/disposable-deletes.md) · [thread lanes](docs/architecture/thread-lanes.md) · [resource meter](docs/architecture/resource-meter.md)
+Platform & ops: [fleet FAQ](docs/fleet-faq.md), [reaping FAQ](docs/reaping-faq.md), [harnesses](docs/HARNESSES.md), [multi-CLI hooks](docs/architecture/multi-cli-hooks.md), [path config](docs/path-config.md), [workspace restore](docs/architecture/workspace-restore.md), [disposable deletes](docs/architecture/disposable-deletes.md), [thread lanes](docs/architecture/thread-lanes.md), [resource meter](docs/architecture/resource-meter.md), [vocabulary: user and operator](docs/architecture/vocabulary-user-and-operator.md), [graph search](docs/graph-search.md)

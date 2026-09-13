@@ -42,8 +42,10 @@ READ_ALLOWLIST = (
     "cli/src/fno/tracker/metadata.py",
     "crates/fno/src/backlog_view.rs",  # consumes the neutral snapshot + graph-mode mtime path (task 1.2)
     "crates/fno-agents/src/graph_get.rs",  # refuses the default store under an external backend (x-997a)
+    "crates/fno-agents/src/prove_it_verdicts.rs",  # the verdict reader's read-only walk, same external-backend refusal as graph_get
     "crates/fno-agents/src/gc_sweep.rs",  # the retirement sweep's read-only reverse join (sessions_index + work_state)
     "crates/fno-agents/src/feed.rs",  # the activity feed's read-only lifecycle derivation
+    "crates/fno-agents/src/scratch.rs",  # the sweep's read-only node-status lookup feeding the file/fold decision
 )
 
 # Known-positive controls (task 4.2 / AC9): verbs the census must FIND in the
@@ -168,7 +170,12 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
     total = 0
     owner_files = {str(REPO_ROOT / p) for p in READ_ALLOWLIST if p.endswith(".py")}
     rust_allow = {str(REPO_ROOT / p) for p in READ_ALLOWLIST if p.endswith(".rs")}
-    machinery = {str(REPO_ROOT / "cli/src/fno/backlog/advance.py")}
+    machinery = {
+        str(REPO_ROOT / "cli/src/fno/backlog/advance.py"),
+        # run_pass is the maintain verb's engine (moved out of the cli shell);
+        # its reads are the verb's own orchestration, not a new consumer.
+        str(REPO_ROOT / "cli/src/fno/graph/maintain.py"),
+    }
     machinery_marker = "tracker-owned machinery"
 
     # Live registry: function names of tracker-owned verb callbacks.

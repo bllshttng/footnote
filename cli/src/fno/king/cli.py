@@ -144,7 +144,43 @@ def init_cmd(
     typer.echo(f"king: manifest written: {manifest_path}")
     typer.echo(f"fno_id: {fields['fno_id']}")
     typer.echo(f"scope:  {fields['scope']}")
+    _print_settled_children(scope)
     _warn_uncrowned_row(scope)
+
+
+def _print_settled_children(scope: str) -> None:
+    """Print the crown scope's settled children as titles, or nothing.
+
+    A crown lands on an epic whose history predates the session, and every
+    board read a king makes filters to open rows, so the done children that
+    record what the epic already established are invisible exactly when they
+    matter most (x-ada6). Titles only: no search over details, no similarity
+    score. One local graph read; nothing prints when none exist or the graph
+    cannot be read.
+    """
+    from fno.agents.crown import _graph_index, split_scope
+
+    by_id = _graph_index()
+    if by_id is None:
+        return
+    lines = []
+    for member in split_scope(scope):
+        for entry in by_id.values():
+            if entry.get("parent") != member:
+                continue
+            if entry.get("status") not in ("done", "superseded"):
+                continue
+            title = entry.get("title") or entry.get("id") or ""
+            lines.append(f"- {title} ({entry.get('id')})")
+    if not lines:
+        return
+    typer.echo()
+    typer.echo(
+        "Settled findings under this crown (done or superseded children; "
+        "read before the first check-in, never re-derive):"
+    )
+    for line in lines:
+        typer.echo(line)
 
 
 def _warn_uncrowned_row(scope: str) -> None:
@@ -229,6 +265,7 @@ def done_cmd(
         AGENT_UNREGISTERED,
         REGISTRY_UNREADABLE,
         calling_agent_row,
+        emit_crown_vacated,
     )
     from fno.agents.registry import TERMINAL_STATUSES as _TERMINAL_ROW_STATUSES
     from fno.agents.registry import update_registry
@@ -295,11 +332,12 @@ def done_cmd(
     # moved to a successor mid-call is refused here instead of disarming the
     # successor's manifest below (same order as the succession path).
     vacated = holder_name is None
+    vacated_rows: list = []
     if holder_name is not None:
         attended_named = holder_name == ""
 
         def _vacate(rows: list) -> list:
-            nonlocal vacated
+            nonlocal vacated, vacated_rows
             for index, row in enumerate(rows):
                 if attended_named:
                     # Attended + named scope: vacate whatever live row holds
@@ -308,6 +346,7 @@ def done_cmd(
                         row.crown_scope == scope
                         and row.status not in _TERMINAL_ROW_STATUSES
                     ):
+                        vacated_rows.append(row)
                         rows[index] = _replace(
                             row,
                             crown_level=None,
@@ -316,6 +355,7 @@ def done_cmd(
                         )
                         vacated = True
                 elif row.name == holder_name and row.crown_scope == scope:
+                    vacated_rows.append(row)
                     rows[index] = _replace(
                         row, crown_level=None, crown_scope=None, crown_grantor=None
                     )
@@ -337,6 +377,16 @@ def done_cmd(
                 err=True,
             )
             raise typer.Exit(1)
+        for vacated_row in vacated_rows:
+            # The row write is the authority: this fires even if the manifest
+            # removal below then fails, and never on the refusal above. One
+            # event per vacated row, so a split crown records every holder.
+            emit_crown_vacated(
+                scope=scope, level=vacated_row.crown_level, holder=vacated_row.name,
+                holder_session=vacated_row.harness_session_id,
+                grantor=vacated_row.crown_grantor,
+                cause="expired" if attended_named else "abdicated",
+            )
 
     # The session-id snapshot guards the successor race under the manifest
     # lock (ownership was proven by the locked vacate above). False means the
@@ -352,6 +402,13 @@ def done_cmd(
             err=True,
         )
         raise typer.Exit(1)
+    if not vacated:
+        # No live holder: the manifest clear is the whole vacate.
+        emit_crown_vacated(
+            scope=scope, level=None, holder=None,
+            holder_session=expired_manifest_session,
+            grantor=None, cause="orphan_manifest",
+        )
     typer.echo(f"king: crown expired: {scope}")
     typer.echo(
         "row crown: vacated; manifest: cleared"
@@ -470,14 +527,144 @@ def manifest_path_cmd(
     """Print this live crowned session's existing scope manifest path."""
     from fno.king.state import resolve_king_manifest_path
 
-    path = resolve_king_manifest_path(
+    path, reason = resolve_king_manifest_path(
         harness_session_id,
         harness or None,
         state_root=state_root,
     )
     if path is None:
+        typer.echo(f"king manifest-path: {reason}", err=True)
         raise typer.Exit(1)
     typer.echo(path)
+
+
+def history_cmd(
+    scope: str = typer.Option(
+        "", "--scope", help="Crown scope to read. Default: this session's own crown."
+    ),
+    as_json: bool = typer.Option(False, "--json", "-J", help="Emit the full JSON payload."),
+) -> None:
+    """Read this crown's recorded reign: its check-ins, newest first, verbatim.
+
+    ``fno agents court -n`` answers who rules NOW; this answers what
+    happened across the reign. Contract: docs/architecture/reign.md.
+    """
+    from fno.king.history import HistoryUnreadable, resolve_scope, run_native
+    from fno.paths import event_journals
+
+    try:
+        crown = resolve_scope(scope)
+    except HistoryUnreadable as exc:
+        _refuse(f"king: {exc}")
+    code, out, err = run_native(event_journals(), crown, as_json)
+    if out:
+        typer.echo(out.rstrip("\n"))
+    if err:
+        typer.echo(err.rstrip("\n"), err=True)
+    raise typer.Exit(code)
+
+
+def checkin_cmd(ctx: typer.Context) -> None:
+    """Run the reign check-in body: gather, print, diff, journal.
+
+    Flags pass through to the native ``king-checkin`` beat: [--scope
+    <scope>] [--no-emit] [--json]. This shell resolves the caller's crown
+    and the paths Python owns; the beat never decides.
+    """
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.king.history import HistoryUnreadable, resolve_scope
+    from fno.paths import (
+        event_journals,
+        graph_json,
+        handoffs_dir,
+        king_faqs_dir,
+        project_events_json,
+    )
+    from fno.rust_binary import resolve_binary
+
+    passed = list(ctx.args)
+    explicit_scope = next(
+        (passed[i + 1] for i, t in enumerate(passed) if t == "--scope" and i + 1 < len(passed)), ""
+    )
+    try:
+        crown = resolve_scope(explicit_scope)
+    except HistoryUnreadable as exc:
+        _refuse(f"king: {exc}")
+    binary = resolve_binary()
+    if binary is None:
+        _refuse(
+            "king: the fno-agents binary was not found, and the check-in beat "
+            "runs there. Reinstall fno, run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN."
+        )
+    argv = [
+        str(binary),
+        "king-checkin",
+        *passed,
+        "--scope",
+        crown,
+        "--graph",
+        str(graph_json()),
+        "--handoffs-dir",
+        str(handoffs_dir()),
+        "--faqs-dir",
+        str(king_faqs_dir()),
+        "--emit-path",
+        str(project_events_json()),
+    ]
+    for path in event_journals():
+        argv += ["--events-path", str(path)]
+    state = None
+    try:
+        from fno.agents.crown import calling_agent_row
+        from fno.king.state import resolve_king_manifest_path
+
+        caller = calling_agent_row()
+        sid = getattr(caller, "harness_session_id", None) or ""
+        if sid:
+            state, _ = resolve_king_manifest_path(sid, getattr(caller, "harness", None))
+    except Exception:  # noqa: BLE001 - an unresolvable crown reads the fleet board
+        state = None
+    if state is not None:
+        argv += ["--board-state", str(state)]
+    try:
+        from fno.agents.registry import load_registry
+
+        level = next(
+            r.crown_level
+            for r in load_registry()
+            if getattr(r, "crown_scope", None) == crown and r.crown_level is not None
+        )
+        argv += ["--level", str(level)]
+    except Exception:  # noqa: BLE001 - a levelless crown degrades the fold, not the beat
+        pass
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if proc.stdout:
+        typer.echo(proc.stdout.rstrip("\n"))
+    if proc.stderr:
+        typer.echo(proc.stderr.rstrip("\n"), err=True)
+    raise typer.Exit(code=propagate_returncode(proc.returncode))
+
+
+def ledger_cmd(
+    out: Optional[Path] = typer.Option(
+        None, "--out", help="Write the page here instead of <state_dir>/reign.html."
+    ),
+) -> None:
+    """Render the reign ledger page: every crown, its territory, its nodes.
+
+    The page assembly is the native ``reign-ledger`` verb; this shell resolves
+    the court and the paths. Contract: docs/architecture/reign.md.
+    """
+    from fno.king.ledger import build_ledger_data, write_ledger
+
+    try:
+        path = write_ledger(build_ledger_data(), out)
+    except RuntimeError as exc:
+        _refuse(f"king: {exc}")
+    typer.echo(f"reign ledger: {path}")
 
 
 @king_app.command("board")
@@ -557,7 +744,7 @@ def board_cmd(
             or ""
         )
         if session_id:
-            resolved = resolve_king_manifest_path(
+            resolved, _ = resolve_king_manifest_path(
                 session_id, getattr(caller, "harness", None)
             )
             if resolved is not None:
@@ -646,20 +833,33 @@ def drain_cmd(
     failure as drained.
     """
     from fno.graph.store import GraphUnreadableError, StoreUnavailable
+    from fno.king import drain_cache
     from fno.king.scope import scope_undelivered
-    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
+    from fno.tracker import active_backend_name
+    from fno.tracker.metadata import ExternalMetadataUnavailable
+    from fno.tracker.metadata import _graph_store_path, read_entries
 
+    path = _graph_store_path()
+    ident = drain_cache.graph_ident(path) if active_backend_name() == "graph" else None
+    if ident is not None:
+        cached = drain_cache.load(scope, ident)
+        if cached is not None:
+            typer.echo(
+                json.dumps({"scope": scope, "undelivered": cached, "cached": True})
+            )
+            return
     try:
         entries = read_entries("king drain", strict=True)
         undelivered = scope_undelivered(scope, entries)
     except (
-        ExternalMetadataUnavailable,
-        GraphUnreadableError,
-        StoreUnavailable,
-        ValueError,
+        ExternalMetadataUnavailable, GraphUnreadableError, StoreUnavailable, ValueError
     ) as exc:
         typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
         raise typer.Exit(1) from exc
+    # A moved post-read identity describes bytes the count never saw.
+    post = drain_cache.graph_ident(path)
+    if post is not None and post == ident:
+        drain_cache.store(scope, post, undelivered)
     typer.echo(json.dumps({"scope": scope, "undelivered": undelivered}))
 
 
@@ -700,6 +900,13 @@ agents_king_app.command("shape")(shape_cmd)
 # deprecated `fno king` spelling once missed the verb_moves fold and burned
 # every stop's unavailable-retries. The hooks now name `agents king` directly.
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
+# Here only, like the faq typer: the retired bare `fno king` menu stays capped.
+agents_king_app.command("history")(history_cmd)
+agents_king_app.command(
+    "checkin",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)(checkin_cmd)
+agents_king_app.command("ledger")(ledger_cmd)
 agents_king_app.add_typer(faq_app, name="faq")
 
 

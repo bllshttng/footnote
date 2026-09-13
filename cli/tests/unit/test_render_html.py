@@ -2,15 +2,43 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 from pathlib import Path
 
+import pytest
+
 from fno.graph.render_html import (
+    LEAK_PATTERNS,
     UNSCOPED_LABEL,
     _dashboard_rows,
     _obsidian_url,
     render_graph_html,
+    render_public_sections_html,
 )
+
+
+@pytest.fixture(autouse=True)
+def hermetic_flow(monkeypatch):
+    """No test in this file talks to the ledger or the keeper: the board
+    render now computes a flow payload, and an autouse stub keeps all fifty
+    pre-existing render tests off the real sources. Flow-specific tests
+    re-patch with the payload they assert on."""
+    monkeypatch.setattr(
+        "fno.graph.render_html._board_flow",
+        lambda entries, project=None, **kw: {
+            "available": False,
+            "reason": "hermetic test stub",
+        },
+    )
+
+
+def _payload_flow(text: str) -> dict:
+    match = re.search(
+        r'<script id="data" type="application/json">(.*?)</script>', text, re.S
+    )
+    assert match, "dashboard payload script tag missing"
+    return json.loads(match.group(1))["flow"]
 
 
 def _entry(eid: str, **kwargs) -> dict:
@@ -796,6 +824,30 @@ def test_the_live_claim_is_keyed_on_local_not_on_projection(tmp_path: Path):
     assert "re-rendered on every graph mutation" not in public
 
 
+def test_the_board_title_names_its_corpus(tmp_path: Path):
+    """Two boards reading different corpora must not share a title: the
+    whole-graph board is not "fno Backlog", it is every project. The eyebrow
+    names what the board reads (live work plus the shipped archive), not just
+    "live".
+    """
+    entries = [_entry("ab-14000001", project="fno", title="A node")]
+
+    scoped_path = tmp_path / "scoped.html"
+    render_graph_html(entries, scoped_path, project="etl")
+    all_path = tmp_path / "all.html"
+    render_graph_html(entries, all_path, all_projects=True)
+    default_path = tmp_path / "default.html"
+    render_graph_html(entries, default_path)
+
+    assert "<title>etl Backlog</title>" in scoped_path.read_text()
+    all_html = all_path.read_text()
+    assert "<title>All Projects Backlog</title>" in all_html
+    assert 'class="eyebrow">all projects' in all_html
+    default_html = default_path.read_text()
+    assert "<title>fno Backlog</title>" in default_html
+    assert "live + shipped archive" in default_html
+
+
 def test_the_light_palette_meets_wcag_aa_on_small_text():
     """Every pill, chip and badge on this board is 10.5px to 12.5px, so 4.5:1
     is the bar for all of them.
@@ -1146,5 +1198,193 @@ def test_the_board_counts_recompute_from_the_filtered_set(tmp_path: Path):
     # The frozen shape is gone for positive reasons above; this names it: the
     # setup-time snapshot of the whole graph no longer exists to go stale.
     assert "var ALL = counts(NODES);" not in local
+
+
+# ---------------------------------------------------------------------------
+# Request origin on the board (x-1005) - AC3-HP / AC3-EDGE
+# ---------------------------------------------------------------------------
+
+
+def test_ac3_hp_local_rows_carry_origin_and_evidence():
+    """All four categories project onto local rows with their evidence, and a
+    row without a stamped birth reads unknown rather than absent."""
+    entries = [
+        _entry("op-000001", request_origin="operator_request", origin_evidence="fu-a1b2c3 source: PR#1700"),
+        _entry("ag-000002", request_origin="agent_discovery", origin_evidence="mail-inject:ev-9"),
+        _entry("au-000003", request_origin="automated_followup", origin_evidence="parent:x-37af"),
+        _entry("uk-000004"),
+    ]
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+    assert rows["op-000001"]["ro"] == "operator_request"
+    assert rows["op-000001"]["oe"] == "fu-a1b2c3 source: PR#1700"
+    assert rows["ag-000002"]["ro"] == "agent_discovery"
+    assert rows["au-000003"]["ro"] == "automated_followup"
+    assert rows["uk-000004"]["ro"] == "unknown"
+    assert rows["uk-000004"]["oe"] == ""
+
+
+def test_ac3_edge_public_projection_omits_origin_and_evidence():
+    """Public rows never carry the origin keys: evidence can name private
+    paths and ids, so the whole pair stays local."""
+    entries = [
+        _entry(
+            "pub-00001",
+            request_origin="operator_request",
+            origin_evidence="/Users/me/private/brief.md",
+        )
+    ]
+    rows = _dashboard_rows(entries, local=False)
+    assert "ro" not in rows[0]
+    assert "oe" not in rows[0]
+
+
+def test_ac3_hp_local_dashboard_renders_origin_filter_pill_and_detail(tmp_path: Path):
+    """The local board has the four-bucket filter, pills on known origins, an
+    origin + evidence detail line, and the matches() guard; ordering is
+    untouched by either."""
+    entries = [
+        _entry("op-000001", request_origin="operator_request", origin_evidence="fu-a1b2c3"),
+        _entry("uk-000004"),
+    ]
+    out = tmp_path / "graph.html"
+    render_graph_html(entries, out)
+    local = out.read_text()
+
+    # Filter select with the four buckets.
+    assert 'id="originSel"' in local
+    assert '<option value="operator_request">Your requests</option>' in local
+    assert '<option value="agent_discovery">Agent discoveries</option>' in local
+    assert '<option value="automated_followup">Automated follow-ups</option>' in local
+    assert '<option value="unknown">Unknown</option>' in local
+    # matches() obeys the origin state; rows default unknown when unstamped.
+    assert "state.origin && (n.ro || 'unknown') !== state.origin" in local
+    # Detail always names the origin (unknown included) plus evidence.
+    assert "<b>origin</b>" in local
+    assert "ORIGIN_LABELS" in local
+    # Rows with a known origin wear the dashed pill; unknown rows wear none.
+    assert 'class="pill origin"' in local
+    assert "n.ro !== 'unknown'" in local
+    # The origin select participates in the same render trigger.
+    assert "originSel.addEventListener" in local
+
+
+def test_ac3_edge_public_dashboard_has_no_origin_surface(tmp_path: Path):
+    content = render_public_sections_html(
+        [("open", [_entry("pub-00001", request_origin="operator_request")])],
+        title="public",
+        projection="open",
+    )
+    (tmp_path / "public.html").write_text(content, encoding="utf-8")
+    assert 'id="originSel"' not in content
+    assert "originSel" not in content.split('id="data"')[0]
+    assert "/Users/me" not in content
+
+
+def test_ac3_hp_origin_filter_does_not_reorder_rows():
+    """A filter changes visibility, never order: ranking and priority are
+    birth-agnostic, so projection order stays the board's authored order."""
+    entries = [
+        _entry("p3-000001", priority="p3", request_origin="operator_request"),
+        _entry("p1-000002", priority="p1", request_origin="unknown"),
+    ]
+    rows = _dashboard_rows(entries, local=True, context_entries=entries)
+    assert [r["id"] for r in rows] == ["p3-000001", "p1-000002"]
+
+
+_FLOW = {
+    "available": True,
+    "window": {
+        "since_days": 28,
+        "start": "2026-08-12",
+        "end": "2026-09-09",
+        "week_start": "monday",
+        "tz_offset": "-07:00",
+    },
+    "deliveries": {
+        "total": 4,
+        "code": 3,
+        "doc": 1,
+        "weeks": [
+            {"week_start": "2026-08-17", "code": 0, "doc": 0, "partial": False},
+            {"week_start": "2026-08-31", "code": 2, "doc": 1, "partial": False},
+            {"week_start": "2026-09-07", "code": 1, "doc": 0, "partial": True},
+        ],
+    },
+    "cycle": {"median_days": 2.5, "p85_days": 6.0, "n": 4},
+    "open_prs": {"count": 1, "oldest_age_days": 12},
+    "waiting": {
+        "in_progress": {"count": 9, "oldest_age_days": 34},
+        "in_review": {"count": 2, "oldest_age_days": 6},
+        "blocked": {"count": 3, "oldest_age_days": 21},
+    },
+    "coverage": {"nodes": 40, "rows": 60, "unlinked": 1, "age_basis": "node created_at"},
+}
+
+
+def test_flow_panel_embeds_scoped_payload_and_shows_all_groups(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_flow(entries, project=None, **kw):
+        seen["project"] = project
+        seen["entries"] = entries
+        return _FLOW
+
+    monkeypatch.setattr("fno.graph.render_html._board_flow", fake_flow)
+    out = tmp_path / "graph.html"
+
+    render_graph_html([_entry("x-1", project="alpha")], out, project="alpha")
+
+    text = out.read_text()
+    assert seen["project"] == "alpha"
+    assert seen["entries"] == [_entry("x-1", project="alpha")]
+    assert _payload_flow(text) == _FLOW
+    assert 'id="flow"' in text
+    assert "renderFlow" in text
+    # AC2-HP: the panel renders ONCE from the embedded payload at setup,
+    # never from the filtered row set, so no filter can move a denominator.
+    js = text.split('<script id="data"')[1]
+    assert js.count("renderFlow(DATA.flow);") == 1
+    refresh_body = js.split("function refreshCounts")[1].split("function renderFlow")[0]
+    assert "renderFlow" not in refresh_body
+
+
+def test_flow_panel_unavailable_names_reason_without_fabricated_numbers(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "fno.graph.render_html._board_flow",
+        lambda entries, project=None, **kw: {
+            "available": False,
+            "reason": "classifier unavailable (StoreUnavailable)",
+        },
+    )
+    out = tmp_path / "graph.html"
+
+    render_graph_html([_entry("x-1")], out)
+
+    flow = _payload_flow(out.read_text())
+    assert flow["available"] is False
+    assert "StoreUnavailable" in flow["reason"]
+    # AC2-EDGE: no weeks array at all when the source is unavailable, so the
+    # panel cannot show a fabricated zero series.
+    assert "weeks" not in flow
+    # The reason names the class, never a local path.
+    assert "/Users/" not in flow["reason"]
+
+
+def test_public_backlog_flow_is_aggregate_and_leak_clean():
+    from fno.graph.roadmap_public import render_public_backlog_html
+
+    content = render_public_backlog_html(
+        [_entry("pub-00001", project="alpha", title="Public title")],
+        "alpha",
+        flow=_FLOW,
+    )
+    assert _payload_flow(content) == _FLOW
+    # The flow payload is aggregates only: every leak class comes up empty
+    # when scanned against it directly.
+    flow_json = json.dumps(_FLOW)
+    for name, pattern in LEAK_PATTERNS:
+        assert not pattern.search(flow_json), f"flow leaks {name}"
 
 

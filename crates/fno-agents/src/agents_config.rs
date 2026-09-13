@@ -559,13 +559,9 @@ pub const DEFAULT_MAX_LIVE: u32 = 3;
 pub const DEFAULT_MAX_LIVE_PER_TERRITORY: u32 = 4;
 /// Default available-RAM floor (GB) for spawn preflight. `<= 0` disables.
 pub const DEFAULT_MIN_FREE_GB: f64 = 4.0;
-/// Default load factor at which spawn preflight stops trusting load average and
-/// consults fleet CPU attribution (x-3f84 W3, re-aimed by x-7c0f). A TRIGGER,
-/// not a refusal. `<= 0` disables the whole check. Matches the Pydantic default.
-pub const DEFAULT_MAX_LOAD_PER_CPU: f64 = 8.0;
-/// Default share of CPU capacity the fleet may hold before spawn preflight
-/// refuses, checked only above [`DEFAULT_MAX_LOAD_PER_CPU`]. Matches the
-/// Pydantic default.
+/// Default share of CPU capacity the fleet may hold, checked on EVERY spawn
+/// (x-7783): an attribution gap widens the share to an interval bounded above
+/// by the machine's measured CPU. Matches the Pydantic default.
 pub const DEFAULT_MAX_FLEET_CPU_SHARE: f64 = 0.5;
 /// Default absolute machine backstop: refuse above this times the CPU count no
 /// matter whose load it is, because pure fleet-share admits onto a box already
@@ -581,6 +577,10 @@ pub const DEFAULT_SINGLE_FLIGHT_JOIN_BUDGET_S: u64 = 30;
 /// `do pr wait --timeout 30m`, the longest detached child that is allowed to be
 /// running. Matches the Pydantic default.
 pub const DEFAULT_ORPHAN_REAP_AFTER_S: u64 = 5400;
+/// Default age at which a reaper hold escalates into a question a king or
+/// the operator can rule on (x-e3cc): the same derivation as the orphan
+/// clock, three times the longest detached wait.
+pub const DEFAULT_HOLD_ESCALATE_AFTER_S: u64 = 5400;
 
 /// Resolve `agents.max_live`. Values < 1 (or unparseable) coerce to
 /// [`DEFAULT_MAX_LIVE`] — never 0, which would block all spawns.
@@ -608,15 +608,6 @@ pub fn min_free_gb(cwd: &Path) -> f64 {
     resolve_agents_value(cwd, "min_free_gb")
         .and_then(|raw| raw.parse::<f64>().ok())
         .unwrap_or(DEFAULT_MIN_FREE_GB)
-}
-
-/// Resolve `agents.max_load_per_cpu` (x-3f84 W3). Same contract as
-/// [`min_free_gb`]: `<= 0` disables the guard, only unparseable input falls
-/// back to [`DEFAULT_MAX_LOAD_PER_CPU`].
-pub fn max_load_per_cpu(cwd: &Path) -> f64 {
-    resolve_agents_value(cwd, "max_load_per_cpu")
-        .and_then(|raw| raw.parse::<f64>().ok())
-        .unwrap_or(DEFAULT_MAX_LOAD_PER_CPU)
 }
 
 /// Resolve `agents.max_fleet_cpu_share`. Unparseable coerces to the default.
@@ -662,6 +653,12 @@ pub fn orphan_reap_after(cwd: &Path) -> Duration {
         "orphan_reap_after_seconds",
         DEFAULT_ORPHAN_REAP_AFTER_S,
     )
+}
+
+/// Resolve `agents.hold_escalate_after_s`: the age at which a reaper hold
+/// escalates into a question a king or the operator can rule on (x-e3cc).
+pub fn hold_escalate_after(cwd: &Path) -> Duration {
+    positive_seconds(cwd, "hold_escalate_after_s", DEFAULT_HOLD_ESCALATE_AFTER_S)
 }
 
 /// Seconds knobs coerce fail-safe: only a POSITIVE value is honored, because
@@ -903,6 +900,19 @@ pub fn notify_min_interval_s(cwd: &Path) -> u64 {
     .unwrap_or(300)
 }
 
+/// `[notify] arm_failing_after_s` (default 1800): how long an arm stays failing, or stale from a dead scheduler, before the arm_watch daemon arm tells the operator. Also the rate floor between arm notices. `0` or a value that does not parse falls back to 1800.
+pub fn notify_arm_failing_after_s(cwd: &Path) -> u64 {
+    resolve(cwd, |t| {
+        t.get("notify")?
+            .as_table()?
+            .get("arm_failing_after_s")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u64)
+    })
+    .filter(|v| *v > 0)
+    .unwrap_or(1800)
+}
+
 /// `mux.notify_on_blocked` (default ON): the daemon fires an OS notification when
 /// a badge ENTERS `blocked` (x-dd84).
 pub fn notify_on_blocked_enabled(cwd: &Path) -> bool {
@@ -982,6 +992,27 @@ mod tests {
         clear_config_env();
         let cwd = write_project_settings("state-reap-defaults", "schema_version = 1\n");
         assert_eq!(state_reap_config(&cwd), StateReapConfig::default());
+        clear_config_env();
+    }
+
+    /// AC9-HP: unset, `0`, or an unparseable value all read 1800; only a
+    /// positive integer changes the threshold.
+    #[test]
+    fn arm_failing_after_s_defaults_and_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("arm-failing-default", "schema_version = 1\n");
+        assert_eq!(notify_arm_failing_after_s(&cwd), 1800);
+        let cwd = write_project_settings("arm-failing-zero", "[notify]\narm_failing_after_s = 0\n");
+        assert_eq!(notify_arm_failing_after_s(&cwd), 1800);
+        let cwd = write_project_settings(
+            "arm-failing-string",
+            "[notify]\narm_failing_after_s = \"600\"\n",
+        );
+        assert_eq!(notify_arm_failing_after_s(&cwd), 1800);
+        let cwd =
+            write_project_settings("arm-failing-valid", "[notify]\narm_failing_after_s = 600\n");
+        assert_eq!(notify_arm_failing_after_s(&cwd), 600);
         clear_config_env();
     }
 

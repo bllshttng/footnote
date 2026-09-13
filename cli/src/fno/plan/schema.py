@@ -306,13 +306,20 @@ class ConsolidationBlock(BaseModel):
     between an `append` outcome and a plan file existing to carry it, and
     whether every one of the node's LIVE decisions is named in
     `decisions_acknowledged` - that check needs the live decision index, which
-    this model has no access to and does not attempt.
+    this model has no access to and does not attempt. A `rejected` entry names
+    a foreign node this plan rules out; `fno.plan.rulings.plan_rulings` is the
+    one scan that surfaces those rows to the ruled-out node's readers.
     """
 
     outcome: Literal["absorb", "append", "proceed_alone"]
     absorbed: list[ConsolidationEntry] = Field(default_factory=list)
     appended_to: list[ConsolidationEntry] = Field(default_factory=list)
     proceed_alone_against: list[ConsolidationEntry] = Field(default_factory=list)
+    # A node this plan rules OUT - stronger than a proceed_alone_against
+    # contrast, so it is the key `plan_rulings` scans for and the reversal
+    # verbs print back. Sits beside any outcome: an absorb plan can still
+    # reject a third node.
+    rejected: list[ConsolidationEntry] = Field(default_factory=list)
     decisions_acknowledged: list[DecisionAcknowledgment] = Field(default_factory=list)
     # Scalar OR list: one reversing command, or the several an absorb of
     # several nodes needs. The bash gate accepts both, and a model that

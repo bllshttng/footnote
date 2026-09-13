@@ -43,6 +43,7 @@ import socket
 import struct
 import subprocess
 import tempfile
+from functools import lru_cache
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -224,7 +225,9 @@ def _worker_binary() -> Path | None:
                         return candidate
             break
     found = shutil.which("fno-agents-worker")
-    if found:
+    # which() answers are normally real files; a stale or faked PATH entry
+    # reaches Popen as FileNotFoundError here, so verify before trusting it.
+    if found and Path(found).is_file():
         return Path(found)
     try:
         from fno.rust_binary import resolve_binary
@@ -278,8 +281,6 @@ def _spawn_keeper(path: Path) -> subprocess.Popen:
         f"store-{os.getpid()}",
         "--lock-timeout-secs",
         str(_LOCK_TIMEOUT_SECS),
-        "--read-source",
-        _graph_read_source(),
     ]
     if _is_canonical(path):
         from fno import paths as _paths
@@ -552,10 +553,9 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     deadline = time.monotonic() + 10.0
     last: StoreUnavailable | None = None
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
+        if proc.poll() is not None and proc.returncode != 3:
             # Our spawned worker died before binding (a stale binary without
-            # the store lane, or the connect-before-bind refusal because a
-            # concurrent client's keeper won the socket). Probe once: a live
+            # the store lane, or an unexpected crash). Probe once: a live
             # listener means the seat is taken by a valid keeper and the
             # request can ride it; still dead means our binary is the
             # problem, and that never justifies waiting out the clock.
@@ -570,6 +570,7 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
                     f"({proc.args!r}); is fno-agents-worker current? "
                     "`fno doctor` names lag",
                 ) from exc
+        # Exit 3 (EXIT_SEAT_OWNED): an incumbent holds the seat; keep polling.
         try:
             probe = keeper._connect()
             probe.close()
@@ -578,37 +579,6 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
             last = exc
             time.sleep(0.05)
     raise last or StoreUnavailable(STATE_SILENT, "keeper never answered")
-
-
-def identify_spawned_keepers() -> list[dict]:
-    """Identify keepers spawned here plus the canonical seat."""
-    socks = {sock for _proc, sock in _SPAWNED_KEEPERS.values()}
-    socks.add(store_socket_for(Path(GRAPH_JSON)))
-    rows: list[dict] = []
-    for sock in sorted(socks):
-        try:
-            rows.append(_Keeper(sock).identify())
-        except StoreUnavailable:
-            continue
-    return rows
-
-
-def restart_spawned_keepers() -> list[dict]:
-    """Restart identified keepers so a backend config flip takes effect."""
-    rows = identify_spawned_keepers()
-    for row in rows:
-        try:
-            _Keeper(store_socket_for(Path(row["graph"]))).shutdown()
-        except (KeyError, StoreUnavailable):
-            continue
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and any(
-        store_socket_for(Path(row["graph"])).exists() for row in rows
-    ):
-        time.sleep(0.05)
-    for row in rows:
-        _client_for(Path(row["graph"]))
-    return identify_spawned_keepers()
 
 
 def _raise_store_error(kind: str, message: str) -> None:
@@ -679,10 +649,6 @@ def _graph_commit_mode() -> str:
     return _graph_setting("commit_mode", "rows")
 
 
-def _graph_read_source() -> str:
-    return _graph_setting("read_source", "json")
-
-
 def _commit_snapshot(client, snap: dict, base_entries: list[dict], entries: list[dict],
                      plan_rungs: dict, attempt: int) -> dict:
     if _graph_commit_mode() == "rows":
@@ -719,13 +685,16 @@ def _commit_snapshot(client, snap: dict, base_entries: list[dict], entries: list
 # Pure helpers (ported; served by the keeper's pure methods)
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=4096)
 def normalize_plan_path(path: str | None) -> str | None:
     """Normalize a ``plan_path`` for comparison across graph / ledger and
     across absolute-vs-relative + trailing-slash conventions.
 
     The one normalizer behind every plan-path guard (the ported Rust
     implementation answers through the keeper; one comparison vocabulary is
-    why every comparison site routes through one function).
+    why every comparison site routes through one function). The keeper side is
+    a lexical fold with no filesystem access and no state, so the answer for a
+    given input never changes and the round trip is cached per process.
     """
     result = _client_for(GRAPH_JSON).request("normalize_plan_path", {"path": path})
     return result["path"] if isinstance(result, dict) else None
@@ -793,6 +762,33 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
     return result["entries"]
 
 
+def request_scoreboard_classify(
+    entries: list[dict],
+    rows: list[dict],
+    project: str | None = None,
+    now=None,
+    since_days: int | None = None,
+) -> dict:
+    """The delivery classifier (scoreboard.rs) over client-shipped rows.
+    Terminal vocabulary stays Python's (fno.terminals); ``now`` rides as ISO.
+    ``since_days`` only feeds the flow section; the decision is window-free."""
+    from fno.terminals import DELIVERED_TERMINALS
+
+    return _client_for(GRAPH_JSON).request(
+        "scoreboard_classify",
+        {
+            "entries": entries,
+            "rows": rows,
+            "doc_terminals": ["DoneAdvisory"],
+            "delivery_terminals": ["DoneDelivery"],
+            "ship_terminals": sorted(DELIVERED_TERMINALS - {"DoneAdvisory", "DoneDelivery"}),
+            "project": project,
+            "now": now.isoformat() if now is not None else None,
+            "since_days": since_days,
+        },
+    )
+
+
 def _plan_rung_map(entries: list[dict]) -> "dict[str, str]":
     """Node id -> the rung of the node's linked plan, computed client-side.
 
@@ -844,6 +840,7 @@ def ready(
     include_deferred: bool = False,
     repo_root: str | None = None,
     entries: "list[dict] | None" = None,
+    occupancy: "set[str] | None" = None,
 ) -> "dict":
     """The dispatch admission decision, answered by the native leg.
 
@@ -855,6 +852,10 @@ def ready(
     backend's joined candidates); otherwise the keeper reads the graph it
     owns. An unreachable keeper raises ``StoreUnavailable`` - selection
     refuses, it never falls back to a locally recomputed answer.
+
+    ``occupancy`` hands in an already-paid strict read of live claims plus
+    roster-worked nodes (``backlog next`` pays one per selection). Absent, this
+    reads both itself, which is what every other caller wants.
     """
     params: "dict" = {
         "project": project,
@@ -866,21 +867,24 @@ def ready(
         "include_deferred": include_deferred,
         "repo_root": repo_root,
     }
-    from fno.graph.statuses import live_claimed_node_ids, live_worked_node_ids
+    if occupancy is not None:
+        params["claimed"] = sorted(occupancy)
+    else:
+        from fno.graph.statuses import live_claimed_node_ids, live_worked_node_ids
 
-    try:
-        claimed = set(live_claimed_node_ids(strict=True))
-    except Exception as exc:  # noqa: BLE001 - unknown claim state refuses
-        # The keeper's own refusal wording: an unreadable claims root is
-        # UNKNOWN claim state, which must refuse, never read as "nothing is
-        # claimed". The parent-side strict read can hit that refusal first.
-        raise ClaimsUnavailableError(f"live claim state is unavailable ({exc})") from exc
-    try:
-        worked = set(live_worked_node_ids())
-    except Exception as exc:  # noqa: BLE001 - claims stay fail-closed
-        print(f"worked overlay degraded: {exc}", file=sys.stderr)
-        worked = set()
-    params["claimed"] = sorted(claimed | worked)
+        try:
+            claimed = set(live_claimed_node_ids(strict=True))
+        except Exception as exc:  # noqa: BLE001 - unknown claim state refuses
+            # The keeper's own refusal wording: an unreadable claims root is
+            # UNKNOWN claim state, which must refuse, never read as "nothing is
+            # claimed". The parent-side strict read can hit that refusal first.
+            raise ClaimsUnavailableError(f"live claim state is unavailable ({exc})") from exc
+        try:
+            worked = set(live_worked_node_ids())
+        except Exception as exc:  # noqa: BLE001 - claims stay fail-closed
+            print(f"worked overlay degraded: {exc}", file=sys.stderr)
+            worked = set()
+        params["claimed"] = sorted(claimed | worked)
     if entries is not None:
         params["entries"] = entries
     from fno import paths as _paths
@@ -1040,6 +1044,15 @@ def read_nodes_by_ids(path: Path, tokens: "list[str]") -> "dict | None":
         return _client_for(Path(path)).read_ids(tokens)
     except Exception:  # noqa: BLE001 - the fast path is an optimization; the full read owns correctness
         return None
+
+
+def store_export_status(path: Path) -> dict:
+    """The keeper's backend/version row, no entries: the identity surface
+    for derived caches. Empty dict on any failure, never a guess."""
+    try:
+        return _client_for(Path(path)).request("export_status", {})
+    except Exception:  # noqa: BLE001 - identity is an optimization; the read owns correctness
+        return {}
 
 
 def read_archive_entries() -> list[dict]:
@@ -1418,14 +1431,21 @@ def _run_op(path: Path, name: str, params: dict) -> dict:
     nudge): the targeted helpers replaced locked_mutate_graph calls, so they
     carry the same visible effects.
 
-    The plan-rung map rides in the op params, computed over the begin
-    snapshot: a session op that opens or closes a do row re-derives
-    in_progress the way any full write would. No Python op mutates
-    plan_path, so a snapshot-derived map is exact."""
+    The plan-rung map rides in the op params, computed over a light
+    plan_refs read (id, plan_path, cwd per node) instead of a full
+    begin, which ships the whole graph for one derived value. A session op
+    that opens or closes a do row re-derives in_progress the way any full
+    write would. No Python op mutates plan_path, so the map is exact. The
+    begin fallback keeps a keeper predating the verb working."""
     path = Path(path)
     client = _client_for(path)
-    snap = client.request("begin", {})
-    params = {**params, "plan_rungs": _plan_rung_map(snap["entries"])}
+    try:
+        rung_entries = client.request("plan_refs", {})["entries"]
+    except RuntimeError as exc:
+        if str(exc) != 'store error (invalid): unknown store method "plan_refs"':
+            raise
+        rung_entries = client.request("begin", {})["entries"]
+    params = {**params, "plan_rungs": _plan_rung_map(rung_entries)}
     result = client.request("op", {"name": name, "params": params})
     _finish_mutation(path, result["outcome"])
     return result["op"]
@@ -1625,7 +1645,7 @@ def remove_open_session_record(
 
 def reap_open_session_record(
     path: Path,
-    node_id: str,
+    node_id: "str | None",
     *,
     phase: str,
     harness: str,
@@ -1639,7 +1659,9 @@ def reap_open_session_record(
     FILLS ``ended_at`` and keeps the row (a reviewer session's provenance did
     happen); ``all`` applies both semantics to every open row carrying the
     identity. The fill value defaults to the reap instant, an UPPER BOUND on
-    the true end."""
+    the true end. ``node_id=None`` is the death-cascade form: every node
+    holding an open row for the identity settles, and the receipt's
+    ``node_ids`` names them."""
     if phase != "all" and phase not in _SESSION_PHASES:
         raise ValueError(
             f"invalid phase {phase!r}; expected 'all' or one of {sorted(_SESSION_PHASES)}"
@@ -1650,7 +1672,13 @@ def reap_open_session_record(
         ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     else:
         ended_at = _utc_session_stamp("ended_at", ended_at)
-    resolved = _resolve_node_id(Path(path), node_id)
+    resolved = None
+    if node_id is not None:
+        # A named node that resolves to nothing must fail loud: None means
+        # the death-cascade form, never a silently widened sweep.
+        resolved = _resolve_node_id(Path(path), node_id)
+        if resolved is None:
+            raise ValueError(f"no node resolves to {node_id!r}")
     result = _run_op(Path(path), "session_reap_open", {
         "node_id": resolved,
         "phase": phase,
@@ -1661,6 +1689,12 @@ def reap_open_session_record(
     # status_after/remaining_open_do: the settlement reader wants the POST
     # state; re-read once, best-effort.
     report = dict(result)
+    if resolved is None:
+        # Identity form: no single node to re-read; node_ids carries the
+        # answer and found is the settlement signal.
+        report.setdefault("node_ids", [])
+        report["settled"] = bool(report.get("found"))
+        return report
     try:
         entries = read_graph(Path(path))
         node = next((e for e in entries if e.get("id") == resolved), None)

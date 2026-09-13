@@ -20,6 +20,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from fno._subprocess_util import run_bounded
+from fno.cargo_build_dir import remove_build_dir_for_worktree
+
+# 120s bounds the hook well below the 10+ minute cleanup-leg stalls on record.
+_SETUP_HOOK_TIMEOUT_S = 120
+
 
 # ---------------------------------------------------------------------------
 # Branch naming (x-ff83 W3)
@@ -193,7 +199,11 @@ def _canonical_base_dir(repo_root: Path) -> Path:
     return Path.home() / "conductor" / "workspaces" / repo_root.name
 
 
-def _run_setup_worktree_hook(repo_root: Path, worktree_path: Path) -> tuple[int, str]:
+def _run_setup_worktree_hook(
+    repo_root: Path,
+    worktree_path: Path,
+    timeout: float = _SETUP_HOOK_TIMEOUT_S,
+) -> tuple[int, str]:
     """Best-effort: run scripts/setup/setup-worktree.sh inside the new worktree.
 
     The script symlinks gitignored shared state (.fno/, internal/,
@@ -202,20 +212,24 @@ def _run_setup_worktree_hook(repo_root: Path, worktree_path: Path) -> tuple[int,
     canonical .fno/ state, so target gates can't see backlog mutations
     from sibling worktrees, codemap goes stale, and inbox drain breaks.
 
-    Returns (returncode, stderr_tail). returncode == -1 indicates the script
-    was not found (silently tolerated). Any non-zero is logged via stderr
-    but never raised - the worktree itself is still usable.
+    Returns (returncode, stderr_tail). -1 means the script was not found
+    (silently tolerated); 124 means it exceeded ``timeout`` and its process
+    group was killed. Any other non-zero is logged but never raised.
     """
     script = repo_root / "scripts" / "setup" / "setup-worktree.sh"
     if not script.exists():
         return (-1, "")
-    proc = subprocess.run(
-        ["bash", str(script)],
-        cwd=str(worktree_path),
-        capture_output=True,
-        text=True,
-        env={**os.environ, "CANONICAL": str(repo_root), "WORKTREE": str(worktree_path)},
-    )
+    try:
+        proc = run_bounded(
+            ["bash", str(script)],
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+            cwd=str(worktree_path),
+            env={**os.environ, "CANONICAL": str(repo_root), "WORKTREE": str(worktree_path)},
+        )
+    except subprocess.TimeoutExpired:
+        return (124, f"setup-worktree.sh exceeded {timeout:.0f}s; its process group was killed")
     tail = (proc.stderr or proc.stdout or "")[-500:]
     return (proc.returncode, tail)
 
@@ -374,6 +388,9 @@ class WorktreeManager:
         If the path is already gone, this is a no-op.
         """
         if worktree.path.exists():
+            # Reclaim the cargo build hash dir while the manifest can still
+            # answer; best-effort, the sweep reaps what resolution misses.
+            remove_build_dir_for_worktree(worktree.path)
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree.path)],
                 cwd=self.repo_root,
@@ -429,51 +446,6 @@ class WorktreeManager:
         self._git_status_snapshots.pop(worktree.path, None)
 
         return dest
-
-    def list_active(self) -> list[Worktree]:
-        """Return all worktrees currently registered under base_dir.
-
-        Parses ``git worktree list --porcelain`` to get live git registrations,
-        then filters to paths under base_dir. Skips the main worktree.
-
-        Returns
-        -------
-        list[Worktree]
-            Worktrees with node_id inferred from the directory name.
-        """
-        result = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            cwd=self.repo_root,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return []
-
-        worktrees: list[Worktree] = []
-        current: dict[str, str] = {}
-
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                if current:
-                    wt = self._parse_porcelain_entry(current)
-                    if wt is not None:
-                        worktrees.append(wt)
-                    current = {}
-            elif " " in line:
-                key, _, value = line.partition(" ")
-                current[key] = value
-            else:
-                current[line] = ""
-
-        # Handle last entry if file doesn't end with blank line
-        if current:
-            wt = self._parse_porcelain_entry(current)
-            if wt is not None:
-                worktrees.append(wt)
-
-        return worktrees
 
     def list_orphaned(self, graph: dict) -> list[Worktree]:
         """Return worktrees with no live graph entry or whose node is done.
@@ -552,37 +524,6 @@ class WorktreeManager:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    def _parse_porcelain_entry(self, entry: dict[str, str]) -> Optional[Worktree]:
-        """Convert a parsed porcelain block into a Worktree if it's under base_dir."""
-        worktree_path_str = entry.get("worktree", "")
-        if not worktree_path_str:
-            return None
-
-        wt_path = Path(worktree_path_str)
-
-        # Skip the main worktree (the repo root itself)
-        if wt_path == self.repo_root:
-            return None
-
-        # Only include paths under our base_dir
-        try:
-            wt_path.relative_to(self.base_dir)
-        except ValueError:
-            return None
-
-        node_id = wt_path.name
-        branch = entry.get("branch", "").replace("refs/heads/", "")
-        if not branch:
-            branch = f"feature/{node_id[-8:]}"
-
-        return Worktree(
-            node_id=node_id,
-            path=wt_path,
-            branch=branch,
-            created_at="",
-            base_ref="main",
-        )
 
     def _git_status_quiet_since_last_poll(self, worktree: Worktree) -> bool:
         """Return True if the worktree's git status is unchanged since last poll.

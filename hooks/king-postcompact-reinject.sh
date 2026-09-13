@@ -4,7 +4,9 @@
 # The crown survives a compaction (crown_level / crown_scope live on the agent
 # registry row) but the operating discipline that came with it does not, so a
 # post-compact king still holds real authority with no rules for using it and
-# the operator re-teaches it by hand. This hook re-teaches it mechanically.
+# the operator re-teaches it by hand. This hook re-teaches it mechanically. It
+# also reads back the crown's precompact canon handoff doc: the judgment halves
+# it holds survive the compact in no other channel.
 #
 # Carrier: shared with target-postcompact-reinject.sh in
 # scripts/lib/postcompact-carrier.sh - on Claude SessionStart(source=="compact")
@@ -26,11 +28,15 @@ else
     PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$SOURCE_ROOT}}"
 fi
 CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
+MARKER_LIB="$PLUGIN_ROOT/scripts/lib/canon-doc-marker.sh"
 BRIEF="$PLUGIN_ROOT/skills/king-for-a-day/references/postcompact-brief.md"
 
 [[ -r "$CARRIER_LIB" ]] || exit 0
 # shellcheck source=../scripts/lib/postcompact-carrier.sh
 source "$CARRIER_LIB"
+# The user-block reader degrades to silence when its lib is unreadable; the
+# brief above still rides. Never a failed hook.
+[[ -r "$MARKER_LIB" ]] && source "$MARKER_LIB"
 
 # Read the hook event through the shared lib (TTY-guarded; one python pass).
 EVENT="$(postcompact_read_event)"
@@ -110,14 +116,86 @@ $FAQ_ENTRIES"
     fi
 fi
 
+# Canon read-back: the PreCompact hook wrote this crown's rolling handoff doc,
+# and the judgment halves it holds (merge order, open decisions, gaps,
+# workarounds) exist in no other channel - the session that wrote them is
+# gone after the compact, and a successor resolves the SAME scope-keyed doc.
+# Only the session-filled blocks ride back: the mechanical halves are stale by
+# definition (they describe the pre-compact world), and an unfilled heading
+# still carries its default placeholder, recognizable by its signature text.
+# Bounded like the FAQ (byte cap) and degrade-safe: no resolvable doc, no doc
+# on disk, or nothing filled means no section, never a failed hook.
+CANON_MAX_BYTES=4000
+if [[ -n "$CROWN_SCOPE" ]]; then
+    CANON_PATH="$(fno config paths handoff --scope "$CROWN_SCOPE" 2>/dev/null || true)"
+    if [[ -n "$CANON_PATH" && -f "$CANON_PATH" ]]; then
+        CANON_SECTIONS="$(awk '
+            /^## / { heading = $0; next }
+            /<!-- fno:session -->/ { grab = 1; buf = ""; next }
+            grab && /<!-- \/fno:session -->/ {
+                grab = 0
+                if (buf ~ /[^[:space:]]/ && buf !~ /Nothing external knows this/) {
+                    print ""
+                    print heading
+                    printf "%s", buf
+                }
+                next
+            }
+            grab { buf = buf $0 "\n" }
+        ' "$CANON_PATH" 2>/dev/null)"
+        CANON_BYTES="$(printf '%s' "$CANON_SECTIONS" | wc -c | tr -d ' ')"
+        if [[ "$CANON_BYTES" -gt "$CANON_MAX_BYTES" ]]; then
+            # Same UTF-8-safe cut as the FAQ: decode, drop the trailing
+            # partial character, never split one mid-sequence.
+            CANON_SECTIONS="$(printf '%s' "$CANON_SECTIONS" | python3 -c "
+import sys
+sys.stdout.write(sys.stdin.buffer.read(${CANON_MAX_BYTES}).decode('utf-8', errors='ignore'))
+")
+
+_(truncated at ${CANON_MAX_BYTES}B; \`${CANON_PATH}\` has the rest)_"
+        fi
+        if [[ -n "$(printf '%s' "$CANON_SECTIONS" | tr -d '[:space:]')" ]]; then
+            CONTEXT="$CONTEXT
+
+## Your crown's handoff (written before the compact)
+
+$CANON_SECTIONS
+
+Full canon doc: \`${CANON_PATH}\`."
+        fi
+
+        # The fno:user block rides back too: the machine never writes it, so
+        # anything beyond the seed placeholder is the user's own words and is
+        # surfaced verbatim - never paraphrased, never summarized. Byte-capped
+        # like the canon sections; silent when empty or placeholder-only.
+        if command -v canon_doc_extract_marker >/dev/null 2>&1; then
+            USER_NOTES="$(canon_doc_extract_marker "$CANON_PATH" user 2>/dev/null)" || USER_NOTES=""
+            if [[ -n "$USER_NOTES" ]] && ! canon_doc_is_placeholder "$USER_NOTES"; then
+                USER_BYTES="$(printf '%s' "$USER_NOTES" | wc -c | tr -d ' ')"
+                if [[ "$USER_BYTES" -gt "$CANON_MAX_BYTES" ]]; then
+                    USER_NOTES="$(printf '%s' "$USER_NOTES" | python3 -c "
+import sys
+sys.stdout.write(sys.stdin.buffer.read(${CANON_MAX_BYTES}).decode('utf-8', errors='ignore'))
+")
+
+_(truncated at ${CANON_MAX_BYTES}B; \`${CANON_PATH}\` has the rest)_"
+                fi
+                CONTEXT="$CONTEXT
+
+## User notes (from your canon doc)
+
+$USER_NOTES"
+            fi
+        fi
+    fi
+fi
+
 # Reign limb (x-7b36): when the crowned scope's manifest reports a shape AND
 # names THIS session, this is a tenured reign, and its beat needs re-teaching
 # after a compact. Reads the same manifest every king arm resolves; a missing
 # manifest or a foreign session id means the king-for-a-day brief above is the
 # whole teaching, so nothing is appended (fail to the narrower rule).
-REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
-REIGN_MANIFEST="$(fno agents king manifest-path --harness-session-id "$SID" \
-    --state-root "$REPO_ROOT/.fno" 2>/dev/null || true)"
+REIGN_MANIFEST="$(fno agents king manifest-path --harness-session-id "$SID" 2>/dev/null || true)"
 if [[ -n "$REIGN_MANIFEST" && -f "$REIGN_MANIFEST" ]]; then
     REIGN_SHAPE="$(sed -n 's/^shape:[[:space:]]*//p' "$REIGN_MANIFEST" | head -1 | tr -d '[:space:]')"
     REIGN_SID="$(sed -n 's/^harness_session_id:[[:space:]]*//p' "$REIGN_MANIFEST" | head -1 | tr -d '[:space:]')"
@@ -126,7 +204,7 @@ if [[ -n "$REIGN_MANIFEST" && -f "$REIGN_MANIFEST" ]]; then
 
 ## You are still reigning (shape: ${REIGN_SHAPE})
 
-The loop, goal and monitors survive a compact: verify with \`/hooks\` and the loop receipt, and re-arm any that is missing. The six monitors: unread mail (60s), board-change proxy (120s), crown liveness (300s), main-branch CI (300s), capacity band debounced across two samples (300s), arm staleness (600s). The two self-injected commands: \`/loop <king.checkin_interval> <king.checkin_text>\` and \`/goal <king.goal_text>\`. Levers in order: mail the stalled worker, \`fno backlog encounter <id> --evidence\` and \`fno backlog update <id> --priority\` (rank is the operator's pin and refuses you), undefer or supersede, ask the operator. Journal \`reign_checkin\`; dispatch only on a red dispatching arm, journaled as \`reign_dispatch_exception\`. Never \`/goal clear\` on NoProgress - escalate-and-park is the stop path."
+The loop, goal and monitor survive a compact: verify with \`/hooks\` and the loop receipt, and re-arm any that is missing. The one monitor: the fleet settled-PR wake (600s) - a quiet or parked roster row whose node's PR reads settled gets poked with \`fno agents resume <id>\` (\`fno agents list --json\` + \`fno do pr status <n>\`); mail, board, crown liveness, main CI and capacity are demand reads, not beats. The two self-injected commands: \`/loop <king.checkin_interval> <king.checkin_text>\` and \`/goal <king.goal_text>\`. The check-in beat is one verb: \`fno agents king checkin\` gathers the readings, prints them, diffs the last beat, and journals \`reign_checkin\` itself; then act on the printout. Levers in order: mail the stalled worker, \`fno backlog encounter <id> --evidence\` and \`fno backlog update <id> --priority\` (rank is the operator's pin and refuses you), undefer or supersede, ask the operator. Dispatch only on a red dispatching arm, journaled as \`reign_dispatch_exception\`. Never \`/goal clear\` on NoProgress - escalate-and-park is the stop path."
     fi
 fi
 postcompact_emit "$(postcompact_carrier "$SOURCE")" "$CONTEXT"

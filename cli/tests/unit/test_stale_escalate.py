@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+import json
+
 from fno.outstanding.core import read_open_questions, read_question_events
 
 _NOW = 1_800_000_000.0
@@ -182,6 +184,59 @@ def test_mechanical_supersede_close_does_not_suppress_a_returning_set(
 
     assert outcome == "asked"
     assert third_id not in (first_id, second_id)
+
+
+def test_emptied_finding_set_closes_the_open_ask(tmp_path: Path) -> None:
+    """The empty branch reconciles like any other: a measured-clean sweep
+    closes the open ask instead of leaving it open and unread forever."""
+    from types import SimpleNamespace
+
+    from fno.agents.stale_escalate import escalate_unfinished
+
+    finding = SimpleNamespace(
+        kind="dirty", subject="/w/x", basis="82 files dirty",
+        clear_command="fno agents workspace worktree cleanup", node_id=None,
+        pr_number=None, cwd="/w/x", age_s=100.0,
+    )
+    _outcome, asked_id = escalate_unfinished(
+        [finding], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+    outcome, closed_id = escalate_unfinished(
+        [], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+
+    assert outcome == "closed"
+    assert closed_id == asked_id
+    assert read_open_questions(tmp_path) == []
+
+
+def test_changed_finding_set_supersedes_the_old_ask(tmp_path: Path) -> None:
+    """The unfinished-work emitter rides the shared fold: a changed finding
+    set supersedes (one open row), it never piles a second ask beside the
+    first - the same snapshot rule the stale lane already held."""
+    from types import SimpleNamespace
+
+    from fno.agents.stale_escalate import escalate_unfinished
+
+    def _finding(subject: str):
+        return SimpleNamespace(
+            kind="dirty", subject=subject, basis="82 files dirty",
+            clear_command="fno agents workspace worktree cleanup", node_id=None,
+            pr_number=None, cwd=subject, age_s=100.0,
+        )
+
+    _first_outcome, first_id = escalate_unfinished(
+        [_finding("/w/a")], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+    outcome, new_id = escalate_unfinished(
+        [_finding("/w/b")], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+
+    assert outcome == "recorded"
+    assert new_id != first_id
+    open_qs = read_open_questions(tmp_path)
+    assert [q.id for q in open_qs] == [new_id]
+    assert "/w/b" in open_qs[0].question
 
 
 def test_answered_finding_ask_suppresses_the_renag(tmp_path: Path) -> None:
@@ -437,9 +492,13 @@ def test_refused_sweep_escalates_and_closes_nothing(
 
     monkeypatch.setattr("fno.agents.watchdog.run_sweep", refused)
     monkeypatch.setattr("fno.carveout.core.resolve_carveout_root", lambda: tmp_path)
+    # The hold channel's own concern is covered by the reap-hold tests; here
+    # the read answers empty so the stale refusal stands alone.
+    monkeypatch.setattr("fno.agents.stale_lane.escalated_holds", lambda: [])
     result = CliRunner().invoke(agents_app, ["stale-escalate", "--json"])
     assert result.exit_code == 0
     assert '"outcome": "refused"' in result.output
+    assert '"hold_outcome": "asked"' not in result.output
     assert read_open_questions(tmp_path) == []
 
 
@@ -473,6 +532,7 @@ def test_full_verb_asked_path_end_to_end(
     monkeypatch.setattr(
         "fno.carveout.core.resolve_session_id", lambda _root: "watchdog-test"
     )
+    monkeypatch.setattr("fno.agents.stale_lane.escalated_holds", lambda: [])
     result = CliRunner().invoke(agents_app, ["stale-escalate", "--json"])
     assert result.exit_code == 0, result.output
     assert '"outcome": "asked"' in result.output
@@ -481,3 +541,82 @@ def test_full_verb_asked_path_end_to_end(
     assert "Summary: 1 stale, outcome asked, oldest 1464h" in result.output
     [question] = read_open_questions(tmp_path)
     assert "k1" in question.question
+
+
+# ── x-e3cc: the reap-hold lane ───────────────────────────────────────────
+
+
+def _hold(rid: str = "bp-9c8b", reason: str = "transcript unresolved"):
+    return {
+        "id": rid,
+        "reason": reason,
+        "detail": "absence is not quiet",
+        "age_s": 7200,
+        "age_basis": "row created",
+        "escalated": True,
+    }
+
+
+def _holds_run(root: Path, holds):
+    from fno.agents import stale_lane as se
+
+    return se.reconcile_holds(
+        holds, root=root, session_id="watchdog-test", cwd=root
+    )
+
+
+def test_an_escalated_hold_asks_and_names_the_release(tmp_path: Path) -> None:
+    outcome, qid = _holds_run(tmp_path, [_hold()])
+    assert outcome == "asked"
+    [question] = read_open_questions(tmp_path)
+    assert question.id == qid
+    assert "[reap-hold:" in question.question
+    assert "bp-9c8b" in question.question
+    assert "transcript unresolved" in question.question
+    assert "agents.hold_escalate_after_s" in question.question
+    assert question.ask == "fno agents reap --release bp-9c8b"
+
+
+def test_unchanged_holds_are_a_duplicate_not_a_second_ask(tmp_path: Path) -> None:
+    holds = [_hold(), _hold("bp-faba", "sources disagree")]
+    first_outcome, first_id = _holds_run(tmp_path, holds)
+    second_outcome, second_id = _holds_run(tmp_path, holds)
+    assert first_outcome == "asked"
+    assert second_outcome == "duplicate"
+    assert second_id == first_id
+    assert len(read_open_questions(tmp_path)) == 1
+
+
+def test_a_hold_that_changes_reason_asks_again(tmp_path: Path) -> None:
+    first_outcome, first_id = _holds_run(tmp_path, [_hold()])
+    second_outcome, second_id = _holds_run(
+        tmp_path, [_hold(reason="open do row on done node")]
+    )
+    assert first_outcome == "asked"
+    assert second_outcome == "asked"
+    assert second_id != first_id
+    assert len(read_open_questions(tmp_path)) == 1
+
+
+def test_a_refused_reap_read_closes_nothing(tmp_path: Path, capsys, monkeypatch) -> None:
+    from fno.agents import stale_lane as se
+    from fno.agents import watchdog as wd
+    from fno.carveout import core as carveout_core
+
+    # The question is already open from an earlier pass.
+    first_outcome, first_id = _holds_run(tmp_path, [_hold()])
+    assert first_outcome == "asked"
+
+    # This pass: the reap read fails and the watchdog sweep refuses too.
+    monkeypatch.setattr(se, "escalated_holds", lambda: None)
+    monkeypatch.setattr(wd, "run_sweep", lambda *a, **k: ({"refused": True}, []))
+    monkeypatch.setattr(carveout_core, "resolve_carveout_root", lambda: tmp_path)
+    monkeypatch.setattr(carveout_core, "resolve_session_id", lambda _r: "watchdog-test")
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: tmp_path)
+
+    se.run(json_out=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["hold_outcome"] == "refused"
+    assert payload["hold_count"] == 0
+    open_now = read_open_questions(tmp_path)
+    assert [q.id for q in open_now] == [first_id]

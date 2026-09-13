@@ -380,6 +380,13 @@ MANIFEST
     AGY_TRANSCRIPT="${TMP_DIR}/agy.jsonl"
     printf '{"role":"model","parts":[{"text":"x"}]}\n' > "$AGY_TRANSCRIPT"
     INPUT="{\"transcriptPath\":\"${AGY_TRANSCRIPT}\",\"fullyIdle\":true,\"conversationId\":\"c1\"}"
+    # K8 used to rely on fno-agents being absent from the host: the
+    # binary-missing branch was its only route into the bounded give-up, so a
+    # host with a real fno-agents on PATH answered a verdictful continue
+    # forever and the ceiling never fired. Stub the checker verdict-less so
+    # the give-up path runs on any host.
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$BIN"
+    chmod +x "$BIN"
     # Cleanup is best-effort, so a live crown's refusal is still bounded. Fire
     # past the ceiling and require a real allow, mirroring how the
     # checker-unavailable path already gives up.

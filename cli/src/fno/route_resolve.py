@@ -268,7 +268,6 @@ def resolve_slot(
     role: Optional[str] = None,
     protected_role: Optional[str] = None,
     model_occupied: bool = False,
-    explicit_model: bool = False,
     explicit_lane: bool = False,
     work_verb: Optional[str] = None,
     explicit_model_value: Optional[str] = None,
@@ -279,8 +278,8 @@ def resolve_slot(
     """Which lane does this dispatch ride right now: the ONE slot resolver.
     Selection is Rust (``fno-agents route-slot``); chain strings come back
     verbatim, and a missing or failing binary is a named refusal. ``work_verb``
-    is the ORIGINAL dispatch command (a planless target plans: the command
-    stays target while the slot is blueprint); it defaults to ``verb``. The
+    is the original dispatch command, audit-only since x-ebd2: the derived
+    verb IS the command, so it defaults to ``verb`` and never diverges. The
     third element is the walk's own verdict word: armed, unarmed, or a hold.
     Callers that need the structured refusal pass ``meta``; it is filled with
     the verb's ``refusal_terminal`` object when the answer carries one."""
@@ -302,7 +301,7 @@ def resolve_slot(
             capacity=capacity, inventory=inventory, settings=settings,
             substrate=substrate, permission_mode=permission_mode,
             constrain_harness=constrain_harness, explicit_lane=explicit_lane,
-            explicit_model=explicit_model, gate_bypassed=gate_bypassed,
+            gate_bypassed=gate_bypassed,
             role=role, protected_role=protected_role,
             model_occupied=model_occupied,
             work_verb=work_verb or verb,
@@ -486,14 +485,16 @@ def _account_record_vendors(settings: object) -> dict[str, str]:
 
 
 def _slot_profiles_table(settings: object) -> dict[str, Any]:
-    """Every dispatched verb's slot as JSON: the owner picks the EFFECTIVE
-    work kind's slot from this table (a planless target rides blueprint)."""
+    """Every verb slot_verbs reports, as JSON: the owner picks the EFFECTIVE
+    work kind's slot from this table (the derived verb owns the phase, x-ebd2).
+    The readout and this table must read one verb set - a configured profile
+    the table omitted got strict-refused with 'declares no lanes' while its
+    lanes sat in config. A verb with no profile still gets a row: empty fields
+    and empty lanes, the same answer the slot lookup's None arm builds."""
     out: dict[str, Any] = {}
     try:
-        for verb in SLOT_VERBS:
+        for verb in slot_verbs(settings):
             _s, prof, lns = _slot_entry(settings, verb)
-            if prof is None and not lns:
-                continue
             by_diff = getattr(prof, "by_difficulty", None)
             out[verb] = {
                 "rung_base": f"agents.profiles.{verb}",
@@ -520,7 +521,7 @@ def _slot_payload(
     *, rung_base: str, profile: Optional[object], lanes: Any, node: Optional[Mapping],
     capacity: Optional[Mapping[str, object]], inventory: Optional[Any], settings: object,
     substrate: Optional[str], permission_mode: Optional[str], constrain_harness: Optional[str],
-    explicit_lane: bool, explicit_model: bool, gate_bypassed: bool,
+    explicit_lane: bool, gate_bypassed: bool,
     role: Optional[str] = None, protected_role: Optional[str] = None,
     model_occupied: bool = False,
     work_verb: Optional[str] = None,
@@ -538,8 +539,8 @@ def _slot_payload(
         node_payload = {
             "difficulty": node.get("difficulty"),
             "priority": node.get("priority"),
-            # Plan-presence evidence: the work-kind owner reads presence, never
-            # plan quality, and needs it even when the model axis is occupied.
+            # Audit evidence for the slot reader; the phase itself is decided
+            # by the derived verb (x-ebd2), never re-derived here.
             "plan_path": str(node.get("plan_path") or ""),
         }
     payload: dict[str, Any] = {
@@ -553,7 +554,6 @@ def _slot_payload(
         "permission_mode": permission_mode,
         "constrain_harness": constrain_harness,
         "explicit_lane": explicit_lane,
-        "explicit_model": explicit_model,
         "gate_bypassed": gate_bypassed,
         "thread_seatable": _thread_seatable(
             [str(r.get("harness", "")) for r in rows.values()]
@@ -637,7 +637,7 @@ def slot_states(
         rung_base=rung_base, profile=_profile, lanes=lanes, node=None,
         capacity=capacity, inventory=inventory, settings=settings,
         substrate=None, permission_mode=None, constrain_harness=None,
-        explicit_lane=False, explicit_model=False, gate_bypassed=False,
+        explicit_lane=False, gate_bypassed=False,
     )
     payload["mode"] = "states"
     states: dict[str, Any] = {}
@@ -725,8 +725,8 @@ def runtime_capacity(
 ) -> dict[str, object]:
     """Harness capacity: per-account headroom aggregated MAX (exhausted only
     if EVERY account is); a proven active slot account IS the aggregate. The
-    value is ``{state, window, accounts, evidence, resets}``. Never probes,
-    never touches the network.
+    value is ``{state, window, accounts, sources, observed_at, evidence,
+    resets}``. Never probes, never touches the network.
     """
     try:
         from fno.adapters.providers.runtime_state import headrooms
@@ -740,12 +740,16 @@ def runtime_capacity(
             accounts = harness_accounts(harness, settings=settings, inventory=inv)
             detail: dict[str, str] = {}
             resets: dict[str, object] = {}
+            sources: dict[str, str] = {}
+            observed_at: dict[str, object] = {}
             best: Optional[str] = None
             window = "absent"
             for account, verdict in headrooms(accounts).items():
                 state = verdict.state.value
                 detail[account] = state
                 resets[account] = verdict.resets_at
+                sources[account] = verdict.source or "unknown"
+                observed_at[account] = verdict.observed_at
                 if best is None or _CAPACITY_RANK.get(state, 1) > _CAPACITY_RANK.get(best, 1):
                     best = state
                     window = verdict.source or "unknown"
@@ -761,6 +765,8 @@ def runtime_capacity(
                 "state": best or "unknown",
                 "window": window,
                 "accounts": detail,
+                "sources": sources,
+                "observed_at": observed_at,
                 "evidence": evidence,
                 "resets": resets,
             }

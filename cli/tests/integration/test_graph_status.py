@@ -657,6 +657,68 @@ def test_include_ideas_long_flag_still_works(tmp_graph, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# A superseded_by edge is terminal; an archived refusal names its remedy
+# (x-e8f3)
+# ---------------------------------------------------------------------------
+
+
+def _archive_node(tmp_path, nid: str) -> None:
+    archive = tmp_path / "graph-archive.json"
+    archive.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": nid,
+                        "title": f"archived {nid}",
+                        "priority": "p1",
+                        "domain": "code",
+                        "created_at": "2026-01-01T00:00:00Z",
+                    }
+                ]
+            }
+        )
+    )
+
+
+def test_update_on_archived_node_names_the_remedy(tmp_graph, tmp_path):
+    """'not found' for a node sitting in graph-archive.json is the message a
+    typo gets; the refusal must name archived and the verb that reverses it."""
+    _archive_node(tmp_path, "ab-22222222")
+    r = _invoke("backlog", "update", "ab-22222222", "--priority", "p1")
+    assert r.exit_code == 1
+    assert "archived" in r.output
+    assert "unarchive" in r.output
+
+
+def test_update_on_unknown_id_still_reads_not_found(tmp_graph):
+    r = _invoke("backlog", "update", "ab-99999999", "--priority", "p1")
+    assert r.exit_code == 1
+    assert "not found" in r.output
+
+
+def test_supersede_persists_old_row_superseded(tmp_graph):
+    """Positive marker for x-e8f3: a fresh supersede leaves the old row
+    persisting status superseded, never blocked on an unverified record."""
+    a = _invoke("--json", "backlog", "add", "old work")
+    old_id = json.loads(a.stdout)["id"]
+    b = _invoke("--json", "backlog", "add", "new work")
+    new_id = json.loads(b.stdout)["id"]
+
+    r = _invoke(
+        "backlog", "supersede", new_id,
+        "--replaces", old_id,
+        "--cause", "consolidated",
+        "--surface", "src/x.py",
+    )
+    assert r.exit_code == 0, r.output
+
+    node = next(e for e in _read_entries(tmp_graph) if e["id"] == old_id)
+    assert node["status"] == "superseded"
+    assert node.get("blocked_reason") is None
+
+
+# ---------------------------------------------------------------------------
 # `backlog idea` shorthand verb
 # ---------------------------------------------------------------------------
 

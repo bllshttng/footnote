@@ -322,8 +322,12 @@ def test_exclusive_pre_existing_uppercase(decls: list[Decl]) -> None:
 
 def test_agents_ask_has_phone_shorts(decls: list[Decl]) -> None:
     """AC1: `agents ask` declares -H/-c/-t for harness/cwd/timeout (Python side)."""
-    ask = {d.long: d.shorts for d in decls if d.file.endswith("agents/cli.py") and d.func == "cmd_ask"}
-    assert ask, "could not find cmd_ask options in agents/cli.py"
+    ask = {
+        d.long: d.shorts
+        for d in decls
+        if d.file.endswith(("agents/cli.py", "agents/ask_cli.py")) and d.func == "cmd_ask"
+    }
+    assert ask, "could not find cmd_ask options in agents/cli.py or agents/ask_cli.py"
     expected = {"--harness": "-H", "--cwd": "-c", "--timeout": "-t"}
     for long, short in expected.items():
         assert long in ask, f"agents ask is missing {long}"

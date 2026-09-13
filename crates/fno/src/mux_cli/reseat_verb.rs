@@ -17,7 +17,7 @@
 //! geometry does not.
 use super::*;
 
-const RESEAT_USAGE: &str = "usage: fno mux thread reseat <agent-name | pane-id> [--portal N] [--session S]\n  move a live pane-hosted worker into a portal seat, keeping its PTY.\n  trade: the row stops being a squad member, so restore never rebuilds it,\n  and `fno agents rm` removes the row without killing the pane child.";
+const RESEAT_USAGE: &str = "usage: fno mux thread reseat <agent-name | pane-id> [--portal N] [--server S]\n  move a live pane-hosted worker into a portal seat, keeping its PTY.\n  trade: the row stops being a squad member, so restore never rebuilds it,\n  and `fno agents rm` removes the row without killing the pane child.";
 
 /// A typed refusal from the reseat move. Printed once at the verb's edge,
 /// each with its own exit code; nothing downstream matches message text.
@@ -251,8 +251,8 @@ pub fn reseat(args: &[OsString], env_session: Option<&str>) -> i32 {
         Err(_) => {
             if session_flag.is_some() {
                 eprintln!(
-                    "fno mux thread reseat: --session names the server for a pane id; \
-                     an agent name already carries its session"
+                    "fno mux thread reseat: --server names the server for a pane id; \
+                     an agent name already carries its server"
                 );
                 return EXIT_USAGE;
             }
@@ -281,11 +281,8 @@ pub fn reseat(args: &[OsString], env_session: Option<&str>) -> i32 {
         Some(r) => (r.session.clone(), r.pane, Some(r.name.clone())),
         None => {
             let session = resolve_session(
-                session_flag
-                    .as_deref()
-                    .or(env_session)
-                    .filter(|s| !s.is_empty()),
-                None,
+                session_flag.as_deref().filter(|s| !s.is_empty()),
+                env_session,
             );
             let pane = match token.parse::<u64>() {
                 Ok(n) => n,

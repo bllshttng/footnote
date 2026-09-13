@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import subprocess as _subprocess
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from fno.agents.registry import AgentEntry
+
+# The mint is a real pre-spawn subprocess (x-84b2); fakes route it here.
+_REAL_SUBPROCESS_RUN = _subprocess.run
 
 
 def _row(**overrides) -> AgentEntry:
@@ -47,6 +51,17 @@ def _screen_verdict(
     return {"matched": matched, "rule_id": rule_id, "state": state}
 
 
+@pytest.fixture(autouse=True)
+def _graph_with_target_node(monkeypatch):
+    """Verb resolution loads the node record; default it to a planless low
+    node so the probe resolves the target verb. A test overrides this by
+    monkeypatching load_graph again inside its own body."""
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{"id": "x-bdb9", "difficulty": "low"}],
+    )
+
+
 def test_retask_node_resolution_canonicalizes_slug_and_bare_hex(monkeypatch):
     import fno.agents.retask as retask
 
@@ -61,6 +76,7 @@ def test_retask_node_resolution_canonicalizes_slug_and_bare_hex(monkeypatch):
 
 
 def test_same_tier_builds_target_payload_without_executable_switch_commands():
+    from fno.agents.harness_map import dispatch_command
     from fno.agents.retask import detect_retask, resolve_target_coordinate
 
     target = resolve_target_coordinate(
@@ -71,7 +87,7 @@ def test_same_tier_builds_target_payload_without_executable_switch_commands():
     receipt = detect_retask(_row(), target, node="x-bdb9")
 
     assert receipt["outcome"] == "retask_ready"
-    assert receipt["payload"]["target_command"] == "$fno:target --no-merge x-bdb9"
+    assert receipt["payload"]["target_command"] == dispatch_command("codex").format(id="x-bdb9")
     assert receipt["payload"]["switch"] == {"required": False}
     assert receipt["payload"]["execution"] == {"mode": "read_only_plan"}
 
@@ -110,25 +126,94 @@ def test_default_target_vendor_preserves_the_registry_vendor_axis():
 
 
 @pytest.mark.parametrize(
-    ("target_override", "reason"),
+    ("target_override", "reason", "live_mode"),
     [
-        ({"harness": "claude"}, "harness"),
-        ({"provider": "zai", "route": "zai/glm-5.3", "model": "glm-5.3"}, "provider"),
-        ({"substrate": "bg"}, "substrate"),
-        ({"permission_mode": "yolo"}, "permission_mode"),
-        ({"account": "work"}, "account"),
+        ({"harness": "claude"}, "harness", None),
+        ({"provider": "zai", "route": "zai/glm-5.3", "model": "glm-5.3"}, "provider", None),
+        ({"substrate": "bg"}, "substrate", None),
+        ({"permission_mode": "yolo"}, "permission_mode", "bypassPermissions"),
+        ({"permission_mode": "bypassPermissions"}, "permission_mode_unobserved", None),
+        ({"account": "work"}, "account", None),
     ],
 )
-def test_incompatible_axis_requires_spawn_before_any_payload(target_override, reason):
+def test_incompatible_axis_requires_spawn_before_any_payload(target_override, reason, live_mode):
+    """AC2-ERR: the mode compare is against the live worker, and an
+    unobservable mode fails closed; a legacy None launch_account counts as
+    different."""
     from fno.agents.retask import detect_retask, resolve_target_coordinate
 
     target = resolve_target_coordinate(
         "x-bdb9", settings=_settings(provider="codex"), env={}
     )
     target = replace(target, **target_override)
-    receipt = detect_retask(_row(), target, node="x-bdb9")
+    receipt = detect_retask(
+        _row(), target, node="x-bdb9", live_permission_mode=live_mode
+    )
 
     assert receipt == {"outcome": "spawn_required", "reason": reason}
+
+
+def test_matching_live_permission_and_account_retasks_ready() -> None:
+    """AC2-HP: equal live mode and account clear the compare the presence
+    test always failed."""
+    from fno.agents.retask import detect_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9", settings=_settings(provider="codex"), env={}
+    )
+    target = replace(
+        target,
+        harness="claude",
+        provider=None,
+        permission_mode="bypassPermissions",
+        account="zai",
+    )
+    receipt = detect_retask(
+        _row(
+            harness="claude",
+            substrate="thread",
+            mux=None,
+            fno_id="F",
+            provider="anthropic",
+            launch_account="zai",
+        ),
+        target,
+        node="x-bdb9",
+        live_permission_mode="bypassPermissions",
+    )
+
+    assert receipt["outcome"] == "retask_ready"
+
+
+def test_live_permission_mode_reads_the_last_transcript_record(tmp_path, monkeypatch):
+    from fno.agents.retask import _live_permission_mode
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": "hi"})
+        + "\n"
+        + json.dumps({"type": "permission-mode", "permissionMode": "default"})
+        + "\nnot json\n"
+        + json.dumps({"type": "permission-mode", "permissionMode": "bypassPermissions"})
+        + "\n"
+        + json.dumps({"type": "user", "message": "go"})
+        + "\n"
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mux_recipient_transcript", lambda _entry: transcript
+    )
+    claude_row = _row(harness="claude", substrate="thread", mux=None, fno_id="F")
+
+    assert _live_permission_mode(claude_row) == "bypassPermissions"
+
+    # A record torn by a concurrent append does not decide; the last complete
+    # record does.
+    with transcript.open("a") as handle:
+        handle.write('{"type":"permission-mode","permissionMode":"yolo"')
+    assert _live_permission_mode(claude_row) == "bypassPermissions"
+
+    # Another harness never reads a transcript at all.
+    assert _live_permission_mode(_row()) is None
 
 
 def test_non_mux_worker_is_refused_without_a_target_payload():
@@ -422,6 +507,10 @@ def test_run_retask_parses_codex_clear_receipt_before_accepting_successor(monkey
     )
 
     def run(command, **_kwargs):
+        # The mint is a real pre-spawn subprocess (x-84b2); route it to the
+        # real binary so it never consumes a scripted read.
+        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in command}:
+            return _REAL_SUBPROCESS_RUN(command, **_kwargs)
         if "read" in command:
             return SimpleNamespace(returncode=0, stdout=next(reads), stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -473,6 +562,10 @@ def test_run_retask_succession_verdict_rides_the_shared_classifier(monkeypatch):
     )
 
     def run(command, **_kwargs):
+        # The mint is a real pre-spawn subprocess (x-84b2); route it to the
+        # real binary so it never consumes a scripted read.
+        if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in command}:
+            return _REAL_SUBPROCESS_RUN(command, **_kwargs)
         if "read" in command:
             return SimpleNamespace(returncode=0, stdout=next(reads), stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -846,19 +939,56 @@ def test_run_retask_passes_live_osc_title_to_manifest_evaluator(monkeypatch):
     assert sends == []
 
 
-def test_run_retask_refuses_claude_when_live_title_is_unavailable(monkeypatch):
+def _claude_thread_row(**overrides) -> AgentEntry:
+    """A claude thread worker with predecessor lineage, for full-transit tests."""
+    values = {"harness": "claude", "substrate": "thread", "mux": None, "fno_id": "F",
+              "predecessor_session_ids": ["old-session"]}
+    values.update(overrides)
+    return _row(**values)
+
+
+def _stub_claude_succession(monkeypatch) -> None:
+    """Shared seams for run_retask tests that must reach past /clear."""
     import fno.agents.retask as retask
 
-    row = _row(harness="claude", screen_state=None)
+    monkeypatch.setattr(retask, "resolve_mux_session", lambda *_a, **_k: "main")
+    monkeypatch.setattr(retask, "classify_session_transition", lambda *_a, **_k: "succession")
+    monkeypatch.setattr(
+        retask,
+        "load_registry",
+        lambda **_kwargs: [SimpleNamespace(
+            name="bp-xbdb9-retask", harness="claude",
+            harness_session_id="new-session",
+            forked_from_session_id="old-session",
+            predecessor_session_ids=["old-session"],
+        )],
+    )
+    monkeypatch.setattr(
+        retask,
+        "rename_agent",
+        lambda *_args, **_kwargs: SimpleNamespace(name="target-x-bdb9"),
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.project_verified_tier", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr("fno.agents.mux_spawn._pane_osc_title", lambda *_args: None)
+
+
+def test_run_retask_retasks_a_claude_thread_worker_whose_title_is_none(monkeypatch):
+    """AC4-HP (x-3ea6): a rule-bordered idle composer with an unreadable title
+    is a verdict, not a refusal - the manifest's grid rules decide."""
+    import fno.agents.retask as retask
+
+    row = _claude_thread_row(model="old-model", effort="high")
     target = retask.RetaskCoordinate(
         harness="claude", provider=None, model="old-model", effort="high",
-        substrate="pane", permission_mode=None, route=None, account=None,
+        substrate="thread", permission_mode=None, route=None, account=None,
     )
     sends: list[str] = []
     monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
     monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
-    monkeypatch.setattr("fno.agents.mux_spawn._pane_osc_title", lambda *_args: None)
+    _stub_claude_succession(monkeypatch)
     monkeypatch.setattr(
         "fno.agents.mux_spawn._evaluate_manifest_screen",
         lambda *_args, **_kwargs: {
@@ -871,13 +1001,166 @@ def test_run_retask_refuses_claude_when_live_title_is_unavailable(monkeypatch):
     def run(command, **_kwargs):
         if "send" in command:
             sends.append(command[command.index("--text") + 1])
-        return SimpleNamespace(returncode=0, stdout="live prompt box", stderr="")
+        if "ls" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"name": "bp-xbdb9-retask", "fno_id": "F", "pane_id": 7}]),
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "─── t-name ─\n❯ \n────────────\n"
+                "Model: old-model (reasoning effort high)\n"
+                "To continue this session, run codex resume old-session"
+            ),
+            stderr="",
+        )
 
     monkeypatch.setattr(retask.subprocess, "run", run)
     receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
 
-    assert receipt["reason"] == "pane_state_unobserved"
-    assert sends == []
+    assert receipt["status"] == "retasked", receipt
+    assert "pane title unreadable" not in str(receipt)
+    assert "/clear" in sends
+
+
+def test_run_retask_exit_23_on_clear_reports_view_left_worker(monkeypatch):
+    """AC4-ERR (x-3ea6): the send gate's identity refusal on /clear names the
+    cause, carries the gate's stderr as detail, and keeps cleared false."""
+    import fno.agents.retask as retask
+
+    row = _claude_thread_row()
+    target = retask.RetaskCoordinate(
+        harness="claude", provider=None, model=None, effort=None,
+        substrate="thread", permission_mode=None, route=None, account=None,
+    )
+    stderr_line = (
+        "fno mux pane send: pane 7 is the portal for bp-xbdb9-retask (attach deadbee1) "
+        "but its child runs claude agents; the viewer left that session"
+    )
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
+    _stub_claude_succession(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._evaluate_manifest_screen",
+        lambda *_args, **_kwargs: _screen_verdict(rule_id="live_prompt_box"),
+    )
+
+    def run(command, **_kwargs):
+        if "send" in command:
+            return SimpleNamespace(returncode=23, stdout="", stderr=f"{stderr_line}\n")
+        if "ls" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"name": "bp-xbdb9-retask", "fno_id": "F", "pane_id": 7}]),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="frame", stderr="")
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "view_left_worker"
+    assert receipt["detail"] == stderr_line
+    assert receipt["cleared"] is False
+    assert receipt["session_restamped"] is False
+
+
+def test_run_retask_exit_23_without_the_portal_marker_names_the_family(monkeypatch):
+    """AC4-ERR (x-3ea6): an identity refusal that is NOT the portal gate keeps
+    the family reason with the gate's own line as detail."""
+    import fno.agents.retask as retask
+
+    row = _claude_thread_row()
+    target = retask.RetaskCoordinate(
+        harness="claude", provider=None, model=None, effort=None,
+        substrate="thread", permission_mode=None, route=None, account=None,
+    )
+    stderr_line = (
+        "fno mux pane send: pane 7 carries label bp-xbdb9-retask but no session "
+        "id resolves for it; re-address by session id through fno mux where"
+    )
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
+    _stub_claude_succession(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._evaluate_manifest_screen",
+        lambda *_args, **_kwargs: _screen_verdict(rule_id="live_prompt_box"),
+    )
+
+    def run(command, **_kwargs):
+        if "send" in command:
+            return SimpleNamespace(returncode=23, stdout="", stderr=f"{stderr_line}\n")
+        if "ls" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"name": "bp-xbdb9-retask", "fno_id": "F", "pane_id": 7}]),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="frame", stderr="")
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "identity_refused"
+    assert receipt["detail"] == stderr_line
+
+
+def test_run_retask_exit_23_after_clear_keeps_the_partial_state_truthful(monkeypatch):
+    """AC4-ERR (x-3ea6): the gate refusing a later send must not unreport the
+    /clear that already landed - cleared and the restamp stay in the receipt."""
+    import fno.agents.retask as retask
+
+    row = _claude_thread_row()
+    target = retask.RetaskCoordinate(
+        harness="claude", provider=None, model=None, effort=None,
+        substrate="thread", permission_mode=None, route=None, account=None,
+    )
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
+    _stub_claude_succession(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._evaluate_manifest_screen",
+        lambda *_args, **_kwargs: _screen_verdict(rule_id="live_prompt_box"),
+    )
+
+    def run(command, **_kwargs):
+        if "send" in command:
+            text = command[command.index("--text") + 1]
+            if text == "/clear":
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(
+                returncode=23,
+                stdout="",
+                stderr="fno mux pane send: pane 7 is the portal for bp-xbdb9-retask "
+                "(attach deadbee1) but its child runs claude agents; the viewer left that session\n",
+            )
+        if "ls" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"name": "bp-xbdb9-retask", "fno_id": "F", "pane_id": 7}]),
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout="frame\nTo continue this session, run codex resume old-session",
+            stderr="",
+        )
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "view_left_worker"
+    assert receipt["cleared"] is True
+    assert receipt["session_restamped"] is True
+    assert receipt["registry_name"] == "target-x-bdb9"
 
 
 def test_run_retask_timeout_mid_transaction_reports_the_true_pane_state(monkeypatch):
@@ -1002,3 +1285,182 @@ def test_thread_viewport_refusal_names_the_substrate_and_cause() -> None:
     assert "worker_has_no_thread_ref" in message
     assert entry.name in message
     assert "thread" in message
+
+
+def test_thread_viewport_reaches_by_registry_name_and_joins_the_opened_pane(
+    monkeypatch,
+) -> None:
+    """AC1-HP: the door is keyed by the row name; the join still matches fno_id."""
+    import fno.agents.retask as retask
+
+    entry = _row(harness="claude", substrate="thread", mux=None, fno_id="F", name="bp-x")
+    calls: list[list[str]] = []
+
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        if "thread" in argv:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"name": "bp-x", "fno_id": "F", "pane_id": 7}]),
+            stderr="",
+        )
+
+    monkeypatch.setattr(retask, "resolve_mux_session", lambda *_args, **_kwargs: "main")
+    monkeypatch.setattr(retask.subprocess, "run", run)
+
+    assert retask.resolve_thread_viewport(entry) == ("main", 7)
+    assert calls[0] == [
+        "fno", "mux", "thread", "--server", "main", "bp-x",
+        "--portal", "new", "--tab", "new",
+    ]
+
+
+def test_run_retask_thread_door_refusal_carries_the_door_stderr(monkeypatch) -> None:
+    """AC1-ERR: the refusal keeps reason thread_view_unavailable and adds the
+    door's own stderr line as detail, so a caller can tell a reach miss from a
+    broken pipe."""
+    import fno.agents.retask as retask
+
+    row = _row(harness="claude", substrate="thread", mux=None, fno_id="F")
+    target = retask.RetaskCoordinate(
+        harness="claude", provider=None, model=None, effort=None,
+        substrate="thread", permission_mode=None, route=None, account=None,
+    )
+    stderr_line = "fno mux thread: portal reach: no live row answers bp-xbdb9-retask"
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_a, **_k: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_a, **_k: target)
+    monkeypatch.setattr(retask, "resolve_mux_session", lambda *_a, **_k: "main")
+    monkeypatch.setattr("fno.agents.dispatch._mux_recipient_transcript", lambda _entry: None)
+
+    def run(_argv, **_kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr=stderr_line)
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "thread_view_unavailable"
+    assert receipt["detail"] == stderr_line
+    assert receipt["cleared"] is False
+
+
+def test_planless_blueprint_node_retasks_an_opus_claude_worker(tmp_path, monkeypatch):
+    """AC3-HP: the node's dispatch_verb drives the profile, so a planless
+    blueprint node reaches an opus anthropic worker instead of refusing on
+    the target profile's glm route."""
+    import fno.agents.retask as retask
+    from fno.agents.harness_map import normalize_command
+
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{
+            "id": "x-bdb9",
+            "difficulty": "medium",
+            "dispatch_verb": "/fno:blueprint",
+        }],
+    )
+    settings = _settings(
+        provider="claude",
+        model="claude-opus-5",
+        permission_mode="bypassPermissions",
+    )
+    settings.agents.profiles = {
+        "target": settings.agents.profiles["target"],
+        "blueprint": settings.agents.profiles["target"],
+    }
+    row = _row(
+        harness="claude",
+        provider="claude",
+        model="claude-opus-5",
+        substrate="thread",
+        mux=None,
+        fno_id="F",
+    )
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "permission-mode", "permissionMode": "bypassPermissions"})
+        + "\n"
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mux_recipient_transcript", lambda _entry: transcript
+    )
+
+    target = retask.resolve_target_coordinate(
+        "x-bdb9", settings=settings, env={}
+    )
+    receipt = retask.detect_retask(
+        row, target, node="x-bdb9",
+        live_permission_mode=retask._live_permission_mode(row),
+    )
+
+    assert receipt["outcome"] == "retask_ready"
+    assert receipt["payload"]["target"]["verb"] == "blueprint"
+    assert receipt["payload"]["target_command"] == normalize_command(
+        "/blueprint {id}", "claude"
+    ).format(id="x-bdb9")
+
+
+def test_ready_target_node_keeps_the_zai_lane_and_refuses_an_opus_row(
+    tmp_path, monkeypatch
+):
+    """AC3-ERR: a ready node still resolves the target profile, so law
+    d-20293d74 holds - an opus anthropic row cannot take the glm lane."""
+    import fno.agents.retask as retask
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{
+            "id": "x-bdb9",
+            "difficulty": "medium",
+            "dispatch_verb": None,
+            "cwd": str(tmp_path),
+            "plan_path": "plan.md",
+        }],
+    )
+    settings = _settings(route="zai/glm-5.3-flash[1m]")
+    row = _row(
+        harness="claude",
+        provider="claude",
+        model="claude-opus-5",
+        substrate="thread",
+        mux=None,
+        fno_id="F",
+    )
+    monkeypatch.setattr("fno.agents.dispatch._mux_recipient_transcript", lambda _entry: None)
+
+    target = retask.resolve_target_coordinate("x-bdb9", settings=settings, env={})
+    receipt = retask.detect_retask(
+        row, target, node="x-bdb9",
+        live_permission_mode=retask._live_permission_mode(row),
+    )
+
+    assert receipt == {"outcome": "spawn_required", "reason": "provider"}
+
+
+def test_unresolvable_dispatch_verb_refuses_instead_of_guessing(monkeypatch):
+    import pytest
+
+    import fno.agents.retask as retask
+    from fno.agents.harness_map import DispatchResolveError
+
+    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [])
+
+    with pytest.raises(DispatchResolveError):
+        retask.resolve_target_coordinate("x-bdb9", env={})
+
+
+def test_run_retask_refuses_when_the_dispatch_verb_cannot_resolve(monkeypatch):
+    import fno.agents.retask as retask
+
+    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [])
+    row = _row()
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_a, **_k: SimpleNamespace(entry=row))
+
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "dispatch_verb_unresolved"
+    assert receipt["detail"]

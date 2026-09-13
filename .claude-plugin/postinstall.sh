@@ -65,6 +65,20 @@ uv_install_verifies() {
   [[ -n "$(find "$td/fno/lib" -name '*.pyc' -print -quit 2>/dev/null)" ]]
 }
 
+# The post-install shim sweep (x-c911): repair any fno* shim in the tool bin
+# that dangles or resolves into a temp dir; fail loud when unrepairable.
+shim_sweep() {
+  local py td
+  py="$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null)/fno/bin/fno-py"
+  td="$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir --bin 2>/dev/null)" || td="${UV_TOOL_BIN_DIR:-$HOME/.local/bin}"
+  [[ -x "$py" ]] || return 0  # no venv python: the verify gate already failed
+  # An installed fno predating the sweep module has nothing to sweep.
+  "$py" -c "import fno.setup.shim_check" 2>/dev/null || return 0
+  "$py" -m fno.setup.shim_check --repair --bin-dir "$td" && return 0
+  err "fno shims in $td dangle or point into a temp dir and could not be relinked to the durable copy. Inspect: $py -m fno.setup.shim_check --bin-dir $td"
+  return 1
+}
+
 # The complete-install marker (x-538e): the Rust `fno` front door rides in the
 # release wheel as a shared_script, so a binary-complete install lands it in
 # the tool venv bin beside fno-py. Checked only on the wheel paths - a source
@@ -190,6 +204,7 @@ if command -v uv >/dev/null 2>&1; then
      && command -v fno-agents-daemon >/dev/null 2>&1 \
      && command -v fno-agents-worker >/dev/null 2>&1; then
     log "fno $SRC_VERSION already installed (binary-complete); skipping."
+    shim_sweep || exit 1
     exit 0
   fi
 
@@ -205,6 +220,7 @@ if command -v uv >/dev/null 2>&1; then
       # that predates the complete payload stays installed (the Python CLI
       # works) but the missing front door is named with its repair (AC2-EDGE).
       verify_frontdoor || true
+      shim_sweep || exit 1
       log "restart your shell (or source your env) to pick up PATH."
       next_steps
       exit 0

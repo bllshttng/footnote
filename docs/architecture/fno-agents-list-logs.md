@@ -118,7 +118,7 @@ Without these checks, the loop would hang silently on every common log-rotation 
   ],
   "count": 1,
   "filters_applied": { "cwd": null, "provider": null, "status": null, "progress": null },
-  "fields_omitted": ["model", "provider"],
+  "fields_omitted": ["model", "model_basis"],
   "schema_version": 2
 }
 ```

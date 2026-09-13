@@ -194,22 +194,21 @@ def test_pane_entry_deduplicates_equivalent_registry_rows(monkeypatch):
     assert pane_transport._pane_entry("main", 7) is entry
 
 
-def test_raw_send_is_byte_identical_and_still_audits(monkeypatch):
-    """`raw=True` types exactly the caller's bytes and keeps the audit row.
+def test_raw_send_is_byte_identical_and_declares_its_source(monkeypatch):
+    """`raw=True` types exactly the caller's bytes; the floor below writes the
+    audit row, so this lane declares its provenance and writes none of its own.
 
-    The `agent_raw_inject` ledger row exists to mark a send that reaches a
-    prompt with no attribution. Since the default is enveloped, `raw` is the
-    only way to produce one - so the row keeps its meaning instead of firing on
-    every routine peer message.
+    x-91ba moved the row into the `fno mux pane send` verb itself so a direct
+    caller is audited too. A second write here would make every pane dispatch
+    read as two, so `append_event` must stay silent on this path -- and the
+    `--source` label must ride the payload paste, where the floor can join it
+    to the bus record.
     """
     calls: list[dict] = []
     monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
 
     seen: list = []
-    monkeypatch.setattr(
-        dispatch.events, "daemon_lifecycle_log", lambda: "/dev/null", raising=False
-    )
     import fno.events as events_mod
 
     monkeypatch.setattr(
@@ -218,7 +217,14 @@ def test_raw_send_is_byte_identical_and_still_audits(monkeypatch):
 
     assert dispatch._mux_pane_send(_entry(), "1", guarded=False, raw=True) is True
     assert _pasted(calls) == "1"
-    assert [e["type"] for e in seen] == ["agent_raw_inject"]
+    assert seen == [], "the mail lane must not write a second row beside the floor's"
+    paste_args = next(c["argv"] for c in calls if "--stdin" in c["argv"])
+    assert "--source" not in paste_args, "no label, no declaration"
+    cr_args = [c["argv"] for c in calls if "--text" in c["argv"]]
+    assert cr_args, "the submit-key sends ran"
+    assert all(
+        "--source" not in argv for argv in cr_args
+    ), "submit-key sends declare nothing: a control byte is not a dispatch"
 
 
 def test_raw_send_skips_the_read_back(monkeypatch):

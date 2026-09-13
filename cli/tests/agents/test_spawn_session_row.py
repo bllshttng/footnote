@@ -6,9 +6,10 @@ landed in no sessions array. Coverage:
 
   - AC1: `spawn --node X --substrate bg` with a resolvable worker uuid opens a
     row carrying the WORKER's harness session id (never the spawner's, never
-    the 8-hex short id). Phase: a /target-family message stamps do (the
-    worker's claim-acquire stamp fills the same row), anything else stamps
-    review.
+    the 8-hex short id). Phase: the message's verb labels the row via the
+    spawn_phase.toml table - do, review, blueprint, think, ship all stamp
+    their spellings; an unlabeled --node spawn is refused (x-007c), so no
+    row is ever born mislabeled or driverless.
   - AC1-fallback: a review-verb prompt naming exactly ONE node id (no --node)
     opens the same row; prose or a two-id prompt arms nothing.
   - AC1-ERR: a review prompt naming an unresolvable id exits 0 with a named
@@ -160,12 +161,12 @@ def test_spawn_with_node_and_review_verb_opens_row(workdir_claude, resolvable_uu
     assert row["effort"] == "xhigh"
 
 
-def test_spawn_with_prose_and_node_opens_no_mislabeled_row(
+def test_spawn_with_prose_and_node_refuses_unlabeled(
     workdir_claude, resolvable_uuid
 ) -> None:
-    """Arbitrary prose is a label the spawn cannot guess and never defaults
-    to review: a review row is a retirement blocker for life, so an
-    unlabeled task opens NO sessions row rather than a lying one."""
+    """Arbitrary prose is a label the spawn cannot guess: a --node spawn it
+    cannot label is refused before anything launches, never defaulted to a
+    lying row (x-007c)."""
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
@@ -176,9 +177,9 @@ def test_spawn_with_prose_and_node_opens_no_mislabeled_row(
         ],
         catch_exceptions=False,
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 2, result.output
     assert _node_rows() == [], f"no row for prose: {_node_rows()!r}"
-    assert "session row open skipped" in result.stderr
+    assert "No worker launched" in result.stderr
 
 
 def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> None:
@@ -209,14 +210,16 @@ def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> 
 
 
 def test_spawn_without_uuid_skips_named(workdir_claude) -> None:
-    """No resolvable full uuid (the autouse stub answers None): no row, named skip."""
+    """No resolvable full uuid (the autouse stub answers None): no row, named
+    skip. The message names a review verb, so the x-007c label gate passes and
+    this exercises the uuid-miss skip, not the refusal."""
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
         agents_app,
         [
             "spawn", "--name", "nouuid-worker", "-H", "claude", "--substrate", "bg",
-            "--node", NODE, "review this diff",
+            "--node", NODE, "/fno:review this diff",
         ],
         catch_exceptions=False,
     )
@@ -323,11 +326,17 @@ def test_spawn_target_family_stamps_do(workdir_claude, resolvable_uuid) -> None:
     assert rows[0]["session_id"] == FULL_UUID
 
 
-def test_spawn_unlabelable_verb_skips_named(workdir_claude, resolvable_uuid) -> None:
-    """A /fno:triage worker with --node is none of the known work shapes; a
-    guessed label would lie on an append-only record, so nothing stamps and
-    the skip names the escape hatch."""
+def test_spawn_unlabelable_verb_refuses_before_spawn(
+    workdir_claude, resolvable_uuid
+) -> None:
+    """AC4 (x-007c): a /fno:triage worker with --node is none of the table's
+    verbs, so the spawn refuses fail-closed before anything launches: exit 2,
+    the flag and the allowed values on stderr, no registry row, no claims
+    taken, no sessions row."""
     from fno.agents.cli import agents_app
+    from fno.agents.registry import load_registry
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
 
     result = CliRunner().invoke(
         agents_app,
@@ -337,10 +346,58 @@ def test_spawn_unlabelable_verb_skips_named(workdir_claude, resolvable_uuid) -> 
         ],
         catch_exceptions=False,
     )
-    assert result.exit_code == 0, result.output
-    assert _node_rows() == []
-    assert "session row open skipped" in result.stderr
+    assert result.exit_code == 2, result.output
     assert "--session-phase" in result.stderr
+    assert "No worker launched" in result.stderr
+    for phase in ("do", "review", "blueprint", "think", "ship"):
+        assert phase in result.stderr, phase
+    assert load_registry() == []  # nothing launched
+    assert _node_rows() == []
+    for key in (f"node:{NODE}", f"dispatch:{NODE}"):
+        assert claim_status(key, root=claims_root_for(key)).get("holder") is None, key
+
+
+def test_spawn_bare_blueprint_spelling_stamps_blueprint(
+    workdir_claude, resolvable_uuid
+) -> None:
+    """AC3 (x-007c): the bare /blueprint spelling - what claude and agy
+    autonomous dispatch render - stamps the blueprint row at dispatch time."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "bp-bare-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "/blueprint x-4ab1",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    rows = _node_rows()
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "blueprint"
+    assert rows[0]["session_id"] == FULL_UUID
+
+
+def test_spawn_explicit_phase_rescues_unmapped_verb(
+    workdir_claude, resolvable_uuid
+) -> None:
+    """AC5 (x-007c): an explicit --session-phase on an unmapped verb is the
+    operator's label and stamps the row instead of refusing."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "triage-labeled", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "--session-phase", "review", "/fno:triage deep",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    rows = _node_rows()
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "review"
 
 
 def test_spawn_think_verb_stamps_think(workdir_claude, resolvable_uuid) -> None:
@@ -360,6 +417,46 @@ def test_spawn_think_verb_stamps_think(workdir_claude, resolvable_uuid) -> None:
     rows = _node_rows()
     assert len(rows) == 1
     assert rows[0]["phase"] == "think"
+
+
+def test_spawn_blueprint_verb_stamps_blueprint(workdir_claude, resolvable_uuid) -> None:
+    """A /fno:blueprint worker names a blueprint planner: the row stamps the
+    planning phase instead of skipping."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "bp-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "/fno:blueprint x-5baf",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    rows = _node_rows()
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "blueprint"
+
+
+def test_spawn_codex_blueprint_spelling_stamps_blueprint(
+    workdir_claude, resolvable_uuid
+) -> None:
+    """The codex spelling travels on the normalized form: `$fno:blueprint`
+    stamps the same planning row the slash spelling does."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "bp-codex-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "$fno:blueprint the plan doc",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    rows = _node_rows()
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "blueprint"
 
 
 def test_spawn_no_node_anywhere_writes_nothing_and_stays_silent(

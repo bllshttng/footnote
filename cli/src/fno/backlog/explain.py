@@ -115,20 +115,14 @@ def _unreadable(name: str, exc: BaseException, *, key: Optional[str] = None) -> 
 _UNSAMPLED: object = object()
 
 
-def _explain_load_decision() -> "Optional[tuple[str, str, dict]]":
-    """One load-gate decision per report build, or None when unreadable: the
-    gates row and the stop share one sample instead of paying it twice.
+def _explain_load_decision() -> "Optional[object]":
+    """One CPU-axis admission per report build, or None when unreadable: the
+    gates rows and the stop share one sample instead of paying it twice.
     """
     try:
-        from fno.agents.spawn_gate import load_gate_decision
-        from fno.config import load_settings
+        from fno.agents.spawn_gate import _cpu_axis
 
-        agents = load_settings().agents
-        return load_gate_decision(
-            float(agents.max_load_per_cpu),
-            float(agents.max_fleet_cpu_share),
-            float(agents.hard_max_load_per_cpu),
-        )
+        return _cpu_axis()
     except Exception:  # noqa: BLE001 - an unreadable preview gate holds no opinion
         return None
 
@@ -267,7 +261,8 @@ def _max_live() -> int:
 
 
 def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
-    """RAM and load, read the way the gate reads them (never probing to refuse)."""
+    """RAM and the CPU axis, read the way the gate reads them (never probing
+    to refuse)."""
     from fno.agents.spawn_gate import available_ram_gb
 
     out: list[Gate] = []
@@ -276,7 +271,6 @@ def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
 
         agents_cfg = load_settings().agents
         floor = float(agents_cfg.min_free_gb)
-        per_cpu = float(agents_cfg.max_load_per_cpu)
     except Exception as exc:  # noqa: BLE001
         return [_unreadable("machine", exc)]
 
@@ -302,41 +296,48 @@ def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
             )
 
     try:
-        from fno.agents.spawn_gate import (
-            _LOAD_REFUSAL_REASONS,
-            _load_snapshot,
-            load_gate_decision,
-        )
+        from fno.agents.spawn_gate import _cpu_axis
+        from fno.footprint import Admission
 
-        snapshot = _load_snapshot(per_cpu)
-        decision = load_gate_decision(per_cpu) if load_decision is _UNSAMPLED else cast(
-            "Optional[tuple[str, str, dict]]", load_decision
+        admission = (
+            _cpu_axis() if load_decision is _UNSAMPLED else cast("Admission", load_decision)
         )
     except Exception as exc:  # noqa: BLE001
-        out.append(_unreadable("load-trigger", exc, key="agents.max_load_per_cpu"))
-    else:
-        if snapshot.spawn_load_status == "unavailable":
-            out.append(
-                _unreadable(
-                    "load-trigger",
-                    RuntimeError("load average unreadable"),
-                    key="agents.max_load_per_cpu",
-                )
-            )
-        else:
-            refusing = decision is not None and decision[0] in _LOAD_REFUSAL_REASONS
-            out.append(
-                Gate(
-                    "load-trigger",
-                    "-" if snapshot.load_1m is None else f"{snapshot.load_1m:.1f}",
-                    f"{snapshot.load_ceiling:.1f} ({per_cpu:g} x {snapshot.load_cpu_count} cpu)",
-                    # Same decision function the real gate runs, so the dry
-                    # run cannot pass a box the spawn would refuse.
-                    "refuse" if refusing else "pass",
-                    key="agents.max_load_per_cpu",
-                    note=None if decision is None else decision[1],
-                )
-            )
+        out.append(_unreadable("cpu-share", exc, key="agents.max_fleet_cpu_share"))
+        return out
+    if admission is None:
+        out.append(_unreadable("cpu-share", RuntimeError("admission unreadable"),
+                               key="agents.max_fleet_cpu_share"))
+        return out
+    verdict = admission.verdict
+    # An instrument that never answered has no figures to show: render the
+    # row unmeasured, never a fabricated 0.00/0.00.
+    unreadable = admission.axis == "cpu_instrument"
+    # Same decision function the real gate runs, so the dry run cannot pass a
+    # box the spawn would refuse or hold.
+    out.append(
+        Gate(
+            "cpu-share",
+            "unreadable" if unreadable
+            else f"{admission.fleet_cores:.2f}/{admission.capacity_cores:.2f} cores",
+            "-" if unreadable else f"{admission.ceiling * 100:.0f}%",
+            "refuse" if verdict in ("refuse", "undecidable")
+            else ("hold" if verdict == "hold" else "pass"),
+            key="agents.max_fleet_cpu_share",
+            note=admission.reason,
+        )
+    )
+    out.append(
+        Gate(
+            "load-backstop",
+            "-" if admission.load_15m is None else f"{admission.load_15m:.1f}",
+            "-" if unreadable else f"{admission.backstop:.1f}",
+            "refuse" if (admission.axis == "load_15m" and verdict == "refuse")
+            else ("pass" if admission.load_15m is not None
+                  else "skipped: load unreadable"),
+            key="agents.hard_max_load_per_cpu",
+        )
+    )
     return out
 
 
@@ -378,7 +379,9 @@ def routing_for(node: Optional[dict]) -> dict:
     The chain is RECOVERED, not constructed: `route_resolve.resolve_slot`
     already returns ``(candidate, chain)`` whose last element is its terminal
     reason. The strings are the existing receipt vocabulary and are surfaced
-    verbatim - reformatting them would fork it.
+    verbatim - reformatting them would fork it. The slot is the node's
+    effective verb, derived through the same wrapper the dispatch grid pick
+    uses, so the narration cannot name a slot the dispatcher would not walk.
     """
     if node is None:
         return {"chain": [], "candidate": None, "inputs": {}, "routing": "unarmed", "skipped": []}
@@ -393,11 +396,24 @@ def routing_for(node: Optional[dict]) -> dict:
         "role": role,
         "plan_path": node.get("plan_path") or None,
     }
+    # The slot comes from the verb, never a literal: one derivation shared
+    # with the dispatch seam, and the same normalization on the canonical
+    # verb, so a blueprint-verb node walks agents.profiles.blueprint here.
+    try:
+        from fno.backlog import advance as adv
+
+        verb = adv._node_effective_verb(node)
+    except Exception as exc:  # noqa: BLE001 - an unanswerable verb is reported
+        return {
+            "chain": [f"verb unresolved: {exc}"], "candidate": None, "inputs": inputs,
+            "routing": "unarmed", "skipped": [],
+        }
+    profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
     try:
         inventory = route_resolve.resolve_inventory()
         capacity = dict(route_resolve.runtime_capacity(inventory=inventory))
         candidate, chain, verdict = route_resolve.resolve_slot(
-            "target",
+            profile_verb,
             node,
             capacity,
             role=role,
@@ -572,10 +588,22 @@ def render_report(report: dict) -> str:
                 why = sel["why"].get(asked["dropped_by"], "")
                 out.append(f"ASKED  {asked['id']}: dropped by {asked['dropped_by']} - {why}")
         elif asked.get("never_a_candidate"):
-            out.append(
-                f"ASKED  {asked['id']}: never a candidate "
-                f"(status {asked.get('status')}, not ready and not cold-dispatchable)"
-            )
+            if asked.get("status") == "in_review":
+                # The PR is the work: no status change is wanted, the driver
+                # adopts the open PR through target init (worktree ensure
+                # continues origin/feature/<node>). Both command spellings:
+                # codex reserves / for harness commands.
+                out.append(
+                    f"ASKED  {asked['id']}: never a candidate (in_review: its open PR is "
+                    f"the work; dispatch /fno:target {asked['id']} (codex: $fno:target "
+                    f"{asked['id']}), whose init adopts the PR on feature/<node>; "
+                    "undriven ones list under undriven_pr on fno inbox board)"
+                )
+            else:
+                out.append(
+                    f"ASKED  {asked['id']}: never a candidate "
+                    f"(status {asked.get('status')}, not ready and not cold-dispatchable)"
+                )
         else:
             out.append(f"ASKED  {asked['id']}: eligible, ranked {asked['rank'] + 1}")
 
@@ -640,6 +668,8 @@ def build_lane_fill_report(
     node_id: Optional[str] = None,
     top: int = 5,
     max_dispatch: Optional[int] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict:
     """``--explain --epic``: the fan-out the daemon's drain would make, as a READ.
 
@@ -650,8 +680,10 @@ def build_lane_fill_report(
     2320 graph nodes carry - so it reported an empty mission for every epic
     (x-7f1f). It now classifies the SAME children through the SAME pre-spawn
     gates the drain runs (``_converge_gate`` plus the epic fan-out's own
-    no-project / unmapped-project / lane-cap), so it cannot describe a
-    selection the drain would not make.
+    no-project / unmapped-project / lane-cap, priced per child by
+    ``_lane_cap_verdict``), so it cannot describe a selection the drain would
+    not make. ``provider``/``model`` forward the dispatch pins raw (the
+    explain branch returns before the CLI validates them).
 
     Never dispatches, never claims, never emits.
     """
@@ -664,7 +696,7 @@ def build_lane_fill_report(
     from fno.backlog import advance as adv
     from fno.graph._intake import project_root_from_settings
 
-    width = adv._spawn_headroom()
+    budget = adv._spawn_budget_or_degraded(provider)
     ready = adv._ready_leaf_children(epic)
 
     # Classify every child through the fan-out's gates, in the drain's order.
@@ -672,8 +704,10 @@ def build_lane_fill_report(
     reasons_by_id: dict[str, str] = {}
     excluded: list[dict] = []
     selected: list[dict] = []
+    filled = 0
     for child in ready:
         reason: Optional[str]
+        lane: Optional[str] = None
         proj = child.get("project")
         if not proj:
             reason = "no-project"
@@ -681,18 +715,30 @@ def build_lane_fill_report(
             root = project_root_from_settings(proj)
             if not root:
                 reason = "unmapped-project"
-            elif len(selected) >= width:
+            else:
                 # The drain checks the cap BEFORE the converge gates
                 # (advance_epic), so the preview must name the same drop first.
-                reason = "lane-cap"
-            else:
-                reason = adv._converge_gate(child, root)
+                refused, lane, _headroom = adv._lane_cap_verdict(
+                    child, budget, total=filled, model=model, provider=provider
+                )
+                if refused:
+                    reason = "lane-cap"
+                else:
+                    reason = adv._converge_gate(child, root)
         if reason is not None:
             reasons_by_id[child["id"]] = reason
             counts[reason] = counts.get(reason, 0) + 1
-            excluded.append({"id": child["id"], "reason": reason})
+            row: dict = {"id": child["id"], "reason": reason}
+            if reason == "lane-cap":
+                row["lane"] = lane
+            excluded.append(row)
         else:
             selected.append(child)
+            filled += 1
+            if lane is not None:
+                budget.dispatched_by_vendor[lane] = (
+                    budget.dispatched_by_vendor.get(lane, 0) + 1
+                )
 
     # The live run's overall --max binds after the spawn-gate width does, so a
     # dry run that ignored it would promise more dispatches than the run makes.
@@ -708,13 +754,15 @@ def build_lane_fill_report(
         excluded.extend({"id": c["id"], "reason": "max-dispatch"} for c in denied)
         stop = "max-dispatch"
 
-    # The load gate refuses machine-wide; a preview that left stop empty
-    # would promise a dispatch the real spawn refuses. One decision sample
-    # feeds both this stop and the gates row below.
-    from fno.agents.spawn_gate import _LOAD_REFUSAL_REASONS
-
+    # The CPU axis refuses machine-wide; a preview that left stop empty
+    # would promise a dispatch the real spawn refuses. One admission sample
+    # feeds both this stop and the gates rows below.
     load_decision = _explain_load_decision()
-    if stop is None and load_decision is not None and load_decision[0] in _LOAD_REFUSAL_REASONS:
+    if (
+        stop is None
+        and load_decision is not None
+        and getattr(load_decision, "verdict", None) in ("refuse", "undecidable")
+    ):
         stop = "load-refused"
 
     ordered_names = [
@@ -753,7 +801,7 @@ def build_lane_fill_report(
         "mode": "lane-fill",
         "epic": epic,
         "selection": {
-            "width": width,
+            "width": budget.fleet,
             "pool": len(ready),
             "drops": drops,
             "would_fill": [
@@ -807,7 +855,8 @@ def render_lane_fill_report(report: dict) -> str:
         out.append(f"  {sel['slot_note']}")
     out.append(f"  stop: {sel['stop']}")
     for row in sel["excluded"]:
-        out.append(f"    excluded {row.get('id')}: {row.get('reason')}")
+        lane = f" (lane {row['lane']})" if row.get("lane") else ""
+        out.append(f"    excluded {row.get('id')}: {row.get('reason')}{lane}")
     if sel["would_fill"]:
         out.append("  would fill:")
         for i, e in enumerate(sel["would_fill"]):

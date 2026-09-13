@@ -185,13 +185,19 @@ def test_the_reader_agrees_with_the_gate_on_a_containing_crown(monkeypatch, tmp_
 
     containing = _Row(crown_level=3, crown_scope="fno")
     containing.status = "live"  # type: ignore[attr-defined]
-    assert _resolve(containing) is None, (
+    containing_path, containing_reason = _resolve(containing)
+    assert containing_path is None, (
         "a containing crown resolved a manifest it does not name; the warning's "
         "premise would then be wrong"
     )
+    # The reason names the file the containing scope looked for, so the miss
+    # is diagnosable instead of the bare silence the reader used to return.
+    assert "kings/fno.md" in containing_reason
 
     # Positive control: the SAME call with an exactly-matching crown resolves
     # the manifest, so the None above is the containment and not a dead stub.
     exact = _Row(crown_level=3, crown_scope="x-b76b")
     exact.status = "live"  # type: ignore[attr-defined]
-    assert _resolve(exact) == armed
+    exact_path, exact_reason = _resolve(exact)
+    assert exact_path == armed
+    assert exact_reason == ""

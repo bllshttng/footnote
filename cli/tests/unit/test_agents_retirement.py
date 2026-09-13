@@ -25,7 +25,10 @@ def _summary() -> dict:
         "kept_crowned": ["w-crown"],
         "kept_no_provenance": ["w-lost"],
         "kept_active": [{"id": "w-live", "age_s": 10}],
-        "kept_transcript_unresolved": ["w-dark"],
+        "kept_transcript_unresolved": [
+            {"id": "w-dark", "held_s": 7200, "nodes_done": False},
+            {"id": "w-dark-done", "held_s": 7 * 3600, "nodes_done": True},
+        ],
         "stop_refused": [{"id": "w-stuck", "reason": "the stop did not confirm"}],
         "kept_no_receipt": [{"id": "w-norc", "reason": "no staged receipt"}],
     }
@@ -55,6 +58,7 @@ def test_every_keep_bucket_maps_to_named_not_retirable():
             ("w-lost", None),
             ("w-live", None),
             ("w-dark", None),
+            ("w-dark-done", None),
             ("w-stuck", None),
             ("w-norc", None),
         ],
@@ -67,8 +71,15 @@ def test_every_keep_bucket_maps_to_named_not_retirable():
     assert out["w-op"].reason == "operator row"
     assert out["w-lost"].reason == "no-node"
     assert out["w-live"].reason == "active: written 10s ago"
+    # (x-1b90 change 3) The hold names its age; the decision rides only an
+    # old hold on done work.
+    assert out["w-dark"].reason == "transcript unresolved for 2h0m"
+    assert (
+        out["w-dark-done"].reason
+        == "transcript unresolved for 7h0m; needs a decision: fno agents rm w-dark-done"
+    )
     assert "stop refused" in out["w-stuck"].reason
-    for name in ("w-door", "w-crown", "w-dark", "w-norc"):
+    for name in ("w-door", "w-crown", "w-dark", "w-dark-done", "w-norc"):
         assert out[name].retire is False
 
 
@@ -99,3 +110,42 @@ def test_default_runner_shells_the_installed_binary(monkeypatch):
     out = retirement.verdicts([("x", None)])
     assert out["x"].retire is False
     assert "rust-reap-unreadable" in out["x"].reason
+
+
+def test_holds_rows_map_with_age_and_reason():
+    # x-e3cc AC5-HP: a row riding `holds` maps to a named, aged verdict.
+    summary = _summary()
+    summary["holds"] = [
+        {
+            "id": "w-conf",
+            "reason": "sources disagree",
+            "detail": "sessions x-84b2 vs registry x-5d79",
+            "age_s": 7200,
+            "age_basis": "row created",
+            "escalated": True,
+        }
+    ]
+    out = verdicts([("w-conf", None)], runner=_runner_with(summary))
+    v = out["w-conf"]
+    assert v.retire is False
+    assert v.reason.startswith("sources disagree:")
+    assert "held" in v.reason
+    assert "7200" in v.reason
+
+
+def test_a_bucket_mapped_row_keeps_its_richer_verdict():
+    # x-e3cc: `holds` never overwrites a verdict the bucket already gave.
+    summary = _summary()
+    summary["holds"] = [
+        {
+            "id": "w-done",
+            "reason": "sources disagree",
+            "detail": "x",
+            "age_s": 1,
+            "age_basis": "row created",
+            "escalated": False,
+        }
+    ]
+    out = verdicts([("w-done", None)], runner=_runner_with(summary))
+    assert out["w-done"].retire is True
+    assert out["w-done"].reason.startswith("every named node done")

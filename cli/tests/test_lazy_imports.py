@@ -12,7 +12,7 @@ from __future__ import annotations
 import importlib
 import subprocess
 import sys
-from typing import Any
+from pathlib import Path
 
 import pytest
 
@@ -102,13 +102,54 @@ def test_fno_paths_does_not_import_heavy_subapps():
     )
 
 
+def test_events_import_defers_schema_parse():
+    """Importing fno.events leaves schema-derived exports unloaded."""
+    result = _run_py(
+        """
+import fno.events as events
+assert "SCHEMA" not in events.__dict__
+assert "EVENT_TYPES" not in events.__dict__
+assert events.SCHEMA is not None
+assert "SCHEMA" in events.__dict__
+"""
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_events_first_access_is_thread_safe():
+    """Concurrent first accesses cannot observe partially loaded exports."""
+    result = _run_py(
+        """
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+import fno.events as events
+
+load = events._load_schema
+def slow_load():
+    time.sleep(0.05)
+    return load()
+events._load_schema = slow_load
+barrier = threading.Barrier(8)
+names = ["SCHEMA", "EVENT_TYPES"] * 4
+def read(name):
+    barrier.wait()
+    return getattr(events, name)
+with ThreadPoolExecutor(max_workers=8) as pool:
+    values = list(pool.map(read, names))
+assert all(values)
+"""
+    )
+    assert result.returncode == 0, result.stderr
+
+
 # ---------------------------------------------------------------------------
 # AC1-ERR: misconfigured lazy entry fails loud
 # ---------------------------------------------------------------------------
 
 def test_bad_lazy_entry_fails_loud():
     """AC1-ERR: bad module:attr in lazy_subcommands exits non-zero with helpful message."""
-    from fno._lazy_group import LazyTypeGroup, make_lazy_group_cls
+    from fno._lazy_group import make_lazy_group_cls
     import typer
     from typer.testing import CliRunner
 
@@ -132,7 +173,7 @@ def test_bad_lazy_entry_fails_loud():
 
 def test_bad_module_path_fails_loud():
     """AC1-ERR: bad module path in lazy_subcommands exits non-zero with helpful message."""
-    from fno._lazy_group import LazyTypeGroup, make_lazy_group_cls
+    from fno._lazy_group import make_lazy_group_cls
     import typer
     from typer.testing import CliRunner
 
@@ -596,7 +637,7 @@ def test_third_party_import_failure_has_no_reinstall_hint():
 # AC8-WIN: verify-then-retry across a tree that changed mid-run
 # ---------------------------------------------------------------------------
 
-def test_module_is_now_on_disk_sees_a_file_written_after_the_dir_was_listed(tmp_path):
+def test_module_appears_on_disk_sees_a_file_written_after_the_dir_was_listed(tmp_path, monkeypatch):
     """The retry gate must read the PRESENT, not a cached past: a module written
     into an already-imported package must be visible, because that is exactly what
     a reinstall does to a running process.
@@ -606,7 +647,14 @@ def test_module_is_now_on_disk_sees_a_file_written_after_the_dir_was_listed(tmp_
     mtime changed and APFS mtimes are fine-grained enough to notice. What it pins is
     the BEHAVIOR the retry depends on, not that one implementation detail."""
     import sys as _sys
-    from fno._lazy_group import _module_is_now_on_disk
+    import time as _time
+
+    from fno._lazy_group import _module_appears_on_disk
+
+    # The first absence now spends the wait budget; flatten the sleeps and
+    # reset the once-per-process cap so this test stays fast and honest.
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+    monkeypatch.setattr("fno._recheck_budget_spent", False)
 
     pkg = tmp_path / "winpkg"
     pkg.mkdir()
@@ -615,14 +663,112 @@ def test_module_is_now_on_disk_sees_a_file_written_after_the_dir_was_listed(tmp_
     try:
         import winpkg  # noqa: F401  (populates the finder cache for pkg/)
 
-        assert _module_is_now_on_disk("winpkg.late") is False
+        assert _module_appears_on_disk("winpkg.late") is False
         # Write the module AFTER the directory has been listed and cached.
         (pkg / "late.py").write_text("x = 1\n", encoding="utf-8")
-        assert _module_is_now_on_disk("winpkg.late") is True
+        assert _module_appears_on_disk("winpkg.late") is True
     finally:
         _sys.path.remove(str(tmp_path))
         _sys.modules.pop("winpkg", None)
         _sys.modules.pop("winpkg.late", None)
+
+
+# ---------------------------------------------------------------------------
+# The bounded wait: absent-then-present, the budget cap, the spent cap
+# ---------------------------------------------------------------------------
+
+# A parent whose import costs nothing: find_spec on a dotted name imports the
+# parent first, so every fake-absent name below hangs directly off `fno`.
+
+
+def test_appears_on_disk_succeeds_once_the_module_lands_within_the_budget(monkeypatch):
+    """Absent on the first look, present on the third: the import wins the race
+    the single-look guard used to lose. This is the reinstall window, shrunk
+    but still real, being closed instead of conceded."""
+    import importlib.util
+    import time as time_mod
+    from types import SimpleNamespace
+
+    import fno
+
+    monkeypatch.setattr("fno._recheck_budget_spent", False)
+    monkeypatch.setattr(time_mod, "sleep", lambda s: None)
+    looks = {"n": 0}
+    real_find_spec = importlib.util.find_spec
+
+    def flaky(name):
+        if name == "fno._mid_reinstall":
+            looks["n"] += 1
+            if looks["n"] >= 3:
+                return SimpleNamespace(loader=object())
+            return None
+        return real_find_spec(name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", flaky)
+
+    assert fno._module_appears_on_disk("fno._mid_reinstall") is True
+    assert looks["n"] == 3, "answered the moment the module appeared, not at budget end"
+
+
+def test_appears_on_disk_spends_the_full_budget_before_answering_absent(monkeypatch):
+    """Absent for longer than the budget: False after exactly the budget's
+    polls, and the once-per-process cap marked spent."""
+    import time as time_mod
+
+    import fno
+
+    monkeypatch.setattr("fno._recheck_budget_spent", False)
+    slept: list[float] = []
+    monkeypatch.setattr(time_mod, "sleep", slept.append)
+
+    assert fno._module_appears_on_disk("fno._never_shipped") is False
+    assert len(slept) == fno._VERIFY_ATTEMPTS, slept
+    assert fno._recheck_budget_spent is True, "exhaustion must arm the spent cap"
+
+
+def test_spent_budget_answers_later_absences_after_a_single_look(monkeypatch):
+    """One exhausted budget per process: a stale install pays the wait on its
+    first absent module, not once per import."""
+    import time as time_mod
+
+    import fno
+
+    monkeypatch.setattr("fno._recheck_budget_spent", True)
+    slept: list[float] = []
+    monkeypatch.setattr(time_mod, "sleep", slept.append)
+
+    assert fno._module_appears_on_disk("fno._never_shipped") is False
+    assert slept == [], "an already-spent budget must not wait again"
+
+
+def test_namespace_portion_is_absent_not_present(monkeypatch):
+    """A directory without its __init__.py mid-swap answers a namespace spec,
+    which imports 'successfully' as an empty module and breaks every submodule
+    lookup after it. The re-check must read that as ABSENT and keep waiting
+    for the real package."""
+    import time as time_mod
+    from types import SimpleNamespace
+
+    import importlib.util
+    import fno
+
+    monkeypatch.setattr("fno._recheck_budget_spent", False)
+    monkeypatch.setattr(time_mod, "sleep", lambda s: None)
+    looks = {"n": 0}
+    real_find_spec = importlib.util.find_spec
+
+    def namespace_then_real(name):
+        if name == "fno._mid_write":
+            looks["n"] += 1
+            if looks["n"] == 1:
+                return SimpleNamespace(loader=None)  # namespace portion
+            return SimpleNamespace(loader=object())  # the real package lands
+        return real_find_spec(name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", namespace_then_real)
+
+    assert fno._module_appears_on_disk("fno._mid_write") is True
+    assert looks["n"] == 2, "namespace portion waited, real package answered"
 
 
 def _counting_import(monkeypatch, target: str, results: list):
@@ -661,7 +807,7 @@ def test_lazy_import_retries_once_when_the_tree_changed_underneath(monkeypatch):
         "fno.state.cli",
         [ModuleNotFoundError("gone", name="fno.state._mid_reinstall"), real_target],
     )
-    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+    monkeypatch.setattr(lg, "_module_appears_on_disk", lambda name: True)
 
     app = typer.Typer(
         cls=make_lazy_group_cls({"state": "fno.state.cli:cli"}),
@@ -693,7 +839,7 @@ def test_lazy_import_does_not_retry_when_the_module_is_really_missing(monkeypatc
         "fno.state.cli",
         [ModuleNotFoundError("gone", name="fno.state._really_gone")],
     )
-    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: False)
+    monkeypatch.setattr(lg, "_module_appears_on_disk", lambda name: False)
 
     app = typer.Typer(
         cls=make_lazy_group_cls({"state": "fno.state.cli:cli"}),
@@ -743,7 +889,7 @@ def test_plain_import_error_is_never_retried(monkeypatch):
     from fno import _lazy_group as lg
 
     # on_disk deliberately True: the guard must be the exception TYPE, not this.
-    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+    monkeypatch.setattr(lg, "_module_appears_on_disk", lambda name: True)
     boom = ImportError("cannot import name 'gone' from 'fno.config'", name="fno.config")
     calls, result = _run_one_lazy_command(monkeypatch, [boom])
 
@@ -758,7 +904,7 @@ def test_retry_failure_is_reported_instead_of_the_stale_first_error(monkeypatch)
     something `fno doctor update` cannot fix."""
     from fno import _lazy_group as lg
 
-    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+    monkeypatch.setattr(lg, "_module_appears_on_disk", lambda name: True)
     first = ModuleNotFoundError("gone", name="fno.state._mid_reinstall")
     second = ModuleNotFoundError("No module named 'some_third_party'", name="some_third_party")
     calls, result = _run_one_lazy_command(monkeypatch, [first, second])
@@ -829,9 +975,9 @@ def test_import_hook_retries_a_module_that_is_on_disk_now(monkeypatch):
     # function by VALUE at import time, so monkeypatching `fno` reaches the
     # finder only. An inlined second copy of the on-disk check in `_load_real`
     # would sail past the patch, and this line is what refuses it.
-    assert fno._lazy_group._module_is_now_on_disk is fno._module_is_now_on_disk
+    assert fno._lazy_group._module_appears_on_disk is fno._module_appears_on_disk
     checked: list[str] = []
-    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: checked.append(name) or True)
+    monkeypatch.setattr(fno, "_module_appears_on_disk", lambda name: checked.append(name) or True)
     _spy_path_finder(monkeypatch, seen)
 
     spec = finder.find_spec("fno.agents.session_truth", None, None)
@@ -853,7 +999,7 @@ def test_import_hook_does_not_retry_a_module_that_is_absent(monkeypatch):
 
     seen: list[str] = []
     finder = _installed_finder()
-    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: False)
+    monkeypatch.setattr(fno, "_module_appears_on_disk", lambda name: False)
     _spy_path_finder(monkeypatch, seen, spec=None)
 
     with pytest.raises(ModuleNotFoundError) as excinfo:
@@ -866,10 +1012,124 @@ def test_import_hook_does_not_retry_a_module_that_is_absent(monkeypatch):
     assert "fno doctor" in message
 
 
+def test_import_hook_stays_reachable_from_other_threads_during_a_wait(monkeypatch):
+    """The recursion stop is per-thread: one thread parked inside the bounded
+    wait must not silence another thread's guard. A plain class flag held for
+    the whole wait would return None for the second thread and hand it the
+    bare error the guard exists to replace."""
+    import threading
+
+    import fno
+
+    finder = _installed_finder()
+    release = threading.Event()
+    consulted: list[tuple[str, str]] = []
+
+    def slow_helper(name):
+        if name.endswith(".a"):
+            consulted.append(("wait", name))
+            release.wait(2)
+            return True
+        consulted.append(("quick", name))
+        return True
+
+    monkeypatch.setattr(fno, "_module_appears_on_disk", slow_helper)
+    seen: list[str] = []
+    _spy_path_finder(monkeypatch, seen)
+
+    a_result: list = []
+    thread_a = threading.Thread(
+        target=lambda: a_result.append(finder.find_spec("fno.a", None, None))
+    )
+    thread_a.start()
+    deadline = threading.Event()
+    for _ in range(100):
+        if ("wait", "fno.a") in consulted:
+            break
+        deadline.wait(0.02)
+    assert ("wait", "fno.a") in consulted, "thread A never reached the wait"
+
+    # Thread A is parked inside its budget, recursion flag set on ITS local.
+    b_result = finder.find_spec("fno.b", None, None)
+
+    release.set()
+    thread_a.join(5)
+
+    assert b_result == "SPEC", "another thread's wait must not silence this guard"
+    assert ("quick", "fno.b") in consulted, "the second thread's re-check must run"
+    assert a_result == ["SPEC"]
+
+
+def test_namespace_refuser_blocks_the_poison_before_it_caches(monkeypatch, tmp_path):
+    """End-to-end through the real import machinery: a subpackage directory
+    without its __init__.py mid-swap must NOT cache an empty namespace module.
+    PathFinder answers namespace specs BEFORE the last-resort guard is ever
+    consulted, so a finder ahead of PathFinder has to refuse the shape; the
+    same import retried after the swap lands on the real package."""
+    import sys as _sys
+
+    import fno
+
+    # The refuser gates on the fno prefix; aim it at a synthetic top name so
+    # the test drives the real meta_path ordering without touching real fno.
+    monkeypatch.setattr(fno, "_is_fno_module", lambda n: n.startswith("zzns."))
+    refuser = fno._FnoNamespaceRefuser()
+    path_finder_at = next(
+        i for i, f in enumerate(_sys.meta_path) if getattr(f, "__name__", "") == "PathFinder"
+    )
+    _sys.meta_path.insert(path_finder_at, refuser)
+    pkg = tmp_path / "zzns"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "claims").mkdir()  # the mid-swap shape: dir sans __init__.py
+    _sys.path.insert(0, str(tmp_path))
+    try:
+        import zzns  # the real parent imports fine
+
+        assert zzns.x == 1
+        with pytest.raises(ModuleNotFoundError) as excinfo:
+            import zzns.claims
+
+        assert "part of fno itself" in str(excinfo.value), str(excinfo.value)
+        assert "zzns.claims" not in _sys.modules, "the empty namespace must not cache"
+
+        (pkg / "claims" / "__init__.py").write_text("y = 2\n", encoding="utf-8")
+        import zzns.claims  # the retry after the swap lands
+
+        assert zzns.claims.y == 2
+    finally:
+        _sys.path.remove(str(tmp_path))
+        _sys.meta_path.remove(refuser)
+        for name in [m for m in list(_sys.modules) if m.startswith("zzns")]:
+            _sys.modules.pop(name, None)
+
+
+def test_namespace_refuser_sits_before_path_finder_and_installs_once():
+    """One refuser, ahead of PathFinder: behind it, PathFinder's namespace
+    answer would cache the poison before anyone refused it."""
+    import fno
+
+    found = [f for f in sys.meta_path if getattr(f, "_fno_namespace_refuser", False)]
+    assert len(found) == 1, f"expected exactly one refuser, got {len(found)}"
+    path_finder_at = max(
+        i for i, f in enumerate(sys.meta_path) if getattr(f, "__name__", "") == "PathFinder"
+    )
+    assert sys.meta_path.index(found[0]) < path_finder_at
+
+
 def test_import_hook_ignores_third_party_modules(monkeypatch):
-    """A missing dependency is a broken install: no re-check, no retry, no hint."""
+    """A missing dependency is a broken install: no re-check, no retry, no hint,
+    and no wait -- the shared helper now polls its budget for any name it is
+    handed, so the fno-only gate has to sit in the finder, in front of it."""
+    import fno
+
     seen: list[str] = []
     finder = _installed_finder()
+
+    def _bomb(name):
+        raise AssertionError(f"third-party module {name!r} reached the re-check helper")
+
+    monkeypatch.setattr(fno, "_module_appears_on_disk", _bomb)
     _spy_path_finder(monkeypatch, seen)
 
     assert finder.find_spec("rich.console", None, None) is None
@@ -927,10 +1187,10 @@ def test_fromlist_submodule_keeps_the_retry_and_loses_only_the_message():
 
     For `from fno.pkg import submodule`, `_handle_fromlist` swallows a
     ModuleNotFoundError matching the fromlist entry and raises `cannot import
-    name ... from ...` instead, so the dual-cause text never reaches the reader.
-    The retry is untouched: it happens inside find_spec, before that exception
-    exists. Both halves are asserted here because the claim in the docs is about
-    the retry, not the message.
+    name ... from ...` instead, so the dual-cause text never reaches the reader
+    at the import layer. The retry is untouched: it happens inside find_spec,
+    before that exception exists. The message's last hop is the console
+    entrypoint (`main` in cli.py), which the tests below pin.
     """
     proc = _run_py(
         "import fno, importlib.machinery\n"
@@ -940,7 +1200,7 @@ def test_fromlist_submodule_keeps_the_retry_and_loses_only_the_message():
         "    def find_spec(name, path=None, target=None):\n"
         "        seen.append(name)\n"
         "        return None\n"
-        "fno._module_is_now_on_disk = lambda name: True\n"
+        "fno._module_appears_on_disk = lambda name: True\n"
         "importlib.machinery.PathFinder = Spy\n"
         "try:\n"
         "    from fno.agents import no_such_submodule\n"
@@ -949,8 +1209,99 @@ def test_fromlist_submodule_keeps_the_retry_and_loses_only_the_message():
         "print('SEEN', seen)\n"
     )
     assert proc.returncode == 0, proc.stderr
-    # The retry ran, for the fully-qualified submodule name.
-    assert "SEEN ['fno.agents.no_such_submodule']" in proc.stdout, proc.stdout
+    # The retry ran, for the fully-qualified submodule name. Consulted once by
+    # the namespace refuser and once more past the guard, so the spy list is
+    # no longer a single exact entry; the member is what the retry pins.
+    assert "fno.agents.no_such_submodule" in proc.stdout, proc.stdout
+    assert "SEEN [" in proc.stdout, proc.stdout
     # And CPython, not us, wrote the message the reader sees.
     assert "cannot import name 'no_such_submodule'" in proc.stdout, proc.stdout
     assert "is part of fno itself" not in proc.stdout, proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# AC-ENTRY: the console entrypoint carries the hint the import layer drops
+# ---------------------------------------------------------------------------
+
+# Both live specimens of 2026-09-04, verbatim shapes.
+_FROMLIST_SWALLOW = (
+    "cannot import name '_subprocess_util' from 'fno'",
+    "fno",
+)
+_ALREADY_IMPORTED = (
+    "cannot import name 'CLAIM_UNAVAILABLE' from 'fno.claims' (unknown location)",
+    "fno.claims",
+)
+
+
+def _run_main_with_raising_app(exc_type: str, msg: str, name: str) -> subprocess.CompletedProcess[str]:
+    """Call `main()` through a stubbed app raising `exc_type(msg, name=name)`."""
+    return _run_py(
+        "import fno.cli\n"
+        f"def boom(): raise {exc_type}({msg!r}, name={name!r})\n"
+        "fno.cli.app = boom\n"
+        "try:\n"
+        "    fno.cli.main()\n"
+        "except ImportError as e:\n"
+        "    print('MSG', e)\n"
+    )
+
+
+def test_entrypoint_carries_reinstall_hint_on_fromlist_swallow():
+    """Specimen 1: `from fno import _subprocess_util` mid-reinstall. The finder is
+    never consulted, so the operator saw a bare ImportError. `main()` is the one
+    layer that can read it."""
+    msg, name = _FROMLIST_SWALLOW
+    proc = _run_main_with_raising_app("ImportError", msg, name)
+    assert proc.returncode == 0, proc.stderr
+    assert msg in proc.stdout, proc.stdout
+    assert "is part of fno itself" in proc.stdout, proc.stdout
+    assert "fno doctor update" in proc.stdout, proc.stdout
+
+
+def test_entrypoint_carries_reinstall_hint_on_already_imported_shape():
+    """Specimen 2: fno.claims already in sys.modules with no spec origin. No
+    finder runs on an already-imported module; the entrypoint is the only site
+    left that sees the failure."""
+    msg, name = _ALREADY_IMPORTED
+    proc = _run_main_with_raising_app("ImportError", msg, name)
+    assert proc.returncode == 0, proc.stderr
+    assert msg in proc.stdout, proc.stdout
+    assert "is part of fno itself" in proc.stdout, proc.stdout
+
+
+def test_entrypoint_leaves_third_party_import_error_untouched():
+    """A genuinely broken third-party install collects no reinstall speculation,
+    and a package merely starting with the letters 'fno' is not ours."""
+    for msg, name in [
+        ("cannot import name 'x' from 'requests'", "requests"),
+        ("cannot import name 'x' from 'fnord'", "fnord"),
+    ]:
+        proc = _run_main_with_raising_app("ImportError", msg, name)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == f"MSG {msg}", proc.stdout
+
+
+def test_entrypoint_never_doubles_the_finder_hint():
+    """A ModuleNotFoundError already carries the finder's hint; appending again
+    would print it twice on one line."""
+    finder_msg = (
+        "No module named 'fno.graph'"
+        " (fno.graph is part of fno itself: either this package was being"
+        " reinstalled underneath the running process, in which case retry, or"
+        " the install is stale, in which case run `fno doctor update` then"
+        " `fno doctor`)"
+    )
+    proc = _run_main_with_raising_app("ModuleNotFoundError", finder_msg, "fno.graph")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.count("is part of fno itself") == 1, proc.stdout
+
+
+def test_fno_py_entrypoint_is_main():
+    """The console script must name `main`, not `app`: the shim is regenerated
+    from this line on every reinstall, and a bare `app` target is what left the
+    hint undelivered."""
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert 'fno-py = "fno.cli:main"' in pyproject, pyproject

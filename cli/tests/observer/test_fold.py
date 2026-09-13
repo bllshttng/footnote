@@ -32,7 +32,10 @@ def test_build_corpus_attribution_and_outcome_join():
         {**_blueprint_row("x-2", "s2"), "phases_completed": ["do"]},  # not blueprint
     ]
     nodes = [{"id": "x-1", "reverted": False}, {"id": "x-2", "reverted": False}]
-    corpus = fold.build_corpus(rows, nodes, [], skill="blueprint", since_days=28, now=NOW)
+    corpus = fold.build_corpus(
+        rows, nodes, [], skill="blueprint", since_days=28, now=NOW,
+        deliveries={"x-1": {"delivered": True}, "x-2": {"delivered": False}},
+    )
     assert corpus["total_rows"] == 2
     assert corpus["attributed"] == 1
     assert corpus["items"][0]["outcome"] == "merged_clean"

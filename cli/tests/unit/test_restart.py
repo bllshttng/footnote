@@ -19,9 +19,17 @@ def _fake_daemon_binary(monkeypatch, path: str = "/cargo/bin/fno-agents") -> Non
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path(path))
 
 
+_REAL_RUN = __import__("subprocess").run
+
+
 def _record_run(calls: list) -> object:
     def _run(cmd, **kwargs):
         calls.append(list(cmd))
+        # The name verbs execute in the binary; a blanket empty stub would
+        # answer the mint with an empty stdout.
+        parts = [str(part) for part in cmd]
+        if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+            return _REAL_RUN(cmd, **kwargs)
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     return _run
@@ -42,7 +50,7 @@ def test_restart_restarts_daemon_and_reports_mux(monkeypatch) -> None:
 
     result = runner.invoke(app, ["agents", "restart"])
     assert result.exit_code == 0
-    assert ["/cargo/bin/fno-agents", "restart"] in calls
+    assert ["/cargo/bin/fno-agents", "restart", "--json"] in calls
     assert not any("kill-server" in c for c in calls), "must NOT kill mux without --mux"
     assert "live mux session" in result.output
 
@@ -56,7 +64,7 @@ def test_agents_restart_force_preserves_the_daemon_break_glass_flag(monkeypatch)
     result = runner.invoke(app, ["agents", "restart", "--force"])
 
     assert result.exit_code == 0, result.output
-    assert ["/cargo/bin/fno-agents", "restart", "--force"] in calls
+    assert ["/cargo/bin/fno-agents", "restart", "--json", "--force"] in calls
 
 
 def test_restart_mux_flag_kills_each_session(monkeypatch) -> None:
@@ -149,7 +157,9 @@ def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:
     """A real daemon-restart failure fails the command (scripts must see it)."""
     _fake_daemon_binary(monkeypatch)
     monkeypatch.setattr(
-        restart.subprocess, "run", lambda cmd, **k: types.SimpleNamespace(returncode=3)
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(returncode=3, stdout="", stderr="daemon boom"),
     )
     monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
 
@@ -161,7 +171,9 @@ def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:
 def test_restart_json_summary(monkeypatch) -> None:
     _fake_daemon_binary(monkeypatch)
     monkeypatch.setattr(
-        restart.subprocess, "run", lambda cmd, **k: types.SimpleNamespace(returncode=0)
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
     monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "main", "state": "live"}])
 
@@ -277,13 +289,15 @@ def test_restart_mux_revives_orphaned_claude_workers(monkeypatch) -> None:
     result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
     assert result.exit_code == 0
     assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
+    # x-84b2: the revived worker is ro-t-session-<short> (the orphan row name
+    # is not a canonical dispatch name, so the identity is the typed session).
     assert [
-        "/cargo/bin/fno", "agents", "spawn", "--name", "worker1",
+        "/cargo/bin/fno", "agents", "spawn", "--name", "ro-t-session-uuid-1",
         "--harness", "claude", "--substrate", "bg", "--resume", "uuid-1", "--cwd", "/w1",
     ] in calls
     assert not any("spawn" in c and "bgw" in c for c in calls), "survivor must not be respawned"
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
-    assert payload["agents_revived"] == ["worker1"]
+    assert payload["agents_revived"] == ["ro-t-session-uuid-1"]
 
 
 def test_restart_no_revive_flag_skips_revival(monkeypatch) -> None:
@@ -358,6 +372,9 @@ def test_restart_revive_failure_reported_not_fatal(monkeypatch) -> None:
 
     def _run(cmd, **kwargs):
         calls.append(list(cmd))
+        parts = [str(part) for part in cmd]
+        if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+            return _REAL_RUN(cmd, **kwargs)
         rc = 1 if "spawn" in cmd else 0
         return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
 
@@ -419,3 +436,119 @@ def test_is_revivable_predicate() -> None:
     assert restart.is_revivable({"harness": "claude", "session_id": None}) is False
     assert restart.is_revivable({"harness": "claude"}) is False
     assert restart.is_revivable({}) is False
+
+
+def _quiet_keeper_leg(monkeypatch) -> None:
+    """A daemon restart with no keeper summary line: the keeper leg is absent."""
+    monkeypatch.setattr(
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(returncode=0, stdout="restarted: pid 1 -> 2", stderr=""),
+    )
+
+
+def test_restart_cycles_stale_store_keeper_and_ends_on_verdict(monkeypatch) -> None:
+    """AC6-HP: stale store keeper cycled, no mux killed, ok verdict last."""
+    _fake_daemon_binary(monkeypatch)
+    calls: list = []
+    keeper_json = json.dumps(
+        {
+            "store_keepers": [
+                {"graph": "/tmp/graph.json", "old_pid": 11, "result": "cycled"}
+            ],
+            "pane_keepers_stale": 1,
+        }
+    )
+
+    def _run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "restarted: pid 1 -> 2\n"
+                "fno agents restart: store keeper /tmp/graph.json pid 11 shut down "
+                "(stale build; respawns on next read).\n"
+                "fno agents restart: 1 pane keeper(s) run an older build; kept with "
+                "their panes, current when each pane ends.\n"
+                f"fno agents restart: keepers {keeper_json}"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(restart.subprocess, "run", _run)
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 0, result.output
+    assert "restarted: pid 1 -> 2" in result.output, "the daemon's own receipt survives"
+    assert "store keeper /tmp/graph.json pid 11 shut down" in result.output, result.output
+    assert "1 pane keeper(s) run an older build" in result.output
+    assert "kept with their panes" in result.output
+    assert ["--json"] == calls[0][-1:], "the daemon leg asks for --json"
+    assert not any("kill-server" in c for c in calls), "no mux kill"
+    last = [ln for ln in result.output.splitlines() if ln.strip()][-1]
+    assert last.startswith("fno agents restart: ok - "), last
+
+
+def test_restart_verdict_is_failed_when_daemon_fails(monkeypatch) -> None:
+    """AC6-ERR: a failed daemon ends on a FAILED verdict naming the error, exit 1."""
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(
+            returncode=1, stdout="", stderr="daemon pid 5 survived SIGKILL"
+        ),
+    )
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 1
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    assert lines[-1].startswith("fno agents restart: FAILED - "), lines[-1]
+    assert "survived SIGKILL" in lines[-1], "the daemon error text rides the verdict"
+
+
+def test_restart_spared_store_keeper_fails_the_verb(monkeypatch) -> None:
+    """AC6-EDGE: a busy-spared keeper is named and the verb exits 1."""
+    _fake_daemon_binary(monkeypatch)
+    keeper_json = json.dumps(
+        {
+            "store_keepers": [
+                {
+                    "graph": "/tmp/graph.json",
+                    "old_pid": 11,
+                    "result": "spared: a mutation is in flight",
+                }
+            ],
+            "pane_keepers_stale": 0,
+        }
+    )
+
+    def _run(cmd, **kwargs):
+        return types.SimpleNamespace(
+            returncode=1,
+            stdout=f"restarted: pid 1 -> 2\nfno agents restart: keepers {keeper_json}",
+            stderr="",
+        )
+
+    monkeypatch.setattr(restart.subprocess, "run", _run)
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 1, result.output
+    assert "spared: a mutation is in flight" in result.output
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    assert lines[-1].startswith("fno agents restart: FAILED - "), lines[-1]
+
+
+def test_ac5_a_refused_row_is_revivable():
+    """x-e594 AC5: a usage-capped worker reads `refused` and is live - its
+    process just cannot get a turn until the reset. It must survive a restart
+    and resume afterwards, so the shared revivable scope includes it and the
+    per-row predicate accepts it. update.py counts through the same constant
+    (one scope, three sites), so pinning it pins every collector."""
+    assert "refused" in restart.REVIVABLE_STATUSES
+    assert restart.is_revivable(
+        {"harness": "claude", "session_id": "sess-1", "status": "refused"}
+    )

@@ -1,6 +1,12 @@
 # Disposable deletes: why two `rm` spellings coexist
 
-This repo uses bare `rm` in most scripts and `command -p rm ... || /bin/rm ...` in exactly two files. That split is deliberate. `scripts/ci/check-disposable-rm.sh` enforces it in CI: a bare `rm` in either guarded file fails the build, and a bare `rm` anywhere else passes. This document states the rule so the next contributor does not "normalize" one spelling into the other.
+This repo uses bare `rm` in most scripts and `command -p rm ... || /bin/rm ...` in exactly three files. That split is deliberate. `scripts/ci/check-disposable-rm.sh` enforces it in CI: a bare `rm` in any guarded file fails the build, and a bare `rm` anywhere else passes. This document states the rule so the next contributor does not "normalize" one spelling into the other.
+
+## Is this page for you?
+
+You touch a guarded file, or your `rm` is aliased to a trash tool and a CI check just failed. This page owns that rule and its three-file boundary. Misreading it "fixes" the guarded spelling repo-wide, and the files that must not risk a trash-alias start depending on your host's `rm` config.
+
+Not for: general delete hygiene elsewhere in the repo, or the reaping sweeps that delete real state. Reaping is [reaping-faq.md](reaping-faq.md). The worktree contract is [../.claude/rules/worktrees.md](../.claude/rules/worktrees.md).
 
 ## The hazard
 
@@ -15,7 +21,7 @@ Use the two-rung form where footnote deletes state it created itself AND that st
 - **(a) inside a concurrency-critical section.** A delete that silently becomes a move is non-atomic work inside a mutex.
 - **(b) potentially large.** Trashing it is a material disk cost, not a rounding error.
 
-Everything else keeps bare `rm`. Two files qualify.
+Everything else keeps bare `rm`. Three files qualify.
 
 ### `scripts/ci/preflight.sh` (criterion a)
 
@@ -24,6 +30,10 @@ Every `rm` in this file sits in, or tears down, the mutex around the one shared 
 ### `hooks/worktree-remove.sh` (criterion b)
 
 A worktree with a built cargo `target/` runs to gigabytes, and git already holds every byte of it. Trashing one turns "reclaim 1.3 GB" into "relocate 1.3 GB and reclaim nothing." The guarded branch is the `[[ ! -e "$WORKTREE_PATH/.git" ]]` one: a leftover directory git itself declined to manage. The registered-worktree path above it is git's own removal and stays untouched.
+
+### `scripts/lib/worktree-lifecycle.sh` (criterion b)
+
+The cargo sweep deletes whole build-base hash dirs, the same gigabyte scale as a built `target/`. Measured 2026-09-12: an apply-mode sweep "reaped" 118 hash dirs through a trash-aliased `rm` and the Trash held 177 GB - zero bytes were reclaimed. The file carries the sanctioned spelling as one `_srm()` helper, so it is defined once and every delete in the file routes through it.
 
 ## The sanctioned spellings
 

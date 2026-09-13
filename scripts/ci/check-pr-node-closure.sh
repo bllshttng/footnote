@@ -145,6 +145,8 @@ if [[ $claimed -eq 0 ]]; then
     echo "  candidate from this message:"
     echo "  a branch segment can match the id grammar without being a real node,"
     echo "  and one unknown id voids the whole binding at merge."
+    echo "  Editing the body starts a fresh run of this check by itself. Do NOT"
+    echo "  rerun this failed run: a rerun replays the old body and fails again."
   } >&2
   exit 1
 fi

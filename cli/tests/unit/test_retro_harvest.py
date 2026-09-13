@@ -992,3 +992,34 @@ def test_triage_pr_with_commit_dates_and_author_login(tmp_path: Path):
     assert not any("addressed gemini finding" in t for t in landed), "addressed finding must not land"
     # The author reply (id=2) is filtered before classification, so it never lands.
     assert not any("Fixed in commit" in t for t in landed), "author reply must not land"
+
+
+def test_land_runs_the_filing_time_dedup_net_when_entries_are_passed(capsys):
+    """land_candidates is the shared retro mint surface; the dedup net every
+    other birth path runs belongs here, not per caller. The offer prints to
+    stderr and the node still lands: the net is warn-only."""
+    from fno.retro.land import MODE_INTERACTIVE, land_candidates
+    from fno.retro.types import KIND_CARVEOUT, Candidate
+
+    cand = Candidate(
+        title="loop-check verb and the stop hook shim",
+        body="the loop-check verb never sees the stop hook shim payload",
+        tier="node",
+        priority="p2",
+        source_pr=604,
+        source_id="finding-1",
+        content_hash="abc123",
+        finding_text="the loop-check verb never sees the stop hook shim payload",
+    )
+    entries = [{"id": "x-4444", "title": "loop-check verb and stop hook shim", "status": "triage"}]
+
+    results = land_candidates(
+        [cand],
+        mode=MODE_INTERACTIVE,
+        repo_root=Path("/nonexistent"),
+        create_fn=lambda **kw: "x-new9",
+        dedup_entries=entries,
+    )
+
+    assert results[0].outcome == "queued"
+    assert "dedup:" in capsys.readouterr().err

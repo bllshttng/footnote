@@ -103,7 +103,7 @@ Re-bench guidance: run `rm -rf cli/.venv && uv sync` first to avoid
 
 ## The reinstall-window hazard
 
-Deferring an import is deferring a **disk read**. A running `fno` process holds a partially imported package. It reaches back into `site-packages` later. `uv tool install --reinstall` (what `fno doctor update` runs) deletes and rewrites the process's executing tree. During installation, every subcommand not yet imported fails.
+Deferring an import is deferring a **disk read**. A running `fno` process holds a partially imported package. It reaches back into `site-packages` later. The `uv tool install` that `fno doctor update` runs deletes and rewrites the executing package tree. During installation, every subcommand not yet imported fails.
 
 This is a real, reproduced operator failure, not a theoretical one, and it took
 three sessions to identify because it presents as three unrelated symptoms that
@@ -130,10 +130,7 @@ Disabling it is also a small win on the help path, which was paying that import.
 
 ### Reproducing it
 
-Start `uv tool install --reinstall --refresh <repo>/cli` against the tool dir,
-and inside that window invoke an `fno` subcommand whose module the running
-process has not yet imported. The lazy group guarantees the import lands in the
-window.
+Start `uv tool install --reinstall --refresh <repo>/cli` against the tool dir, and inside that window invoke an `fno` subcommand whose module the running process has not yet imported. The lazy group guarantees the import lands in the window. That is the WIDE form, which no longer runs on a merge. The merge-path command is the narrow form described below. The wide form remains the deterministic way to reproduce the dependency-stripping window by hand.
 
 A synthetic loop that re-imports modules already resident in `sys.modules` will
 **not** reproduce it: a cached import never touches the disk. That false negative
@@ -147,11 +144,11 @@ Fixed, in four layers.
 
 **Legibility.** The error path performs no first-time import. A missing module under the `fno` package names both candidate causes: retry during a reinstall, or run `fno doctor update` then `fno doctor` for a stale install.
 
-**Verify-then-retry.** On an `fno` package import failure, `_load_real` checks current disk presence. A module present now gets exactly one retry. The disk check separates this from a hopeful sleep. A stale or broken install answers "absent", receives no retry, and keeps the original message. Nothing is masked. This window is common on real machines. Several launchd agents plus live sessions usually leave an `fno` process running during `uv tool install --reinstall`. Therefore, every `fno doctor update` reached the window.
+**Verify-then-retry.** On an `fno` package import failure, `_load_real` asks the shared on-disk re-check, which polls within a bounded budget (below). A module that appears within the budget gets its retry. The re-run predicate separates this from a hopeful sleep. A stale or broken install answers "absent" through every pass, receives no retry, and keeps the original message. Nothing is masked. This window is common on real machines. Several launchd agents plus live sessions usually leave an `fno` process running during an install. Therefore, every `fno doctor update` reached the window.
 
 **The same retry, on the other import path.** `_load_real` guards the lazy command-group import. That is one path of two. The other one carries far more traffic. It is a deferred `from fno. ...` written inside a command body, and there are about 2000 of those. `fno agents truth` reaches `fno.agents.session_truth` that way. The fno-agents daemon runs that verb as a continuous per-session liveness probe, so it is the highest-frequency reader of the window. Those sites used to fail with a bare `ModuleNotFoundError`, no retry and no dual-cause message. A guard on one of two reachable paths is decorative, so the guard moved to the one site both paths cross.
 
-`fno/__init__.py` appends a meta-path finder, `_ReinstallWindowFinder`, at the END of `sys.meta_path`. Every `fno.*` import imports `fno` first, so no caller can miss it. That covers the console script, `python -m fno.cli`, a spawned worker, and all 2000 in-body imports. Being last means it is consulted only after every normal finder has already answered "no such module". So it costs nothing on the happy path. At that point it runs the same `_module_is_now_on_disk` re-check `_load_real` runs, then asks `PathFinder` one more time. Present now, the import proceeds. Still absent, it raises the dual-cause message instead of the bare error. An absent module is neither slept on nor masked. Both paths share one check and one message, and both live in `fno/__init__.py`. A second copy rebuilds the same one-of-N trap.
+`fno/__init__.py` appends a meta-path finder, `_ReinstallWindowFinder`, at the END of `sys.meta_path`. Every `fno.*` import imports `fno` first, so no caller can miss it. That covers the console script, `python -m fno.cli`, a spawned worker, and all 2000 in-body imports. Being last means it is consulted only after every normal finder has already answered "no such module". So it costs nothing on the happy path. At that point it runs the same bounded re-check `_load_real` runs (`_module_appears_on_disk`), then asks `PathFinder` one more time. Present within the budget, the import proceeds. Still absent, it raises the dual-cause message instead of the bare error. An absent module is not masked. Both paths share one check and one message, and both live in `fno/__init__.py`. A second copy rebuilds the same one-of-N trap.
 
 Measured cost: `import fno` self-time rises from 99us to 171us per process. That is 0.07% of a 110ms `fno --help`. This file carries no `from __future__ import annotations` for the same reason. That import alone measured 154us, and nothing in the module needs it.
 
@@ -171,9 +168,13 @@ One refusal is exempt, and deliberately so. A foreign package at the resolved pa
 
 All four now spend the same 15 times 0.2s. All four RE-CHECK rather than sleeping blind, so a genuinely broken install still fails with the message it always had. The budget is duplicated across Rust, bash, and emitted POSIX sh, because no implementation crosses those boundaries. `tests/ci/test_uv_install_verify_wait.sh` reads all four files and fails on drift, so the pin is a test rather than a comment. The identity probe has two implementations. One is Rust. The other is the sh twin in scripts/install/fno.sh. The twin now emits the same key=value fields and spends the same 3s budget. It refuses a complete stranger on the first pass too. Its two executable gates wait as well. The adopt gate uses the same two-dir discriminator as the Rust arm: the bootstrap cache dir or the venv bin dir. One probe waiting while the other refused single-shot was the one-of-N shape again. A torn read on the installer path fell through to `uv tool install --force`, the storm trigger.
 
-What the meta-path finder closed is the COVERAGE gap, not the window. Every `fno.*` import now gets the same one retry. The paragraph below still holds.
+What the meta-path finder closed is the COVERAGE gap, not the window. Every `fno.*` import now gets the same bounded re-check before it concedes. The paragraph below still holds.
 
 The message reaches one shape less than the retry does. For `from fno.pkg import submodule`, CPython's `_handle_fromlist` swallows our ModuleNotFoundError and raises `cannot import name ... from ...` in its place. Nothing at this layer can reach that decision. The retry still runs, because it happens inside `find_spec` before the exception exists. The in-body imports are written as `from fno.pkg.submodule import name`, which keeps the message. Raising from a finder also inverts one stdlib contract: `importlib.util.find_spec` on an absent `fno.*` module raises rather than returning None. No caller in this repo probes an fno module that way, and the error stays an ImportError subclass.
+
+**The console entrypoint owns the decision.** `main` in `cli.py` targets the `fno-py` console script. When `exc.name` names an `fno` module, it catches the plain ImportError and appends the same `_reinstall_hint`. Both blind shapes arrive that way. One is the fromlist swallow above. The other is a module already in `sys.modules` with no spec origin, which no finder is ever consulted for. The live text was `cannot import name 'CLAIM_UNAVAILABLE' from 'fno.claims' (unknown location)`. Both specimens hit on 2026-09-04. Not being the import layer, it can read the exception instead of shaping it, and it touches no import machinery. ModuleNotFoundError is skipped there because the finder already stamped its hint, so the text can never double. The failure path first-imports nothing, the reason `typer`'s own reporter is disabled in that module.
+
+One asymmetry the error text used to hide, named here so it stays visible: `update.py` refuses concurrent updates, so updaters protect each other. Nothing protects a reader mid-import from an updater. That is why this node's fix is the message and not a lock - the doc above already measured and rejected the lock.
 
 Not fixed, and unfixable at this layer: the window itself. A process whose import
 lands while the file is genuinely still absent still fails. Closing that would
@@ -190,6 +191,18 @@ which cost more than a transient, self-healing failure. Specifically rejected:
   stale or broken install. The shipped retry is a different thing and the
   distinction is the point: it retries only after confirming on disk that the
   module is present, so an absent module is never waited on and never masked.
+
+### Which installs still open a window, after the narrow form
+
+The merge-path install changed shape. `fno doctor update` used to run the wide `--reinstall`. That form removed all packages in the shared tool venv. Every `fno` process on the machine imported from a torn tree for seconds. Three independent readers broke in one window on 2026-09-12: agent verbs, the pr-watch daemon, and the target stop gate. It now runs `uv tool install --reinstall-package fno --refresh-package fno --compile-bytecode`. Only the `fno` package is deleted and rewritten. uv still resolves the whole environment, so a dependency the source adds or bumps installs as normal. Third-party packages never leave `site-packages`, which is what the wide window took away. `--refresh-package fno` is what busts the build cache for a path source at an unchanged version. The plain `--refresh`/`--reinstall` pair stays only in this doc and the reproduce recipe above.
+
+What remains is the `fno` package's own swap, and it has two shapes. The one the guard sees: `fno` imported whole, a submodule absent mid-swap. The shared re-check polls for it, 15 passes at 0.2s. That is the Rust front door's `install_verified_within` budget, mirrored by `_VERIFY_ATTEMPTS` and `_VERIFY_POLL_SECONDS` in `fno/__init__.py`. The budget is shared as numbers because the implementations cannot cross the language boundary. The budget is spent once per process. After one exhausted wait, later absences answer after a single look. A stale install then cannot stall every import it touches.
+
+A namespace portion, a directory whose `__init__.py` is absent mid-swap, is sharper than absent. PathFinder ANSWERS it with a namespace spec. The machinery caches that as an empty module, which breaks every `from fno.pkg import name` for the process lifetime even after the install settles. The last-resort guard never sees that import: it runs only after every normal finder has said no. So a second finder, `_FnoNamespaceRefuser`, sits BEFORE PathFinder. It refuses namespace specs for `fno.*` names and raises the dual-cause ModuleNotFoundError instead. A retry after the swap lands on the real package. Cost: one prefix check per import walk. The machine ships no namespace subpackage under `fno`, so refusing the shape is safe.
+
+The shape no in-package code can fully see: mid-swap, `fno/__init__.py` itself is absent while its directory remains. A fresh process STARTING in that instant namespace-imports `fno` before any fno code exists to refuse it. The refuser covers every process that already imported fno whole, which is every daemon, hook, and live verb on the machine. Only an interpreter whose first `import fno` lands inside the swap still fails fast with an fno-scoped error, and a retry lands. Measured 2026-09-12 with a probe loop overlapping real installs (`tests/ci/test_reinstall_window_narrow.sh`). About 0.5s of exposure per swap, 3 to 4 fno-scoped failures per run, zero third-party failures. A guard cannot live in a file that is being deleted. Closing the last shape needs the atomic prefix swap rejected above, so it is accepted, bounded, and named here rather than hidden behind a zero.
+
+Two install paths still recreate the whole environment on purpose, and neither runs on a merge. `.claude-plugin/postinstall.sh` uses `uv tool install --force` because it IS the install-and-repair path for a possibly broken venv. The Rust front door's provisioning (`install_wheel` in `crates/fno/src/bootstrap.rs`) has the same `--force` semantics and already waits for its own artifacts before exec. A hand-run `uv tool install --force` is the third way to the same place. If the whole environment needs rebuilding, those are the doors.
 
 ### The bytecode-write race (fixed at install time)
 
@@ -208,5 +221,7 @@ A future refactor must preserve:
 5. Misconfigured lazy entries fail loudly with the bad path in stderr. Tests: `test_bad_lazy_entry_fails_loud`, `test_bad_module_path_fails_loud`.
 6. The error path never first-imports `typer.rich_utils` (see the reinstall-window hazard above). Tests: `test_error_path_never_first_imports_rich_utils`, `test_building_the_command_does_not_import_rich_utils`.
 7. A missing module under the `fno` package explains itself and names both causes. A missing third-party dependency collects no reinstall speculation. Tests: `test_fno_module_import_failure_names_reinstall_window`, `test_third_party_import_failure_has_no_reinstall_hint`.
+8. The merge-path install reinstalls only the `fno` package. A third-party import never fails because of it. Tests: `tests/ci/test_reinstall_window_narrow.sh`, and the narrow-form assertions in `cli/tests/integration/test_update_rust_leg.py`.
+8. A plain ImportError naming an `fno` module leaves the console entrypoint carrying the dual-cause hint. `fno-py` stays wired to `main`. A third-party ImportError leaves untouched. Tests: `test_entrypoint_carries_reinstall_hint_on_fromlist_swallow`, `test_entrypoint_carries_reinstall_hint_on_already_imported_shape`, `test_entrypoint_leaves_third_party_import_error_untouched`, `test_entrypoint_never_doubles_the_finder_hint`, `test_fno_py_entrypoint_is_main`.
 
 Adding a new sub-app: add one line to `LAZY_SUBCOMMANDS` in `cli.py` with the import path and a short help string. Run the test suite to confirm coverage. No changes to `_lazy_group.py` are required for a normal sub-app addition.

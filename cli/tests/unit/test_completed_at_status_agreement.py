@@ -1,11 +1,11 @@
-"""Regression pin: _cascade_close_parents trusts completed_at, not status.
+"""Regression pin: the epic close guard's two fields agree, both directions.
 
-Measured across the live graph on 2026-09-05 (2428 entries): zero rows carry
-completed_at while holding a non-terminal status, so the cascade's
-completed_at-only guard (graph/cli.py, _cascade_close_parents) never closed a
-wrong ancestor. That measurement could go stale silently - this test proves
-the detector actually catches a divergence rather than only ever reporting
-none.
+Forward (measured 2026-09-05, 2428 entries): zero rows carry completed_at
+while holding a non-terminal status. Reverse (added 2026-09-12): a ``done``
+row with no completed_at is named; a ``superseded`` row without one is NOT,
+because supersede stamps only ``superseded_by`` - that absence is correct by
+design. A pin tested one way reads green while its invariant breaks the
+other, which is exactly how the reverse divergence stayed invisible.
 
 Filter: ``fno doctor test cli/tests/unit/test_completed_at_status_agreement.py``
 """
@@ -40,4 +40,15 @@ def test_the_detector_names_a_real_divergence():
 
 def test_a_non_dict_or_id_less_entry_is_ignored_not_crashed():
     entries = [None, {"status": "in_progress", "completed_at": "x"}, _n("ab-1", "done", "t")]
+    assert completed_at_status_divergence(entries) == []
+
+
+def test_a_done_row_without_completed_at_is_named():
+    entries = [_n("ab-undone", "done", None)]
+    assert completed_at_status_divergence(entries) == ["ab-undone"]
+
+
+def test_a_superseded_row_without_completed_at_is_not_named():
+    """Supersede stamps only ``superseded_by``; the absence is by design."""
+    entries = [_n("ab-replaced", "superseded", None)]
     assert completed_at_status_divergence(entries) == []

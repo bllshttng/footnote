@@ -122,7 +122,7 @@ fn absent_project_dir() -> PathBuf {
 fn build_argv_create_default_sandbox() {
     let cwd = absent_project_dir();
     let full_prompt = "[from: alice]\n\nhello";
-    let argv = build_argv_create(&cwd, full_prompt, false, None, None, None);
+    let argv = build_argv_create(&cwd, full_prompt, false, None, None, None, &[]);
     assert_eq!(
         &argv[..8],
         [
@@ -148,14 +148,14 @@ fn build_argv_create_forwards_model() {
     // x-c772: an explicit --model reaches `codex exec --model <m>` (between
     // --skip-git-repo-check and the sandbox flag). None/empty = no --model.
     let cwd = absent_project_dir();
-    let argv = build_argv_create(&cwd, "hi", false, Some("gpt-5.5"), None, None);
+    let argv = build_argv_create(&cwd, "hi", false, Some("gpt-5.5"), None, None, &[]);
     let i = argv
         .iter()
         .position(|a| a == "--model")
         .expect("--model present");
     assert_eq!(argv[i + 1], "gpt-5.5");
     // empty model = no flag (parity with the None case)
-    let argv_none = build_argv_create(&cwd, "hi", false, Some(""), None, None);
+    let argv_none = build_argv_create(&cwd, "hi", false, Some(""), None, None, &[]);
     assert!(!argv_none.iter().any(|a| a == "--model"));
 }
 
@@ -165,13 +165,13 @@ fn build_argv_create_forwards_add_dir() {
     // own cwd rides -C, so add-dir is purely additive. Empty/None adds no USER
     // flag; the bounded worker's internal plan grant remains.
     let cwd = absent_project_dir();
-    let argv = build_argv_create(&cwd, "hi", false, None, None, Some("/extra"));
+    let argv = build_argv_create(&cwd, "hi", false, None, None, Some("/extra"), &[]);
     let i = argv
         .iter()
         .position(|a| a == "--add-dir")
         .expect("--add-dir present");
     assert_eq!(argv[i + 1], "/extra");
-    let none = build_argv_create(&cwd, "hi", false, None, None, Some(""));
+    let none = build_argv_create(&cwd, "hi", false, None, None, Some(""), &[]);
     assert!(!none.iter().any(|a| a == "/extra"));
     assert_eq!(none.iter().filter(|a| *a == "--add-dir").count(), 1);
 }
@@ -197,7 +197,7 @@ fn build_argv_create_grants_git_metadata_write_in_a_repo() {
         .output()
         .unwrap();
 
-    let argv = build_argv_create(dir.path(), "hi", false, None, None, None);
+    let argv = build_argv_create(dir.path(), "hi", false, None, None, None, &[]);
     let i = argv
         .iter()
         .position(|a| a == "--add-dir")
@@ -208,7 +208,7 @@ fn build_argv_create_grants_git_metadata_write_in_a_repo() {
     );
 
     // Full yolo is already unsandboxed: no grant to make.
-    let yolo = build_argv_create(dir.path(), "hi", true, None, None, None);
+    let yolo = build_argv_create(dir.path(), "hi", true, None, None, None, &[]);
     assert!(!yolo.iter().any(|a| a == "--add-dir"));
 }
 
@@ -255,7 +255,7 @@ fn build_argv_create_internal_grants_compose_with_user_add_dir() {
     }
     unsafe { std::env::set_var("PATH", &new_path) };
 
-    let argv = build_argv_create(dir.path(), "hi", false, None, None, Some("/extra"));
+    let argv = build_argv_create(dir.path(), "hi", false, None, None, Some("/extra"), &[]);
 
     match old_path {
         Some(path) => unsafe { std::env::set_var("PATH", path) },
@@ -280,7 +280,7 @@ fn build_argv_create_approval_precedes_exec() {
     // Regression (pr704): --ask-for-approval is a GLOBAL flag and MUST come
     // before the `exec` subcommand, or codex aborts with
     // `error: unexpected argument '--ask-for-approval' found`.
-    let argv = build_argv_create(&PathBuf::from("/x"), "m", false, None, None, None);
+    let argv = build_argv_create(&PathBuf::from("/x"), "m", false, None, None, None, &[]);
     let approval = argv
         .iter()
         .position(|a| a == "--ask-for-approval")
@@ -295,7 +295,7 @@ fn build_argv_create_approval_precedes_exec() {
 #[test]
 fn build_argv_create_yolo() {
     let cwd = PathBuf::from("/work");
-    let argv = build_argv_create(&cwd, "msg", true, None, None, None);
+    let argv = build_argv_create(&cwd, "msg", true, None, None, None, &[]);
     // --dangerously-bypass-approvals-and-sandbox replaces --sandbox workspace-write
     assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
     assert!(!argv.contains(&"--sandbox".to_string()));
@@ -304,7 +304,7 @@ fn build_argv_create_yolo() {
 
 #[test]
 fn build_argv_create_no_resume_subcommand() {
-    let argv = build_argv_create(&PathBuf::from("/x"), "m", false, None, None, None);
+    let argv = build_argv_create(&PathBuf::from("/x"), "m", false, None, None, None, &[]);
     // Should be `codex --ask-for-approval never exec --json -C ...`, not
     // `codex exec resume`. The exec subcommand follows the global approval flag.
     assert_eq!(argv[0], "codex");
@@ -568,5 +568,25 @@ fn error_interrupted_exit_code_130() {
         msg.contains("SIGINT") || msg.contains("Ctrl-C"),
         "msg: {}",
         msg
+    );
+}
+
+#[test]
+fn fenced_tokens_ride_before_the_prompt_fence() {
+    let dir = tempfile::tempdir().unwrap();
+    let argv = build_argv_create(
+        dir.path(),
+        "msg",
+        false,
+        None,
+        None,
+        None,
+        &["-c".to_string(), "key=1".to_string()],
+    );
+    let prompt_pos = argv.iter().position(|t| t == "--").expect("a prompt fence");
+    assert_eq!(
+        &argv[prompt_pos - 2..prompt_pos],
+        &["-c".to_string(), "key=1".to_string()],
+        "the fenced tokens land before the prompt fence: {argv:?}"
     );
 }

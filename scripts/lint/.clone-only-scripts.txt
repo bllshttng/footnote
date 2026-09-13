@@ -63,3 +63,4 @@ scripts/lint-flock-pattern.sh :: lint flock-pattern
 # ruling-retired command; scans the repo's own source tree, so it is only
 # meaningful in a clone.
 scripts/ci/check-retired-command-strings.sh :: lint retired-commands
+scripts/ci/check-preamble-budget.sh :: lint preamble-budget

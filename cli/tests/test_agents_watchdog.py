@@ -847,9 +847,12 @@ def test_sweep_reads_each_rows_transcript_under_that_rows_harness(monkeypatch, t
 
 
 def test_apply_wake_confirms_through_the_verdicts_harness(monkeypatch):
-    """The wake-landed proof re-reads the transcript under the verdict's own
-    harness, so a codex wake confirms at the codex store."""
-    v = Verdict("thread-9", "codex-worker", "blocked", WAKE, "silent", "resume", "codex")
+    """The claude wake-landed proof re-reads the transcript under the
+    verdict's own harness key, so a claude wake confirms at the claude
+    store. Codex rows take a different receipt (see the daemon-receipt
+    test below): resume exits 0 there only when the daemon accepted the
+    turn, so no transcript re-read runs for them."""
+    v = Verdict("aaaa1111-0000", "claude-worker", "blocked", WAKE, "silent", "resume", "claude")
     reads: list[str] = []
     calls = {"n": 0}
 
@@ -866,7 +869,56 @@ def test_apply_wake_confirms_through_the_verdicts_harness(monkeypatch):
     runner = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
     outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
     assert outcome == "applied"
-    assert reads == ["codex", "codex"]
+    assert reads == ["claude", "claude"]
+
+
+def test_apply_wake_codex_row_accepts_resumes_own_daemon_receipt(monkeypatch):
+    """A codex thread wake that exits 0 is delivered: the daemon accepted
+    the turn, which is the same receipt mail trusts. The transcript
+    re-confirm must not run - a lagging rollout write would read as a
+    refusal on a delivered wake and invite a duplicate turn."""
+    v = Verdict("thread-9", "codex-worker", "blocked", WAKE, "silent", "resume", "codex")
+
+    monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **kw: None)
+
+    def _no_confirm(*a, **kw):
+        raise AssertionError("the transcript confirm must not run for codex")
+
+    monkeypatch.setattr(watchdog, "confirm_wake_landed", _no_confirm)
+    runner = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
+    outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
+    assert outcome == "applied"
+    assert "delivery receipt (codex)" in detail
+
+
+def test_apply_wake_refusal_carries_resumes_own_receipt_line(monkeypatch):
+    """AC5-HP (x-6ac3): resume's exit 0 was the false receipt, so its own
+    before -> after line belongs in the refusal detail the next operator
+    reads, without re-running anything."""
+    v = Verdict("aaaa1111-0000", "w1", "blocked", WAKE, "silent", "resume", "claude")
+    monkeypatch.setattr(watchdog, "confirm_wake_landed", lambda *a, **kw: False)
+    runner = lambda cmd, **kw: SimpleNamespace(
+        returncode=0,
+        stderr="",
+        stdout="w1 (aaaa1111-0000): Needs input -> Working\n",
+    )
+    outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
+    assert outcome == "refused"
+    assert "Needs input -> Working" in detail
+
+
+def test_apply_wake_refusal_unchanged_when_resume_prints_nothing(monkeypatch):
+    """AC5-EDGE (x-6ac3): a silent resume keeps today's text with no
+    trailing separator."""
+    v = Verdict("aaaa1111-0000", "w1", "blocked", WAKE, "silent", "resume", "claude")
+    monkeypatch.setattr(watchdog, "confirm_wake_landed", lambda *a, **kw: False)
+    runner = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
+    outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
+    assert outcome == "refused"
+    assert detail == (
+        f"resume reported success but {watchdog.WAKE_MESSAGE!r} is not in "
+        "the transcript after the wake"
+    )
 
 
 def test_a_transcript_read_without_an_agent_refuses():
@@ -922,7 +974,8 @@ def test_a_codex_row_with_a_genuinely_missing_transcript_still_ghosts_by_id():
 def test_fleet_rows_skips_a_name_only_nonclaude_row_loudly(monkeypatch, tmp_path):
     """A row carrying only a name cannot resolve a transcript or a claim, so a
     name-based row id is never minted for it: it would silently drop a live
-    same-named row at the dedup. Skipped loudly, like the claude roster."""
+    same-named row at the dedup. Named loudly with its node attribution
+    (x-ae54), and its node reads worked through the unmeasurable fold."""
     from fno.agents import registry as registry_mod
     from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import AgentEntry
@@ -943,7 +996,10 @@ def test_fleet_rows_skips_a_name_only_nonclaude_row_loudly(monkeypatch, tmp_path
     rows, warnings = watchdog.fleet_rows()
 
     assert rows == []
-    assert any("no session id" in w for w in warnings)
+    named = [w for w in warnings if "unmeasurable-row: " in w]
+    assert len(named) == 1
+    assert "node=x-535c" in named[0]
+    assert "name=codex-thread" in named[0]
 
 
 def test_reroute_delegates_to_the_full_failover(monkeypatch):
@@ -2855,7 +2911,7 @@ def test_json_liveness_carries_watchdog_freshness(monkeypatch, tmp_path):
     monkeypatch.setattr(_install, "_LAUNCH_AGENTS_DIR", tmp_path)
     monkeypatch.setattr(_install, "_launchctl_is_loaded", lambda: False)
     settings = SimpleNamespace(
-        pr_watch=SimpleNamespace(enabled=True, interval_seconds=600),
+        pr_watch=SimpleNamespace(enabled=True, interval_seconds=600, wedged_after_ticks=3),
         recovery=SimpleNamespace(watchdog=_wd("report"), enabled=True),
         autonomy=SimpleNamespace(enabled=True),
     )
@@ -3682,6 +3738,7 @@ def _probe(
     *,
     pid_alive=None,
     transcript_age_s=None,
+    last_activity_basis=None,
     claim_state=None,
     stored_exited=False,
 ):
@@ -3689,6 +3746,7 @@ def _probe(
         handle=handle,
         pid_alive=pid_alive,
         transcript_age_s=transcript_age_s,
+        last_activity_basis=last_activity_basis,
         claim_state=claim_state,
         stored_exited=stored_exited,
     )
@@ -3830,6 +3888,48 @@ def test_ac2_live_pid_defeats_any_stored_terminal_word():
 def test_ac2_fresh_transcript_defeats_stored_state_too():
     assert uw.owner_verdict(_probe(transcript_age_s=30.0)) == "live"
     assert uw.owner_verdict(_probe(transcript_age_s=30.0, claim_state="stale")) == "live"
+
+
+# --- x-dead: the owner verdict routes through the shared predicate ---------
+
+
+def test_xdead_resumed_worker_dead_pid_fresh_transcript_reads_live():
+    # A harness resume kills the recorded pid while the session keeps writing
+    # (x-a613); the fresh transcript outranks the corpse, exactly as the
+    # claims layer's witness heals a resumed holder.
+    assert uw.owner_verdict(_probe(pid_alive=False, transcript_age_s=30.0)) == "live"
+
+
+def test_xdead_mtime_basis_is_never_positive_evidence():
+    # Measured 2026-09-11: a transcript mtime read 2h33m past its newest
+    # record because the file is touched with no record appended. An
+    # active-looking age taken from a file stamp reads UNKNOWN.
+    assert uw.owner_verdict(_probe(transcript_age_s=30.0, last_activity_basis="mtime")) == "unknown"
+
+
+def test_xdead_claim_holder_counts_with_a_stale_registry_cwd():
+    # Task 0.3 proof (the x-b7f8 shape): the registry row records the SPAWN
+    # directory, so the cwd join contributes no handle; the live claim's
+    # holder is the second occupancy source and keeps the tree owned.
+    probe = _probe(handle="spawn-handover:t-b7f8-worker", pid_alive=True)
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/x-b7f8", dirty=3, node_id="x-b7f8", probes=[probe])])
+    )
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_DIRTY].state == uw.MEASURED
+
+
+def test_xdead_true_positive_keeps_its_clearing_verb():
+    # x-77db, measured: the one genuinely ownerless dirty tree of the five
+    # the watchdog reported that hour. The fix must not suppress it; the
+    # finding carries the target verb because the GONE was positive.
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/x-77db", dirty=4, node_id="x-77db")])
+    )
+    [finding] = snap.findings
+    assert finding.kind == uw.KIND_DIRTY
+    assert "no live owner" in finding.basis
+    assert "/fno:target x-77db" in finding.clear_command
 
 
 def test_ac2_unreadable_liveness_is_unknown_not_ownerless():
@@ -4618,3 +4718,150 @@ def test_unfinished_mail_gate_mails_an_incomplete_scan(tmp_path, monkeypatch):
     assert len(sent) == 1
     assert f"{uw.KIND_STARTED}={uw.UNKNOWN_DIM}" in sent[0]
     assert stamp == uw.snapshot_signature(snap)
+
+
+def test_an_attributable_no_sid_row_is_advisory_and_named(monkeypatch):
+    """A live registry row with no harness session id but a node attribution
+    rides an advisory line naming the row, so the worked overlay can skip the
+    one row instead of refusing the measure for every node (x-ae54)."""
+    from types import SimpleNamespace
+
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents import registry as registry_mod
+
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: ([], []))
+    row = SimpleNamespace(
+        harness="codex", status="live", harness_session_id=None,
+        session_id=None, short_id=None, name="bp-a238-king-brief",
+        node="x-a238", cwd="/tmp/nowhere",
+    )
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
+    rows, warnings = watchdog.fleet_rows()
+    assert rows == []
+    advisory = [w for w in warnings if "unmeasurable-row: " in w]
+    assert len(advisory) == 1
+    assert "node=x-a238" in advisory[0]
+    assert "name=bp-a238-king-brief" in advisory[0]
+    assert not any("carried no session id" in w for w in warnings)
+
+
+def test_an_unattributable_no_sid_row_still_warns_blocking(monkeypatch):
+    """Without a node attribution the row is unknowable liveness: the
+    blocking warning stays, so read_roster fails closed (x-ae54 posture)."""
+    from types import SimpleNamespace
+
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents import registry as registry_mod
+
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: ([], []))
+    row = SimpleNamespace(
+        harness="codex", status="live", harness_session_id=None,
+        session_id=None, short_id=None, name="bp-ghost", node=None,
+        cwd="/tmp/nowhere",
+    )
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
+    rows, warnings = watchdog.fleet_rows()
+    assert rows == []
+    assert any("carried no session id" in w for w in warnings)
+
+
+def test_a_claude_no_sid_row_in_a_linked_worktree_is_attributed(monkeypatch):
+    """The claude-side twin: cwd names a linked worktree, so the row rides the
+    same advisory attribution instead of the blocking count."""
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents import registry as registry_mod
+    import fno.recovery as recovery_mod
+
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [])
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: (
+        [{"sessionId": "", "name": "t-ae54-worker", "cwd": "/repo/.claude/worktrees/x-ae54",
+          "state": "working"}],
+        [],
+    ))
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda _cwd: True)
+    monkeypatch.setattr(recovery_mod, "_node_id_from_worktree", lambda _cwd: "x-ae54")
+    rows, warnings = watchdog.fleet_rows()
+    assert rows == []
+    advisory = [w for w in warnings if "unmeasurable-row: " in w]
+    assert len(advisory) == 1
+    assert "harness=claude node=x-ae54 name=t-ae54-worker" in advisory[0]
+
+
+def test_stale_reset_default_report_carries_provider_outages(monkeypatch, capsys):
+    """The default -J surface carries the outage instrument - open
+    breakers and every refusal reason with a count - without reaching for
+    --only. A failed measurement lands as a named unknown, never a missing
+    key, and the human lines carry the same numbers."""
+    import json as _json
+    from collections import defaultdict
+    from pathlib import Path as _Path
+    from types import SimpleNamespace
+
+    from fno.agents import cli as agents_cli
+    from fno.agents import keeper_lane as keeper_lane_mod
+    from fno.agents import unfinished_work as uw_mod
+
+    measured = {
+        "instrument": "measured",
+        "breakers": [{
+            "provider": "zai", "account": "zai", "kind": "fair_usage_policy",
+            "outage_epoch": 1.0, "reset_at": 2.0,
+        }],
+        "counts": {"accepted": 2},
+        "refusals": [{"reason": "evidence_stale", "age_s": 900, "count": 1}] * 7,
+    }
+    monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: ([], []))
+    monkeypatch.setattr(
+        watchdog, "measure_provider_outages",
+        lambda rows, *, now_s, **kw: measured,
+    )
+    monkeypatch.setattr(uw_mod, "report_roots", lambda: [_Path("/w")])
+    monkeypatch.setattr(
+        uw_mod, "build_report",
+        lambda roots, *, now_s, **kw: SimpleNamespace(
+            findings=[],
+            dimensions=defaultdict(
+                lambda: SimpleNamespace(state="unreadable", count=None, warning=None)
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        uw_mod, "publish_report",
+        lambda snapshot, *, source, now_s, mail_to, log=None: {
+            "warnings": [], "counts": {},
+        },
+    )
+
+    class _Lane:
+        broken = False
+
+        def render(self):
+            return "keeper lane: ok"
+
+        def to_json(self):
+            return {}
+
+    monkeypatch.setattr(keeper_lane_mod, "discover", lambda: _Lane())
+
+    agents_cli._run_unfinished_report(now=0.0, json_out=True, mail_to="")
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["provider_outages"] == measured
+
+    agents_cli._run_unfinished_report(now=0.0, json_out=False, mail_to="")
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "provider outage open: zai/zai kind=fair_usage_policy reset_at=2.0" in text
+    assert "provider-outage refusals (evidence_stale=7)" in text
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("no registry")
+
+    monkeypatch.setattr(watchdog, "measure_provider_outages", _boom)
+    agents_cli._run_unfinished_report(now=0.0, json_out=True, mail_to="")
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["provider_outages"]["instrument"] == "unknown"
+    assert (
+        payload["provider_outages"]["refusals"][0]["reason"]
+        == "provider_outage_measure_failed"
+    )
+    assert "no registry" in payload["provider_outages"]["refusals"][0]["detail"]

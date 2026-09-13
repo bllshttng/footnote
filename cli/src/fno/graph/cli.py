@@ -26,12 +26,28 @@ import typer
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
 from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
+# the external-backend verb classification: the sets live beside the data
+# they classify (the classification runner below fails the import when a
+# verb is missing from both lists)
+from fno.graph._verb_classification import (
+    _FOOTNOTE_OWNED_VERBS,
+    _NO_GRAIN_ON_EXTERNAL_BACKEND,
+    _TRACKER_OWNED_VERBS,
+)
 from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
+    DESCRIPTION_HELP,
+    ENCOUNTER_EVIDENCE_HELP,
+    ORIGIN_EVIDENCE_HELP,
+    RELATED_HELP,
+    SOURCE_KIND_HELP,
+    SOURCE_NODE_HELP,
+    TAG_HELP,
     _build_backlog_node,
     _session_provenance,
 )
 from fno.graph.node_builder import register as _register_node_builder
 from fno.graph.rank import cmd_rank as _cmd_rank
+from fno.graph.api import cmd_version as _cmd_version
 
 cli = typer.Typer(
     name="graph",
@@ -57,13 +73,13 @@ _register_node_builder(cli)
 from fno.graph.worked import cmd_worked as _cmd_worked  # noqa: E402
 
 cli.command("worked", hidden=True)(_cmd_worked)
+cli.command("version", hidden=True)(_cmd_version)
 
 cli.add_typer(_triage_cli, name="triage")
 
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
 # `fno agents mail` (cross-project messaging).
-#
 # `inbox` was a SECOND registration of this same app, so all nine of its
 # subcommands were duplicates and the surface paid for them twice. It is gone;
 # `fno.tombstones` keeps the name reachable as a signpost.
@@ -74,6 +90,8 @@ cli.add_typer(_capture_cli, name="capture", hidden=True)
 # Nested batch sub-app: `fno backlog batch <verb>`. Batch-lane state
 # (.fno/batches/<domain>.json) — coalesce same-domain nodes into one PR.
 from fno.backlog.batch import cli as _batch_cli  # noqa: E402
+from fno.backlog.advance import refuse_unknown_source as _refuse_unknown_source  # noqa: E402
+from fno.backlog import dispatch_overrides as _dispatch_overrides  # noqa: E402
 
 cli.add_typer(_batch_cli, name="batch", hidden=True)
 
@@ -749,26 +767,18 @@ def cmd_epic_status(
 cli.add_typer(_epic_cli, name="epic", hidden=True)
 
 
-# -- shared node construction --
-
-_NodeFields = dict
-
-
-
-
 def _stamp_ship_on_pr_link(node_id: str) -> None:
     """Stamp the ship lifecycle row when a node is first PR-linked.
 
     The PR link is ship's START (the PR is open, awaiting review/merge), so the
     row carries started_at only - no ended_at, since merge is recorded elsewhere
-    or not at all, and the roster renders the row 'in progress' rather than
-    guessing an end. Every shipped node passes through a PR-link site regardless
-    of which worker or skill opened the PR, so the
-    row records the implementer's identity, not the merger's. ``fno do pr
-    bind-created`` is the second such site and calls this too. Best-effort: an
-    unresolvable identity or a graph failure skips with a named stderr reason and
-    never fails the update. Idempotent: append_session_record collapses a
-    re-stamp of the same (phase, harness, session_id).
+    or not at all. The row records whoever ran the link - a crown or an ambient
+    session can be that - not the implementer or the merger, and no terminal
+    ever closes it, so readers must treat it as a link event, never occupancy.
+    ``fno do pr bind-created`` is the second such site and calls this too.
+    Best-effort: an unresolvable identity or a graph failure skips with a named
+    stderr reason and never fails the update. Idempotent: append_session_record
+    collapses a re-stamp of the same (phase, harness, session_id).
     """
     from datetime import datetime, timezone
 
@@ -921,7 +931,7 @@ def _append_creation_encounter(path: Path, node_id: str, evidence: str) -> None:
                 word_cap=load_settings().style.word_cap.encounter,
             )
             if violations:
-                raise ValueError(style.format_violations(violations))
+                raise ValueError(style.format_violations(violations, surface="encounter"))
 
         try:
             identity = resolve_self_identity()
@@ -973,6 +983,28 @@ def _validate_priority_or_exit(priority: str, *, blocks_everything: bool = False
         raise typer.Exit(code=2)
 
 
+def _require_node_id(task_id: str) -> None:
+    """The shared node-id gate: one refusal text for every verb that takes one."""
+    from fno.graph._constants import has_node_id_prefix
+
+    if has_node_id_prefix(task_id):
+        return
+    typer.echo(
+        f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
+    )
+    raise typer.Exit(code=1)
+
+
+def _require_nodes(entries: "list[dict]", ids: "list[str]") -> None:
+    """The shared missing-node gate for the multi-id verbs."""
+    from fno.graph._intake import _find_node
+
+    missing = [tid for tid in ids if _find_node(entries, tid) is None]
+    if missing:
+        typer.echo(f"Error: feature(s) not found: {', '.join(missing)}", err=True)
+        raise typer.Exit(code=1)
+
+
 def _create_node_impl(
     *,
     title: str,
@@ -996,6 +1028,7 @@ def _create_node_impl(
     source_kind: str = SOURCE_KIND_DEFAULT,
     related: Optional[list[str]] = None,
     evidence: Optional[str] = None,
+    origin_evidence: Optional[str] = None,
     require_difficulty: bool = False,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
@@ -1122,6 +1155,8 @@ def _create_node_impl(
             tags=resolved_tags,
             source_node=resolved_source_node,
             source_kind=source_kind,
+            origin_channel="idea",
+            origin_evidence=origin_evidence,
             known_ids=live_ids,
             out=capture_meta,
         )
@@ -1167,15 +1202,12 @@ def _create_node_impl(
         # Strictly non-fatal - any failure degrades to the orphan line (AC4).
         try:
             from fno.graph import rollup as _rollup
-            from fno.graph._intake import (
-                _find_node,
-                _would_create_cycle,
-                _would_exceed_epic_depth,
-            )
+            from fno.graph._intake import _find_node, _would_create_cycle, _would_exceed_epic_depth
 
+            _rollup.crown_reader_spec = "fno.agents.crown:current_crown"
             resolution = _rollup.resolve(node, entries)
             link_to: Optional[str] = None
-            if resolution.kind == "linked":
+            if resolution.kind in ("linked", "crown"):
                 target = _find_node(entries, resolution.epic_id or "")
                 # A brand-new leaf can neither cycle nor deepen epic nesting,
                 # but honor the same guards the update path applies rather than
@@ -1303,47 +1335,23 @@ def cmd_add(
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
     evidence: Optional[str] = typer.Option(
-        None,
-        "--evidence",
-        "-e",
-        help="Record why the creator encountered this node. Optional.",
+        None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
+    origin_evidence: Optional[str] = typer.Option(None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP),
     description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
+        None, "--description", help=DESCRIPTION_HELP
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", hidden=True, help=TAG_HELP),
     source_node: Optional[str] = typer.Option(
-        None,
-        "--source-node",
-        help=(
-            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-            "ambient capture. Refuses if it does not resolve."
-        ),
+        None, "--source-node", help=SOURCE_NODE_HELP
     ),
     source_kind: str = typer.Option(
-        SOURCE_KIND_DEFAULT,
-        "--source-kind",
-        help=(
-            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-            "Mark an operator ask with operator_request."
-        ),
+        SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
-        None,
-        "--related",
-        help=(
-            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Refuses an id that does not resolve."
-        ),
+        None, "--related", help=RELATED_HELP
     ),
 ) -> None:
     _create_node_impl(
@@ -1368,6 +1376,7 @@ def cmd_add(
         source_kind=source_kind,
         related=related,
         evidence=evidence,
+        origin_evidence=origin_evidence,
         require_difficulty=True,
     )
 
@@ -1414,11 +1423,10 @@ def _fold_candidates(
     # A live plan surface is an independent fold signal when the filing names
     # one of the same files. The claim holder comes from the lockfile, not the
     # graph snapshot's stale locked_by field.
-    import re
     from pathlib import Path
     from fno.graph.collision import parse_files_to_modify
 
-    incoming_files = set(re.findall(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", details or ""))
+    incoming_files = discovery.filing_paths(details or "")
     if incoming_files:
         known = {item["id"] for item in out}
         for node in entries:
@@ -1498,59 +1506,41 @@ def cmd_idea(
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
     evidence: Optional[str] = typer.Option(
-        None,
-        "--evidence",
-        "-e",
-        help="Record why the creator encountered this node. Optional.",
+        None, "--evidence", "-e", help=ENCOUNTER_EVIDENCE_HELP
     ),
+    origin_evidence: Optional[str] = typer.Option(None, "--origin-evidence", help=ORIGIN_EVIDENCE_HELP),
     description: Optional[str] = typer.Option(
-        None,
-        "--description",
-        help=(
-            "Alias for --details. Reads more naturally for an idea-stage "
-            "row. Mutually exclusive with --details."
-        ),
+        None, "--description", help=DESCRIPTION_HELP
     ),
     size: Optional[str] = typer.Option(None, help="Size estimate: S|M|L"),
     batch: Optional[str] = typer.Option(None, help="Execution batch group"),
-    tag: Optional[List[str]] = typer.Option(
-        None, "--tag", hidden=True, help="Tag (repeatable, lowercase-kebab)."
-    ),
+    tag: Optional[List[str]] = typer.Option(None, "--tag", hidden=True, help=TAG_HELP),
     source_node: Optional[str] = typer.Option(
-        None,
-        "--source-node",
-        help=(
-            "Origin node this filing came out of (id, slug, or bare hex). Overrides "
-            "ambient capture. Refuses if it does not resolve."
-        ),
+        None, "--source-node", help=SOURCE_NODE_HELP
     ),
     source_kind: str = typer.Option(
-        SOURCE_KIND_DEFAULT,
-        "--source-kind",
-        help=(
-            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
-            "Mark an operator ask with operator_request."
-        ),
+        SOURCE_KIND_DEFAULT, "--source-kind", help=SOURCE_KIND_HELP
     ),
     related: Optional[List[str]] = typer.Option(
-        None,
-        "--related",
-        help=(
-            "Related node ids/slugs (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Refuses an id that does not resolve."
-        ),
+        None, "--related", help=RELATED_HELP
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
+    details_file: Optional[Path] = typer.Option(
+        None,
+        "--details-file",
+        help="Read --details from a file ('-' = stdin) instead of the flag.",
+    ),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
     Equivalent to `fno backlog add <title>` but signals intent to skip the
-    spec/plan ceremony for now. The new node has no ``plan_path`` and so
-    derives to ``status: idea`` until a plan is associated (via
-    ``fno backlog intake`` or by setting ``--plan-path`` on
-    ``fno backlog update``). Shares ``add``'s full option set so a fresh idea
-    can carry parent/size/domain without a follow-up ``fno backlog update``.
+    spec/plan ceremony: no ``plan_path`` derives to ``status: idea`` until
+    one is bound. Shares ``add``'s full option set.
     """
+    from fno.text_or_file import read_text_arg
+
+    details = read_text_arg(details, details_file, what="the details")
+
     if wave_of:
         if evidence is not None:
             typer.echo("Error: --wave-of cannot record a creation vote", err=True)
@@ -1558,29 +1548,23 @@ def cmd_idea(
         if separate:
             typer.echo("Error: --wave-of and --separate are mutually exclusive", err=True)
             raise typer.Exit(code=2)
-        topology_flags = []
-        if blocked_by:
-            topology_flags.append("--blocked-by")
-        if parent:
-            topology_flags.append("--parent")
-        if roadmap_id:
-            topology_flags.append("--roadmap-id")
-        if vision_path:
-            topology_flags.append("--vision-path")
-        if project:
-            topology_flags.append("--project")
-        if cwd:
-            topology_flags.append("--cwd")
-        if size:
-            topology_flags.append("--size")
-        if batch:
-            topology_flags.append("--batch")
-        if related:
-            topology_flags.append("--related")
-        if type_ != "feature":
-            topology_flags.append("--type")
-        if priority != "p2":
-            topology_flags.append("--priority")
+        topology_flags = [
+            flag
+            for flag, given in (
+                ("--blocked-by", blocked_by),
+                ("--parent", parent),
+                ("--roadmap-id", roadmap_id),
+                ("--vision-path", vision_path),
+                ("--project", project),
+                ("--cwd", cwd),
+                ("--size", size),
+                ("--batch", batch),
+                ("--related", related),
+                ("--type", type_ != "feature"),
+                ("--priority", priority != "p2"),
+            )
+            if given
+        ]
         if topology_flags:
             typer.echo(
                 "Error: wave filing cannot use node-only topology flags: "
@@ -1749,6 +1733,7 @@ def cmd_idea(
         source_kind=source_kind,
         related=related,
         evidence=evidence,
+        origin_evidence=origin_evidence,
         require_difficulty=True,
     )
 
@@ -1765,25 +1750,19 @@ def cmd_decompose(
         "--groups",
         help=(
             "JSON array of {slug,title,waves,blocked_by_groups[,project][,cwd]"
-            "[,adopt]} group specs. Optional per-group project/cwd route a child "
-            "into a different repo (multi-repo decomposition): project resolves "
-            "its cwd from the settings work-map; an explicit cwd overrides; "
-            "absent -> inherit the epic's repo. "
-            "Optional `adopt: [<node-id>...]` re-parents EXISTING nodes under the "
-            "group child instead of minting new ones - use it to package an epic "
-            "already populated by `fno backlog idea --parent` rather than "
-            "doubling it. Epic children no group adopts are named on stderr. "
-            "Prefix '@' to read a file (--groups @groups.json) or pass '-' to read stdin."
+            "[,adopt]} specs; '@file' or '-' reads stdin. Per-group project/cwd "
+            "route a child into another repo; `adopt` re-parents existing nodes "
+            "instead of minting. Full schema: "
+            "skills/blueprint/references/epic-decomposition.md."
         ),
     ),
     max_prs: Optional[int] = typer.Option(
         None,
         "--max-prs",
         help=(
-            "Ceiling on group/PR count. Rejects when groups exceed it (N is a "
-            "ceiling, not a quota). Defaults to config.blueprint.max_prs_per_epic. "
-            "An epic doc's `max_children:` frontmatter overrides that default; "
-            "--max-prs may then only tighten it (never loosen the author's cap)."
+            "Ceiling on group/PR count; rejects when exceeded. Default: "
+            "config.blueprint.max_prs_per_epic, tightened by the epic doc's "
+            "`max_children:` frontmatter."
         ),
     ),
     force: bool = typer.Option(
@@ -1796,12 +1775,9 @@ def cmd_decompose(
         "separate",
         "--plans",
         help=(
-            "Per-child plan packaging. Only 'separate' is supported: scaffold a "
-            "self-contained quick-plan stub per child and repoint its plan_path "
-            "to that file (one plan == one PR == one node). The former 'fragment' "
-            "packaging (a <epic-doc>#group-<slug> section of a shared doc) was "
-            "removed - it is still recognized on existing children for idempotent "
-            "re-decompose, but never authored."
+            "Only 'separate': a self-contained quick-plan per child (one plan "
+            "== one PR == one node). The removed 'fragment' form is still "
+            "recognized on existing children for idempotent re-decompose."
         ),
     ),
 ) -> None:
@@ -2090,6 +2066,8 @@ def cmd_decompose(
                     difficulty=live_epic.get("difficulty"),
                     domain=live_epic.get("domain", "code"),
                     plan_path=None,
+                    origin_channel="decompose",
+                    origin_evidence=f"parent:{epic_resolved_id}",
                     known_ids={e.get("id") for e in graph_entries},
                 )
                 node["group_slug"] = grp["slug"]
@@ -2226,17 +2204,7 @@ def cmd_decompose(
         # left in place, not deleted - deleting graph nodes is destructive.
         orphan_box[0] = [o["id"] for o in orphans]
 
-        # Epic children that no group adopted ( US3). Uses the SAME
-        # predicate as the adoption refusal above, deliberately: keying this on
-        # the base-scoped group_child_slug instead would list a group child
-        # whose plan path no longer matches a renamed epic doc, and the warning
-        # would then tell the operator to adopt a node the refusal blocks.
-        # Collected after the re-parenting above, so
-        # adopted nodes have already left the epic and exclude themselves; no
-        # cross-reference against the adopt lists is needed. Warning, not
-        # refusal: refusing deadlocks, because re-parenting needs the group
-        # nodes a refusal prevents creating, and a parked child is a legitimate
-        # steady state.
+    # Rationale (11 lines): docs/architecture/graph-cli-rationale.md#cmd-decompose-2220
         _unadopted = [
             e
             for e in graph_entries
@@ -2285,17 +2253,7 @@ def cmd_decompose(
     except Exception:  # noqa: BLE001 - never wedge the report on a re-read failure
         by_id = {}
 
-    # 3c. Scaffold per-child quick-plan files (--plans separate). Runs OUTSIDE
-    #     the graph lock (mirrors the _set_expected_count doc write below), because
-    #     it reads settings (plans_content_dir walks .claude/settings) and settings
-    #     reads never happen under the lock. Each child is born at its CANONICAL
-    #     `fno do plan path` name, routed into the CHILD project's plans dir - not the
-    #     epic's dir, not the legacy `.group-<slug>.md` name ().
-    # US4: transcribe the epic's why (intent + Locked Decisions) once - every child
-    # scaffold is born grounded, AND a fan-out seed carries it so the /think worker
-    # stays grounded even when its origin transcript is unresolved. A missing
-    # Locked-Decisions block degrades to intent-only + a warning; an unreadable doc
-    # yields an empty digest (the scaffold then seeds the validator-rejected stub).
+    # Rationale (11 lines): docs/architecture/graph-cli-rationale.md#cmd-decompose-2279
     why_digest = ""
     # The epic's own Execution Strategy, read from the SAME doc text as the why
     # digest. `group N` already used these waves to partition the children, so
@@ -2332,14 +2290,7 @@ def cmd_decompose(
             # place, no rename, no canonical duplicate (Locked Decision 4).
             if Path(separate_plan_path(base_box[0], slug)).exists():
                 continue
-            # Route the stub into the CHILD project's plans dir. The child node's
-            # own cwd is the authoritative per-child root: the mutator set it to
-            # the routed cwd (or inherited the epic's) at mint, so it already
-            # reflects a route made WITHOUT an explicit re-route - a routed child
-            # re-decomposed with no route keeps its own repo, not the epic's.
-            # created_at sources the filename date, so a later-day re-decompose
-            # recomputes the SAME path (idempotent). Fall back to the epic cwd
-            # then repo_root() only if the re-read lost the node.
+    # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#cmd-decompose-2326
             child_root = (child.get("cwd") if child else None) or epic_cwd_box[0] or repo_root()
             canonical = Path(
                 canonical_child_plan_path(
@@ -2381,24 +2332,7 @@ def cmd_decompose(
                     err=True,
                 )
 
-    # 4a. Per-child design pass ( US3) + born-with-why (v2 A1). Runs BEFORE
-    #     the report so a flagged fan-out's outcome rides in the --json payload
-    #     (a machine caller must see when a child was left an unlinked idea, not a
-    #     silent success). Two lanes, one shared RunState bounding the batch's blast
-    #     radius (AC1-EDGE):
-    #       - `needs_think` group -> FORCE a fan-out /think+/blueprint design pass.
-    #         The decompose invocation IS the operator consent (Locked Decision 3),
-    #         so the gate + attended-offer are overridden (mirrors the
-    #         dispatch_conversational env-forcing); the caps still bound it. A spawn
-    #         that does not fire leaves the child `idea` with its stub on disk.
-    #       - unflagged group -> nothing. `needs_think` is the SOLE consent for a
-    #         decompose-time /think: the born-with-why lane that used to
-    #         run here spawned unconditionally on any autonomous decompose, because
-    #         its OFFER branch needs presence == attended and an autonomous session
-    #         always classifies `away`. The epic doc is a group child's design
-    #         authority; scaffold_separate_plan + why_digest already carry it.
-    #     Only UNLINKED children are candidates (a re-decompose never re-designs a
-    #     child that already has a plan). Strictly non-fatal: never wedge decompose.
+    # Rationale (18 lines): docs/architecture/graph-cli-rationale.md#cmd-decompose-2375
     fanout: list[dict] = []
     flagged_slugs = {g["slug"] for g in norm if g["needs_think"]}
     slug_by_id = {r["id"]: r["slug"] for r in results}
@@ -2457,14 +2391,7 @@ def cmd_decompose(
                         why_digest=why_digest,
                         project_root=Path(child_root) if child_root else None,
                     )
-                    # `owned` resolves the inline-fill handoff (Open Question 3)
-                    # and is the field step 7 reads. Ownership is keyed on the
-                    # OBSERVED spawn receipt, never on predicted wave
-                    # membership: if the spawn did not fire, the child is still
-                    # inline-fill's, so a spawn failure degrades to today's
-                    # behavior instead of leaving an orphan nobody fills.
-                    # That is also what makes double-writing impossible (AC9-CON)
-                    # - exactly one lane can see `owned: true` for a child.
+    # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#cmd-decompose-2451
                     lane = "wave0" if cid in wave0_ids else "needs_think"
                     fanout.append(
                         {
@@ -2577,15 +2504,7 @@ def cmd_decompose(
             err=True,
         )
 
-    # 5. Record the group count N on the shared epic doc so it graduates only
-    #    after all N group PRs ship (not after the first). The graph mutation
-    #    above is the source of truth and is NEVER rolled back; decompose also
-    #    never exits non-zero on a stamp problem, because that would break
-    #    pipelines (e.g. /blueprint group) for a best-effort stamp. A genuine
-    #    write failure (the doc exists but could not be written) is surfaced as
-    #    a loud, actionable stderr warning so it is not silent; environment
-    #    skips (absent doc/script - which also can't be stamped at ship, so no
-    #    early graduation) stay quiet.
+    # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#cmd-decompose-2571
     base = base_box[0]
     expected_count = len(results)
     if base and expected_count >= 1:
@@ -2636,7 +2555,7 @@ def _intake_impl(
     `_intake.py` helpers can be exercised by tests without going through Typer.
     """
     from fno.graph._constants import PRIORITY_ORDER
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import (
         _prepare_intake,
         _build_intake_node,
@@ -2932,84 +2851,6 @@ def cmd_intake(
 # -- update --
 
 
-@cli.command("note")
-def cmd_note(
-    task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
-    text: str = typer.Argument(..., help="Progress note text (one line)."),
-    quiet: bool = typer.Option(
-        False, "--quiet", "-q", help="Annotate silently: write it, mail nobody."
-    ),
-    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
-) -> None:
-    """Append a timestamped progress note to a backlog node, and DELIVER it.
-
-    Delivery is the DEFAULT: a worker reads its node once, at dispatch, so the
-    verb mails a pointer to the node's holder, the owner's holder and the epic's
-    king. ``--quiet`` is the deliberate silent annotation. Contract, and why the
-    fanout's own stamps never mail: docs/architecture/backlog-graph-verb-contracts.md.
-    """
-    from fno.graph.store import append_progress_note
-    from fno.claims.self_identity import resolve_self_identity
-
-    text = text.strip()
-    if not text:
-        typer.echo("Error: note text is empty", err=True)
-        raise typer.Exit(code=1)
-
-    note = {"ts": datetime.now(timezone.utc).isoformat(), "text": text}
-    try:
-        identity = resolve_self_identity()
-    except Exception:  # noqa: BLE001 - an unprovable identity must not lose the note
-        identity = None
-    if identity is not None and identity.session_id:
-        note["source_session_id"] = identity.session_id
-    if identity is not None and identity.harness:
-        note["source_harness"] = identity.harness
-    entries: list[dict] = []
-    found, _ = append_progress_note(_graph_path(), task_id, note, entries_out=entries)
-    if not found:
-        typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
-        raise typer.Exit(code=1)
-    _warn_if_note_is_long(text)
-    if json_output:
-        typer.echo(json.dumps({"id": task_id, "note": note}, separators=(",", ":")))
-    else:
-        typer.echo(f"noted {task_id}: {text}")
-    if not quiet:
-        try:
-            from fno.backlog.note_notify import deliver_note
-
-            receipts = deliver_note(task_id, text, _graph_path(), entries or None)
-        except Exception as exc:  # noqa: BLE001 - the note is written, delivery is not
-            receipts = [(f"notify FAILED {task_id}: {exc}", True)]
-        for line, undelivered in receipts:
-            typer.echo(line, err=undelivered or json_output)
-
-
-def _warn_if_note_is_long(text: str) -> None:
-    """Advise on a long note, never refuse one.
-
-    Why uncapped, and why the blunt multiplier:
-    docs/architecture/backlog-graph-verb-contracts.md.
-    """
-    from fno import style
-
-    try:
-        from fno.config import load_settings
-
-        cap = load_settings().style.word_cap.encounter
-    except Exception:  # noqa: BLE001 - an advisory must never break a write
-        cap = style.MESSAGE_WORD_CAP
-    count = style.word_count(text)
-    if count <= cap * 4:
-        return
-    typer.echo(
-        f"note appended ({count} words). Long evidence belongs in a plan doc; "
-        "a note carrying a path is cheaper for every later reader.",
-        err=True,
-    )
-
-
 @cli.command("encounter", hidden=True)
 def cmd_encounter(
     task_id: str = typer.Argument(..., help="Node id this session hit while doing something else."),
@@ -3073,7 +2914,7 @@ def cmd_encounter(
         cap = load_settings().style.word_cap.encounter
         violations = style.check(evidence, surface="encounter", word_cap=cap)
         if violations:
-            typer.echo(style.format_violations(violations), err=True)
+            typer.echo(style.format_violations(violations, surface="encounter"), err=True)
             raise typer.Exit(code=4)
 
     record: dict[str, object] = {
@@ -3202,10 +3043,8 @@ def cmd_update(
         None,
         "--repo",
         help=(
-            "owner/name of the repo the PR lives in, when that differs from the "
-            "cwd checkout. A cwd-derived url is a guess; naming the repo makes "
-            "the stamp an assertion, which is also what lets it override a "
-            "recorded pr_url that names a different repo ()."
+            "owner/name of the repo the PR lives in, when that differs from "
+            "the cwd checkout; naming it makes the stamp an assertion."
         ),
     ),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
@@ -3219,6 +3058,11 @@ def cmd_update(
         "--description",
         "-d",
         help="Update free-form details/rationale (stored in `details`). Pass 'null' to clear.",
+    ),
+    details_file: Optional[Path] = typer.Option(
+        None,
+        "--details-file",
+        help="Read --details from a file ('-' = stdin) instead of the flag.",
     ),
     domain: Optional[str] = typer.Option(None, "--domain", help="Update domain (e.g. code)"),
     size: Optional[str] = typer.Option(None, "--size", help="Update size estimate: S|M|L"),
@@ -3251,12 +3095,12 @@ def cmd_update(
     dispatch_verb: Optional[str] = typer.Option(
         None,
         "--dispatch-verb",
-        help="Verb a dispatcher launches this node with (US3), e.g. /think. Validated against config.dispatch.allowed_verbs at dispatch, not here. Pass 'null' to clear (revert to the /target --no-merge default).",
+        help="Verb a dispatcher launches this node with (US3), e.g. /think. Refused at write when it is not one bare verb word; the config.dispatch allowlist still applies at dispatch. Pass 'null' to clear (revert to the /target --no-merge default).",
     ),
     dispatch_brief: Optional[str] = typer.Option(
         None,
         "--dispatch-brief",
-        help="Free-text brief carried to the worker via TARGET_BRIEF env at cold-start (US3), never the command line. Capped at 8 KB at dispatch. Pass 'null' to clear.",
+        help="Free-text brief carried to the worker via TARGET_BRIEF env at cold-start (US3), never the command line. Warns at write and is refused at dispatch when over the 8 KB env budget. Pass 'null' to clear.",
     ),
     type_: Optional[str] = typer.Option(None, "--type", help="Update node type (feature|epic|bug)"),
     public: Optional[bool] = typer.Option(
@@ -3272,17 +3116,16 @@ def cmd_update(
         None,
         "--source-node",
         help=(
-            "Set the origin node this node came out of (id, slug, or bare hex). "
-            "Pass 'null' to clear. Refuses a self-reference or an id that does not resolve."
+            "Origin node this node came out of (id, slug, or hex). 'null' "
+            "clears; a self-reference or an unresolved id refuses."
         ),
     ),
     related: Optional[List[str]] = typer.Option(
         None,
         "--related",
         help=(
-            "Replace the related list (asserted, symmetric, non-blocking). Repeat or "
-            "comma-separate. Pass 'null' to clear. Refuses a self-reference or an id "
-            "that does not resolve."
+            "Replace the related list (asserted, symmetric, non-blocking); "
+            "repeat or comma-separate. 'null' clears."
         ),
     ),
     blocked_by: Optional[List[str]] = typer.Option(
@@ -3362,9 +3205,9 @@ def cmd_update(
     ),
 ) -> None:
     from fno._flag_aliases import refuse_retired_model_tier
+    from fno.text_or_file import read_text_arg
     from fno.graph._constants import (
         PRIORITY_ORDER,
-        has_node_id_prefix,
         normalize_difficulty,
         normalize_tag,
         validate_priority_write,
@@ -3381,11 +3224,11 @@ def cmd_update(
 
     refuse_retired_model_tier(_model_tier_tombstone)
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    details = read_text_arg(details, details_file, what="the details")
+    # A file's content is data; the 'null' clear-sentinel is CLI-only.
+    details_from_file = details_file is not None
+
+    _require_node_id(task_id)
 
     if priority is not None and priority not in PRIORITY_ORDER:
         typer.echo(
@@ -3409,14 +3252,7 @@ def cmd_update(
     if size is not None and size.lower() != "null" and size.upper() not in {"S", "M", "L"}:
         typer.echo(f"Error: invalid size '{size}'. Must be one of: S, M, L", err=True)
         raise typer.Exit(code=1)
-    # Model pin (): a validated-shape pass-through, not an allowlist. The
-    # value must be a single shell-safe token so it survives unquoted use in the
-    # dispatchers (dispatch-node.sh $model_arg, the loop-driver MODEL_FLAG
-    # word-split) without word-splitting OR globbing. The charset [A-Za-z0-9._:/-]
-    # covers every real model id (fable, claude-opus-4-8, openai/gpt-4,
-    # us.anthropic.claude-...) while forbidding whitespace and shell/glob
-    # metacharacters (* ? [ ] etc.); the CLI (not fno) resolves the alias.
-    # 'null' clears.
+    # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#cmd-update-3397
     if model is not None and model.lower() != "null":
         import re  # module-level `re` is function-local elsewhere; scope it here
 
@@ -3656,9 +3492,16 @@ def cmd_update(
         except Exception:
             linked_size = None
 
+    brief_warning_box = [None]
+
     def mutator(entries):
         node = _find_node(entries, task_id)
         if node is None:
+            # An archived node must not read as absent (the reopen contract).
+            from fno.graph._archive_lookup import refuse_update_if_archived
+
+            if refuse_update_if_archived(task_id):
+                raise typer.Exit(code=1)
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
@@ -3729,15 +3572,7 @@ def cmd_update(
             if plan_path.lower() == "null":
                 node["plan_path"] = None
             else:
-                # plan == PR == node (): a plan file is the delivery unit
-                # of exactly one node. Refuse to arm a second node against a plan
-                # another node already owns; the ambiguous state is what armed
-                # two concurrent dispatches against one sequential-mode plan on
-                # 2026-07-28. Routed through the shared plan_path_owner_conflict
-                # so every write site (this one + intake's lanes) checks one way;
-                # the decompose repoint is scoped to a slug it owns and never
-                # lands here. --force escapes a deliberate repoint and still
-                # names the other holder (AC2).
+    # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#cmd-update-3722
                 from fno.graph.store import plan_path_owner_conflict
 
                 owner = plan_path_owner_conflict(entries, node["id"], plan_path)
@@ -3771,12 +3606,13 @@ def cmd_update(
         elif derived_pr_number is not None:
             node["pr_number"] = derived_pr_number
         # Ship provenance fires once on the unset->set transition. Every shipped
-        # node passes through this link regardless of which worker or skill
-        # opened the PR, so this is the choke point that records the implementer
-        # (not the merger). Detected inside the lock so two racing linkers see
-        # one transition; the stamp itself runs after the lock releases, because
-        # append_session_record takes its own lock and calling it here would
-        # deadlock. Best-effort + idempotent, never fails the update.
+        # node passes through this link, so this is the choke point that records
+        # whoever ran the link (a crown can be that). No terminal closes the
+        # row, so it is a link event, never occupancy. Detected inside the lock
+        # so two racing linkers see one transition; the stamp itself runs after
+        # the lock releases, because append_session_record takes its own lock
+        # and calling it here would deadlock. Best-effort + idempotent, never
+        # fails the update.
         if isinstance(node.get("pr_number"), int) and not isinstance(_pr_number_before, int):
             ship_stamp_node[0] = node["id"]
         if pr_url is not None:
@@ -3797,12 +3633,7 @@ def cmd_update(
                 raise typer.Exit(code=2)
             else:
                 node["orphan_ok"] = orphan_ok
-        # Dispatch overrides (US3). Stored permissively; the resolver is the trust
-        # boundary (allowlist + 8 KB cap at dispatch time, not write time).
-        if dispatch_verb is not None:
-            node["dispatch_verb"] = None if dispatch_verb.lower() == "null" else dispatch_verb
-        if dispatch_brief is not None:
-            node["dispatch_brief"] = None if dispatch_brief.lower() == "null" else dispatch_brief
+        brief_warning_box[0] = _dispatch_overrides.apply(node, dispatch_verb, dispatch_brief)
         if priority is not None:
             node["priority"] = priority
         # --blocks-everything acknowledges p0. Standalone, it acknowledges an
@@ -3832,7 +3663,11 @@ def cmd_update(
                 raise typer.Exit(code=1)
             node["title"] = new_title
         if details is not None:
-            node["details"] = None if details.lower() == "null" else details
+            node["details"] = (
+                None
+                if (not details_from_file and details.lower() == "null")
+                else details
+            )
         if domain is not None:
             node["domain"] = domain
         if size is not None:
@@ -3935,19 +3770,7 @@ def cmd_update(
             # a reparent (or --parent null) leaves the OLD epic/mission counting
             # a child it no longer owns until it is projected (codex P2).
             reparent_old_parent[0] = node.get("parent")
-            # Re-parenting AWAY from the delivery unit un-adopts the node
-            # (). Without this there is no supported way out of a mistyped
-            # `adopt` id: only decompose writes `contained_in`, re-running the
-            # spec without the entry leaves the stale value, and graph.json is a
-            # hook-blocked forbidden surface - so one typo permanently unarmed a
-            # real delivery unit AND had the cascade later stamp it "shipped
-            # inside <owner>", a false completion note on work that never
-            # shipped. It also keeps `parent` and `contained_in` from
-            # disagreeing, which is what produced that false note.
-            #
-            # Deliberately keyed on moving away from THE OWNER, not on any
-            # re-parent: a contained node moved between two nodes that both sit
-            # under its delivery unit is still contained.
+    # Rationale (12 lines): docs/architecture/graph-cli-rationale.md#cmd-update-3928
             _new_parent = None if parent.lower() == "null" else parent
             _owner = node.get("contained_in")
             if _owner:
@@ -4015,6 +3838,7 @@ def cmd_update(
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+    _dispatch_overrides.emit(brief_warning_box[0])
 
     # Mutation receipts read the committed, recomputed row. Flags express the
     # caller's intent; only the reread can say whether ownership and dispatch
@@ -4123,110 +3947,6 @@ def cmd_requeue(
 # -- next --
 
 
-def _starvation_receipts(
-    entries: list[dict],
-    project_filter: Optional[str],
-    all_: bool,
-    scope_ids: Optional[set],
-    claimed: set,
-    now,
-    staleness_days: int,
-    *,
-    mission: Optional[str] = None,
-    roadmap_id: Optional[str] = None,
-) -> list[tuple[str, str]]:
-    """Classify why each ready-ish in-scope node was NOT selected (G1 receipts).
-
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    from fno.backlog.advance import selection_guards
-    from fno.graph._intake import filter_by_project
-
-    container_ids = _container_ids(entries)
-    # One pass, guarding against a non-dict row (codebase convention: a malformed
-    # entry must not AttributeError the cold receipt path).
-    by_id: dict = {}
-    ready_ish_rows: list[dict] = []
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        if e.get("id"):
-            by_id[e["id"]] = e
-        # `design` rides along with ready/idea: it is buildable-looking work a
-        # human can still name explicitly, so a null `next` must explain it
-        # rather than drop it silently - the exact starvation this receipt
-        # exists to prevent (a backlog that is ALL design-stage would otherwise
-        # return null with nothing to say).
-        if e.get("status") not in ("ready", "design", "idea") or e.get("completed_at"):
-            continue
-        if roadmap_id and e.get("roadmap_id") != roadmap_id:
-            continue
-        if mission and e.get("mission_id") != mission:
-            continue
-        ready_ish_rows.append(e)
-    ready_ish = filter_by_project(ready_ish_rows, project_filter, all_)
-    if scope_ids is not None:
-        ready_ish = [e for e in ready_ish if e.get("id") in scope_ids]
-    out: list[tuple[str, str]] = []
-    for e in ready_ish:
-        nid = e.get("id")
-        if not nid:
-            continue
-        # A plan hold outranks structural exclusions: the owner may also be a
-        # container and a descendant may carry no plan of its own, but the
-        # actionable reason every dispatcher must report is the attributable
-        # hold on their shared delivery ancestry.
-        hold_guard = selection_guards(e, by_id, now, staleness_days=staleness_days)
-        if hold_guard and hold_guard.startswith("dispatch-hold"):
-            reason = hold_guard
-        elif not e.get("plan_path"):
-            reason = "plan-less"
-        elif nid in container_ids:
-            reason = "container"
-        elif nid in claimed:
-            reason = "claimed"
-        elif e.get("status") in ("design", "idea"):
-            # Read off the persisted rung, not the guard: the guard only fires
-            # for the stale window (graph still says `ready`, doc since edited
-            # down a rung), so a node already ON the rung would fall through to
-            # `selection_guards`, get None (it is gated on a persisted `ready`),
-            # and be dropped by the `continue` - reporting nothing at all.
-            #
-            # `idea` is the COMMON case for a linked decompose scaffold, since
-            # recomputation persists that rung directly; without this arm a
-            # backlog of nothing but undesigned children prints a bare `null`
-            # instead of naming what each one is waiting on.
-            reason = e["status"]
-        elif e.get("status") == "ready" and (_has_unmerged_open_pr(e) or _is_batched_member(e)):
-            continue  # in review / batched - handled, not starved
-        else:
-            g = hold_guard
-            if not g:
-                continue  # no known exclusion (would have been selected)
-            if g.startswith("dead-ancestor"):
-                reason = "dead-ancestor"
-            elif g.startswith("contained"):
-                # Not starvation either: the work IS being delivered, inside
-                # another node's PR. Left in the generic `quarantined` bucket it
-                # read as stale work needing attention, and a decomposed epic
-                # printed one bogus line per adopted node on every `next` until
-                # its unit merged - permanent noise the operator cannot act on.
-                reason = "contained"
-            elif g == "design-stage":
-                # Not starvation: planned but not blueprinted, so it reads as
-                # its own rung rather than the generic quarantine bucket.
-                reason = "design"
-            elif g == "idea-stage":
-                # Also not starvation: a linked-but-undesigned doc (a decompose
-                # scaffold, or a plan hand-edited back down). Named separately
-                # from `design` so the receipt says which pass it is waiting on.
-                reason = "idea"
-            else:
-                reason = "quarantined"
-        out.append((nid, reason))
-    return out
-
-
 def _external_open_status(*, pr_number: Optional[int], plan_path: Optional[str]) -> str:
     """Read-time status for an OPEN external item: in_review > ready > idea.
 
@@ -4306,14 +4026,7 @@ def _joined_open_candidates() -> list[dict]:
     return joined
 
 
-#: How long an external selector's `node:<id>` claim protects the node it just
-#: handed out. It is a SELECTION window, not a work lease: the winner is handed
-#: to a caller that has yet to launch anything, and the worker replaces this
-#: hold with its own the moment `fno target init` runs. Sized to match the spawn
-#: handover window for the same reason - both cover launch-to-init, and the
-#: selector's caller has strictly less to do before init than a spawn does. Short
-#: on purpose: a selector that never dispatches must not wedge the node, and an
-#: expired claim is provably dead so the node self-heals.
+    # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#joined-open-candidates-4307
 EXTERNAL_SELECTION_TTL = "15m"
 
 
@@ -4394,7 +4107,7 @@ def cmd_next(
         ),
     ),
 ) -> None:
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import locked_mutate_graph, read_graph, read_graph_strict
     from fno.graph._intake import (
         detect_project,
         descendants_of,
@@ -4405,6 +4118,19 @@ def cmd_next(
     result: list = [None]
     project_filter = project
     _external = active_backend_name() != "graph"
+
+    def _read_entries() -> list[dict]:
+        """The graph, strictly: corruption refuses instead of answering [].
+
+        `read_graph` swallows a corrupt file and answers no rows; a selection
+        over no rows prints `null`, which `advance` reads as the benign
+        `no-work` skip. An unreadable graph is not an empty backlog.
+        """
+        try:
+            return read_graph_strict(_graph_path())
+        except Exception as exc:  # noqa: BLE001 - unknown graph state refuses
+            typer.echo(f"Error: graph unreadable: {exc}; selection refused", err=True)
+            raise typer.Exit(code=1) from exc
     # One read for the prelude AND selection: under an external backend the
     # transient joined model (list_open + sidecar join, fail-closed); under
     # the default backend the working graph, read at most once for project
@@ -4415,7 +4141,7 @@ def cmd_next(
         else:
             pre_entries = None
             if (not project_filter and not all_) or parent:
-                pre_entries = read_graph(_graph_path())
+                pre_entries = _read_entries()
     except _ExternalSelectionError as exc:
         typer.echo(f"Error: {exc}; selection refused", err=True)
         raise typer.Exit(code=1)
@@ -4423,14 +4149,7 @@ def cmd_next(
         assert pre_entries is not None  # set under the same condition above
         project_filter = detect_project(pre_entries)
 
-    # Epic-scope filter (C2, ): restrict candidates to the
-    # transitive children of --parent. Resolve the parent id up-front so a
-    # missing node is a hard error (AC2-ERR) and a childless node prints a
-    # clear note while still returning null so the walker can fall back
-    # (AC2-EDGE). The actual descendant SET is computed inside the keeper's
-    # ready verb from the entries it receives so that under --claim it reflects the
-    # locked graph state, not a pre-read snapshot (avoids a TOCTOU where a
-    # concurrent reparent could claim a node no longer in the subtree).
+    # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#cmd-next-4424
     parent_target_id: Optional[str] = None
     if parent:
         assert pre_entries is not None  # set when `parent` is truthy above
@@ -4442,14 +4161,15 @@ def cmd_next(
         if not descendants_of(pre_entries, parent_target_id):
             typer.echo(f"no children under {parent_target_id}", err=True)
 
-    def _select(entries):
+    def _select(entries, occupancy):
         """One call into the native leg: survivors, in selection order.
 
         The admission set, the narrowing cascade, and the ranking are the
         keeper verb's (backlog_ready::select); `next` takes rows[0] of the
         same answer its sibling verb serves, so the two surfaces cannot
         drift. `entries` rides IN so a `--claim` mutation and its selection
-        read the same instant under the graph lock.
+        read the same instant under the graph lock; `occupancy` rides IN so the
+        keeper never re-reads claims this command already has.
         """
         from fno.graph._intake import repo_root
         from fno.graph.store import (
@@ -4470,6 +4190,7 @@ def cmd_next(
                 include_deferred=include_deferred,
                 repo_root=repo_root(),
                 entries=entries,
+                occupancy=occupancy,
             )["rows"]
         except StoreUnavailable as exc:
             typer.echo(f"Error: store keeper unavailable; selection refused: {exc}", err=True)
@@ -4484,50 +4205,51 @@ def cmd_next(
     from fno.backlog.undispatched import (
         ObserverReadError,
         build_selection_divergence_event,
-        classify_planned_unclaimed,
         prepend_missed_rows,
-        read_claim_snapshot,
-        read_planned_unclaimed,
         read_planned_unclaimed_from_entries,
     )
 
-    try:
-        if _external:
-            assert pre_entries is not None
-            read_planned_unclaimed_from_entries(
-                pre_entries,
-                project=None if all_ else project_filter,
-                mission=mission,
-                roadmap_id=roadmap_id,
-                parent=parent_target_id,
-            )
-        else:
-            read_planned_unclaimed(
-                graph_path=_graph_path(),
-                project=None if all_ else project_filter,
-                mission=mission,
-                roadmap_id=roadmap_id,
-                parent=parent_target_id,
-            )
-    except ObserverReadError as exc:
-        typer.echo(f"Error: {exc}; selection refused", err=True)
-        raise typer.Exit(code=1) from exc
+    # The claim set of the selection that actually ran, for the receipts below.
+    selection_claimed: list = [set()]
 
-    def _with_observer(candidates: list[dict], source_entries: list[dict]) -> list[dict]:
-        by_id = {entry.get("id"): entry for entry in source_entries}
+    def _prepare(entries: list[dict]) -> tuple[set, dict]:
+        """Dispatch occupancy plus the observer receipt, read ONCE per selection.
+
+        The claim verdict and the roster read are what this command costs, and
+        three layers each used to pay for them. A `--claim` transaction that
+        loses to an interleaved writer pays again on its retry, deliberately:
+        the entries it selects from are new, so its occupancy must be too.
+        """
         try:
-            current_observer = classify_planned_unclaimed(
-                source_entries,
-                read_claim_snapshot(),
+            claimed, worked = read_occupancy(entries, _live_claimed_node_ids)
+        except OccupancyUnavailable as exc:
+            typer.echo(f"Error: {exc}; selection refused", err=True)
+            raise typer.Exit(code=1) from exc
+        try:
+            observer = read_planned_unclaimed_from_entries(
+                entries,
                 project=None if all_ else project_filter,
                 mission=mission,
                 roadmap_id=roadmap_id,
                 parent=parent_target_id,
+                worked=worked,
             )
+        except ObserverReadError as exc:
+            typer.echo(f"Error: {exc}; selection refused", err=True)
+            raise typer.Exit(code=1) from exc
         except Exception as exc:  # noqa: BLE001 - unknown state refuses recovery
             typer.echo(f"Error: observer revalidation failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
-        claimed = _require_live_claimed_node_ids("backlog next observer recovery")
+        selection_claimed[0] = claimed
+        return claimed | set(worked), observer
+
+    def _with_observer(
+        candidates: list[dict],
+        source_entries: list[dict],
+        occupied: set,
+        current_observer: dict,
+    ) -> list[dict]:
+        by_id = {entry.get("id"): entry for entry in source_entries}
         container_ids = _container_ids(source_entries)
         from fno.backlog.advance import _guard_staleness_days, selection_guards
 
@@ -4536,7 +4258,7 @@ def cmd_next(
         safe_rows = []
         for row in current_observer["rows"]:
             entry = by_id.get(row.get("id"))
-            if entry is None or row.get("id") in claimed:
+            if entry is None or row.get("id") in occupied:
                 continue
             if entry.get("completed_at") or _has_unmerged_open_pr(entry):
                 continue
@@ -4589,25 +4311,13 @@ def cmd_next(
             from fno.claims.io import claims_root_for
 
             assert pre_entries is not None
-            candidates = _with_observer(_select(pre_entries), pre_entries)
+            occupied, observer = _prepare(pre_entries)
+            candidates = _with_observer(
+                _select(pre_entries, occupied), pre_entries, occupied, observer
+            )
             for winner in candidates:
                 key = f"node:{winner['id']}"
-                # TWO things have to be true for this lock to protect anything,
-                # and routing alone gave only the first.
-                #
-                # ROUTE the root, or the lock lands in the cwd-default tree
-                # while every reader of a `node:` key resolves the global root
-                # through `claims_root_for`, so the node still reads `free`.
-                # `_read_node_claim` names the same trap from the other side.
-                #
-                # TTL, or the lock is visible and still not honored. Selection
-                # runs in a process that exits as soon as it prints the node,
-                # so a pid-liveness claim is dead on arrival: it reads `stale`,
-                # which does not block dispatch, and a worker launches onto the
-                # node this selector just handed out. The TTL makes the dead pid
-                # read `suspect` instead, which does block, and it bounds the
-                # hold so an external selector that never dispatches cannot wedge
-                # the node past the window.
+    # Rationale (14 lines): docs/architecture/graph-cli-rationale.md#cmd-next-4593
                 try:
                     acquire_claim(
                         key,
@@ -4622,7 +4332,10 @@ def cmd_next(
         else:
 
             def mutator(entries):
-                candidates = _with_observer(_select(entries), entries)
+                occupied, observer = _prepare(entries)
+                candidates = _with_observer(
+                    _select(entries, occupied), entries, occupied, observer
+                )
                 if candidates:
                     winner = candidates[0]
                     # Rows are serialized summaries, not graph references:
@@ -4648,42 +4361,53 @@ def cmd_next(
             assert pre_entries is not None
             entries = pre_entries
         else:
-            entries = read_graph(_graph_path())
-        candidates = _with_observer(_select(entries), entries)
+            # The prelude may already hold this graph, and nothing mutates it
+            # on the read-only path: a second read buys the same rows.
+            entries = pre_entries if pre_entries is not None else _read_entries()
+        occupied, observer = _prepare(entries)
+        candidates = _with_observer(_select(entries, occupied), entries, occupied, observer)
         if candidates:
             result[0] = _dispatch_node_summary(candidates[0])
 
-    if result[0] is None:
-        # Zero-silent-starvation receipts ( G1): explain to stderr why
-        # nothing was picked. Advisory - stdout stays exactly the node-or-"null"
-        # contract `_next_node` parses, so a receipt failure never breaks
-        # dispatch. Under an external backend the receipts explain the ACTUAL
-        # joined denominator, never the local graph.
-        try:
-            from fno.backlog.advance import _guard_staleness_days
+    # Zero-silent-starvation receipts ( G1): explain to stderr why nothing
+    # was picked - and, even when a winner WAS picked, which in-scope nodes
+    # are stranded under terminal parents (x-a31a). Advisory - stdout stays
+    # exactly the node-or-"null" contract `_next_node` parses, so a receipt
+    # failure never breaks dispatch. Under an external backend the receipts
+    # explain the ACTUAL joined denominator, never the local graph.
+    try:
+        from fno.backlog.advance import _guard_staleness_days
 
-            recv_entries = (
-                pre_entries if _external else (read_graph(_graph_path()) if claim else entries)
-            ) or []
-            scope_ids = (
-                descendants_of(recv_entries, parent_target_id)
-                if parent_target_id is not None
-                else None
-            )
-            for nid, reason in _starvation_receipts(
-                recv_entries,
-                project_filter,
-                all_,
-                scope_ids,
-                _live_claimed_node_ids(),
-                datetime.now(timezone.utc),
-                _guard_staleness_days(),
-                mission=mission,
-                roadmap_id=roadmap_id,
-            ):
+        recv_entries = (
+            pre_entries if _external else (read_graph(_graph_path()) if claim else entries)
+        ) or []
+        scope_ids = (
+            descendants_of(recv_entries, parent_target_id)
+            if parent_target_id is not None
+            else None
+        )
+        receipts = _starvation_receipts(
+            recv_entries,
+            project_filter,
+            all_,
+            scope_ids,
+            selection_claimed[0],
+            datetime.now(timezone.utc),
+            _guard_staleness_days(),
+            mission=mission,
+            roadmap_id=roadmap_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - receipts are advisory
+        typer.echo(f"warning: starvation receipts failed: {exc}", err=True)
+    else:
+        if result[0] is None:
+            for nid, reason in receipts:
                 typer.echo(f"excluded {nid}: {reason}", err=True)
-        except Exception as exc:  # noqa: BLE001 - receipts are advisory
-            typer.echo(f"warning: starvation receipts failed: {exc}", err=True)
+        else:
+            # A winner exists: only the strand receipts fire, capped, so a
+            # healthy dispatch never drowns in exclusion noise again.
+            for line in _stranded_next_receipts(receipts):
+                typer.echo(line, err=True)
 
     typer.echo(json.dumps(result[0], indent=2) if result[0] else "null")
 
@@ -4880,23 +4604,27 @@ def cmd_dispatch_lanes(
         "-P",
         help="Pin the model vendor for every lane.",
     ),
+    source: Optional[str] = typer.Option(
+        None,
+        "--source",
+        help="Dispatch origin for every lane worker's name (x-84b2): the daemon passes ab; an attended run passes nothing.",
+    ),
 ) -> None:
     """Spawn up to max_lanes isolated background lanes (parallel mode, group 3).
 
     Selects collision-clean ready nodes (like ``lane-fill``), then for each one
     isolates a worktree off origin/main, seeds its per-lane
-    ``.fno/config.local.toml`` (: own project.id), and
-    spawns a detached ``/target`` worker rooted there (merge posture per
-    ``config.auto_merge.grant``). Prints one JSON object: ``lanes`` (one receipt
-    per selected lane, ``status`` dispatched | skipped) plus a ``fill`` summary.
-    ``max_lanes < 1`` spawns
-    nothing (a single lane is the daemon's sequential path).
+    ``.fno/config.local.toml``, and spawns a detached ``/target`` worker rooted
+    there. Prints one JSON object: ``lanes`` plus a ``fill`` summary.
+    ``max_lanes < 1`` spawns nothing (a single lane is the daemon's path).
     """
     from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
     )
     from fno.backlog.advance import dispatch_lanes
+
+    _refuse_unknown_source("dispatch-lanes", source)
 
     try:
         model = reject_empty_model(model)
@@ -4940,6 +4668,7 @@ def cmd_dispatch_lanes(
         harness=harness,
         vendor=provider,
         report=fill,
+        source=source,
     )
     # dispatch_lanes fills every key before returning (both the no-selection and
     # completion paths write the report), so the shape is read directly.
@@ -6147,16 +5876,7 @@ def cmd_task_update(
     assert holder is not None
     key = task_key(node_id, task_id)
 
-    # The pid is the discriminator, not the name. A claim whose holder name
-    # equals OURS but whose pid is a different live process proves the
-    # identity is shared (an opencode worker's daemon-anchored pid, a
-    # manifest-inherited session id) - refusing with the fix beats attributing
-    # a stranger's work. release_claim is non-strict, so honoring a takeover
-    # against a LIVE claim would delete a running worker's claim and let the
-    # next in_progress succeed on an empty key: the double-dispatch these verbs
-    # exist to close. A live claim is never takeable, whoever it names; this
-    # guard runs for every transition, so done/pending cannot settle a live
-    # worker's row either.
+    # Rationale (10 lines): docs/architecture/graph-cli-rationale.md#cmd-task-update-6154
     from fno.claims.core import claim_status as _live_check
 
     try:
@@ -6802,7 +6522,6 @@ def cmd_cost(
     import click
 
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
 
     session = merge_deprecated_alias(
@@ -6813,11 +6532,7 @@ def cmd_cost(
     if session is None:
         raise click.UsageError("Missing option '--session-id'.")
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     try:
         amount_f = float(amount)
@@ -6856,15 +6571,10 @@ def cmd_remove(
     """Delete a node from the graph permanently. This verb exists and works.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node, _find_dependents
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     entries = read_graph(_graph_path())
     dependents = _find_dependents(entries, task_id)
@@ -6905,152 +6615,19 @@ def cmd_remove(
     typer.echo(f"Removed {task_id}" + (f" (orphaned deps in {dependents})" if dependents else ""))
 
 
-# -- defer / undefer --
-#
-# ``defer`` records a first-class pause on a backlog node via dedicated
-# ``deferred_at`` + ``deferred_reason`` fields. The cascade derives
-# ``status: deferred`` from those fields so the node disappears from the
-# default ``ready`` / ``next`` candidate sets and from triage proposals,
-# but resurfaces with ``--include-deferred``. Reversal is via ``undefer``
-# (idempotent: clearing already-clear state warns but exits 0).
-#
-# Predates the ``completed_at: "deferred:<ts>"`` workaround; ``recompute_statuses``
-# auto-migrates the prefix to the new schema, so callers should never see
-# the old shape after one mutation.
-
-
-@cli.command(
-    "defer",
-    epilog="Paired verb: `fno backlog undefer <id>...` reverses this (hidden; run its own --help).",
-)
-def cmd_defer(
-    task_ids: List[str] = typer.Argument(
-        ...,
-        help="Feature IDs (ab-XXXXXXXX). Multiple via space and/or comma: 'ab-X,ab-Y ab-Z'.",
-    ),
-    reason: str = typer.Option(
-        ...,
-        "--reason",
-        "-R",
-        help="Why these nodes are being deferred (applies to all). Free text, surfaced in triage.",
-    ),
-    kind: Optional[str] = typer.Option(
-        None,
-        "--kind",
-        "-K",
-        help=(
-            "Classify the deferral (expired|blocked|wont_do|superseded|later|"
-            "contingent|carveout|internal_only|junk). Omitted: stamped only when "
-            "the reason exactly matches a known machine-stamped string."
-        ),
-    ),
-) -> None:
-    """Mark one or more backlog nodes as deferred. Sets ``deferred_at`` + ``deferred_reason``.
-
-    Atomic across the batch: if any ID is unknown, none are deferred.
-    Same reason applies to every ID in the batch.
-    """
-    from fno.graph._constants import (
-        DEFERRED_KINDS,
-        classify_deferred_reason,
-    )
-    from fno.graph.store import locked_mutate_graph
-    from fno.graph._intake import _find_node, _find_dependents
-
-    if kind is not None and kind not in DEFERRED_KINDS:
-        typer.echo(
-            f"Error: --kind must be one of {', '.join(DEFERRED_KINDS)}, got '{kind}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    ids = _expand_valid_ids(task_ids)
-
-    # Strip and validate the reason at the CLI boundary so direct invocation
-    # cannot land an empty-reason deferral. The triage validator already
-    # rejects blank reasons; matching that contract here keeps both write
-    # paths producing identically-shaped graph state.
-    cleaned_reason = reason.strip()
-    if not cleaned_reason:
-        typer.echo("Error: --reason cannot be blank", err=True)
-        raise typer.Exit(code=1)
-
-    def mutator(entries):
-        # Resolve every id and abort naming ALL missing ones before mutating,
-        # mirroring cmd_queue's all-or-nothing batch atomicity.
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        now = datetime.now(timezone.utc).isoformat()
-        for tid in ids:
-            node = _find_node(entries, tid)
-            dependents = _find_dependents(entries, tid)
-            if dependents:
-                typer.echo(
-                    f"WARN: Deferring {tid} blocks: {', '.join(dependents)}",
-                    err=True,
-                )
-            node["locked_by"] = None
-            node["locked_at"] = None
-            # Clear completed_at PER NODE, inside the loop. The precedence
-            # ladder is `done > deferred`, so hoisting this clear out of the
-            # loop (or skipping it for the batch) makes deferring a done node
-            # a silent no-op: completed_at would keep status pinned to done.
-            # Symmetric with cmd_done, which clears deferred_at on the reverse
-            # transition.
-            node["completed_at"] = None
-            node["deferred_at"] = now
-            node["deferred_reason"] = cleaned_reason
-            # Explicit --kind wins; else classify ONLY by exact match against
-            # the machine-stamped table (the maintain drain self-classifies
-            # with no flag). No match leaves the kind unset - an honest
-            # unknown, never a guess from prose. Sparse: no kind means no key
-            # (popped so a re-deferral of a previously stamped node clears it).
-            resolved_kind = kind or classify_deferred_reason(cleaned_reason)
-            if resolved_kind:
-                node["deferred_kind"] = resolved_kind
-            else:
-                node.pop("deferred_kind", None)
-        return entries
-
-    locked_mutate_graph(_graph_path(), mutator)
-    for tid in ids:
-        typer.echo(f'Deferred {tid}: "{cleaned_reason}"')
-    _project_plans_from_graph(ids)
-
-
-# -- queue / unqueue / queued --
-#
-# ``queue`` is the user-facing triage marker for "I'm pulling this off
-# the backlog and intend to work on it next" (e.g. "tomorrow I'm going
-# to queue x, y, z"). Orthogonal to ``status``: a queued node still has
-# ``status: ready`` so ``fno backlog ready`` keeps surfacing it. The
-# kanban renderer reads ``queued_at`` separately and promotes the card
-# into the Now column (between ``claimed`` and the priority-driven
-# promotion rule).
-#
-# Cleared automatically by ``cmd_done``; reversible via ``unqueue``.
+    # Rationale (10 lines): docs/architecture/graph-cli-rationale.md#cmd-remove-6902
 
 
 def _expand_valid_ids(task_ids: list[str]) -> list[str]:
     """Expand one-or-many id args; refuse an empty set and non-node ids
     (the shared prologue of every batch-mutating verb)."""
-    from fno.graph._constants import has_node_id_prefix
 
     ids = _expand_id_args(task_ids)
     if not ids:
         typer.echo("Error: at least one task_id is required", err=True)
         raise typer.Exit(code=1)
     for tid in ids:
-        if not has_node_id_prefix(tid):
-            typer.echo(
-                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
-            )
-            raise typer.Exit(code=1)
+        _require_node_id(tid)
     return ids
 
 
@@ -7149,13 +6726,7 @@ def cmd_queue(
     cleaned_reason = (reason or "").strip() or None
 
     def mutator(entries):
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_nodes(entries, ids)
         now = datetime.now(timezone.utc).isoformat()
         for tid in ids:
             node = _find_node(entries, tid)
@@ -7190,13 +6761,7 @@ def cmd_unqueue(
     not_queued: list[str] = []
 
     def mutator(entries):
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_nodes(entries, ids)
         for tid in ids:
             node = _find_node(entries, tid)
             if not node.get("queued_at"):
@@ -7561,63 +7126,6 @@ def cmd_pick(
         typer.echo(f"({len(queued_applied)} queued, {len(unqueued_applied)} unqueued)")
     else:
         typer.echo("(no changes)")
-
-
-@cli.command("undefer", hidden=True)
-def cmd_undefer(
-    task_ids: List[str] = typer.Argument(
-        ...,
-        help="Feature IDs (ab-XXXXXXXX). Multiple via space and/or comma: 'ab-X,ab-Y ab-Z'.",
-    ),
-) -> None:
-    """Clear deferred state on one or more backlog nodes. Idempotent.
-
-    Atomic across the batch: if any ID is unknown, none are cleared.
-    Reports each ID's prior state; warns (non-fatally) for IDs that were
-    not actually deferred. Each node that WAS deferred gets its own
-    streak-reset event.
-    """
-    from fno.graph.store import locked_mutate_graph
-    from fno.graph._intake import _find_node
-
-    ids = _expand_valid_ids(task_ids)
-
-    was_deferred: list[tuple[str, bool]] = []
-
-    def mutator(entries):
-        missing = [tid for tid in ids if _find_node(entries, tid) is None]
-        if missing:
-            typer.echo(
-                f"Error: feature(s) not found: {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        for tid in ids:
-            node = _find_node(entries, tid)
-            was_deferred.append((tid, bool(node.get("deferred_at"))))
-            node["deferred_at"] = None
-            node["deferred_reason"] = None
-            node.pop("deferred_kind", None)
-        return entries
-
-    locked_mutate_graph(_graph_path(), mutator)
-
-    for tid, did in was_deferred:
-        if did:
-            # Mark a streak-reset boundary so the failed-node cascade (#34) gives a
-            # human-recovered node a clean slate: it needs N FRESH consecutive
-            # failures before auto-defer re-triggers (AC5-FR). The reader keys on
-            # data.unit_id; the flat agents envelope it writes is accepted too.
-            # Best-effort - a failed emit only means the node keeps its pre-undefer
-            # streak, never a crash in undefer. Per node: the boundary is keyed on
-            # data.unit_id, so N nodes that were actually deferred emit N events.
-            from fno.graph.failure import emit_undefer_boundary
-
-            emit_undefer_boundary(tid)
-        else:
-            typer.echo(f"warning: {tid} was not deferred", err=True)
-        typer.echo(f"Undeferred {tid}")
-    _project_plans_from_graph(ids)
 
 
 @cli.command(
@@ -8040,100 +7548,26 @@ def _echo_freed(freed: list, owner_id: str) -> None:
     )
 
 
-def _release_contained_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Un-contain everything shipping inside ``owner_id``; return the ids freed.
+# In graph/strand.py: the terminal-parent strand family (moved with the
+# close guards, release twins, and self-heal that share its liveness predicate).
+from fno.graph.strand import (  # noqa: E402
+    _live_child_ids,
+    _release_contained_children,
+    _release_parented_children,
+    _reparent_live_children,
+    _reparent_receipt,
+    _strandable_orphan_ids,
+    _stranded_next_receipts,
+    _sweep_reparent_stranded_orphans,
+)
 
-    Called wherever a delivery unit permanently dies: remove and supersede. A
-    reversible defer keeps its folded delivery unit intact so undefer restores
-    the same one-PR scope. A permanently dead unit will never merge, so
-    ``_strandable_contained_ids`` (which keys on ``completed_at``) can never heal
-    its children, while ``selection_guards`` and ``fno do target init`` keep
-    refusing them: unbuildable, uncloseable, invisible to every sweep.
-
-    Un-contained, never closed: a unit dying is not a claim that its children
-    shipped.
-    """
-    if not owner_id:
-        return []
-    freed: list[str] = []
-    for e in entries:
-        if isinstance(e, dict) and e.get("contained_in") == owner_id:
-            e.pop("contained_in", None)
-            nid = e.get("id")
-            if isinstance(nid, str) and nid:
-                freed.append(nid)
-    return freed
-
-
-def _is_live(entry: dict) -> bool:
-    """A child is LIVE when it is not terminal: it would strand if its owner died.
-
-    Terminal is the precedence floor in `recompute_statuses` (done > superseded
-    > deferred): a node with ``completed_at`` is done, one with
-    ``superseded_by`` is superseded, one with ``deferred_at`` is deferred.
-    Everything else (idea, ready, blocked, in_review, in_progress) is live and
-    dispatchable, so killing its owner without releasing it leaves it
-    unbuildable under the dead-ancestor guard.
-    """
-    if entry.get("completed_at") or entry.get("deferred_at"):
-        return False
-    if not entry.get("superseded_by"):
-        return True
-    supersession = entry.get("supersession")
-    return isinstance(supersession, dict) and not supersession.get("verified_at")
-
-
-def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Ids of the owner's live children that the supersede guard refuses over.
-
-    Membership children only (``parent == owner``), EXCLUDING contained
-    children (``contained_in == owner``). The two axes are released differently:
-    a contained child is folded delivery work, and superseding the unit
-    releases it routinely - that release IS the safety, so it is not a reason
-    to refuse. A parent-only child is epic membership; superseding orphans it
-    (clearing ``parent``), a structural change the guard exists to consent to.
-    This is also why the guard reads liveness, not ``type``: the epic that
-    prompted this was itself typed ``feature``.
-    """
-    if not owner_id:
-        return []
-    live: list[str] = []
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        if e.get("contained_in") == owner_id:
-            continue  # folded work - the contained release handles it, not the guard
-        if e.get("parent") != owner_id:
-            continue
-        if not _is_live(e):
-            continue
-        nid = e.get("id")
-        if isinstance(nid, str) and nid:
-            live.append(nid)
-    return live
-
-
-def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Clear ``parent`` on the owner's non-done children; return the ids freed.
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    if not owner_id:
-        return []
-    freed: list[str] = []
-    for e in entries:
-        if not isinstance(e, dict) or e.get("parent") != owner_id:
-            continue
-        if e.get("completed_at"):
-            continue  # done is truly terminal - keep parent as history
-        # Set None (key kept) rather than pop, matching the supported un-adopt
-        # path (`update --parent null`) and every other parent writer; readers
-        # use .get(), so a present-None reads identically to absent.
-        e["parent"] = None
-        nid = e.get("id")
-        if isinstance(nid, str) and nid:
-            freed.append(nid)
-    return freed
-
+# In graph/selection_evidence.py: the occupancy one `backlog next` selection
+# reads, and the receipts that explain what it passed over.
+from fno.graph.selection_evidence import (  # noqa: E402
+    OccupancyUnavailable,
+    _starvation_receipts,
+    read_occupancy,
+)
 
 # In graph/_closures.py: this file is over the source budget.
 from fno.graph._closures import (  # noqa: E402
@@ -8659,14 +8093,7 @@ def cmd_done(
         )
         raise typer.Exit(code=2)
 
-    # A query that is not a bare node id (title substring, bare hex, slug,
-    # `next`) resolves through the same fuzzy resolver the rich surface uses
-    # and then closes CANONICALLY on the resolved id: the close depth must
-    # not fork on which resolvable form named the node (PR 1200 review -
-    # a bare-hex close of an epic child skipped the cascade and stamp that
-    # the prefixed form ran). The rich surface still delegates wholesale
-    # (and resolves inside the delegate, so no resolve happens here);
-    # an unresolvable query delegates so ITS error rendering answers.
+    # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#cmd-done-8491
     if (
         not _close_flags
         and not _rich_flags
@@ -8733,12 +8160,7 @@ def cmd_done(
         _done_via_seam(task_id, skip_stamp=skip_stamp, force=force, reason=reason)
         return
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     # Usage guard: --force requires --reason
     if force and not reason:
@@ -8792,6 +8214,9 @@ def cmd_done(
     except Exception:
         cost_rollup = {}
 
+    # Stranded children of a forced close, echoed after the lock.
+    reparented_out: list = [[]]
+
     def mutator(entries):
         n = _find_node(entries, task_id)
         if not n:
@@ -8802,6 +8227,22 @@ def cmd_done(
         if existing:
             already_holder[0] = True
             return entries
+        # Strand guard (same shape as the supersede guard): closing over live
+        # children strands them under a terminal parent, so refuse unless
+        # forced - and a forced close re-parents them in this same mutation.
+        live_kids = _live_child_ids(entries, n["id"])
+        if live_kids and not force:
+            typer.echo(
+                f"Error: cannot close {task_id}: it still has "
+                f"{len(live_kids)} live child(ren): {', '.join(live_kids)}. "
+                "Closing would strand them under a terminal parent. Re-run "
+                "with --force --reason to close anyway (each child is "
+                "re-parented to its nearest live ancestor).",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if live_kids:
+            reparented_out[0] = _reparent_live_children(entries, n["id"])
         node_after_out[0] = n
         _apply_completion_fields(n, merge_status="merged" if evidence_pr_url else None)
         # Fill-only: never overwrite a cost a richer path (e.g. the done root)
@@ -8832,6 +8273,8 @@ def cmd_done(
         return
 
     typer.echo(f"Marked {task_id} done")
+    if reparented_out[0]:
+        typer.echo(_reparent_receipt(reparented_out[0]))
 
     # Operator-authority matrix (LD3/LD29): `fno backlog done` is an allowed
     # action during a drive window, but audit-tag it so the trail attributes
@@ -8910,54 +8353,7 @@ def _canonical_post_close(
 # -- reconcile (close merged-PR drift) --
 
 
-def _run_advance_epic(
-    epic: str,
-    *,
-    stop: bool,
-    max_dispatch: Optional[int],
-    json_out: bool,
-    verbose: bool,
-    model: Optional[str],
-    provider: Optional[str],
-    continuation: bool = False,
-) -> None:
-    """Run the epic advance and render its receipt ( K1).
-
-    Refusals (no-such-node / not-a-container) exit non-zero: unlike the
-    merge-advance path (a dispatch decision is never an error), an operator naming
-    a bad node to --epic wants a clear failure. Everything else exits 0.
-
-    ``continuation`` is the K2 daemon-drain mode (never reactivate; retire an
-    inactive mission).
-    """
-    from fno.backlog.advance import advance_epic
-
-    try:
-        result = advance_epic(
-            epic,
-            stop=stop,
-            max_dispatch=max_dispatch,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-            continuation=continuation,
-        )
-    except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
-        typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
-        raise typer.Exit(code=0)
-
-    from fno.backlog.advance import echo_advance_receipt
-
-    echo_advance_receipt(result, kind="epic", json_out=json_out)
-
-    # A refusal (bad node) is the only non-zero exit; a per-child failure is a
-    # loud receipt, not a verb error.
-    if result.error in ("no-such-node", "not-a-container"):
-        raise typer.Exit(code=1)
-
-
 # -- reopen --
-#
 # The inverse of `done`, and a deliberate inversion of its gate: `done` refuses
 # when no referenced PR is merged, `reopen` refuses when one IS. Both gates ask
 # the same question of the same evidence and disagree only about which answer
@@ -8966,38 +8362,11 @@ def _run_advance_epic(
 
 
 def _archived_entry(node_id: str) -> Optional[dict]:
-    """The node's row in graph-archive.json, or None. Read-only, never raises.
+    """The archive lookup, kept as a name for reopen's call sites; the
+    question owns the module now (fno.graph._archive_lookup)."""
+    from fno.graph._archive_lookup import archived_entry
 
-    Reopen needs this to tell "archived" apart from "absent". Without it an
-    archived node reports "not found", which is the same message a typo gets,
-    while the node sits readable in the sibling file - an absence with two
-    explanations and no way to distinguish them.
-    """
-    from fno.graph._intake import _find_node
-    from fno.graph.store import read_graph
-
-    try:
-        # The archive is default-backend storage: never consulted behind an
-        # external selection (the caller's refusal already fired; this guard
-        # keeps the helper honest for any future caller).
-        from fno.tracker import active_backend_name
-
-        if active_backend_name() != "graph":
-            return None
-        # `_archive_path`, not a second accessor: cmd_archive and cmd_unarchive
-        # already route through it, and a helper that resolves the archive its
-        # own way is a second path that drifts on the first config change.
-        path = _archive_path()
-        if not path.exists():
-            return None
-        # `_find_node`, not an exact compare: it is what resolved the id against
-        # the WORKING graph a line earlier, and a stricter match here recreates
-        # the very ambiguity this helper exists to remove. An exact compare made
-        # `reopen ab-9728` report "not found" for an archived ``,
-        # which is the same message a typo gets.
-        return _find_node(read_graph(path), node_id)
-    except Exception:  # noqa: BLE001 - the archive is advisory; a bad read must not mask the real refusal
-        return None
+    return archived_entry(node_id)
 
 
 def _evidence_pr_number(evidence, refs: list) -> Optional[int]:
@@ -9076,7 +8445,6 @@ def cmd_reopen(
     """Clear a node's completion, returning it to its underlying state.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
@@ -9085,12 +8453,7 @@ def cmd_reopen(
         resolve_merge_evidence,
     )
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     # Validate at the CLI boundary the way cmd_defer validates its own reason, so
     # a direct call cannot land a reasonless reopen that the event then records
@@ -9125,16 +8488,7 @@ def cmd_reopen(
         typer.echo(f"warning: {task_id} is not done; nothing to reopen", err=True)
         return
 
-    # -- Step 2: the merged-PR gate (outside the lock, like cmd_done's) --
-    #
-    # Through `resolve_merge_evidence`, the SAME resolver `cmd_done` uses, and
-    # over ALL refs rather than the primary. That is what makes this the same
-    # gate inverted rather than a similar-looking one: a node can close on a
-    # merged `additional_prs` entry while its primary `pr_number` sits closed
-    # and unmerged, and a reopen that only queried the primary would permit
-    # exactly the case the refusal exists to catch. It also carries the node's
-    # `cwd`, which is how a foreign-repo ref reaches the right repository
-    # instead of resolving PR #N in whatever checkout happens to be current.
+    # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#cmd-reopen-8893
     refs = node_pr_refs(node)
     pr_number: Optional[int] = None
     pr_state: Optional[str] = None
@@ -9270,14 +8624,10 @@ def cmd_advance(
         help="The just-merged node id whose close triggered this advance (AC1-RACE keying).",
     ),
     epic: Optional[str] = typer.Option(
-        None,
-        "--epic",
-        help="Advance (converge) an epic mission: fan out its ready leaf children across all projects ( K1). Mutually exclusive with --closed.",
+        None, "--epic", help="Advance (converge) an epic mission: fan out its ready leaf children across all projects ( K1). Mutually exclusive with --closed.",
     ),
     stop: bool = typer.Option(
-        False,
-        "--stop",
-        help="With --epic: deactivate the mission (clear mission_active) and dispatch nothing.",
+        False, "--stop", help="With --epic: deactivate the mission (clear mission_active) and dispatch nothing.",
     ),
     loose: bool = typer.Option(
         False,
@@ -9285,27 +8635,20 @@ def cmd_advance(
         help="With --project: drain the project territory's loose (parentless) ready nodes - no mission lifecycle, never retires (x-e221 rung-1).",
     ),
     continuation: bool = typer.Option(
-        False,
-        "--continuation",
-        hidden=True,
+        False, "--continuation", hidden=True,
         help="With --epic: K2 daemon-drain mode - never (re)activate the mission; retire an already-inactive one (dispatches nothing, reports deactivated).",
     ),
     max_dispatch: Optional[int] = typer.Option(
-        None,
-        "--max",
-        help="With --epic: cap the total workers this epic advance dispatches (width derives from spawn-gate headroom).",
+        None, "--max", help="With --epic: cap the total workers this epic advance dispatches (width derives from spawn-gate headroom).",
     ),
-    project: Optional[str] = typer.Option(
-        None, "--project", "-p", help="Restrict next-node selection to this project."
-    ),
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Restrict next-node selection to this project."),
     explain: bool = typer.Option(
         False,
         "--explain",
         help=(
-            "Dry run: report why this node and not another, which gate or cap "
-            "would refuse it with its measured value against its threshold, and "
-            "what the capacity grid resolves. Dispatches nothing, claims "
-            "nothing, and ignores config.auto_continue."
+            "Dry run: report why this node and not another - the refusing gate "
+            "or cap with its measured value, and the grid's resolve. Dispatches "
+            "nothing, claims nothing, ignores config.auto_continue."
         ),
     ),
     explain_node: Optional[str] = typer.Option(
@@ -9319,30 +8662,24 @@ def cmd_advance(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the decision as JSON."),
     verbose: bool = typer.Option(False, "--verbose", help="Print the dispatch decision to stderr."),
     model: Optional[str] = typer.Option(
-        None,
-        "--model",
-        "-m",
-        help="Pin a model for the dispatched worker(s), overriding node annotations.",
+        None, "--model", "-m", help="Pin a model for the dispatched worker(s), overriding node annotations.",
     ),
     provider: Optional[str] = typer.Option(
+        None, "--provider", help="Pin a provider for the dispatched worker(s). (No -p short: it is --project here.)",
+    ),
+    source: Optional[str] = typer.Option(
         None,
-        "--provider",
-        help="Pin a provider for the dispatched worker(s). (No -p short: it is --project here.)",
+        "--source",
+        help="Dispatch origin for the worker name (x-84b2): ab daemon, ac merge continuation, sob blueprint. Omit when attended.",
     ),
 ) -> None:
     """Dispatch a fresh /target --no-merge worker for the next now-unblocked node.
 
-    Merge-triggered auto-continue (). Opt-in and non-fatal: when
-    auto-continue is disabled it emits advance_skipped{disabled} and dispatches
-    nothing. Driven by the merge event (reconcile / post-merge), so megawalk,
-    /target, and /megatron all inherit it without driver-specific code. Always
-    exits 0 (a dispatch decision is never an error to the host op).
-
-    ``--epic <id>`` switches to the epic advance / converge path ( K1):
-    mark the epic's mission active and fan out every currently-ready LEAF child
-    across all projects. Idempotent; the width derives from spawn-gate headroom
-    (fleet max_live and provider lanes) + ``--max`` overall. ``--stop``
-    deactivates instead.
+    Merge-triggered auto-continue (). Opt-in and non-fatal; driven by the
+    merge event (reconcile / post-merge). Always exits 0 (a dispatch decision
+    is never an error to the host op). ``--epic <id>`` switches to the epic
+    advance / converge path ( K1): mark the mission active and fan out every
+    ready LEAF child across all projects; ``--stop`` deactivates instead.
     """
     from fno.dispatch_flags import (
         DispatchFlagError,
@@ -9351,6 +8688,8 @@ def cmd_advance(
     )
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
+
+    _refuse_unknown_source("advance", source)  # x-84b2: refuse, never default.
 
     # --explain returns BEFORE every dispatch path, including the pin validation
     # below: it is a read, so an unparseable --model must not stop it from
@@ -9367,7 +8706,7 @@ def cmd_advance(
             try:
                 report = build_lane_fill_report(
                     epic=epic, project=project, node_id=explain_node, top=explain_top,
-                    max_dispatch=max_dispatch,
+                    max_dispatch=max_dispatch, provider=provider, model=model,
                 )
             except Exception as exc:  # noqa: BLE001 - never a partial verdict
                 typer.echo(f"advance --explain --epic: {exc}", err=True)
@@ -9406,6 +8745,11 @@ def cmd_advance(
         typer.echo(f"advance: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    from contextlib import nullcontext
+
+    from fno.backlog.advance import run_advance_epic
+    from fno.backlog.single_flight import advance_flight_scope
+
     # --epic routes to the epic-advance path; it is a distinct trigger from the
     # merge-advance --closed path (they never combine on one call).
     if epic is not None:
@@ -9425,6 +8769,34 @@ def cmd_advance(
             provider=provider,
             continuation=continuation,
         )
+        # One in flight per mission (x-ef2c); the key uses the CANONICAL id so
+        # both spellings of an epic are one scope. --stop is a control action
+        # and never queues behind its own drain.
+        canonical_epic = epic
+        try:
+            from fno.graph._intake import _find_node
+            from fno.graph.store import read_graph
+
+            _epic_node = _find_node(read_graph(_graph_path()), epic)
+            if _epic_node and _epic_node.get("id"):
+                canonical_epic = _epic_node["id"]
+        except Exception:  # noqa: BLE001 - an unreadable graph keys on the raw arg
+            pass
+        scope_cm = nullcontext(True) if stop else advance_flight_scope(canonical_epic, json_out=json_out)
+        with scope_cm as ok:
+            if not ok:
+                return
+            run_advance_epic(
+                epic,
+                stop=stop,
+                max_dispatch=max_dispatch,
+                json_out=json_out,
+                verbose=verbose,
+                model=model,
+                provider=provider,
+                continuation=continuation,
+                source=source,
+            )
         return
     if loose:
         if closed is not None:
@@ -9452,13 +8824,9 @@ def cmd_advance(
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)
         raise typer.Exit(code=2)
 
-    # RC2 (): closed_project is the CLOSED NODE's own project, read from the
-    # graph - NEVER the --project next-selection flag. --project restricts which
-    # project advance() picks `next` from; it is normally OMITTED on a manual
-    # `advance --closed A`, which left closed_project=None and defeated
-    # advance_dependents' same-project guard, misrouting a same-project dependent
-    # through the cross-project --cwd path onto a protected branch where the bg
-    # worker dies. Mirror the reconcile path (cli.py reads the node's .project).
+    # RC2: closed_project is the CLOSED NODE's own project from the graph -
+    # NEVER the --project next-selection flag (which is normally OMITTED on a
+    # manual `advance --closed A`; see docs/architecture/backlog-board-ordering).
     closed_project: Optional[str] = None
     if closed:
         try:
@@ -9470,62 +8838,55 @@ def cmd_advance(
         except Exception:  # noqa: BLE001 - non-fatal; advance_deps fails closed on None
             closed_project = None
 
-    try:
-        result = _advance(
-            closed_node_id=closed,
-            project=project,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-        )
-        # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
-        # Only meaningful with --closed (an edge source); the project-scoped
-        # next selection above never reaches a foreign dependent. Shares the
-        # dispatch:<id> dedup with reconcile's call so a node seen by both the
-        # reconcile sweep and this explicit verb dispatches at most once.
-        if closed:
-            _advance_deps(
+    # One in flight for the board advance (x-ef2c): the merge event, a groom
+    # leg and a manual run all fire this verb, and nothing used to stop two
+    # of them from running at once.
+    with advance_flight_scope(None, json_out=json_out) as ok:
+        if not ok:
+            return
+        try:
+            result = _advance(
                 closed_node_id=closed,
-                closed_project=closed_project,
+                project=project,
                 verbose=verbose,
                 model=model,
                 provider=provider,
+                source=source,
             )
-            # G4: route the closed node's contract dependents to a reconcile pass
-            # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
-            # advance paths so a node seen by all three dispatches at most once.
-            from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
+            # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
+            # Only meaningful with --closed (an edge source); the project-scoped
+            # next selection above never reaches a foreign dependent. Shares the
+            # dispatch:<id> dedup with reconcile's call so a node seen by both the
+            # reconcile sweep and this explicit verb dispatches at most once.
+            if closed:
+                _advance_deps(
+                    closed_node_id=closed,
+                    closed_project=closed_project,
+                    verbose=verbose,
+                    model=model,
+                    provider=provider,
+                    source=source,
+                )
+                # G4: route the closed node's contract dependents to a reconcile pass
+                # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
+                # advance paths so a node seen by all three dispatches at most once.
+                from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
 
-            dispatch_reconcile_for_blocker(closed_node_id=closed, verbose=verbose)
-    except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
-        # advance() is designed non-fatal (every path emits + returns), but the
-        # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
-        # decision is not an error to whoever invoked the verb. Report on stderr
-        # and exit 0.
-        typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
-        return
+                dispatch_reconcile_for_blocker(closed_node_id=closed, verbose=verbose)
+        except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
+            # advance() is designed non-fatal (every path emits + returns), but the
+            # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
+            # decision is not an error to whoever invoked the verb. Report on stderr
+            # and exit 0. x-4138: stdout also gets one verdict line - the detail
+            # alone left stdout empty, byte-identical to a swallowed crash.
+            typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
+            typer.echo("advance: failed reason=unexpected-error")
+            return
     if json_out:
-        typer.echo(
-            json.dumps(
-                {
-                    "decision": result.decision,
-                    "event": result.event,
-                    "reason": result.reason,
-                    "node_id": result.node_id,
-                    "short_id": result.short_id,
-                },
-                indent=2,
-            )
-        )
+        typer.echo(json.dumps(result.json_receipt(), indent=2))
     else:
-        parts = [result.decision]
-        if result.node_id:
-            parts.append(result.node_id)
-        if result.reason:
-            parts.append(f"reason={result.reason}")
-        if result.short_id:
-            parts.append(f"short_id={result.short_id}")
-        typer.echo(" ".join(parts))
+        for line in result.render():
+            typer.echo(line)
 
 
 @cli.command("reconcile-findings", hidden=True)
@@ -9644,9 +9005,35 @@ def cmd_reconcile(
     to it (no archiving). This fires on every throttled auto-reconcile,
     including the SessionStart hook - not just a manual invocation.
     """
+    from fno.backlog.single_flight import reconcile_gate
+
+    # The mutual-exclusion refusal, the dry-run bypass, and the one-in-flight
+    # gate (x-ef2c) all live in single_flight.reconcile_gate.
+    reconcile_gate(
+        dry_run=dry_run,
+        node=node,
+        json_out=json_out,
+        pr_number=pr_number,
+        once=lambda: _reconcile_once(
+            dry_run=dry_run, node=node, json_out=json_out,
+            pr_number=pr_number, repo=repo,
+        ),
+    )
+
+
+def _reconcile_once(
+    dry_run: bool,
+    node: Optional[str],
+    json_out: bool,
+    pr_number: Optional[int],
+    repo: Optional[str],
+) -> None:
+    """Run one reconcile pass: the body of `cmd_reconcile`, gate-free."""
+    _refuse_tracker_owned_on_external_backend("reconcile")
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
+        _ListingCache,
         _effective_reconcile_cwd,
         emit_gate_escape_for_record,
         emit_human_touch_for_record,
@@ -9659,22 +9046,6 @@ def cmd_reconcile(
         write_retro_sentinel,
     )
     from fno.paths import retro_pending_dir
-
-    # --node + --pr-number together is refused rather than silently
-    # mis-scoped: --pr-number's own binding step (below) binds EVERY node the
-    # PR's trailer claims, unconditional on --node, but the scan/close scope
-    # would then collapse to the single --node id - leaving newly-bound
-    # sibling claims stamped with a live PR ref but never closed until some
-    # later, unrelated sweep happens to revisit them (round-6/7 review,
-    # flagged twice with no caller ever exercising this combination). Loud
-    # refusal beats a latent gap a future caller could silently trip.
-    if node is not None and pr_number is not None:
-        raise typer.BadParameter(
-            "--node and --pr-number are mutually exclusive: --pr-number "
-            "already scopes the scan to every node its own trailer claims, "
-            "which --node cannot narrow without silently stranding the "
-            "other claimed nodes stamped-but-unclosed. Run them separately."
-        )
 
     # A truly unscoped, no-args sweep (SessionStart, a bare manual run) - the
     # only shape allowed to touch the whole graph: revert detection, the
@@ -9830,20 +9201,7 @@ def cmd_reconcile(
         # narrow pr_ctx to non-None for the rest of this block - it cannot
         # narrow across a reassignment to None in a sibling `except`.
         if pr_ctx is not None and pr_ctx.state != "MERGED":
-            # A binding is a MERGE-time close signal, never a promise on
-            # an OPEN or CLOSED-unmerged PR - the caller could later
-            # abandon or close it unmerged, leaving a claimed node
-            # holding a dead ref. The three real callers (the ritual,
-            # fno do pr merge, the bare sweep) only ever reach this with an
-            # already-merged PR; this guards a direct manual
-            # `--pr-number` invocation against the same premature bind.
-            #
-            # Only worth refusing (and reporting) when the body actually
-            # names a trailer: a state-read blip on a PR with NO trailer
-            # at all has nothing to bind either way, and the node this
-            # run is closing almost always closes fine via the ordinary
-            # ref-based scan below - flagging that as a refusal read a
-            # fully successful run as failed (round-8 review fix).
+    # Rationale (13 lines): docs/architecture/graph-cli-rationale.md#reconcile-once-9604
             if parse_closure_trailer(pr_ctx.body):
                 closure_refused = f"PR #{pr_number} is not merged (state={pr_ctx.state})"
                 if not json_out:
@@ -9878,22 +9236,19 @@ def cmd_reconcile(
                         err=True,
                     )
 
-    # Open-PR binding heal (): an open PR whose branch names an open,
-    # ref-less node leaves that node invisible to every graph-first reader
-    # until something fills pr_number. One bounded open-PR listing per repo
-    # BEFORE the scan, so the healed rows feed the forward scan and the status
-    # derivation below. Full and explicit-node runs only: a --pr-number call
-    # is bounded to its own PR and must not sweep unrelated repos.
+    # Open-PR binding heal (): an open PR whose branch names an open, ref-less
+    # node is invisible to every reader until something fills pr_number; one
+    # bounded open-PR listing per repo BEFORE the scan feeds the forward scan.
+    # Full and explicit-node runs only: a --pr-number call sweeps only its PR.
     open_bound: list[dict] = []
     open_binding_advisories: list[str] = []
+    listings = _ListingCache()
     if _full_sweep or node is not None:
-        from fno.graph._reconcile import (
-            bind_pr_rows,
-            collect_open_binding_heals,
-            node_pr_refs,
-        )
+        from fno.graph._reconcile import bind_pr_rows, collect_open_binding_heals, node_pr_refs
 
-        _open_heals, open_binding_advisories = collect_open_binding_heals(entries, node_id=node)
+        _open_heals, open_binding_advisories = collect_open_binding_heals(
+            entries, node_id=node, listings=listings
+        )
         if _open_heals:
 
             def _open_fill(_entries: list[dict]) -> list[dict]:
@@ -9960,15 +9315,7 @@ def cmd_reconcile(
 
         _our_repo = repo or (_repo_slug_from_url(pr_ctx.url) if pr_ctx is not None else None)
         if _our_repo is None and not json_out:
-            # _pr_touch_ids refuses to repo-scope a bare-number ref match
-            # when it cannot resolve OUR OWN repo (avoiding a false cross-repo
-            # collision), so the scan below can silently see only trailer
-            # claims and open ref-less nodes - the ordinary ref-stamped,
-            # no-trailer close can go dark with nothing on stderr to say so.
-            # Same condition leg_stamp already warns about before it calls
-            # this same command with an explicit --repo; surface it here too
-            # for a caller (a bare `fno backlog reconcile --pr-number`) that
-            # never resolves one itself (round-11 review fix, ).
+    # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#reconcile-once-9733
             typer.echo(
                 f"warning: reconcile --pr-number {pr_number}: could not resolve "
                 "this repo's slug; scoping to exact trailer claims and open "
@@ -9978,17 +9325,9 @@ def cmd_reconcile(
         _scan_scope = _pr_touch_ids(entries, pr_number, closure_claims, _our_repo)
     else:
         _scan_scope = None
-    records = scan_merge_drift(entries, node_id=_scan_scope)
+    records = scan_merge_drift(entries, node_id=_scan_scope, listings=listings)
 
-    # Auto-bind closure claims for every OTHER merged PR this sweep just
-    # discovered on its own (). --pr-number above covers the two paths
-    # that already KNOW the PR number (the post-merge ritual, `fno do pr
-    # merge`); a THIRD path merges with no caller ever naming a number at
-    # all - an operator merging in the GitHub UI, or a king's automation -
-    # and is caught only later by this bare sweep's own forward/reverse scan.
-    # Full sweep only: a --pr-number call is scoped to its own PR above, and
-    # discovering totally unrelated merged PRs is this bare sweep's job (it
-    # auto-fires often), not a side effect of every single merge event.
+    # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#reconcile-once-9753
     if _full_sweep:
         from fno.pr.closure import (
             ClosureQueryError,
@@ -10005,16 +9344,7 @@ def cmd_reconcile(
         for r in records:
             if r.closeable and r.pr_number != pr_number and r.pr_number not in discovered:
                 discovered[r.pr_number] = r
-        # Bounded two ways, not because more discovery is wrong, but because
-        # each entry costs one sequential `gh pr view` (up to
-        # GH_QUERY_TIMEOUT_S each) - an unbounded loop on a backlog with many
-        # stale closeable records turns every SessionStart sweep into a
-        # serial gh-latency tax. A COUNT cap alone still lets a degraded gh
-        # (network blip, auth stall) burn up to count*GH_QUERY_TIMEOUT_S -
-        # 20*30s = 10 minutes - turning a hook that used to fail fast into
-        # one that hangs. A wall-clock budget bounds that regardless of the
-        # count cap. A later sweep (SessionStart auto-fires often) picks up
-        # whatever this run dropped either way.
+    # Rationale (10 lines): docs/architecture/graph-cli-rationale.md#reconcile-once-9778
         import time as _time
 
         _MAX_AUTO_DISCOVER = 20
@@ -10072,7 +9402,7 @@ def cmd_reconcile(
         if auto_bound_any:
             if not dry_run:
                 entries = read_graph(_graph_path())  # real binds just persisted
-            records = scan_merge_drift(entries, node_id=node)
+            records = scan_merge_drift(entries, node_id=node, listings=listings)
 
     status_drift = _status_drift(_graph_path()) if _full_sweep else {}
     closeable = [r for r in records if r.closeable]
@@ -10148,6 +9478,9 @@ def cmd_reconcile(
     # already-merged owner strands the node permanently. Full sweep only, for
     # the same reason as the epic sweep above.
     strandable_contained = _strandable_contained_ids(entries) if _full_sweep else set()
+    # Same self-heal role on the parent axis (x-a31a): gates the dry-run preview
+    # when no other leg has candidates; the mutator's sweep re-detects.
+    strandable_orphans = _strandable_orphan_ids(entries) if _full_sweep else set()
     # A pending supersession whose successor closed outside this sweep is owed a
     # verdict nothing else will ever deliver. Gather its evidence BEFORE the
     # lock: these are `gh` round trips, and the graph lock is not the place for
@@ -10217,6 +9550,10 @@ def cmd_reconcile(
 
     closed: list[dict] = []
     healed_epics: list[str] = []
+    # (child_id, new_parent) pairs written by the close-time re-parent and the
+    # full-sweep strand self-heal; reported in the summary and --json payload.
+    reparented: list = []
+    reparented_acc: list = []
     contained_closed: list[str] = []
     carried_stamped: list[str] = []
     contained_errors: list[dict] = []
@@ -10285,6 +9622,7 @@ def cmd_reconcile(
             cascade_closed_acc.clear()
             supersession_unverified_acc.clear()
             blocked_by_settlement_acc.clear()
+            reparented_acc.clear()
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
@@ -10304,6 +9642,16 @@ def cmd_reconcile(
                         )
                         continue
                     _apply_completion_fields(node_obj, merge_status="merged")
+                    # The close must not strand its live children under a
+                    # now-terminal parent: re-parent them in this same
+                    # mutation. Guarded like every non-load-bearing leg here.
+                    try:
+                        reparented_acc.extend(
+                            _reparent_live_children(entries, record.node_id)
+                        )
+                    except Exception as _rp_exc:  # noqa: BLE001 - never abort a close
+                        contained_errors_acc.append({"owner": record.node_id, "stage": "strand-reparent", "error": str(_rp_exc)[:200]})
+                        typer.echo(f"warning: re-parenting {record.node_id}'s live children failed: {_rp_exc}", err=True)
                     supersession_unverified_acc.extend(
                         verify_pending_supersessions(
                             entries,
@@ -10409,6 +9757,13 @@ def cmd_reconcile(
                         err=True,
                     )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
+                # Strand self-heal (x-a31a): re-parents live children stranded
+                # under terminal parents by closes that predate the guard.
+                try:
+                    reparented_acc.extend(_sweep_reparent_stranded_orphans(entries))
+                except Exception as _sr_exc:  # noqa: BLE001 - never abort the sweep
+                    contained_errors_acc.append({"owner": None, "stage": "strand-heal", "error": str(_sr_exc)[:200]})
+                    typer.echo(f"warning: the strand self-heal failed: {_sr_exc}", err=True)
                 # AFTER both close sweeps: a node closed this pass is a
                 # passenger too. Guarded like them, for the same reason.
                 try:
@@ -10460,16 +9815,16 @@ def cmd_reconcile(
         blocked_by_settlement.extend(blocked_by_settlement_acc)
 
         def _auto_continue_after_close(node_id, project, root):
-            """Merge-triggered auto-continue dispatch for one just-closed node:
-            same-project `next`, cross-project dependents, and contract de-stub.
-            Shared by directly-closed records AND cascade-closed ancestor epics
-            () so an epic-level dependent is dispatched, not stranded."""
+            """Merge-triggered auto-continue for one closed node: same-project
+            `next`, cross-project dependents, contract de-stub. Also shared by
+            cascade-closed ancestor epics ()."""
             from fno.backlog.advance import advance as _advance
             from fno.backlog.advance import advance_dependents as _advance_deps
             from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
 
-            _advance(closed_node_id=node_id, project=project, project_root=root)
-            _advance_deps(closed_node_id=node_id, closed_project=project, project_root=root)
+            # Merge continuation stamps ac (x-84b2); de-stub stamps rd at the seam.
+            _advance(closed_node_id=node_id, project=project, project_root=root, source="ac")
+            _advance_deps(closed_node_id=node_id, closed_project=project, project_root=root, source="ac")
             dispatch_reconcile_for_blocker(closed_node_id=node_id, project_root=root)
 
         # Post-mutation work outside the lock (mirrors `done`): stamp the plan
@@ -10638,7 +9993,10 @@ def cmd_reconcile(
         contained_closed = sorted(set(contained_closed_acc))
         carried_stamped = sorted(set(carried_stamped_acc))
         contained_errors = list(contained_errors_acc)
-    elif dry_run and (closeable or strandable or strandable_contained or status_drift):
+        reparented = sorted(set(reparented_acc))
+    elif dry_run and (
+        closeable or strandable or strandable_contained or strandable_orphans or status_drift
+    ):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
         # pre-close `strandable` epics - closing a closeable last child cascade-
         # closes its parent, and the sweep fixpoint reaches ancestors. Simulate
@@ -10649,10 +10007,12 @@ def cmd_reconcile(
         _sim = _copy.deepcopy(entries)
         _sim_acc: list = []
         _sim_contained: list = []
+        _sim_reparented: list = []
         for record in closeable:
             _sn = _find_node(_sim, record.node_id)
             if _sn and not _sn.get("completed_at"):
                 _apply_completion_fields(_sn)
+                _sim_reparented.extend(_reparent_live_children(_sim, record.node_id))
                 # Same order as the real mutator (contained children first), and
                 # guarded like it: an unguarded raise crashed the PREVIEW where
                 # a real run degrades to a warning, and left `contained_errors`
@@ -10692,8 +10052,10 @@ def cmd_reconcile(
                     }
                 )
             _sim_acc.extend(_sweep_close_done_epics(_sim))
+            _sim_reparented.extend(_sweep_reparent_stranded_orphans(_sim))
         healed_epics = sorted(set(_sim_acc))
         contained_closed = sorted(set(_sim_contained))
+        reparented = sorted(set(_sim_reparented))
         try:  # a preview that omits a leg reads "in sync" where a run writes
             carried_stamped = sorted(set(_sweep_stamp_carried_sessions(_sim)))
         except Exception:  # noqa: BLE001 - a preview never raises
@@ -10745,10 +10107,8 @@ def cmd_reconcile(
 
             _cu = run_sync_catchup()
             sync_catchup = {
-                "outcome": _cu.outcome,
-                "pr_number": _cu.pr_number,
-                "swept": _cu.swept,
-                "detail": _cu.detail,
+                "outcome": _cu.outcome, "stale": _cu.stale,
+                "pr_number": _cu.pr_number, "swept": _cu.swept, "detail": _cu.detail,
             }
             if _cu.outcome not in ("disabled", "fresh") and not json_out:
                 typer.echo(f"sync catch-up: {_cu.outcome}", err=True)
@@ -10901,6 +10261,9 @@ def cmd_reconcile(
             # Auto-closed container epics (cascade + self-heal sweep); on --dry-run
             # this is the simulated preview of what a real run would heal (codex P3).
             "healed_epics": healed_epics,
+            # Live children re-parented away from terminal parents (close-time
+            # + full-sweep strand heal). The count the summary line names.
+            "reparented": [{"node_id": cid, "parent": p} for cid, p in reparented],
             "reclaimed": [
                 {"node_id": node_id, "from": before, "to": after}
                 for node_id, (before, after) in status_drift.items()
@@ -10957,6 +10320,7 @@ def cmd_reconcile(
         and not strandable_contained
         and not healed_epics
         and not contained_closed
+        and not reparented
         and not carried_stamped
         and not reverted_stamped
         and not promise_held
@@ -10987,6 +10351,8 @@ def cmd_reconcile(
             typer.echo(
                 f"Would self-heal {len(healed_epics)} container epic(s): " + ", ".join(healed_epics)
             )
+        if reparented:
+            typer.echo(_reparent_receipt(reparented, lead="Would "))
         for node_id, (before, after) in status_drift.items():
             typer.echo(f"Would reclaim {node_id}: {before} -> {after}")
     else:
@@ -11019,6 +10385,9 @@ def cmd_reconcile(
                 f"Auto-closed {len(healed_epics)} container epic(s) "
                 f"(all children complete): " + ", ".join(healed_epics)
             )
+        if reparented:
+            # Bare-lead shape: groom's _reconcile_leg_outcome parses this line.
+            typer.echo(_reparent_receipt(reparented))
         for node_id, (before, after) in status_drift.items():
             typer.echo(f"reclaimed {node_id}: {before} -> {after}")
 
@@ -11070,212 +10439,13 @@ def cmd_reconcile(
 # -- maintain (recurring backlog + kanban hygiene sweep) --
 
 
-def _validity_rg_search(symbol: str) -> Optional[int]:
-    """Bounded git-grep file count for a named symbol under the repo root.
-
-    Returns the number of tracked files mentioning ``symbol`` (a validity signal:
-    0 files -> the symbol likely no longer exists), or ``None`` when the source
-    is unavailable (rg/git missing, timeout, not a repo) so the sweep records it
-    unavailable rather than reading a spurious zero. 5 s cap (Locked Decision #7).
-    """
-    import subprocess
-
-    from fno.paths import resolve_repo_root
-
-    try:
-        root = str(resolve_repo_root())
-    except Exception:
-        return None
-    try:
-        proc = subprocess.run(
-            ["git", "-C", root, "grep", "-l", "--fixed-strings", "-e", symbol],
-            capture_output=True,
-            text=True,
-            timeout=_maintain_source_timeout(),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    # git grep exits 1 with no output when there are no matches (not an error).
-    if proc.returncode not in (0, 1):
-        return None
-    return sum(1 for line in proc.stdout.splitlines() if line.strip())
-
-
-def _maintain_source_timeout() -> float:
-    from fno.graph import maintain as _m
-
-    return _m.EVIDENCE_SOURCE_TIMEOUT_S
-
-
-# Bounds for the retro enrichment items (Discretion #1/#2): a few lines of the
-# merged file around the comment, and a truncated diff_hunk. Kept small so both
-# sit comfortably inside PACKET_MAX_BYTES alongside the base packet.
-_RETRO_REGION_WINDOW = 8
-_RETRO_REGION_MAX_BYTES = 1200
-_RETRO_HUNK_MAX_BYTES = 400
-
-
-def _fetch_retro_comment(
-    source_pr: int,
-    finding_hash: str,
-    root: str,
-    *,
-    repo: Optional[str] = None,
-) -> Optional[dict]:
-    """Fetch PR ``source_pr``'s inline comments (resolved from ``root``) and return
-    the one whose body hash-joins ``finding_hash``, or ``None`` on any failure.
-
-    The hash is the canonical ``content_hash`` ``land`` wrote (function-local import
-    so ``graph`` keeps no module-level ``fno.retro`` dependency - that edge runs
-    retro -> graph). The gh path is templated with a numeric PR slot, so an injected
-    trailer value cannot escape the current repo or the ``<int>`` slot (Pessimist B).
-    """
-    import subprocess
-
-    from fno.retro.dedup import content_hash  # function-local: no graph->retro cycle
-
-    path = (
-        f"repos/{repo}/pulls/{source_pr}/comments"
-        if repo
-        else f"repos/:owner/:repo/pulls/{source_pr}/comments"
-    )
-    try:
-        proc = subprocess.run(
-            ["gh", "api", path, "--paginate", "--slurp"],
-            capture_output=True,
-            text=True,
-            cwd=root,
-            timeout=_maintain_source_timeout(),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        raw = json.loads(proc.stdout) if proc.stdout.strip() else []
-    except (json.JSONDecodeError, ValueError):
-        return None
-    # --slurp wraps paginated pages as [[page1...],[page2...]]; flatten, tolerating
-    # a non-slurped flat list too (defensive, mirrors fetch_review_comments).
-    flat: list[dict] = []
-    if isinstance(raw, list):
-        for elem in raw:
-            if isinstance(elem, list):
-                flat.extend(x for x in elem if isinstance(x, dict))
-            elif isinstance(elem, dict):
-                flat.append(elem)
-    for c in flat:
-        if content_hash(str(c.get("body", ""))) == finding_hash:
-            return c
-    return None
-
-
-def _summarize_review_comment(path: object, line: object, diff_hunk: object) -> str:
-    """One-line, bounded summary of the originating ask: cited path/line plus a
-    truncated diff_hunk (the shape of the ask, not the whole hunk - Discretion #2)."""
-    loc = f"{path}:{line}" if line else str(path)
-    hunk = str(diff_hunk or "").strip()
-    if len(hunk) > _RETRO_HUNK_MAX_BYTES:
-        hunk = hunk[:_RETRO_HUNK_MAX_BYTES] + "…[truncated]"
-    return f"reviewer asked at {loc}; diff_hunk: {hunk}" if hunk else f"reviewer asked at {loc}"
-
-
-def _read_merged_region(root: str, path: str, line: object) -> str:
-    """A bounded excerpt of ``path`` in the live merged tree around ``line``.
-
-    Reads ``git show HEAD:<path>`` (Locked Decision #3: live HEAD, not the merge
-    SHA); on git failure falls back to a path-safe filesystem read gated by
-    ``contained_path_exists`` (CWE-22). Returns "" when neither resolves. The line
-    is clamped to the file's bounds (Boundaries: a comment at/past EOF)."""
-    import subprocess
-
-    from fno.graph import maintain as _m
-
-    # Defense in depth (CWE-22): `path` originates from a GitHub comment, so reject
-    # a non-str or a parent-escaping / absolute path BEFORE any read. `git show
-    # HEAD:<path>` already cannot escape the tree object and the fs fallback is
-    # gated by contained_path_exists, but guarding up front keeps every reader safe
-    # and avoids a TypeError on a non-str root/path.
-    if not isinstance(root, str) or not isinstance(path, str):
-        return ""
-    norm = os.path.normpath(path)
-    if os.path.isabs(norm) or norm == ".." or norm.startswith(".." + os.sep):
-        return ""
-
-    content: Optional[str] = None
-    try:
-        proc = subprocess.run(
-            ["git", "-C", root, "show", f"HEAD:{path}"],
-            capture_output=True,
-            text=True,
-            timeout=_maintain_source_timeout(),
-        )
-        if proc.returncode == 0:
-            content = proc.stdout
-    except (OSError, subprocess.SubprocessError):
-        content = None
-    if content is None:
-        if not _m.contained_path_exists(root, path):
-            return ""
-        try:
-            with open(os.path.join(root, path), encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
-        except OSError:
-            return ""
-    file_lines = content.splitlines()
-    if not file_lines:
-        return ""
-    anchor = line if isinstance(line, int) and line >= 1 else 1
-    anchor = min(anchor, len(file_lines))  # clamp EOF
-    lo = max(0, anchor - 1 - _RETRO_REGION_WINDOW)
-    hi = min(len(file_lines), anchor + _RETRO_REGION_WINDOW)
-    excerpt = "\n".join(file_lines[lo:hi])
-    return excerpt[:_RETRO_REGION_MAX_BYTES]
-
-
-def _validity_retro_source(node: dict) -> dict[str, str]:
-    """Per-retro-node enrichment seam (Locked Decision #1): the originating review
-    comment (`pr:review-comment`) + the cited file's merged region
-    (`git:merged-region:<path>`), for the validity classifier. Returns allowlisted
-    `pr:`/`git:` items, or ``{}`` on any failure at any step (fail open, node kept).
-    Wired only here in the CLI edge; the hermetic core injects a stub under test."""
-    from fno.graph import maintain as _m
-
-    parsed = _m.parse_retro_trailer(node.get("details"))
-    if parsed is None:
-        return {}
-    source_pr, finding_hash = parsed
-    if source_pr is None:  # postmortem-sourced: no fetchable PR comment
-        return {}
-    root = node.get("cwd")
-    if not isinstance(root, str) or not os.path.isdir(root):
-        return {}
-    root_p = os.path.abspath(os.path.expanduser(root))
-    comment = _fetch_retro_comment(source_pr, finding_hash, root_p)
-    if comment is None:
-        return {}
-    items: dict[str, str] = {}
-    path = comment.get("path")
-    line = comment.get("line") or comment.get("original_line")  # outdated diff -> original_line
-    items["pr:review-comment"] = _summarize_review_comment(path, line, comment.get("diff_hunk"))
-    # Ordered after the comment item so a cap drops the precision add (merged
-    # region) before the higher-value ask (Discretion #4 / AC4-EDGE).
-    if isinstance(path, str) and path:
-        region = _read_merged_region(root_p, path, line)
-        if region:
-            items[f"git:merged-region:{path}"] = region
-    return items
-
-
 @cli.command("maintain", hidden=True)
 def cmd_maintain(
     apply: bool = typer.Option(
         False,
         "--apply",
         help=(
-            "Apply the DETERMINISTIC legs (re-scope drift, prune pytest leaks, "
-            "backfill url-less pr_url). "
-            "The judgment legs (dedup, drain-stale, cap-Now) are ALWAYS "
+            "Apply the deterministic legs; the judgment legs stay "
             "proposal-only regardless of this flag."
         ),
     ),
@@ -11299,591 +10469,37 @@ def cmd_maintain(
         False,
         "--suspect-reverts",
         help=(
-            "Read-only retro sweep: print drained nodes that carry evidence of "
-            "a human curation decision, then exit. Runs no other leg, mutates "
-            "nothing, and emits no undefer command - the operator rules on the "
-            "list themselves."
+            "Read-only retro sweep: print drained nodes carrying evidence of "
+            "a human curation decision, then exit; mutates nothing."
         ),
     ),
 ) -> None:
     """Keep graph.json + the kanban board clean by composing existing verbs.
 
-    Deterministic legs apply under ``--apply``: re-scope project/cwd drift,
-    prune pytest-temp leak nodes, and backfill a derived ``pr_url`` onto rows
-    carrying a ``pr_number`` with no url. Three are
-    judgment calls and only ever PROPOSE (never mutate, regardless of
-    ``--apply``): surface near-duplicate idea titles, propose a reversible
-    ``defer`` for stale ideas, and report a Now column over its WIP cap. The
-    last leg appends a summary to health-history so ``triage trend`` shows the
-    board trending cleaner.
+    Deterministic legs apply under ``--apply``; the judgment legs (dedup,
+    drain-stale, cap-Now) only ever propose. Full leg list + loop form:
+    docs/backlog-usage.md "Health and hygiene". Best-effort: a single failed
+    apply does not abort the rest; an empty graph is a clean no-op.
 
-    Loop form: ``/loop 1d fno backlog maintain --apply``.
-
-    Best-effort: a malformed row is skipped, a single failed apply does not
-    abort the rest, and an empty graph is a clean no-op.
+    The pass runs under a wall-clock budget, ``backlog.maintain.budget_seconds``
+    (default 300s), checked between legs; the validity analyzer additionally
+    inherits whatever time is left. A pass that runs out exits 4 and prints a
+    partial receipt naming the leg it stopped in, plus a health-history row
+    with ``complete: false`` - exit 4 means "partial results", never a clean
+    board.
     """
-    from fno.graph.store import read_graph, locked_mutate_graph
-    from fno.graph.statuses import recompute_statuses
-    from fno.graph._intake import _find_node
-    from fno.graph.render import make_kanban_column
-    from fno.graph.render_html import _load_wip_caps
     from fno.graph import maintain as _maintain
 
-    # Read once and derive status so the judgment legs see accurate states
-    # (read_graph applies defaults but does not run the cascade).
-    entries = recompute_statuses(read_graph(_graph_path()))
-
-    if suspect_reverts:
-        # Short-circuit (): a retro sweep, not another leg. Runs before
-        # the claim check and every other detector below - it reads and
-        # prints only, so it needs none of their machinery.
-        reverts = _maintain.detect_suspect_reverts(entries)
-        typer.echo(
-            f"reversals: {len(reverts)} of the drained pile carry evidence of a human decision"
-        )
-        for r in reverts:
-            title = r.title[:60]
-            typer.echo(f"  {r.node_id}  {r.priority}  {r.deferred_at[:10]}  {r.signal}  {title}")
-        typer.echo(
-            "(read-only: no node was changed. Rule on these yourself with `fno backlog undefer <id>...`)"
-        )
-        return
-
-    # Apply legs must never touch a node a live target session is driving.
-    claimed = (
-        _require_live_claimed_node_ids("backlog maintain --apply")
-        if apply
-        else _live_claimed_node_ids()
+    _maintain.run_pass(
+        apply=apply,
+        json_out=json_out,
+        recheck=recheck,
+        no_validity=no_validity,
+        suspect_reverts=suspect_reverts,
+        graph_path=_graph_path,
+        live_claimed=_live_claimed_node_ids,
+        require_live_claimed=_require_live_claimed_node_ids,
     )
-
-    # --- detect (all read-only) ---
-    workspaces = _maintain.load_workspaces()
-    rescope_fixes = _maintain.detect_rescope_fixes(entries, workspaces)
-    prune_ids = _maintain.detect_temp_leaks(entries)
-    pr_url_fixes = _maintain.detect_url_less_prs(entries)
-    twin_drops = _maintain.detect_misharnessed_twins(entries)
-    shape_fixes = _maintain.detect_harness_shape_fixes(entries)
-    pr_url_writable = [f for f in pr_url_fixes if f.pr_url]
-    pr_url_unresolvable = [f for f in pr_url_fixes if not f.pr_url]
-    dup_groups = _maintain.detect_dup_groups(entries)
-    plan_cost_violations = _maintain.detect_shared_plan_cost_violations(entries)
-    # Propose-only in v1 even under --apply: a bulk reparent has no human
-    # reading a receipt the way intake's one-at-a-time auto-link does.
-    try:
-        rollup_cands = _maintain.detect_rollup_candidates(entries)
-    except Exception:  # noqa: BLE001 - advisory leg; maintain must not break
-        rollup_cands = []
-
-    try:
-        from fno.config import load_settings
-        _maintain_cfg = load_settings().backlog.maintain
-        staleness_days = _maintain_cfg.staleness_days
-        max_failed_attempts = _maintain_cfg.max_failed_attempts
-    except Exception:
-        staleness_days = 30
-        max_failed_attempts = 3
-    stale = _maintain.detect_stale_ideas(entries, staleness_days)
-
-    # G1 stale-ready quarantine leg (): the propose-only mirror of the
-    # failure-defer leg over READY rows abandoned past
-    # config.backlog.staleness_days (default 21, distinct from the idea-stage
-    # staleness above). --apply defers each with the quarantine reason. Reuses
-    # the SAME blast cap so a mass-quarantine can never defer half the board.
-    try:
-        from fno.config import load_settings
-
-        ready_staleness_days = load_settings().backlog.staleness_days
-    except Exception:
-        ready_staleness_days = 21
-    stale_ready_cands = _maintain.detect_stale_ready(entries, ready_staleness_days)
-    stale_ready_truncated = 0
-    if len(stale_ready_cands) > _maintain.AUTO_DEFER_BLAST_CAP:
-        stale_ready_cands = sorted(stale_ready_cands, key=lambda s: (-s.age_days, s.node_id))
-        stale_ready_truncated = len(stale_ready_cands) - _maintain.AUTO_DEFER_BLAST_CAP
-        stale_ready_cands = stale_ready_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
-
-    now_cap = _load_wip_caps().get("now", 20)
-    column_for = make_kanban_column(entries)
-    overflow = _maintain.now_overflow(
-        entries,
-        now_cap,
-        column_for,
-    )
-
-    # Leg 7: auto-defer failure-prone nodes (#34). Derive the streak from the
-    # walker's existing node_failed/node_closed events (Locked Decision #4).
-    from fno.graph import failure as _failure
-
-    events = _failure.read_events()
-    defer_cands = _maintain.detect_failure_defers(entries, events, max_failed_attempts)
-    # Blast-radius guard (Open Question #2): cap per-run auto-defers so a
-    # provider-outage mass-failure cannot defer half the board. Truncate the
-    # lowest-streak candidates and ALWAYS log the drop (no silent cap).
-    defer_truncated = 0
-    if len(defer_cands) > _maintain.AUTO_DEFER_BLAST_CAP:
-        defer_cands = sorted(defer_cands, key=lambda d: (-d.streak, d.node_id))
-        defer_truncated = len(defer_cands) - _maintain.AUTO_DEFER_BLAST_CAP
-        defer_cands = defer_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
-
-    # --- apply (deterministic legs only) ---
-    applied_rescope: list[str] = []
-    applied_prune: list[str] = []
-    applied_defers: list[dict] = []
-    applied_stale_ready: list[dict] = []
-    applied_pr_urls: list[dict] = []
-    applied_twin_drops: list[dict] = []
-    applied_shape_fixes: list[dict] = []
-    skipped_claimed: list[str] = []
-
-    if apply and (rescope_fixes or prune_ids or defer_cands or stale_ready_cands or pr_url_writable or twin_drops or shape_fixes):
-        # One locked mutation: the board renders once; one failed item never strands the rest.
-        def mutator(ents):
-            current_claimed = claimed | _require_live_claimed_node_ids("backlog maintain --apply")
-            applied_rescope.clear()
-            applied_prune.clear()
-            applied_defers.clear()
-            applied_stale_ready.clear()
-            applied_pr_urls.clear()
-            skipped_claimed.clear()
-            prune_set: set[str] = set()
-            for fix in rescope_fixes:
-                if fix.node_id in current_claimed:
-                    skipped_claimed.append(fix.node_id)
-                    continue
-                try:
-                    n = _find_node(ents, fix.node_id)
-                    if not n:
-                        continue
-                    # Only project/cwd are ever touched - never priority/status.
-                    n["project"] = fix.new_project
-                    n["cwd"] = fix.new_cwd
-                    applied_rescope.append(fix.node_id)
-                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(f"warning: re-scope of {fix.node_id} failed: {exc}", err=True)
-            for nid in prune_ids:
-                if nid in current_claimed:
-                    skipped_claimed.append(nid)
-                    continue
-                prune_set.add(nid)
-                applied_prune.append(nid)
-            if prune_set:
-                # Mirror `remove`: drop the node AND clean dangling blocked_by refs.
-                for e in ents:
-                    blocked = e.get("blocked_by")
-                    if blocked:
-                        e["blocked_by"] = [b for b in blocked if b not in prune_set]
-                ents = [e for e in ents if e.get("id") not in prune_set]
-            # Leg 2b: backfill a pr_url onto url-less rows, in-lock (a present url outranks).
-            for fix in pr_url_writable:
-                if fix.node_id in current_claimed:
-                    skipped_claimed.append(fix.node_id)
-                    continue
-                try:
-                    n = _find_node(ents, fix.node_id)
-                    if not n or n.get("pr_url") or n.get("pr_number") != fix.pr_number:
-                        continue
-                    n["pr_url"] = fix.pr_url
-                    applied_pr_urls.append({"node_id": fix.node_id, "pr_url": fix.pr_url})
-                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(f"warning: pr_url backfill of {fix.node_id} failed: {exc}", err=True)
-            # Leg 2c: drop the mis-harnessed session twin (re-checked in-lock).
-            applied_twin_drops, twin_skipped, twin_warn = _maintain.apply_twin_drops(
-                ents, twin_drops, current_claimed
-            )
-            skipped_claimed.extend(twin_skipped)
-            # Leg 2d: correct a wrong harness the twin leg left (no twin to drop).
-            applied_shape_fixes, fix_skipped, fix_warn = _maintain.apply_harness_shape_fixes(
-                ents, shape_fixes, current_claimed
-            )
-            skipped_claimed.extend(fix_skipped)
-            for _w in [*twin_warn, *fix_warn]:
-                typer.echo(f"warning: {_w}", err=True)
-            # Leg 7: auto-defer failure-prone nodes (#34). Re-checks live state
-            # and claims INSIDE the lock so a node that raced is not touched.
-            defer_claimed = current_claimed
-            for cand in defer_cands:
-                if cand.node_id in defer_claimed:
-                    skipped_claimed.append(cand.node_id)
-                    continue
-                try:
-                    n = _find_node(ents, cand.node_id)
-                    if not n:
-                        continue
-                    if n.get("completed_at") or n.get("deferred_at"):
-                        continue  # raced to done/deferred; leave it
-                    reason = cand.reason()
-                    # Mirror cmd_defer: clear claim/completion so the cascade derives status.
-                    n["locked_by"] = None
-                    n["locked_at"] = None
-                    n["completed_at"] = None
-                    n["deferred_at"] = datetime.now(timezone.utc).isoformat()
-                    n["deferred_reason"] = reason
-                    # Failure-cascade defers carry the sentinel vocabulary, not
-                    # an expired drift: no kind (pop so a re-deferral cannot inherit one).
-                    n.pop("deferred_kind", None)
-                    applied_defers.append(
-                        {"node_id": cand.node_id, "streak": cand.streak, "reason": reason}
-                    )
-                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(f"warning: auto-defer of {cand.node_id} failed: {exc}", err=True)
-            # G1 stale-ready quarantine (): the reversible defer for a ready
-            # node abandoned past the threshold. Same in-lock re-sample as the
-            # failure leg (a node claimed/done/deferred since the read is left
-            # alone - the "quarantine racing a live claim must lose" race rule).
-            sr_claimed = current_claimed
-            for cand in stale_ready_cands:
-                if cand.node_id in sr_claimed:
-                    skipped_claimed.append(cand.node_id)
-                    continue
-                try:
-                    n = _find_node(ents, cand.node_id)
-                    if not n:
-                        continue
-                    if n.get("completed_at") or n.get("deferred_at"):
-                        continue  # raced to done/deferred; leave it
-                    # Re-run the predicate under the lock: a candidate that
-                    # gained a movement signal since the pre-lock scan (e.g. a
-                    # PR attached -> now in-review, or a fresh plan edit) is no
-                    # longer stale, and deferring it would sink active work into
-                    # the pile (deferred outranks in-review). Re-check on `n`.
-                    if not _maintain.is_stale_ready(
-                        n, datetime.now(timezone.utc), ready_staleness_days
-                    ):
-                        continue
-                    n["locked_by"] = None
-                    n["locked_at"] = None
-                    n["completed_at"] = None
-                    n["deferred_at"] = datetime.now(timezone.utc).isoformat()
-                    n["deferred_reason"] = _maintain.STALE_QUARANTINE_REASON
-                    n["deferred_kind"] = "expired"
-                    applied_stale_ready.append(
-                        {
-                            "node_id": cand.node_id,
-                            "age_days": cand.age_days,
-                            "reason": _maintain.STALE_QUARANTINE_REASON,
-                        }
-                    )
-                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(
-                        f"warning: stale-ready defer of {cand.node_id} failed: {exc}",
-                        err=True,
-                    )
-            return ents
-
-        locked_mutate_graph(_graph_path(), mutator)
-
-    # --- leg 8: validity sweep (proposal-only, ALWAYS - never mutates) ---
-    # Runs even under --apply as proposal-only; a single analyzer call reviews the
-    # oldest stale ideas and writes an immutable evidence deck. Self-limiting:
-    # once the pile is watermarked, later runs find 0 eligible and skip the call.
-    validity_result = None
-    if not no_validity:
-        try:
-            from fno.config import load_settings
-
-            _vcfg = load_settings().backlog.maintain
-            v_days, v_batch = _vcfg.validity_days, _vcfg.validity_batch_size
-        except Exception:
-            v_days, v_batch = _maintain.VALIDITY_DAYS_DEFAULT, _maintain.VALIDITY_BATCH_DEFAULT
-
-        from fno import paths as _paths
-
-        try:
-            _deck_dir = _paths.state_dir() / "validity-decks"
-        except Exception:
-            _deck_dir = None
-
-        if _deck_dir is not None:
-
-            def _exists_factory(node):
-                root = node.get("cwd")
-                if not isinstance(root, str) or not os.path.isdir(root):
-                    return None  # repo unavailable -> path evidence recorded unavailable
-                root_p = os.path.abspath(os.path.expanduser(root))
-                # `rel` is extracted from untrusted node text; contained_path_exists
-                # rejects an absolute or `../` escape from the repo root (CWE-22).
-                return lambda rel: _maintain.contained_path_exists(root_p, rel)
-
-            # Re-read seam: the sweep calls this AFTER the analyzer returns, so a
-            # node that raced to claimed/done/deferred DURING analysis voids its
-            # recommendation (AC4-EDGE).
-            def _reread():
-                return recompute_statuses(read_graph(_graph_path()))
-
-            validity_result = _maintain.run_validity_sweep(
-                entries,
-                validity_days=v_days,
-                batch_size=v_batch,
-                out_dir=_deck_dir,
-                claimed_ids=frozenset(
-                    claimed
-                    | (
-                        _require_live_claimed_node_ids("backlog maintain --apply")
-                        if apply
-                        else _live_claimed_node_ids()
-                    )
-                ),
-                recheck=recheck,
-                exists_factory=_exists_factory,
-                search=_validity_rg_search,
-                retro_source=_validity_retro_source,
-                reread=_reread,
-            )
-            if validity_result.error and not json_out:
-                typer.echo(f"validity: {validity_result.error}", err=True)
-                raise typer.Exit(code=1)
-
-    # --- report leg: append a summary to health-history (best-effort) ---
-    report = {
-        "scope": "maintain",
-        "applied": apply,
-        "rescoped": len(applied_rescope) if apply else len(rescope_fixes),
-        "pruned": len(applied_prune) if apply else len(prune_ids),
-        "pr_url_backfilled": len(applied_pr_urls) if apply else len(pr_url_writable),
-        "pr_url_unresolvable": len(pr_url_unresolvable),
-        "dedup_groups": len(dup_groups),
-        "shared_plan_cost_violations": len(plan_cost_violations),
-        "rollup_candidates": len(rollup_cands),
-        "stale_ideas": len(stale),
-        "now_overflow": list(overflow) if overflow else None,
-        "skipped_claimed": len(skipped_claimed),
-        "auto_deferred": len(applied_defers) if apply else len(defer_cands),
-        # Carry node + reason so a sweep's auto-defers are never silent (a
-        # silent auto-defer is a design bug, per UI State Machines).
-        "auto_deferred_nodes": applied_defers
-        if apply
-        else [{"node_id": c.node_id, "streak": c.streak} for c in defer_cands],
-        "auto_defer_truncated": defer_truncated,
-        "stale_ready": len(applied_stale_ready) if apply else len(stale_ready_cands),
-        "stale_ready_nodes": applied_stale_ready
-        if apply
-        else [{"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands],
-        "stale_ready_truncated": stale_ready_truncated,
-    }
-    try:
-        from fno.health_monitor import append_history
-
-        append_history(report, [])
-    except Exception as exc:  # noqa: BLE001 - report leg is non-fatal
-        typer.echo(f"warning: maintain health-history append failed: {exc}", err=True)
-
-    if json_out:
-        payload = {
-            "applied": apply,
-            "rescope": {
-                "applied": applied_rescope if apply else [],
-                "candidates": [
-                    {
-                        "node_id": f.node_id,
-                        "new_project": f.new_project,
-                        "new_cwd": f.new_cwd,
-                    }
-                    for f in rescope_fixes
-                ],
-            },
-            "prune": {
-                "applied": applied_prune if apply else [],
-                "candidates": prune_ids,
-            },
-            "pr_url_backfill": {
-                "applied": applied_pr_urls if apply else [],
-                "candidates": [
-                    {"node_id": f.node_id, "pr_number": f.pr_number, "pr_url": f.pr_url}
-                    for f in pr_url_writable
-                ],
-                "unresolvable": [
-                    {"node_id": f.node_id, "pr_number": f.pr_number, "cwd": f.cwd}
-                    for f in pr_url_unresolvable
-                ],
-            },
-            "dedup_groups": dup_groups,
-            "shared_plan_cost_violations": [
-                {"plan_path": v.plan_path, "nodes": v.nodes} for v in plan_cost_violations
-            ],
-            "rollup_candidates": [
-                {"node_id": n, "epic_id": e, "score": sc} for n, e, sc in rollup_cands
-            ],
-            "stale_ideas": [{"node_id": s.node_id, "age_days": s.age_days} for s in stale],
-            "now_overflow": list(overflow) if overflow else None,
-            "skipped_claimed": skipped_claimed,
-            "auto_defer": {
-                "applied": applied_defers if apply else [],
-                "candidates": [{"node_id": c.node_id, "streak": c.streak} for c in defer_cands],
-                "truncated": defer_truncated,
-            },
-            "stale_ready": {
-                "applied": applied_stale_ready if apply else [],
-                "candidates": [
-                    {"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands
-                ],
-                "truncated": stale_ready_truncated,
-            },
-            "session_twins": _maintain.twin_payload(twin_drops, applied_twin_drops, apply),
-            "session_harness_fixes": _maintain.shape_fix_payload(
-                shape_fixes, applied_shape_fixes, apply),
-        }
-        if validity_result is not None:
-            payload["validity"] = {
-                "eligible": validity_result.eligible,
-                "counts": validity_result.counts,
-                "deck": validity_result.deck_md,
-                "degraded": validity_result.degraded,
-                "stale": validity_result.stale,
-                "error": validity_result.error,
-            }
-        typer.echo(json.dumps(payload, indent=2))
-        if validity_result is not None and validity_result.error:
-            raise typer.Exit(code=1)
-        return
-
-    # --- human per-leg summary (a no-op run is visibly distinct, AC1-UI) ---
-    # AC1-UI: every category prints its count, zero included - a silent
-    # category reads as "nothing to do" when it may be "nothing resolved".
-    if apply:
-        # "written N of M", never a bare N: the in-lock loop skips a row that
-        # raced to a url or a different pr_number, so 120-of-159 would read
-        # exactly like a complete run.
-        typer.echo(
-            f"pr-url written {len(applied_pr_urls)} of {len(pr_url_writable)} | "
-            f"pr-url unresolvable {len(pr_url_unresolvable)}"
-        )
-    else:
-        typer.echo(
-            f"pr-url proposed {len(pr_url_writable)} | "
-            f"pr-url unresolvable {len(pr_url_unresolvable)}"
-        )
-    for f in pr_url_unresolvable:
-        typer.echo(f"  unresolvable pr_url {f.node_id} (PR #{f.pr_number}, cwd={f.cwd or 'unset'})")
-
-    if apply:
-        typer.echo(
-            f"re-scoped {len(applied_rescope)} | pruned {len(applied_prune)} | "
-            f"auto-deferred {len(applied_defers)} | "
-            f"stale-ready-deferred {len(applied_stale_ready)} | "
-            f"dedup-groups {len(dup_groups)} | rollup-candidates "
-            f"{len(rollup_cands)} | stale-ideas {len(stale)} | "
-            f"now-overflow {'yes' if overflow else 'no'} | "
-            f"skipped-claimed {len(skipped_claimed)}"
-        )
-    else:
-        typer.echo(
-            f"re-scope candidates {len(rescope_fixes)} | prune candidates "
-            f"{len(prune_ids)} | auto-defer candidates {len(defer_cands)} | "
-            f"stale-ready candidates {len(stale_ready_cands)} | "
-            f"dedup-groups {len(dup_groups)} | rollup-candidates "
-            f"{len(rollup_cands)} | stale-ideas "
-            f"{len(stale)} | now-overflow {'yes' if overflow else 'no'}  "
-            f"(run with --apply to apply the deterministic legs)"
-        )
-
-    for rf in rescope_fixes:
-        verb = "re-scoped" if (apply and rf.node_id in applied_rescope) else "would re-scope"
-        typer.echo(f"  {verb} {rf.node_id} -> project={rf.new_project} cwd={rf.new_cwd}")
-    for nid in prune_ids:
-        verb = "pruned" if (apply and nid in applied_prune) else "would prune (temp-cwd leak)"
-        typer.echo(f"  {verb} {nid}")
-    if apply:
-        for d in applied_defers:
-            typer.echo(
-                f"  auto-deferred {d['node_id']} ({d['streak']} consecutive "
-                f"failures): {d['reason']}"
-            )
-    else:
-        for c in defer_cands:
-            typer.echo(
-                f"  would auto-defer {c.node_id} ({c.streak} consecutive failures, "
-                f">= {max_failed_attempts}): fno backlog undefer {c.node_id} to recover"
-            )
-    if defer_truncated:
-        typer.echo(
-            f"  NOTE: auto-defer blast cap hit - {defer_truncated} further "
-            f"candidate(s) NOT deferred this run "
-            f"(cap {_maintain.AUTO_DEFER_BLAST_CAP}); re-run to continue"
-        )
-    if apply:
-        for d in applied_stale_ready:
-            typer.echo(
-                f"  stale-ready deferred {d['node_id']} ({d['age_days']}d unmoved): {d['reason']}"
-            )
-    else:
-        for sc in stale_ready_cands:
-            typer.echo(
-                f"  would quarantine stale-ready {sc.node_id} ({sc.age_days}d "
-                f"unmoved, >{ready_staleness_days}d): fno backlog undefer "
-                f"{sc.node_id} to recover"
-            )
-    if stale_ready_truncated:
-        typer.echo(
-            f"  NOTE: stale-ready blast cap hit - {stale_ready_truncated} further "
-            f"candidate(s) NOT quarantined this run "
-            f"(cap {_maintain.AUTO_DEFER_BLAST_CAP}); re-run to continue"
-        )
-    for group in dup_groups:
-        typer.echo(f"  near-duplicate ideas (merge/supersede by hand): {', '.join(group)}")
-    for v in plan_cost_violations:
-        typer.echo(
-            f"  shared-plan cost double-count {v.plan_path}: {', '.join(v.nodes)} "
-            f"all carry cost_usd (a plan is one PR is one node; one node is the "
-            f"delivery unit, the rest are contained). Read-only: pick the unit "
-            f"and `fno backlog update <other> --plan-path null` by hand."
-        )
-    for _tl in _maintain.twin_lines(twin_drops, applied_twin_drops, apply):
-        typer.echo(_tl)
-    for _fl in _maintain.shape_fix_lines(shape_fixes, applied_shape_fixes, apply):
-        typer.echo(_fl)
-    for nid, epic_id, score in rollup_cands:
-        typer.echo(
-            f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
-            f"fno backlog update {nid} --parent {epic_id}"
-        )
-    # Bounded stale-idea receipt: the per-candidate echo swamped the report on
-    # a mature graph. Summary + 10 oldest + one drain command instead;
-    # --no-validity skips the analyzer call that made an earlier `maintain -J` hang.
-    if stale:
-        ages = sorted(s.age_days for s in stale)
-        oldest = sorted(stale, key=lambda s: s.age_days, reverse=True)[:10]
-        typer.echo(
-            f"  stale ideas: {len(stale)} (age {ages[0]}-{ages[-1]}d) - drain in one locked write:"
-        )
-        for s in oldest:
-            typer.echo(f"    {s.node_id} ({s.age_days}d)")
-        if len(stale) > 10:
-            typer.echo(f"    (showing 10 of {len(stale)} oldest)")
-        typer.echo(
-            f"    fno backlog maintain --no-validity -J "
-            f"| jq -r '.stale_ideas[].node_id' "
-            f"| xargs fno backlog defer -R 'stale >{staleness_days}d, drained by maintain' "
-            f"--kind expired"
-        )
-    else:
-        typer.echo("  stale ideas: 0")
-    if overflow:
-        count, cap = overflow
-        typer.echo(
-            f"  Now over WIP cap ({count} > {cap}): run `fno backlog triage propose` "
-            f"to demote lower-priority work (never auto-reprioritized)"
-        )
-    if skipped_claimed:
-        typer.echo(
-            f"  skipped {len(skipped_claimed)} live-claimed node(s): {', '.join(skipped_claimed)}"
-        )
-
-    if validity_result is not None:
-        for w in validity_result.warnings:
-            typer.echo(f"  validity config: {w}", err=True)
-        if validity_result.eligible == 0:
-            typer.echo("validity: 0 eligible ideas")
-        else:
-            counts = validity_result.counts
-            tag = " (DEGRADED: analyzer unavailable)" if validity_result.degraded else ""
-            stale_note = f", {validity_result.stale} stale" if validity_result.stale else ""
-            typer.echo(
-                f"validity: reviewed {validity_result.eligible} ideas{tag} -> "
-                f"promote {counts.get('promote', 0)} | keep {counts.get('keep', 0)} | "
-                f"supersede {counts.get('supersede', 0)} | needs-human "
-                f"{counts.get('needs-human', 0)}{stale_note}"
-            )
-            typer.echo(f"  deck: {validity_result.deck_md}")
 
 
 # -- reprioritize --
@@ -11897,15 +10513,10 @@ def cmd_reprioritize(
         False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
     ),
 ) -> None:
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     _validate_priority_or_exit(priority, blocks_everything=blocks_everything)
 
@@ -12029,35 +10640,6 @@ cli.command("rank")(_cmd_rank)
 
 # -- archive --
 
-_ARCHIVE_SKIP_REASONS = (
-    "referenced-by-open-node",
-    "related-peer-not-archived",
-    "too-recent",
-    "no-parseable-timestamp",
-)
-
-
-def _archive_bucket_counts(skipped: list) -> dict[str, int]:
-    """Tally ``skipped`` by ``_skip`` reason, zero-filled for every known reason.
-
-    Zero-filled so the receipt always names all four buckets (): a run
-    that holds back 0 for a reason reads as "checked, none held", not as an
-    absent line a reader has to interpret as either "zero" or "not measured".
-    A reason not in ``_ARCHIVE_SKIP_REASONS`` still lands in the dict and the
-    stdout receipt prints it, so a new ``_skip`` reason reads in the receipt
-    (and in groom's regex sum over these lines) instead of vanishing.
-    """
-    held = {reason: 0 for reason in _ARCHIVE_SKIP_REASONS}
-    for s in skipped:
-        held[s["_skip"]] = held.get(s["_skip"], 0) + 1
-    return held
-
-
-def _receipt_reason_order(held: dict[str, int]) -> list[str]:
-    extras = set(held) - set(_ARCHIVE_SKIP_REASONS)
-    return list(_ARCHIVE_SKIP_REASONS) + sorted(extras)
-
-
 @cli.command(
     "archive",
     hidden=True,
@@ -12089,9 +10671,13 @@ def cmd_archive(
         GraphCorruptError,
     )
     from fno.graph.archive import (
+        _archive_bucket_counts,
+        _last_sweep_line,
+        _receipt_reason_order,
         merge_into_archive,
         partition_for_archive,
         release_soft_edges,
+        retire_stale_postmortems,
         stamp_archived_at,
     )
 
@@ -12118,6 +10704,7 @@ def cmd_archive(
         for reason in _receipt_reason_order(held):
             typer.echo(f"  held back ({reason}): {held[reason]}")
         typer.echo(f"  soft edges stripped from open nodes: {stripped}")
+        typer.echo(f"  last sweep: {_last_sweep_line(_archive_path(), now)}")
 
     def _emit_swept_event(
         moved: int, held: dict[str, int], stripped: int = 0, mode: str = "apply"
@@ -12145,11 +10732,13 @@ def cmd_archive(
             pass
 
     if not apply:
-        to_archive, _rem, skipped = _split(read_graph(_graph_path()))
+        entries, retired = retire_stale_postmortems(read_graph(_graph_path()), now)
+        to_archive, _rem, skipped = _split(entries)
         typer.echo(
             f"[dry-run] would archive {len(to_archive)} terminal node(s) "
             f"older than {older_than_days}d to {_archive_path()}"
         )
+        typer.echo(f"  would retire {len(retired)} stale postmortem receipt(s)")
         _echo_receipt(len(to_archive), _archive_bucket_counts(skipped))
         typer.echo("Re-run with --apply to move them.")
         # Every run emits, dry-run included: a leg that went silent must stay
@@ -12158,9 +10747,11 @@ def cmd_archive(
         _emit_swept_event(len(to_archive), _archive_bucket_counts(skipped), mode="dry-run")
         return
 
-    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([]), "stripped": 0}
+    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([]), "stripped": 0, "retired": 0}
 
     def mutator(entries):
+        entries, retired = retire_stale_postmortems(entries, now)
+        receipt["retired"] = len(retired)
         to_archive, remaining, skipped = _split(entries)
         receipt["held"] = _archive_bucket_counts(skipped)
         if not to_archive:
@@ -12194,6 +10785,10 @@ def cmd_archive(
         typer.echo(f"Archived {receipt['moved']} terminal node(s) to {_archive_path()}")
     else:
         typer.echo("No terminal nodes eligible to archive.")
+    if receipt["retired"]:
+        typer.echo(
+            f"Retired {receipt['retired']} stale postmortem receipt(s) (closed by age rule)"
+        )
     _echo_receipt(receipt["moved"], receipt["held"], receipt["stripped"])
     _emit_swept_event(receipt["moved"], receipt["held"], receipt["stripped"])
 
@@ -12427,7 +11022,6 @@ def cmd_unarchive(
     """Move one node from graph-archive.json back into the working graph.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph._intake import _find_node
     from fno.graph.store import (
         GraphCorruptError,
@@ -12438,12 +11032,7 @@ def cmd_unarchive(
         read_graph,
     )
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    _require_node_id(task_id)
 
     if _find_node(read_graph(_graph_path()), task_id) is not None:
         typer.echo(f"warning: {task_id} is already in the working graph", err=True)
@@ -12457,23 +11046,7 @@ def cmd_unarchive(
         )
         raise typer.Exit(code=1)
 
-    # TWO locked passes, and the split is the whole safety argument.
-    #
-    # `archive` writes the archive inside its mutator because archive-FIRST is
-    # safe for it: a crash leaves a duplicate. Inverting the verb inverts the
-    # safe order, and the mutator cannot express it - `locked_mutate_graph`
-    # persists the returned entries only AFTER the mutator returns, so an
-    # archive shrink written inside the mutator lands BEFORE the working graph
-    # and a crash between them loses the node from both files. That is the one
-    # outcome neither verb may produce, and doing it there quietly guaranteed
-    # the ordering the comment claimed to prevent.
-    #
-    # So: pass 1 adds the row to the working graph and persists it. Pass 2 takes
-    # the lock again, re-reads the archive fresh (never a list read before the
-    # first write, which a concurrent `archive --apply` could have grown), and
-    # drops the row only after confirming the node is really live. A crash
-    # between the passes leaves a duplicate, which read-through resolves working
-    # -first and the next sweep dedupes.
+    # Rationale (15 lines): docs/architecture/graph-cli-rationale.md#cmd-unarchive-11491
     row_box: list[Optional[dict]] = [None]
 
     def add_to_working(entries):
@@ -12749,14 +11322,7 @@ def _do_intake_multi(
         raise typer.Exit(code=4)
 
     preview_entries = read_graph(_graph_path())
-    # Unlike the per-file refusals inside the mutator (which skip one file and
-    # land the rest), a surface-less plan refuses the WHOLE batch here, before
-    # any write: the rule is knowable up front and a half-landed batch is what
-    # the caller would otherwise have to unwind by hand. Plans already bound to
-    # a node are exempt on every roadmap: the mutator resolves them per file
-    # with the accurate verdicts ('already intaked' same-roadmap, the
-    # owner-conflict error cross-roadmap), and blaming one for the batch would
-    # name a remedy - add file rows - that cannot fix the real blocker.
+    # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#do-intake-multi-11781
     from fno.graph.store import plan_path_owner_conflict
 
     def _unbound(f: str) -> bool:
@@ -13274,12 +11840,13 @@ def cmd_supersede(
 ) -> None:
     """Record that ``new_id`` proposes to replace ``replaces``.
 
-    Sets the compatibility edge plus a pending structured evidence record on
-    the old node. The old row stays active until a merged PR covers every
-    declared surface. Refuses if ``replaces`` still has live children unless
-    ``--force`` is given; under ``--force`` the live children's ``parent`` is
-    cleared so they stay dispatchable instead of stranding under a dead unit.
-    Reverse with ``unsupersede``.
+    Sets the compatibility edge plus a structured evidence record on the old
+    node. The edge terminals the old row's status immediately (x-e8f3); the
+    record stays unverified until a merged PR covers every declared surface,
+    which reconcile reports as receipts. Refuses if ``replaces`` still has
+    live children unless ``--force`` is given; under ``--force`` the live
+    children's ``parent`` is cleared so they stay dispatchable instead of
+    stranding under a dead unit. Reverse with ``unsupersede``.
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
@@ -13301,10 +11868,11 @@ def cmd_supersede(
     if not cleaned_cause:
         typer.echo(
             "Error: --cause is required and cannot be blank.\n"
-            "A supersede now carries the evidence that closes it: what the old\n"
+            "A supersede carries the evidence trail: what the old\n"
             "node was for, and which repo paths must change to prove the new one\n"
-            "replaced it. The old node stays open until a merged PR covers every\n"
-            "declared surface.\n"
+            "replaced it. The old node's status reads superseded from the edge\n"
+            "alone; a merged PR covering every declared surface later stamps the\n"
+            "evidence verified_at.\n"
             f"  {_SUPERSEDE_EXAMPLE}",
             err=True,
         )
@@ -13368,15 +11936,7 @@ def cmd_supersede(
             )
             raise typer.Exit(code=1)
 
-        # Guard the death transition: a unit with live children cannot
-        # be killed without orphaning them, and orphaning is a deliberate act.
-        # Refuse unless forced, naming the children so the operator sees what
-        # would strand under a dead unit. Gates on liveness, not type - the
-        # `type` field is not maintained reliably enough to guard on (the epic
-        # that prompted this was itself typed `feature`).
-        # Use the canonical resolved id, not the raw `replaces` argument: an
-        # abbreviated id (ab-9728) resolves via _find_node but would never
-        # equal a child's full canonical `parent`, silently bypassing the guard.
+    # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#cmd-supersede-12402
         live_kids = _live_child_ids(entries, old_node.get("id"))
         if live_kids and not force:
             typer.echo(
@@ -13416,17 +11976,7 @@ def cmd_supersede(
             "evidence_pr": None,
             "matched_surfaces": [],
         }
-        # A pre-existing deferral stays: status precedence reads superseded
-        # above deferred, so the park resurfaces if the supersession is
-        # reversed.
-        # Release anything that was shipping inside it (, sigma). Same
-        # trap `cmd_remove` was fixed for, one step short of deletion: a
-        # superseded unit will never merge, so `_strandable_contained_ids`
-        # (which keys on completed_at) never heals its children, while
-        # selection_guards keeps refusing them and the redirect keeps pointing
-        # at a node that is not going to ship. Unbuildable, uncloseable, and
-        # invisible to every sweep. Un-contained rather than closed: superseding
-        # the unit is not a claim that its children shipped.
+    # Rationale (11 lines): docs/architecture/graph-cli-rationale.md#cmd-supersede-12450
         _freed_box[0] = _release_contained_children(entries, old_node.get("id"))
         # Release the membership axis too. contained_in covers nodes shipping
         # inside this unit's PR; epic children carry `parent`, a different field.
@@ -13472,82 +12022,7 @@ def cmd_supersede(
 # ---------------------------------------------------------------------------
 
 
-@cli.command("unsupersede", hidden=True)
-def cmd_unsupersede(
-    node_id: str = typer.Argument(..., help="The superseded node ID to revive"),
-) -> None:
-    """Reverse a supersede on ``node_id``. Idempotent in the safe direction.
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    from fno.graph._constants import has_node_id_prefix
-    from fno.graph.store import locked_mutate_graph
-    from fno.graph._intake import _find_node
 
-    if not has_node_id_prefix(node_id):
-        typer.echo(
-            f"Error: node_id must be a <prefix>-<4..8 hex> node id, got '{node_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    was_superseded_holder: list[bool] = [False]
-    canonical_id_box: list[str] = [node_id]
-
-    def mutator(entries):
-        node = _find_node(entries, node_id)
-        if node is None:
-            typer.echo(f"Error: node {node_id} not found", err=True)
-            raise typer.Exit(code=1)
-        replacer = node.get("superseded_by")
-        was_superseded_holder[0] = bool(replacer)
-        canonical_id_box[0] = node.get("id", node_id)
-        if not replacer:
-            # Not superseded: nothing to reverse. Return WITHOUT touching
-            # deferred_at, so a node that is merely deferred (not superseded)
-            # keeps its park. Clearing it here would reactivate parked work.
-            return entries
-        # Drop the backref so the replacer's `supersedes` list no longer claims
-        # a node it no longer supersedes - a stale claim would make the chain
-        # read as live after we just broke it. Compare against the canonical id,
-        # not the (possibly abbreviated) argument: the backref stores the full id.
-        new_node = _find_node(entries, replacer)
-        if new_node is not None:
-            new_node["supersedes"] = [
-                s for s in (new_node.get("supersedes") or []) if s != node["id"]
-            ]
-        node["superseded_by"] = None
-        node["supersession"] = None
-        # Any pre-supersession deferral survives the reversal on purpose.
-        return entries
-
-    locked_mutate_graph(_graph_path(), mutator)
-
-    if not was_superseded_holder[0]:
-        typer.echo(f"warning: {node_id} was not superseded", err=True)
-    else:
-        # Give a revived node the same streak-reset boundary cmd_undefer gives a
-        # human-recovered one: a superseded node is often auto-deferred first, so
-        # without this the next maintain pass could re-defer it from stale
-        # failure history without a single fresh failure. Best-effort, like undefer.
-        from fno.graph.failure import emit_undefer_boundary
-
-        emit_undefer_boundary(canonical_id_box[0])
-    typer.echo(f"Unsuperseded {node_id}")
-    # Force the revived node's plan status off terminal `superseded` (the
-    # forward-only projector refuses to leave a terminal): without this the
-    # graph is active while the plan doc stays superseded. Scoped to the revived
-    # node only, not the ancestors/siblings the converger also repaints.
-    cid = canonical_id_box[0]
-    _project_plans_from_graph([cid], force_status_off_terminal_for=cid)
-    # Recompute+persist after projection. The graph status was derived during
-    # the mutation while the plan still read `superseded`, so it must follow the
-    # now-corrected plan or `backlog get`/the board keep reporting `ready` and a
-    # fail-closed `design` never makes the node non-dispatchable. Always, not
-    # only on a fresh reverse: an interrupted earlier unsupersede can leave the
-    # plan reading `superseded` after superseded_by is already clear, and this
-    # rerun heals that plan through the no-replacer branch too. A no-op mutator
-    # still triggers the recompute+write; idempotent on a clean call.
-    locked_mutate_graph(_graph_path(), lambda entries: entries)
 
 
 def _relevant_exec_scope(root: str, by_id: dict) -> set[str]:
@@ -13603,157 +12078,8 @@ def _exec_liveness(state: str) -> str:
     }.get(state, "")
 
 
-# -- task 4.2: the external-backend verb classification -----------------------
-#
-# Every registered backlog verb is classified exactly ONCE, here, against the
-# LIVE registry (never a frozen count): tracker-owned verbs wrap their
-# registered callback with the shared external refusal BEFORE any graph
-# read/write, and footnote-owned verbs carry the read-side marker the
-# consumer census pins (scripts/diagnostics/tracker-consumers.py --verbs).
-# A verb missing from both lists fails the import, and a listed verb the
-# registry no longer carries fails it too (no tombstones, no renames smuggled
-# past the classification). Misclassifying a read as tracker-owned only
-# refuses it externally; misclassifying a mutation as footnote-owned is the
-# dangerous direction, so unsure verbs sit tracker-owned.
-
-_TRACKER_OWNED_VERBS = frozenset(
-    {
-        # node lifecycle + creation
-        "add",
-        "idea",
-        "new",
-        "intake",
-        "decompose",
-        "update",
-        "note",
-        # encounter appends to a node's graph record, exactly like note
-        "encounter",
-        "remove",
-        "migrate-priorities",
-        "migrate-difficulty",
-        "migrate-updated-at",
-        "reopen",
-        "supersede",
-        "unsupersede",
-        # board/rank/queue state
-        "rank",
-        "reprioritize",
-        "defer",
-        "undefer",
-        # stamps contained_in + parent under the lock
-        "contain",
-        "queue",
-        "unqueue",
-        "pick",
-        "unclaim",
-        "requeue",
-        # storage + sweep machinery
-        "archive",
-        "unarchive",
-        "archive-dedupe-ids",
-        "maintain",
-        "groom",
-        # graph-row mutation (stamps deferred_kind under the lock)
-        "backfill-deferred-kind",
-        # graph-state read: under an external backend the local graph is not
-        # the store, so the read must refuse with the rest
-        "stuck-epics",
-        # orchestration that stamps nodes
-        "advance",
-        "reconcile",
-        "reconcile-findings",
-        "lanes",
-        "lane-fill",
-        "dispatch-lanes",
-        # join spawns workers into a held worktree; the joiners, not join,
-        # write task rows ()
-        "join",
-        # footnote-owned DATA with a graph-resident write path (refused until the
-        # write moves to the sidecar seam)
-        "cost",
-        "session add",
-        "session close",
-        "session reap-open",
-        "decide",
-        "decisions",
-        "decide-retract",
-        "decide-reindex",
-        # sub-app mutations
-        "triage apply",
-        "capture promote",
-        "batch join",
-        "batch prepare",
-        "batch ship",
-        "batch ship-closeable",
-        # task rows + task claims write graph state (list materializes rows)
-        "task list",
-        "task update",
-    }
-)
-
-_FOOTNOTE_OWNED_VERBS = frozenset(
-    {
-        # seam reads / renders
-        "get",
-        "status",
-        "view",
-        "find",
-        "next",
-        "ready",
-        "worked",
-        "queued",
-        "provenance",
-        "roadmap",
-        "bases",
-        "album",
-        "project-root",
-        "board",
-        "undispatched",
-        # replays the post-publish views after a native (mux) store write;
-        # renders only, never a graph write
-        "render-views",
-        "discover",
-        # demand reads encounters and writes nothing
-        "demand",
-        # completion works on any backend by design (task 4.1)
-        "done",
-        # footnote-owned sidecar files, no graph write
-        "relatedness build",
-        "relatedness get",
-        "epic status",
-        # capture-pile file machinery (no graph writes; promote is tracker-owned)
-        "capture add",
-        "capture archive",
-        "capture capture-pass",
-        "capture dismiss",
-        "capture empty-pass",
-        "capture list",
-        "capture scan",
-        "capture tidy",
-        # triage read/propose surfaces (apply is tracker-owned)
-        "triage consistency",
-        "triage context",
-        "triage health",
-        "triage projects",
-        "triage propose",
-        "triage rank",
-        "triage trend",
-        "triage validate",
-        # batch read surfaces
-        "batch open",
-        "batch status",
-        "batch metrics",
-        # read-only operators' surface over the graph store
-        # graph-store integrity check (read-only)
-        "collisions check",
-    }
-)
-
-
-#: Tracker-owned verbs whose refusal a caller must read as "no grain here",
-#: not as a stop. Under a non-graph backend there are no task rows at all, so
-#: a wave has nothing to guard and dispatches exactly as it did before.
-_NO_GRAIN_ON_EXTERNAL_BACKEND = frozenset({"task list", "task update"})
+# -- the external-backend verb classification (the sets are imported at the
+# top of this module from _verb_classification.py, beside the data)
 
 
 def _refuse_tracker_owned_on_external_backend(label: str) -> None:
@@ -13827,7 +12153,8 @@ def _classify_backlog_verbs() -> None:
                 raise RuntimeError(
                     f"unclassified backlog verb {label!r}: classify it in "
                     "_TRACKER_OWNED_VERBS or _FOOTNOTE_OWNED_VERBS "
-                    "(graph/cli.py) so the external-backend census holds"
+                    "(graph/_verb_classification.py) so the external-backend "
+                    "census holds"
                 )
     unknown = (_TRACKER_OWNED_VERBS | _FOOTNOTE_OWNED_VERBS) - seen
     if unknown:
@@ -13836,5 +12163,23 @@ def _classify_backlog_verbs() -> None:
             f"removed?): {sorted(unknown)}"
         )
 
+
+from fno.graph import note_cli  # noqa: E402,F401
+
+# Node-lifecycle reversal verbs live in graph/lifecycle.py (file-budget
+# ratchet): the module never imports graph.cli, so the shared helpers are
+# injected here at registration, the same shape as the decide leaves above.
+# Each helper rides a lambda so the call resolves the module global at CALL
+# time: tests monkeypatch these names on this module, and a reference
+# captured at import would read the unpatched original.
+from fno.graph.lifecycle import register_lifecycle_commands  # noqa: E402
+
+register_lifecycle_commands(
+    cli,
+    lambda *a, **k: _expand_valid_ids(*a, **k),
+    lambda *a, **k: _require_nodes(*a, **k),
+    lambda: _graph_path(),
+    lambda *a, **k: _project_plans_from_graph(*a, **k),
+)
 
 _classify_backlog_verbs()

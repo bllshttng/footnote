@@ -1,6 +1,7 @@
 """The crown vocabulary: what a scope is, what rung it implies, and what a
 grantor may hand down. ``registry`` owns the three row fields; this module owns
-their meaning and touches no file.
+their meaning. Its one file write is the crown journal: the events a grant,
+a vacate, or a spawn-time handoff leaves in ``~/.fno/events.jsonl``.
 
 THE LADDER IS THREE RUNGS, EACH A FACT ABOUT THE SCOPE:
 
@@ -612,6 +613,144 @@ class CrownPromotionError(RuntimeError):
     """An attended in-place grant that refused without changing the registry."""
 
 
+def emit_crown_vacated(
+    *,
+    scope: Optional[str],
+    level: Optional[int],
+    holder: Optional[str],
+    holder_session: Optional[str],
+    grantor: Optional[str],
+    cause: str,
+    successor: Optional[str] = None,
+) -> None:
+    """Journal one crown leaving its holder, after the registry write commits.
+
+    An abdication and a crown lost to a bug are indistinguishable from outside
+    until one of these lines lands, so the court answers from the record, never
+    from testimony.
+    """
+    from fno.agents import events
+
+    events.emit(
+        "agent_crown_vacated", scope=scope, level=level, holder=holder,
+        holder_session=holder_session, grantor=grantor, cause=cause,
+        successor=successor,
+    )
+
+
+def settle_spawn_crown(
+    rows: list,
+    *,
+    scope: str,
+    succession: bool,
+    succession_caller_name: Optional[str],
+    exclude_name: Optional[str] = None,
+) -> "tuple[list, str, list]":
+    """The one-live-crown guard a crowned spawn runs, as a pure function over rows.
+
+    One behavior the bg and pane spawn paths each hand-wrote, order kept: clear
+    terminal holders of ``scope``, collect live holders (skipping the row a
+    revive replaces), succession before refusal. Returns ``(rows, outcome,
+    vacated)``: outcome is ``granted`` | ``succeeded`` | ``declined`` (the
+    caller stamps its own row, dropping the crown fields when declined), and
+    ``vacated`` lists ``(row_before_clear, cause)`` to journal once the
+    registry write commits.
+    """
+    from fno.agents.registry import TERMINAL_STATUSES
+
+    vacated: list = []
+    for index, row in enumerate(rows):
+        if row.crown_scope == scope and row.status in TERMINAL_STATUSES:
+            vacated.append((row, "holder_terminal"))
+            rows[index] = replace(row, crown_level=None, crown_scope=None, crown_grantor=None)
+    holders = [
+        row for row in rows
+        if row.name != exclude_name
+        and row.crown_scope == scope
+        and row.status not in TERMINAL_STATUSES
+    ]
+    outcome = "granted"
+    if succession and succession_caller_name and holders and all(
+        h.name == succession_caller_name for h in holders
+    ):
+        for index, row in enumerate(rows):
+            if row.crown_scope == scope and row.name == succession_caller_name:
+                vacated.append((row, "succession"))
+                rows[index] = replace(row, crown_level=None, crown_scope=None, crown_grantor=None)
+        outcome = "succeeded"
+    elif holders:
+        outcome = "declined"
+    return rows, outcome, vacated
+
+
+def arm_crowned_missions(scope: Optional[str]) -> Optional[list[str]]:
+    """Set mission_active on every open epic in a crowned scope. Operator rule:
+    an epic with an owner is a mission, or no drain loop can see its children.
+    Returns the epic ids newly armed, or None when the graph write failed."""
+    armed: list[str] = []
+    try:
+        from fno.backlog.advance import (
+            EVENT_MISSION_ACTIVATED,
+            _emit,
+            _set_mission_active,
+        )
+        from fno.graph.cli import _container_ids
+
+        # ONE graph parse serves every member: a graph this rung could not
+        # read answers None, and the per-call fallback keeps that machine
+        # working one member at a time.
+        by_id = _graph_index()
+        entry_of = _graph_entry if by_id is None else by_id.get
+        containers = _container_ids(list(by_id.values())) if by_id else set()
+        for member in split_scope(scope):
+            entry = entry_of(member) or {}
+            if entry.get("type") != "epic":
+                continue
+            if entry.get("status") in ("done", "superseded"):
+                continue
+            if member not in containers:
+                # advance_epic refuses a childless epic as not-a-container and
+                # leaves the flag standing, which the drain then polls forever.
+                # The dispatch lever arms it once children exist.
+                continue
+            if _set_mission_active(member, True):
+                _emit(
+                    EVENT_MISSION_ACTIVATED,
+                    {"epic_id": member, "source": "crown"},
+                    None,
+                )
+                armed.append(member)
+    except Exception as exc:  # noqa: BLE001 - the crown already committed
+        import sys
+
+        print(
+            f"crown: WARNING: mission arming failed for scope {scope!r} ({exc}); "
+            "arm it with: fno backlog advance --epic <id>",
+            file=sys.stderr,
+        )
+        return None
+    return armed
+
+
+def journal_spawn_crown(outcome: Optional[str], vacated: list, *, name, level, scope, grantor) -> None:
+    """Journal one committed spawn write: a vacate line per cleared holder plus
+    the grant line. A declined launch moved no crown and writes nothing."""
+    for row, cause in vacated:
+        emit_crown_vacated(
+            scope=scope, level=row.crown_level, holder=row.name,
+            holder_session=row.harness_session_id, grantor=row.crown_grantor,
+            cause=cause, successor=name if cause == "succession" else None,
+        )
+    if outcome in ("granted", "succeeded"):
+        from fno.agents import events
+
+        events.emit(
+            "agent_crowned", name=name, level=level, scope=scope, grantor=grantor,
+            vacated_scope=None, vacated_level=None, stranded_subordinates=[],
+        )
+        arm_crowned_missions(scope)
+
+
 def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
     """Return a transferred crown to its recorded grantor.
 
@@ -1013,6 +1152,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # a post-release re-read could see a concurrent grant over the
     # just-freed scope and mislabel that heir as stranded.
     rows_after = update_registry(_stamp)
+    receipt["missions_armed"] = arm_crowned_missions(scope)
     if receipt.get("vacated_scope") and not _same_territory(
         receipt["vacated_scope"], scope
     ):

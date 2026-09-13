@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from fno import paths
+from fno.agents.naming import AgentNameError, parse_dispatch_agent_name
 
 if TYPE_CHECKING:
     from fno.agents.context import EventContext
@@ -365,18 +366,74 @@ def emit_session_transition(
 # Merge-triggered cleanup: the merge mints the reap order itself; the
 # ritual reuses the same helper, one request-id formula for both.
 KIND_MERGE_CLEANUP_REQUESTED = "merge_cleanup_requested"
+KIND_MERGE_CLEANUP_SKIPPED = "merge_cleanup_skipped"
+
+# Taken verbatim from the ritual's archive leg so the two legs cannot drift.
+MERGE_CLEANUP_SKIP_REASONS = (
+    "gh-unavailable",
+    "unparseable-pr-json",
+    "not-merged",
+    "no-branch",
+    "emit-failed",
+)
 
 
-def merge_cleanup_request_id(
-    project: Any, pr: int, branch: str, worktree: Optional[str], node_ids
-) -> str:
-    """The daemon's fold key for one exact merge (the ritual's old formula)."""
-    ordered = sorted(str(node) for node in node_ids)
-    identity = "|".join([str(project), str(pr), branch, worktree or "", *ordered])
+def merge_cleanup_request_id(project: Any, pr: int, branch: str) -> str:
+    """The daemon's fold key for one exact merge: project, PR and branch.
+
+    Worktree and node ids left the key: the two mint sites know different
+    amounts about them (the merge mint can bind [], the ritual recovers), so
+    keying on them split one merge into two requests that never folded.
+    """
+    identity = "|".join([str(project), str(pr), branch])
     return "merge-cleanup-" + hashlib.sha256(identity.encode()).hexdigest()[:20]
 
 
-def rows_for_cleanup(worktree: str, node_ids, *, runner=None) -> list[str]:
+def scan_pr_nodes(entries, pr: int, slug: Optional[str]) -> list[str]:
+    """Graph-derived node ids whose pr_url matches this PR's repo.
+
+    Repo-scoped because pr_number is unique only within a repo (cross-project
+    graph): a foreign repo sharing the number is excluded. A url-less or
+    non-string pr_url is skipped, never fatal (a corrupt entry cannot drop the
+    legitimate nodes after it). Pure so the ACs test it directly.
+    """
+    if not slug:
+        return []
+    needle = f"/{slug.lower()}/pull/"
+    out: list[str] = []
+    for e in entries or []:
+        if not isinstance(e, dict) or e.get("pr_number") != pr:
+            continue
+        url = e.get("pr_url")
+        if not isinstance(url, str) or needle not in url.lower():
+            continue
+        nid = e.get("id")
+        if nid and nid not in out:
+            out.append(nid)
+    return out
+
+
+def pr_node_ids(pr: int, slug: Optional[str]) -> list[str]:
+    """Node ids this PR shipped, read from the sidecar store (repo-scoped).
+
+    The one answerer of "which nodes did this PR ship?" for both mint sites;
+    an unreadable store degrades to no recovery.
+    """
+    if not slug:
+        return []
+    try:
+        from fno.tracker import sidecar as sidecar_store
+
+        rows = [
+            {"id": nid, "pr_number": sc.pr_number, "pr_url": sc.pr_url}
+            for nid, sc in sidecar_store.load_all().items()
+        ]
+    except Exception:  # noqa: BLE001 - unreadable store degrades to no recovery
+        return []
+    return scan_pr_nodes(rows, pr, slug)
+
+
+def rows_for_cleanup(worktree: Optional[str], node_ids, *, runner=None) -> list[str]:
     """Row names whose cwd IS the merged worktree or whose name targets one
     of the closed nodes (``target-<node>-*``). Best-effort: any failure
     reads as no candidates (the daemon's registry scan is the second net).
@@ -398,13 +455,22 @@ def rows_for_cleanup(worktree: str, node_ids, *, runner=None) -> list[str]:
     except json.JSONDecodeError:
         return []
     rows = payload if isinstance(payload, list) else payload.get("agents") or []
-    ids = [str(node) for node in node_ids]
+    ids = {str(node) for node in node_ids}
     out = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         name = str(row.get("name") or "")
-        if row.get("cwd") == worktree or any(
+        if worktree is not None and row.get("cwd") == worktree:
+            out.append(name)
+            continue
+        try:
+            parsed = parse_dispatch_agent_name(name)
+        except AgentNameError:
+            # Stale/missing binary: this row falls back to the legacy prefix
+            # leg, keeping the best-effort contract (never no candidates).
+            parsed = None
+        if (parsed is not None and parsed.node in ids) or any(
             name.startswith(f"target-{node}-") for node in ids
         ):
             out.append(name)
@@ -423,10 +489,18 @@ def emit_merge_cleanup_requested(
     harness: Optional[str],
     merged_at: Optional[str] = None,
     candidate_row_names,
+    repo_slug: Optional[str] = None,
 ) -> str:
     """Mint the durable reap order in the daemon lifecycle log; ``merged_at``
-    anchors the grace clock (``None`` stamps now). Returns the request id."""
-    request_id = merge_cleanup_request_id(project, pr, branch, worktree, node_ids)
+    anchors the grace clock (``None`` stamps now). Returns the request id.
+
+    A caller that bound no node ids passes ``repo_slug`` (the PR's
+    ``owner/repo``) so the mint recovers them from the sidecar store itself,
+    the way the ritual's mint always has."""
+    ids = [str(node) for node in node_ids]
+    if not ids and repo_slug:
+        ids = pr_node_ids(pr, repo_slug)
+    request_id = merge_cleanup_request_id(project, pr, branch)
     _emit_daemon_envelope(
         KIND_MERGE_CLEANUP_REQUESTED,
         {
@@ -436,7 +510,7 @@ def emit_merge_cleanup_requested(
             "pr": int(pr),
             "branch": branch,
             "worktree": worktree,
-            "node_ids": sorted(str(node) for node in node_ids),
+            "node_ids": sorted(ids),
             "candidate_row_names": list(candidate_row_names),
             "merged_at": merged_at or _utc_now_iso(),
             "session_id": session_id,
@@ -444,6 +518,39 @@ def emit_merge_cleanup_requested(
         },
     )
     return request_id
+
+
+def emit_merge_cleanup_skipped(
+    *,
+    repo: str,
+    project: str,
+    pr: int,
+    reason: str,
+    branch: Optional[str] = None,
+    detail: str = "",
+    session_id: Optional[str] = None,
+    harness: Optional[str] = None,
+) -> None:
+    """Say that a merge minted no cleanup request, and which precondition was
+    unmet. ``reason`` is a closed set, so an unclassifiable row is refused."""
+    if reason not in MERGE_CLEANUP_SKIP_REASONS:
+        raise ValueError(
+            f"unknown merge cleanup skip reason: {reason!r}; "
+            f"expected one of {', '.join(MERGE_CLEANUP_SKIP_REASONS)}"
+        )
+    _emit_daemon_envelope(
+        KIND_MERGE_CLEANUP_SKIPPED,
+        {
+            "repo": repo,
+            "project": str(project),
+            "pr": int(pr),
+            "reason": reason,
+            "branch": branch,
+            "detail": detail,
+            "session_id": session_id,
+            "harness": harness,
+        },
+    )
 
 
 # ---------------------------------------------------------------------

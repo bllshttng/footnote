@@ -45,6 +45,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
 )
 
 if TYPE_CHECKING:
@@ -52,35 +53,41 @@ if TYPE_CHECKING:
 
 from fno import paths
 from fno.agents import events
-from fno.agents import rm_directory_bytes
+from fno.agents import fork_lineage
+from fno.agents.stop_release import stop_agent  # noqa: F401 - re-exported public verb
 from fno.agents.sender_provenance import (
     _proven_self_sender,
     _resolve_sender_entry,
     _sender_provenance,
     warn_sender_provenance_miss as _loud_sender_provenance,
 )
-from fno.agents import rm_notice
 from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
-from fno.agents.harness_map import DispatchResolveError, normalize_command
+from fno.agents.harness_map import DispatchResolveError, render_seed
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
 from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
+from fno.agents.stop_receipt import emit_shellout_stop, wake_set_refusal
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
     AgentStatus,
     RegistryVersionError,
-    TERMINAL_STATUSES,
     load_registry,
     mint_agent_entry,
     resolve_registered_agent_across_sources,
     update_registry,
 )
-from fno.agents.crown import calling_agent_row, crown_validation_error, grant_error
+from fno.agents.crown import (
+    calling_agent_row,
+    crown_validation_error,
+    grant_error,
+    journal_spawn_crown,
+    settle_spawn_crown,
+)
 from fno.harness_identity import (
     canonical_handle,
     session_identity_key,
@@ -405,10 +412,6 @@ _FROM_NAME_FORBIDDEN_CHARS = frozenset('"<>&')
 _DEFAULT_FOLLOWUP_TIMEOUT_SEC = 600.0
 
 
-
-
-
-
 def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
     """Validate a harness at the thread/headless spawn seam.
 
@@ -547,7 +550,6 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-
 def _stamp_status(
     name: str,
     *,
@@ -642,6 +644,7 @@ def _codex_create_path(
     effort: Optional[str] = None,
     add_dir: Optional[str] = None,
     node: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
 ) -> DispatchAskResult:
     """Spawn a new codex agent under the per-agent flock.
 
@@ -673,6 +676,7 @@ def _codex_create_path(
             role=role,
             reasoning_effort=effort,
             add_dir=add_dir,
+            passthrough=list(passthrough) if passthrough else None,
         )
     except RouteCompositionError as exc:
         events.emit(
@@ -813,7 +817,6 @@ def _codex_create_path(
         reply=result.last_msg,
         duration_ms=result.duration_ms,
     )
-
 
 
 # Moved to fno.agents.spawn_lineage (x-5c25, file budget); re-exported here.
@@ -1001,6 +1004,7 @@ def _lane_b_thread_spawn(
     add_dir: Optional[str] = None,
     resume_session_id: Optional[str] = None,
     effort: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
 ) -> dict:
     """Host a lane-B harness thread on a pane-less keeper (x-889a).
@@ -1086,6 +1090,10 @@ def _lane_b_thread_spawn(
             add_dir=add_dir,
             effort=effort,
         )
+        if passthrough:
+            from fno.agents.mux_spawn import pane_passthrough_tokens
+
+            argv = [*argv, *pane_passthrough_tokens(passthrough, emitted=argv)]
 
         sock = _lane_b_keeper_socket(name)
         log_path = paths.state_dir() / "agents" / name / "keeper.log"
@@ -1426,6 +1434,7 @@ def _claude_create_path(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
     account_env: Optional[Mapping[str, str]] = None,
     launch_account: Optional[str] = None,
     route_provider_id: Optional[str] = None,
@@ -1438,6 +1447,9 @@ def _claude_create_path(
     route_provider: Optional[str] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
+    # x-50d0: the row this resume forks FROM (fork_lineage.lineage_row_for);
+    # states every axis the caller left unstated.
+    lineage_row: object | None = None,
     # The model token the ROUTE named (-P vendor/model or --route
     # vendor,model). Recorded on the row beside an explicit --model; never fed
     # to the child argv, so launch behavior is untouched.
@@ -1604,6 +1616,7 @@ def _claude_create_path(
             agent=agent,
             tools=tools,
             deny_tools=deny_tools,
+            passthrough=list(passthrough) if passthrough else None,
             account_env=account_env,
             sandbox_settings=sandbox_settings,
         )
@@ -1660,7 +1673,11 @@ def _claude_create_path(
     # silent substitution is named, not remembered. A fresh spawn with no sample
     # yet probes `no-model-yet` and stays silent (an unanswered probe is not a
     # verdict); a REVIVE reads history, so its answer is deterministic here.
-    requested_token = model or route_model
+    # x-50d0: an inherited lineage model is part of the request, so the probe
+    # sees it instead of reading a real substitution as no request at all.
+    src = lineage_row
+    lineage_model = fork_lineage.inherited_model(src, model, route_model)
+    requested_token = model or route_model or lineage_model
     substitution: Optional[dict] = None
     verified_model: Optional[str] = None
     if requested_token and session_uuid:
@@ -1738,26 +1755,22 @@ def _claude_create_path(
         # by name. A raced uuid-resolution miss leaves harness_session_id None;
         # reconcile / send-time heal backfills it.
         harness="claude",
-        provider=lane_provider,
-        # The route's model is in hand at this mint and was dropped (the
-        # receipt named it while the row read None). Explicit --model wins the
-        # argv, so it wins the row; the route's token records otherwise.
-        # v23 (x-2019): a verified substitution beats the request on the
-        # observed axes - the row then carries BOTH readings, which is the
-        # whole point. No verified reading: the request stays (labeled).
-        model=verified_model or model or route_model,
-        model_basis=(
-            "verified"
-            if verified_model
-            else ("requested" if (model or route_model) else None)
+        # x-50d0: provider/model/requested axes and the predecessor edge come
+        # from fork_lineage.axis_overrides - lineage row where the caller was
+        # silent, byte-identical stamps where there is none.
+        **fork_lineage.axis_overrides(
+            src,
+            model=model,
+            route_model=route_model,
+            verified_model=verified_model,
+            route_provider=route_provider,
+            lane_provider=lane_provider,
+            effort=effort,
+            route_provider_id=route_provider_id,
+            model_name=model_name,
+            resume_session_id=resume_session_id,
+            revive=revive,
         ),
-        effort=effort,
-        # v23 (x-2019): the REQUEST verbatim beside the effect, including any
-        # [1m] suffix. `model` flips to a verified observation later; these
-        # three never do, so a silent substitution stays diffable.
-        requested_model=model or route_model,
-        requested_provider=route_provider or lane_provider,
-        requested_effort=effort,
         spawn_trigger=spawn_trigger,
         # The SAME stamp the pane path writes. Two Python paths mint a worker
         # row - pane and bg - and stamping only one would leave the reap lane
@@ -1786,8 +1799,6 @@ def _claude_create_path(
         # provenance pass - never this process's ambient value, which names
         # the SPAWNING session's node.
         node=node,
-        route_provider_id=route_provider_id,
-        model_name=model_name,
         account_record_id=account_record_id,
         crown_level=crown_level,
         crown_scope=crown_scope,
@@ -1796,6 +1807,8 @@ def _claude_create_path(
 
     crown_declined = False
     crown_succeeded = False
+    crown_outcome: Optional[str] = None
+    crown_cleared: list = []
     king_loop_armed: Optional[bool] = None
     king_unarmed_reason = ""
 
@@ -1804,7 +1817,9 @@ def _claude_create_path(
     # update_registry's own lock, so a concurrent reader sees the old exited row
     # or the new live row, never a torn/absent state.
     def _write(entries: list) -> list:
-        nonlocal crown_declined, crown_succeeded, king_loop_armed, king_unarmed_reason
+        nonlocal crown_declined, crown_succeeded
+        nonlocal crown_outcome, crown_cleared
+        nonlocal king_loop_armed, king_unarmed_reason
         entry = new_entry
         # One-live-crown guard (x-7685), inside the write lock so the check and
         # the stamp are atomic against a racing spawn. If a non-terminal row
@@ -1823,37 +1838,16 @@ def _claude_create_path(
         # a king reviving its own exited session must not be blocked by the
         # corpse it is about to overwrite.
         if crown_level is not None and crown_scope:
-            # Reclaiming an abandoned scope also clears the terminal holder's
-            # stale crown in this same write. Terminal rows are excluded from
-            # `holders`, but their crown fields still make them appear crowned
-            # to readers and can create a double-rule after re-registration.
-            entries = [
-                replace(
-                    e,
-                    crown_level=None,
-                    crown_scope=None,
-                    crown_grantor=None,
-                )
-                if e.crown_scope == crown_scope and e.status in TERMINAL_STATUSES
-                else e
-                for e in entries
-            ]
-            contenders = [e for e in entries if not (revive and e.name == name)]
-            holders = [
-                e
-                for e in contenders
-                if e.crown_scope == crown_scope and e.status not in TERMINAL_STATUSES
-            ]
-
-            if succession and succession_caller_name and holders and all(h.name == succession_caller_name for h in holders):
-                entries = [
-                    replace(e, crown_level=None, crown_scope=None, crown_grantor=None)
-                    if e.crown_scope == crown_scope and e.name == succession_caller_name
-                    else e
-                    for e in entries
-                ]
+            entries, crown_outcome, crown_cleared = settle_spawn_crown(
+                entries,
+                scope=crown_scope,
+                succession=succession,
+                succession_caller_name=succession_caller_name,
+                exclude_name=name if revive else None,
+            )
+            if crown_outcome == "succeeded":
                 crown_succeeded = True
-            elif holders:
+            elif crown_outcome == "declined":
                 entry = replace(
                     new_entry, crown_level=None, crown_scope=None, crown_grantor=None
                 )
@@ -1875,21 +1869,20 @@ def _claude_create_path(
                 king_loop_armed = False
                 king_unarmed_reason = str(exc)
         if revive:
-            # x-98ab: a revival replaces the row wholesale, and the fork caller
-            # passes no node - carry the replaced row's node forward so the
-            # continuation keeps pointing at the node it works.
-            if entry.node is None:
-                entry = replace(
-                    entry,
-                    node=next(
-                        (e.node for e in entries if e.name == name and e.node), None
-                    ),
-                )
             return [entry if e.name == name else e for e in entries]
         return entries + [entry]
 
     try:
         update_registry(_write)
+        if crown_scope:
+            journal_spawn_crown(
+                crown_outcome,
+                crown_cleared,
+                name=name,
+                level=crown_level,
+                scope=crown_scope,
+                grantor=crown_grantor_val,
+            )
         if crown_declined:
             print(
                 f"spawn: crown declined (scope {crown_scope!r} already held by a "
@@ -2025,7 +2018,6 @@ def _claude_create_path(
         duration_ms=result.duration_ms,
         model_substituted=substitution,
     )
-
 
 
 # ---------------------------------------------------------------------------
@@ -2304,38 +2296,17 @@ def note_quota_death(account_env: Optional[Mapping[str, str]], tail: str | None)
 
     The reactive half of quota survival: a snapshot can be up to
     ``probe_ttl_seconds`` stale, so without this the next pick would hand the
-    successor the account that just died. Reuses the existing error taxonomy and
-    health writer rather than adding a second classifier. Best-effort - a
-    telemetry write must never turn a worker's death into a dispatch failure.
-    """
+    successor the account that just died. Thin caller over the one
+    lock-decision site; launch-time attribution stays here. Best-effort."""
     if not tail:
         return
     try:
-        from fno.adapters.providers.error_taxonomy import (
-            classify_error,
-            reset_epoch_from,
-        )
         from fno.adapters.providers.loader import effective_active
-        from fno.adapters.providers.runtime_state import (
-            record_reset_timezone,
-            update_provider_health,
-        )
+        from fno.agents.quota_lock import record_quota_lock
 
-        rule = classify_error(None, tail)
-        if rule is None:
-            return
         provider_id = _account_id_for_env(account_env) or effective_active()
         if provider_id:
-            # The tail that proves the death usually also names when the window
-            # reopens. Without it this wrote a seconds-scale backoff over a
-            # multi-hour cap, and the next pick handed the successor the account
-            # that had just refused.
-            update_provider_health(
-                provider_id, rule,
-                resets_at=reset_epoch_from(
-                    tail, record_reset_timezone(provider_id),
-                ),
-            )
+            record_quota_lock(provider_id, tail)
     except Exception:  # noqa: BLE001 - never let a health write break teardown
         pass
 
@@ -2389,6 +2360,7 @@ def dispatch_spawn(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
     headless: bool = False,
     output_format: Optional[str] = None,
     resume_session_id: Optional[str] = None,
@@ -2587,7 +2559,7 @@ def dispatch_spawn(
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
         try:
-            message = normalize_command(message, harness)
+            message = render_seed(message, harness)
         except DispatchResolveError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
         effective_message = message
@@ -2615,28 +2587,9 @@ def dispatch_spawn(
 
     # 3b. Codex thread spawns are held by the Rust app-server lane. The Python
     # runtime delegates there instead of silently downgrading to a one-shot.
+    # The spawn front door already demoted every flag the thread lane cannot
+    # carry to the pane, so whatever reaches here rides the lane natively.
     if harness == "codex" and not once:
-        unsupported = next(
-            (
-                flag
-                for flag, value in (
-                    ("--role", launch_role),
-                    ("--add-dir", add_dir),
-                    ("--agent", agent),
-                    ("--tools", tools),
-                    ("--deny-tools", deny_tools),
-                    ("--effort", effort),
-                )
-                if value
-            ),
-            None,
-        )
-        if unsupported is not None:
-            raise DispatchAskError(
-                f"{unsupported} is not supported on the codex thread lane; "
-                "drop it or use --substrate pane",
-                exit_code=2,
-            )
         if resume_session_id:
             raise DispatchAskError(
                 f"--resume {resume_session_id} is not supported on the codex "
@@ -2653,6 +2606,10 @@ def dispatch_spawn(
             model=model,
             yolo=yolo,
             node=node,
+            effort=effort,
+            add_dir=add_dir,
+            permission_mode=permission_mode,
+            passthrough=list(passthrough) if passthrough else None,
             account_env=account_env,
             route_env=route_env,
         )
@@ -2688,6 +2645,7 @@ def dispatch_spawn(
             "launch_role": launch_role, "agent": agent, "tools": tools,
             "deny_tools": deny_tools, "permission_mode": permission_mode,
             "resume_session_id": resume_session_id,
+            "passthrough": list(passthrough) if passthrough else None,
         },
         lock_timeout=lock_timeout,
     )
@@ -2760,19 +2718,17 @@ def dispatch_spawn(
             # on a revive is the silent wrong-account re-entry.
             row_launch_account = effective_launch_account
             row_launch_account_source = launch_account_source
+            # x-50d0: the row this resume forks FROM, matched by uuid alone.
+            lineage_row = fork_lineage.lineage_row_for(entries, resume_session_id)
+            if lineage_row is not None and node is None:
+                # A wake fork (new name, no caller node) carries the lineage
+                # row's node so the join survives the revive.
+                node = lineage_row.node
             if resume_session_id and row_launch_account is None:
-                account_source = existing if revive else next(
-                    (
-                        e
-                        for e in entries
-                        if getattr(e, "harness_session_id", None) == resume_session_id
-                    ),
-                    None,
-                )
-                row_launch_account = getattr(account_source, "launch_account", None)
+                row_launch_account = getattr(lineage_row, "launch_account", None)
                 # A revive inherits the source row's provenance; None is honest.
                 row_launch_account_source = getattr(
-                    account_source, "launch_account_source", None
+                    lineage_row, "launch_account_source", None
                 )
             elif not resume_session_id:
                 row_launch_account = effective_launch_account or "default"
@@ -2912,6 +2868,7 @@ def dispatch_spawn(
                                 account_env=account_env,
                                 route_env=route_env,
                                 name=name,
+                                passthrough=list(passthrough) if passthrough else None,
                             )
                         except claude_mod.ProviderSubprocessError as exc:
                             # A quota death here is the freshest signal there is:
@@ -2957,10 +2914,12 @@ def dispatch_spawn(
                         effort=effort,
                         resume_session_id=resume_session_id,
                         revive=revive,
+                        lineage_row=lineage_row,
                         add_dir=add_dir,
                         agent=agent,
                         tools=tools,
                         deny_tools=deny_tools,
+                        passthrough=passthrough,
                         account_env=account_env,
                         launch_account=row_launch_account,
                         sandbox_settings=sandbox_settings,
@@ -3011,12 +2970,6 @@ def dispatch_spawn(
                         raise DispatchAskError(
                             "--resume is not carried on the opencode serve lane "
                             "yet; resume on --substrate pane or spawn fresh",
-                            exit_code=2,
-                        )
-                    if launch_role is not None:
-                        raise DispatchAskError(
-                            "--role is not carried on the opencode serve lane; "
-                            f"spawn {name!r} without --role or on --substrate pane",
                             exit_code=2,
                         )
                     short_id = _opencode_serve_spawn(
@@ -3073,6 +3026,7 @@ def dispatch_spawn(
                         effort=effort,
                         add_dir=add_dir,
                         node=node,
+                        passthrough=passthrough,
                     )
                 else:
                     raise DispatchAskError(
@@ -3135,103 +3089,13 @@ class StopResult:
 
     ``claude_exit`` is the shellout's exit code on the claude path; ``None``
     for codex / gemini where stop is a synchronous no-op between asks.
+    ``noop`` marks that arm: no stop happened, so no claims get released.
     """
 
     name: str
     provider: str
     claude_exit: Optional[int] = None
-
-
-@dataclass(frozen=True)
-class RmResult:
-    """Return shape for :func:`rm_agent`.
-
-    ``registry_changed`` is False when the claude path refuses non-forcefully
-    so the entry stayed in the registry. ``force`` reflects the caller's
-    flag for forensic visibility downstream.
-    """
-
-    name: str
-    provider: str
-    claude_exit: Optional[int] = None
-    force: bool = False
-    registry_changed: bool = False
-    worktree_receipt: Optional[str] = None
-    actor: str = "operator"
-    reason: str = "operator-requested"
-    request_id: Optional[str] = None
-    worktree_touched: bool = False
-    # `None`: removed, but the size walk hit its budget. See rm_agent.
-    reclaimed_bytes: Optional[int] = 0
-
-
-_directory_bytes = rm_directory_bytes.directory_bytes
-
-
-def _prune_row_worktree(entry: Any) -> Optional[str]:
-    """Take a removed row's worktree with it, through the reapable gate only.
-
-    A human removed ONE named row, so its worktree may go with it - but a
-    row removal must never become a fourth door around the three buckets in
-    ``.claude/rules/worktrees.md``. Every decision routes through
-    :func:`fno.worktree_reapable.reapable` (the classifier behind
-    ``fno agents workspace worktree reapable``) PLUS the merge check the
-    ``--merged`` sweep applies as its own pre-filter: DIRTY is never
-    touched, clean-and-unmerged is never auto-pruned (the branch is where
-    its work lives; a human judges), and clean-and-MERGED loses the TREE
-    while the branch stays (``git worktree remove`` never deletes
-    branches).
-
-    A gate that cannot answer keeps the tree - removal never guesses. A
-    refusal prints a receipt naming the path and the gate's reason, and the
-    ROW is removed either way: a protected worktree must not wedge the row
-    on the sideline. ``None``: the row owned no linked worktree, a clean
-    no-op.
-    """
-    cwd = entry.cwd or ""
-    if not cwd:
-        return None
-
-    from fno.worktree_reapable import (
-        branch_merged,
-        is_linked_worktree,
-        reapable as classify_reapable,
-    )
-
-    if not is_linked_worktree(cwd):
-        return None
-
-    verdict = classify_reapable(cwd)
-    if not verdict.reapable:
-        if verdict.reason == "probe-failed":
-            return (
-                f"worktree kept: {cwd} "
-                f"(the reapable probe could not answer: {verdict.detail or verdict.reason})"
-            )
-        return f"worktree kept: {cwd} (the gate said no: {verdict.reason})"
-    if branch_merged(cwd) is not True:
-        return (
-            f"worktree kept: {cwd} "
-            "(clean but the branch is not merged; the contract keeps it for a human)"
-        )
-    try:
-        removed = subprocess.run(
-            ["git", "worktree", "remove", "--force", cwd],
-            capture_output=True,
-            text=True,
-            timeout=60.0,
-            # Run git FROM the worktree: git discovers the repository from
-            # the process cwd, and the caller's cwd is often not the row's
-            # repo. A forced self-removal from inside the leaf is allowed.
-            cwd=cwd,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"worktree kept: {cwd} (git worktree remove failed: {exc})"
-    if removed.returncode != 0:
-        detail = (removed.stderr or "").strip().splitlines()
-        why = detail[0] if detail else f"exited {removed.returncode}"
-        return f"worktree kept: {cwd} (git worktree remove failed: {why})"
-    return f"worktree removed: {cwd}"
+    noop: bool = False
 
 
 @dataclass(frozen=True)
@@ -3365,7 +3229,7 @@ def with_agent_lock_and_entry(
 ) -> Iterator[tuple[object, AgentEntry]]:
     """Acquire per-agent flock AND re-load the registry entry under it.
 
-    The lifecycle write verbs (``stop_agent`` / ``rm_agent``) used to
+    The lifecycle write verbs (``stop_agent) used to
     open-code a two-step pattern: pre-flock ``_resolve_registry_entry``
     (for fast-fail + timeout-event payload), then ``hold_agent_lock``,
     then post-flock ``_resolve_registry_entry`` (to defeat the TOCTOU
@@ -3754,7 +3618,7 @@ def _stop_cursor_agent(name: str, existing: AgentEntry) -> StopResult:
     if session and pane_id is not None:
         try:
             result = subprocess.run(
-                ["fno", "mux", "pane", "kill", "--session", str(session), str(pane_id)],
+                ["fno", "mux", "pane", "kill", "--server", str(session), str(pane_id)],
                 capture_output=True,
                 text=True,
                 timeout=_DEFAULT_CLAUDE_SHELLOUT_TIMEOUT,
@@ -3821,7 +3685,7 @@ def _stop_cursor_agent_thread(
     return result
 
 
-def stop_agent(
+def _stop_agent_inner(
     name: str,
     *,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
@@ -3898,7 +3762,9 @@ def stop_agent(
                     provider=existing.harness,
                     claude_exit=None,
                 )
-                return StopResult(name=name, provider=existing.harness, claude_exit=None)
+                return StopResult(
+                    name=name, provider=existing.harness, claude_exit=None, noop=True
+                )
 
             if existing.harness != "claude":
                 keeper_sock = getattr(existing, "messaging_socket_path", None)
@@ -3981,8 +3847,7 @@ def stop_agent(
                 ) from exc
             except OSError as exc:
                 # Gemini medium: surface PermissionError / EIO as structured
-                # DispatchAskError rather than a raw Python traceback. Mirrors
-                # the catch on rm_agent.
+                # DispatchAskError rather than a raw Python traceback.
                 events.emit(
                     "agent_stopped",
                     name=name,
@@ -3993,16 +3858,6 @@ def stop_agent(
                 )
                 raise DispatchAskError(f"claude stop failed: {exc}", exit_code=1) from exc
 
-            def _emit_shellout_stop() -> None:
-                events.emit(
-                    "agent_stopped",
-                    name=name,
-                    provider="claude",
-                    claude_exit=exit_code,
-                    short_id=short_id,
-                    stopped_by="shellout",
-                )
-
             if exit_code != 0:
                 if stderr_text:
                     sys.stderr.write(stderr_text)
@@ -4011,16 +3866,21 @@ def stop_agent(
                 escalated = _escalate_to_pid()
                 if escalated is not None:
                     return escalated
-                _emit_shellout_stop()
+                emit_shellout_stop(name=name, claude_exit=exit_code, short_id=short_id)
                 raise DispatchAskError(
                     # retired-ok: reports which shellout failed on which session.
                     f"claude stop {short_id} exited {exit_code}",
                     exit_code=1,
                 )
 
-            _emit_shellout_stop()
-
+            # x-dead task 3.1: the shellout's receipt is verified before the
+            # word `stopped` prints.
             _mark_stopped_orphaned(name, existing)
+            receipt = wake_set_refusal(name, short_id, existing)
+            if receipt is not None:
+                emit_shellout_stop(name=name, claude_exit=exit_code, short_id=short_id)
+                raise DispatchAskError(receipt, exit_code=1)
+            emit_shellout_stop(name=name, claude_exit=exit_code, short_id=short_id)
 
             print(
                 f"stopped: {name} ({short_id})",
@@ -4030,527 +3890,6 @@ def stop_agent(
     except AgentLockTimeout as exc:
         events.emit(
             "agent_stopped", name=name, provider=pre_provider, claude_exit=None, lock_timeout=True
-        )
-        raise DispatchAskError(
-            f"lock timeout for agent {name!r} after {exc.timeout}s"
-            f"{exc.holder_note()}",
-            exit_code=11,
-        ) from exc
-
-
-def _teardown_harness_session(
-    existing: AgentEntry,
-    *,
-    name: str,
-    force: bool,
-) -> Optional[str]:
-    """Delete a non-claude agent's record from its own harness store.
-
-    Returns the teardown error message when ``force`` swallowed a failure,
-    else None. The caller folds it into the ONE terminal ``agent_removed``
-    event: emitting from in here would both duplicate that event and
-    report a registry mutation that has not happened yet.
-
-    Record-only: the harness's index record goes, the conversation stays.
-    Upholds the ordering invariant by raising before the caller touches
-    the registry -- unless ``force``, which downgrades every failure to a
-    stderr WARN naming the orphan so the operator can clean it later.
-
-    An already-absent harness record is success, not an error: a manually
-    cleaned store must not wedge ``fno agents rm``.
-
-    opencode is registry-only because it has no record-only teardown at
-    all; see :mod:`fno.agents.harnesses.opencode`.
-    """
-    harness = existing.harness
-    sid = existing.harness_session_id
-
-    def _fail(message: str, *, exit_code: int) -> str:
-        if not force:
-            # Terminal here, so this IS the only event for this rm.
-            events.emit(
-                "agent_removed",
-                name=name,
-                provider=harness,
-                force=False,
-                registry_changed=False,
-                teardown_error=message,
-            )
-            raise DispatchAskError(message, exit_code=exit_code)
-        sys.stderr.write(
-            f"WARN: {message}; --force given, removing registry only. "
-            f"Orphan {harness} session record: {sid}\n"
-        )
-        return message
-
-    if harness == "opencode":
-        # No record-only teardown exists for opencode: removing the session
-        # would take its child sessions and full message history with it.
-        # Registry-only, and say so rather than implying nothing was left.
-        from fno.agents.harnesses import opencode as opencode_mod
-
-        if sid:
-            print(opencode_mod.REGISTRY_ONLY_NOTE.format(sid=sid), flush=True)
-        return None
-
-    if harness == "cursor-agent":
-        from fno.agents.harnesses.cursor_agent import (
-            capture_detached_worker_servers,
-            reap_detached_worker_servers,
-        )
-
-        # rm runs after the owner is already gone, and the census's ownership
-        # proof needs a live owner pid: unprovable here is the normal shape,
-        # not a fault. Refusing would brick every post-stop rm; the row goes
-        # and the leak, if any, is named. A reap that FAILS with handles in
-        # hand is different - servers are provably alive and surviving - and
-        # still refuses.
-        census_unverified: Optional[str] = None
-        try:
-            worker_servers = capture_detached_worker_servers(
-                existing.pid, existing.pid_start_time
-            )
-        except RuntimeError as exc:
-            worker_servers = ()
-            census_unverified = str(exc)
-        # A keeper-hosted thread row's session IS the keeper process, so the
-        # Kill frame is the teardown; without it rm orphans the hosted TUI.
-        # Census first (it wants a provable owner), kill second, reap last.
-        keeper_sock = getattr(existing, "messaging_socket_path", None)
-        if keeper_sock and "mux/threads/" in keeper_sock:
-            _stop_keeper_thread(name, existing, keeper_sock)
-        try:
-            reaped = reap_detached_worker_servers(worker_servers)
-        except RuntimeError as exc:
-            return _fail(str(exc), exit_code=1)
-        if census_unverified:
-            print(
-                "cursor-agent worker-server cleanup unverified: "
-                f"{census_unverified}; if a worker-server survives, kill it "
-                "by pid",
-                flush=True,
-            )
-        print(
-            f"cursor-agent worker-server processes reaped: {reaped}", flush=True
-        )
-        return None
-
-    if not sid:
-        # Refuse rather than assume there is nothing to clean: the harness
-        # record may well exist, and this row simply lost the id that
-        # addresses it. Silently dropping the row would orphan it for good.
-        return _fail(
-            f"registry entry has no {harness} session id on file; cannot "
-            "tear down the harness record. Recover the id from the harness "
-            "first if it can still name the session (rm tears the record "
-            "down itself once it can address it); dropping the row without "
-            "one orphans that record - it stays behind in the harness, "
-            "findable only by hand. The override is documented in "
-            "`fno agents rm --help`, not here.",
-            exit_code=12,
-        )
-
-    if harness == "codex":
-        from fno.agents.harnesses import codex as codex_mod
-
-        failure = codex_mod.teardown_session_index(sid)
-        if failure is not None:
-            return _fail(failure[0], exit_code=failure[1])
-        return None
-
-    # Fail loud rather than fall off the end: the caller's harness tuple and
-    # the arms above are two lists nothing ties together, and a silent return
-    # would drop the registry row while leaving the session record behind --
-    # the exact orphan this function exists to prevent.
-    raise DispatchAskError(
-        f"no teardown arm for harness {harness!r}",
-        exit_code=2,
-    )
-
-
-def rm_agent(
-    name: str,
-    *,
-    force: bool = False,
-    lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
-    shellout_timeout: float = _DEFAULT_CLAUDE_SHELLOUT_TIMEOUT,
-    audit_actor: Optional[str] = None,
-    audit_reason: str = "operator-requested",
-    audit_request_id: Optional[str] = None,
-    audit_worktree_touched: Optional[bool] = None,
-    audit_reclaimed_bytes: Optional[int] = None,
-) -> RmResult:
-    """Remove an agent from the registry, and from claude's supervisor too.
-
-    claude: shellout FIRST, registry mutation AFTER (Locked Decision 6
-    ordering invariant). On non-forceful claude refusal, the registry is
-    unchanged so the operator can address the underlying issue (e.g.
-    uncommitted worktree state) and retry. ``--force`` overrides: the
-    registry entry is removed even when ``claude rm`` fails, with a
-    stderr WARN about the orphan supervisor session.
-
-    codex / opencode: the harness's own session RECORD is torn down
-    first (codex's ``session_index.jsonl`` entry, opencode's session via
-    ``opencode session delete``), registry row after -- same ordering
-    invariant, same ``--force`` override. Transcript files always stay
-    (Locked Decision 1).
-
-    gemini: registry-only; no teardown arm for a deprecated provider.
-
-    Emits ``agent_removed`` with ``provider``, ``force``, ``claude_exit``
-    fields.
-
-    """
-    _validate_lifecycle_name(name)
-    # Resolve any address form once, then carry that identity through the
-    # canonical-name flock. A same-name replacement cannot inherit this action.
-    pre_existing, expected_identity = _resolve_lifecycle_target(name)
-    name = pre_existing.name
-    # Pre-flock fast-fail + capture provider for lock-timeout event
-    # payload. See ``stop_agent`` for the lint-pattern rationale: the
-    # body does NOT call ``hold_agent_lock`` directly — that lives inside
-    # ``with_agent_lock_and_entry``, which the lint script allowlists.
-    pre_provider = pre_existing.harness
-
-    def _on_wait() -> None:
-        print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
-
-    try:
-        with with_agent_lock_and_entry(
-            name,
-            timeout=lock_timeout,
-            on_wait=_on_wait,
-            expected_identity=expected_identity,
-        ) as (
-            _lock_handle,
-            existing,
-        ):
-            claude_exit: Optional[int] = None
-            # Non-None only when --force swallowed a teardown failure; rides
-            # the terminal event so the forensic stream stays single and true.
-            teardown_error: Optional[str] = None
-            captured_index_lines: list = []
-            from fno.worktree_reapable import is_linked_worktree
-
-            detected_worktree = bool(existing.cwd and is_linked_worktree(existing.cwd))
-            worktree_touched = (
-                audit_worktree_touched
-                if audit_worktree_touched is not None
-                else detected_worktree
-            )
-            worktree_bytes = _directory_bytes(existing.cwd) if detected_worktree else None
-            actor = audit_actor or "operator"
-            reason = audit_reason or "operator-requested"
-            request_id = audit_request_id or f"agent-rm:{existing.name}:{existing.created_at}"
-
-            # The teardown below destroys the harness session record, which IS
-            # the resume handle. Name it and name the verb that reverses it,
-            # before anything is torn down. The interactive prompt lives at the
-            # `rust_runtime` seam instead, because that is the one place both
-            # runtimes pass through; this is the warning half only, so the
-            # documented wedged-daemon escape hatch (`python -c "... rm_agent
-            # (...)"` in the king brief's CLI reference) is not silent either.
-            #
-            # Gated on the harness actually HAVING a teardown arm: opencode is
-            # registry-only by design and gemini has none, so warning about a
-            # forfeited handle there would report a loss that does not happen.
-            #
-            # Skipped when the seam already wrote it in this process, or the
-            # Python route prints the same block twice -- the hazard the seam's
-            # own comments record for the env-scrub spawn warning.
-            handle = rm_notice.resume_handle_for(existing)
-            if (
-                handle is not None
-                and rm_notice.forfeits_resume_handle(existing)
-                and not os.environ.get(rm_notice.NOTICE_SHOWN_ENV)
-            ):
-                sys.stderr.write(
-                    rm_notice.resume_handle_notice(name, existing.harness, handle)
-                )
-
-            if existing.harness == "claude":
-                short_id = existing.short_id
-                if not short_id:
-                    if not force:
-                        # Help text promises --force can drop the orphan row,
-                        # but the original code raised here unconditionally
-                        # (Codex P1 finding). Honor the promise: without
-                        # --force, refuse; with --force, fall through to
-                        # the registry-only removal at the bottom.
-                        raise DispatchAskError(
-                            f"registry entry {name!r} has no short id on file; "
-                            "cannot rm via claude shellout. The row is the "
-                            "resume handle; dropping it without a teardown "
-                            "orphans the harness session record behind it. "
-                            "Bind a short id (re-spawn or adopt the session) "
-                            "and rm again; the override is documented in "
-                            "`fno agents rm --help`, not here.",
-                            exit_code=12,
-                        )
-                    # --force on a corrupted row: skip the claude shellout,
-                    # emit a forensic WARN, proceed to registry-only removal.
-                    sys.stderr.write(
-                        "WARN: registry entry has no short id on file; "
-                        "--force given, removing registry row without "
-                        "shelling out to claude.\n"
-                    )
-                    claude_exit = None
-                else:
-                    if not is_provider_available("claude"):
-                        raise DispatchAskError("claude CLI not on PATH", exit_code=14)
-
-                    from fno.agents.harnesses import claude as claude_mod
-
-                    try:
-                        claude_exit, stderr_text = claude_mod.claude_rm(
-                            short_id, timeout=shellout_timeout
-                        )
-                    except FileNotFoundError as exc:
-                        raise DispatchAskError("claude CLI not on PATH", exit_code=14) from exc
-                    except subprocess.TimeoutExpired as exc:
-                        events.emit(
-                            "agent_removed",
-                            name=name,
-                            provider="claude",
-                            claude_exit=None,
-                            force=force,
-                            timed_out=True,
-                            registry_changed=False,
-                        )
-                        raise DispatchAskError(
-                            f"claude rm timed out after {int(shellout_timeout)}s",
-                            exit_code=15,
-                        ) from exc
-                    except OSError as exc:
-                        # Gemini medium: surface as structured DispatchAskError
-                        # not a raw traceback. Matches stop_agent's catch.
-                        events.emit(
-                            "agent_removed",
-                            name=name,
-                            provider="claude",
-                            claude_exit=None,
-                            force=force,
-                            registry_changed=False,
-                            error=str(exc),
-                            error_type=type(exc).__name__,
-                        )
-                        raise DispatchAskError(f"claude rm failed: {exc}", exit_code=1) from exc
-
-                    if claude_exit != 0:
-                        if stderr_text:
-                            sys.stderr.write(stderr_text)
-                            if not stderr_text.endswith("\n"):
-                                sys.stderr.write("\n")
-                        if not force:
-                            # Registry unchanged: AC2-ERR contract. Emit event
-                            # for forensics so a downstream `fno agents list`
-                            # vs claude-supervisor diff can be reconciled.
-                            events.emit(
-                                "agent_removed",
-                                name=name,
-                                provider="claude",
-                                claude_exit=claude_exit,
-                                force=False,
-                                registry_changed=False,
-                                short_id=short_id,
-                            )
-                            raise DispatchAskError(
-                                # retired-ok: reports which shellout failed on which session.
-                                f"claude rm {short_id} exited {claude_exit}",
-                                exit_code=1,
-                            )
-                        # --force path: warn about the orphan supervisor and
-                        # proceed to drop the registry row.
-                        sys.stderr.write(
-                            "WARN: claude rm failed but --force given; removing "
-                            f"registry only. Supervisor session {short_id} is "
-                            f"orphaned; `fno agents adopt {short_id}` brings it "
-                            f"back under management.\n"
-                        )
-
-            elif existing.harness in ("codex", "opencode", "cursor-agent"):
-                # Snapshot the index lines the teardown drops, so a declining
-                # write can put them back: the refusal leaves every store
-                # unchanged, harness store included.
-                captured_index_lines = []
-                if existing.harness == "codex" and existing.harness_session_id:
-                    from fno.agents.harnesses import codex as codex_mod
-
-                    captured_index_lines = codex_mod.capture_for_rm_rollback(
-                        existing.harness_session_id
-                    )
-                teardown_error = _teardown_harness_session(
-                    existing,
-                    name=name,
-                    force=force,
-                )
-            elif existing.harness != "gemini":
-                raise DispatchAskError(
-                    f"rm for harness {existing.harness!r} is not implemented",
-                    exit_code=2,
-                )
-            # gemini: registry-only. No teardown arm -- the provider is
-            # deprecated, so a speculative one would be untestable guesswork.
-
-            decline_reason: list[str] = []
-            try:
-                registry_changed = _update_registry_if_recipient_unchanged(
-                    name,
-                    _recipient_identity_key(existing),
-                    lambda entries: [e for e in entries if e.name != name],
-                    decline_reason=decline_reason,
-                )
-            except (OSError, RegistryVersionError) as exc:
-                if captured_index_lines:
-                    codex_mod.restore_session_index_entries(captured_index_lines)
-                events.emit(
-                    "agent_removed",
-                    name=name,
-                    provider=existing.harness,
-                    claude_exit=claude_exit,
-                    force=force,
-                    registry_changed=False,
-                    teardown_error=teardown_error,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
-                raise DispatchAskError(
-                    f"registry write failed: {exc}",
-                    exit_code=12,
-                ) from exc
-            if not registry_changed:
-                if captured_index_lines:
-                    codex_mod.restore_session_index_entries(captured_index_lines)
-                row_removed = decline_reason and decline_reason[0] == "row_removed"
-                events.emit(
-                    "agent_removed",
-                    name=name,
-                    provider=existing.harness,
-                    claude_exit=claude_exit,
-                    force=force,
-                    registry_changed=False,
-                    teardown_error=teardown_error,
-                    error=(
-                        "resolved row removed entirely during harness removal"
-                        if row_removed
-                        else "recipient identity changed during harness removal"
-                    ),
-                    error_type=(
-                        "RecipientRowRemoved"
-                        if row_removed
-                        else "RecipientIdentityChanged"
-                    ),
-                )
-                raise DispatchAskError(
-                    f"agent {name!r}: resolved to a row the registry does not hold, "
-                    "or its recipient identity changed during rm; nothing was "
-                    "removed, and any replacement row was retained. Re-read it "
-                    "with `fno agents list --json` and rm by the exact `name` field.",
-                    exit_code=12,
-                )
-
-            if existing.crown_scope:
-                from fno.king.state import remove_king_manifest
-
-                remove_king_manifest(
-                    existing.crown_scope,
-                    owner_cwd=existing.cwd,
-                    expected_harness_session_id=(
-                        existing.harness_session_id
-                        or existing.cc_session_id
-                        or existing.short_id
-                        or ""
-                    ),
-                )
-
-            # (x-d545) The row is gone from the registry: now take its
-            # worktree, but only as far as the reapable gate allows. The
-            # receipt rides stdout, the event, and RmResult; a refusal never
-            # blocks the removal that already happened.
-            worktree_receipt = _prune_row_worktree(existing)
-            if worktree_receipt:
-                print(worktree_receipt, flush=True)
-            worktree_removed = worktree_touched and (
-                not Path(existing.cwd).exists()
-                or (worktree_receipt or "").startswith("worktree removed:")
-            )
-            # `None`, not `0`, when the tree was removed but the size walk
-            # hit its budget - `0` stays reserved for a real zero.
-            reclaimed_bytes = (
-                audit_reclaimed_bytes
-                if audit_reclaimed_bytes is not None
-                else worktree_bytes if worktree_removed else 0
-            )
-            worktree_outcome = (
-                "not-touched"
-                if not worktree_touched
-                else "removed"
-                if worktree_removed
-                else "kept"
-            )
-            if worktree_removed:
-                print(
-                    "WARNING: worktree removed by guarded cleanup "
-                    f"(reclaimed_bytes={'unmeasured' if reclaimed_bytes is None else reclaimed_bytes})",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
-            # Stdout "removed:" prints come AFTER update_registry succeeds so
-            # a write failure cannot leave the operator with a misleading
-            # confirmation. (Sigma-review C3 finding.)
-            if existing.harness == "codex" and existing.harness_session_id:
-                print(
-                    f"removed: {name} (codex transcript files left on disk)",
-                    flush=True,
-                )
-            else:
-                print(f"removed: {name}", flush=True)
-
-            events.emit(
-                "agent_removed",
-                name=name,
-                provider=existing.harness,
-                harness=existing.harness,
-                harness_session_id=existing.harness_session_id,
-                short_id=existing.short_id,
-                claude_exit=claude_exit,
-                force=force,
-                registry_changed=True,
-                teardown_error=teardown_error,
-                worktree_receipt=worktree_receipt,
-                actor=actor,
-                reason=reason,
-                request_id=request_id,
-                worktree_touched=worktree_touched,
-                worktree_outcome=worktree_outcome,
-                reclaimed_bytes=reclaimed_bytes,
-            )
-            return RmResult(
-                name=name,
-                provider=existing.harness,
-                claude_exit=claude_exit,
-                force=force,
-                registry_changed=True,
-                worktree_receipt=worktree_receipt,
-                actor=actor,
-                reason=reason,
-                request_id=request_id,
-                worktree_touched=worktree_touched,
-                reclaimed_bytes=reclaimed_bytes,
-            )
-    except AgentLockTimeout as exc:
-        # Symmetric with stop_agent's lock-timeout emit so forensics can
-        # distinguish "rm refused at flock layer" from "operator never
-        # ran rm" via events.jsonl alone. (Sigma-review #2 finding.)
-        events.emit(
-            "agent_removed",
-            name=name,
-            provider=pre_provider,
-            claude_exit=None,
-            force=force,
-            registry_changed=False,
-            lock_timeout=True,
         )
         raise DispatchAskError(
             f"lock timeout for agent {name!r} after {exc.timeout}s"
@@ -5785,12 +5124,11 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
     return wrap_fno_mail(
         cur,
         from_=ctx.from_,
-        harness=ctx.harness,
-        model=ctx.model,
         node=ctx.node,
         to=ctx.to,
         from_session=ctx.from_session,
         origin=ctx.origin,
+        to_session=ctx.to_session,
     )
 
 
@@ -6280,8 +5618,6 @@ _CODEX_ACTIVE_REVIEW_MARKERS = (
 )
 
 
-
-
 def _pane_recipient_handle(entry: "AgentEntry") -> Optional[str]:
     """The canonical mail handle of a pane's occupant, or None.
 
@@ -6310,6 +5646,7 @@ def _mux_pane_send(
     review_invocation_id: Optional[str] = None,
     origin: Optional[str] = None,
     self_send: bool = False,
+    source_label: Optional[str] = None,
 ) -> bool | str:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
@@ -6486,50 +5823,11 @@ def _mux_pane_send(
             _record_failure("pre-submit")
             return False
 
-    # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
-    # the <cross-session-message> peer-follow-up container) leaves no agent-authored
-    # marker in the recipient transcript, so record it in the ledger. Both wrapped
-    # forms carry their own marker, so excluding only <fno_mail> would log every
-    # routine peer follow-up as a false raw-inject. The mux pane lane never reaches
-    # the Rust mail-inject binary, so this site is mandatory, not decorative.
-    # Emitted AFTER the send with the transport's own answer: an emit-before-send
-    # leaves a phantom record asserting an injection that a stalled pane or an
-    # absent `fno mux` never performed. Best-effort -- a write failure never
-    # breaks or fails the send.
-    audit_unwrapped = not text.lstrip().startswith(
-        ("<fno_mail", "<cross-session-message")
-    )
-
-    def _audit_raw_inject(confirmed: bool) -> None:
-        if not audit_unwrapped:
-            return
-        try:
-            from fno.events import agent_raw_inject, append_event
-
-            # Write the CANONICAL {type, source, data} envelope to the SAME log
-            # the Rust mail-inject binary uses (~/.fno/agents/events.jsonl). That
-            # file is canonical-shape only; the flat {kind, ...} emitter would put
-            # a second shape in one file and a consumer reading data.target_session
-            # (where schema.yaml says it lives) would silently miss every mux
-            # record -- the exact audit gap this event exists to close.
-            append_event(
-                agent_raw_inject(
-                    target_session=getattr(entry, "harness_session_id", "") or "",
-                    payload=text[:512],
-                    harness=getattr(entry, "harness", "") or "",
-                    lane="mux-pane",
-                    target_cwd=getattr(entry, "cwd", None),
-                    sender=sender,
-                    origin=origin,
-                    self_send=self_send,
-                    confirmed=confirmed,
-                    source="daemon",
-                ),
-                events.daemon_lifecycle_log(),
-                lock_timeout_seconds=2,
-            )
-        except Exception:
-            pass
+    # Audit floor (x-91ba): the row this pane write leaves is written by the
+    # Rust verb itself (`fno mux pane send`), one layer below, so it covers a
+    # direct caller too. This lane only DECLARES its provenance (--source) so
+    # the floor's row joins the bus record; it must not write a second row of
+    # its own, or every pane dispatch reads as two.
 
     fno_bin = os.environ.get("FNO_BIN") or "fno"
     pane = str(pane_id)
@@ -6545,7 +5843,7 @@ def _mux_pane_send(
                 run_env = os.environ.copy()
                 run_env["FNO_REVIEW_INVOCATION_ID"] = review_invocation_id
             proc = subprocess.run(
-                [fno_bin, "mux", "pane", *args, "--session", str(session)],
+                [fno_bin, "mux", "pane", *args, "--server", str(session)],
                 input=stdin_text,
                 capture_output=True,
                 text=True,
@@ -6586,7 +5884,7 @@ def _mux_pane_send(
                     "pane",
                     "ls",
                     "--json",
-                    "--session",
+                    "--server",
                     str(session),
                 ],
                 capture_output=True,
@@ -6653,6 +5951,10 @@ def _mux_pane_send(
         )
         if expected_fno_id:
             send_args.extend(["--fno-id", str(expected_fno_id)])
+        if source_label:
+            # The floor's audit row joins this dispatch to its bus record by
+            # the mail id; declared, never sniffed from the wrapped body.
+            send_args.extend(["--source", source_label])
         if guarded:
             send_args.append("--guarded")
         pasted = _run(send_args, stdin_text=text)
@@ -6782,11 +6084,9 @@ def _mux_pane_send(
         outcome: bool | str = sent
         if sent and review and (getattr(entry, "harness", "") or "") == "codex":
             outcome = _review_outcome()
-        _audit_raw_inject(outcome in {True, "started", "queued"})
         return outcome
 
     if not _verify_pane_occupant():
-        _audit_raw_inject(False)
         return False
 
     # Baseline BEFORE the paste (not after): the confirm below scans only lines
@@ -6883,12 +6183,10 @@ def _mux_pane_send(
                 _record_failure("unconfirmed")
         elif not sent:
             _record_failure(last_attempt_phase)
-        _audit_raw_inject(outcome in {True, "started", "queued"})
         return outcome
     finally:
         if claimed:
             _run(["release", pane])
-
 
 
 def mail_inject_probe(recipient: str) -> tuple[bool, str]:
@@ -6933,7 +6231,6 @@ def mail_inject_probe(recipient: str) -> tuple[bool, str]:
 #: (compared everywhere) because the registry field is an open
 #: ``Optional[str]``; a second value would graduate to an enum then.
 BUS_ONLY_POLICY = "bus-only"
-
 
 
 def _mux_recipient_transcript(entry: "AgentEntry") -> Optional[Path]:
@@ -7025,31 +6322,22 @@ def _hold_lapsed_for(entry) -> bool:
         return _hold.lapsed(entry)
     except Exception:  # noqa: BLE001 - the gate never raises, and never lifts a hold it could not read
         return False
-    return False
 
 
 def _delivery_policy_refusal(target) -> Optional[str]:
     """:data:`BUS_ONLY_POLICY` when ``target``'s registry row says its mail
     belongs on the durable bus; ``None`` otherwise (no row, no policy, or an
-    unreadable registry).
-
-    The gate every shared injector consults BEFORE any transport call, so the
-    no-paste guarantee holds on every reachable lane (name/reply, job, project,
-    raw, dispatch, ask, annotate) rather than on whichever lane remembered to
-    check. Accepts the target in whatever form the lane holds: a registry
-    ``AgentEntry``, or an id/handle token matched against ``harness_session_id``,
-    ``short_id``, and ``name``. Unresolvable reads as no-policy -- failing open
-    here fails toward today's behavior (live delivery to workers), never toward
-    stranding a worker's mail on a registry hiccup.
-
-    Never raises."""
+    unreadable registry). The gate every shared injector consults BEFORE any
+    transport call, so the no-paste guarantee holds on every reachable lane
+    rather than on whichever lane remembered to check. Accepts an
+    ``AgentEntry``, or an id/handle token matched against
+    ``harness_session_id``, ``short_id``, and ``name``; an unresolvable read
+    fails open toward live delivery, never toward stranding mail. Never
+    raises."""
     try:
         if target is None:
             return None
-        # Two branches, and the expiry check belongs on BOTH. A caller holding
-        # an AgentEntry never reaches the registry loop below, so a self-heal
-        # on one branch is decorative on the other (dispatch.py:576, :5741 and
-        # :6773 all pass an entry).
+        # The expiry check belongs on BOTH entry and token branches.
         if hasattr(target, "delivery_policy"):
             if getattr(target, "delivery_policy", None) == BUS_ONLY_POLICY:
                 return None if _hold_lapsed_for(target) else BUS_ONLY_POLICY
@@ -7455,8 +6743,15 @@ def wake_and_deliver(
     gate = None
     revived_reservation = False
     if route_provider is not None:
+        # The revival launches work on the account the row pinned at mint, so
+        # the gate reads that account's quota lock; an unattributed row skips.
+        from fno.agents.launch_provenance import launch_account_for_session
+
         try:
-            gate = run_gate(spawn_name, "bg", route_provider=route_provider, node=getattr(entry, "node", None))
+            gate = run_gate(
+                spawn_name, "bg", route_provider=route_provider,
+                account=launch_account_for_session(session_uuid),
+            )
         except GateRefused as exc:
             return False, f"spawn-exit-{exc.code}"
 
@@ -7860,8 +7155,6 @@ def _deliver_live(
         wrapped = wrap_fno_mail(
             body,
             from_=mail.from_,
-            harness=mail.harness,
-            model=mail.model,
             node=mail.node,
             to=mail.to,
             id=mail.id,
@@ -7914,6 +7207,7 @@ def _deliver_live(
                 gate=True,
                 sender=from_name or None,
                 failure_out=attempt_failure,
+                source_label=(f"mail:{mail.id}" if mail is not None else None),
             )
             if mux_delivered:
                 return True
@@ -8023,20 +7317,20 @@ def _deliver_live(
     # never reaches _deliver_live, unaffected).
     relay_ctxs = None
     if mail is not None:
-        from fno.mail.envelope import harness_for_provider
-
         relay_ctxs = {from_name: mail}
         # Only wrap the recipient's relay turns when it has a resolvable short id;
         # otherwise leave that side raw rather than emit <fno_mail from=""> (codex
         # peer P2). mail.to is the recipient short resolved in dispatch_send.
         if mail.to:
+            # x-3dcc: this ctx wraps B's replies, which are injected into A, so
+            # the recipient-crown line reads A's session (mail.from_session).
             relay_ctxs[entry.name] = _MailCtx(
                 from_=mail.to,
-                harness=harness_for_provider(entry.harness),
                 model="unknown",
                 to=mail.from_,
                 from_session=entry.harness_session_id or None,
                 origin="peer",
+                to_session=mail.from_session,
             )
     if _switchboard_exchange(
         entry.name,
@@ -8180,8 +7474,6 @@ def _queue_durable_fallback(
     durable_body = wrap_fno_mail(
         message,
         from_=mail_ctx.from_,
-        harness=mail_ctx.harness,
-        model=mail_ctx.model,
         node=mail_ctx.node,
         to=mail_ctx.to,
         id=mail_ctx.id,
@@ -8201,6 +7493,9 @@ def _queue_durable_fallback(
             provider_to=entry.harness,
             provider_from=provider_from,
             from_session=from_session,
+            # The envelope no longer renders the model (x-d7cf); the durable
+            # row carries it, matching what the live hosted path records.
+            from_model=mail_ctx.model,
             owner=owner or DurableOwner.WAKE_DAEMON.value,
             origin=mail_ctx.origin,
             # Count the raw body, not the wire wrapper: Rule 7 and the rolling
@@ -8315,41 +7610,25 @@ def _reserve_send_budget(
     recipient: str,
     message: str,
     msg_id: str,
-    enforce: bool,
 ):
-    """Reserve one canonical pair before any outward send side effect."""
+    """Reserve the control lane's ledger before any outward send side effect.
+
+    An ordinary body reserves nothing (rule 7 is its only word gate), so this
+    returns None and callers release unconditionally.
+    """
     from fno import style
     from fno.mail import budget
 
+    if not budget.is_control(message):
+        return None
     words = style.word_count(message)
-    if budget.is_control(message):
-        # The control lane keeps its own ledger: a stop or resume must arrive
-        # even when the pair's ordinary window is spent.
-        try:
-            return budget.reserve_control(
-                sender=sender, recipient=recipient, words=words, msg_id=msg_id
-            )
-        except budget.BudgetRefused as exc:
-            raise DispatchAskError(
-                f"refused: control word budget for {exc.pair}: {exc.marker()}",
-                exit_code=1,
-            ) from exc
-        except budget.BudgetUnavailable as exc:
-            raise DispatchAskError(f"refused: {exc}", exit_code=1) from exc
     try:
-        return budget.reserve(
-            sender=sender,
-            recipient=recipient,
-            words=words,
-            msg_id=msg_id,
-            enforce=enforce,
+        return budget.reserve_control(
+            sender=sender, recipient=recipient, words=words, msg_id=msg_id
         )
     except budget.BudgetRefused as exc:
         raise DispatchAskError(
-            f"refused: rolling word budget for {exc.pair}: {exc.marker()}\n"
-            "operational control (stop, resume, scope change)? resend with the "
-            "body's first line starting `control:` -- its own lane, 60 words, "
-            "exempt from this budget",
+            f"refused: control word budget for {exc.pair}: {exc.marker()}",
             exit_code=1,
         ) from exc
     except budget.BudgetUnavailable as exc:
@@ -8365,7 +7644,6 @@ def dispatch_send(
     from_name: str = _FROM_NAME_DEFAULT,
     *,
     registry_stamp_timeout_seconds: float = 1.0,
-    budget_enforce: bool = True,
     origin: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
@@ -8638,7 +7916,6 @@ def dispatch_send(
                 recipient=budget_recipient,
                 message=message,
                 msg_id=msg_id,
-                enforce=budget_enforce,
             )
 
             live_attempted = False
@@ -8747,8 +8024,6 @@ def dispatch_send(
                         hosted_body = wrap_fno_mail(
                             message,
                             from_=mail_ctx.from_,
-                            harness=mail_ctx.harness,
-                            model=mail_ctx.model,
                             node=mail_ctx.node,
                             to=mail_ctx.to,
                             id=mail_ctx.id,
@@ -8988,7 +8263,6 @@ def dispatch_send(
                     recipient=timeout_recipient,
                     message=message,
                     msg_id=msg_id,
-                    enforce=budget_enforce,
                 )
                 ctx_token = _DISPATCH_CTX.set(ctx_for_timeout)
                 try:
@@ -9239,7 +8513,6 @@ def dispatch_send_to_project(
     from_name: str = _FROM_NAME_DEFAULT,
     any_: bool = False,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
-    budget_enforce: bool = True,
     origin: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Async send addressed to a project (anycast over the registry).
@@ -9276,10 +8549,6 @@ def dispatch_send_to_project(
 
     if res.recipient is not None:
         # Exactly one live peer (or --any winner): deliver live by name.
-        # Omit the default kwarg so existing in-process adapters that implement
-        # the pre-budget dispatch signature keep working. The exception lane
-        # passes False explicitly because it changes enforcement.
-        budget_kwargs = {} if budget_enforce else {"budget_enforce": False}
         result = dispatch_send(
             name=res.recipient,
             message=message,
@@ -9288,7 +8557,6 @@ def dispatch_send_to_project(
             lock_timeout=lock_timeout,
             from_name=from_name,
             origin=origin,
-            **budget_kwargs,
         )
         return replace(result, recipient=res.recipient, to_project=project)
 
@@ -9321,7 +8589,6 @@ def dispatch_send_to_project(
         recipient=project,
         message=message,
         msg_id=msg_id,
-        enforce=budget_enforce,
     )
 
     try:

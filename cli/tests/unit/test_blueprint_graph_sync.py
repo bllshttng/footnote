@@ -45,7 +45,7 @@ def calls(monkeypatch):
 
 def test_bound_node_is_refreshed(calls, tmp_path):
     plan = tmp_path / "p.md"
-    mod._sync_graph_status("x-abcd", plan)
+    mod._sync_graph_status({"node": "x-abcd"}, plan)
     assert calls == [["fno", "backlog", "update", "x-abcd", "--plan-path", str(plan)]]
 
 
@@ -63,7 +63,7 @@ def test_missing_cli_is_a_silent_noop(monkeypatch, tmp_path):
         raise AssertionError("must not shell out when fno is absent")
 
     monkeypatch.setattr(mod.subprocess, "run", explode)
-    mod._sync_graph_status("x-abcd", tmp_path / "p.md")
+    mod._sync_graph_status({"node": "x-abcd"}, tmp_path / "p.md")
 
 
 def test_refresh_failure_never_fails_the_written_doc(monkeypatch, capsys, tmp_path):
@@ -74,7 +74,7 @@ def test_refresh_failure_never_fails_the_written_doc(monkeypatch, capsys, tmp_pa
         raise OSError("graph locked")
 
     monkeypatch.setattr(mod.subprocess, "run", boom)
-    mod._sync_graph_status("x-abcd", tmp_path / "p.md")  # must not raise
+    mod._sync_graph_status({"node": "x-abcd"}, tmp_path / "p.md")  # must not raise
     assert "graph status refresh failed" in capsys.readouterr().err
 
 
@@ -85,6 +85,6 @@ def test_nonzero_exit_warns_with_the_node_id(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr(mod.shutil, "which", lambda _: "/usr/bin/fno")
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Proc())
-    mod._sync_graph_status("x-abcd", tmp_path / "p.md")
+    mod._sync_graph_status({"node": "x-abcd"}, tmp_path / "p.md")
     err = capsys.readouterr().err
     assert "x-abcd" in err and "no such node" in err

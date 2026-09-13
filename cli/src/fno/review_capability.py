@@ -38,6 +38,7 @@ from fno.harness_identity import (
     resolve_harness_identity,
     spawned_substrate,
 )
+from fno.user import display_name
 
 # Harnesses that can dispatch subagents at all, for a REGISTRY reviewer that
 # declares `requires: subagent-dispatch`. No built-in uses the value anymore
@@ -281,21 +282,25 @@ def _skill_id(descriptor: ReviewerDescriptor, name: str) -> str:
     return head[0].lstrip("/") if head and head[0].strip("/") else name
 
 
-def _resolve_skill(name: str, session: SessionCapability) -> tuple[Status, str]:
-    """`requires: skill` - is the named skill resolvable on this harness?
+def resolve_skill_presence(
+    name: str,
+    harness: str,
+    *,
+    context: str = "config.review.reviewers",
+) -> tuple[Status, str]:
+    """Is the named skill resolvable on `harness`? One probe, two callers.
 
-    Three outcomes, all onto the existing Status enum: found -> satisfiable,
-    absent with at least one root readable -> unavailable (init refuses, naming
-    the roots searched), and anything we cannot answer -> unverifiable, which is
-    already non-blocking precisely so a bad root guess degrades rather than
-    bricking a run.
+    Shared by the reviewer gate and the dispatch verb registry; `context`
+    names the config surface in the unavailable reason. Three outcomes:
+    found -> satisfiable, absent with one root readable -> unavailable,
+    unanswerable -> unverifiable (degrades rather than bricking a run).
     """
     proceed = "Proceeding - if the gate does go unmet, run the skill by hand"
-    if session.harness != "claude":
+    if harness != "claude":
         return (
             "unverifiable",
             f"needs a resolvable skill; footnote only knows Claude's skill roots "
-            f"and this is {session.describe()}. {proceed}",
+            f"and this is harness={harness}. {proceed}",
         )
     if ":" in name:
         return (
@@ -328,8 +333,13 @@ def _resolve_skill(name: str, session: SessionCapability) -> tuple[Status, str]:
         "unavailable",
         f"skill {name!r} resolves in none of the roots searched "
         f"({', '.join(searched)}); install it there or change "
-        f"config.review.reviewers",
+        f"{context}",
     )
+
+
+def _resolve_skill(name: str, session: SessionCapability) -> tuple[Status, str]:
+    """`requires: skill`, resolved for THIS session's harness."""
+    return resolve_skill_presence(name, session.harness)
 
 
 def _resolve_one(
@@ -387,7 +397,7 @@ def _resolve_one(
 
     if descriptor.requires == "operator":
         if session.attended:
-            return verdict("satisfiable", f"ask the operator to run `{descriptor.invocation}`")
+            return verdict("satisfiable", f"ask {display_name()} to run `{descriptor.invocation}`")
         return verdict(
             "needs-operator",
             f"kind={descriptor.kind}, never autonomously satisfiable; this run is "

@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional
 
 from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
 
@@ -29,6 +29,11 @@ from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lan
 # skipped, which is the failure this verb exists to fix.
 RENDER_CAP = 3
 QUESTION_RENDER_CAP = 10
+# A rendered entry is a pointer, not the evidence. The full body is one `-J`
+# away; a 2000-character row in a 10-row budget is how the short asks got
+# buried (law d-59af3235's own rationale). Measured 2026-09-12: human-authored
+# bodies run a 929-character median, so this cap binds on most rows by design.
+QUESTION_BODY_CAP = 240
 
 EVENTS_NAME = "events.jsonl"
 # `retro sweep-carveouts` skips this kind; /fno:pr merged owns it.
@@ -74,6 +79,7 @@ class Question:
     ask: Optional[str] = None
     options: tuple[str, ...] = ()
     blocks: tuple[str, ...] = ()
+    subject: Optional[str] = None
     live: Optional[bool] = None
 
     def as_dict(self, *, rank: Optional[int] = None) -> "dict[str, Any]":
@@ -88,6 +94,7 @@ class Question:
             "ask": self.ask,
             "options": list(self.options),
             "blocks": list(self.blocks),
+            "subject": self.subject,
             "live": self.live,
             "rank": rank,
         }
@@ -115,6 +122,17 @@ class Capture:
         }
 
 
+class VerdictRow(NamedTuple):
+    """One open prove-it FAIL verdict (x-6d64): claimed outcome did not hold."""
+
+    node: str
+    report: str
+    verdict: str
+    claim: str
+    status: Optional[str] = None
+    mtime: Optional[str] = None
+
+
 @dataclass(frozen=True)
 class Outstanding:
     carveout_total: int
@@ -126,6 +144,9 @@ class Outstanding:
     capture_row_total: int = 0
     lane: "list[LaneItem]" = field(default_factory=list)
     lane_parked: int = 0
+    #: Open prove-it FAIL verdicts, plus the reader's failure: surfaced, never a silent zero.
+    verdicts: "list[VerdictRow]" = field(default_factory=list)
+    verdicts_error: Optional[str] = None
     #: The one project-scoped leg names its root; the machine-wide legs name
     #: their stores, so a zero in any stream is diagnosable instead of
     #: silently meaning either "clean" or "read from the wrong place".
@@ -133,9 +154,8 @@ class Outstanding:
 
     @property
     def empty(self) -> bool:
-        return (
-            self.carveout_total == 0 and not self.questions and not self.captures and not self.lane
-        )
+        clean = not (self.carveout_total or self.questions or self.captures or self.lane or self.verdicts)
+        return clean and self.verdicts_error is None
 
     def as_dict(self) -> "dict[str, Any]":
         by_project: "dict[str, int]" = {}
@@ -171,6 +191,11 @@ class Outstanding:
                 "total": len(self.lane),
                 "parked": self.lane_parked,
                 "items": [{"text": i.text, "line": i.line} for i in self.lane],
+            },
+            "verdicts": {
+                "total": len(self.verdicts),
+                "error": self.verdicts_error,
+                "items": [v._asdict() for v in self.verdicts],
             },
         }
 
@@ -350,7 +375,8 @@ def read_open_questions(
 ) -> "list[Question]":
     """Fold ``operator_question`` minus ``operator_question_closed``.
 
-    Ranked by liveness, blocked nodes, age, then id. A malformed line is SKIPPED, never raised, inheriting
+    Ranked by liveness lane, then newest first (blocked nodes break same-second
+    ties). A malformed line is SKIPPED, never raised, inheriting
     ``read_carveouts``' rule: one bad row must not cost the others. A missing
     index reads as no questions with a recovery hint; an unreadable one fails.
     """
@@ -376,6 +402,7 @@ def read_open_questions(
                 ask=data.get("ask") or None,
                 options=tuple(data.get("options") or ()),
                 blocks=tuple(data.get("blocks") or ()),
+                subject=data.get("subject") or None,
             )
         elif rec.get("type") == QUESTION_CLOSED_EVENT:
             qid = data.get("question_id")
@@ -390,18 +417,13 @@ def read_open_questions(
         resolver=resolver,
     )
     open_qs = [replace(q, live=False if not q.asker else resolved.get(q.asker)) for q in open_qs]
-    # A stale asker never outranks a reachable one, even when it blocks more.
-    # Within each liveness lane, unblock the most nodes first, then honor the
-    # questions that have waited longest. No auto-expiry: age only ranks.
-    open_qs.sort(
-        key=lambda q: (
-            q.live is not True,
-            -len(q.blocks),
-            not bool(q.ts),
-            q.ts,
-            q.id,
-        )
-    )
+    # Newest first inside a lane. An ask filed minutes ago is the one a human
+    # can still act on, and blocks drops below recency because the 19 rows
+    # carrying it were all filed before 09-08 and held the whole 10-row window
+    # against every ask filed since. An empty ts sorts last: "" loses under
+    # reverse.
+    open_qs.sort(key=lambda q: (q.ts, -len(q.blocks), q.id), reverse=True)
+    open_qs.sort(key=lambda q: q.live is not True)
     return open_qs
 
 
@@ -737,6 +759,7 @@ def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:
     lane_read = lane if lane is not None else read_lane()
     if lane_read.error:
         raise OutstandingError(lane_read.error)
+    verdicts, verdicts_error = _read_open_verdicts()
     return Outstanding(
         carveout_total=len(rows),
         carveout_by_kind=by_kind,
@@ -747,8 +770,34 @@ def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:
         capture_row_total=capture_row_total,
         lane=open_items(lane_read),
         lane_parked=len(parked_items(lane_read)),
+        verdicts=verdicts,
+        verdicts_error=verdicts_error,
         carveout_root=str(Path(root)),
     )
+
+
+def _read_open_verdicts() -> "tuple[list[VerdictRow], Optional[str]]":
+    """Open prove-it FAIL rows from the Rust reader, or why it could not be
+    read. A failed call never raises: that would blank the questions leg."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        payload = verb_call("prove-it-verdicts", {})
+    except (VerbUnavailable, OSError, ValueError) as exc:
+        return [], str(exc)
+    rows = [
+        VerdictRow(
+            node=str(r.get("node") or ""),
+            report=str(r.get("report") or ""),
+            verdict=str(r.get("verdict") or "FAIL"),
+            claim=str(r.get("claim") or ""),
+            status=r.get("status"),
+            mtime=r.get("mtime"),
+        )
+        for r in payload.get("rows") or []
+        if r.get("open")
+    ]
+    return rows, None
 
 
 def _age_days(ts: str) -> Optional[int]:
@@ -844,8 +893,19 @@ def render(
         lines.append(f"{_plural(len(outstanding.questions), 'open question')} awaiting you.")
 
         shown = outstanding.questions[:QUESTION_RENDER_CAP]
+        body_trimmed = False
+
+        def _one_line(text: str) -> "tuple[str, bool]":
+            """First line only, truncated at QUESTION_BODY_CAP with an ellipsis
+            that says it truncated. Returns (line, was_trimmed)."""
+            line = text.split("\n", 1)[0].strip()
+            cut = len(line) > QUESTION_BODY_CAP
+            if cut:
+                line = line[: QUESTION_BODY_CAP - 1] + "…"
+            return line, cut
 
         def append_question(q: Question, *, stale_row: bool = False) -> None:
+            nonlocal body_trimmed
             label = "[this session] " if q in mine else ""
             where = q.node or (Path(q.cwd).name if q.cwd else None)
             details = [where] if where else []
@@ -853,9 +913,13 @@ def render(
                 age = _age_days(q.ts)
                 details.append(f"{_plural(age, 'day')} old" if age is not None else "age unknown")
             suffix = f"  ({'; '.join(details)})" if details else ""
-            lines.append(f"  {label}{q.id}  {q.question}{suffix}")
-            if q.ask:
-                lines.append(f"    Action: {q.ask}")
+            body, cut = _one_line(q.question)
+            action, action_cut = _one_line(q.ask) if q.ask else (None, False)
+            if cut or action_cut or "\n" in q.question or (q.ask and "\n" in q.ask):
+                body_trimmed = True
+            lines.append(f"  {label}{q.id}  {body}{suffix}")
+            if action:
+                lines.append(f"    Action: {action}")
 
         group_order: "list[str | bool | None]" = []
         grouped: "dict[str | bool | None, list[Question]]" = {}
@@ -891,6 +955,26 @@ def render(
         if len(outstanding.questions) > QUESTION_RENDER_CAP:
             lines.append(f"  Showing {len(shown)} of {len(outstanding.questions)} open questions.")
         lines.append('  Answer with: fno inbox outstanding clear <id> --answer "..."')
+        if body_trimmed:
+            lines.append(
+                "  Rows are trimmed to one line; read a full question with: fno inbox outstanding -J"
+            )
+        lines.append("")
+
+    if outstanding.verdicts:
+        lines.append(f"{_plural(len(outstanding.verdicts), 'prove-it FAIL verdict')} with no ruling.")
+        for v in outstanding.verdicts[:RENDER_CAP]:
+            claim = v.claim.split("\n", 1)[0].strip()
+            if len(claim) > 100:
+                claim = claim[:99] + "…"
+            where = f" ({v.status})" if v.status else ""
+            lines.append(f"  {v.node}{where}: {claim}")
+            lines.append(f"    Read: {v.report}")
+        lines.append("  Rule with: fno inbox decide <node> naming the report, or re-run /fno:review prove-it.")
+        lines.append("")
+
+    if outstanding.verdicts_error:
+        lines.append(f"prove-it verdicts could not be read ({outstanding.verdicts_error}).")
         lines.append("")
 
     if outstanding.captures:

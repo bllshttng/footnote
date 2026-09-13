@@ -30,12 +30,35 @@ SESSION="fk-$$"
 export SESSION
 SERVER_PID=""
 
+# The worker needs a durable session identity: a harness-stub `claude` whose
+# resume form carries a real session id, so the pane is ADDRESSABLE - a
+# labelled pane whose identity resolves. A bare responder with a worker name
+# and no session id is exactly the unresolved:spawned-name shape the send
+# gate refuses, by design. The stub answers every line it is sent and never
+# exits, which is the survival behavior under test.
+STUB_DIR="$TMP_DIR/stubbin"
+mkdir -p "$STUB_DIR"
+cat >"$STUB_DIR/claude" <<'STUB'
+#!/bin/sh
+while IFS= read -r l; do echo "GOT:$l"; done
+STUB
+chmod +x "$STUB_DIR/claude"
+export PATH="$STUB_DIR:$PATH"
+WORKER_SESSION="01a0f1ce-0000-4c1e-8a1c-2d3e4f5a6b7c"
+export WORKER_SESSION
+
 cleanup() {
     "$MUX_BIN" mux kill-server "$SESSION" >/dev/null 2>&1 || true
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
         kill -9 "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
     fi
+    # The survivors were the POINT; they are not orphans once the proof is
+    # on the record. End them so the run leaves nothing behind.
+    for pid in $SURVIVOR_PIDS; do
+        kill -9 "$pid" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -54,13 +77,21 @@ done
 
 # The worker pane: a responder that answers every line it is sent. It is
 # the harness under test - after the server's death IT must still answer.
+# The resume form is what stamps the session id at spawn, the same
+# birthright a real worker carries.
 "$MUX_BIN" mux pane run --session "$SESSION" --worker proof-worker --json -- \
-    bash -c 'while IFS= read -r l; do echo "GOT:$l"; done' >"$TMP_DIR/worker.json"
+    claude --resume "$WORKER_SESSION" >"$TMP_DIR/worker.json"
 # The control: a plain pane, which is CORRECT to die with its server.
 "$MUX_BIN" mux pane run --session "$SESSION" --json -- sleep 600 >"$TMP_DIR/plain.json"
 
 PANE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pane_id"])' "$TMP_DIR/worker.json")"
 PLAIN_PANE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pane_id"])' "$TMP_DIR/plain.json")"
+
+# Survivor pids, captured the moment they are known so the EXIT trap can end
+# them: the keeper and its child detach on purpose (that is the survival
+# under test), and an orphan guard that sees them outliving the test would
+# read the proof as a leak.
+SURVIVOR_PIDS=""
 
 CHILD_PID="$("$MUX_BIN" mux pane ls --session "$SESSION" --json | python3 -c '
 import json,sys
@@ -83,6 +114,7 @@ r=rows[0]
 assert r.get("keeper_pid"), "the keeper row names its own pid"
 print(r["keeper_pid"])' "$CHILD_PID")"
 echo "[before] worker pane $PANE_ID child=$CHILD_PID keeper=$KEEPER_ROW; plain pane $PLAIN_PANE_ID child=$PLAIN_PID"
+SURVIVOR_PIDS="$KEEPER_ROW $CHILD_PID"
 
 # The named death: SIGKILL, never SIGTERM - a graceful path could spare the
 # child through a route that proves nothing about the hangup.
@@ -148,6 +180,18 @@ else
     echo "FAIL: the re-adopted pane vanished" >&2
     exit 1
 fi
+
+# The identity, not just the pid: the re-adopted pane still answers to the
+# worker's own session id - the birth pane id carried the resume birthright
+# across the restart, so the pane is ADDRESSABLE, not merely alive.
+"$MUX_BIN" mux pane ls --session "$SESSION" --json | python3 -c '
+import json,os,sys
+rows=json.load(sys.stdin)
+rows=[r for r in rows if r.get("pane_id")==int(sys.argv[1])]
+assert len(rows)==1, f"expected one row for pane {sys.argv[1]}, got {rows}"
+got = rows[0].get("harness_session_id") or rows[0].get("fno_id")
+assert got==os.environ["WORKER_SESSION"], f"the re-adopted pane lost its session identity: {rows[0]}"' "$CHILD_PID_AFTER"
+echo "[identity] pane $CHILD_PID_AFTER still carries session $WORKER_SESSION"
 
 # The answer: the surviving pane still ANSWERS a prompt. A live pid hosting
 # a wedged harness is not a survival. The pane's ID is the fresh server's

@@ -53,7 +53,9 @@ def test_the_seam_leaves_a_resume_alone():
 
 def test_cmd_spawn_refuses_a_defaulted_thread_before_dispatch(tmp_path, monkeypatch):
     # No --substrate: the seam leaves it to cmd_spawn, which resolves the
-    # default (a thread for claude) and must refuse before dispatch runs.
+    # default (a thread for claude). With --node and no message, the node-seed
+    # refusal (x-e53e) fires first: the node is unreadable here, so the seed
+    # cannot resolve, and the refusal names the encode remedy before dispatch.
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
@@ -78,5 +80,6 @@ def test_cmd_spawn_refuses_a_defaulted_thread_before_dispatch(tmp_path, monkeypa
         agents_cli.agents_app, ["spawn", "--name", "w", "--node", "x-1", "--harness", "claude"]
     )
     assert res.exit_code == 2, res.output
-    assert "/fno:target x-1" in res.output, res.output
+    assert "refusing node-seeded spawn" in res.output, res.output
+    assert "fno backlog update x-1 --dispatch-verb" in res.output, res.output
     assert dispatched == []

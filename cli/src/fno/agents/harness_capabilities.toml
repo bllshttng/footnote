@@ -3,7 +3,7 @@
 # (Python package data) and crates/fno/src/harness_capabilities.toml (include_str!ed by
 # the fno mux). Edit the canonical and rebuild; the rust-ci generated-copies dirty-tree
 # step fails on a hand-edited copy.
-map_version = 18
+map_version = 19
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -88,6 +88,16 @@ session_binding = { strategy = "preassigned-or-session-start", required = true, 
 pane = "argv-add-dir"
 thread = "argv-add-dir"
 headless = "argv-add-dir"
+
+# The thread lane's carrier row (spawn flag passthrough). `carries` names the
+# keeper LAUNCH_AXES axes this lane takes in its native form; `passthrough`
+# names the fenced `--` token spellings it maps, or ["*"] when it appends
+# every token to its argv. A flag outside both lists demotes the spawn to the
+# pane before dispatch, it never refuses on the substrate.
+# claude: the bg lane carries the whole launch argv, role included.
+[harness.claude.thread]
+carries = ["model", "yolo", "permission_mode", "effort", "add_dir", "launch_role", "agent", "tools", "deny_tools"]
+passthrough = ["*"]
 
 [harness.claude.permission_response.allow_once]
 supported = true
@@ -211,6 +221,15 @@ session_binding = { strategy = "rollout-fd-or-daemon", required = true, timeout_
 pane = "argv-add-dir"
 thread = "turn-start-sandbox-policy"
 headless = "argv-add-dir"
+
+# The thread lane's carrier row (spawn flag passthrough; see claude's for the
+# vocabulary). codex: the shared app-server daemon takes effort, posture and
+# add-dir natively, and maps the fenced -c/--config/--add-dir spellings onto
+# thread/start config + state_dirs. role and the subagent selectors have no
+# spelling a shared daemon can see, so those demote to the pane.
+[harness.codex.thread]
+carries = ["model", "yolo", "permission_mode", "effort", "add_dir"]
+passthrough = ["-c", "--config", "--add-dir"]
 
 [harness.codex.permission_response.allow_once]
 supported = true
@@ -514,6 +533,7 @@ state = "native"
 [harness.agy.keeper]
 once_refusal = "--once is not supported on the agy thread lane (it is persistent); agy's one-shot form is `agy -p`, whose lane is unmeasured"
 carries = ["model", "yolo", "permission_mode", "add_dir", "effort", "resume_session_id"]
+passthrough = ["*"]
 ready_marker = "? for shortcuts"
 headless_refusal = "agy's headless lane is unmeasured: `agy -p` prints and exits, and nothing has run it as an fno worker. Use --substrate thread for a persistent worker or --substrate pane for an attended one."
 bypass_flag = "--dangerously-skip-permissions"
@@ -576,6 +596,14 @@ session_binding = { strategy = "store-lookup", required = false, timeout_ms = 20
 pane = "unsandboxed"
 thread = "serve-external-directory"
 headless = "unmeasured"
+
+# The thread lane's carrier row (spawn flag passthrough; see claude's for the
+# vocabulary). opencode serve takes a model; every other flag demotes to the
+# pane until the serve lane maps it. Whether the lane is HONEST is a separate
+# question its own node owns; this row records only what it carries today.
+[harness.opencode.thread]
+carries = ["model"]
+passthrough = []
 
 [harness.opencode.permission_response.allow_once]
 supported = false
@@ -847,6 +875,7 @@ state = "native"
 [harness.pi.keeper]
 once_refusal = "--once is not supported on the pi thread lane (it is persistent); pi has no one-shot lane - its headless stance is unmeasured"
 carries = []
+passthrough = ["*"]
 ready_marker = "(sub)"
 resume_refusal = "is not supported on the pi thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than silently spawning a fresh session."
 
@@ -1083,6 +1112,7 @@ pattern = '(?i)\bacp\b'
 once_refusal = "cursor-agent has no headless lane: --print is output-only (no --input-format, no rpc), so there is no one-shot form. Use the thread substrate for a persistent worker or --substrate pane for an attended one."
 once_and_headless_together = true
 carries = ["model", "yolo", "permission_mode", "add_dir", "resume_session_id"]
+passthrough = ["*"]
 # The declared create form already carries --trust. --trust is NOT the bypass
 # axis; --force is.
 bypass_flag = "--force"
@@ -1228,6 +1258,7 @@ state = "native"
 [harness.grok.keeper]
 once_refusal = "--once is not supported on the grok thread lane (it is persistent); grok has no one-shot lane - its headless stance is unmeasured"
 carries = ["model", "yolo", "permission_mode", "effort"]
+passthrough = ["*"]
 ready_marker = "Shift+Tab:mode"
 resume_refusal = "is not supported on the grok thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than spawning a fresh session."
 bypass_flag = "--always-approve"

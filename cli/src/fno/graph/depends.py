@@ -110,11 +110,6 @@ def _first_h1(plan_path: Path) -> str | None:
     return None
 
 
-# Batch-intake file pattern. Matches `NN-name.md` and `NNa-name.md` forms
-# so parallel-lane plans (02a-, 02b-, 04a-, 04b-, 04c-, ...) that are
-# common in /spec fork folders are included in --batch. `00-*` remains
-# reserved for the INDEX and is excluded by filename check.
-_PLAN_FILE_RE = re.compile(r"^\d{2}[a-zA-Z]?-.+\.md$")
 _TITLE_PREFIX_RE = re.compile(r"^\d+[a-zA-Z]?-")
 _SEQUENCE_PREFIX_RE = re.compile(r"^(\d{1,2}[a-zA-Z]?)-")
 

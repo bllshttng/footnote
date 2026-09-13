@@ -157,10 +157,14 @@ fn distinct_handle_sets_still_spawn_one_child_each() {
     );
 }
 
-/// AC17: the ceiling is not the defect. 319 against 96 was the machine telling
-/// the truth, and raising the cap would have deleted the signal instead of the
-/// load.
+/// AC17's successor (x-7783): the ceiling itself was the defect - the
+/// trigger read a number that does not track the work. The decider is the
+/// fleet's CPU share now, and the retired key has no Rust resolver.
 #[test]
-fn the_spawn_gate_load_ceiling_is_unchanged() {
-    assert_eq!(fno_agents::agents_config::DEFAULT_MAX_LOAD_PER_CPU, 8.0);
+fn the_retired_load_trigger_has_no_rust_resolver() {
+    let source = include_str!("../src/agents_config.rs");
+    assert!(
+        !source.contains("pub fn max_load_per_cpu"),
+        "agents_config::max_load_per_cpu must stay deleted (x-7783 AC7)"
+    );
 }

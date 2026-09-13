@@ -412,3 +412,58 @@ def test_the_exemption_does_not_hide_a_typo_in_the_same_file(tmp_path: Path) -> 
     unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
     assert len(unknown) == 1, unknown
     assert "reveiw.cross_model" in unknown[0]
+
+
+# --- an out-of-enum value refuses by name -----------------------------------
+
+
+def test_an_out_of_enum_value_refuses_by_name(tmp_path: Path) -> None:
+    """The loader refuses naming file, key, value and legal set; the doctor
+    prints that refusal verbatim and never suggests migrate-paths, which
+    recreates files, not values."""
+    f = _write(
+        tmp_path / "config.toml",
+        'schema_version = 1\n[recovery.watchdog]\nmode = "on"\n',
+    )
+    result = _doctor(f)
+    assert result.exit_code == 1, result.output
+    assert "refusing to load settings" in result.output
+    assert str(f) in result.output
+    assert "recovery.watchdog.mode = 'on'" in result.output
+    assert "'report', 'wake' or 'handoff'" in result.output
+    assert "Traceback" not in result.output
+    assert "migrate-paths" not in result.output
+
+
+def test_a_masked_out_of_enum_value_is_still_reported(tmp_path: Path) -> None:
+    """A higher-priority file masks the value today without disarming it;
+    check_values names the masked file while the load itself stays clean."""
+    _write(
+        tmp_path / ".fno" / "config.toml",
+        'schema_version = 1\n[recovery.watchdog]\nmode = "report"\n',
+    )
+    masked = _write(
+        tmp_path / "masked-global.toml",
+        'schema_version = 1\n[recovery.watchdog]\nmode = "on"\n',
+    )
+    env = {
+        **_ENV,
+        "FNO_NO_CANONICAL_CONFIG": "1",
+        "FNO_GLOBAL_SETTINGS_PATH": str(masked),
+    }
+    result = runner.invoke(app, ["config", "doctor"], env=env)
+    assert result.exit_code == 1, result.output
+    assert "config value(s) the schema refuses" in result.output
+    assert str(masked) in result.output
+    assert "recovery.watchdog.mode = 'on'" in result.output
+
+
+def test_a_clean_config_reports_no_value_findings(tmp_path: Path) -> None:
+    """Negative control for check_values."""
+    f = _write(
+        tmp_path / "config.toml",
+        'schema_version = 1\n[recovery.watchdog]\nmode = "handoff"\n',
+    )
+    result = _doctor(f)
+    assert result.exit_code == 0, result.output
+    assert "the schema refuses" not in result.output

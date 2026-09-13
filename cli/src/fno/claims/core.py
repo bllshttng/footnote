@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 from urllib.parse import quote as _url_quote
 
@@ -45,6 +45,7 @@ from .io import (
     atomic_create_exclusive,
     claim_path,
     claims_dir,
+    claims_root_for,
     decode_key,
     dedup_claims_roots,
     global_claims_root,
@@ -166,6 +167,7 @@ __all__ = [
     "ClaimValidationError",
     "ClaimVerdictError",
     "ClaimVerdictUnavailable",
+    "ForceReleaseOutcome",
     "HolderMismatch",
     "RebindRefused",
     "acquire_claim",
@@ -749,7 +751,10 @@ def compare_and_rebind(
     one still refuses as a concurrent writer, so the move never yanks a running
     owner.
 
-    Omitting it preserves the holder, which is every pre-existing caller.
+    Omitting it preserves the holder, which is every pre-existing caller. A
+    handover also records the prior record's session id under
+    ``metadata['dispatched_by_session']`` so the session that dispatched the
+    work stays auditable after the successor's session replaces it.
 
     Returns ``(claim, mode)`` where mode is ``"rebind"`` (a dead prior PID was
     rebound), ``"idempotent"`` (a live same-PID lease refresh), or ``"handover"``
@@ -855,7 +860,17 @@ def compare_and_rebind(
         # the rename or not at all. Applying them to a refused handover let a
         # caller rewrite another holder's fields while leaving the holder alone.
         effective_new_reason = new_reason if handover_allowed else None
-        effective_new_metadata = new_metadata if handover_allowed else None
+        effective_new_metadata = None
+        if handover_allowed:
+            # The takeover rewrites session_id to the worker, which erases the
+            # only record of who dispatched the node. Carry the dispatcher's
+            # session in metadata so the audit survives; an explicit caller
+            # key wins.
+            merged = dict(existing.metadata or {})
+            merged.update(new_metadata or {})
+            if existing.session_id:
+                merged.setdefault("dispatched_by_session", existing.session_id)
+            effective_new_metadata = merged
         # A handover with no PINNED harness resolves one from the ambient
         # markers, exactly as `_make_claim` does on the ordinary acquire path.
         # Preserving the spawner's tag instead left a claude worker under a
@@ -995,6 +1010,44 @@ def compare_and_rebind(
 #: all. Closing it properly needs a secret the worker alone holds, which is its
 #: own change.
 HANDOVER_HOLDER_PREFIX = "spawn-handover:"
+
+#: The requeue pseudo-holder (`backlog/requeue`): the session that takes the
+#: node, not an agent. `holder_agent_name` is the one resolver.
+TARGET_SESSION_HOLDER_PREFIX = "target-session:"
+
+#: A subagent planner holds node:<id> under this prefix between `session open`
+#: and `session close`, mirroring target-session. Resolved in the same branch.
+BLUEPRINT_HOLDER_PREFIX = "blueprint-session:"
+
+
+def holder_agent_name(holder: Optional[str], rows: Any) -> Optional[str]:
+    """Resolve a claim holder to the agent behind it, or None.
+
+    None means no row in ``rows`` stands behind the name: a skip, not a
+    failure. ``rows`` is the caller's read; no agents import here.
+    """
+    if not holder:
+        return None
+
+    if holder.startswith(HANDOVER_HOLDER_PREFIX):
+        name = holder[len(HANDOVER_HOLDER_PREFIX):]
+        return name if any(row.name == name for row in rows) else None
+    if holder.startswith((TARGET_SESSION_HOLDER_PREFIX, BLUEPRINT_HOLDER_PREFIX)):
+        sid = holder.split(":", 1)[1]
+        row = next(
+            (
+                r
+                for r in rows
+                if sid in {
+                    r.harness_session_id,
+                    getattr(r, "session_id", None),
+                    getattr(r, "cc_session_id", None),
+                }
+            ),
+            None,
+        )
+        return row.name if row else None
+    return holder
 
 #: Suffix of the per-claim recovery mutex directory. One definition: this
 #: string was written out at six call sites, and a seventh (the dispatch
@@ -1402,13 +1455,30 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
 
     Keys in the returned dict:
         key:       echo of input
-        state:     one of free | live | suspect | stale | corrupted
+        state:     one of free | live | suspect | stale | corrupted | unknown
         basis:     why the state (only when state in {live, suspect, stale});
-                   e.g. stale/offhost vs stale/pid-reuse vs suspect/pid-shared
+                   e.g. stale/offhost vs stale/pid-reuse vs suspect/pid-shared;
+                   unknown/key-unrouted when a node-shaped key lost its prefix
         holder:    string (only when state in {live, suspect, stale})
         pid, host, acquired_at, expires_at, reason, metadata: when readable
         error:     string (only when state == corrupted)
+
+    With no ``root``, the store is resolved from the key via
+    :func:`fno.claims.io.claims_root_for`, so ``free`` means the key routed
+    and nothing holds it - never "some tree was read".
     """
+    from fno.graph._constants import is_wellformed_node_id
+
+    if ":" not in key and is_wellformed_node_id(key):
+        # A bare node id names no store; free here reads as safe-to-dispatch.
+        return {
+            "key": key,
+            "state": "unknown",
+            "basis": "key-unrouted",
+            "detail": f"{key!r} has no claim prefix; node claims are keyed node:{key}",
+        }
+    if root is None:
+        root = claims_root_for(key)
     path = claim_path(key, root=root)
     try:
         claim = read_claim_file(path)
@@ -1558,19 +1628,29 @@ def list_claims_with_counts(
     return _list_claims_impl(prefix=prefix, include_stale=include_stale, root=root)
 
 
+class ForceReleaseOutcome(NamedTuple):
+    """What a force-release found at the path; archived=False means nothing was there."""
+
+    path: Path
+    archived: bool
+    previous_holder: Optional[str]
+
+
 def force_release_claim(
     key: str,
     reason: str,
     *,
     root: Optional[Path] = None,
     holding_recovery_lock: bool = False,
-) -> None:
+) -> ForceReleaseOutcome:
     """Administratively drop a claim, regardless of holder.
 
     ``reason`` is required (non-empty); the audit event records who ran the
-    override and why. Idempotent: missing claim file is success. Existing
-    claims are archived to ``.expired/`` rather than unlinked, so a forensic
-    trail survives.
+    override and why. Existing claims are archived to ``.expired/`` rather
+    than unlinked, so a forensic trail survives, and the outcome names the
+    path that was read and whether an archive happened. A missing claim file
+    is no longer reported as a release: the outcome carries
+    ``archived=False`` so a caller can tell "dropped" from "nothing there".
 
     ``holding_recovery_lock`` is for the one caller that already holds this
     key's recovery mutex and is calling from inside it. The mutex is a mkdir
@@ -1619,7 +1699,7 @@ def force_release_claim(
             emit_claim_force_overridden(
                 key=key, reason=reason, previous_holder=None, previous_pid=None,
             )
-            return
+            return ForceReleaseOutcome(path=path, archived=False, previous_holder=None)
 
         previous: Optional[Claim] = None
         try:
@@ -1633,6 +1713,11 @@ def force_release_claim(
             reason=reason,
             previous_holder=previous.holder if previous is not None else None,
             previous_pid=previous.pid if previous is not None else None,
+        )
+        return ForceReleaseOutcome(
+            path=path,
+            archived=True,
+            previous_holder=previous.holder if previous is not None else None,
         )
     finally:
         if acquired_lock:
@@ -1780,12 +1865,10 @@ def reap_dead_claims(
 
     Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
     ``kept_live``, ``kept_suspect``, ``kept_suspect_alive``,
-    ``kept_suspect_unprobed``, ``kept_offhost``, ``corrupted``, ``vanished``,
-    ``contended``, ``reap_failed`` (list of ``(path, reason)``), ``apply``,
-    ``roots``. The two new suspect buckets split what used to be one number:
-    "kept: 2 suspect" is the line that taught the operator the reaper was
-    useless, because it could not say whether those two were protected or
-    merely unmeasured. A ``claim_reap_swept`` event fires on every
+    ``kept_suspect_unprobed``, ``kept_unclassified``, ``unclassified_dirs``,
+    ``kept_suspect_unprobed_by``, ``kept_offhost``, ``corrupted``,
+    ``vanished``, ``contended``, ``reap_failed`` (list of ``(path,
+    reason)``), ``apply``, ``roots``. A ``claim_reap_swept`` event fires on every
     ``apply=True`` call, including a zero-reap run - a leg that never ran
     must not look the same as one that ran and found nothing. A dry run
     fires no event: the "nothing is written" promise above covers the
@@ -1800,7 +1883,9 @@ def reap_dead_claims(
     use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
     native_verdicts: dict[str, dict[str, Any]] = {}
     for cdir in use_dirs:
-        native_verdicts.update(claim_verdicts(root=cdir.parent.parent))
+        # Verbatim: root=cdir.parent.parent re-resolved one level down, so
+        # space-root claims got no verdict (x-9c91).
+        native_verdicts.update(claim_verdicts(claims_dir_path=cdir))
 
     ts = now_ms()
     scanned = 0
@@ -1810,19 +1895,31 @@ def reap_dead_claims(
         "offhost": 0, "suspect": 0, "live": 0,
         "suspect_alive": 0, "suspect_unprobed": 0,
     }
+    # No verdict row in the walked dir is unclassified, never "unprobed".
+    kept_unclassified = 0
+    unclassified_dirs: dict[str, int] = {}
+    unprobed_by: dict[str, int] = {}
 
     def _sweep_verdict(
-        claim: Claim, native_verdict: Optional[dict[str, Any]] = None
+        claim: Claim, cdir: Path, native_verdict: Optional[dict[str, Any]] = None
     ) -> tuple[bool, str]:
+        nonlocal kept_unclassified
         native = native_verdict or native_verdicts.get(claim.key)
         if native is None:
-            return False, "suspect_unprobed"
-        return sweep_verdict(
+            kept_unclassified += 1
+            unclassified_dirs[str(cdir)] = unclassified_dirs.get(str(cdir), 0) + 1
+            return False, "_unclassified"
+        dead, bucket = sweep_verdict(
             claim,
             abandonment_probe=abandonment_probe,
             node_settlement=node_settlement,
             native_verdict=native,
         )
+        if not dead and bucket == "suspect_unprobed":
+            token = getattr(abandonment_probe, "reasons", {}).get(claim.key)
+            if token:
+                unprobed_by[token] = unprobed_by.get(token, 0) + 1
+        return dead, bucket
 
     corrupted = 0
     vanished = 0
@@ -1887,7 +1984,7 @@ def reap_dead_claims(
             # file and asks the native door again for that fresh claim, because
             # the claim may have been archived-and-recreated between this scan
             # and the lock.
-            provably_dead, bucket = _sweep_verdict(claim)
+            provably_dead, bucket = _sweep_verdict(claim, cdir)
 
             if provably_dead:
                 if not apply:
@@ -1924,9 +2021,10 @@ def reap_dead_claims(
                     # The native key read deliberately has unknown PID
                     # exclusivity: this is a TOCTOU re-read, not a reused batch
                     # scan. The first batch read carried the full sibling set.
-                    fresh_native = claim_verdicts(prefix="", root=cdir.parent.parent).get(fresh.key)
+                    fresh_native = claim_verdicts(prefix="", claims_dir_path=cdir).get(fresh.key)
                     if fresh_native is None:
-                        kept["suspect_unprobed"] += 1
+                        kept_unclassified += 1
+                        unclassified_dirs[str(cdir)] = unclassified_dirs.get(str(cdir), 0) + 1
                         continue
                     identity = fresh.machine_id or fresh.host
                     pid_key = (identity, fresh.pid) if fresh.pid is not None else None
@@ -1945,6 +2043,7 @@ def reap_dead_claims(
                         }
                     fresh_dead, fresh_bucket = _sweep_verdict(
                         fresh,
+                        cdir,
                         native_verdict=fresh_native,
                     )
                     if not fresh_dead:
@@ -2014,6 +2113,9 @@ def reap_dead_claims(
                     release_dir_mutex(recovery_lock, recovery_token)
                 continue
 
+            if bucket == "_unclassified":
+                continue
+
             # Not provably dead. Bucket the reason for the report.
             kept[bucket] += 1
 
@@ -2038,6 +2140,9 @@ def reap_dead_claims(
         "kept_suspect": kept["suspect"],
         "kept_suspect_alive": kept["suspect_alive"],
         "kept_suspect_unprobed": kept["suspect_unprobed"],
+        "kept_unclassified": kept_unclassified,
+        "unclassified_dirs": unclassified_dirs,
+        "kept_suspect_unprobed_by": unprobed_by,
         "kept_offhost": kept["offhost"],
         "corrupted": corrupted,
         "vanished": vanished,

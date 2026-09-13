@@ -537,13 +537,13 @@ class TestAC1FR:
 
 
 # ---------------------------------------------------------------------------
-# AC3-HP: non-existent path -> redirect to /think
+# AC3-HP: non-existent path -> exit 1 with fno do plan path guidance
 # ---------------------------------------------------------------------------
 
 
 class TestAC3HP:
     def test_nonexistent_path_exits_1(self, tmp_path):
-        """AC3-HP: non-existent path -> exit 1 with redirect message."""
+        """AC3-HP: non-existent path -> exit 1 with guidance message."""
         nonexistent = tmp_path / "does_not_exist.md"
         result = _run_mutate(nonexistent)
         assert result.returncode == 1, \
@@ -559,7 +559,7 @@ class TestAC3HP:
             f"blueprint owns the plan; no /think redirect: {result.stderr}"
 
     def test_nonexistent_path_stderr_mentions_path(self, tmp_path):
-        """AC3-HP: redirect message includes the attempted path."""
+        """AC3-HP: guidance message includes the attempted path."""
         nonexistent = tmp_path / "does_not_exist.md"
         result = _run_mutate(nonexistent)
         assert str(nonexistent) in result.stderr or nonexistent.name in result.stderr, \

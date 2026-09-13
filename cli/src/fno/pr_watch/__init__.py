@@ -21,7 +21,7 @@ still works.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
 from fno.pr_watch._discover import PrObservation
 
@@ -55,19 +55,6 @@ class Decision:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _iso_to_date_str(ts: Optional[str]) -> Optional[str]:
-    """Return the date portion of an ISO-8601 string (first 10 chars).
-
-    Used to compute day-level age without pulling in datetime parsing. For UTC
-    timestamps the first 10 chars are always YYYY-MM-DD, so a lexical
-    subtraction of total days is not needed -- we compare epoch day counts
-    approximated from the date string.
-    """
-    if not ts:
-        return None
-    return ts[:10]
-
 
 def _days_between(a_iso: str, b_iso: str) -> int:
     """Approximate number of days between two ISO-8601 timestamps.

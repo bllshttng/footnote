@@ -64,7 +64,9 @@ def default_dedup_key(reason: str, env: Optional[Mapping[str, str]] = None) -> s
     processes from one operator burst collapse rather than triple-count.
     """
     e = _env(env)
-    session = (e.get("FNO_SESSION") or e.get("FNO_SESSION_PID") or "").strip()
+    session = (
+        e.get("FNO_SERVER") or e.get("FNO_SESSION") or e.get("FNO_SESSION_PID") or ""
+    ).strip()
     return f"{reason}:{session}:{_utc_day(e)}"
 
 

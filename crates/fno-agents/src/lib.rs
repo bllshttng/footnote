@@ -49,12 +49,16 @@ pub mod active_backlog;
 mod agent_lock;
 pub mod agents_config;
 pub mod agy_ask;
+pub mod announce;
+pub mod arm_watch;
 pub mod attach;
 pub mod authorized_merge;
+pub mod backlog;
 pub mod backlog_ready;
 pub mod bash_census;
 mod bounded_spawn;
 mod cancel_sentinel;
+pub mod census;
 pub mod check_supersession;
 pub mod claim_verbs;
 pub mod claims;
@@ -84,14 +88,17 @@ pub mod daemon;
 pub mod delivery_completion;
 pub mod digest;
 pub mod disposition_gate;
-mod distress;
+pub mod distress;
 pub mod drift;
 pub mod envelope;
 pub mod events;
 pub mod events_limits;
+pub mod evidence;
 pub mod fallback_chain;
 pub mod feed;
 pub mod finalize;
+pub mod fleet_incident;
+pub mod flight_gate;
 pub mod gc;
 pub mod gc_inventory;
 pub mod gc_native;
@@ -102,7 +109,6 @@ pub mod gemini_ask;
 mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
-pub mod graph_sqlite;
 pub mod graph_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
@@ -111,7 +117,12 @@ mod identity;
 pub mod interrupt_classify;
 pub mod kill_criteria;
 pub mod king_board;
+pub mod king_checkin;
+pub mod king_history;
+pub mod king_ledger;
 pub mod king_termination;
+pub mod law_match;
+pub mod liveness_sweep;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
@@ -120,6 +131,7 @@ pub mod loop_reign;
 pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
+pub mod machine_watch;
 pub mod mail_inject;
 pub mod manifest;
 pub mod manifest_lookup;
@@ -129,7 +141,9 @@ pub mod merge_reap;
 #[path = "mint_guard_tests.rs"]
 mod mint_guard_tests;
 pub mod model_env_scrub;
+pub mod naming;
 pub mod needs;
+pub mod node_origin;
 pub mod node_route;
 pub mod nudge;
 pub mod opencode_ask;
@@ -139,17 +153,25 @@ pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
 pub mod pane_relaunch;
+pub mod pane_stop;
 pub mod paths;
 pub mod pi;
+pub mod plugin_install;
 pub mod protocol;
+pub mod prove_it_verdicts;
 pub mod provider;
+pub mod publish_review;
 pub mod readiness;
+pub mod reap_release;
 pub mod reap_render;
 pub mod receipt;
+pub mod reclaim;
 pub mod reentry;
+pub mod registry_json;
 pub mod rename;
 pub mod resume_args;
 pub mod resume_receipt;
+pub mod resume_wake;
 pub mod review_freshness;
 pub mod review_summary;
 pub mod roster_progress;
@@ -158,8 +180,11 @@ pub mod route_slot;
 pub mod row_truth;
 pub mod run_outcome;
 pub mod run_state;
+pub mod scoreboard;
 pub mod scrape;
+pub mod scratch;
 pub mod screen;
+pub(crate) mod served_liveness;
 pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod single_flight;
@@ -854,6 +879,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     "agent_stopped",
+    // Stop/rm claims release (x-9c91): the receipt event for the claims a
+    // stopped or removed worker held; one emit per stop/rm that ran one.
+    "agent_stop_claims_released",
     // A stop the daemon REFUSED to claim: the interrupt never confirmed a
     // terminal turn, so the row stays live and the work is still running.
     "agent_stop_refused",
@@ -872,6 +900,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_effort_changed",
     "session_aliases_merged",
     "merge_cleanup_requested",
+    "merge_cleanup_skipped",
     "merge_cleanup_completed",
     "merge_cleanup_refused",
     // Merge reaper (daemon-emitted, x-07dc): a pending request was HELD (the
@@ -909,6 +938,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "state_reap",
     "graph_write_gate",
     "graph_export_failed",
+    // One 5-minute parity sample: relational export vs authoritative JSON
+    // while JSON is still the backend (the 7-day soak clock's input).
+    "graph_parity_sample",
     // Choke-point removal accounting (x-a879): ANY write path that drops a
     // registry row emits one of these, receipt staged first. Distinct from
     // `agent_row_reaped` (the GC door's own event); this fires for every
@@ -1055,6 +1087,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // fire row whose journal entries are the operator-notice rate bound.
     "evals_scheduled_run",
     "evals_stale",
+    // Scratch-shape sweep (x-caf8, agents-emitted from the `scratch sweep`
+    // stage of the daily eval-sweep ignition): one row per new (job, shape)
+    // recurrence the jobs-dir walker found, and one row per node the sweep
+    // filed, folded, or seeded for a shape. The journal is the sweep's own
+    // dedupe index: a pair already observed in the window never re-emits.
+    "scratch_shape_observed",
+    "scratch_shape_filed",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
     // Inside-leg state push (daemon-emitted, inside-out E3.2): a per-turn hook

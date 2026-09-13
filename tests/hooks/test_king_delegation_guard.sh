@@ -2,11 +2,13 @@
 # test_king_delegation_guard.sh
 #
 # Unit tests for hooks/king-delegation-guard.sh: a crowned court session is
-# refused source authorship with a reason naming the delegation verbs (AC1);
+# refused with a reason naming the write target and the allowed roots (AC1);
 # the unblock allowlist, the plans-directory carveout, and the off knob allow
 # (AC2); a pass shape, an uncrowned row, and an unreadable registry all allow,
-# the unreadable case with a line on stderr (AC3). The registry row, reign
-# manifest, knob and plans dir are stubbed per case; no real fno state.
+# the unreadable case with a line on stderr (AC3); a Task limb of the court
+# allows via its payload agent_id or its subagents/ transcript, anything else
+# fail-closes. The registry row, reign manifest, knob and plans dir
+# are stubbed per case; no real fno state.
 
 set -uo pipefail
 
@@ -42,6 +44,8 @@ elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "manifest-path" ]; the
   fi
 elif [ "$1" = "config" ] && [ "$2" = "get" ]; then
   cat "$KGD_KNOB" 2>/dev/null || true
+elif [ "$1" = "config" ] && [ "$2" = "paths" ] && [ "$3" = "handoff" ]; then
+  echo "$KGD_HANDOFF"
 elif [ "$1" = "do" ] && [ "$2" = "plan" ] && [ "$3" = "path" ]; then
   echo "$KGD_PLANS/probe.md"
 else
@@ -54,6 +58,7 @@ export KGD_REG_FIXTURE="$TMP/registry.json"
 export KGD_KNOB="$TMP/knob.txt"
 export KGD_PLANS="$TMP/plans"
 export KGD_MANIFEST_ARGS="$TMP/manifest-args.log"
+export KGD_HANDOFF="$TMP/handoffs/20260910-crown-fno.md"
 mkdir -p "$KGD_PLANS"
 : > "$KGD_KNOB"
 : > "$KGD_MANIFEST_ARGS"
@@ -79,16 +84,22 @@ UNCROWNED='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","crown_
 
 edit_payload() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$TMP/repo" "$1"; }
 bash_payload() { printf '{"tool_name":"Bash","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"command":"%s"}}' "$SID" "$TMP/repo" "$1"; }
+edit_payload_t() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"%s","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$2" "$TMP/repo" "$1"; }
+# $1 file, $2 transcript_path, $3 agent_id - the subagent-borne shape carries
+# the parent session id plus the harness's per-call subagent marker.
+edit_payload_ag() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"%s","agent_id":"%s","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$2" "$3" "$TMP/repo" "$1"; }
 
-# ── AC1-HP: crowned court + Edit on a source file -> deny naming both verbs ──
+# ── AC1-HP: crowned court + Edit on a source file -> deny names path + roots ─
 registry_fixture "$CROWNED"
 manifest_fixture court
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
+REASON="$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')"
 if [[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-   && echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q "fno agents spawn '/fno:target <id>' --node <id> --substrate thread" \
-   && echo "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -q "fno backlog advance" \
+   && printf '%s' "$REASON" | grep -qF "$SRC_FILE" \
+   && printf '%s' "$REASON" | grep -qF "$KGD_PLANS" \
+   && ! printf '%s' "$REASON" | grep -qiE "spawn|advance" \
    && echo "$OUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
-  pass "AC1: crowned court Edit denied, reason names spawn + advance"
+  pass "AC1: crowned court Edit denied, reason names the path + allowed roots, no delegation verbs"
 else
   fail "AC1: rc=$RC out=${OUT:0:300}"
 fi
@@ -126,8 +137,8 @@ OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 printf 'warn\n' > "$KGD_KNOB"
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 ERR="$(cat "$TMP/stderr.txt")"
-[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"crowned court session does not implement"* ]] \
-  && pass "AC2: knob warn emits refusal on stderr and allows" \
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"$SRC_FILE"* && "$ERR" == *"outside the allowed roots"* ]] \
+  && pass "AC2: knob warn names the path on stderr and allows" \
   || fail "AC2: knob warn rc=$RC out=$OUT err=$ERR"
 : > "$KGD_KNOB"
 
@@ -198,10 +209,141 @@ OUT="$(run_guard "$(bash_payload "fno agents spawn '/fno:target x-9' --node x-9 
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "Bash floor: spawn with 2>/dev/null allowed" \
   || fail "Bash floor: spawn devnull rc=$RC out=$OUT"
 
+# ── Handoff exemption: the crown's own canon doc stays writable ──────────────
+registry_fixture "$CROWNED"
+manifest_fixture court
+OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","content":"gaps"}}' "$SID" "$TMP/repo" "$KGD_HANDOFF")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: Write to the crown's canon doc allowed" \
+  || fail "handoff Write rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(edit_payload "$KGD_HANDOFF")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: Edit of the crown's canon doc allowed" \
+  || fail "handoff Edit rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "cat >> $KGD_HANDOFF")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: cat redirect append allowed" \
+  || fail "handoff cat rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "printf ruling | tee -a $KGD_HANDOFF")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: tee append allowed" \
+  || fail "handoff tee rc=$RC out=$OUT"
+
+# A sibling under the same directory is NOT the resolved doc: still denied.
+OUT="$(run_guard "$(bash_payload "echo x > $TMP/handoffs/evil.md")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "handoff: sibling path still denied" \
+  || fail "handoff sibling rc=$RC out=${OUT:0:300}"
+
 OUT="$(run_guard "$(bash_payload "sed -i s/a/b/ $TMP/repo/src/x.py")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
   && pass "Bash floor: in-place sed on source denied" \
   || fail "Bash floor: sed -i rc=$RC out=${OUT:0:300}"
+
+# ── Glued boundary: shlex glues `;` onto a redirect token when unspaced ──────
+# `2>&1;` must still classify as the fd dup, not a write to a file named `&1;`.
+registry_fixture "$CROWNED"
+manifest_fixture court
+OUT="$(run_guard "$(bash_payload "echo probe-d 2>&1; echo probe-e")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "glue: chained 2>&1; allows" \
+  || fail "glue chained rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "echo probe-i 2>&1 ; echo probe-j")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "glue: spaced control allows" \
+  || fail "glue spaced rc=$RC out=$OUT"
+
+# A real target outside plans still denies, semicolon glued or not.
+OUT="$(run_guard "$(bash_payload "echo x > $TMP/repo/src/evil.py; echo done")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "glue: real source target glued to ; denied" \
+  || fail "glue real target rc=$RC out=${OUT:0:300}"
+
+# A quoted semicolon inside the filename is data: plans-dir write still allows.
+OUT="$(run_guard "$(bash_payload "cat > \"$KGD_PLANS/plan;.md\"")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "glue: quoted plan;.md in plans allows" \
+  || fail "glue quoted rc=$RC out=$OUT"
+
+# The node's live specimen shape: a read verb with a thrown-away dup chain.
+OUT="$(run_guard "$(bash_payload "fno backlog session close x-1 --launch '/fno:target x-1' 2>&1; echo done")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "glue: session close with 2>&1; chain allows" \
+  || fail "glue session close rc=$RC out=$OUT"
+
+# ── Node specimens: reads pass untouched; a refusal names the path, never ────
+# delegation. These are the verify shapes the node names.
+registry_fixture "$CROWNED"
+manifest_fixture court
+OUT="$(run_guard "$(bash_payload "git log --oneline -5")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "reads: git log allows" \
+  || fail "reads git log rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "ls -la $TMP/repo/src")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "reads: ls allows" \
+  || fail "reads ls rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $KGD_HANDOFF")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: cp into the canon doc allowed" \
+  || fail "handoff cp rc=$RC out=$OUT"
+
+mkdir -p "$TMP/vault/briefs"
+OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $TMP/vault/briefs/b.md")")"; RC=$?
+REASON="$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')"
+if echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+   && printf '%s' "$REASON" | grep -qF "vault/briefs/b.md" \
+   && ! printf '%s' "$REASON" | grep -qiE "spawn|advance"; then
+  pass "vault: cp outside the roots denied, reason names the path, no delegation verbs"
+else
+  fail "vault cp rc=$RC out=${OUT:0:300}"
+fi
+
+# ── Limb carve-out: a Task subagent of this very court is a limb, not the king.
+# Its payload carries the parent's session_id, so sections 2-4 see the crown,
+# plus a non-empty agent_id, the per-call subagent marker; the transcript path
+# names the parent transcript for king and limb alike, so the on-disk
+# subagents/ layout is only the second signature.
+SUBTRANS="$TMP/transcripts/$SID/subagents/agent-x.jsonl"
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$SUBTRANS")")"; RC=$?
+ERR="$(cat "$TMP/stderr.txt")"
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"limb of crowned session $SID"* ]] \
+  && pass "limb: subagent transcript Write allowed, stderr names the limb" \
+  || fail "limb allow rc=$RC out=$OUT err=$ERR"
+
+# The live incident shape: the payload's transcript_path names the PARENT main
+# transcript (measured: it is never the limb's subagents file), and only the
+# agent_id marks the call as subagent-borne. This blocked a real limb on
+# 2026-09-13; it must allow.
+MAINTRANS="$TMP/transcripts/$SID/main.jsonl"
+OUT="$(run_guard "$(edit_payload_ag "$SRC_FILE" "$MAINTRANS" "agent-a4f5701e9783b4bfe")")"; RC=$?
+ERR="$(cat "$TMP/stderr.txt")"
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"limb (agent_id agent-a4f5701e9783b4bfe) of crowned session $SID"* ]] \
+  && pass "limb: agent_id allows with a parent main transcript, stderr names the agent" \
+  || fail "limb agent_id rc=$RC out=$OUT err=$ERR"
+
+# A bg job limb may carry an empty transcript_path entirely; agent_id still
+# decides. Named and unnamed limbs both carry it.
+OUT="$(run_guard "$(edit_payload_ag "$SRC_FILE" "" "agent-hotfix-restart-json")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "limb: agent_id allows with an empty transcript (bg job shape)" \
+  || fail "limb agent_id empty-transcript rc=$RC out=$OUT"
+
+# A foreign session's subagents dir is not this court's limb: fail closed.
+FOREIGNTRANS="$TMP/transcripts/sess-other/subagents/agent-y.jsonl"
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$FOREIGNTRANS")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "limb: foreign session's subagents transcript denied" \
+  || fail "limb foreign rc=$RC out=${OUT:0:300}"
+
+# A main-thread transcript (parent dir is not subagents/) and no agent_id
+# keeps court treatment.
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$MAINTRANS")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "limb: main-thread transcript denied" \
+  || fail "limb main-thread rc=$RC out=${OUT:0:300}"
+
+# Empty transcript (non-claude harness) keeps court treatment: AC1 already pins
+# it, re-asserted here next to the carve-out cases.
+OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "limb: empty transcript denied" \
+  || fail "limb empty rc=$RC out=${OUT:0:300}"
 
 # Positive control on the harness itself: the stub fno must be reachable and
 # the crown read live, else every "allow" above is a silent stub failure.

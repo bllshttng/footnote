@@ -107,6 +107,11 @@ fn watching_ignored_names_a_missing_claim_as_permanent() {
         "the refusal must stop the re-arm loop it caused: {}",
         d.message
     );
+    assert!(
+        d.message.contains("fno do target start <node>"),
+        "the refusal must name the way back, not only the dead end: {}",
+        d.message
+    );
 }
 
 // The refusal above and the hint below it used to arrive in one message: no

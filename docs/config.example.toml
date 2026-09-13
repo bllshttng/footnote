@@ -47,7 +47,7 @@ prefix = "fno"
 # postmortems_dir = <unset>   # optional; no default
 # Override base dir for worktrees.
 # worktrees_base = <unset>   # optional; no default
-# Where 'worktree cargo-offload' relocates crates/<crate>/target caches (default ~/.fno/cargo-targets). Each tree keeps its own directory under <base>/<repo>/<tree>/; the checkout keeps a symlink, so built-binary paths stay valid.
+# Cargo build base: where cargo intermediates land, as <base>/{workspace-path-hash} via CARGO_BUILD_BUILD_DIR (default ~/.fno/cargo-build). Each checkout hashes to its own dir, so parallel builds never share the cargo artifact lock; the checkout's target/ keeps only final binaries.
 # cargo_targets_base = <unset>   # optional; no default
 # Override path to the memory dir.
 # memory_dir = <unset>   # optional; no default
@@ -98,6 +98,10 @@ unclaimed_ttl = 1800
 # Seconds past which an outstanding sent message drops off the nag entirely and is never grepped again.
 landed_abandon_ttl = 21600
 
+[user]
+# What fno calls you. Empty falls back to `git config user.name`.
+name = ""
+
 [sandbox]
 # When a headless harness has no confinement backend: refuse before spawn (default) or explicitly warn and continue unconfined.
 on_unavailable = "refuse"
@@ -121,6 +125,10 @@ render_targets = []
 staleness_days = 30
 # Consecutive failures before a node auto-defers.
 max_failed_attempts = 3
+# Transcript-quiet hours before `maintain --apply` reaps an open do row whose session is provably gone.
+abandoned_do_row_hours = 24
+# Wall-clock budget (seconds) for one `fno backlog maintain` pass; a short run exits 4 with a partial receipt naming the leg it stopped in.
+budget_seconds = 300
 # Age (days) before a stale idea enters the validity sweep.
 validity_days = 60
 # Oldest-first validity-sweep batch size (clamped to 100).
@@ -212,10 +220,6 @@ agent_routes = {}
 # Enable cross-model (codex/gemini) second-opinion review.
 enabled = false
 
-[style]
-# Rolling per-pair mail word budget inside the 10-minute window (default 80). Raise it alongside style.word_cap.mail: a higher per-message cap that leaves this at 80 refuses the very message the cap now permits.
-pair_budget_words = 80
-
 [style.word_cap]
 # Masked-word cap for style rule 7 on a mail body (default 80). The refusal names the number enforced here, not the built-in.
 mail = 80
@@ -291,7 +295,9 @@ happy_routed_panes = false
 retire_grace_s = 900
 # Seconds between runs of the daemon's retirement sweep (default 300, a third of the retire grace). The Rust resolver clamps this under a third of agents.retire_grace_s: the interval must be a fraction of the grace, never a multiple, so an eligible row never waits past the grace window it retires inside. Unset, unparseable, or below the 5s daemon tick resolves to the default. The `retire` row in `fno agents status` carries the value the loop enforces.
 retire_interval_s = 300
-# Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).
+# Seconds a reaper hold (sources disagree, transcript unresolved, open do row, needs live stop, stop refused) must sit past before the reap report names its release verb and the stale-escalate arm asks the operator (default 5400). A hold whose age cannot be measured never escalates.
+hold_escalate_after_s = 5400
+# Backstop cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3). Sized from RAM, because every live row holds RAM whether or not it works: floor((RAM_GB - 4 GB OS reserve - your desktop apps) / 1 GB per worker). The 1 GB planning figure is generous on purpose (a build or a test suite bursts past the measured 430 MB a quiet worker holds); the CPU axis (max_fleet_cpu_share) binds first on any machine with real headroom, so raise this instead of tuning it.
 max_live = 3
 # Per-territory team cap: the max live workers whose node is contained in one crown scope, enforced in the spawn gate beside agents.max_live (the machine ceiling, which stays independent and authoritative). Rows that work no node (kings, blueprinters, ad-hoc panes) never count. Unknown territory attribution refuses; other-territory headroom is untouched (default 4).
 max_live_per_territory = 4
@@ -299,13 +305,13 @@ max_live_per_territory = 4
 provider_limits = { zai = { lanes = 5, subagents = 1 } }
 # Maximum panes placed in one named pane_group tab before a spawn creates the next numbered sibling tab (default 4).
 pane_group_max = 4
-# Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4).
+# Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4). Set it to what the OS needs to stay out of swap: 2 on an 8 GB box, 3 on 16 GB, 4 above.
 min_free_gb = 4.0
-# Load at which spawn preflight stops trusting load average and consults fleet CPU attribution: this factor times the CPU count on the 1-min load average (<= 0 disables the whole check; default 8). A TRIGGER, not a refusal - it refused outright until the fleet-share governor landed, twice on load the fleet did not cause, because load average counts blocked processes and measures nobody's CPU share. Measured motivation for keeping a load signal at all: load 309 on 12 CPUs while the RAM floor held ten times its margin.
+# DEPRECATED and ignored since 2026-09-09: admission decides on the fleet's CPU share (agents.max_fleet_cpu_share) on every spawn, never on a load trigger - the 1-minute load moved 101 points in three minutes with no change in real work. The key parses for one release and prints one deprecation line when set; delete it.
 max_load_per_cpu = 8.0
-# Share of CPU capacity the fleet may hold before spawn preflight refuses, checked only above agents.max_load_per_cpu (default 0.5). This is the figure the refusal already printed and never decided on. Unreadable attribution refuses, because an unknown share is not evidence of headroom.
+# Share of CPU capacity the fleet may hold, checked on EVERY spawn (default 0.5). An attribution gap widens the share to an interval bounded above by the whole machine's measured CPU: over by its own attributed work the gate holds and re-samples; the ceiling inside the interval refuses and names both bounds plus the gap; above the interval the gate admits and says the reading was an upper bound. Leave 0.5 unless the box is dedicated, then 0.6.
 max_fleet_cpu_share = 0.5
-# Absolute machine backstop for spawn preflight: refuse above this factor times the CPU count regardless of whose load it is (<= 0 disables; default 40). Pure fleet-share admits spawns onto a box already thrashing from foreign work. Keep it well above agents.max_load_per_cpu.
+# Absolute machine backstop for spawn preflight, read on the FIFTEEN-minute load average: refuse above this factor times the CPU count regardless of whose load it is (<= 0 disables; default 40). Fifteen minutes because the backstop should fire only on a box that has been dying for a while, not on a transient spike. Leave it alone.
 hard_max_load_per_cpu = 40.0
 # Worker CPU/IO priority: utility (background QoS, default) or off.
 worker_qos = "utility"
@@ -373,8 +379,10 @@ harness = ""
 substrate = ""
 # Dispatch command template with a single {id}. Empty = '/target --no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve. A leading /verb becomes $fno:verb on codex and /fno:verb on opencode. The deprecated gemini is refused. A non-slash template passes through literally.
 command = ""
-# Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).
-allowed_verbs = ["/target", "/think"]
+# Dispatch verbs from outside fno, as [dispatch.verb_registry.<name>] tables with the descriptor fields (invocation, invocations, requires, takes_node_id, asserts, session_phase). Unioned with the allowed_verbs allowlist at resolve; a key naming an allowlisted verb is dropped, so a project cannot redefine a shipped one. invocation is the worker's exact spelling and is rendered verbatim (never fno-namespaced); invocations maps harness to spelling and doubles as the harness allowlist, so a dispatch to any other harness refuses. requires=skill probes the harness skill roots at resolve and refuses naming them; asserts records what a completion proves (pr | doc | invocation); session_phase names the sessions-row phase stamped for the worker (a --node dispatch of a registry verb without one is refused).
+verb_registry = {}
+# Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think, /blueprint).
+allowed_verbs = ["/target", "/think", "/blueprint"]
 # DEPRECATED: reads as auto_merge.grant for one release ('dispatch' when true); migrate with `fno config set auto_merge.grant <none|dispatch>`. Formerly the per-project merge posture for autonomous dispatch.
 auto_merge = false
 # On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'.
@@ -389,7 +397,7 @@ objective = "cheapest-that-clears"
 prefer_harness = ""
 # The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.
 models = []
-# Opt-in strict inventory: a spawn qualifies against its effective work-kind slot's CONFIG-declared lanes only; explicit flags constrain, never bypass, and an unresolvable request is a named refusal. Default off.
+# Opt-in strict inventory: a spawn qualifies against its effective work-kind slot's CONFIG-declared lanes only, and an unresolvable request is a named refusal. A typed --model, -P, or --route is an operator pin and outranks the declared lanes; every axis the operator did not name still qualifies against them. Default off.
 enforce_inventory = false
 # The operator's access posture: local (attending), remote (only verified-native-view rows qualify), or unknown (the default; filters like remote, labeled unknown in receipts). Never inferred.
 operator_access = "unknown"
@@ -483,10 +491,12 @@ retries = 3
 max_age_days = 14
 # Claude model used for headless PR-watcher skill fires.
 model = "claude-haiku-4-5"
-# Wall-clock ceiling for one PR-watcher tick; unset derives 0.8x the poll interval so a stalled tick can never suppress its successor.
+# Wall-clock ceiling for one PR-watcher tick; unset derives 0.8x the poll interval so a stalled tick can never suppress its successor. Each phase also runs under its own alarm slice inside that ceiling, so one slow phase cannot abort the phases after it.
 # tick_timeout_seconds = <unset>   # optional; no default
 # Skip the PR-watcher's per-PR dispatch pass when the shared GraphQL budget falls below this floor.
 graphql_min_remaining = 200
+# Consecutive broken tick ends (timeout/error) at a fresh watermark before the watcher reads `wedged` and auto-heal re-renders its plist via `fno do pr watch refresh`.
+wedged_after_ticks = 3
 
 [groom]
 # Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true.
@@ -503,6 +513,10 @@ enabled = true
 schedule_days = 7
 # Age in days at which the newest regression-tier run reads STALE in doctor and triage health.
 stale_days = 7
+# Distinct jobs inside the window at which a recurring scratch shape files one p1 node.
+scratch_threshold = 3
+# Window in days the scratch-shape sweep reads job tmp dirs over.
+scratch_window_days = 28
 
 [recovery]
 # Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.defaults.permission_mode built-in for autonomous dispatch); a non-bypass worker cannot run autonomously and is not resumed.
@@ -525,7 +539,7 @@ provider_outage_529_span_seconds = 120
 provider_outage_529_cross_session_window_seconds = 600
 # Maximum age in seconds for a persisted pane snapshot to vote; minimum and default 120.
 provider_outage_pane_freshness_seconds = 120
-# Maximum age in seconds for durable transcript outage evidence; minimum and default 600 so the full cross-session overload window remains observable.
+# Maximum age in seconds for durable transcript outage evidence; minimum and default 600 so the full cross-session overload window remains observable. Evidence naming a reset epoch still in the future stays admissible past this age, by name, so a multi-hour cap cannot age out of view.
 provider_outage_evidence_freshness_seconds = 600
 # Grace after a reset-bearing limit before the breaker may close; minimum and default 120.
 provider_outage_reset_grace_seconds = 120
@@ -631,11 +645,11 @@ sandbox = false
 [model_routing]
 # Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn.
 enabled = true
-# Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in.
+# Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, tier_models, wire_api}); 'zai' is built in. tier_models maps a Claude tier to a model ({opus = "glm-5.3[1m]"}); keys are opus|sonnet|haiku|fable and undeclared tiers keep the spawn model.
 providers = {}
 # Per-role target map (role -> 'provider/model', e.g. tidy: 'zai/glm-4.7'; legacy 'provider,model' comma form also accepted); manage via `fno config route set/unset`. The opt-in 'build' lane routes delivery spawns (/target bg).
 roles = {}
-# Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides).
+# Extra env merged into routed spawns (e.g. API_TIMEOUT_MS). Prefer tier_models for per-tier models; extra_env still wins as a hand pin.
 extra_env = {}
 
 [mux]
@@ -665,7 +679,7 @@ status_row = true
 [mux.restore]
 # Rebuild named held panes for pane-substrate workers after a mux server restart; focusing a held pane resumes its persisted harness session (default on).
 hold_workers = true
-# Startup restore policy for worker members: hold (rebuild named held panes, default), idle (members stay idle rows), or resume (run the bulk restore and resume every member through its own harness). Overrides hold_workers when set.
+# Startup restore policy for worker members: hold (rebuild named held panes, resume on focus, skip tabs whose every slot binds a done worker, default), idle (members stay idle rows), or resume (relaunch every member that is not tombstoned, gone, or reap-retired, finished work included). The policy never decides the tab count by itself: tabs rebuild from the stored tab trees under every value, so no value restores zero tabs. Overrides hold_workers when set.
 # policy = <unset>   # optional; no default
 
 [dev]
@@ -695,12 +709,12 @@ wake_debounce_seconds = 900
 wake_backstop_seconds = 1800
 # Minutes a blocked distress row may sit unanswered before the blocked_child board queue surfaces it (default 30). An answer is mail to that session, a claim release on the node, or the node closing.
 blocked_child_grace_minutes = 30
-# What a crowned court session may write through the king-delegation-guard hook: refuse (default) blocks source authorship and routes it to spawn/advance, warn prints the refusal on stderr and allows (adopt the guard mid-reign without a surprise), off silences the guard. An unknown value degrades to refuse.
+# What a crowned court session may write through the king-delegation-guard hook: refuse (default) denies a write whose target resolves outside the plans directory and the crown handoff doc, naming the rejected path, warn prints the refusal on stderr and allows (adopt the guard mid-reign without a surprise), off silences the guard. An unknown value degrades to refuse.
 implementation_guard = "refuse"
 # The /loop interval a reign self-injects (default 30m). Fail-safe: a value that is not <digits>[smhd] degrades to 30m at load, never raises.
 checkin_interval = "30m"
-# The /loop prompt text a reign self-injects at each check-in (default: run the reign skill's check-in body, journal reign_checkin, print 'no change' when idle).
-checkin_text = "reign check-in. Run the check-in body of the reign skill (skills/reign/SKILL.md). Journal reign_checkin. When nothing changed since the last check-in, print 'no change' and stop."
+# The /loop prompt text a reign self-injects at each check-in (default: run fno agents king checkin, which gathers the readings, diffs the last beat, and journals reign_checkin; print 'no change' when idle).
+checkin_text = "reign check-in. Run fno agents king checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals reign_checkin. Then act on the printout per the reign skill. When nothing changed and coverage is full, print 'no change' and stop."
 # The /goal conditions a reign self-injects (default: board clean for the scope, court unsplit, no stand-down order; never /goal clear on NoProgress).
 goal_text = "reign goal. When every node in the crown scope reads done or superseded, the goal is met. An open operator question blocks completion. An empty actionable queue is a quiet beat, never a finish line. A stand-down order from the operator ends the reign. Until then keep reigning. Never /goal clear on NoProgress."
 

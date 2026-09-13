@@ -109,11 +109,21 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "NO_COLOR",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
+    # Relocates uv's tools dir, which scrape::fno_py stats for the wheel's
+    # fno-py console script. Scrubbed, the resolver reads the default
+    # ~/.local/share/uv layout instead of a developer's XDG customization.
+    "XDG_DATA_HOME",
+    # Where cargo writes build intermediates. A developer shell that exports it
+    # would point test-built artifacts at an arbitrary tree; _child_env re-sets
+    # it deliberately from the fno build base after this scrub.
+    "CARGO_BUILD_BUILD_DIR",
     "STATE_FILE",
     "POSTMORTEMS_DIR",
     "POSTMORTEM_CORRECTIONS_LOG",
     "WORKTREE_STATUS_REGISTRY",
     "TASK_LOCK_TTL_HOURS",
+    # The open-do-row TTL beside the lock TTL: same family, same scrub.
+    "TASK_DO_TTL_HOURS",
     "POST_MERGE_NONINTERACTIVE",
     "MCP_CHANNEL_INBOUND_POKE",
     # CI transport state, never developer intent: the push-event sha the

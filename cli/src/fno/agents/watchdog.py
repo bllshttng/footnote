@@ -46,7 +46,12 @@ Verdict = namedtuple(
 )
 #: ``agent`` (default "claude") resolves the row's transcript store (x-c624);
 #: apply lanes re-read the transcript through it, so it rides the verdict too.
-Row = namedtuple("Row", "row_id name state node cwd agent", defaults=(None, "", "claude"))
+#: ``pid``/``pid_start_time``/``mux`` ride for the reachability falsifiers.
+Row = namedtuple(
+    "Row",
+    "row_id name state node cwd agent pid pid_start_time mux",
+    defaults=(None, "", "claude", None, None, None),
+)
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
 #: record so the wake gate can run the shipped tail classifier (a POSITIVE
@@ -460,6 +465,10 @@ ADVISORY_WARNING_PREFIX = "roster advisory: "
 #: Prefix of the headroom notice. It carries ADVISORY_WARNING_PREFIX because a
 #: probe that took a while still returned every row.
 HEADROOM_WARNING_PREFIX = f"{ADVISORY_WARNING_PREFIX}latency: "
+
+#: Advisory structured line for a live row with no harness session id; the
+#: payload names the node so the overlay skips the one row (x-ae54).
+UNMEASURABLE_ROW_PREFIX = "unmeasurable-row: "
 
 #: The roster enumeration budget. ``claude agents --json --all`` is a
 #: fleet-wide live-status probe (measured 3.4s on a 43-row fleet), so the
@@ -1345,7 +1354,15 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
     for r in raw:
         sid = str(r.get("sessionId") or r.get("session_id") or "")
         if not sid:
-            skipped_no_sid += 1
+            cwd = str(r.get("cwd") or "")
+            node = _node_id_from_worktree(cwd) if _is_linked_worktree(cwd) else None
+            if node:
+                warnings.append(
+                    f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
+                    f"harness=claude node={node} name={r.get('name') or 'unknown'}"
+                )
+            else:
+                skipped_no_sid += 1
             continue
         match: Any = by_sid.get(sid)
         name = str(getattr(match, "name", None) or r.get("name") or sid)
@@ -1383,7 +1400,16 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             or getattr(entry, "short_id", None)
         )
         if not row_id:
-            skipped_nonclaude_no_id += 1
+            node = getattr(entry, "node", None)
+            name = str(getattr(entry, "name", None) or "") or "unknown"
+            if not node:
+                skipped_nonclaude_no_id += 1
+            else:
+                warnings.append(
+                    f"{ADVISORY_WARNING_PREFIX}{UNMEASURABLE_ROW_PREFIX}"
+                    f"harness={getattr(entry, 'harness', None) or 'unknown'} "
+                    f"node={node} name={name}"
+                )
             continue
         if str(row_id) in seen_row_ids:
             continue
@@ -1405,6 +1431,9 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
                 # The loop exists only because this entry is NOT claude; the
                 # harness it filtered on is the one the row must carry.
                 agent=str(getattr(entry, "harness", "") or "claude"),
+                pid=getattr(entry, "pid", None),
+                pid_start_time=getattr(entry, "pid_start_time", None),
+                mux=getattr(entry, "mux", None),
             )
         )
         seen_row_ids.add(row_id)
@@ -1672,12 +1701,15 @@ def measure_provider_outages(
         policy = OutagePolicy.from_settings(settings)
     except Exception:  # noqa: BLE001 - use the schema floor on a config miss
         policy = OutagePolicy()
+    from fno.adapters.providers.runtime_state import record_reset_timezone
+
     records, refusals = collect_transcript_evidence(
         identities,
         now_s=now_s,
         transcript_path_for=transcript_path_for,
         evidence_freshness_s=policy.evidence_freshness_s,
         entries_for=entries_for,
+        reset_timezone_for=record_reset_timezone,
     )
     # Rows whose transcript cannot be read fall back to the pane buffer: both
     # a MISSING transcript and an UNSUPPORTED transcript SHAPE leave the pane
@@ -1705,6 +1737,7 @@ def measure_provider_outages(
             now_s=now_s,
             snapshot_dir=Path(snapshot_root),
             pane_read_fn=pane_read_fn,
+            reset_timezone_for=record_reset_timezone,
         )
         successful_rows = {record.row_id for record in pane_records}
         refusals = [
@@ -1733,6 +1766,38 @@ def measure_provider_outages(
         for reason, count in counts.items():
             report.setdefault("counts", {})[reason] = count
     return report
+
+
+def measure_provider_outages_safe(now_s: float) -> dict[str, Any]:
+    """The default report's outage measure: a crash lands as a named unknown
+    report, never a missing key."""
+    try:
+        rows, _warnings = fleet_rows()
+        return measure_provider_outages(rows, now_s=now_s)
+    except Exception as exc:  # noqa: BLE001 - the report outlives one lane's crash
+        report = _unknown_provider_report("provider_outage_measure_failed")
+        report["refusals"][0]["detail"] = repr(exc)
+        return report
+
+
+def provider_outage_lines(report: Optional[dict[str, Any]]) -> list[str]:
+    """Human lines for one report: every open breaker, every refusal reason
+    with its count. A clean zero means measured and clear, never dropped
+    evidence."""
+    lines = []
+    for breaker in (report or {}).get("breakers") or []:
+        lines.append(
+            f"provider outage open: {breaker.get('provider')}/{breaker.get('account')}"
+            f" kind={breaker.get('kind')} reset_at={breaker.get('reset_at')}"
+        )
+    counts: dict[str, int] = {}
+    for item in (report or {}).get("refusals") or []:
+        reason = str(item.get("reason"))
+        counts[reason] = counts.get(reason, 0) + 1
+    if counts:
+        named = " ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        lines.append(f"provider-outage refusals ({named})")
+    return lines
 
 
 def supervise_provider_handoffs(
@@ -2034,7 +2099,7 @@ def production_handoff_candidate(
                 while time.monotonic() < deadline:
                     proc = subprocess.run(
                         [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
-                         "--session", spawned.session, str(spawned.pane_id),
+                         "--server", spawned.session, str(spawned.pane_id),
                          "--lines", "20"],
                         capture_output=True, text=True, timeout=5, check=False,
                     )
@@ -2066,7 +2131,7 @@ def production_handoff_candidate(
             def stop(spawned: Any) -> bool:
                 subprocess.run(
                     [*_subprocess_util.fno_py_cmd(), "mux", "pane", "kill",
-                     "--session", spawned.session, str(spawned.pane_id)],
+                     "--server", spawned.session, str(spawned.pane_id)],
                     capture_output=True, text=True, timeout=10, check=False,
                 )
                 stopped = _mux_pane_alive({
@@ -2190,7 +2255,7 @@ def _production_pane_occupancy(harness: str) -> int:
     session = resolve_mux_session(None)
     proc = subprocess.run(
         [*_subprocess_util.fno_py_cmd(), "mux", "pane", "ls",
-         "--session", session, "--json"],
+         "--server", session, "--json"],
         capture_output=True, text=True, timeout=10, check=False,
     )
     if proc.returncode != 0:
@@ -2699,7 +2764,6 @@ def _send_machine_report(
                     to[len("project:"):],
                     body,
                     cwd=Path.cwd(),
-                    budget_enforce=False,
                     origin="recovery",
                 )
             else:
@@ -2708,7 +2772,6 @@ def _send_machine_report(
                     body,
                     cwd=Path.cwd(),
                     from_name=sender,
-                    budget_enforce=False,
                     origin="recovery",
                 )
         else:
@@ -2718,7 +2781,6 @@ def _send_machine_report(
                     message=body,
                     provider=None,
                     cwd=Path.cwd(),
-                    budget_enforce=False,
                     origin="recovery",
                 )
             else:
@@ -2728,7 +2790,6 @@ def _send_machine_report(
                     provider=None,
                     cwd=Path.cwd(),
                     from_name=sender,
-                    budget_enforce=False,
                     origin="recovery",
                 )
     except DispatchAskError as exc:
@@ -2999,11 +3060,25 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str) -> tuple[
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return "refused", f"resume exit {proc.returncode}: {tail[-1] if tail else ''}"
+    if agent != "claude":
+        # Resume's own exit code is the receipt on every non-claude harness
+        # (x-6ac3): a codex thread row exits 0 only when the daemon accepted
+        # the turn - the same receipt mail delivery trusts - and every exec
+        # arm cannot exit 0 under a captured stdin at all. The transcript
+        # marker is the claude contract; re-checking it here would read a
+        # lagging rollout write as a refusal on a delivered wake.
+        return "applied", f"woke {v.name}; resume exit 0 is the delivery receipt ({agent})"
     if not confirm_wake_landed(v.row_id, cwd, WAKE_MESSAGE, before_epoch, agent=agent):
+        # Carry resume's own last line into the refusal: exit 0 is exactly
+        # the receipt that lied here (x-6ac3), so its before -> after line
+        # is what the next operator needs without re-running anything.
+        # Empty output keeps today's text with no trailing separator.
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return (
             "refused",
             f"resume reported success but {WAKE_MESSAGE!r} is not in the "
-            f"transcript after the wake",
+            f"transcript after the wake"
+            + (f": {tail[-1]}" if tail else ""),
         )
     return "applied", f"woke {v.name}; message confirmed in transcript"
 

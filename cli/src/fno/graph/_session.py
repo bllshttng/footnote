@@ -1,7 +1,8 @@
-"""Blueprint session lifecycle verbs: stamp, close, reap.
+"""Blueprint session lifecycle verbs: stamp, open, close, reap.
 
-The close releases the handover claim it was launched under and repoints
-dispatch_verb at the launch verb, so a finished blueprint names what runs next.
+The close releases the spawn-handover claim or the blueprint-session claim it
+was opened under and repoints dispatch_verb at the launch verb, so a finished
+blueprint names what runs next.
 """
 
 import json
@@ -9,6 +10,9 @@ import os
 from typing import Optional
 
 import typer
+
+# The constant lives in claims beside the other two holder prefixes.
+from fno.claims.core import BLUEPRINT_HOLDER_PREFIX
 
 
 def _graph_path():
@@ -26,6 +30,28 @@ session_app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+
+def _release_into(receipt: dict, claim_key: str, holder: str) -> None:
+    """Release exactly OUR holder and stamp the receipt; a close never fails
+    on its release - the claim just waits out its TTL."""
+    from fno.claims.core import release_claim
+    from fno.claims.io import claims_root_for
+
+    try:
+        released = release_claim(
+            claim_key, holder, strict=True, root=claims_root_for(claim_key)
+        )
+        receipt["claim_released"] = bool(released)
+        if released:
+            receipt["claim_holder"] = holder
+    except Exception as exc:  # noqa: BLE001 - a close never fails on its release
+        receipt["claim_released"] = False
+        typer.echo(
+            f"session close: {claim_key} not released: "
+            f"{type(exc).__name__}: {exc}. It stays held until its TTL expires.",
+            err=True,
+        )
 
 
 def _plan_claims(plan_path: str) -> "set[str]":
@@ -107,6 +133,7 @@ def cmd_session_add(
 ) -> None:
     """Stamp a node with a lifecycle phase record (idempotent, append-only).
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
+    Self-close spelling (the owning session): session add <node> --phase <phase> --ended-at <ISO-8601 now>.
     """
     from fno.graph.fuzzy import resolve_node
     from fno.graph.store import (
@@ -115,6 +142,44 @@ def cmd_session_add(
         read_graph,
         stamp_session_for_pr,
     )
+
+    def _open_row_to_end(node_id: str):
+        """The open (phase, session) row an --ended-at append would close,
+        read only when an end is being recorded - every other call pays
+        nothing."""
+        if ended_at is None:
+            return None
+        from fno.graph.statuses import is_open_phase_row
+
+        for entry in read_graph(_graph_path()) or []:
+            if not (isinstance(entry, dict) and entry.get("id") == node_id):
+                continue
+            for row in entry.get("sessions") or []:
+                if (isinstance(row, dict) and isinstance(row.get("phase"), str)
+                        and row["phase"] == phase
+                        and row.get("session_id") == eff_session
+                        and is_open_phase_row(row, phase)):
+                    return row
+        return None
+
+    def _refuse_foreign_row(node_id: str, prior) -> None:
+        # Ending another live session's open row is the synthesized-death move
+        # reap-open owns (it demands proof of death); only the owning session
+        # ends its own row here. Keyed on session identity, never the
+        # --session-id override: a guard a caller satisfies by asserting its
+        # own answer is not a guard.
+        if prior is None or eff_session == (ident.session_id or "").strip():
+            return
+        owner_harness = prior.get("harness") or eff_harness
+        typer.echo(
+            f"session add: {owner_harness}:{eff_session} owns an open {phase} row "
+            f"on {node_id}; only that session ends it here. A dead session's row "
+            f"closes with: fno backlog session reap-open {node_id} --phase {phase} "
+            f"--harness {owner_harness} --session-id {eff_session} "
+            "(after proving death).",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     if (node is None) == (pr is None):
         typer.echo("session add: pass exactly one of NODE or --pr-number.", err=True)
@@ -200,8 +265,16 @@ def cmd_session_add(
         # costs a stamp on a legacy node; guessing costs a corrupted one, and
         # the skip is now LOUD (it names the candidates), so nothing is silent.
 
+    prior_open = None
     try:
         if pr is not None:
+            # Both paths resolve one node before the stamp: find_nodes_for_pr
+            # yields exactly one id here or stamp_session_for_pr skips below.
+            if ended_at is not None:
+                single = find_nodes_for_pr(_graph_path(), pr, repo=repo)
+                if len(single) == 1:
+                    prior_open = _open_row_to_end(single[0])
+                    _refuse_foreign_row(single[0], prior_open)
             node_id, status = stamp_session_for_pr(
                 _graph_path(),
                 pr,
@@ -281,6 +354,8 @@ def cmd_session_add(
                         f"plan {guard_plan} claims {sorted(claims)} != node {node_id}",
                         node_id=node_id,
                     )
+            prior_open = _open_row_to_end(node_id)
+            _refuse_foreign_row(node_id, prior_open)
             found, added = append_session_record(
                 _graph_path(),
                 node_id,
@@ -298,12 +373,25 @@ def cmd_session_add(
         typer.echo(f"session add: {exc} (target={who} phase={phase})", err=True)
         raise typer.Exit(code=2)
 
+    # An honest self-close is not a duplicate: an open row existed before and
+    # reads closed after, so the receipt says what happened. A backfill (no
+    # prior open row) keeps `recorded`; a re-close keeps `already recorded`.
+    # A harness mismatch appends a second row and leaves the first open, so it
+    # is not an end.
+    ended_existing = (
+        prior_open is not None
+        and prior_open.get("harness") == eff_harness
+        and ended_at is not None
+    )
     if json_out:
         typer.echo(
             json.dumps(
                 {
                     "node_id": node_id,
-                    "status": "added" if added else "duplicate",
+                    "status": (
+                        "ended" if ended_existing
+                        else ("added" if added else "duplicate")
+                    ),
                     "phase": phase,
                     "harness": eff_harness,
                     "session_id": eff_session,
@@ -311,9 +399,106 @@ def cmd_session_add(
                 }
             )
         )
+    elif ended_existing:
+        typer.echo(f"ended {phase} {eff_harness}:{eff_session} on {node_id}")
     else:
         state = "recorded" if added else "already recorded"
         typer.echo(f"{state} {phase} {eff_harness}:{eff_session} on {node_id}")
+
+
+@session_app.command("open")
+def cmd_session_open(
+    node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
+    harness: Optional[str] = typer.Option(None, "--harness"),
+    session_id: Optional[str] = typer.Option(None, "--session-id"),
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit the open receipt as JSON."
+    ),
+) -> None:
+    """Hold node:<id> under blueprint-session:<id> for this session's planner.
+
+    The open takes only the claim; the close writes the lifecycle row and
+    releases. A planner running between open and close is visible to every
+    dispatch gate, so a second planner on the same node is refused here.
+    """
+    from fno.claims.core import (
+        ClaimContended,
+        ClaimCorrupted,
+        ClaimGoneAway,
+        ClaimHeldByOther,
+        acquire_claim,
+        claim_status,
+    )
+    from fno.claims.io import claims_root_for
+    from fno.claims.self_identity import resolve_self_identity
+    from fno.graph.fuzzy import resolve_node
+    from fno.graph.store import read_graph
+
+    ident = resolve_self_identity()
+    eff_harness = (harness or ident.harness or "").strip()
+    eff_session = (session_id or ident.session_id or "").strip()
+    if not eff_harness or not eff_session:
+        typer.echo(
+            f"session open: no ambient identity for {node}; run inside a session.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    match = resolve_node(node, read_graph(_graph_path()))
+    if match.kind != "exact":
+        typer.echo(f"session open: no exact node matches {node!r}.", err=True)
+        raise typer.Exit(code=2)
+    node_id = match.candidates[0]["id"]
+    claim_key = f"node:{node_id}"
+    holder = BLUEPRINT_HOLDER_PREFIX + eff_session
+    existing = claim_status(claim_key, root=claims_root_for(claim_key))
+    if existing.get("state") != "free" and existing.get("holder") == holder:
+        typer.echo(
+            f"session open: node:{node_id} is already open for this session ({holder}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    try:
+        from fno.claims.session_pid import resolve_session_pid
+
+        pid = resolve_session_pid()
+    except Exception:  # noqa: BLE001 - degrade to acquire_claim's transient-pid default
+        pid = None
+    try:
+        claim = acquire_claim(
+            claim_key,
+            holder,
+            reason=f"blueprint session for {node_id}",
+            pid=pid,
+            harness=eff_harness,
+            root=claims_root_for(claim_key),
+        )
+    except ClaimHeldByOther as exc:
+        typer.echo(
+            f"session open: node:{node_id} held by {exc.holder} (pid={exc.pid}); "
+            "no planner started.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    except (ClaimCorrupted, ClaimGoneAway, ClaimContended) as exc:
+        typer.echo(
+            f"session open: node:{node_id} could not be claimed: "
+            f"{type(exc).__name__}: {exc}.",
+            err=True,
+        )
+        raise typer.Exit(code=3)
+    receipt = {
+        "node_id": node_id,
+        "status": "opened",
+        "claim_key": claim_key,
+        "holder": holder,
+        "harness": eff_harness,
+        "session_id": eff_session,
+        "acquired_at": claim.acquired_at,
+    }
+    if json_out:
+        typer.echo(json.dumps(receipt))
+    else:
+        typer.echo(f"opened {node_id} holder={holder}")
 
 
 @session_app.command("close")
@@ -361,6 +546,23 @@ def cmd_session_close(
         raise typer.Exit(code=2)
     node_id = match.candidates[0]["id"]
     ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # A blueprint-session claim bounds the planning window: its acquire time
+    # is the row's started_at unless the caller pinned one. The backfilled
+    # subagent rows this closes for good carried started_at: null.
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
+
+    claim_key = f"node:{node_id}"
+    claim = claim_status(claim_key, root=claims_root_for(claim_key))
+    blueprint_holder = BLUEPRINT_HOLDER_PREFIX + eff_session
+    blueprint_held = (
+        claim.get("state") != "free" and claim.get("holder") == blueprint_holder
+    )
+    acquired_at = claim.get("acquired_at")
+    if blueprint_held and started_at is None and isinstance(acquired_at, int):
+        started_at = datetime.fromtimestamp(acquired_at / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
     try:
         found, added = append_session_record(
             _graph_path(),
@@ -413,27 +615,14 @@ def cmd_session_close(
     # A spawn dispatch acquires node:<id> under spawn-handover:<worker> and
     # this close is the only terminal that lifecycle has. Release exactly OUR
     # holder, never the key: a successor target session may already hold the
-    # claim under its own after rebinding it at init.
-    from fno.claims.core import release_claim
-    from fno.claims.io import claims_root_for
-
+    # claim under its own after rebinding it at init. A claim has one holder,
+    # so at most one branch matches.
     holder = (os.environ.get("FNO_NODE_CLAIM_HOLDER") or "").strip()
     claim_key = f"node:{node_id}"
     if holder.startswith("spawn-handover:"):
-        try:
-            released = release_claim(
-                claim_key, holder, strict=True, root=claims_root_for(claim_key)
-            )
-            receipt["claim_released"] = bool(released)
-            if released:
-                receipt["claim_holder"] = holder
-        except Exception as exc:  # noqa: BLE001 - a close never fails on its release
-            receipt["claim_released"] = False
-            typer.echo(
-                f"session close: {claim_key} not released: "
-                f"{type(exc).__name__}: {exc}. It stays held until its TTL expires.",
-                err=True,
-            )
+        _release_into(receipt, claim_key, holder)
+    elif blueprint_held:
+        _release_into(receipt, claim_key, blueprint_holder)
     else:
         receipt["claim_released"] = False
     if json_out:
@@ -446,7 +635,13 @@ def cmd_session_close(
 
 @session_app.command("reap-open")
 def cmd_session_reap_open(
-    node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
+    node: "str | None" = typer.Argument(
+        None,
+        help=(
+            "Node id / slug / bare-hex. Omit to settle EVERY node holding an "
+            "open row for the identity (the death-cascade form)."
+        ),
+    ),
     harness: str = typer.Option(..., "--harness", help="Harness owning the dead session."),
     session_id: str = typer.Option(..., "--session-id", help="Dead harness session id."),
     phase: str = typer.Option(
@@ -461,11 +656,35 @@ def cmd_session_reap_open(
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
-    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open do row on its own, so this verb is the hand path for every other case, including a node still in flight."""
+    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open do row on its own, so this verb is the hand path for every other case, including a node still in flight. Without a node the identity form settles every node holding an open row for the session."""
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import is_open_do_row, is_open_phase_row
     from fno.graph.store import reap_open_session_record, read_graph
     from fno.graph.types import SESSION_PHASES
+
+    if node is None:
+        try:
+            receipt = reap_open_session_record(
+                _graph_path(), None, phase=phase, harness=harness, session_id=session_id
+            )
+        except (ValueError, OSError, RuntimeError) as exc:
+            typer.echo(f"session reap-open: {exc}", err=True)
+            raise typer.Exit(code=2)
+        if not receipt.get("settled"):
+            typer.echo(
+                "session reap-open: no open row carries that identity on any node.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if json_out:
+            typer.echo(json.dumps(receipt, sort_keys=True))
+        else:
+            nodes = ", ".join(receipt.get("node_ids") or [])
+            typer.echo(
+                f"settled {nodes or 'nothing'}: row_removed={receipt['row_removed']} "
+                f"row_closed={receipt.get('row_closed')}"
+            )
+        return
 
     entries = read_graph(_graph_path())
     match = resolve_node(node, entries)

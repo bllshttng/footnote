@@ -162,18 +162,20 @@ def test_a_provider_cap_receipt_cannot_carry_a_null_count() -> None:
         spawn_gate._refuse_provider_cap("zai", 10)
 
 
-def test_the_load_refusal_keeps_its_cause_stated_marker(journal: Path) -> None:
-    """The cause-stated contract survives routing through the emit seam.
-
-    run_gate appends a second, independently sampled footprint reading to a
-    load refusal ONLY when the refusal could not say whose CPU it was. A
-    refactor that dropped the marker would print two disagreeing measurements
-    in one refusal - the exact defect x-7c0f removed.
-    """
+def test_the_cpu_refusal_names_the_axis_that_decided(journal: Path) -> None:
+    """x-7783 AC13: a CPU-axis refusal carries `axis` and the one-word verdict
+    for every axis read before it, so the journal answers "what decided"."""
     with pytest.raises(spawn_gate.GateRefused) as excinfo:
-        spawn_gate._refuse_load_cause_stated(reason="fleet_cpu_share", share=0.9)
+        spawn_gate._refuse(
+            spawn_gate.EXIT_LOAD_REFUSED,
+            {"status": "refused", "reason": "cpu_share_undecidable"},
+            reason="cpu_share_undecidable",
+            axis="fleet_cpu_share",
+            axes_read={"ram": "ok", "load_15m": "ok", "cpu": "undecidable"},
+        )
 
-    assert getattr(excinfo.value, "cause_stated", False) is True
     rows = _refusals(journal)
     assert len(rows) == 1, rows
-    assert rows[0]["reason"] == "fleet_cpu_share"
+    assert rows[0]["axis"] == "fleet_cpu_share"
+    assert rows[0]["axes_read"]["cpu"] == "undecidable"
+    assert rows[0]["reason"] == "cpu_share_undecidable"

@@ -25,6 +25,7 @@ fn pane(fno_id: Option<&str>, name: Option<&str>) -> PaneInfo {
         tab_ordinal: None,
         fno_id: fno_id.map(str::to_string),
         orphaned_worker: false,
+        release: None,
         harness_session_id: None,
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
@@ -102,6 +103,20 @@ fn session_id_shape_rejects_names_and_short_ids() {
     assert!(!session_id_shaped("t-6021-roster-gate-gpt"));
     assert!(!session_id_shaped("119e3c52"));
     assert!(!session_id_shaped(""));
+}
+
+#[test]
+fn the_listing_state_is_the_refusal_state() {
+    // The send gate refuses exactly the panes this listing already marks:
+    // a reconciled pane reads `resolved`, and the unresolved:spawned-name
+    // row is the one a plain send refuses, so the listing predicts it.
+    let reconciled = pane(
+        Some("01a05fce-0000-7ccc-8000-000000000000"),
+        Some("t-e2e-crew"),
+    );
+    assert_eq!(pane_identity_cell(&reconciled).0, "resolved");
+    let refused = pane(None, Some("bp-f8b1-unplanned"));
+    assert_eq!(pane_identity_cell(&refused).0, "unresolved:spawned-name");
 }
 
 #[test]

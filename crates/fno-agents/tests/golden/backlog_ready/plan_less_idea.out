@@ -9,7 +9,7 @@
     "cwd": null,
     "parent": null,
     "size": null,
-    "difficulty": null,
+    "difficulty": "low",
     "plan_path": null,
     "model": null,
     "dispatch_verb": null,

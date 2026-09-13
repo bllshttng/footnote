@@ -20,8 +20,12 @@ It does not reimplement worktree mechanics; it sequences pieces that already exi
 
 ## Idempotency
 
-- Run from **inside a valid (linked) worktree** → no-op: `already isolated at <path>; nothing created`. It never nests a worktree inside a worktree.
+- Run from **inside a valid (linked) worktree** → it prints `already isolated at <path>; nothing created` and never nests a worktree inside a worktree. Then it binds the session to this tree instead of returning empty-handed. A foreign live claim parks. The caller's own claim reports `node=already-claimed`. A dead predecessor's claim is re-acquired. A tree with no manifest falls through to init against the existing tree. That is how a session that lost its manifest gets its claim back with one command. Nothing is created in any branch.
 - When the worktree **already has a manifest**, a re-run from canonical skips init (the manifest is write-once). It reports `node=already-claimed holder=<holder> state=<state>`, read from the live claim lockfile. It never double-claims. This path does NO network work. Its base field reads `behind=unmeasured:idempotent-path-does-no-network`. An idempotent re-run that was pure-local must not pay a fetch. Naming what it did not measure costs less than measuring it.
+
+## Re-binding an in_review node
+
+The second half of a stranded session's way back lives in init's `in_review` guard. A fresh dispatch on a node with an open PR is refused exactly as before. A caller standing in the open PR's own worktree, on the PR's own head branch, is **adopted** instead. Init proceeds, stamps `target_adopted_pr: <n>` on the manifest, and prints an `ADOPTED` receipt. The receipt names the ban on a second PR. Any proof that fails or cannot be read refuses as before. The agent-forbidden escape hatch (`TARGET_ALLOW_IN_REVIEW`) stays human-only. The adopt proof is something the agent's own worktree already is.
 
 ## Gate-safety
 

@@ -11,7 +11,7 @@ Read [worktree-mechanics](../../docs/architecture/worktree-mechanics.md) for hoo
 - **Unset (OSS-neutral default):** harness-native `<repo>/.claude/worktrees/<name>` (gitignored, search-clean). No config needed.
 - **`config.paths.worktrees_base: <dir>`:** worktrees land at `<dir>/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`).
 - **`worktree.use_conductor_canonical: true` is DEPRECATED:** acts as `worktrees_base = ~/conductor/workspaces`. Prefer `worktrees_base`.
-- Cargo targets stay worktree-local (sibling builds never share the artifact lock). Details in [worktree-mechanics](../../docs/architecture/worktree-mechanics.md). Never name-match target dirs: `cli/src/fno/target`, `skills/target`, and `tests/target` are source dirs. A 2026-09-02 name-based sweep deleted 66 across 26 worktrees. Match cargo dirs by `CACHEDIR.TAG` or `crates/*/target`.
+- Cargo output lives in TWO places per checkout. Final binaries sit in `crates/*/target`. Intermediates sit in the build base, one hash dir per workspace root, so sibling builds never share the artifact lock. Details in [worktree-mechanics](../../docs/architecture/worktree-mechanics.md). Never name-match target dirs: `cli/src/fno/target`, `skills/target`, and `tests/target` are source dirs. A 2026-09-02 name-based sweep deleted 66 across 26 worktrees. Match cargo dirs by `CACHEDIR.TAG` on the nearest ancestor, by `crates/*/target`, or by a tagged build-base hash dir.
 
 ## Creating and entering one
 
@@ -34,6 +34,7 @@ The removal contract, missing until 174 trees piled up (74 GB). Three buckets, o
 - **DIRTY** - the merge reaper takes a done-and-merged tree whatever its git status; unpushed HEAD still holds (law d-cfcf5a8e).
 - **clean + unmerged** - never auto-pruned. Report the branch so a human judges (open PR or abandoned work).
 - **clean + merged** - prune the TREE, keep the BRANCH. The tree is a checkout. The branch is the work.
+- **unborn** - a branch with no commit of its own is never a merged branch, whatever the merge-base says. Inside the setup window the gate refuses it (`reason=unborn`, row `kept (unborn)`), so a fresh dispatch survives setup. Predicate and rationale: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
 - **Trigger: MERGE, never node-done.** Mint sites: `fno do pr merge`, the post-merge ritual; the daemon reaper pays after a grace window.
 - **Gate: `reapable`** (`fno agents workspace worktree reapable`) enforces the buckets, not each caller.
 - **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual only sees its own PRs.

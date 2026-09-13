@@ -235,6 +235,47 @@ grep -q "Do not force these closed" <<<"$OUT" \
 pass "render: retryable-unknown nodes get their own line and no --force advice"
 
 # ============================================================================
+# AC: render - a PROVEN-STALE canonical catchup (outcome fresh, stale true)
+# surfaces the catch-up line: the tick leg that used to alarm on this state
+# is gone, and the hook is now the only place that says so.
+# ============================================================================
+log "render: stale-and-fresh catchup -> reminder emitted"
+REPO_CS="$WORK/repo-catchup-stale"; mkdir -p "$REPO_CS/.fno"
+RESULT_CS="$REPO_CS/.fno/.reconcile-result.json"
+touch "$REPO_CS/.fno/.reconcile-stamp"
+cat > "$RESULT_CS" <<'JSON'
+{"dry_run": false, "candidates": [], "closed": [], "failures": [], "sync_catchup": {"outcome": "fresh", "stale": true, "pr_number": null, "swept": 0, "detail": "local default branch 5 behind origin"}}
+JSON
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_CS" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+grep -q "canonical-sync catch-up fresh (local default branch 5 behind origin)" <<<"$OUT" \
+    || fail "render: proven-stale catchup got no reminder line (got: $OUT)"
+pass "render: proven-stale catchup surfaces the reminder"
+
+# ============================================================================
+# AC: render - a result written BEFORE the `stale` key existed (outcome fresh,
+# no stale key) must stay silent AND still reach the fire below. `.stale` on
+# such a file is null, and `null == true` is a plain false in jq, never the
+# type error the legacy case above documents.
+# ============================================================================
+log "render: pre-stale catchup result -> silent, trigger intact"
+REPO_PC="$WORK/repo-prestale"; mkdir -p "$REPO_PC/.fno"
+RESULT_PC="$REPO_PC/.fno/.reconcile-result.json"
+cat > "$RESULT_PC" <<'JSON'
+{"dry_run": false, "candidates": [], "closed": [], "failures": [], "sync_catchup": {"outcome": "fresh", "pr_number": null, "swept": 0, "detail": "x"}}
+JSON
+: > "$FNO_CALL_LOG"
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_PC" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+_RC_PC=$?
+[[ "$_RC_PC" -eq 0 ]] \
+    || fail "render/pre-stale: hook exited $_RC_PC on a result with no stale key"
+grep -q "canonical-sync catch-up" <<<"$OUT" \
+    && fail "render: pre-stale result wrongly emitted a catchup line (got: $OUT)"
+# No stamp => the hook must reach reconcile_maybe_fire and fire.
+wait_for_file "$RESULT_PC" \
+    || fail "render/pre-stale: reconcile never fired"
+pass "render: pre-stale result is silent and the reconcile still fires"
+
+# ============================================================================
 # AC: render — a legacy result (no `sync_catchup` key) must not kill the hook.
 # The render block runs under `set -euo pipefail` ABOVE the load-bearing
 # reconcile trigger, so a jq type error there took out both the consume and

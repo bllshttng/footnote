@@ -42,3 +42,19 @@ def test_ready_names_worked_overlay_degradation(monkeypatch, capsys):
 
     assert keeper.params["claimed"] == ["claimed-node"]
     assert "worked overlay degraded: roster timeout" in capsys.readouterr().err
+
+
+def test_ready_reuses_a_precomputed_occupancy(monkeypatch):
+    """`backlog next` pays one strict read for its whole selection."""
+    keeper = _Keeper()
+    monkeypatch.setattr(store, "_client_for", lambda _path: keeper)
+
+    def _boom(**_kw):
+        raise AssertionError("precomputed occupancy must not be re-read")
+
+    monkeypatch.setattr("fno.graph.statuses.live_claimed_node_ids", _boom)
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", _boom)
+
+    store.ready(occupancy={"worked-node", "claimed-node"})
+
+    assert keeper.params["claimed"] == ["claimed-node", "worked-node"]

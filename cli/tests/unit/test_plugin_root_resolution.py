@@ -91,6 +91,22 @@ def test_resolve_falls_to_persisted_when_env_and_pkg_miss(tmp_path, monkeypatch,
     assert got == plugin / "scripts" / "lib" / "set-gate.sh"
 
 
+def test_resolve_skips_persisted_when_relpath_missing(tmp_path, monkeypatch, isolated_home):
+    """AC3-EDGE: a persisted pointer whose relpath does not exist (e.g. a
+    stale codex plugin-cache pointer that predates a script move) is skipped
+    rather than handed back dead - resolution falls through to the repo root
+    candidate instead of returning a path that 404s at call time."""
+    plugin = _make_plugin(tmp_path / "plugin")
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    (isolated_home / "plugin-root").write_text(str(plugin) + "\n")
+    monkeypatch.setattr(paths, "_is_plugin_root", lambda r: Path(r) == plugin)
+    repo_root = tmp_path / "repo"
+    (repo_root / "scripts" / "analysis").mkdir(parents=True)
+    monkeypatch.setattr(paths, "resolve_repo_root", lambda: repo_root)
+    got = paths.resolve_plugin_script("scripts/analysis/graph-parity.py")
+    assert got == repo_root / "scripts" / "analysis" / "graph-parity.py"
+
+
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(cwd), *args], check=True,
                    capture_output=True, text=True)

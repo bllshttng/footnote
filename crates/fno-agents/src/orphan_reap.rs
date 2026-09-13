@@ -41,7 +41,9 @@ pub struct ReapRow {
 fn deps_binary_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"/target/(?:debug|release)/deps/[A-Za-z0-9_]+-[0-9a-f]{16}$").unwrap()
+        // No `/target` segment: under build.build-dir the deps dir lives at
+        // <build-base>/<h2>/<hash>/debug/deps, with no dir named target.
+        Regex::new(r"/(?:debug|release)/deps/[A-Za-z0-9_]+-[0-9a-f]{16}$").unwrap()
     })
 }
 
@@ -70,7 +72,7 @@ fn elapsed_seconds(value: &str) -> Option<u64> {
     }
 }
 
-/// Detect candidates from one `ps -Ao pid,ppid,etime,%cpu,rss,command`
+/// Detect candidates from one `ps -Ao pid,ppid,state,etime,%cpu,rss,command`
 /// snapshot: a deps test binary that is parentless or holds a zombie pile,
 /// with its dead children counted from the same snapshot. Rows that do not
 /// parse are skipped; they carry no candidate.
@@ -82,17 +84,17 @@ pub fn detect(ps_output: &str) -> Vec<OrphanedTestBinary> {
             continue;
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 6 {
+        if fields.len() < 7 {
             continue;
         }
         let (Ok(pid), Ok(ppid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>()) else {
             continue;
         };
-        let Some(elapsed) = elapsed_seconds(fields[2]) else {
+        let Some(elapsed) = elapsed_seconds(fields[3]) else {
             continue;
         };
         // The command is the tail; rejoin so argv words survive.
-        let command = fields[5..].join(" ");
+        let command = fields[6..].join(" ");
         processes.push((pid, ppid, elapsed, command));
     }
     // A defunct row is a dead child: count it against its PPID.
@@ -121,15 +123,16 @@ pub fn detect(ps_output: &str) -> Vec<OrphanedTestBinary> {
     candidates
 }
 
-/// A candidate is confirmed only when its owning target dir carries
-/// CACHEDIR.TAG. A path-shape match alone is a name match.
+/// A candidate is confirmed only when its owning build tree carries
+/// CACHEDIR.TAG. A path-shape match alone is a name match. Under
+/// build.build-dir the grandparent of `deps` is the hash dir, which is where
+/// cargo puts the marker (no ancestor is named `target` there).
 pub fn confirmed(orphan: &OrphanedTestBinary) -> bool {
     let path = Path::new(argv0(&orphan.command));
-    let Some(target) = path.parent().and_then(Path::parent).and_then(Path::parent) else {
+    let Some(build_root) = path.parent().and_then(Path::parent).and_then(Path::parent) else {
         return false;
     };
-    target.file_name().map(|n| n == "target").unwrap_or(false)
-        && target.join("CACHEDIR.TAG").is_file()
+    build_root.join("CACHEDIR.TAG").is_file()
 }
 
 /// `config.test.orphan_min_elapsed_seconds` (900); the env override lets a
@@ -187,7 +190,7 @@ pub fn reap_rows(ps_output: &str, apply: bool, min_elapsed: u64) -> Vec<ReapRow>
 
 fn read_ps() -> Option<String> {
     let output = std::process::Command::new("ps")
-        .args(["-Ao", "pid,ppid,etime,%cpu,rss,command"])
+        .args(["-Ao", "pid,ppid,state,etime,%cpu,rss,command"])
         .output()
         .ok()?;
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -300,13 +303,13 @@ mod tests {
 
     fn snapshot_with(orphan_ppid: u32, command: &str) -> String {
         let mut rows = vec![
-            "PID PPID ELAPSED %CPU RSS COMMAND".to_string(),
-            format!("59929 {orphan_ppid} 03:07:00 0.0 4096 {command}"),
+            "PID PPID S ELAPSED %CPU RSS COMMAND".to_string(),
+            format!("59929 {orphan_ppid} S 03:07:00 0.0 4096 {command}"),
         ];
         for i in 0..227 {
-            rows.push(format!("{} 59929 00:00:10 0.0 0 <defunct>", 70000 + i));
+            rows.push(format!("{} 59929 Z 00:00:10 0.0 0 <defunct>", 70000 + i));
         }
-        rows.push("900 1 01:00:00 0.1 1024 fno-agents-daemon --serve".to_string());
+        rows.push("900 1 Ss 01:00:00 0.1 1024 fno-agents-daemon --serve".to_string());
         rows.join("\n")
     }
 
@@ -340,20 +343,20 @@ mod tests {
 
     #[test]
     fn skips_a_childless_deps_binary_with_a_parent() {
-        let ps = "PID PPID ELAPSED %CPU RSS COMMAND\n\
-                  59929 4321 03:07:00 0.0 4096 /w/crates/fno/target/debug/deps/fno-aa7282e99eecb046 portal\n";
+        let ps = "PID PPID S ELAPSED %CPU RSS COMMAND\n\
+                  59929 4321 S 03:07:00 0.0 4096 /w/crates/fno/target/debug/deps/fno-aa7282e99eecb046 portal\n";
         assert!(detect(ps).is_empty());
     }
 
     #[test]
     fn holds_below_the_zombie_bar_when_parented() {
         let mut rows = vec![
-            "PID PPID ELAPSED %CPU RSS COMMAND".to_string(),
-            "59929 4321 03:07:00 0.0 4096 /w/crates/fno/target/debug/deps/fno-aa7282e99eecb046"
+            "PID PPID S ELAPSED %CPU RSS COMMAND".to_string(),
+            "59929 4321 S 03:07:00 0.0 4096 /w/crates/fno/target/debug/deps/fno-aa7282e99eecb046"
                 .to_string(),
         ];
         for i in 0..(ORPHAN_MIN_ZOMBIES - 1) {
-            rows.push(format!("{} 59929 00:00:10 0.0 0 <defunct>", 70000 + i));
+            rows.push(format!("{} 59929 Z 00:00:10 0.0 0 <defunct>", 70000 + i));
         }
         assert!(detect(&rows.join("\n")).is_empty());
     }
@@ -399,6 +402,38 @@ mod tests {
             elapsed_seconds: 3600,
         };
         assert!(!confirmed(&orphan));
+    }
+
+    #[test]
+    fn detects_and_confirms_a_build_dir_deps_binary() {
+        // build.build-dir layout measured 2026-09-10: the deps dir sits under a
+        // sharded hash dir carrying CACHEDIR.TAG, with NO dir named target.
+        let dir = temp_dir("builddir");
+        let hash = dir.join("bd/bac4721f2d16ec");
+        let deps = hash.join("debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(hash.join("CACHEDIR.TAG"), "Signature: x").unwrap();
+        let bin = deps.join("probe-0123456789abcdef").display().to_string();
+        let found = detect(&snapshot_with(1, &bin));
+        assert_eq!(found.len(), 1, "regex must match without a /target segment");
+        assert!(confirmed(&found[0]), "tag on the hash dir must confirm");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_dir_confirmation_still_demands_the_tag() {
+        // Same shape, no CACHEDIR.TAG on the hash dir: not confirmed.
+        let dir = temp_dir("builddir-notag");
+        let deps = dir.join("bd/bac4721f2d16ec/debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        let orphan = OrphanedTestBinary {
+            pid: 1,
+            command: format!("{} 300", deps.join("probe-0123456789abcdef").display()),
+            zombies: 0,
+            elapsed_seconds: 3600,
+        };
+        assert!(!confirmed(&orphan));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -86,6 +86,14 @@ struct Fleet {
     dir: PathBuf,
 }
 
+impl Drop for Fleet {
+    // The fleet dir is a fake HOME; a panic must reap it too, or the leaked
+    // scratch outlives the run that made it.
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.dir).ok();
+    }
+}
+
 impl Fleet {
     fn new(tag: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("cross-door-{tag}-{}", std::process::id()));
@@ -293,7 +301,11 @@ fn write_claude_shim(fleet_dir: &Path, shim_dir: &Path) {
     std::fs::write(
         &c4,
         format!(
-            r#"{{"kind":"background","id":"{S4}","sessionId":"{U4}","name":"{ROW4}","cwd":"{WORK}","state":"done"}}"#,
+            // The LIVE row must read live everywhere: a terminal roster
+            // state now retires a row whatever its transcript recency, so
+            // staging it `done` would make it dead by the harness's own
+            // word.
+            r#"{{"kind":"background","id":"{S4}","sessionId":"{U4}","name":"{ROW4}","cwd":"{WORK}","state":"working"}}"#,
             WORK = fleet_dir.join("work").display()
         ),
     )
@@ -360,17 +372,45 @@ fn every_removal_door_leaves_the_row_absent_from_all_three_stores() {
     let shim_dir = fleet.dir.join("shims");
     std::fs::create_dir_all(&shim_dir).unwrap();
     write_claude_shim(&fleet.dir, &shim_dir);
-    // A `fno` shim: the prune's pane probe answers no panes. It must speak
-    // only when addressed, so an unexpected call is loud.
+    // A `fno` shim: the prune's pane probe answers no panes, and the
+    // reaper's truth probe answers the wire the Rust reader parses (a
+    // keyed map for `--handles`, a bare payload for one handle): quiet
+    // rows report old ages, the live row a young one. It must speak only
+    // when addressed, so an unexpected call is loud.
     write_executable(
         &shim_dir.join("fno"),
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "agents" ] && [ "$2" = "truth" ]; then
+  if [ "$3" = "--handles" ]; then
+    printf '{{'
+    first=1
+    for h in $(printf '%s' "$4" | /usr/bin/tr ',' ' '); do
+      if [ "$h" = "{S4}" ]; then
+        row='{{"state":"working","last_activity_age_s":2}}'
+      else
+        row='{{"state":"stalled","last_activity_age_s":100000}}'
+      fi
+      if [ "$first" -eq 1 ]; then first=0; else printf ','; fi
+      printf '"%s":%s' "$h" "$row"
+    done
+    printf '}}\n'
+  elif [ "$3" = "{S4}" ]; then
+    printf '{{"state":"working","last_activity_age_s":2}}\n'
+  else
+    printf '{{"state":"stalled","last_activity_age_s":100000}}\n'
+  fi
+  exit 0
+fi
 if [ "$1" = "mux" ] && [ "$2" = "pane" ] && [ "$3" = "ls" ]; then
   printf '[]\n'
   exit 0
 fi
-exit 0
+exit 2
 "#,
+            S4 = S4,
+        )
+        .as_str(),
     );
     BUILD.call_once(|| {
         let status = Command::new("cargo")
@@ -438,7 +478,6 @@ exit 0
         (Err(_), Err(_)) => {}
         (b, a) => panic!("squad store changed shape on re-run: {b:?} vs {a:?}"),
     }
-    std::fs::remove_dir_all(&fleet.dir).ok();
 }
 
 impl Fleet {

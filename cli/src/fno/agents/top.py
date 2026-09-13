@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, cast
 
 from fno.agents.discover import (
     _SUBAGENT_SCAN_WINDOW_S,
@@ -195,11 +195,13 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
             truth_state=truth_state,
             age_s=truth.get("last_activity_age_s"),
             falsifier=registry_falsifier(entry) if entry is not None else None,
+            observed_model=truth.get("observed_model"),
         )
         activity = rendered_activity(
             truth_state=truth_state,
             age_s=reach.age_s,
             reachability=reach.verdict,
+            provider_refusal=truth.get("provider_refusal"),
         )
         if entry is None:
             out[w.name] = RowTruth(None, activity, reach.age_s, reach.verdict, reach.basis)
@@ -211,6 +213,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
             harness=w.harness,
             route_settings_path=entry.route_settings_path,
             last_activity_age_s=truth.get("last_activity_age_s"),
+            provider_refusal=truth.get("provider_refusal"),
         )
         out[w.name] = RowTruth(
             prog.verdict, activity, reach.age_s, reach.verdict, reach.basis
@@ -281,6 +284,58 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
         )
     # Heaviest first: the row the operator is looking for when RAM is tight.
     rows.sort(key=lambda r: -float(r["rss_mb"] or 0))
+    return rows
+
+
+def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
+    """Registry rows whose RUN ended but whose session still answers (x-74aa).
+
+    census() counts runs holding a process, so a parked row drops out of the
+    table while its transcript keeps moving, and absence licensed a second
+    writer onto a live worktree. Display only: never enters LiveCensus. Only
+    a positive UNREACHABLE verdict drops a row - absence of evidence stays.
+    """
+    from fno.agents.reachability import UNREACHABLE, classify_reachability, registry_falsifier
+    from fno.agents.registry import TERMINAL_STATUSES, load_registry
+    from fno.agents.session_truth import resolve_session_truth
+    from fno.agents.spawn_gate import LIVE_STATUSES
+
+    try:
+        entries = load_registry()
+    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
+        return []
+    rows: list[dict] = []
+    for e in entries:
+        # Terminal rows are already answered (finished or provably gone);
+        # spending a transcript read on each would tax every render.
+        if e.status in LIVE_STATUSES or e.status in TERMINAL_STATUSES:
+            continue
+        truth = resolve_session_truth(e.name)
+        reach = classify_reachability(
+            truth_state=truth.get("state"),
+            age_s=truth.get("last_activity_age_s"),
+            falsifier=registry_falsifier(e),
+            observed_model=truth.get("observed_model"),
+        )
+        if reach.verdict == UNREACHABLE:
+            continue
+        rows.append(
+            {
+                "source": "registry",
+                "name": e.name,
+                "harness": e.harness,
+                "substrate": getattr(e, "substrate", None) or "-",
+                "king": (getattr(e, "spawned_by", None) or "")[:8] or None,
+                "pid": None,
+                "reach": reach.verdict,
+                "reach_basis": reach.basis,
+                "status": "run-ended",
+                "status_age_s": reach.age_s,
+                "stored_status": e.status,
+                "status_basis": reach.basis,
+                "crown": crowns.get(e.name),
+            }
+        )
     return rows
 
 
@@ -542,6 +597,26 @@ def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
     return out
 
 
+#: Twelve-minute reconcile runs are measured, per the FLIGHT_TTL_MS doc in
+#: flight_gate.rs; a single-flight hold older than this shows in `top`.
+LONG_HOLD_S = 12 * 60
+
+
+def long_hold_rows() -> dict:
+    """Single-flight holds over LONG_HOLD_S from the Rust ``long-holds`` op;
+    ``{"error": ...}`` instead of raising: a top render never dies on a read."""
+    from fno.claims.io import claims_dir, global_claims_dir
+    from fno.claims.verdict import run_op
+
+    payload, error = run_op(
+        ["long-holds", "--min-hold-s", str(LONG_HOLD_S)],
+        [global_claims_dir(), claims_dir(None)],
+    )
+    # run_op answers a payload exactly when the error is empty.
+    return cast("dict", payload) if error is None else {"error": error}
+
+
+
 def render_top(
     as_json: bool = False, include_subagents: bool = False, include_pane_stats: bool = False
 ) -> str:
@@ -549,20 +624,38 @@ def render_top(
     ``include_subagents`` appends the sidechain section (x-af92);
     ``include_pane_stats`` appends the per-pane mux counter deltas."""
     c = census()
-    rows = _rows(c.workers, _crown_map())
+    crowns = _crown_map()
+    rows = _rows(c.workers, crowns)
+    run_ended = _run_ended_rows(crowns)
     lanes = lane_rows()
     subagents = _subagent_section() if include_subagents else None
     pane_stats = pane_counter_rows() if include_pane_stats else None
+    predicate = (
+        "rows are RUNS holding a process (census LIVE_STATUSES); a session "
+        "whose run ended is under run_ended, not missing; per-session "
+        "liveness is fno agents truth <handle>"
+    )
+    long_holds = long_hold_rows()
+    long_hold_warning = (
+        [f"long holds read failed: {long_holds['error']}"] if "error" in long_holds else []
+    )
     if as_json:
         payload: dict = {
             "workers": rows,
+            "run_ended": run_ended,
+            "predicate": predicate,
             "lanes": lanes,
             "slot_claims": c.slot_claims,
-            "warnings": list(c.warnings),
+            "warnings": list(c.warnings) + long_hold_warning,
         }
+        if "error" in long_holds:
+            # long_holds stays absent: tell "read, none" from "not read".
+            payload["long_holds_error"] = long_holds["error"]
+        else:
+            payload["long_holds"] = long_holds["rows"]
         if subagents is not None:
             payload["subagents"] = subagents["rows"]
-            payload["warnings"] = c.warnings + subagents["warnings"]
+            payload["warnings"] = c.warnings + long_hold_warning + subagents["warnings"]
         if pane_stats is not None:
             payload["pane_stats"] = pane_stats
         return json.dumps(payload, indent=2)
@@ -572,6 +665,11 @@ def render_top(
     # Lanes lead: a provider cap refuses spawns the table below calls healthy.
     if lanes:
         out.extend(_render_lane_lines(lanes))
+        out.append("")
+    if "error" in long_holds:
+        out.append(f"long holds read failed: {long_holds['error']}")
+    elif long_holds["lines"]:
+        out.extend(long_holds["lines"])
         out.append("")
     # The retirable line leads with the lanes (x-1379): the same shape of
     # fact as a full lane - a cap refusing spawns the table calls healthy.
@@ -586,8 +684,8 @@ def render_top(
     )
     out.append(header)
     if not rows:
-        out.append("no live workers")
-    for r in rows:
+        out.append("no live workers (runs holding a process; a run-ended session is not missing)")
+    for r in [*rows, *run_ended]:
         # US9: mark a crowned worker in the name cell (ASCII, alignment-safe).
         # The registry handle rides along when it differs from this view's own
         # label, so `top` and `list` can be joined by eye instead of by guessing
@@ -599,19 +697,17 @@ def render_top(
         activity = r["status"] + (f" {_fmt_age(age_s)}" if age_s is not None else "")
         out.append(
             f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
-            f"{r['substrate']:<10} {r['king'] or '-':<9} {r['pid'] or '-':>7} "
-            f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} "
-            f"{r['node'] or '-':<8} "
-            f"{r['progress'] or '-':<17} {r['reach'] or '-':<11} {activity}"
+            f"{r['substrate']:<10} {r['king'] or '-':<9} {r.get('pid') or '-':>7} "
+            f"{r['rss_mb'] if r.get('rss_mb') is not None else '-':>7} "
+            f"{r.get('node') or '-':<8} "
+            f"{r.get('progress') or '-':<17} {r['reach'] or '-':<11} {activity}"
             + (f" ({r['status_basis']})" if r.get("status_basis") else "")
         )
     if c.slot_claims:
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")
-    out.append(
-        "census: PID/RSS are the process at scan time; REACH reads the "
-        "transcript (fno agents truth for the full evidence); NODE and the "
-        "retirement line read the graph"
-    )
+    out.append(f"census: {predicate}. PID/RSS are the process at scan time; "
+               "REACH reads the transcript (fno agents truth for the full "
+               "evidence); NODE and the retirement line read the graph")
     if subagents is not None:
         out.append("")
         out.extend(subagents["warnings"])

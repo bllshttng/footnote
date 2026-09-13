@@ -9,6 +9,12 @@ A practical guide to driving `fno backlog` day to day. For the internals
 (lane key, rank model, WIP caps, board rendering) see
 [architecture/backlog-board-ordering.md](architecture/backlog-board-ordering.md).
 
+## Is this page for you?
+
+You create, update, rank, or close backlog cards from a terminal, or you wonder why a verb refused. This page owns the day-to-day verbs and the node lifecycle. Misreading it costs a lost edit: a field you change by hand does not move the card. The board renders from node fields, never from the board file.
+
+Not for: why one card sits above another, or how the render pipeline works. That is [architecture/backlog-board-ordering.md](architecture/backlog-board-ordering.md). Sorting deferred work at intake is [backlog-triage.md](backlog-triage.md).
+
 ## Mental model: the board is derived
 
 You never drag a card. Both boards (`graph.md` Obsidian Kanban and the
@@ -114,7 +120,7 @@ An encounter has no correction verb. It cannot be edited or withdrawn, because a
 
 ### Progress notes reach the people building the node
 
-`fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to three readers. The node's live claim holder. The holder of the node whose PR carries it. Whoever is crowned over the epic. Every outcome prints, including "nobody to reach". Silence reads the same as delivery.
+`fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to every bound reader. The node's live claim holder. The node's graph sessions. Workers named on the node in the registry. The same chain runs for the owner node. Then the crown walk, from the epic out to the project. Every outcome prints, including "nobody to reach". When nobody bound to the node can hear it, the verb refuses, writes nothing, and exits 3. `--quiet` writes it anyway.
 
 Pass `--quiet` to annotate without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
 
@@ -172,8 +178,9 @@ Priority is bounded to four values, so two agents disagreeing about a node produ
 | Action | Command | Effect |
 |--------|---------|--------|
 | Pause a node | `fno backlog defer <id> --reason "..."` | leaves the board; `status: deferred` |
+| Retract a false row | `fno backlog retract <id> "the false premise"` | defers + stamps `deferred_kind: retracted` in one act; the blueprint consolidation gate halts on the stamp |
 | Resume it | `fno backlog undefer <id>` | returns to `ready`/`idea` |
-| Replace with a newer node | `fno backlog supersede <new> --replaces <old> --cause "..." --surface <path>` | old stays `blocked` until a merged PR touches every `--surface`, then `superseded` |
+| Replace with a newer node | `fno backlog supersede <new> --replaces <old> --cause "..." --surface <path>` | old's status reads `superseded` from the edge alone; a merged PR touching every `--surface` stamps the record's `verified_at` |
 | Mark complete | `fno backlog done <id>` | closes only on a MERGED PR; sets `completed_at`, unblocks dependents |
 | Reopen it | `fno backlog reopen <id> --reason "..."` | clears `completed_at`; refuses when a referenced PR is MERGED |
 | Remove permanently | `fno backlog remove <id>` | hard delete (use for dupes / dead nodes) |
@@ -202,13 +209,14 @@ An epic closed on its own evidence is left alone and named, because reopening it
 
 ## Deferred kinds
 
-A deferral is two facts wearing one status. One is an expiry: a hygiene sweep aged it out, nobody ruled. One is a decision: a human said no, not now, or wait-for-X. `deferred_kind` separates the two. The difference is load-bearing: a wont-do child never holds its epic open, while an expired one is just drift.
+A deferral is two facts wearing one status. One is an expiry: a hygiene sweep aged it out, nobody ruled. One is a decision: a human said no, not now, or wait-for-X. `deferred_kind` separates the two. The difference is load-bearing: a wont-do or retracted child never holds its epic open, while an expired one is just drift.
 
 | Kind | Means |
 |------|-------|
 | `expired` | aged out by machinery, no human judgment |
 | `blocked` | waiting on a named thing |
 | `wont_do` | an operator or author ruled against it |
+| `retracted` | the row was filed on a false premise; stamped only by `fno backlog retract`, and the blueprint consolidation gate halts on it |
 | `superseded` | the work moved elsewhere |
 | `later` | real intent, not now |
 | `contingent` | fires only if a named condition fires |
@@ -289,6 +297,21 @@ fno backlog provenance <id> --spawned    # invert the origin edge: what did this
 
 `fno backlog epic status <epic>` reports **scope growth**: follow-ups the epic accumulated after decomposition (reachable by `source_node_id`, not already children by `parent`). The figure is withheld when origin-capture coverage across the epic's window sits below 50%, since at low capture a small number is indistinguishable from a missed one. Coverage counts only origins that still resolve to a live node, because an origin naming a deleted node joins nothing and would otherwise inflate coverage while contributing no growth; any such danglers are reported separately. Realized node and PR counts print either way, so a withheld figure explains itself.
 
+### Request origin: who asked for this
+
+`request_origin` names who requested the work. The native decision in `crates/fno-agents/src/node_origin.rs` decides it once at birth. Later edits, re-intakes, and rulings never rewrite it. The buckets:
+
+- `operator_request`: a human asked, via `--source-kind operator_request`.
+- `agent_discovery`: an agent found it. Declare it with `--source-kind from_observation` or `from_supervisor` plus `--origin-evidence`.
+- `automated_followup`: a machine follow-up. Retro landings and decomposed children.
+- `unknown`: everything else.
+
+A node carries `origin_evidence`, the producing-event reference the birth had: a capture fu-id and its substrate ref, a plan's sources, or a causal node id.
+
+Unknown stays unknown. A recorder harness, an organic default, or the words "operator raised" in a title never establish origin. Every node born before this field existed reads unknown.
+
+On the local board the buckets appear as an `All origins` filter. Rows with a known origin wear a dashed pill. Each detail panel shows an origin line and its evidence. The public board omits origin evidence entirely, since evidence can carry private paths and ids. Read either back with `fno backlog get <id> --grouped` under Provenance.
+
 **done = merged.** `fno backlog done` closes a node only when a referenced PR is
 MERGED. An OPEN PR (even with green CI) exits 5 (awaiting merge): the node stays
 `in_review` and closes on the actual merge via `reconcile` / merge-triggered
@@ -333,6 +356,14 @@ When a source cannot be read, the section renders an explicit `(unknown: ...)`. 
 
 The "In progress" blocking fact comes from the cache's newest row for that PR. That row can be stale by up to the cache TTL. When the PR stays quiet, the row can be older still. The line prints the age beside the verdict, so nobody reads it as the current state.
 
+## Delivery flow panel
+
+The HTML boards carry a flow panel under the status tiles. It answers three questions: how fast work ships, how long a PR stays open, and where work waits. The numbers come from the one delivery classifier in the Rust keeper, computed once per board render for the board's own scope.
+
+The panel has three groups. Delivered counts confirmed deliveries in the window, split into code and documents, with per-local-week counts and a `*` marker on partial weeks. Code means merged PRs and explicit delivery terminals. Documents mean DoneAdvisory. Elapsed shows the PR open-to-merge median and nearest-rank p85 with the sample count, plus the current open PR population and its oldest age. Waiting shows the canonical in-progress, review and blocked counts with the oldest age of each.
+
+Read the fine print before comparing numbers. The scope line names the window, the local timezone, and the fact that the panel does not follow row filters. Searching, hiding Done, or picking projects moves the rows, never the throughput denominator. Ages are measured from node `created_at`, and accumulated blocked time is unmeasured because the graph keeps no interval history. PRs the graph cannot link to a node ride the coverage line as unlinked deliveries instead of the weekly counts. When the ledger or the keeper cannot be read, the panel names the reason and shows no numbers at all.
+
 ## Health and hygiene
 
 ```bash
@@ -340,6 +371,10 @@ fno backlog triage health          # idea pile, stale ready, collisions, dupes
 fno backlog maintain --apply       # recurring sweep: re-scope, prune, pr_url backfill, auto-defer
 fno backlog reconcile              # close nodes whose PR merged outside the gate
 ```
+
+### Abandoned do rows
+
+An open do row wedges its node `in_progress`. The in-progress status hides the row from the Rust settle's done+merged gate. A session that died mid-do strands its node forever. `fno backlog maintain` carries the leg that watches this population. Read mode reports every candidate with its verdict (`gone` or `held`) and the reason. `--apply` reaps a `gone` row only after the transcript prover proves the session quiet. The bar is `config.backlog.maintain.abandoned_do_row_hours` (default 24) with a non-engaged tail. A live claim holds the row. A live roster worker holds the row. A transcript the prover cannot read holds the row and names the reason. Opencode rows always hold, because no file-backed transcript exists to prove against. A held row can still be reaped by hand. Run `fno backlog session reap-open` after you have proven the session dead yourself.
 
 ### The daily pass
 

@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 from fno import _subprocess_util
+from fno.adapters.providers.error_taxonomy import ErrorClass
 from fno.agents.harnesses.claude import ProviderSocketError
 from fno.rust_binary import VerbUnavailable
 
@@ -214,6 +215,9 @@ class Candidate:
     cwd: Optional[str] = None
     name: Optional[str] = None
     session_id: Optional[str] = None
+    # The CALLER's attributed account for the quota-lock write. Never the
+    # process-global active one: a refusal belongs to the launch account.
+    launch_account: Optional[str] = None
     agent: str = "claude"
 
 
@@ -264,6 +268,7 @@ def iter_candidates(registry_entries: Iterable, locate_fn: Callable) -> list[Can
             cwd=getattr(entry, "cwd", None), name=getattr(entry, "name", None),
             session_id=(getattr(entry, "harness_session_id", None)
                         or getattr(entry, "cc_session_id", None) or short_id),
+            launch_account=getattr(entry, "launch_account", None),
         ))
     return out
 
@@ -295,6 +300,12 @@ def _refused_key(short_id: str, error_class: str) -> str:
     (a capped worker's last turn does not change) stays one.
     """
     return f"refused:{short_id}:{error_class}"
+
+
+def _quota_key(short_id: str) -> str:
+    """Sentinel: the sweep-time quota lock was decided once for this id.
+    Same flat counts dict, same collision-free prefix rule."""
+    return f"quota-locked:{short_id}"
 
 
 def recovery_sweep(
@@ -382,6 +393,27 @@ def recovery_sweep(
                     "reset_is_derived": _err.reset_is_derived,
                     "reset_stamp_unparsed": _err.reset_stamp_unparsed,
                     "excerpt": _err.body_excerpt,
+                })
+
+            # Guards: corroboration, the quota class, the once-per-worker
+            # sentinel, and record_quota_lock refusing an unattributed
+            # account. The event fires even when nothing was written.
+            if (refusal_acts
+                    and _err.error_class is ErrorClass.PROVIDER_4XX_QUOTA
+                    and not counts.get(_quota_key(c.short_id))):
+                from fno.agents.quota_lock import record_quota_lock
+
+                counts[_quota_key(c.short_id)] = True
+                _wrote = record_quota_lock(
+                    c.launch_account, _err.body_excerpt, resets_at=_err.resets_at,
+                )
+                emit("provider_quota_locked", {
+                    "short_id": c.short_id,
+                    "account": _wrote,
+                    "attributed": _wrote is not None,
+                    "source": _source,
+                    "resets_at": _err.resets_at,
+                    "reset_is_derived": _err.reset_is_derived,
                 })
 
         truth_state = str(truth.get("state") or "unknown")
@@ -1025,7 +1057,15 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
             # predate the worker and prove nothing about THIS invocation. Claiming
             # completion from them would re-open the very suppression this fixes,
             # so they read unverifiable until an ownership lease can date them.
-            tail = (candidate.name or "")[len(f"think-{node_id}-"):]
+            name_str = candidate.name or ""
+            if name_str.startswith(f"think-{node_id}-"):
+                tail = name_str[len(f"think-{node_id}-"):]
+            else:
+                # x-84b2 canonical shape: the reason opens the parsed tail.
+                from fno.agents.naming import parse_dispatch_agent_name
+
+                dname = parse_dispatch_agent_name(name_str)
+                tail = dname.tail if dname and dname.node == node_id else ""
             if any(tail == r or tail.startswith(f"{r}-")
                    for r in _NON_BIRTH_THINK_REASONS):
                 return None
@@ -1093,6 +1133,30 @@ def _clear_dead_owner(node: str, cwd: str) -> bool:
     return False
 
 
+def _alias_predecessor(new_name: Optional[str], old_name: Optional[str]) -> None:
+    """Best-effort: keep the predecessor name addressable on the successor row."""
+    if not (new_name and old_name):
+        return
+    try:
+        from fno.agents.registry import append_row_alias
+
+        append_row_alias(new_name, old_name)
+    except Exception:  # noqa: BLE001 - aliasing is best-effort
+        pass
+
+
+def _recovery_agent_name(
+    predecessor: Optional[str], node_or_session: str, short: str
+) -> str:
+    """The ``rec-<verb>-<node-or-session>-<short>`` recovery name; the verb
+    parses from the predecessor (legacy spellings still resolve, else t)."""
+    from fno.agents.naming import dispatch_agent_name, legacy_verb_code, parse_dispatch_agent_name
+
+    parsed = parse_dispatch_agent_name(predecessor or "")
+    verb = parsed.verb if parsed else (legacy_verb_code(predecessor) or "t")
+    return dispatch_agent_name("rec", verb, node_or_session, slug=short)
+
+
 def _redispatch(
     candidate: "Candidate",
     *,
@@ -1148,7 +1212,14 @@ def _redispatch(
         # Raced to completion: nothing to continue, so do not re-dispatch.
         return _Failed("node-done")
     name = getattr(candidate, "name", None)
-    agent = f"failover-{candidate.short_id}"
+    from fno.agents.naming import AgentNameError
+
+    try:
+        agent = _recovery_agent_name(name, node, candidate.short_id)
+    except AgentNameError as exc:
+        # A stale/missing binary unmints this candidate; report it as the
+        # candidate's failure, never crash the sweep.
+        return _Failed(f"name-unmintable: {exc}")
     old_worker_stopped = False
     try:
         if name:
@@ -1171,7 +1242,7 @@ def _redispatch(
                     # owns that half.
                     killed = subprocess.run(
                         [*_subprocess_util.fno_py_cmd(), "mux", "pane", "kill",
-                         "--session", m.group(1), m.group(2)],
+                         "--server", m.group(1), m.group(2)],
                         cwd=cwd, capture_output=True, timeout=30, check=False,
                     )
                     if killed.returncode != 0:
@@ -1251,6 +1322,7 @@ def _redispatch(
             # invite another failover spawn onto the same branch.
             _clear_dead_owner(node, cwd)
             return REDISPATCH_PARTIAL
+        _alias_predecessor(agent, name)
         return True
     except (OSError, subprocess.SubprocessError):
         # Non-fatal: the swap already landed; never let a respawn miss crash the
@@ -1508,7 +1580,14 @@ def _respawn_bg_resume(
 
     cwd = getattr(candidate, "cwd", None)
     name = getattr(candidate, "name", None)
-    agent = f"revive-{candidate.short_id}"
+    # Nodeless resume: a typed session identity, never a fabricated node.
+    from fno.agents.naming import AgentNameError
+
+    try:
+        agent = _recovery_agent_name(name, f"session-{candidate.short_id}", candidate.short_id)
+    except AgentNameError:
+        # A stale/missing binary unmints the resume; the caller notifies.
+        return False
     if not name:
         # No name to stop the dead thread by. The node-less path has no claim +
         # `target init` backstop against a double (unlike _redispatch), so a blind
@@ -1532,6 +1611,8 @@ def _respawn_bg_resume(
             argv += ["--cwd", cwd]
         argv += ["--name", agent, CONTINUE_MESSAGE]
         proc = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=60, check=False)
+        if proc.returncode == 0:
+            _alias_predecessor(agent, name)
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
@@ -1697,7 +1778,7 @@ def _prune_keep(key: str, live: set) -> bool:
         # here every refusal key survives forever and the counts file grows
         # unbounded.
         return key.split(":")[1] in live
-    for prefix in ("capped:", "close:"):
+    for prefix in ("capped:", "close:", "quota-locked:"):
         if key.startswith(prefix):
             return key[len(prefix):] in live
     return key in live

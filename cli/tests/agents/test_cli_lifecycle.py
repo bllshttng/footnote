@@ -74,52 +74,6 @@ def test_cli_stop_propagates_dispatch_exit_code(
 # ---------------------------------------------------------------------------
 
 
-def test_cli_rm_passes_force_flag(monkeypatch, runner: CliRunner) -> None:
-    """--force is wired through to dispatch.rm_agent."""
-    from fno.agents import dispatch
-    from fno.agents.cli import agents_app
-
-    received: dict = {}
-
-    def fake_rm_agent(name: str, *, force: bool = False):
-        received["name"] = name
-        received["force"] = force
-        return dispatch.RmResult(
-            name=name,
-            provider="claude",
-            claude_exit=1,
-            force=force,
-            registry_changed=True,
-        )
-
-    monkeypatch.setattr(dispatch, "rm_agent", fake_rm_agent)
-
-    result = runner.invoke(agents_app, ["rm", "worker-claude", "--force"])
-    assert result.exit_code == 0, result.output
-    assert received == {"name": "worker-claude", "force": True}
-
-
-def test_cli_rm_default_force_is_false(monkeypatch, runner: CliRunner) -> None:
-    """When --force is omitted, rm_agent receives force=False."""
-    from fno.agents import dispatch
-    from fno.agents.cli import agents_app
-
-    received: dict = {}
-
-    def fake_rm_agent(name: str, *, force: bool = False):
-        received["force"] = force
-        return dispatch.RmResult(
-            name=name, provider="claude", claude_exit=0,
-            force=force, registry_changed=True,
-        )
-
-    monkeypatch.setattr(dispatch, "rm_agent", fake_rm_agent)
-
-    result = runner.invoke(agents_app, ["rm", "worker-claude"])
-    assert result.exit_code == 0, result.output
-    assert received == {"force": False}
-
-
 def test_cli_rm_help_mentions_force_consequences(runner: CliRunner) -> None:
     """rm --help spells out the orphan-supervisor warning."""
     from fno.agents.cli import agents_app

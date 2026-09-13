@@ -38,26 +38,26 @@ use std::time::{Duration, Instant};
 use crate::server::lifecycle_target;
 use crate::server::lifecycle_target::pane_table_host;
 
+pub(crate) use crate::mux_rows::{pid_from_sidecar, read_wire_version};
+use crate::pane_send_audit::{pane_send_is_control_only, PaneSendAudit};
 use crate::proto::{
     self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, LayoutScope,
     PanePlacement, PaneTarget, PlacementFallback, ServerMsg, SquadLayout, TabPaneOccupant, TabSel,
     WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
 };
+use crate::review_invocation::{append_review_invocation, review_invocation_command};
 use crate::tree::Dir;
 
 /// Bound every probe: a wedged server counts as alive-but-unqueryable, never
 /// a hang. Generous next to a socket round-trip, tight next to a human.
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Resolve the target session: explicit flag/arg > `FNO_SESSION` (set in
-/// every pane the server spawns) > the default. Pure, so precedence is
-/// unit-testable (Locked 7).
-pub fn resolve_session(explicit: Option<&str>, env: Option<&str>) -> String {
-    explicit
-        .map(str::to_string)
-        .or_else(|| env.filter(|s| !s.is_empty()).map(str::to_string))
-        .unwrap_or_else(|| DEFAULT_SESSION.to_string())
-}
+mod server_axis;
+
+pub use server_axis::{
+    env_server, flag_value, note_server_flag, resolve_session, take_common_flags,
+    LEGACY_SERVER_ENV, SERVER_ENV,
+};
 
 /// What one socket probe learned.
 enum Probe {
@@ -250,16 +250,6 @@ impl SessionRow {
     }
 }
 
-/// Read a session socket's `.ver` sidecar (x-1a85) and parse the stamped wire
-/// version. `None` on any read/parse failure (absent sidecar = older server).
-fn read_wire_version(sock: &Path) -> Option<u32> {
-    std::fs::read_to_string(proto::version_sidecar_path(sock))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-}
-
 /// Enumerate `*.sock` stems in the mux dir, sorted. `Err` is an unreadable dir
 /// the caller must distinguish from "no sessions" (a permissions/IO error must
 /// never read as empty); `NotFound` returns an empty list (no session ever
@@ -328,6 +318,9 @@ fn session_row_json(row: &SessionRow) -> serde_json::Value {
             // spares live-pane servers. `wire_version` is null for a
             // pre-sidecar (older) server.
             "stale": stale, "wire_version": wire_version,
+            // x-f188 change 4: the census classifies the mux server's build
+            // from this pid; null when the sidecar is absent or unparseable.
+            "pid": pid_from_sidecar(name),
         }),
         Probe::Unqueryable => serde_json::json!({ "session": name, "state": "unqueryable" }),
         Probe::Wedged => {
@@ -1434,51 +1427,6 @@ fn squad_store_verdict(total: usize, orphan: usize) -> Check {
     }
 }
 
-/// `fno mux doctor`'s squad-store check: count how many persisted squads the
-/// prune predicate would reap. Read-only (load + registry/roster reads, no pane
-/// probe, no mutation). An unreadable registry means the count is unknown, so
-/// the check warns and points at the prune verb (which is fail-safe regardless).
-fn squad_store_check() -> Check {
-    let loaded = crate::squad_store::load();
-    let total = loaded.squads.len();
-    if total == 0 {
-        return squad_store_verdict(0, 0);
-    }
-    let Some(live) = live_set_or_unknown() else {
-        return Check {
-            name: "squad store".into(),
-            verdict: Verdict::Warn,
-            detail: "agent registry unreadable; orphan count unknown".into(),
-            remedy: Some(PRUNE_REMEDY.into()),
-        };
-    };
-    let origin_exists = |p: &str| std::path::Path::new(p).exists();
-    // ONE argument set with the prune that actually runs. This counter used to
-    // pass an empty `live_cwds` and no clock, so the number the operator read
-    // could disagree with what a bare `prune` would do. `include_named: false`
-    // stays hardcoded on purpose: it is what a bare `prune` uses.
-    let (_, live_cwds, ..) = live_tabs();
-    let now = crate::squad_store::now_epoch_secs();
-    let orphan = loaded
-        .squads
-        .iter()
-        .filter(|sq| {
-            matches!(
-                crate::squad_store::prune_decision_at(
-                    sq,
-                    false,
-                    Some(&live),
-                    &live_cwds,
-                    &origin_exists,
-                    now,
-                ),
-                crate::squad_store::PruneDecision::Prune
-            )
-        })
-        .count();
-    squad_store_verdict(total, orphan)
-}
-
 /// Run every check. The fs/net/env reads live here; the verdict logic each one
 /// calls is pure and unit-tested.
 fn gather_checks() -> Vec<Check> {
@@ -1498,9 +1446,11 @@ fn gather_checks() -> Vec<Check> {
         }),
     }
     #[cfg(not(test))]
-    checks.push(legacy_mux_root_check());
+    checks.push(doctor::legacy_mux_root_check());
     #[cfg(not(test))]
-    checks.push(legacy_squads_newer_check());
+    checks.push(doctor_squads::legacy_squads_newer_check());
+    #[cfg(not(test))]
+    checks.push(doctor_squads::agents_squads_orphan_check());
     #[cfg(not(test))]
     if let Some((detail, remedy)) = proto::pending_config_warning() {
         checks.push(Check {
@@ -1515,174 +1465,17 @@ fn gather_checks() -> Vec<Check> {
         &std::env::var("COLORTERM").unwrap_or_default(),
     ));
     checks.push(clipboard_check(crate::clipboard::available_tool()));
-    checks.push(squad_store_check());
-    checks.push(board_scope_check());
+    checks.push(doctor::squad_store_check());
+    checks.push(doctor::board_scope_check());
     checks
-}
-
-/// Sessions stranded at the pre-config-chain root `~/.fno/mux` when this
-/// process resolves its socket dir elsewhere through the ambient chain
-/// (`config.state_dir`). A daemon bound before an upgrade - or started from a
-/// directory with no state_dir override while clients run inside one that has
-/// it - keeps serving a dir no current client lands on, and every reaper
-/// (`ls`-based) resolves the new root, so nothing finds it to reap. Visible
-/// ONLY here, which is why it is a `warn` with the one command that reaches
-/// the old root.
-#[cfg(not(test))]
-fn legacy_mux_root_check() -> Check {
-    // An explicit FNO_MUX_DIR relocates the sockets ON PURPOSE (the documented
-    // test seam, scratch dirs, operator partitions), and a pinned FNO_CONFIG
-    // is the same deliberate relocation from the other side: an isolated demo
-    // env running doctor. Sessions at the global root are then live for every
-    // normal client, and "restart them under the resolved root" would direct
-    // an operator to kill a healthy fleet - into a tempdir, or out of the
-    // real machine's mux. The check is about UPGRADE divergence only.
-    if std::env::var_os("FNO_MUX_DIR").is_some_and(|v| !v.is_empty())
-        || std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty())
-    {
-        return Check {
-            name: "legacy mux root".into(),
-            verdict: Verdict::Na,
-            detail: "FNO_MUX_DIR or a pinned FNO_CONFIG relocates the sockets on purpose".into(),
-            remedy: None,
-        };
-    }
-    // The same helper the resolver's own fallback uses, so this comparison
-    // can never drift from what mux_dir actually falls back to. Canonical
-    // forms catch a state_dir that aliases the legacy root through a
-    // symlink or a `..` segment - lexically distinct, physically the same
-    // dir, and warning there would direct an operator to kill a fleet that
-    // never moved.
-    let legacy = proto::legacy_mux_root();
-    let resolved = proto::mux_dir();
-    let same_root = match (
-        std::fs::canonicalize(&resolved),
-        std::fs::canonicalize(&legacy),
-    ) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => resolved == legacy,
-    };
-    if same_root {
-        return Check {
-            name: "legacy mux root".into(),
-            verdict: Verdict::Na,
-            detail: "resolved dir is the legacy root".into(),
-            remedy: None,
-        };
-    }
-    let socks = std::fs::read_dir(&legacy)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|x| x == "sock"))
-                .count()
-        })
-        .unwrap_or(0);
-    if socks == 0 {
-        return Check {
-            name: "legacy mux root".into(),
-            verdict: Verdict::Na,
-            detail: "no sessions at the legacy root".into(),
-            remedy: None,
-        };
-    }
-    Check {
-        name: "legacy mux root".into(),
-        verdict: Verdict::Warn,
-        detail: format!(
-            "{socks} session socket(s) sit at the pre-config-chain root {} this \
-             process no longer resolves",
-            legacy.display()
-        ),
-        remedy: Some(format!(
-            "FNO_MUX_DIR='{}' fno mux ls; kill-server or restart them under the \
-             resolved root",
-            legacy.display()
-        )),
-    }
-}
-
-/// The migration-overlap window: a pre-upgrade daemon still bound to the
-/// legacy root keeps writing the legacy squads.json AFTER this process
-/// seeded the state-root copy, and the read path stops seeing the legacy
-/// file the moment the primary exists (the fallback is NotFound-only).
-/// Merging the two stores is reconciliation work beyond a check, but the
-/// DIVERGENCE is visible: warn when the legacy file is newer than the copy
-/// it seeded, which is exactly the old server's signature.
-#[cfg(not(test))]
-fn legacy_squads_newer_check() -> Check {
-    if !proto::legacy_fallback_allowed() {
-        return Check {
-            name: "legacy squads store".into(),
-            verdict: Verdict::Na,
-            detail: "an explicit override isolates the store on purpose".into(),
-            remedy: None,
-        };
-    }
-    let primary = crate::squad_store::squads_path();
-    let legacy = proto::legacy_sidecar_path("squads.json");
-    let newer = match (std::fs::metadata(&primary), std::fs::metadata(&legacy)) {
-        (Ok(p), Ok(l)) => match (p.modified(), l.modified()) {
-            (Ok(pm), Ok(lm)) => lm > pm,
-            _ => false,
-        },
-        _ => false,
-    };
-    if !newer {
-        return Check {
-            name: "legacy squads store".into(),
-            verdict: Verdict::Na,
-            detail: "no legacy copy is outrunning the resolved store".into(),
-            remedy: None,
-        };
-    }
-    Check {
-        name: "legacy squads store".into(),
-        verdict: Verdict::Warn,
-        detail: format!(
-            "the legacy {} is newer than the resolved {}; a pre-upgrade \
-             server may still be writing it",
-            legacy.display(),
-            primary.display()
-        ),
-        remedy: Some(
-            "restart the old mux server under the resolved root, then run \
-             `fno mux workspace prune` once"
-                .into(),
-        ),
-    }
-}
-
-/// What the backlog board would be scoped to (x-20f1).
-///
-/// Resolves LIVE, the same way a client does at spawn, so this answers "what
-/// will a server started from here show". A server already running latched its
-/// scope when it was spawned; changing the config takes a `mux kill-server`,
-/// and this line is where that is visible.
-///
-/// Read-only and advisory: a refusal is a `warn`, not a `fail`, because nothing
-/// is broken - the board just falls back to every project. But it must be
-/// VISIBLE here, because that fallback is silent everywhere else: a board
-/// correctly scoped to one project and a board that could not resolve one and
-/// widened look nothing alike, and only this line says which you got.
-fn board_scope_check() -> Check {
-    let (scope, why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
-    let refused = matches!(
-        &scope,
-        crate::backlog_view::BoardScope::Projects(s) if s.is_empty()
-    );
-    Check {
-        name: "backlog board scope".into(),
-        verdict: if refused { Verdict::Warn } else { Verdict::Ok },
-        detail: why,
-        remedy: refused
-            .then(|| "set config.project.id in this repo, or config.mux.board_scope=all".into()),
-    }
 }
 
 /// Render every check and return the exit code: `EXIT_ERROR` iff any check
 /// FAILed (a version skew), else `EXIT_OK`. Pure over the check list so the
 /// exit mapping and both output shapes are testable without a live server.
-fn render_doctor(checks: &[Check], json: bool) -> i32 {
+/// Dependency rows render beside the checks but never touch the exit: an
+/// unavailable optional backend is advisory for a plain workspace.
+fn render_doctor(checks: &[Check], deps: &[doctor_boundary::DependencyRow], json: bool) -> i32 {
     let failed = checks.iter().any(|c| c.verdict == Verdict::Fail);
     if json {
         let arr: Vec<_> = checks
@@ -1696,12 +1489,35 @@ fn render_doctor(checks: &[Check], json: bool) -> i32 {
                 })
             })
             .collect();
-        println!("{}", serde_json::json!({ "ok": !failed, "checks": arr }));
+        let deps_json: Vec<_> = deps.iter().map(|d| d.json.clone()).collect();
+        println!(
+            "{}",
+            serde_json::json!({ "ok": !failed, "checks": arr, "dependencies": deps_json })
+        );
     } else {
         for c in checks {
             match &c.remedy {
                 Some(r) => println!("{}: {} - {} [{}]", c.name, c.verdict.word(), c.detail, r),
                 None => println!("{}: {} - {}", c.name, c.verdict.word(), c.detail),
+            }
+        }
+        for d in deps {
+            match &d.check.remedy {
+                Some(r) => {
+                    println!(
+                        "{}: {} - {} [{}]",
+                        d.check.name,
+                        d.check.verdict.word(),
+                        d.check.detail,
+                        r
+                    )
+                }
+                None => println!(
+                    "{}: {} - {}",
+                    d.check.name,
+                    d.check.verdict.word(),
+                    d.check.detail
+                ),
             }
         }
     }
@@ -1714,35 +1530,36 @@ fn render_doctor(checks: &[Check], json: bool) -> i32 {
 
 /// `fno mux doctor [--json]`: read-only environment diagnostics.
 pub fn doctor(json: bool) -> i32 {
-    render_doctor(&gather_checks(), json)
+    let deps = doctor_boundary::dependency_rows(&std::env::current_dir().unwrap_or_default());
+    render_doctor(&gather_checks(), &deps, json)
+}
+
+/// `fno mux stats` body lives in server_stats, beside its answer.
+pub fn stats(json: bool) -> i32 {
+    crate::server_stats::cli(json)
 }
 
 // ---------------------------------------------------------------------------
 // `fno mux workspace prune` - reap dead-origin residue (x-a572)
 // ---------------------------------------------------------------------------
 
-/// `fno mux workspace <verb> ...`: the workspace-store maintenance family. Only
-/// `prune` exists today; a bare verb or an unknown verb is usage. Carries the
-/// tokens after the verb family verbatim, like `pane`/`block`.
+/// `fno mux workspace <verb> ...`: the workspace-store maintenance family.
+/// Only `prune` and `restore` exist; a bare or unknown verb is usage. Tokens
+/// after the family verb carry verbatim, like `pane`/`block`.
 ///
-/// The retired `fno mux squad` spelling is GONE: it was an unadvertised alias
-/// of this family, named by nothing outside its own test, and a second spelling
-/// of one verb is a leaf the surface pays for twice. `--squad` stays a
-/// hidden-deprecated flag alias alongside the canonical `--workspace`. The
-/// user-facing/internal vocabulary split that leaves behind - `workspace`
-/// everywhere a person types, `squad` throughout this crate's identifiers - is
-/// a decision, not an unfinished rename: renaming ~2900 internal sites buys no
-/// user-visible change and collides with every in-flight mux branch. The two
-/// remaining user-adjacent
-/// spellings, the `squad` key in the `--json` placement receipt and
-/// `~/.fno/squads.json`, ride the next change that bumps `PROTO_VERSION` or
-/// migrates the store for a real reason, where the compatibility window and
-/// the migration already exist.
+/// The retired `fno mux squad` spelling is GONE: an unadvertised alias named
+/// by nothing outside its own test. `--squad` stays a hidden-deprecated flag
+/// alias beside the canonical `--workspace`. The user-facing/internal
+/// vocabulary split that leaves behind - `workspace` where a person types,
+/// `squad` in this crate's identifiers - is a decision, not an unfinished
+/// rename: renaming ~2900 internal sites buys no user-visible change. The
+/// remaining user-adjacent `squad` spellings, the key in the `--json`
+/// placement receipt and `~/.fno/squads.json`, ride the next change that
+/// bumps `PROTO_VERSION` or migrates the store for a real reason.
 pub fn workspace(args: &[OsString], env_session: Option<&str>) -> i32 {
     // main.rs routes here only with a token after the family verb, so a bare
-    // `mux workspace` never reaches this function - it is the global usage
-    // arm. That leaves exactly one failure shape here, an unknown verb, and a
-    // non-UTF-8 one is simply unknown rather than a second branch.
+    // `mux workspace` is the global usage arm; one failure shape here, an
+    // unknown verb.
     let sub = args
         .first()
         .map(|a| a.to_string_lossy())
@@ -1783,11 +1600,12 @@ fn workspace_restore(args: &[OsString], env_session: Option<&str>) -> i32 {
                     }
                 });
             }
-            Some("--session") => {
+            Some(flag @ ("--server" | "--session")) => {
+                note_server_flag(flag);
                 session = Some(match it.next().and_then(|v| v.to_str()) {
                     Some(v) => v.to_string(),
                     None => {
-                        eprintln!("fno mux workspace restore: --session needs a value");
+                        eprintln!("fno mux workspace restore: {flag} needs a value");
                         return EXIT_USAGE;
                     }
                 });
@@ -2135,7 +1953,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
     // sweep modal's "both" queues exactly that pair, and gating tabs on bare
     // `!dead_only` made it close zero tabs while reporting both.
     let tab_outcome = if scope.fold_tabs && (!dead_only || tabs_only) {
-        prune_live_tabs(&tabs, include_named, dry_run, include_used_shells)
+        prune_live_tabs_measuring_named(&tabs, include_named, dry_run, include_used_shells)
     } else {
         TabPruneOutcome {
             kept: tabs.len(),
@@ -2610,6 +2428,12 @@ pub enum PaneCmd {
         /// hatch keeps one shape across every enveloped lane. A raw send
         /// never renders, so the flag beside `--raw` has no effect.
         style_exception: Option<String>,
+        /// (x-91ba) `--source <label>`: caller-declared provenance for the
+        /// audit row. The mail lane declares `mail`; absent, the row reads
+        /// `unattributed:<pid>`. Declared, never sniffed from the payload:
+        /// `--raw` carries both a wrapped mail body and an operator's
+        /// verbatim keystrokes, which no byte inspection can tell apart.
+        provenance: Option<String>,
     },
     Wait {
         pane: u64,
@@ -2646,15 +2470,6 @@ pub struct ParsedPane {
     pub session: Option<String>,
     pub json: bool,
     pub cmd: PaneCmd,
-}
-
-/// Read the value of a `--flag value` pair, advancing `i` past the value.
-fn flag_value(args: &[OsString], i: &mut usize, flag: &str) -> Result<String, String> {
-    *i += 1;
-    args.get(*i)
-        .and_then(|a| a.to_str())
-        .map(str::to_string)
-        .ok_or_else(|| format!("{flag} needs a value"))
 }
 
 fn parse_u64(s: &str, flag: &str) -> Result<u64, String> {
@@ -2734,9 +2549,12 @@ pub const PANE_REFERENCE_USAGE: &str =
 /// around the character `1` is the nonsense the flag exists to avoid.
 pub const PANE_SEND_RAW_HELP: &str = "pane send wraps the text in an <fno_mail> envelope by \
 default, so a worker can tell a peer's message from its operator's, and refuses a pane showing \
-an option prompt. The enveloped body passes the same style and word-budget gates as mail; \
+an option prompt. The enveloped body passes the same style gate as mail; \
 --style-exception <reason> excepts one reasoned send. --raw types the bytes verbatim for \
-genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit.";
+genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit. \
+Every send writes one audit row to ~/.fno/agents/events.jsonl naming the pane, the recipient and \
+the caller; --source <label> declares that provenance (the mail lane declares mail; a bare \
+invocation reads unattributed:<pid>).";
 
 /// `pane run --worker`'s one line, same posture as [`PANE_SEND_RAW_HELP`]: the
 /// flag records the pane as a squad member joined to the registry row by name,
@@ -2836,7 +2654,10 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 }
                 "--json" => json = true,
                 "--claim" => claim = true,
-                "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+                "--server" | "--session" => {
+                    note_server_flag(tok);
+                    session = Some(flag_value(args, &mut i, tok)?)
+                }
                 "--cwd" => cwd = Some(flag_value(args, &mut i, "--cwd")?),
                 // (x-5f7f) The registry name of the worker this pane hosts.
                 // Validated here with the same rule the store's load gate
@@ -2964,6 +2785,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut submit = false;
     let mut raw = false;
     let mut style_exception: Option<String> = None;
+    let mut provenance: Option<String> = None;
     let mut quiet_ms = None;
     let mut pattern = None;
     let mut timeout_s = None;
@@ -2983,7 +2805,10 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             .ok_or_else(|| "non-UTF-8 argument".to_string())?;
         match tok {
             "--json" => json = true,
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
             // (x-d865) split/break/ls flags.
             "--direction" | "-d" => {
                 direction = Some(parse_dir(&flag_value(args, &mut i, tok)?, tok)?)
@@ -3007,6 +2832,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             "--style-exception" => {
                 style_exception = Some(flag_value(args, &mut i, "--style-exception")?)
             }
+            "--source" => provenance = Some(flag_value(args, &mut i, "--source")?),
             "--quiet-ms" => {
                 quiet_ms = Some(parse_u64(
                     &flag_value(args, &mut i, "--quiet-ms")?,
@@ -3049,6 +2875,9 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     // `--raw` check, which sits after only because bool is Copy.
     if style_exception.is_some() && verb != "send" {
         return Err("--style-exception pairs only with pane send".into());
+    }
+    if provenance.is_some() && verb != "send" {
+        return Err("--source pairs only with pane send".into());
     }
     let cmd = match verb {
         "ls" => PaneCmd::Ls { fno_id },
@@ -3102,6 +2931,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 raw,
                 expected_identity: fno_id,
                 style_exception,
+                provenance,
             }
         }
         "wait" => PaneCmd::Wait {
@@ -3390,27 +3220,6 @@ fn run_on_existing_server(
     }
 }
 
-/// Split off a leading `--session <s>` / `--json` prefix shared by the small
-/// `tab`/`layout` verbs, returning the rest for verb-specific parsing.
-fn take_common_flags(args: &[OsString]) -> Result<(Option<String>, bool, Vec<String>), String> {
-    let mut session = None;
-    let mut json = false;
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let tok = args[i]
-            .to_str()
-            .ok_or_else(|| "non-UTF-8 argument".to_string())?;
-        match tok {
-            "--json" => json = true,
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
-            other => rest.push(other.to_string()),
-        }
-        i += 1;
-    }
-    Ok((session, json, rest))
-}
-
 /// A `--workspace <name>` (alias `--squad`) -> `PaneTarget`, defaulting to `CurrentRoute`.
 ///
 /// `id:<n>` addresses a squad by the id `fno mux pane ls` reports, so a caller
@@ -3464,7 +3273,10 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
         let res = (|| -> Result<(), String> {
             match tok {
                 "--json" => json = true,
-                "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+                "--server" | "--session" => {
+                    note_server_flag(tok);
+                    session = Some(flag_value(args, &mut i, tok)?)
+                }
                 "--workspace" | "--squad" | "-s" => squad = Some(flag_value(args, &mut i, tok)?),
                 "--name" => name = Some(flag_value(args, &mut i, "--name")?),
                 "--tab" => {
@@ -3651,9 +3463,11 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
         };
         let res = (|| -> Result<(), String> {
             match tok {
-                "get" | "--json" | "--session" => {
-                    if tok == "--session" {
-                        let _ = flag_value(flags, &mut i, "--session")?;
+                "get" | "--json" | "--server" | "--session" => {
+                    // A re-parse of flags the common prefix already consumed:
+                    // the note fired there, so this skip stays silent.
+                    if tok == "--server" || tok == "--session" {
+                        let _ = flag_value(flags, &mut i, tok)?;
                     }
                 }
                 "--workspace" | "--squad" | "-s" => squad = Some(flag_value(flags, &mut i, tok)?),
@@ -4418,7 +4232,7 @@ fn view_picker(verb: &str, json: bool, url: bool) -> i32 {
     match run_focus_picker(pane_rows) {
         Some((session, pane)) => {
             if url {
-                print_pane_url(verb, &session, pane)
+                crate::web::print_pane_url(verb, &session, pane)
             } else {
                 focus_pane(verb, &session, pane, true, json)
             }
@@ -4427,10 +4241,6 @@ fn view_picker(verb: &str, json: bool, url: bool) -> i32 {
     }
 }
 
-/// Read a session's web-bridge state file (x-b80d) and build the pasteable
-/// per-pane URL. The bridge writes `web-<session>.json` at bind; a file whose
-/// port no longer answers is a corpse, not a bridge, so the TCP probe - not
-/// the file's existence - decides liveness.
 /// The first-eight short form of a session id, matching Python's
 /// `fno.harness_identity.canonical_handle` closely enough for DISPLAY (the
 /// resolver never consumes this spelling, so the ses_ case rule that matters
@@ -4441,72 +4251,6 @@ fn short_handle(session_id: &str) -> String {
         .take(8)
         .collect::<String>()
         .to_lowercase()
-}
-
-fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
-    let path = proto::mux_dir().join(format!("web-{session}.json"));
-    let hint = format!(
-        "no web bridge for session {session}; start one with: fno mux serve --web --session {session}"
-    );
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        eprintln!("{verb}: {hint}");
-        return EXIT_ERROR;
-    };
-    let state: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("{verb}: {hint}");
-            return EXIT_ERROR;
-        }
-    };
-    let bind = state
-        .get("bind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("127.0.0.1");
-    let port = match state.get("port").and_then(|v| v.as_u64()) {
-        Some(p) => p,
-        None => {
-            eprintln!("{verb}: {hint}");
-            return EXIT_ERROR;
-        }
-    };
-    let token = state
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    // A wide bind is reachable locally too; the pasteable URL says where THIS
-    // machine finds it, mirroring the bind-time print's host hint.
-    let host = if bind == "0.0.0.0" || bind == "::" {
-        "127.0.0.1"
-    } else {
-        bind
-    };
-    // Probe liveness for ANY spelling the operator may have bound. A bare
-    // SocketAddr parse only accepts IPs, so `localhost` and `::1` would skip
-    // the probe and trust a corpse file (codex P2); the tuple form resolves
-    // hostnames and needs no IPv6 brackets.
-    let probe_addr = {
-        use std::net::ToSocketAddrs;
-        (host, port as u16)
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut it| it.next())
-    };
-    if let Some(addr) = probe_addr {
-        let timeout = std::time::Duration::from_millis(300);
-        if std::net::TcpStream::connect_timeout(&addr, timeout).is_err() {
-            eprintln!("{verb}: {hint}");
-            return EXIT_ERROR;
-        }
-    }
-    // Bracket a literal IPv6 host; a bare ::1 in a URL truncates at the colon.
-    let url_host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    println!("http://{url_host}:{port}/?t={token}&pane={pane}");
-    EXIT_OK
 }
 
 /// Split a `--workspace <name>` (alias `--squad`/`-s`) pair out of an
@@ -4604,7 +4348,7 @@ fn location_lookup(
             // URL on stdout, never the client move - the same precedence the
             // agent-matched path of `view` gives the flag.
             if url {
-                return print_pane_url(verb, &session, pane);
+                return crate::web::print_pane_url(verb, &session, pane);
             }
             // JSON stdout carries exactly ONE document: this receipt. The
             // focus action still runs, but its own receipt is suppressed for
@@ -4735,28 +4479,32 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
         return EXIT_NOT_PANE_HOSTED;
     };
     if url {
-        return print_pane_url(verb, &host_session, pane);
+        return crate::web::print_pane_url(verb, &host_session, pane);
     }
     let session = resolve_session(session_flag.as_deref(), Some(&host_session));
     focus_pane(verb, &session, pane, true, json)
 }
 
-// (x-9b60) The `fno mux thread` verb lives in the child module below, named
-// by the question it answers; the file-budget gate keeps this over-budget
-// file shrink-only.
+// The `fno mux thread` verb, same child-module pattern.
 mod thread_verb;
 pub use thread_verb::thread;
+pub mod web_ctl;
 // (v71) The prune aftermath (reload live servers + the receipt), same rule.
 mod prune_sync;
 // (v71) The live-tab fold, same rule; its tests moved with it.
 mod tab_prune;
-use tab_prune::{live_tabs, prune_live_tabs, LiveTab, TabPruneOutcome};
+use tab_prune::{live_tabs, prune_live_tabs_measuring_named, TabPruneOutcome};
 // (v72) The `fno mux thread reseat` verb, same child-module pattern.
 mod reseat_verb;
 pub use reseat_verb::reseat;
 // (v75, x-7649) The `fno mux retire-session` verb, same child-module pattern.
 mod retire_session;
 pub use retire_session::retire_session;
+
+mod doctor;
+mod doctor_boundary;
+#[cfg(not(test))]
+mod doctor_squads;
 /// `fno mux where <fno_id>` (x-d865): resolve an fno session id to its live
 /// location. Reads the registry to find the hosting mux session, connects to
 /// THAT session's socket, and rounds-trips one `PaneWhere`. The three failure
@@ -4880,7 +4628,7 @@ pub fn where_(args: &[OsString], env_session: Option<&str>) -> i32 {
 }
 
 /// Resolve `PaneCmd` -> a control verb + the read deadline, then run it.
-fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
+pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
     // (x-d865) `pane ls --fno-id` filters the listing client-side over the
     // reply's PaneInfo.fno_id, so capture the filter before `cmd` is consumed.
     let ls_fno_id = match &cmd {
@@ -4891,6 +4639,10 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
     // every other verb operates on an existing server. `pane ls` against no
     // server is "no panes" (exit 0); the rest are an error (nothing to act on).
     let mut review_command = None;
+    // (x-91ba) The pane-send audit row, staged where the exact bytes are
+    // known; emitted once the outcome (exit code) is known - inline on the
+    // submit path, in the shared tail on the paste path.
+    let mut pane_send_audit: Option<PaneSendAudit> = None;
     let (verb, read_timeout) = match cmd {
         // pane() intercepts the keeper read before dispatch; it needs no
         // server and this arm exists to keep the match total.
@@ -4952,6 +4704,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             raw,
             expected_identity,
             style_exception,
+            provenance,
         } => {
             let bytes = match source {
                 SendSource::Text(t) => t.into_bytes(),
@@ -4974,6 +4727,16 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             let bytes = if raw {
                 if bytes.len() > RAW_PANE_SEND_CAP_BYTES {
                     eprintln!("fno mux pane send: {}", paste_cap_refusal(bytes.len()));
+                    if !pane_send_is_control_only(&bytes) {
+                        PaneSendAudit::new(
+                            pane,
+                            expected_identity.as_deref(),
+                            &bytes,
+                            submit,
+                            provenance.as_deref(),
+                        )
+                        .emit(session, EXIT_ERROR);
+                    }
                     return EXIT_ERROR;
                 }
                 bytes
@@ -4982,10 +4745,33 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     Ok(b) => b,
                     Err(e) => {
                         eprintln!("fno mux pane send: {e}");
+                        if !pane_send_is_control_only(&bytes) {
+                            PaneSendAudit::new(
+                                pane,
+                                expected_identity.as_deref(),
+                                &bytes,
+                                submit,
+                                provenance.as_deref(),
+                            )
+                            .emit(session, EXIT_ERROR);
+                        }
                         return EXIT_ERROR;
                     }
                 }
             };
+            // (x-91ba) Stage the row here, where the exact typed bytes are
+            // known; the submit path emits inline below, the paste path in
+            // the shared tail once the reply's exit code is known. Submit-key
+            // sends are control bytes and stage nothing (AC5).
+            if !pane_send_is_control_only(&bytes) {
+                pane_send_audit = Some(PaneSendAudit::new(
+                    pane,
+                    expected_identity.as_deref(),
+                    &bytes,
+                    submit,
+                    provenance.as_deref(),
+                ));
+            }
             review_command = if raw {
                 review_invocation_command(&bytes)
             } else {
@@ -5001,6 +4787,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     expected_identity.as_deref(),
                     json,
                 );
+                if let Some(audit) = pane_send_audit.take() {
+                    audit.emit(session, code);
+                }
                 if review_command.is_some() {
                     let receipt = match code {
                         EXIT_OK => "submitted",
@@ -5092,6 +4881,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     return EXIT_OK;
                 }
                 eprintln!("fno mux pane: cannot reach session {session:?}: {e}");
+                if let Some(audit) = pane_send_audit.take() {
+                    audit.emit(session, EXIT_ERROR);
+                }
                 return EXIT_ERROR;
             }
         }
@@ -5127,6 +4919,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             EXIT_ERROR
         }
     };
+    if let Some(audit) = pane_send_audit.take() {
+        audit.emit(session, code);
+    }
     if review_command.is_some() {
         append_review_invocation(
             session,
@@ -5800,7 +5595,10 @@ fn parse_block_args(args: &[OsString]) -> Result<ParsedBlockPipe, String> {
         match tok {
             "--json" => json = true,
             "--force" => force = true,
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
             "--from" => from = Some(parse_u64(&flag_value(args, &mut i, "--from")?, "--from")?),
             "--to" => to = Some(parse_u64(&flag_value(args, &mut i, "--to")?, "--to")?),
             "--block" => block = parse_block_sel(&flag_value(args, &mut i, "--block")?)?,
@@ -5856,7 +5654,7 @@ fn pipe_block_gate(meta: Option<&proto::BlockMeta>) -> Result<(), String> {
 /// connect + [`send_control`], factored so `block pipe` can do two in a row).
 /// Timeouts are parameters, not the hardcoded constants, so a test can force
 /// `Unanswered` in milliseconds instead of waiting out `CONTROL_REPLY_DEADLINE`.
-fn control_roundtrip_with_timeouts(
+pub(crate) fn control_roundtrip_with_timeouts(
     sock: &Path,
     session: &str,
     verb: ControlVerb,
@@ -5868,7 +5666,7 @@ fn control_roundtrip_with_timeouts(
     send_control(stream, verb, read_timeout, reply_deadline, session)
 }
 
-fn control_roundtrip(
+pub(crate) fn control_roundtrip(
     sock: &Path,
     session: &str,
     verb: ControlVerb,
@@ -6069,189 +5867,6 @@ fn pane_text(sock: &Path, session: &str, pane: u64) -> Result<String, ControlErr
             "unexpected pane read reply while confirming submit: {other:?}"
         ))),
     }
-}
-
-fn review_invocation_command(bytes: &[u8]) -> Option<(String, String)> {
-    let raw = std::str::from_utf8(bytes).ok()?.trim();
-    let mut parts = raw.splitn(2, char::is_whitespace);
-    let token = parts.next()?.strip_prefix('/')?;
-    let name = token.rsplit(':').next()?;
-    if !matches!(
-        name,
-        "code-review" | "review" | "review-changes" | "sigma-review"
-    ) {
-        return None;
-    }
-    Some((
-        format!("/{name}"),
-        parts.next().unwrap_or("").trim_start().to_string(),
-    ))
-}
-
-fn review_invocation_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("ri-{nanos:x}-{}", std::process::id())
-}
-
-fn review_events_path() -> PathBuf {
-    if let Ok(path) = std::env::var("FNO_EVENTS_PATH") {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut command = crate::process_admission::std_command("git");
-    command.args(["-C", &cwd.to_string_lossy(), "rev-parse", "--show-toplevel"]);
-    let probe = crate::process_admission::std_output(&mut command);
-    if let Err(error) = &probe {
-        // The spawn itself failed (admission refusal, missing git). Say so, or
-        // the fallback silently lands the journal where no reader looks.
-        eprintln!("fno mux: review-events git probe failed ({error}); events fall back to the current directory");
-    }
-    let root = probe
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|root| PathBuf::from(root.trim()))
-        .filter(|root| !root.as_os_str().is_empty())
-        .unwrap_or(cwd);
-    root.join(".fno/events.jsonl")
-}
-
-fn review_invocation_branch_and_head() -> (Option<String>, Option<String>) {
-    let git = |args: &[&str]| {
-        let mut command = crate::process_admission::std_command("git");
-        command.args(["rev-parse", "--verify"]).args(args);
-        let probe = crate::process_admission::std_output(&mut command);
-        if let Err(error) = &probe {
-            eprintln!(
-                "fno mux: review-evidence git probe failed ({error}); evidence fields will be null"
-            );
-        }
-        probe
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
-    let head = git(&["HEAD"]);
-    let mut command = crate::process_admission::std_command("git");
-    command.args(["rev-parse", "--abbrev-ref", "HEAD"]);
-    let branch = crate::process_admission::std_output(&mut command)
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty() && value != "HEAD");
-    (branch, head)
-}
-
-fn append_review_invocation(
-    session: &str,
-    command: Option<(String, String)>,
-    submitted: bool,
-    submit_confirmed: bool,
-    receipt: &str,
-) {
-    if std::env::var_os("FNO_REVIEW_INVOCATION_ID").is_some() {
-        return;
-    }
-    append_review_invocation_at(
-        &review_events_path(),
-        session,
-        command,
-        submitted,
-        submit_confirmed,
-        receipt,
-    );
-}
-
-fn append_review_invocation_at(
-    path: &Path,
-    session: &str,
-    command: Option<(String, String)>,
-    submitted: bool,
-    submit_confirmed: bool,
-    receipt: &str,
-) {
-    let Some((verb, args_raw)) = command else {
-        return;
-    };
-    let (branch, head_sha) = review_invocation_branch_and_head();
-    let invocation_id = review_invocation_id();
-    // `submitted` records whether this send carried a submit key at all. A
-    // plain text write is not a submit, so it must not claim one: the row is
-    // the transport fact an operator debugs a wedged review against.
-    let (submit_required, submit_key, submit_confirmed) = if submitted {
-        (true, "\\r", submit_confirmed)
-    } else {
-        (false, "none", false)
-    };
-    let data = serde_json::json!({
-        "invocation_id": invocation_id,
-        "stage": "sent",
-        "verb": verb,
-        "args_raw": args_raw,
-        "transport": "mux_pane_send_raw",
-        "initiator": "unknown",
-        "target_session_id": session,
-        "submit_required": submit_required,
-        "submit_key": submit_key,
-        "submit_confirmed": submit_confirmed,
-        "receipt": receipt,
-        "branch": branch,
-        "head_sha": head_sha,
-    });
-    let event = serde_json::json!({
-        "ts": review_invocation_timestamp(),
-        "type": "review_invocation",
-        "source": "daemon",
-        "data": data,
-    });
-    let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        writeln!(file, "{event}")
-    })();
-    let _ = result;
-}
-
-fn review_invocation_timestamp() -> String {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = (seconds / 86_400) as i64;
-    let remainder = seconds % 86_400;
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let month_part = (5 * doy + 2) / 153;
-    let day = doy - (153 * month_part + 2) / 5 + 1;
-    let month = if month_part < 10 {
-        month_part + 3
-    } else {
-        month_part - 9
-    };
-    let year = if month <= 2 { year + 1 } else { year };
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        remainder / 3_600,
-        (remainder % 3_600) / 60,
-        remainder % 60
-    )
 }
 
 fn send_pane_bytes(
@@ -6531,7 +6146,10 @@ fn parse_block_annotate(args: &[OsString]) -> Result<ParsedBlockAnnotate, String
             .to_str()
             .ok_or_else(|| "non-UTF-8 argument".to_string())?;
         match tok {
-            "--session" => session = Some(flag_value(args, &mut i, "--session")?),
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                session = Some(flag_value(args, &mut i, tok)?)
+            }
             "--from" => from = Some(parse_u64(&flag_value(args, &mut i, "--from")?, "--from")?),
             "--block" => block = parse_block_sel(&flag_value(args, &mut i, "--block")?)?,
             "--node" => node = Some(flag_value(args, &mut i, "--node")?),
@@ -6729,6 +6347,7 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane_send_audit::{FNO_AGENTS_HOME_GUARD, FNO_BIN_GUARD};
 
     // The paneless route-hint test lives in its own file; the parent is
     // shrink-only under the file-budget gate.
@@ -6767,15 +6386,8 @@ mod tests {
         assert_eq!(squad_target(None), PaneTarget::CurrentRoute);
     }
 
-    #[test]
-    fn mux_session_resolution_flag_beats_env_beats_default() {
-        // Locked 7: --session flag > FNO_SESSION env > "main" (AC3-EDGE).
-        assert_eq!(resolve_session(Some("other"), Some("work")), "other");
-        assert_eq!(resolve_session(None, Some("work")), "work");
-        assert_eq!(resolve_session(None, None), DEFAULT_SESSION);
-        // An empty env var reads as unset, not as a session named "".
-        assert_eq!(resolve_session(None, Some("")), DEFAULT_SESSION);
-    }
+    #[path = "server_axis_flag_tests.rs"]
+    mod server_axis_flag_tests;
 
     fn pane_args(tokens: &[&str]) -> Result<ParsedPane, String> {
         let args: Vec<OsString> = tokens.iter().map(OsString::from).collect();
@@ -6915,6 +6527,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
     }
@@ -7856,6 +7469,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         assert_eq!(
@@ -7868,6 +7482,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         // --guarded opts the send into the server-side turn-taken interlock.
@@ -7883,6 +7498,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         assert_eq!(
@@ -7897,6 +7513,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         // --raw opts OUT of the envelope (node x-3a64). Default false is the
@@ -7914,6 +7531,7 @@ mod tests {
                 raw: true,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         assert_eq!(
@@ -7930,6 +7548,7 @@ mod tests {
                 raw: false,
                 expected_identity: Some("addressed".into()),
                 style_exception: None,
+                provenance: None,
             }
         );
         // The bare-submit keystroke the attribution refusal promises (x-3081):
@@ -7947,6 +7566,7 @@ mod tests {
                 raw: true,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         // Every other source-less form is still a usage error: `--raw` or
@@ -7984,6 +7604,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: Some("quoted".into()),
+                provenance: None,
             }
         );
         // A valueless flag and a non-send verb are usage errors, mirroring
@@ -8002,6 +7623,17 @@ mod tests {
         // nonzero exit with no PaneSend reaching the socket, while the
         // byte-identical --raw payload never launches a renderer and arrives
         // verbatim. The received BYTES are asserted, not `raw: true`.
+        // (x-91ba) Serializes against the audit test: this test's dispatches
+        // write audit rows into the process-global agents events file, so the
+        // env is redirected to a scratch dir and never the operator's real
+        // journal.
+        let _agents = FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let agents_dir = std::env::temp_dir().join(format!("fno-agents-sendgates-{}", line!()));
+        let _ = std::fs::remove_dir_all(&agents_dir);
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &agents_dir);
         let sock = control_test_sock("send-gates");
         let _ = std::fs::remove_file(&sock);
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -8045,6 +7677,7 @@ mod tests {
             raw,
             expected_identity: None,
             style_exception: None,
+            provenance: None,
         };
 
         std::env::set_var("FNO_BIN", &script);
@@ -8079,6 +7712,9 @@ mod tests {
             ),
             other => panic!("expected PaneSend at the socket, got {other:?}"),
         }
+
+        std::env::remove_var("FNO_AGENTS_HOME");
+        let _ = std::fs::remove_dir_all(&agents_dir);
     }
 
     #[test]
@@ -8090,6 +7726,17 @@ mod tests {
         // size limit at all, an ungated prose channel. The cap refuses
         // in-process, before any control connection, while a small raw payload
         // in the same run still delivers.
+        // (x-91ba) Serializes against the audit test: this test's dispatches
+        // write audit rows into the process-global agents events file, so the
+        // env is redirected to a scratch dir and never the operator's real
+        // journal.
+        let _agents = FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let agents_dir = std::env::temp_dir().join(format!("fno-agents-rawcap-{}", line!()));
+        let _ = std::fs::remove_dir_all(&agents_dir);
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &agents_dir);
         let sock = control_test_sock("raw-cap");
         let _ = std::fs::remove_file(&sock);
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -8118,6 +7765,7 @@ mod tests {
             raw: true,
             expected_identity: None,
             style_exception: None,
+            provenance: None,
         };
 
         let over = dispatch("t", &sock, false, send_cmd(big));
@@ -8145,66 +7793,9 @@ mod tests {
             ),
             other => panic!("expected PaneSend at the socket, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn review_invocation_records_a_canonical_positive_receipt() {
-        let path = std::env::temp_dir().join(format!(
-            "fno-review-invocation-{}-{}.jsonl",
-            std::process::id(),
-            line!()
-        ));
-        let _ = std::fs::remove_file(&path);
-
-        let command = review_invocation_command(b"/review medium --comment");
-        let command_plain = command.clone();
-        assert_eq!(
-            command,
-            Some(("/review".to_string(), "medium --comment".to_string()))
-        );
-        append_review_invocation_at(
-            &path,
-            "mux-session",
-            command,
-            true,
-            false,
-            "text delivered, submission unconfirmed",
-        );
-
-        let line = std::fs::read_to_string(&path).unwrap();
-        let event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(event["type"], "review_invocation");
-        assert_eq!(event["source"], "daemon");
-        assert_eq!(event["data"]["stage"], "sent");
-        assert_eq!(event["data"]["transport"], "mux_pane_send_raw");
-        assert_eq!(
-            event["data"]["receipt"],
-            "text delivered, submission unconfirmed"
-        );
-        assert_eq!(event["data"]["submit_required"], true);
-        assert_eq!(event["data"]["submit_key"], "\\r");
-        assert_eq!(event["data"]["submit_confirmed"], false);
-        assert!(event["data"]["invocation_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("ri-"));
-        let _ = std::fs::remove_file(&path);
-
-        // A plain text write with no submit key must not claim one.
-        append_review_invocation_at(
-            &path,
-            "mux-session",
-            command_plain,
-            false,
-            false,
-            "text delivered, no submit requested",
-        );
-        let line = std::fs::read_to_string(&path).unwrap();
-        let event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(event["data"]["submit_required"], false);
-        assert_eq!(event["data"]["submit_key"], "none");
-        assert_eq!(event["data"]["submit_confirmed"], false);
-        let _ = std::fs::remove_file(path);
+        std::env::remove_var("FNO_AGENTS_HOME");
+        let _ = std::fs::remove_dir_all(&agents_dir);
     }
 
     #[test]
@@ -8377,16 +7968,16 @@ mod tests {
     fn doctor_exit_ok_when_no_check_fails() {
         // AC6-FR/HP: ok/warn/na only -> exit 0 (the exit table's OK row).
         let checks = [check(Verdict::Ok), check(Verdict::Warn), check(Verdict::Na)];
-        assert_eq!(render_doctor(&checks, false), EXIT_OK);
-        assert_eq!(render_doctor(&checks, true), EXIT_OK);
+        assert_eq!(render_doctor(&checks, &[], false), EXIT_OK);
+        assert_eq!(render_doctor(&checks, &[], true), EXIT_OK);
     }
 
     #[test]
     fn doctor_exit_error_when_any_check_fails() {
         // AC6-ERR: a single Fail (version skew) flips the exit non-zero.
         let checks = [check(Verdict::Ok), check(Verdict::Fail)];
-        assert_eq!(render_doctor(&checks, false), EXIT_ERROR);
-        assert_eq!(render_doctor(&checks, true), EXIT_ERROR);
+        assert_eq!(render_doctor(&checks, &[], false), EXIT_ERROR);
+        assert_eq!(render_doctor(&checks, &[], true), EXIT_ERROR);
     }
 
     #[test]
@@ -8431,7 +8022,7 @@ mod tests {
         let checks = session_checks(&[], |_| VersionVerdict::Ok);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].verdict, Verdict::Na);
-        assert_eq!(render_doctor(&checks, false), EXIT_OK);
+        assert_eq!(render_doctor(&checks, &[], false), EXIT_OK);
     }
 
     #[test]
@@ -8443,7 +8034,7 @@ mod tests {
             _ => VersionVerdict::Ok,
         });
         assert_eq!(checks.len(), 2);
-        assert_eq!(render_doctor(&checks, false), EXIT_ERROR);
+        assert_eq!(render_doctor(&checks, &[], false), EXIT_ERROR);
     }
 
     #[test]
@@ -8685,13 +8276,6 @@ mod tests {
     /// A unique short-lived scratch socket path. No tempfile dep: pid + test
     /// name is unique enough for a test process (sun_path stays short - the
     /// limit is ~104 bytes on macOS).
-    /// Serializes any test that mutates the process-global FNO_BIN (today the
-    /// one renderer-gate test). Cargo runs this binary's tests on parallel
-    /// threads; a second mutator added without this guard would race the
-    /// first for the same env slot. A concurrent test that only READS
-    /// FNO_BIN during the window remains a theoretical exposure.
-    static FNO_BIN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn control_test_sock(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("fno-control-{}-{name}.sock", std::process::id()))
     }

@@ -14,7 +14,11 @@
 //! the session provenance (phase, harness, session id, started_at) survives,
 //! stamped `ended_by: "reap-sweep"` because the sweep infers the end instant
 //! rather than observing it. A row the settle cannot fill on a node still in
-//! flight keeps under `open do row on done node`.
+//! flight keeps under `open do row on done node`. That stranded population
+//! (an open do row is what holds its node out of this settle's own gate) has
+//! its own lane: `fno backlog maintain` detects it in Python, where the
+//! transcript resolver lives, and reaps a row only after the prover proves
+//! the session gone. Widen THIS gate never; extend that lane instead.
 //!
 //! Retirement removes the session from its harness's ACTIVE surface only
 //! (the agent list, the session index); the native history is never deleted,
@@ -24,17 +28,29 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::events::EventEmitter;
-use crate::gc::{
-    gc_decide, row_handle, transcript_age_s, tree_action, GcAction, GcRow, KeepReason, TreeAction,
-};
+use crate::gc::{gc_decide, row_handle, tree_action, GcAction, GcRow, KeepReason, TreeAction};
 use crate::graph_store::{self, WorkState};
 use crate::node_route;
 use crate::paths::AgentsHome;
+
+/// (x-1b90 change 3) How long a row has sat unresolved: now minus
+/// `last_message_at`, else `created_at`; a stamp that cannot parse names no
+/// age (0 keeps the line shape without inventing a number).
+fn unresolved_hold_secs(e: &state::RegistryEntry, now: i64) -> i64 {
+    let parsed = e
+        .last_message_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(state::rfc3339_like_to_secs)
+        .or_else(|| state::rfc3339_like_to_secs(&e.created_at));
+    parsed.map_or(0, |at| (now - at as i64).max(0))
+}
 use crate::receipt::{
     build_reap_receipt, expire_receipt_details, write_reap_receipt, EffectRecord, ReapReceipt,
 };
@@ -65,7 +81,10 @@ pub struct GcSummary {
     pub kept_shared_tree: Vec<(String, String)>,
     /// `(row id, descendant)`: a live registry row names this row's session
     /// in its own `spawned_by_session` - the parent is held, unretired,
-    /// until that child is gone.
+    /// until that child is gone. A parent whose own harness reports a
+    /// terminal state is not held: the lineage guard exists to keep a
+    /// running parent's surface alive for its children, and a terminal
+    /// parent has none.
     pub kept_live_descendants: Vec<(String, String)>,
     pub kept_operator: Vec<String>,
     pub kept_crowned: Vec<String>,
@@ -92,7 +111,9 @@ pub struct GcSummary {
     /// `(id, age_s)`: the transcript was written inside the grace window.
     pub kept_active: Vec<(String, i64)>,
     /// The transcript could not be resolved through the row's own store.
-    pub kept_transcript_unresolved: Vec<String>,
+    /// (x-1b90 change 3) Rows of `{ id, held_s, nodes_done }`: the hold
+    /// names its age, and an old hold on done work asks for a decision.
+    pub kept_transcript_unresolved: Vec<UnresolvedHold>,
     /// The graph could not be read this pass. Never a retirement on a failed
     /// read.
     pub kept_graph_unreadable: Vec<String>,
@@ -121,6 +142,13 @@ pub struct GcSummary {
     /// promise rows a real run then refuses (2026-09-08: dry promised nine,
     /// real retired zero).
     pub needs_live_stop: Vec<(String, String)>,
+    /// `(id, gate)`: DRY RUN only. The row cleared every read-only
+    /// gate, but a remaining retirement gate (the active-surface removal)
+    /// can only be answered by applying it, so the rehearsal names the gate
+    /// instead of implying it passed. Never counted as retired; kept
+    /// outside `holds` - an effect a dry run deliberately skips is not an
+    /// aged operator-release request.
+    pub dry_run_unverified: Vec<(String, String)>,
     /// `(id, reason)`: a retirement held because no resumable receipt could
     /// be staged. Unknown never removes - a removal the operator cannot undo
     /// needs at least the record of how to come back.
@@ -130,6 +158,117 @@ pub struct GcSummary {
     /// `(receipt filename, reason)` for every receipt the retention sweep
     /// HELD: a failed read is not evidence of age.
     pub kept_receipts: Vec<(String, String)>,
+    /// The registry file could not be read this pass. Never a retirement on
+    /// a failed read; the tick names this instead of a quiet no_rows.
+    pub registry_unreadable: bool,
+    /// One per held row (x-e3cc): its clock. The text buckets above stay
+    /// exactly as they were; `holds` is the read-side projection that gives
+    /// a keep an age, a basis, and an escalation flag. It is a projection
+    /// OVER the kept_* buckets, never a bucket itself: kept_total must not
+    /// count it.
+    pub holds: Vec<Hold>,
+    /// The escalation threshold `mark_escalated` stamped with, so the
+    /// renderer prints the same number the verb enforced. `None` until
+    /// stamped; an unstamped summary renders no escalation.
+    pub hold_escalate_after_s: Option<u64>,
+    /// Rulings the sweep could not apply (x-e3cc): a release named a row
+    /// whose current hold no longer matched the one it captured. The row
+    /// keeps under its real hold; the reason rides here and in the JSON.
+    pub release_refused: Vec<String>,
+}
+
+/// The ruling a `reap --release <row>` carries into the sweep (x-e3cc): the
+/// row's classified hold, captured when the verb classified it. The sweep
+/// lifts one gate on the matching row only, and only while the row's
+/// current hold still equals the captured one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Release {
+    /// The row handle the release names (the `id` every bucket carries).
+    pub handle: String,
+    /// The hold reason the classifier answered for the row.
+    pub reason: String,
+    /// The hold detail at classification time.
+    pub detail: String,
+}
+
+impl Release {
+    /// The stop family (x-e3cc): `needs live stop` is the dry-run spelling
+    /// and `stop refused` the real-run spelling of the same missing-death-
+    /// evidence fact, so the two reasons answer for each other. Their
+    /// details are mode-dependent wording and are not compared.
+    fn is_stop_family(&self) -> bool {
+        self.reason == "needs live stop" || self.reason == "stop refused"
+    }
+
+    /// Does this release answer for a row currently held with `reason` and
+    /// `detail`?
+    fn matches(&self, reason: &str, detail: &str) -> bool {
+        if self.is_stop_family() && (reason == "needs live stop" || reason == "stop refused") {
+            return true;
+        }
+        self.reason == reason && self.detail == detail
+    }
+}
+
+/// One held row with its clock (x-e3cc): a correct hold with no age is
+/// indistinguishable from a reader that never ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Hold {
+    /// The row handle (`row_handle`).
+    pub id: String,
+    /// `KeepReason::as_str`, or "needs live stop" / "stop refused" for the
+    /// two buckets KeepReason has no variant for.
+    pub reason: &'static str,
+    /// The bucket's own detail; an open do row adds its settle blocker.
+    pub detail: String,
+    /// Transcript-quiet seconds when the age seam answered, else seconds
+    /// since the row's `created_at`, else `None`.
+    pub age_s: Option<i64>,
+    /// "transcript quiet" | "row created" | "unmeasured"
+    pub age_basis: &'static str,
+    /// Set by `mark_escalated`: age_s past the configured threshold. An
+    /// unmeasured hold never escalates.
+    pub escalated: bool,
+}
+
+impl GcSummary {
+    /// Every `kept_*` bucket summed: the rows the pass judged but did not
+    /// retire. Zero alongside an empty `retired` means the pass classified
+    /// no row at all (the retire tick's `no_rows` skip reason).
+    pub fn kept_total(&self) -> usize {
+        self.kept_shared_tree.len()
+            + self.kept_live_descendants.len()
+            + self.kept_operator.len()
+            + self.kept_crowned.len()
+            + self.kept_not_spawn.len()
+            + self.kept_no_provenance.len()
+            + self.kept_node_conflict.len()
+            + self.kept_pr_contradicts.len()
+            + self.kept_planning_unclosed.len()
+            + self.kept_open_work.len()
+            + self.kept_active.len()
+            + self.kept_transcript_unresolved.len()
+            + self.kept_graph_unreadable.len()
+            + self.kept_open_do_row.len()
+            + self.kept_dirty.len()
+            + self.kept_unmerged.len()
+            + self.kept_unprobed.len()
+            + self.kept_no_receipt.len()
+            + self.kept_receipts.len()
+            + self.dry_run_unverified.len()
+    }
+
+    /// Stamp every hold's escalation flag against the configured threshold
+    /// (x-e3cc). Called once per verb run, after the sweep filled the
+    /// buckets; the sweep itself stays clock-free so a dry run and a real
+    /// run carry the same hold rows.
+    pub fn mark_escalated(&mut self, after: Duration) {
+        self.hold_escalate_after_s = Some(after.as_secs());
+        let after = after.as_secs() as i64;
+        for h in &mut self.holds {
+            h.escalated = h.age_s.is_some_and(|a| a >= after);
+        }
+    }
 }
 
 /// One state file selected for deletion by the shared age policy.
@@ -139,6 +278,22 @@ pub struct StateReapEntry {
     pub bytes: u64,
     pub age_s: u64,
 }
+
+/// (x-1b90 change 3) One transcript-unresolved hold: the row, how long it
+/// has sat unresolved (now minus `last_message_at`, else `created_at`), and
+/// whether every node the row names reads done. The hold is right; what it
+/// lacked was a clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnresolvedHold {
+    pub id: String,
+    pub held_s: i64,
+    pub nodes_done: bool,
+}
+
+/// (x-1b90 change 3) When an unresolved hold is this old AND the row's work
+/// is all done, the render asks for a decision: `fno agents rm <name>` - an
+/// rm that, since change 1, proves the death it prints.
+pub(crate) const UNRESOLVED_HOLD_DECIDE_S: i64 = 6 * 3600;
 
 /// One state file retained because its safety proof was incomplete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -160,7 +315,7 @@ pub struct StateReapFamilySummary {
     pub would_delete_entries: Vec<StateReapEntry>,
 }
 
-/// Totals are derived only from the four named families.
+/// Totals are derived only from the five named families.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct StateReapTotals {
     pub scanned: usize,
@@ -180,6 +335,7 @@ pub struct StateFilesReapSummary {
     pub plan_locks: StateReapFamilySummary,
     pub agent_locks: StateReapFamilySummary,
     pub pr_status_cache: StateReapFamilySummary,
+    pub claim_tmp: StateReapFamilySummary,
     pub totals: StateReapTotals,
     pub applied: bool,
     pub dry_run: bool,
@@ -193,6 +349,7 @@ impl Default for StateFilesReapSummary {
             plan_locks: StateReapFamilySummary::default(),
             agent_locks: StateReapFamilySummary::default(),
             pr_status_cache: StateReapFamilySummary::default(),
+            claim_tmp: StateReapFamilySummary::default(),
             totals: StateReapTotals::default(),
             applied: false,
             dry_run: true,
@@ -207,6 +364,9 @@ impl Default for StateFilesReapSummary {
 #[derive(Debug, Default, Clone)]
 pub struct GraphRead {
     pub index: HashMap<String, Vec<(String, String)>>,
+    /// The ship-row-excluded join: the WORK question reads this,
+    /// attribution reads [`GraphRead::index`].
+    pub work_index: HashMap<String, Vec<(String, String)>>,
     pub open_do: HashMap<String, Vec<String>>,
     /// Normalized session id -> the phases its sessions[] rows carry. The
     /// planning lane reads this to recognize a planner row (blueprint/think)
@@ -242,6 +402,9 @@ pub(crate) struct RetireOrder {
     /// open do row is the stale record of work that moved on, not a live
     /// assignment.
     pub(crate) released: bool,
+    /// A `reap --release` ruling applied to this row (x-e3cc): the event
+    /// names the release as the remover.
+    pub(crate) via_release: bool,
 }
 
 /// Why a row's session effects refused. The caller names its own bucket: the
@@ -259,6 +422,51 @@ pub(crate) enum RetireRefusal {
     /// effect fires, because a held session whose process was already
     /// stopped is not held at all - it is dead (the codex P1 on PR 1637).
     GraphObligation(String),
+    /// The graph obligation re-read could not answer. Never a retirement on
+    /// a failed read; the sweep files the row under `kept_graph_unreadable`.
+    GraphUnreadable,
+    /// DRY RUN only: no positive stop evidence backs the row, so the
+    /// rehearsal cannot evaluate the stop gate at all. The sweep files it
+    /// under `needs_live_stop`.
+    StopUnproven(String),
+}
+
+/// Which run [`stage_session_retirement`] answers for. Apply fires
+/// the effect seams and demands each confirmation; DryRun runs no effect and
+/// names every gate it could not evaluate instead of implying it passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetireMode {
+    /// The real run: effects fire, refusals hold the row for retry.
+    Apply,
+    /// The rehearsal: read-only gates only, effects never invoked.
+    DryRun,
+}
+
+/// The stop gate as the caller read it before staging:
+/// `run_with_release` folds its read-only evidence - harness death state, a
+/// gone pid, a stop-family release - into one answer, so the rehearsal can
+/// satisfy the gate without mutating anything. Apply never reads this: its
+/// stop answers for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopObservation {
+    /// Positive read-only evidence: the real run's stop will confirm.
+    Proven,
+    /// No read-only evidence. Apply learns by running the stop; a dry run
+    /// refuses with [`RetireRefusal::StopUnproven`].
+    Unproven,
+}
+
+/// What staging decided for one would-retire row. Apply answers
+/// `Retired` only after every gate confirmed; the rehearsal answers
+/// `Unverified` naming the gate it could not evaluate - the row must never
+/// read as retired on that answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StagedRetirement {
+    /// Every gate confirmed; the receipt is persisted and the row may drop.
+    Retired,
+    /// The receipt is staged, no effect ran, and the named gate stays
+    /// unevaluated. Dry run only; apply never produces it.
+    Unverified(String),
 }
 
 /// What one commit actually wrote. `retired_names` is the removal truth: a
@@ -315,6 +523,7 @@ pub(crate) fn read_graph_entries_raw(home: &AgentsHome) -> Option<Vec<Value>> {
 pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let entries = read_graph_entries_raw(home)?;
     let index = graph_store::sessions_index(&entries);
+    let work_index = graph_store::work_index(&entries);
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
     let mut phases: HashMap<String, Vec<String>> = HashMap::new();
     let mut closed_planning: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -399,6 +608,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     }
     Some(GraphRead {
         index,
+        work_index,
         open_do,
         phases,
         closed_planning,
@@ -509,7 +719,7 @@ pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(
             Ok(settled) => return (settled, Vec::new()),
             Err(SettleRefusal::Retry(err)) if attempt + 1 < SETTLE_ATTEMPTS => {
                 let _ = err;
-                std::thread::sleep(std::time::Duration::from_millis(250));
+                std::thread::sleep(std::time::Duration::from_millis(settle_backoff_ms(attempt)));
             }
             Err(SettleRefusal::Retry(err)) => {
                 let reason =
@@ -522,6 +732,24 @@ pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(
         }
     }
     unreachable!("every loop arm returns")
+}
+
+/// Full-jitter exponential delay before settle retry attempt `attempt + 1`,
+/// the shape x-1601 landed on the Python side (`_tx_backoff_secs`): sweepers
+/// are correlated by construction, so the flat 250 ms re-lined every loser
+/// up at the same instant. Uniform in [0, min(cap, base << attempt)].
+const SETTLE_BACKOFF_BASE_MS: u64 = 250;
+const SETTLE_BACKOFF_CAP_MS: u64 = 4_000;
+
+fn settle_backoff_ms(attempt: usize) -> u64 {
+    let bound = SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << attempt);
+    let mut buf = [0u8; 8];
+    // A failed entropy draw sleeps 0: the immediate retry this replaces,
+    // never a panic in a sweep thread.
+    if getrandom::fill(&mut buf).is_err() {
+        return 0;
+    }
+    u64::from_le_bytes(buf) % (bound + 1)
 }
 
 /// One read-apply-publish attempt. `Err(Retry(_))` is a lost race a fresh
@@ -569,7 +797,6 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
             canonical_path: None,
             base_version: Some(base),
             plan_rungs: None,
-            sqlite_authoritative: false,
         },
         graph_store::DEFAULT_LOCK_TIMEOUT,
     );
@@ -589,6 +816,98 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
 enum SettleRefusal {
     Retry(String),
     Fatal(String),
+}
+
+/// Fill ONE open do row with `ended_by: "reap-release"` (x-e3cc): the
+/// release verb's narrowed settle. Fill-if-absent over a fresh read, the
+/// same blocker gate the batch settle applies (a node whose additional PRs
+/// are not recorded merged is not fillable), and the same bounded retry
+/// before the write refuses. `Ok(false)` = the pair is not fillable: the
+/// row was already closed, or the node still carries a blocker - the
+/// caller keeps the row either way.
+fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<bool, String> {
+    let path = graph_path(home);
+    const ATTEMPTS: usize = 5;
+    for attempt in 0..ATTEMPTS {
+        let base = graph_store::file_content_version(&path);
+        let mut entries = match graph_store::read_defaulted(&path, false) {
+            Ok(e) => e,
+            Err(err) => return Err(format!("graph unreadable: {err}")),
+        };
+        // The same eligibility the batch settle applies: the pair must sit
+        // in the batch's own stale set.
+        let eligible = stale_open_do_rows(&entries)
+            .iter()
+            .any(|r| r.node == node && r.session_id.eq_ignore_ascii_case(session_id));
+        if !eligible {
+            return Ok(false);
+        }
+        let now = crate::daemon::now_rfc3339_like();
+        let mut filled = false;
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|e| graph_store::entry_id(e) == Some(node))
+        {
+            if let Some(sessions) = entry.get_mut("sessions").and_then(Value::as_array_mut) {
+                for session in sessions.iter_mut() {
+                    let matches = graph_store::is_open_do_row(session)
+                        && session.get("session_id").and_then(Value::as_str) == Some(session_id);
+                    if matches {
+                        if let Some(obj) = session.as_object_mut() {
+                            obj.entry("ended_at".to_string())
+                                .or_insert_with(|| Value::String(now.clone()));
+                            obj.entry("ended_by".to_string())
+                                .or_insert_with(|| Value::String("reap-release".into()));
+                            filled = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !filled {
+            return Ok(false);
+        }
+        let outcome = graph_store::locked_mutate(
+            &path,
+            graph_store::MutateInput {
+                entries,
+                canonical_path: None,
+                base_version: Some(base),
+                plan_rungs: None,
+            },
+            graph_store::DEFAULT_LOCK_TIMEOUT,
+        );
+        match outcome {
+            Ok(_) => return Ok(true),
+            Err(
+                err
+                @ (graph_store::StoreError::Conflict | graph_store::StoreError::LockTimeout(..)),
+            ) if attempt + 1 < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                let _ = err;
+            }
+            Err(
+                err
+                @ (graph_store::StoreError::Conflict | graph_store::StoreError::LockTimeout(..)),
+            ) => {
+                return Err(format!(
+                    "settle write refused: {err} (after {ATTEMPTS} attempts)"
+                ))
+            }
+            Err(err) => return Err(format!("settle write refused: {err}")),
+        }
+    }
+    unreachable!("every loop arm returns")
+}
+
+/// The retire-basis prefix a release rides (x-e3cc): `released <reason>
+/// held <age>: <detail>; `. The age uses the same human clock the hold
+/// lines render.
+fn release_basis_prefix(reason: &str, age_s: Option<i64>, detail: &str) -> String {
+    let age = age_s
+        .map(crate::reap_render::human_duration)
+        .unwrap_or_else(|| "unmeasured".to_string());
+    format!("released {reason} held {age}: {detail}; ")
 }
 
 /// Drop each planned settle from the dry-run graph read, so the rehearsal
@@ -697,6 +1016,28 @@ pub(crate) fn claude_death_reason(
     None
 }
 
+/// The three witnesses that say a worker finished. Any one suffices: a
+/// transcript older than the grace window, a held pid that answers ESRCH,
+/// or a terminal state on the harness roster. Liveness alone never vetoes:
+/// a terminal state outranks a fresh transcript. The merge reaper passes
+/// the roster's death evidence as `terminal`; the sweep passes `None` and
+/// keeps its own classify-to-apply gap clause on top, because only the
+/// sweep holds a classification age to compare against.
+pub(crate) fn worker_finished(
+    e: &state::RegistryEntry,
+    age_s: Option<i64>,
+    grace_secs: i64,
+    terminal: Option<&str>,
+) -> bool {
+    if matches!(age_s, Some(a) if a > grace_secs) {
+        return true;
+    }
+    if e.pid.is_some_and(crate::daemon::pid_is_gone) {
+        return true;
+    }
+    terminal.is_some()
+}
+
 /// Stop a claude row's session before the row drops. The roster is the exited
 /// proof: a session the live roster no longer lists is already gone, and
 /// running `claude stop` on it would fail on every future sweep, wedging the
@@ -740,6 +1081,22 @@ fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
         .unwrap_or(false)
     };
     stopped && roster_lists(&short, sid) == Some(false)
+}
+
+/// The stop detail for the arms whose injected seam answers a bare bool
+/// (x-9485 change 1): which arm ran, the session, and the registered pid.
+/// The pane arm carries its own measurement; this fills the gap so a
+/// confirmed-removed effect names the pid the outcome is about, and the
+/// checked-in probe (`scripts/probes/reap-receipt-stop-probe.py`) verifies
+/// that pid reads gone.
+fn stop_row_detail(e: &state::RegistryEntry) -> Option<String> {
+    if e.harness_name() == "claude" {
+        let sid = e.harness_session_id.as_deref()?;
+        Some(format!("claude stop ran; session {sid}"))
+    } else {
+        let pid = e.pid.map(|p| format!("; pid {p}")).unwrap_or_default();
+        Some(format!("worker socket stop ran{pid}"))
+    }
 }
 
 /// Whether the live roster still lists the session, by short id or session
@@ -809,7 +1166,7 @@ pub fn provenance_verdict(
     graph: &GraphRead,
     transcripts: Option<&[std::path::PathBuf]>,
 ) -> ProvenanceVerdict {
-    let mut work = graph_store::work_state(&graph.index, sid);
+    let mut work = graph_store::work_state(&graph.work_index, sid);
     // The full cascade runs EVEN WHEN the reverse join answers: the later
     // sources are witnesses, not substitutes, so a source naming a
     // DIFFERENT node holds the row instead of the answer riding on the
@@ -827,8 +1184,14 @@ pub fn provenance_verdict(
         .conflict
         .clone()
         .map(|(src, node)| KeepReason::NodeConflict {
-            a: src.as_str().to_string(),
-            b: node,
+            // Both witnesses ride the hold (x-e3cc): "sources disagree" naming
+            // only the dissenting node made a reader re-derive the first half.
+            a: format!(
+                "{} {}",
+                route.source.map(|s| s.as_str()).unwrap_or("sessions"),
+                route.node.clone().unwrap_or_default()
+            ),
+            b: format!("{} {}", src.as_str(), node),
         });
     let mut merge_note: Vec<String> = Vec::new();
     let mut merged_but_open: Option<String> = None;
@@ -880,13 +1243,48 @@ pub fn provenance_verdict(
     }
 }
 
+/// The hold clock (x-e3cc): the staged transcript age when the seam
+/// answered, else seconds since the row's `created_at`, else unmeasured -
+/// and an unmeasured hold never escalates, because a wrong number is not a
+/// clock.
+fn hold_clock(age: Option<i64>, created_at: &str, now: i64) -> (Option<i64>, &'static str) {
+    match age {
+        Some(a) => (Some(a), "transcript quiet"),
+        None => match crate::tick_ledger::parse_rfc3339_unix(created_at) {
+            Some(created) => (Some((now - created as i64).max(0)), "row created"),
+            None => (None, "unmeasured"),
+        },
+    }
+}
+
+/// The settle blocker an open-do-row hold names (x-e3cc): the same pr_state
+/// read the confirm step makes, so the hold line carries the why the settle
+/// refused, not only the node.
+fn settle_blocker_detail(graph: &GraphRead, node: &str) -> String {
+    let (merge_status, total, open) = graph.pr_state.get(node).cloned().unwrap_or((None, 0, 0));
+    if open > 0 {
+        format!("additional_prs: {open} of {total} not recorded merged")
+    } else if let Some(status) = merge_status.filter(|m| m != "merged") {
+        format!("merge_status: {status}")
+    } else {
+        "merge_status: unrecorded".to_string()
+    }
+}
+
 /// The one retirement pass. Every I/O seam (`read_graph`, `store_matches`,
-/// `stop_confirmed`, `tree_probe`, `prune_tree`) is injected so a test
-/// stages the world; production wiring is [`crate::gc::gc_sweep`] /
+/// `age_many`, `stop_confirmed`, `tree_probe`, `prune_tree`) is injected so a
+/// test stages the world; production wiring is [`crate::gc::gc_sweep`] /
 /// [`crate::gc::gc_sweep_dry_run`]. `agents_read` is the same kind of seam
 /// for the `claude agents --json --all` snapshot: read at most once per
 /// sweep, lazily, only when a row actually reaches the stop gate - steady
 /// state keeps zero subprocesses on the hot path.
+///
+/// `age_many` is the transcript-age seam (x-54cf): one batched call answers
+/// every candidate row's age in SECONDS, keyed by [`row_handle`]. The
+/// production default reads the newest timestamped transcript entry through
+/// the shared truth probe; a file stat was the retired instrument, because
+/// untimestamped trailing records keep a dead file reading fresh. A row the
+/// seam does not answer reads `None`, and `None` is never quiet.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     home: &AgentsHome,
@@ -896,11 +1294,50 @@ pub(crate) fn run(
     retain_days: u64,
     read_graph: &dyn Fn(&AgentsHome) -> Option<GraphRead>,
     store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<PathBuf>>,
+    age_many: &dyn Fn(&[&state::RegistryEntry]) -> HashMap<String, Option<i64>>,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     agents_read: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
     tree_probe: &dyn Fn(&state::RegistryEntry) -> (Option<bool>, Option<bool>),
     prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
+) -> GcSummary {
+    run_with_release(
+        home,
+        emitter,
+        grace_secs,
+        dry_run,
+        retain_days,
+        read_graph,
+        store_matches,
+        age_many,
+        stop_confirmed,
+        surface_removal,
+        agents_read,
+        tree_probe,
+        prune_tree,
+        None,
+    )
+}
+
+/// [`run`] with a release ruling (x-e3cc): the sweep lifts exactly one gate
+/// on the matching row, and only while its current hold still equals the
+/// one the release captured. Every other gate stays.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_release(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_secs: i64,
+    dry_run: bool,
+    retain_days: u64,
+    read_graph: &dyn Fn(&AgentsHome) -> Option<GraphRead>,
+    store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<PathBuf>>,
+    age_many: &dyn Fn(&[&state::RegistryEntry]) -> HashMap<String, Option<i64>>,
+    stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
+    surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
+    agents_read: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
+    tree_probe: &dyn Fn(&state::RegistryEntry) -> (Option<bool>, Option<bool>),
+    prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
+    release: Option<&Release>,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
     // The retention pass runs on EVERY sweep, before the empty-registry early
@@ -910,7 +1347,15 @@ pub(crate) fn run(
     if !dry_run {
         expire_reap_receipts(home, retain_days, &mut summary);
     }
-    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+    let (registry, registry_read) = match state::load_registry(&home.registry_json()) {
+        Ok(r) => (r, true),
+        Err(_) => (Default::default(), false),
+    };
+    if !registry_read {
+        // A read that failed is not a census of zero: the tick must render a
+        // failed sweep, not a quiet no_rows.
+        summary.registry_unreadable = true;
+    }
     if registry.entries.is_empty() {
         return summary; // empty registry -> nothing to sweep
     }
@@ -939,6 +1384,17 @@ pub(crate) fn run(
     // verdict instead of answering the reverse join twice. Entries the
     // origin gates already hold stay None - their buckets are decided in
     // pass 2 without a verdict.
+    // One batched age read for the whole sweep (x-54cf): the seam answers
+    // every candidate through one single-flighted read, keyed by row handle.
+    // A row the seam does not answer reads None, and None is never quiet.
+    let age_entries: Vec<&state::RegistryEntry> = registry
+        .entries
+        .iter()
+        .filter(|e| {
+            e.origin.as_deref() == Some("spawn") && e.crown_level.is_none() && graph.is_some()
+        })
+        .collect();
+    let ages = age_many(&age_entries);
     let mut staged: Vec<Option<(ProvenanceVerdict, Option<i64>)>> =
         Vec::with_capacity(registry.entries.len());
     for e in &registry.entries {
@@ -954,7 +1410,7 @@ pub(crate) fn run(
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
         let hits = store_matches(e);
         let verdict = provenance_verdict(e, sid, graph, hits.as_deref());
-        let age = transcript_age_s(hits.as_deref(), now);
+        let age = ages.get(&row_handle(e)).copied().flatten();
         staged.push(Some((verdict, age)));
     }
 
@@ -1020,18 +1476,115 @@ pub(crate) fn run(
             continue;
         };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
-        let work = verdict.work.clone();
+        let mut work = verdict.work.clone();
+        // (x-1b90 change 3) Every node the row names reads done - the exact
+        // condition under which an old unresolved hold may ask for a
+        // decision. Computed before `work` moves into the GcRow.
+        let nodes_done = matches!(work, WorkState::AllDone { .. });
+        // The hold clock (x-e3cc): computed once per row, read by every hold
+        // push below. A keep without an age is a reader that never ran.
+        let (hold_age_s, hold_age_basis) = hold_clock(*age, &e.created_at, now);
+        // The release's per-row state (x-e3cc): the lifts and the note the
+        // retire basis carries. `None` note after all gates ran means a
+        // release named this row but matched none of its holds.
+        let release_for_row = release.filter(|r| r.handle == id);
+        let mut release_note: Option<String> = None;
+        let mut release_quiet_row = false;
+        let mut release_stop = false;
         // Locked Decision 1: every named node done but one still carries an
         // OPEN do row for this session -> the row stays and the node is
         // named. The retirement never settles graph rows itself.
         if matches!(work, WorkState::AllDone { .. }) {
             if let Some(nodes) = graph.open_do.get(&sid.to_ascii_lowercase()) {
                 let node = nodes.first().cloned().unwrap_or_default();
-                summary.kept_open_do_row.push((id, node));
-                continue;
+                let reason = KeepReason::OpenDoRow { node: node.clone() }.as_str();
+                let detail = settle_blocker_detail(graph, &node);
+                // The release settles this one obligation through the
+                // settle's own door (x-e3cc): fill-if-absent, ended_by
+                // reap-release, the same blocker gate the batch settle
+                // applies. A write that refuses keeps the row.
+                if release_for_row.is_some_and(|r| r.matches(reason, &detail)) {
+                    match settle_one_do_row(home, &node, sid) {
+                        Ok(true) => {
+                            release_note = Some(release_basis_prefix(reason, hold_age_s, &detail));
+                        }
+                        Ok(false) => {
+                            summary.release_refused.push(format!(
+                                "{id}: release refused: the open do row on {node} is not fillable: {detail}"
+                            ));
+                            summary.kept_open_do_row.push((id.clone(), node.clone()));
+                            summary.holds.push(Hold {
+                                id,
+                                reason,
+                                detail,
+                                age_s: hold_age_s,
+                                age_basis: hold_age_basis,
+                                escalated: false,
+                            });
+                            continue;
+                        }
+                        Err(refused) => {
+                            summary.settle_refused.push((id.clone(), refused));
+                            summary.kept_open_do_row.push((id.clone(), node.clone()));
+                            summary.holds.push(Hold {
+                                id,
+                                reason,
+                                detail,
+                                age_s: hold_age_s,
+                                age_basis: hold_age_basis,
+                                escalated: false,
+                            });
+                            continue;
+                        }
+                    }
+                } else {
+                    if let Some(r) = release_for_row {
+                        summary.release_refused.push(format!(
+                            "{id}: release refused: hold changed from {} ({}) to {reason} ({detail})",
+                            r.reason, r.detail
+                        ));
+                    }
+                    summary.kept_open_do_row.push((id.clone(), node.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason,
+                        detail,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                    continue;
+                }
             }
         }
-        let confirm_hold = verdict.hold.clone();
+        let mut confirm_hold = verdict.hold.clone();
+        // x-e3cc: the release reads the conflict hold as agreement - the
+        // witness set (first source's node plus the dissenting node) is all
+        // done, so work reads AllDone over that set and the hold lifts. The
+        // not-done-witness refusal is the classify phase's job; this is the
+        // apply of a ruling already checked.
+        if let Some(r) = release_for_row {
+            if let Some(KeepReason::NodeConflict { a, b }) = &confirm_hold {
+                let detail = format!("{a} vs {b}");
+                let reason = KeepReason::NodeConflict {
+                    a: a.clone(),
+                    b: b.clone(),
+                }
+                .as_str();
+                if r.matches(reason, &detail) {
+                    // Both sides of the hold are "<source> <node>" strings
+                    // (x-e3cc change 1), so the dissenting NODE is the last
+                    // token, never the whole side.
+                    let dissent_node = b.split_whitespace().last().unwrap_or(b).to_string();
+                    let mut nodes = vec![verdict.route.node.clone().unwrap_or_default()];
+                    nodes.push(dissent_node);
+                    nodes.dedup();
+                    work = WorkState::AllDone { nodes };
+                    confirm_hold = None;
+                    release_note = Some(release_basis_prefix(reason, hold_age_s, &detail));
+                }
+            }
+        }
         let merge_note = verdict.merge_note.clone();
         let age = *age;
         let owns_worktree = !e.is_one_shot_ask() && crate::daemon::is_linked_worktree(&e.cwd);
@@ -1076,17 +1629,18 @@ pub(crate) fn run(
         // parked or never-started node, and a recorded merge the status lags
         // all answer the same question - is THIS session's own story over -
         // and each falls through to the grace gate in gc_decide.
-        let session_terminal =
-            if matches!(work, WorkState::Open { .. }) && e.harness_name() == "claude" {
-                let mut memo = agents_memo.borrow_mut();
-                let snapshot = memo.get_or_insert_with(&agents_read);
-                crate::daemon::claude_row_id(e)
-                    .and_then(|rid| snapshot.find(&rid).cloned())
-                    .and_then(|row| row.state)
-                    .filter(|s| crate::claude_roster::is_terminal_roster_state(s))
-            } else {
-                None
-            };
+        // x-b7f8: EVERY claude row carries its terminal state, not only
+        // Open-work rows - recency and lineage must be able to yield to it.
+        let session_terminal = if e.harness_name() == "claude" {
+            let mut memo = agents_memo.borrow_mut();
+            let snapshot = memo.get_or_insert_with(&agents_read);
+            crate::daemon::claude_row_id(e)
+                .and_then(|rid| snapshot.find(&rid).cloned())
+                .and_then(|row| row.state)
+                .filter(|s| crate::claude_roster::is_terminal_roster_state(s))
+        } else {
+            None
+        };
         let superseded_by_live_peer = match &work {
             WorkState::Open { node, .. } => live_peer
                 .get(node)
@@ -1100,6 +1654,30 @@ pub(crate) fn run(
         // x-2774 change 8: the existence-specific probe on the row's own
         // pid. One kill(2) per row, no subprocess; only ESRCH counts.
         let pid_gone = e.pid.is_some_and(crate::daemon::pid_is_gone);
+        // x-e3cc: the remaining two lifts. A release for a
+        // transcript-unresolved hold reads the missing age as quiet for this
+        // row only (grace_gate's release_quiet arm). A stop-family release
+        // satisfies the stop gate whether or not absence confirms; the stop
+        // is still issued below.
+        if let Some(r) = release_for_row {
+            if release_note.is_none()
+                && confirm_hold.is_none()
+                && r.matches(
+                    KeepReason::TranscriptUnresolved.as_str(),
+                    "absence is not quiet",
+                )
+            {
+                release_quiet_row = true;
+                release_note = Some(release_basis_prefix(
+                    KeepReason::TranscriptUnresolved.as_str(),
+                    hold_age_s,
+                    "absence is not quiet",
+                ));
+            } else if release_note.is_none() && confirm_hold.is_none() && r.is_stop_family() {
+                release_stop = true;
+                release_note = Some(release_basis_prefix(&r.reason, hold_age_s, &r.detail));
+            }
+        }
         let row = GcRow {
             origin: e.origin.clone(),
             crowned: e.crown_level.is_some(),
@@ -1115,9 +1693,18 @@ pub(crate) fn run(
             superseded_by_live_peer,
             node_merged,
             pid_gone,
+            release_quiet: release_quiet_row,
         };
         let (action, reason) = gc_decide(&row, grace_secs);
         if action == GcAction::Keep {
+            if let Some(r) = release_for_row {
+                if release_note.is_none() {
+                    summary.release_refused.push(format!(
+                        "{id}: release refused: hold changed from {} ({}) to {:?}",
+                        r.reason, r.detail, reason
+                    ));
+                }
+            }
             match reason {
                 Some(KeepReason::Operator) => summary.kept_operator.push(id),
                 Some(KeepReason::Crowned) => summary.kept_crowned.push(id),
@@ -1134,10 +1721,40 @@ pub(crate) fn run(
                 }
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::TranscriptUnresolved) => {
-                    summary.kept_transcript_unresolved.push(id)
+                    // Main's x-1b90 bucket carries the clock the TU line
+                    // renders; the holds projection stays the one answer for
+                    // every hold kind the question lane and the release verb
+                    // read.
+                    summary.kept_transcript_unresolved.push(UnresolvedHold {
+                        id: id.clone(),
+                        held_s: unresolved_hold_secs(e, now),
+                        nodes_done,
+                    });
+                    summary.holds.push(Hold {
+                        id,
+                        reason: KeepReason::TranscriptUnresolved.as_str(),
+                        detail: "absence is not quiet".into(),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
                 }
                 Some(KeepReason::NodeConflict { a, b }) => {
-                    summary.kept_node_conflict.push((id, a, b))
+                    summary
+                        .kept_node_conflict
+                        .push((id.clone(), a.clone(), b.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: KeepReason::NodeConflict {
+                            a: a.clone(),
+                            b: b.clone(),
+                        }
+                        .as_str(),
+                        detail: format!("{a} vs {b}"),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
                 }
                 Some(KeepReason::PrStateContradicts { node, detail }) => {
                     summary.kept_pr_contradicts.push((id, node, detail))
@@ -1155,7 +1772,12 @@ pub(crate) fn run(
         // lineage field says who spawned whom, and this is the only site
         // that consults it. Runs before staging so no active-surface
         // removal ever touches a row a live child names.
-        if !sid.is_empty() {
+        // x-b7f8: one conjunct - a parent whose own harness reports a
+        // terminal state is not held. The guard's harm (a parent's native
+        // surface archived while children still run) needs a RUNNING
+        // parent; the shared-worktree guard below still protects a live
+        // child's tree.
+        if !sid.is_empty() && row.session_terminal.is_none() {
             let sid_lower = sid.to_ascii_lowercase();
             if let Some(child) = registry.entries.iter().find(|other| {
                 other.name != e.name
@@ -1179,13 +1801,30 @@ pub(crate) fn run(
         // too: absence on re-read is not quiet. One stat, on rows already
         // classified would-retire, so the hot path pays nothing.
         if !dry_run {
-            let fresh_age = transcript_age_s(store_matches(e).as_deref(), now);
+            // The re-read rides the same age seam (x-54cf): a fresh answer for
+            // THIS row, so activity inside the classify-to-apply gap keeps.
+            let fresh_age = age_many(&[e]).get(&row_handle(e)).copied().flatten();
             // x-2774 change 8: activity without a living writer is not
             // activity. A pid that answered ESRCH at the re-check keeps its
             // retirement even if the transcript mtime moved - the write came
-            // from something else.
-            let pid_gone_now = e.pid.is_some_and(crate::daemon::pid_is_gone);
-            let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs) || pid_gone_now;
+            // from something else. The age and pid witnesses live in
+            // `worker_finished`; the roster witness stays here as the
+            // x-b7f8 gap clause, because only this sweep compares the fresh
+            // read against its classification age.
+            // x-b7f8: for a terminal row the re-check asks one question -
+            // did the session write since classification. A smaller fresh
+            // age IS a new write (the session came back, perhaps through a
+            // mail inject); an equal-or-older one is not. An unresolved
+            // re-read keeps: absence is not quiet.
+            // ponytail: a write inside the same whole second as a
+            // classification that already read age 0 is not seen.
+            let still_quiet = worker_finished(e, fresh_age, grace_secs, None)
+                // The release lift (x-e3cc): a missing age reads quiet for
+                // this row only. An ANSWERED fresh age still keeps -
+                // activity is activity even under a ruling.
+                || (release_quiet_row && fresh_age.is_none())
+                || (row.session_terminal.is_some()
+                    && matches!((fresh_age, age), (Some(now_a), Some(then_a)) if now_a >= then_a));
             if !still_quiet {
                 let age_now = fresh_age.unwrap_or(0);
                 summary.kept_active.push((id, age_now));
@@ -1207,50 +1846,202 @@ pub(crate) fn run(
         };
         // The 2026-09-08 shape (dry promised nine, real retired zero): a dry
         // run never promises a claude stop it holds no evidence for.
-        if dry_run && death.is_none() && e.harness_name() == "claude" {
-            summary.needs_live_stop.push((
-                id,
-                "no terminal roster state and no dead pid; a dry run does not \
+        if dry_run && death.is_none() && e.harness_name() == "claude" && !release_stop {
+            let detail = "no terminal roster state and no dead pid; a dry run does not \
                  promise a stop it cannot prove"
-                    .into(),
-            ));
+                .to_string();
+            if let Some(r) = release_for_row {
+                if release_note.is_none() {
+                    summary.release_refused.push(format!(
+                        "{id}: release refused: hold changed from {} ({}) to needs live stop ({detail})",
+                        r.reason, r.detail
+                    ));
+                }
+            }
+            summary.needs_live_stop.push((id.clone(), detail.clone()));
+            summary.holds.push(Hold {
+                id,
+                reason: "needs live stop",
+                detail,
+                age_s: hold_age_s,
+                age_basis: hold_age_basis,
+                escalated: false,
+            });
             continue;
         }
+        // x-58a5: the same honesty for pane rows. The precheck answers what
+        // the real run's stop will answer - already-stopped retires, a live
+        // pid is a kill no dry run may promise, an unprovable pid is a
+        // refusal both runs share. No release lift here: a release
+        // satisfies only the stop_on_death seam, and the pane stop never
+        // consults that seam, so the real pane stop refuses under one and
+        // the dry run must predict that.
+        let mut pane_stop_proven = false;
+        if dry_run && e.substrate.as_deref() == Some("pane") {
+            match crate::pane_stop::precheck_pane_stop(e) {
+                // Already stopped is positive read-only stop evidence: the
+                // observation carries it, so staging advances the row to
+                // the next gate instead of holding it as unproven.
+                crate::pane_stop::PanePrecheck::AlreadyStopped(_) => {
+                    pane_stop_proven = true;
+                }
+                crate::pane_stop::PanePrecheck::NeedsKill => {
+                    let detail = "pane pid is running; a dry run does not promise a kill \
+                                  it cannot prove"
+                        .to_string();
+                    if let Some(r) = release_for_row {
+                        if release_note.is_none() {
+                            summary.release_refused.push(format!(
+                                "{id}: release refused: hold changed from {} ({}) to needs live stop ({detail})",
+                                r.reason, r.detail
+                            ));
+                        }
+                    }
+                    summary.needs_live_stop.push((id.clone(), detail.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: "needs live stop",
+                        detail,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                    continue;
+                }
+                crate::pane_stop::PanePrecheck::Unprovable(detail) => {
+                    if let Some(r) = release_for_row {
+                        if release_note.is_none() {
+                            summary.release_refused.push(format!(
+                                "{id}: release refused: hold changed from {} ({}) to stop refused ({detail})",
+                                r.reason, r.detail
+                            ));
+                        }
+                    }
+                    summary.stop_refused.push((id.clone(), detail.clone()));
+                    summary.holds.push(Hold {
+                        id,
+                        reason: "stop refused",
+                        detail,
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                    continue;
+                }
+            }
+        }
+        // The stop-family release still ISSUES the stop (x-e3cc): the seam
+        // runs, the receipt records the outcome, and the release satisfies
+        // the gate whether or not absence confirms. `None` when death
+        // evidence already answered or no release rides.
+        let release_stop_outcome: Option<bool> = if release_stop && death.is_none() {
+            Some(stop_confirmed(e))
+        } else {
+            None
+        };
         // Death evidence satisfies the stop. It wraps the callee's seam here,
         // in the caller that owns the snapshot, so the shared signature is
         // untouched.
-        let stop_on_death = |entry: &state::RegistryEntry| death.is_some() || stop_confirmed(entry);
+        let stop_on_death =
+            |entry: &state::RegistryEntry| death.is_some() || release_stop || stop_confirmed(entry);
         // x-2774: the session-shaped release that let an OPEN-work row
         // retire. The obligation re-checks (stage and commit) yield to it.
         let released = row.session_released();
-        if let Err(refusal) = stage_session_retirement(
+        // The stop gate's read-only answer, folded here where the evidence
+        // lives: harness death state, a stop-family release, or the pane
+        // precheck's already-stopped. Staging decides with it, and the
+        // rehearsal never has to fire the stop to learn what this already
+        // knows.
+        let stop_observation = if death.is_some() || release_stop || pane_stop_proven {
+            StopObservation::Proven
+        } else {
+            StopObservation::Unproven
+        };
+        let staged = match stage_session_retirement(
             home,
             e,
             ledger.as_deref(),
-            dry_run,
+            if dry_run {
+                RetireMode::DryRun
+            } else {
+                RetireMode::Apply
+            },
+            stop_observation,
             released,
             &stop_on_death,
             surface_removal,
             &mut receipts,
         ) {
-            match refusal {
-                RetireRefusal::StopRefused(reason) => {
-                    // A claude row with no death evidence names the missing
-                    // evidence, not just the unconfirmed stop: the refusal
-                    // says what would have satisfied it.
-                    let reason = if death.is_none() && e.harness_name() == "claude" {
-                        "no death evidence (no terminal roster state, no dead pid) and the \
+            Ok(staged) => staged,
+            Err(refusal) => {
+                match refusal {
+                    RetireRefusal::StopRefused(reason) => {
+                        // A claude row with no death evidence names the missing
+                        // evidence, not just the unconfirmed stop: the refusal
+                        // says what would have satisfied it.
+                        let reason = if death.is_none() && e.harness_name() == "claude" {
+                            "no death evidence (no terminal roster state, no dead pid) and the \
                          stop did not confirm; row kept for retry"
-                            .into()
-                    } else {
-                        reason
-                    };
-                    summary.stop_refused.push((id, reason));
+                                .into()
+                        } else {
+                            reason
+                        };
+                        summary.stop_refused.push((id.clone(), reason.clone()));
+                        summary.holds.push(Hold {
+                            id,
+                            reason: "stop refused",
+                            detail: reason,
+                            age_s: hold_age_s,
+                            age_basis: hold_age_basis,
+                            escalated: false,
+                        });
+                    }
+                    RetireRefusal::NativeRemoval(reason) => {
+                        summary.stop_refused.push((id.clone(), reason.clone()));
+                        summary.holds.push(Hold {
+                            id,
+                            reason: "stop refused",
+                            detail: reason,
+                            age_s: hold_age_s,
+                            age_basis: hold_age_basis,
+                            escalated: false,
+                        });
+                    }
+                    RetireRefusal::NoReceipt(reason) => summary.kept_no_receipt.push((id, reason)),
+                    RetireRefusal::GraphObligation(node) => {
+                        summary.kept_open_do_row.push((id.clone(), node.clone()));
+                        summary.holds.push(Hold {
+                            id,
+                            reason: KeepReason::OpenDoRow { node: node.clone() }.as_str(),
+                            detail: settle_blocker_detail(graph, &node),
+                            age_s: hold_age_s,
+                            age_basis: hold_age_basis,
+                            escalated: false,
+                        });
+                    }
+                    // the rehearsal's unevaluatable stop lands where the
+                    // prechecks land - held, named, never promised.
+                    RetireRefusal::StopUnproven(reason) => {
+                        summary.needs_live_stop.push((id.clone(), reason.clone()));
+                        summary.holds.push(Hold {
+                            id,
+                            reason: "needs live stop",
+                            detail: reason,
+                            age_s: hold_age_s,
+                            age_basis: hold_age_basis,
+                            escalated: false,
+                        });
+                    }
+                    RetireRefusal::GraphUnreadable => summary.kept_graph_unreadable.push(id),
                 }
-                RetireRefusal::NativeRemoval(reason) => summary.stop_refused.push((id, reason)),
-                RetireRefusal::NoReceipt(reason) => summary.kept_no_receipt.push((id, reason)),
-                RetireRefusal::GraphObligation(node) => summary.kept_open_do_row.push((id, node)),
+                continue;
             }
+        };
+        // a dry-run row whose remaining gate needs a mutation is
+        // named where it stands - never planted in to_retire, so neither
+        // retired nor pruned can count it.
+        if let StagedRetirement::Unverified(gate) = staged {
+            summary.dry_run_unverified.push((id, gate));
             continue;
         }
         // The tree probes run only now, on a row already retiring: steady
@@ -1310,12 +2101,34 @@ pub(crate) fn run(
         // that reads "quiet past grace" when the transcript was actually
         // inside grace misreports why the row went; the pid evidence is the
         // reason it went when it did.
-        let basis =
+        let mut basis =
             if probed.pid_gone && probed.transcript_age_s.is_some_and(|age| age <= grace_secs) {
                 format!("{basis}; pid {} is gone", e.pid.unwrap_or(0))
             } else {
                 basis
             };
+        // x-b7f8: name the early fire for a terminal state the way the pid
+        // evidence names its own. An AllDone row retiring INSIDE the grace
+        // window went because the harness says the session finished, not
+        // because the transcript aged out; the Open basis already names the
+        // state in its own arm.
+        if matches!(probed.work, WorkState::AllDone { .. })
+            && probed.session_terminal.is_some()
+            && probed.transcript_age_s.is_some_and(|age| age <= grace_secs)
+        {
+            basis = format!(
+                "{basis}; session terminal: harness state {}",
+                probed.session_terminal.clone().unwrap_or_default()
+            );
+        }
+        // The release rides the audit line (x-e3cc): what was ruled, how old
+        // the hold was, and an unconfirmed stop named as such.
+        if let Some(note) = &release_note {
+            basis = format!("{note}{basis}");
+        }
+        if release_stop_outcome == Some(false) {
+            basis.push_str("; stop issued, unconfirmed");
+        }
         let worktree = if probed.owns_worktree {
             Some(e.cwd.clone())
         } else {
@@ -1336,6 +2149,7 @@ pub(crate) fn run(
                 tree,
                 worktree,
                 released,
+                via_release: release_note.is_some(),
             },
         );
     }
@@ -1437,18 +2251,22 @@ pub(crate) fn run(
 /// carries the effect that refused.
 /// DRY-RUN stops nothing and applies nothing - a rehearsal that killed the
 /// worker it rehearsed retiring would be the destructive run wearing a dry
-/// flag - but it still stages the receipt, so the rehearsal reports the same
-/// holds the real run would.
+/// flag - and it evaluates the read-only gates with the real run:
+/// the graph obligation is re-read in both modes, and every gate a mutation
+/// would answer is named - [`StagedRetirement::Unverified`] or
+/// [`RetireRefusal::StopUnproven`] - instead of implied passed. Silence
+/// about a skipped gate reads identical to a gate that passed.
 pub(crate) fn stage_session_retirement(
     home: &AgentsHome,
     e: &state::RegistryEntry,
     ledger_rows: Option<&[Value]>,
-    dry_run: bool,
+    mode: RetireMode,
+    stop_observation: StopObservation,
     session_released: bool,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
-) -> Result<(), RetireRefusal> {
+) -> Result<StagedRetirement, RetireRefusal> {
     let ledger = ledger_rows
         .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
     // The obligation re-check runs HERE, before any effect: an open do row
@@ -1466,18 +2284,24 @@ pub(crate) fn stage_session_retirement(
     // closing it. Holding the row here would re-hold every released row one
     // gate later, on the very obligation the release just resolved. The
     // grace and freshness gates still protect a genuinely live session.
-    if !dry_run && !session_released {
-        if let Some(graph) = read_graph_entries(home) {
-            let sid = e
-                .harness_session_id
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase();
-            if let Some(nodes) = graph.open_do.get(&sid) {
-                if let Some(node) = nodes.first().cloned() {
-                    return Err(RetireRefusal::GraphObligation(node));
-                }
+    if !session_released {
+        // the re-read runs in BOTH modes - a rehearsal that skips it
+        // promises retirements the real run refuses on the very row the
+        // obligation names. An unreadable read is its own refusal, never a
+        // silent no-obligation.
+        let graph = match read_graph_entries(home) {
+            Some(graph) => graph,
+            None => return Err(RetireRefusal::GraphUnreadable),
+        };
+        let sid = e
+            .harness_session_id
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if let Some(nodes) = graph.open_do.get(&sid) {
+            if let Some(node) = nodes.first().cloned() {
+                return Err(RetireRefusal::GraphObligation(node));
             }
         }
     }
@@ -1488,24 +2312,68 @@ pub(crate) fn stage_session_retirement(
         Ok(receipt) => receipt,
         Err(reason) => return Err(RetireRefusal::NoReceipt(reason)),
     };
-    if dry_run {
-        receipts.insert(e.name.clone(), receipt);
-        return Ok(());
+    if mode == RetireMode::DryRun {
+        // the rehearsal never fires an effect, and it does not
+        // report a row as retiring while a mutation-only gate stands
+        // unevaluated between it and a real retirement. The stop gate the
+        // caller already read answers here; the active-surface removal can
+        // only be known by applying it, so the row lands in the sweep's
+        // dry_run_unverified bucket - named, never in retired.
+        return match stop_observation {
+            StopObservation::Unproven => Err(RetireRefusal::StopUnproven(
+                "no positive stop evidence; a dry run does not promise a stop \
+                 it cannot prove"
+                    .into(),
+            )),
+            StopObservation::Proven => {
+                receipts.insert(e.name.clone(), receipt);
+                Ok(StagedRetirement::Unverified(
+                    "active-surface removal was not evaluated".into(),
+                ))
+            }
+        };
     }
     if let Err(err) = write_reap_receipt(home, &receipt) {
         return Err(RetireRefusal::NoReceipt(format!(
             "receipt did not persist: {err}"
         )));
     }
-    // Effect 1: the confirmed stop of the held process.
-    let stopped = stop_confirmed(e);
+    // Effect 1: the confirmed stop of the held process. Pane-substrate rows
+    // stop through the pid-proving helper (x-1b90 change 1): the roster and
+    // the worker socket never held the pane, so both today's arms confirm a
+    // stop that never happened. The detail is the receipt's measurement, so
+    // the routing decision lives here where the effect is built - never in
+    // the seam closure, whose bool answer cannot carry it.
+    let pane_stop = if e.substrate.as_deref() == Some("pane") {
+        Some(crate::pane_stop::stop_pane_process_confirmed(e))
+    } else {
+        None
+    };
+    let stopped = pane_stop
+        .as_ref()
+        .map(|s| s.confirmed)
+        .unwrap_or_else(|| stop_confirmed(e));
+    // x-9485 change 1: a confirmed stop names what it stopped. The pane arm
+    // carries what actually ran (x-1b90); the other arms go through the
+    // injected bool seam, so the detail names the arm and the row's
+    // registered pid - the process the outcome is about - and the checked-in
+    // probe verifies that pid reads gone.
+    let stop_detail = pane_stop.as_ref().map(|s| s.detail.clone()).or_else(|| {
+        if stopped {
+            stop_row_detail(e)
+        } else {
+            None
+        }
+    });
     receipt
         .effects
-        .push(crate::gc_native::stop_outcome_effect(stopped));
+        .push(crate::gc_native::stop_outcome_effect(stopped, stop_detail));
     if !stopped {
         let _ = write_reap_receipt(home, &receipt);
         return Err(RetireRefusal::StopRefused(
-            "the stop did not confirm; row kept for retry".into(),
+            pane_stop
+                .map(|s| s.detail)
+                .unwrap_or_else(|| "the stop did not confirm; row kept for retry".into()),
         ));
     }
     // Effect 2: the ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent
@@ -1526,7 +2394,7 @@ pub(crate) fn stage_session_retirement(
     receipt.effects.push(resume_evidence_effect(&receipt));
     let _ = write_reap_receipt(home, &receipt);
     receipts.insert(e.name.clone(), receipt);
-    Ok(())
+    Ok(StagedRetirement::Retired)
 }
 
 /// The resume-evidence op, measured off the staged receipt: the resume
@@ -1699,6 +2567,14 @@ pub(crate) fn commit_retirements(
     });
     match write {
         Ok(()) => {
+            // The receipt's node join (x-cbfa): the dispatch grammar answers
+            // first and unchanged; everything it misses resolves through the
+            // one cascade the sweep already trusts (node_route: the sessions
+            // witness, the registry field, then the name route) instead of a
+            // second name parser. The source that answered rides the event as
+            // node_resolution, so a null receipt names its reason: a graph
+            // that cannot be read answers "none", the same null as before.
+            let graph_join = read_graph_entries(home);
             for e in entries {
                 let Some(order) = to_retire.get(&e.name) else {
                     continue;
@@ -1760,12 +2636,28 @@ pub(crate) fn commit_retirements(
                     report.retired_names.remove(&e.name);
                     continue;
                 }
-                let _ = emitter.emit(
-                    "agent_row_reaped",
-                    &json!({
+                let (receipt_node, node_resolution) = match node_id.as_deref() {
+                    Some(node) => (Some(node.to_string()), "name"),
+                    None => graph_join
+                        .as_ref()
+                        .map(|g| {
+                            let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
+                            node_route::resolve(e, sid, g, None)
+                        })
+                        .and_then(|route| {
+                            route.node.map(|node| {
+                                let source = route.source.map(|s| s.as_str()).unwrap_or("none");
+                                (Some(node), source)
+                            })
+                        })
+                        .unwrap_or((None, "none")),
+                };
+                let _ = emitter.emit("agent_row_reaped", &{
+                    let mut event = json!({
                         "short_id": e.short_id,
                         "name": e.name,
-                        "node_id": node_id,
+                        "node_id": receipt_node,
+                        "node_resolution": node_resolution,
                         "session_id": target_session_id,
                         "termination_event": termination_event,
                         "harness": e.harness_name(),
@@ -1775,8 +2667,15 @@ pub(crate) fn commit_retirements(
                         // receipt and the node's sessions[] row keep the
                         // resumable handle.
                         "resumable": true,
-                    }),
-                );
+                    });
+                    // The release names itself as the remover (x-e3cc): a
+                    // retirement an operator ruling applied is auditable
+                    // as one.
+                    if order.via_release {
+                        event["remover"] = json!("reap --release");
+                    }
+                    event
+                });
                 report.retired.push((order.id.clone(), order.basis.clone()));
                 if order.tree == TreeAction::Prune {
                     // The same door a human removal walks (production: gate +
@@ -1987,7 +2886,7 @@ fn reap_mtime_family(
     shared_root: &std::path::Path,
     dir: &std::path::Path,
     retain_days: u64,
-    extension: Option<&str>,
+    accept: Option<&dyn Fn(&str) -> bool>,
     apply: bool,
     summary: &mut StateReapFamilySummary,
 ) {
@@ -2009,9 +2908,12 @@ fn reap_mtime_family(
             }
         };
         let path = entry.path();
-        if extension.is_some_and(|wanted| path.extension().and_then(|e| e.to_str()) != Some(wanted))
-        {
-            continue;
+        if let Some(keep) = accept {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !keep(name) {
+                continue;
+            }
         }
         summary.scanned += 1;
         let display_path = state_path(shared_root, &path);
@@ -2037,6 +2939,20 @@ fn reap_mtime_family(
         }
         record_state_file_action(&path, display_path, metadata.len(), age_s, apply, summary);
     }
+}
+
+/// A claim temp file lives microseconds in the happy path: created,
+/// hardlinked onto the .lock, unlinked. One that outlives a day is residue
+/// from a holder killed in that gap. Deliberately not a config leaf - the
+/// margin is five orders of magnitude and a knob would need six mirrors.
+const CLAIM_TMP_RETAIN_DAYS: u64 = 1;
+
+/// Both temp shapes the claim writers mint: `.claim-tmp-*` from the exclusive
+/// create (claims.rs create_via_link, io.py atomic_create_exclusive) and
+/// `<key>.lock.tmp.<pid>.<seq>` from claims.rs atomic_replace. Neither is ever
+/// a live lock, so neither belongs to any other family.
+fn is_claim_tmp(name: &str) -> bool {
+    name.starts_with(".claim-tmp-") || name.contains(".lock.tmp.")
 }
 
 fn reap_pr_status_rows(
@@ -2235,6 +3151,7 @@ fn state_reap_totals(summary: &StateFilesReapSummary) -> StateReapTotals {
         &summary.plan_locks,
         &summary.agent_locks,
         &summary.pr_status_cache,
+        &summary.claim_tmp,
     ];
     StateReapTotals {
         scanned: families.iter().map(|family| family.scanned).sum(),
@@ -2280,6 +3197,14 @@ fn reap_state_files_with_roots(
         None,
         apply,
         &mut summary.expired_claims,
+    );
+    reap_mtime_family(
+        &roots.claims_root,
+        &roots.claims_dir,
+        CLAIM_TMP_RETAIN_DAYS,
+        Some(&is_claim_tmp),
+        apply,
+        &mut summary.claim_tmp,
     );
     reap_lock_family(
         &roots.locks_root,
@@ -2449,6 +3374,85 @@ pub(crate) fn default_ledger_path() -> std::path::PathBuf {
 mod tests {
     use super::*;
 
+    #[test]
+    fn settle_backoff_is_full_jitter_within_the_attempt_bound() {
+        // The x-1601 shape: uniform in [0, min(cap, base << attempt)], so two
+        // sweepers never re-line up on the same instant the way the flat 250
+        // ms sleep did.
+        for attempt in 0..7 {
+            let bound = SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << attempt);
+            for _ in 0..64 {
+                let delay = settle_backoff_ms(attempt);
+                assert!(delay <= bound, "attempt {attempt}: {delay} > {bound}");
+            }
+        }
+        // The cap holds at the ceiling no matter how far the shift climbs.
+        assert_eq!(
+            SETTLE_BACKOFF_CAP_MS.min(SETTLE_BACKOFF_BASE_MS << 20),
+            SETTLE_BACKOFF_CAP_MS
+        );
+    }
+
+    #[test]
+    fn worker_finished_reads_three_witnesses() {
+        let grace = 900i64;
+        let mut e = state::RegistryEntry::default();
+        // Witness 1: a transcript older than the grace window.
+        assert!(worker_finished(&e, Some(901), grace, None));
+        // Witness 2: a held pid that answers ESRCH.
+        e.pid = Some(2_000_000_000);
+        assert!(worker_finished(&e, Some(10), grace, None));
+        // Witness 3: a terminal state on the roster outranks a fresh
+        // transcript.
+        assert!(worker_finished(
+            &e,
+            Some(5),
+            grace,
+            Some("row p present, state done")
+        ));
+        // Nothing decisive: not finished, liveness alone never vetoes a
+        // retirement but never proves one either.
+        e.pid = None;
+        assert!(!worker_finished(&e, Some(20), grace, None));
+        // An unresolved transcript is not a quiet one.
+        assert!(!worker_finished(&e, None, grace, None));
+    }
+
+    // x-9485 change 1: the non-pane stop arms name the arm and the process
+    // the receipt's confirmed-removed outcome is about, so the checked-in
+    // probe can verify the pid reads gone.
+    #[test]
+    fn stop_row_detail_names_the_arm_and_the_registered_pid() {
+        let mut claude = state::RegistryEntry::default();
+        claude.harness = Some("claude".into());
+        claude.harness_session_id = Some("aaaa-bbbb".into());
+        claude.pid = Some(40001);
+        assert_eq!(
+            stop_row_detail(&claude).as_deref(),
+            Some("claude stop ran; session aaaa-bbbb")
+        );
+
+        let mut codex = state::RegistryEntry::default();
+        codex.harness = Some("codex".into());
+        codex.harness_session_id = Some("01a08db0-0000".into());
+        codex.pid = Some(50678);
+        assert_eq!(
+            stop_row_detail(&codex).as_deref(),
+            Some("worker socket stop ran; pid 50678")
+        );
+
+        // No pid: the row is still named, the pid slot is not invented.
+        codex.pid = None;
+        assert_eq!(
+            stop_row_detail(&codex).as_deref(),
+            Some("worker socket stop ran")
+        );
+
+        // A claude row with no session id has nothing honest to say.
+        claude.harness_session_id = None;
+        assert_eq!(stop_row_detail(&claude), None);
+    }
+
     fn stale_state_home(tag: &str) -> (std::path::PathBuf, AgentsHome) {
         let base = std::env::temp_dir().join(format!(
             "fno-expire-stale-state-{tag}-{}-{}",
@@ -2485,6 +3489,7 @@ mod tests {
             7,
             &|_| panic!("empty registry must return before graph read"),
             &|_| None,
+            &|_| std::collections::HashMap::new(),
             &|_| false,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
@@ -2521,6 +3526,107 @@ mod tests {
         assert!(fresh.exists());
         assert!(future.exists(), "future mtimes saturate to age zero");
         assert_eq!(summary, GcSummary::default());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_reap_removes_claim_tmp_residue() {
+        let (base, home) = stale_state_home("claim-tmp");
+        let claims = base.join("claims");
+        std::fs::create_dir_all(&claims).unwrap();
+        let create_tmp = claims.join(".claim-tmp-9-9-0");
+        let replace_tmp = claims.join("node%3Ax-1.lock.tmp.9.0");
+        std::fs::write(&create_tmp, b"").unwrap();
+        std::fs::write(&replace_tmp, b"").unwrap();
+        age_file(&create_tmp, 2);
+        age_file(&replace_tmp, 2);
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(!create_tmp.exists());
+        assert!(!replace_tmp.exists());
+        assert_eq!(summary.claim_tmp.deleted, 2);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_reap_keeps_claim_tmp_within_retention_window() {
+        let (base, home) = stale_state_home("claim-tmp-fresh");
+        let claims = base.join("claims");
+        std::fs::create_dir_all(&claims).unwrap();
+        let tmp = claims.join(".claim-tmp-1-1-0");
+        std::fs::write(&tmp, b"").unwrap();
+
+        let summary = reap_state_files(
+            &home,
+            crate::agents_config::StateReapConfig::default(),
+            true,
+        );
+
+        assert!(tmp.exists());
+        assert_eq!(summary.claim_tmp.kept.len(), 1);
+        assert_eq!(summary.claim_tmp.kept[0].reason, "within retention window");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_reap_claim_tmp_sweep_ignores_locks_and_expired() {
+        let (base, _home) = stale_state_home("claim-tmp-lock-expired");
+        let claims = base.join("claims");
+        std::fs::create_dir_all(&claims).unwrap();
+        let lock = claims.join("node%3Ax-1.lock");
+        std::fs::write(&lock, b"").unwrap();
+        age_file(&lock, 40);
+        let expired_dir = claims.join(".expired");
+        std::fs::create_dir_all(&expired_dir).unwrap();
+        let expired_entry = expired_dir.join("old-claim");
+        std::fs::write(&expired_entry, b"{}").unwrap();
+        age_file(&expired_entry, 40);
+        let tmp = claims.join(".claim-tmp-2-2-0");
+        std::fs::write(&tmp, b"").unwrap();
+        age_file(&tmp, 2);
+
+        let mut summary = StateReapFamilySummary::default();
+        reap_mtime_family(
+            &base,
+            &claims,
+            CLAIM_TMP_RETAIN_DAYS,
+            Some(&is_claim_tmp),
+            true,
+            &mut summary,
+        );
+
+        assert!(lock.exists());
+        assert!(expired_entry.exists());
+        assert!(!tmp.exists());
+        assert_eq!(summary.scanned, 1, "only the temp file is scanned");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn state_reap_claim_tmp_sweep_ignores_recovery_dir() {
+        let (base, _home) = stale_state_home("claim-tmp-recovery");
+        let claims = base.join("claims");
+        std::fs::create_dir_all(&claims).unwrap();
+        let recovery_dir = claims.join("reconcile%3Apr-1.lock.recovery.d");
+        std::fs::create_dir_all(&recovery_dir).unwrap();
+
+        let mut summary = StateReapFamilySummary::default();
+        reap_mtime_family(
+            &base,
+            &claims,
+            CLAIM_TMP_RETAIN_DAYS,
+            Some(&is_claim_tmp),
+            true,
+            &mut summary,
+        );
+
+        assert!(recovery_dir.exists());
+        assert_eq!(summary.scanned, 0);
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2951,8 +4057,10 @@ mod tests {
         assert_eq!(
             verdict.hold,
             Some(KeepReason::NodeConflict {
-                a: "name".into(),
-                b: "N2".into()
+                // Both witnesses ride the hold (x-e3cc): the first source's
+                // answer names itself beside the dissenting one.
+                a: "sessions N1".into(),
+                b: "name N2".into()
             }),
             "the contradicting witness holds the row"
         );

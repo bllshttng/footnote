@@ -15,11 +15,15 @@ dependency. Each module preserves the bash exit-code / output contract.
 from __future__ import annotations
 
 import enum
+import functools
 import json
 import os
+import subprocess
 from typing import List, Optional
 
 import typer
+
+from fno.pr._proc import run
 
 
 pr_app = typer.Typer(
@@ -310,6 +314,11 @@ def list_cmd(
                     continue
                 row["node_id"] = binding.node_id
                 row["node_binding"] = binding.verdict
+                if binding.detail:
+                    row["node_binding_detail"] = binding.detail
+    for row in rows:
+        # Internal to the binding reader; the listing keeps its current width.
+        row.pop("body", None)
     typer.echo(json.dumps(rows, separators=(",", ":")))
 
 
@@ -467,6 +476,21 @@ def base_lineage_check(
 
 
 @pr_app.command(
+    "merge-result-check",
+    hidden=True,
+    help=(
+        "Compile the merge result of <pr_number> against its base: git merge-tree plus the"
+        " repo-wide ruff + mypy step on that tree. Exit 0 ok, 3 red (rebase, fix, push,"
+        " retry), 4 unknown (a probe failed)."
+    ),
+)
+def merge_result_check(pr_number: int = typer.Argument(..., help="GitHub PR number")) -> None:
+    from fno.pr import _merge_result
+
+    raise typer.Exit(code=_merge_result.run_merge_result_check(pr_number))
+
+
+@pr_app.command(
     "coverage-check",
     hidden=True,
     help=(
@@ -535,11 +559,11 @@ def _parse_flags(flags_json: Optional[str]) -> Optional[List[str]]:
         "Register, clear, or read the hold that says a review of this PR's head "
         "is RUNNING. Merge readiness only knows what verdicts EXIST for a head, "
         "so a review still writing its fixes is invisible to it. Actions: "
-        "check <pr> (exit 0 clear, 3 held, 4 unanswered), acquire, release."
+        "check <pr> (exit 0 clear, 3 held, 4 unanswered), acquire, release, round."
     ),
 )
 def review_hold(
-    action: str = typer.Argument(..., help="check | acquire | release"),
+    action: str = typer.Argument(..., help="check | acquire | release | round"),
     pr_number: Optional[int] = typer.Argument(None, help="GitHub PR number (check)"),
     branch: Optional[str] = typer.Option(None, "--branch", help="Head branch (acquire/release)."),
     head: str = typer.Option("", "--head", help="The head sha being reviewed (acquire)."),
@@ -591,9 +615,12 @@ def review_hold(
         typer.echo(f"PR {pr_number}: no review in flight on {branch}")
         raise typer.Exit(code=0)
 
-    if not branch:
+    if not branch and not (action == "acquire" and pr_number is not None):
         typer.echo(f"review-hold {action} needs --branch", err=True)
         raise typer.Exit(code=1)
+    # A PR-number acquire resolves the branch below; every path reaching here
+    # otherwise holds one. Rebound so the callers read as typed.
+    branch = branch or ""
     if action == "release":
         # --holder is OPTIONAL here, and omitting it is the normal case: this is
         # a lane lock, not an ownership assertion. The refusal an operator reads
@@ -611,10 +638,64 @@ def review_hold(
 
         typer.echo(json.dumps(claim_status(_review_hold.review_hold_key(branch))))
         raise typer.Exit(code=0)
+    if action == "round":
+        if not head:
+            typer.echo("review-hold round needs --head", err=True)
+            raise typer.Exit(code=1)
+        # The instrument must have RUN: an empty chain is an absence with more
+        # than one explanation, and journals missing on both mirrors means no
+        # read ever answered. Fail closed so the caller stamps nothing rather
+        # than trusting a zero-shaped read.
+        from fno.pr._reviews import _coverage_logs
+
+        try:
+            journal_paths = _coverage_logs(cwd)[:2]
+        except Exception:  # noqa: BLE001 - a dead probe never mints a round
+            raise typer.Exit(code=1) from None
+        if not any(path is not None and path.exists() for path in journal_paths):
+            raise typer.Exit(code=1)
+        try:
+            round_no = _review_hold.scoped_verify_round(branch, head, cwd=cwd)
+        except Exception:  # noqa: BLE001 - fail closed: no number, no stamp
+            raise typer.Exit(code=1) from None
+        typer.echo(round_no)
+        raise typer.Exit(code=0)
     if not holder:
         typer.echo("review-hold acquire needs --holder", err=True)
         raise typer.Exit(code=1)
     if action == "acquire":
+        if pr_number is not None:
+            # x-b5f6: a review that names its PR keys the hold on that PR's head
+            # ref, resolved from GitHub - never on whatever branch this checkout
+            # stands on. No hold rather than a guessed one: a hold on a
+            # bystander branch reports protection of a PR it is not protecting.
+            # The verb runs inside a PreToolUse hook, so the read is bounded.
+            from fno.pr._merge import _pr_head_ref_and_oid
+
+            try:
+                refs = _pr_head_ref_and_oid(
+                    pr_number, cwd, runner=functools.partial(run, timeout=10)
+                )
+            except subprocess.TimeoutExpired:
+                refs = None
+            if refs is None:
+                typer.echo(
+                    f"review-hold: not registered on PR {pr_number}: the PR read failed; "
+                    "no hold rather than a guessed branch",
+                    err=True,
+                )
+                raise typer.Exit(code=0)
+            resolved_branch, resolved_head, resolved_state = refs
+            if resolved_state != "OPEN":
+                typer.echo(
+                    f"review-hold: not registered on PR {pr_number}: {resolved_state}; "
+                    "no hold rather than a guessed branch",
+                    err=True,
+                )
+                raise typer.Exit(code=0)
+            # The PR's own head ref and head replace whatever the caller passed.
+            branch = resolved_branch
+            head = resolved_head
         flags = _parse_flags(flags_json)
         # The cap gate: the prefixed line lets the hook surface the denial;
         # policy, not infra, so the one acquire failure that blocks.
@@ -622,6 +703,9 @@ def review_hold(
         if refusal:
             typer.echo(f"review-invocation-refused: {refusal}")
             raise typer.Exit(code=3)
+        advisory = _review_hold.verify_fixes_advisory(branch, head, cwd=cwd)
+        if advisory:
+            typer.echo(advisory, err=True)
         claim = _review_hold.acquire_review_hold(
             branch,
             head=head,
@@ -727,7 +811,8 @@ def global_receipt_events_path() -> None:
         "config.post_merge.sync_command in the CANONICAL checkout after a PR "
         "merges (opt-in; unset command = no-op). Exactly-once per merge SHA via "
         "a marker + single-flight lock; fail-open. Exit 0 no-op/skipped/synced, "
-        "non-zero only on a failed sync_command (marker withheld -> retries)."
+        "non-zero on a failed sync_command or a canonical checkout dirty on "
+        "paths this merge touches (marker withheld -> retries)."
     ),
 )
 def sync_canonical(
@@ -737,6 +822,55 @@ def sync_canonical(
 
     rc = _sync_canonical.run_sync_canonical(pr_number)
     raise typer.Exit(code=rc)
+
+
+@pr_app.command(
+    "publish-review",
+    hidden=True,
+    help=(
+        "Post a review verdict to GitHub as config.review.bot_identity "
+        "(--pr-number N; --verdict defaults to the newest head-pinned "
+        "attestation for HEAD). One bot-review: receipt line; exit 0 posted,"
+        " 1 skipped|refused|failed, 2 no attestation to default from."
+    ),
+)
+def publish_review_cmd(
+    pr_number: Optional[int] = typer.Option(None, "--pr-number", help="GitHub PR number"),
+    pr_legacy: Optional[int] = typer.Option(
+        None, "--pr", hidden=True, help="[DEPRECATED] alias for --pr-number."
+    ),
+    verdict: Optional[str] = typer.Option(
+        None, "--verdict", help="pass | fail; default: newest head-pinned attestation for HEAD."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", "-N", help="Resolve and refuse-check, but make no POST."
+    ),
+) -> None:
+    from fno._flag_aliases import merge_deprecated_alias
+    from fno.pr._publish_review import PublishReviewUnavailable, publish_review_call
+
+    pr_number = merge_deprecated_alias(
+        pr_number, pr_legacy, canonical_flag="--pr-number", legacy_flag="--pr"
+    )
+    if pr_number is None:
+        typer.echo("publish-review: missing option --pr-number", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = publish_review_call(
+            {
+                "pr_number": pr_number,
+                "head_sha": "",
+                "verdict": verdict or "",
+                "reviewer": "",
+                "cwd": os.getcwd(),
+                "dry_run": dry_run,
+            }
+        )
+    except PublishReviewUnavailable as exc:
+        typer.echo(f"bot-review: failed ({exc})", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(result.get("receipt", ""), err=True)
+    raise typer.Exit(code=int(result.get("exit", 1)))
 
 
 @pr_app.command(

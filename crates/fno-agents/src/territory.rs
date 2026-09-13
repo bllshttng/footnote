@@ -1141,27 +1141,31 @@ pub fn run_territory_rows(args: &[String]) -> i32 {
     0
 }
 
-/// `fno-agents active-backlog-receipt`: the drain-target receipt as JSON on
-/// stdout. Exit 1 with the reason on stderr when a source is unreadable -
-/// `unknown` must never print as an empty list. Invoked by the
-/// `fno config active-backlog` passthrough and rank's dispatcher note.
+/// `fno-agents active-backlog-receipt`: the drain reading as JSON on stdout,
+/// the x-338c object shape (`targets`/`missions`/`skip_reason`). Exit 1 with
+/// the reason on stderr when a source is unreadable - `unknown` must never
+/// print as an empty list. Invoked by the `fno config active-backlog`
+/// passthrough and rank's dispatcher note.
 pub fn run_active_backlog_receipt(args: &[String]) -> i32 {
     let _ = args;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let registry = AgentsHome::from_env().registry_json();
-    match crate::active_backlog::native_receipt(&cwd, &registry) {
-        Ok(targets) => {
-            println!(
-                "{}",
-                serde_json::to_string(&targets).unwrap_or_else(|_| "[]".to_string())
-            );
-            0
-        }
-        Err(reason) => {
-            eprintln!("active-backlog: {reason}");
-            1
-        }
+    let report = crate::active_backlog::resolve_targets_report(&cwd, &registry);
+    if let Some(failure) = &report.failure {
+        eprintln!("active-backlog: {failure}");
+        return 1;
     }
+    let reading = serde_json::json!({
+        "targets": report.targets,
+        "missions": report.missions,
+        "skip_reason": report.skip_reason,
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&reading)
+            .unwrap_or_else(|_| "{\"targets\":[],\"missions\":0}".to_string())
+    );
+    0
 }
 
 /// `fno-agents blueprint-feed --scope <s> [--deliver] [--repair <r>]`: the

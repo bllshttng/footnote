@@ -43,6 +43,22 @@ import subprocess as _subprocess_module
 #: passthrough in _fake_spawn_run must reach the real binary even while a
 #: test has patched subprocess.run.
 _REAL_SUBPROCESS_RUN = _subprocess_module.run
+
+
+def _naming_passthrough(cmd, **kwargs):
+    """fno-invocations stay fakeable EXCEPT the name verbs: mint/codes/parse
+    execute in the binary and ride the real subprocess, so the tests assert
+    the shipped naming and not a mock's guess about it. Non-fno execs (the
+    config reader's git probes) ride real too - they are infrastructure, not
+    the behavior under test."""
+    parts = [str(part) for part in cmd]
+    is_fno = bool(parts) and (
+        parts[0].endswith("fno-py") or parts[0].endswith("fno") or "fno-agents" in parts[0]
+    )
+    if is_fno and not ({"name-mint", "name-codes", "name-parse"} & set(parts)):
+        return None
+    return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+
 from fno.claims.core import acquire_claim, claim_status
 from fno.cli import app
 
@@ -115,12 +131,35 @@ def _hold(key: str) -> None:
     acquire_claim(key, "test-holder", ttl_ms=60_000, root=adv._claims_root_for(key))
 
 
-NODE = {"id": "ab-2222aaaa", "title": "next", "project": "fno", "_resolved_cwd": "/tmp/x"}
+# A real selection projection row (x-0961/x-ebd2): the keys the node-aware
+# doors read. Planless low is the law's straight-to-target intake.
+NODE = {
+    "id": "ab-2222aaaa",
+    "title": "next",
+    "project": "fno",
+    "_resolved_cwd": "/tmp/x",
+    "difficulty": "low",
+    "dispatch_verb": "",
+}
 
 
 # ---------------------------------------------------------------------------
 # Decision matrix
 # ---------------------------------------------------------------------------
+
+
+def test_refuse_unknown_source_lives_in_advance():
+    """The --source door check sits beside the mint (one naming importer
+    edge); graph/cli delegates instead of importing the runtime itself."""
+    from typer import Exit
+
+    from fno.backlog.advance import refuse_unknown_source
+
+    refuse_unknown_source("advance", None)  # unset passes
+    refuse_unknown_source("advance", "ab")  # a known code passes
+    with pytest.raises(Exit) as exc:
+        refuse_unknown_source("advance", "zz")
+    assert exc.value.exit_code == 2
 
 
 def test_disabled_dispatches_nothing(iso, monkeypatch):
@@ -204,7 +243,7 @@ def test_skip_tick_without_detail_is_byte_identical(iso, monkeypatch):
 
 def test_no_work(iso, monkeypatch):
     monkeypatch.setattr(adv, "_next_node", lambda project: None)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", events_path=iso)
 
@@ -217,7 +256,7 @@ def test_next_error_skips_never_guesses(iso, monkeypatch):
         raise RuntimeError("gh exploded")
 
     monkeypatch.setattr(adv, "_next_node", boom)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", events_path=iso)
 
@@ -228,7 +267,7 @@ def test_walker_live_suppresses(iso, monkeypatch):
     """AC2-EDGE: a live walk owns the project -> skip."""
     _hold(adv._walker_key())
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", events_path=iso)
 
@@ -239,18 +278,19 @@ def test_node_already_claimed(iso, monkeypatch):
     """A live node:<id> claim means a worker is already running -> skip."""
     _hold(f"node:{NODE['id']}")
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", events_path=iso)
 
-    assert res.decision == "skipped" and res.reason == "already-claimed"
+    assert res.decision == "skipped"
+    assert res.reason == "held: claim live held by test-holder"
 
 
 def test_dispatch_reservation_held(iso, monkeypatch):
     """A peer's live dispatch:<id> reservation -> already-claimed, no spawn."""
     _hold(f"dispatch:{NODE['id']}")
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", events_path=iso)
 
@@ -285,9 +325,38 @@ def test_live_worked_node_refuses_and_names_worker(monkeypatch):
     observation = adv._observe_node_claim(NODE["id"])
 
     assert observation.blocks_dispatch is True
-    assert observation.refusal_reason == "already-claimed"
+    assert observation.refusal_reason == "held: worked overlay: bp-worker"
     assert observation.worker == "bp-worker"
     assert emitted[0][1]["worker"] == "bp-worker"
+
+
+def test_one_unmeasurable_row_elsewhere_does_not_block_a_free_node(monkeypatch):
+    """The p0's exact shape: a live row with no harness session id is
+    attributed to ITS node, so a different node with a free claim and no
+    unmeasurable worker still dispatches (x-ae54)."""
+    from fno import target_cli
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda _node, **_: ("free", {"state": "free", "holder": "unknown"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+    monkeypatch.setattr(
+        "fno.graph.statuses.live_worked_node_ids",
+        lambda **_kw: {"x-a238": ["bp-a238-king-brief (unmeasurable: no harness session id)"]},
+    )
+
+    observation = adv._observe_node_claim(NODE["id"], emit=False)
+
+    assert observation.action == "dispatch"
+    assert observation.block_reason is None
 
 
 def test_worked_authority_failure_refuses_dispatch(monkeypatch):
@@ -418,19 +487,20 @@ def test_node_claim_predispatch_is_family2_loud(
 
     assert adv._claim_is_live("node:x-a35a") is occupied
 
-    assert emitted == [
-        (
-            "dispatch_claim_observed",
-            {
-                "node_id": "x-a35a",
-                "claim_verdict": claim_verdict,
-                "claim_state": claim_state,
-                "holder": "target-session:prior",
-                "truth_status": truth_state,
-                "action": action,
-            },
+    expected_event = {
+        "node_id": "x-a35a",
+        "claim_verdict": claim_verdict,
+        "claim_state": claim_state,
+        "holder": "target-session:prior",
+        "truth_status": truth_state,
+        "action": action,
+    }
+    if occupied:
+        # x-dead task 2.2: the occupied refusal names what was consulted.
+        expected_event["block_reason"] = (
+            f"held: claim {claim_state} held by target-session:prior"
         )
-    ]
+    assert emitted == [("dispatch_claim_observed", expected_event)]
     assert notices and "target-session:prior" in notices[0][1]
     warning = capsys.readouterr().err
     assert claim_state in warning
@@ -521,11 +591,24 @@ def test_spawn_failure_records_the_refusal_not_a_clipped_head(iso, monkeypatch):
     failed_ticks = [t for t in ticks if t["data"].get("skip_reason") == "spawn-failed"]
     assert failed_ticks
     detail = failed_ticks[-1]["data"].get("detail") or ""
-    # The composed tick row keeps 200 chars total; the error is tail-truncated
-    # to match, so the window ENDS at the refusal instead of opening on the
-    # advisory. 140 chars of the error's tail survive the prefix budgets.
-    assert refusal[-140:] in detail
-    assert "refusing to spawn" in detail
+    # No window: the tick row carries the whole error. A tail window the size
+    # of the refusal lands mid-sentence when the stderr is longer (the row's
+    # `error=` read empty-looking) and a head window cut mid-flag, so both the
+    # exit context and the full refusal must survive.
+    assert "exited 79" in detail
+    assert refusal in detail
+
+
+def test_gate_refusal_detail_fallback_keeps_stderr_over_200():
+    """No spawn-gate: line on stderr -> the detail is the WHOLE stderr. The
+    200-char head fallback cut a real refusal mid-flag and left the cause
+    unrecoverable from the status surface."""
+    stderr = (
+        "fno agents spawn: applied model=opus (agents.profiles.blueprint.model)\n"
+        + "x" * 260
+        + "\nfno agents spawn: refusing; no worker launched"
+    )
+    assert adv._gate_refusal_detail(stderr) == stderr
 
 
 def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
@@ -599,6 +682,32 @@ def test_gate_refusal_maps_the_gate_exit_family():
     )
 
 
+def test_gate_refusal_reads_the_sandbox_probe_exit_as_lane_scoped():
+    """A sandbox that blocks gh blocks it for every node the codex lane takes,
+    so the refusal skips instead of charging the node."""
+    from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
+
+    line = (
+        "sandbox-probe: gh is unreachable inside the codex workspace-write sandbox "
+        "(error connecting to api.github.com); no worker launched, node stays dispatchable"
+    )
+    detail = adv._gate_refusal_detail(f"{line}\nremedy: allow it in ~/.codex/config.toml")
+    assert detail == line
+    refusal = adv.gate_refusal(
+        adv.SpawnError("exited 82", exit_code=EXIT_SANDBOX_UNREACHABLE, detail=detail)
+    )
+    assert refusal is not None and refusal.reason == "sandbox-unreachable"
+    assert refusal.exit_code == EXIT_SANDBOX_UNREACHABLE and refusal.detail == line
+    # The number alone is not proof, and neither is the gate family's marker.
+    for other in ("Traceback (most recent call last):", _GATE_LINE):
+        assert (
+            adv.gate_refusal(
+                adv.SpawnError("exited 82", exit_code=EXIT_SANDBOX_UNREACHABLE, detail=other)
+            )
+            is None
+        )
+
+
 def test_gate_refusal_carries_queue_retry_at():
     from fno.agents.spawn_gate import EXIT_PROVIDER_CAP
 
@@ -617,11 +726,14 @@ def test_spawn_worker_attaches_gate_exit_and_last_gate_line(monkeypatch):
     monkeypatch.setattr(
         adv.subprocess,
         "run",
-        lambda cmd, **kw: _FakeProc(
-            79,
-            "",
-            "spawn-gate: 1 live row(s) were minted without a provider stamp\n"
-            f"{_GATE_LINE}\n",
+        lambda cmd, **kw: (
+            _naming_passthrough(cmd, **kw)
+            or _FakeProc(
+                79,
+                "",
+                "spawn-gate: 1 live row(s) were minted without a provider stamp\n"
+                f"{_GATE_LINE}\n",
+            )
         ),
     )
     with pytest.raises(adv.SpawnError) as ei:
@@ -636,7 +748,7 @@ def test_spawn_worker_attaches_gate_exit_and_last_gate_line(monkeypatch):
 def test_spawn_worker_gate_detail_falls_back_to_stderr_head(monkeypatch):
     """No spawn-gate: line on stderr -> the head of stderr is the detail."""
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(79, "", "daemon unreachable"),
+        adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(79, "", "daemon unreachable")),
     )
     with pytest.raises(adv.SpawnError) as ei:
         adv._spawn_worker("ab-2222aaaa", None)
@@ -899,6 +1011,9 @@ def _fake_spawn_run(short_id):
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         if "route-slot" in [str(part) for part in cmd]:
             return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
@@ -920,7 +1035,12 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
         lambda **kw: {"claude": "exhausted", "codex": "ok"},
     )
     sid = adv._spawn_worker(
-        "x-grid1", None, "grid-slug", node={"difficulty": "high", "priority": "p1"}
+        "x-grid1",
+        None,
+        "grid-slug",
+        # planless low: the law's straight-to-/target intake, so the grid
+        # consult this test exists for stays keyed on the target profile.
+        node={"difficulty": "low", "priority": "p1", "dispatch_verb": ""},
     )
     assert sid == "sid-grid1"
     cmd = captured["cmd"]
@@ -941,7 +1061,7 @@ def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
     )
     adv._spawn_worker(
         "x-pin1", None, "pin-slug", provider="claude",
-        node={"difficulty": "high", "priority": "p1"},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
     )
     cmd = captured["cmd"]
     i = cmd.index("--harness")
@@ -958,7 +1078,7 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     (tmp_path / ".git").mkdir()
     node = {
         "id": "x-grid2", "slug": "grid-two", "difficulty": "high",
-        "priority": "p1", "cwd": str(tmp_path),
+        "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
     }
 
     monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
@@ -980,6 +1100,9 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         if "route-slot" in [str(part) for part in cmd]:
             return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
@@ -1009,7 +1132,7 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     (tmp_path / ".git").mkdir()
     node = {
         "id": "x-dec1", "slug": "decline-pin", "difficulty": "high",
-        "priority": "p1", "cwd": str(tmp_path),
+        "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
     }
     capacity = {"claude": "exhausted", "codex": "exhausted"}
 
@@ -1030,6 +1153,9 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
         return tmp_path
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         if "route-slot" in [str(part) for part in cmd]:
             return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
@@ -1125,6 +1251,9 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1136,7 +1265,7 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
     assert cmd[:5] == ["fno-py", "agents", "spawn", "--harness", "claude"]
     assert "--cwd" in cmd and "/work/dir" in cmd
     assert "--fresh" not in cmd
-    assert cmd[-2] == "target-ab-2222aaaa"
+    assert cmd[-2] == "t-ab-2222aaaa"
     assert cmd[-1] == "/target --no-merge ab-2222aaaa"  # no-merge rides as a token
     # subscription lane only - never the API-credit/-p lane.
     assert "-p" not in cmd and "--print" not in cmd and "--bare" not in cmd
@@ -1153,6 +1282,9 @@ def test_spawn_worker_threads_model_and_provider(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _CODEX_THREAD_RECEIPT)
 
@@ -1170,6 +1302,9 @@ def test_spawn_worker_default_provider_claude(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1184,6 +1319,9 @@ def test_spawn_worker_argv_fresh_when_no_cwd(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1202,6 +1340,9 @@ def test_spawn_worker_default_substrate_bg(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1217,6 +1358,9 @@ def test_spawn_worker_verb_routes_command_and_brief_env(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         captured["env"] = kw.get("env")
         return _FakeProc(0, _RECEIPT)
@@ -1237,6 +1381,9 @@ def test_spawn_worker_verb_normalizes_codex_thread(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _CODEX_THREAD_RECEIPT)
 
@@ -1254,6 +1401,9 @@ def test_spawn_worker_thread_without_session_id_refuses(monkeypatch):
     """A Codex thread must return a session identity receipt."""
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         # A thread spawn without a session identity is not a launch receipt.
         return _FakeProc(0, "the model reply text, no json receipt here")
 
@@ -1269,7 +1419,7 @@ def test_spawn_worker_bg_still_requires_short_id(monkeypatch):
     headless one-shot is exempt."""
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda cmd, **kw: _FakeProc(0, "no receipt on the claude bg lane"),
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, "no receipt on the claude bg lane")),
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", "/w")  # default -> claude/bg
@@ -1282,6 +1432,9 @@ def test_spawn_worker_extra_env_reaches_subprocess(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["env"] = kw.get("env")
         return _FakeProc(0, _RECEIPT)
 
@@ -1308,6 +1461,9 @@ def test_predispatch_auto_defers_before_birth_at_durable_failure_limit(monkeypat
     calls: list[list[str]] = []
 
     def fake_run(cmd, **_kwargs):
+        passthrough = _naming_passthrough(cmd, **_kwargs)
+        if passthrough is not None:
+            return passthrough
         calls.append(cmd)
         return _FakeProc(0)
 
@@ -1406,6 +1562,9 @@ def test_spawn_worker_auto_merge_drops_no_merge(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -1421,7 +1580,9 @@ def test_spawn_worker_unknown_harness_raises_resolve_error(monkeypatch):
 
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda *a, **k: pytest.fail("must not spawn on a resolve error"),
+        lambda cmd, *a, **k: (
+            _naming_passthrough(cmd, **k) or pytest.fail("must not spawn on a resolve error")
+        ),
     )
     with pytest.raises(DispatchResolveError):
         adv._spawn_worker("ab-2222aaaa", "/w", harness="bogus")
@@ -1449,74 +1610,75 @@ def test_advance_resolver_error_is_non_fatal(iso, monkeypatch):
 
 
 def test_worker_agent_name_carries_verb_id_and_slug():
-    # Provenance-carrying name: target-<full-node-id>-<slug>, degrading to
-    # target-<full-node-id> when the node has no slug.
+    # Provenance-carrying name (x-84b2): [<source>-]<verb>-<node>-<slug>,
+    # degrading to ...-<node> when the node has no slug. An attended manual
+    # launch (source=None) carries no source segment.
     assert adv._worker_agent_name("ab-2222aaaa", "cargo-bootstrapper") == \
-        "target-ab-2222aaaa-cargo-bootstrapper"
-    assert adv._worker_agent_name("ab-2222aaaa", None) == "target-ab-2222aaaa"
-    assert adv._worker_agent_name("ab-2222aaaa", "") == "target-ab-2222aaaa"
+        "t-ab-2222aaaa-cargo-bootstrapper"
+    assert adv._worker_agent_name("ab-2222aaaa", None) == "t-ab-2222aaaa"
+    assert adv._worker_agent_name("ab-2222aaaa", "") == "t-ab-2222aaaa"
     # Parity with the shell dispatchers (codex P2 / gemini HIGH, PR #525): an
     # unsanitized title fallback (caps/spaces/punct) must normalize identically,
     # and a slug longer than the 30-char cut must truncate (graph slugs reach 48)
     # so the Python name never diverges from dispatch-node.sh's.
     assert adv._worker_agent_name("ab-2222aaaa", "Cargo Bootstrapper!!") == \
-        "target-ab-2222aaaa-cargo-bootstrapper"
+        "t-ab-2222aaaa-cargo-bootstrapper"
     assert adv._worker_agent_name("ab-2222aaaa", "x" * 35) == \
-        "target-ab-2222aaaa-" + "x" * 30
-
-
-def test_verb_qualifier_derives_bare_declared_verb():
-    assert adv._verb_qualifier("/fno:blueprint") == "blueprint"
-    assert adv._verb_qualifier("blueprint") == "blueprint"
-    assert adv._verb_qualifier("$fno:blueprint") == "fno-blueprint"
-    assert adv._verb_qualifier(None) is None
-    assert adv._verb_qualifier("") is None
-    assert adv._verb_qualifier("  ") is None
+        "t-ab-2222aaaa-" + "x" * 30
+    # A sourced daemon dispatch stamps its origin first.
+    assert adv._worker_agent_name(
+        "ab-2222aaaa", "cargo-bootstrapper", source="ab", verb_code="bp"
+    ) == "ab-bp-ab-2222aaaa-cargo-bootstrapper"
 
 
 def test_worker_agent_name_qualifier_keeps_prefix_contract():
-    # The verb lands in agent_name's qualifier slot: the name states which verb
-    # ran while every target-<node>- consumer match keeps holding.
-    name = adv._worker_agent_name("x-7aa8abc1", "daily-pass", qualifier="blueprint")
-    assert name == "target-x-7aa8abc1-blueprint-daily-pass"
-    assert name.startswith("target-x-7aa8abc1-")
-    # A node declaring no verb keeps today's exact name (no empty qualifier).
+    # x-84b2: the verb code replaced the qualifier slot. The blueprint verb
+    # lands as bp; the bare default is t.
+    assert adv._worker_agent_name(
+        "x-7aa8abc1", "daily-pass", verb_code="bp"
+    ) == "bp-x-7aa8abc1-daily-pass"
+    # A node declaring no verb keeps the manual t- name.
     assert adv._worker_agent_name("ab-2222aaaa", "cargo-bootstrapper") == \
-        "target-ab-2222aaaa-cargo-bootstrapper"
+        "t-ab-2222aaaa-cargo-bootstrapper"
 
 
 def test_spawn_worker_declared_verb_lands_in_name(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    # /think: an allowlisted verb exercises the same qualifier mechanics the
-    # resolver refuses for unlisted ones.
+    # /think: an allowlisted verb exercises the same code-mapping mechanics the
+    # vocabulary refuses for unlisted ones.
     adv._spawn_worker("x-7aa8abc1", None, "daily-pass", verb="/think")
     name = captured["cmd"][-2]
-    assert name.startswith("target-x-7aa8abc1-")
-    assert "think" in name
+    assert name.startswith("th-x-7aa8abc1-")
 
 
 def test_spawn_worker_name_includes_slug(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker("ab-2222aaaa", None, "cargo-bootstrapper")
-    assert captured["cmd"][-2] == "target-ab-2222aaaa-cargo-bootstrapper"
+    assert captured["cmd"][-2] == "t-ab-2222aaaa-cargo-bootstrapper"
 
 
 def test_spawn_worker_name_collision_raises_already_running(monkeypatch):
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda cmd, **kw: _FakeProc(2, "", "agent tgt-x already exists"),
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(2, "", "agent tgt-x already exists")),
     )
     with pytest.raises(adv.SpawnAlreadyRunning):
         adv._spawn_worker("ab-2222aaaa", None)
@@ -1525,24 +1687,68 @@ def test_spawn_worker_name_collision_raises_already_running(monkeypatch):
 def test_spawn_worker_other_failure_raises_spawn_error(monkeypatch):
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda cmd, **kw: _FakeProc(1, "", "daemon unreachable"),
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(1, "", "daemon unreachable")),
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", None)
+
+
+def test_spawn_worker_refuses_source_reconcile_impossible_pair():
+    """x-84b2: a source other than rd can never ride a reconcile manifest."""
+    with pytest.raises(adv.SpawnError, match="impossible pair"):
+        adv._spawn_worker(
+            "x-7aa8abc1", None, "daily-pass",
+            source="ac", reconcile_manifest="/tmp/manifest.json",
+        )
+
+
+def test_spawn_worker_receipt_carries_the_registered_name(monkeypatch):
+    """x-84b2: the receipt's agent_name is the exact name passed to --name, so
+    every downstream event copies one mint instead of re-deriving a lookalike."""
+    captured = {}
+    receipt: dict = {}
+
+    def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
+        captured["cmd"] = cmd
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker(
+        "x-7aa8abc1", None, "daily-pass", source="ab", verb="/blueprint",
+        node={"id": "x-7aa8abc1", "dispatch_verb": "", "difficulty": "high",
+              "plan_path": "", "priority": "p1"},
+        receipt=receipt,
+    )
+    minted = captured["cmd"][captured["cmd"].index("--name") + 1]
+    assert minted == "ab-bp-x-7aa8abc1-daily-pass"
+    assert receipt["agent_name"] == minted
+
+
+def test_spawn_worker_unknown_verb_word_refuses(monkeypatch):
+    """AC1-EDGE: an out-of-vocabulary verb refuses before spawn, never a t."""
+    monkeypatch.setattr(
+        adv.subprocess, "run",
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or pytest.fail("must not spawn")),
+    )
+    with pytest.raises(Exception, match="unknown dispatch verb"):
+        adv._spawn_worker("x-1", None, "s", verb="/impeccable")
 
 
 def test_spawn_worker_skips_noise_line_mentioning_short_id(monkeypatch):
     """A non-JSON stdout line that merely mentions short_id must not abort the
     parse; the real receipt on a later line still wins (gemini review)."""
     noisy = 'note: writing short_id to log\n' + _RECEIPT
-    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, noisy))
+    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, noisy)))
     assert adv._spawn_worker("ab-2222aaaa", None) == "abc12345"
 
 
 def test_spawn_worker_exit0_no_receipt_raises_spawn_error(monkeypatch):
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda cmd, **kw: _FakeProc(0, "some banner noise\n", ""),
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, "some banner noise\n", "")),
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", None)
@@ -1557,7 +1763,7 @@ def test_spawn_worker_exit0_no_receipt_raises_spawn_error(monkeypatch):
 
 def test_spawn_worker_accepts_codex_thread_full_id_receipt(monkeypatch):
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _CODEX_THREAD_RECEIPT)
+        adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, _CODEX_THREAD_RECEIPT))
     )
     identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex")
     assert identity == "0198c0de-1111-7000-8000-00000000000a"
@@ -1570,7 +1776,7 @@ def test_spawn_worker_refuses_codex_head8_launch_identity(monkeypatch):
         '"harness_session_id":"01a025f8","status":"live","lane":"thread"}\n'
     )
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, head8_receipt)
+        adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, head8_receipt))
     )
     with pytest.raises(adv.SpawnError) as excinfo:
         adv._spawn_worker("ab-2222aaaa", None, harness="codex")
@@ -1580,7 +1786,7 @@ def test_spawn_worker_refuses_codex_head8_launch_identity(monkeypatch):
 def test_spawn_worker_still_accepts_claude_head8_short_id(monkeypatch):
     """A claude jobId head-8 is 32 random bits (UUIDv4) and stays a legal
     launch identity; only codex is refused by shape."""
-    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _RECEIPT))
+    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, _RECEIPT)))
     assert adv._spawn_worker("ab-2222aaaa", None) == "abc12345"
 
 
@@ -1591,7 +1797,7 @@ def test_spawn_worker_codex_receipt_with_only_session_id_key(monkeypatch):
         '{"name":"tgt-2222aaaa","short_id":"","harness":"codex",'
         '"session_id":"0198c0de-2222-7000-8000-00000000000b","status":"live"}\n'
     )
-    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, receipt))
+    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, receipt)))
     identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex")
     assert identity == "0198c0de-2222-7000-8000-00000000000b"
 
@@ -1606,7 +1812,7 @@ def test_spawn_worker_codex_receipt_with_only_session_id_key(monkeypatch):
 
 def test_spawn_worker_fills_receipt_out_param(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _RECEIPT)
+        adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, _RECEIPT))
     )
     ev = tmp_path / "events.jsonl"
     receipt: dict = {}
@@ -1622,7 +1828,7 @@ def test_spawn_worker_fills_receipt_out_param(monkeypatch, tmp_path):
 def test_spawn_worker_receipt_stays_empty_on_spawn_error(monkeypatch):
     receipt: dict = {}
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(1, "", "daemon unreachable"),
+        adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(1, "", "daemon unreachable")),
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", None, receipt=receipt)
@@ -1831,6 +2037,9 @@ def test_next_node_enriches_resolved_cwd(monkeypatch):
     calls = []
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         calls.append(cmd[:3])
         if cmd[:3] == ["fno-py", "backlog", "next"]:
             return _FakeProc(0, json.dumps({"id": "ab-2222aaaa", "cwd": "/raw"}))
@@ -1847,6 +2056,9 @@ def test_next_node_enriches_resolved_cwd(monkeypatch):
 
 def test_next_node_get_failure_is_nonfatal(monkeypatch):
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         if cmd[:3] == ["fno-py", "backlog", "next"]:
             return _FakeProc(0, json.dumps({"id": "ab-2222aaaa", "cwd": "/raw"}))
         return _FakeProc(1, "", "get exploded")
@@ -1861,6 +2073,9 @@ def test_next_node_skips_get_when_already_resolved(monkeypatch):
     calls = []
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         calls.append(cmd[:3])
         return _FakeProc(0, json.dumps(
             {"id": "ab-2222aaaa", "cwd": "/raw", "_resolved_cwd": "/already"}))
@@ -1926,7 +2141,7 @@ def test_dependents_unmapped_project_refused(iso, monkeypatch):
     the project; no spawn."""
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_DEP])
     _map_project(monkeypatch, {})  # "web" unmapped
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -1941,7 +2156,7 @@ def test_dependents_unmapped_project_refused(iso, monkeypatch):
 def test_dependents_no_project_skipped(iso, monkeypatch):
     dep = {"id": "ab-3333bbbb", "project": None, "slug": "x", "cross_project": True}
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [dep])
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -1970,12 +2185,49 @@ def test_dependents_already_claimed_skips(iso, monkeypatch):
     _hold(f"node:{_DEP['id']}")
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_DEP])
     _map_project(monkeypatch, {"web": "/mapped/web"})
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
     )
-    assert results[0].decision == "skipped" and results[0].reason == "already-claimed"
+    assert results[0].decision == "skipped"
+    assert results[0].reason == "held: claim live held by test-holder"
+
+
+def test_xdead_undatable_transcript_is_not_fresh_activity(monkeypatch, tmp_path):
+    """Task 1.5, the 2h33m specimen: a transcript whose newest record is old
+    but whose mtime is fresh is NOT recently-active. The fallback that read
+    the mtime is deleted; no timestamped entry is no evidence."""
+    import os
+    import time
+
+    from pathlib import Path
+
+    projects = tmp_path / ".claude" / "projects" / "proj-abc"
+    projects.mkdir(parents=True)
+    sid = "0123abcd-0000-0000-0000-000000000000"
+    transcript = projects / f"{sid}.jsonl"
+    old = time.time() - 2 * 3600
+    transcript.write_text(
+        json.dumps({"timestamp": "2026-09-11T09:05:03Z", "message": {}}) + "\n"
+    )
+    os.utime(transcript, (old, old))
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    # Positive control: the probe finds the file and reads it (it is the
+    # RECORD age, not the glob, that decides).
+    assert adv._transcript_recently_active(sid) is False
+
+    fresh = time.time()
+    fresh_stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(fresh - 120))
+    transcript.write_text(
+        json.dumps({"timestamp": "2026-09-11T09:05:03Z", "message": {}}) + "\n"
+        + json.dumps({"timestamp": fresh_stamp, "message": {}}) + "\n"
+    )
+    os.utime(transcript, (fresh - 60, fresh - 60))
+    # A record INSIDE the idle window is the one thing that flips the answer.
+    assert adv._transcript_recently_active(sid) is True
 
 
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
@@ -2095,7 +2347,7 @@ def test_dependents_same_project_no_cwd_skips(iso, monkeypatch):
     dep = {"id": "ab-4444cccc", "project": "fno", "slug": "x", "cross_project": False}
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [dep])
     _map_project(monkeypatch, {})  # unmapped AND dep has no cwd
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="fno", events_path=iso
@@ -2112,7 +2364,7 @@ def test_dependents_fail_closed_on_unknown_closed_project(iso, monkeypatch):
         adv, "_direct_dependents",
         lambda cid, cproj: pytest.fail("must not read graph when closed_project is None"),
     )
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     # None (the normal last-resort) AND an empty-string project both fail closed:
     # an empty string would otherwise tag every dependent cross_project=True and
@@ -2205,7 +2457,7 @@ def test_dependents_dependents_error_skips_never_guesses(iso, monkeypatch):
         raise RuntimeError("graph read exploded")
 
     monkeypatch.setattr(adv, "_direct_dependents", boom)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -2328,7 +2580,7 @@ def test_dependents_honors_dependent_repo_walker(iso, monkeypatch):
     monkeypatch.setattr(adv, "_direct_dependents", lambda cid, cproj: [_DEP])
     _map_project(monkeypatch, {"web": "/mapped/web"})
     monkeypatch.setattr(adv, "_walker_live_at", lambda root: root == "/mapped/web")
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     results = adv.advance_dependents(
         closed_node_id="ab-1111aaaa", closed_project="etl", events_path=iso
@@ -2347,6 +2599,9 @@ def _capture_spawn_argv(monkeypatch):
     captured = {}
 
     def fake_run(cmd, *a, **k):
+        passthrough = _naming_passthrough(cmd, **k)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(returncode=0, stdout=_RECEIPT)
 
@@ -2385,14 +2640,17 @@ def test_spawn_worker_error_contract_unchanged(monkeypatch):
     exit 2 + 'already exists' -> SpawnAlreadyRunning; other non-zero -> SpawnError."""
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda *a, **k: _FakeProc(returncode=2, stderr="agent already exists"),
+        lambda cmd, *a, **k: (_naming_passthrough(cmd, **k)
+                            or _FakeProc(returncode=2, stderr="agent already exists")),
     )
     with pytest.raises(adv.SpawnAlreadyRunning):
         adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug")
 
     monkeypatch.setattr(
         adv.subprocess, "run",
-        lambda *a, **k: _FakeProc(returncode=1, stderr="boom"),
+        lambda cmd, *a, **k: (
+            _naming_passthrough(cmd, **k) or _FakeProc(returncode=1, stderr="boom")
+        ),
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug")
@@ -2583,7 +2841,7 @@ def test_failover_provider_pin_bypasses(iso, monkeypatch):
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, lambda *a: pytest.fail("a provider pin must bypass failover"))
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(adv, "_spawn_worker", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn")))
 
     res = adv.advance(project="fno", provider="ccm", events_path=iso)
 
@@ -2634,12 +2892,10 @@ def test_failover_racing_advances_dedup(iso, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# x-2716: both autonomous launchers consume ONE route decision.
-#
-# `backlog advance` and `fno agents dispatch` used to disagree - advance could walk the
-# combo onto another harness while dispatch could only defer or decline to
-# defer - so these pin that identical fixtures resolve to the identical
-# destination tuple, and that an unresolvable destination reaches neither spawn.
+# x-2716: the autonomous route decision. The second launcher it used to be
+# pinned against is gone (x-e53e): `fno agents dispatch` shells the ONE
+# launcher, so the identity question dissolved into structure. What survives
+# here is the refusal half - an unresolvable destination launches nothing.
 # ---------------------------------------------------------------------------
 
 
@@ -2647,7 +2903,9 @@ DISPATCH_NODE = {**NODE, "id": "ab-3333bbbb", "priority": "p2"}
 
 
 def _dispatch_one_capture(monkeypatch, tmp_path):
-    """Drive `fno agents dispatch`'s autonomous path, capturing its pane-spawn kwargs.
+    """Drive `fno agents dispatch`'s autonomous path, capturing its launch
+    shellout (x-e53e: the pane seam this helper used to capture is the spawn
+    door's now, covered by the door's own suites).
 
     Its own node id, so the sibling advance leg's live dispatch:<id> reservation
     does not read as this launcher already dispatching."""
@@ -2679,13 +2937,31 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
     from fno.agents import autonomous_route as ar
 
     monkeypatch.setattr(ar, "_healthy_alternate_exists", lambda: False)
+    # Unit seams beside the resolver: the grid consult, the name mint, and the
+    # launch cwd (the resolver and shellout are the subject, covered end to end
+    # in test_dispatch_one.py).
     monkeypatch.setattr(
-        dispatch_mod,
-        "dispatch_spawn_bounded_pane",
-        # `bound` too: the dispatcher's `launched` return reports whether the
-        # worker actually bound a session, not just whether a pane was created.
-        lambda **kw: captured.update(kw) or SimpleNamespace(pane_id="p1", bound=True),
+        "fno.backlog.advance._grid_lane_for",
+        lambda node, *, model=None, provider=None, verb=None: (None, None, None, None, None),
     )
+    monkeypatch.setattr(
+        "fno.backlog.advance._worker_agent_name",
+        lambda node_id, node_slug, *, source=None, verb_code="t": f"{verb_code}-{node_id}",
+    )
+    monkeypatch.setattr("fno.agents.naming.verb_code_for", lambda word: "t")
+    monkeypatch.setattr(
+        dispatch_mod, "_worktree_ensure_for_launch", lambda cwd, name, harness: str(cwd)
+    )
+
+    def fake_run(cmd, **kw):
+        captured.update({"cmd": cmd, **kw})
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"pane_id": "p1", "bound": True, "seed": "submitted"}) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", fake_run)
     try:
         verdict = dispatch_mod._dispatch_one(session="s", node=None, project=None)
     finally:
@@ -2696,75 +2972,22 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
     return verdict, captured
 
 
-def test_route_tuple_identical_across_launchers(iso, tmp_path, monkeypatch):
-    """AC6-CON: one node + config + quota fixture -> the same destination record
-    and harness on advance AND dispatch, each staging the credential at its own
-    launch boundary."""
-    env = {"CODEX_HOME": "/acct/codex"}
-    _force_exhausted(monkeypatch, "ccm")
-    _destination(monkeypatch, ("codex-acct", "codex", env))
-    # The codex surface rewrites bare /target only for a verb in the shipped
-    # roster. The roster resolves through resolve_plugin_script, which honors
-    # CLAUDE_PLUGIN_ROOT and CODEX_PLUGIN_ROOT ahead of FNO_REPO_ROOT; with no
-    # plugin-root var set (CI, and the hermetic sandbox, which scrubs them),
-    # it lands on FNO_REPO_ROOT, which `iso` points at this test's bare tmp
-    # dir: unreadable here by construction. Whether the read lands non-empty
-    # depends on a sibling test leaving the roster's cache warm
-    # (test_harness_map_roster clears it in a finally), which made this
-    # assertion an ordering flake. Pin the roster: the subject is
-    # cross-launcher identity, not cache warmth.
-    monkeypatch.setattr(
-        "fno.agents.harness_map.footnote_verbs", lambda: frozenset({"target"})
-    )
-    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
-    adv_captured: dict = {}
-    monkeypatch.setattr(
-        adv,
-        "_spawn_worker",
-        lambda node_id, node_cwd, node_slug=None, **kw: adv_captured.update(kw) or "sid",
-    )
-
-    assert adv.advance(project="fno", events_path=iso).decision == "dispatched"
-    verdict, disp_captured = _dispatch_one_capture(monkeypatch, tmp_path)
-
-    assert verdict["outcome"] == "launched"
-    assert adv_captured["provider"] == disp_captured["provider"] == "codex"
-    # Same destination RECORD on both launchers. They carry it differently on
-    # purpose: advance names the record on argv and lets the spawn front door
-    # stage the overlay at the launch boundary, while dispatch spawns the pane
-    # itself and hands the overlay straight to that seam. Neither puts the
-    # credential on a footnote wrapper's own environment (x-c33e).
-    assert adv_captured["dispatch_account"] == "codex-acct"
-    assert disp_captured["launch_account"] == "codex-acct"
-    assert disp_captured["account_env"] == env
-    # Codex takes its own command surface, never a raw claude slash verb.
-    assert disp_captured["message"] == f"$fno:target --no-merge {DISPATCH_NODE['id']}"
-    # Both launchers leave one post-spawn cutover receipt naming the same
-    # destination, triggering window, and reason.
-    for receipt in (
-        _events(iso)[0],
-        _events(tmp_path / ".fno" / "events.jsonl")[-1],
-    ):
-        assert receipt["type"] == "dispatch_failover"
-        d = receipt["data"]
-        assert (d["from"], d["to"], d["harness_to"]) == ("ccm", "codex-acct", "codex")
-        assert d["window"] == "exhausted" and d["reason"] == "exhausted-cutover"
-
-
 def test_unresolvable_harness_never_reaches_the_dispatch_spawn(tmp_path, monkeypatch):
     """AC5-FR: a destination whose harness cannot render a command is not
-    launched - the node stays dispatchable behind the defer floor."""
+    launched - the resolver refuses it and the verdict is failed, before any
+    subprocess fires."""
     import fno.dispatch as dispatch_mod
 
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, ("ghost-acct", "no-such-harness", {"X": "1"}))
-    monkeypatch.setattr(
-        dispatch_mod,
-        "dispatch_spawn_bounded_pane",
-        lambda **kw: pytest.fail("an unresolvable destination must not spawn"),
-    )
+
+    def no_launch(cmd, **kw):
+        pytest.fail("an unresolvable destination must not spawn")
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", no_launch)
     verdict, _ = _dispatch_one_capture(monkeypatch, tmp_path)
-    assert verdict["outcome"] == "quota-deferred"
+    assert verdict["outcome"] == "failed"
+    assert "no-such-harness" in (verdict.get("detail") or "")
 
 
 def test_quota_change_after_selection_cannot_rewrite_the_spawn(iso, monkeypatch):
@@ -2812,6 +3035,9 @@ def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, sub
     captured: dict = {}
 
     def _fake_run(cmd, **_kw):
+        parts = [str(part) for part in cmd]
+        if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
+            return _REAL_SUBPROCESS_RUN(cmd, **_kw)
         captured["cmd"] = cmd
         return _FakeProc(returncode=0, stdout=_RECEIPT if substrate == "bg" else "")
 
@@ -3190,32 +3416,45 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
 
     node_id = "regready-pipeline-2c4f9a1b3d"
     slug = "path consolidation wave 0 delegate handoff"
-    assert len(f"target-{node_id}-{slug_component(slug)}") > MAX_LEN
+    # The sourced (daemon) form is the widest the seam mints; a naive assembly
+    # of THAT would overflow.
+    assert len(f"ab-bp-{node_id}-{slug_component(slug)}") > MAX_LEN
 
     calls = []
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         calls.append(cmd)
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    sid = adv._spawn_worker(node_id, "/w", slug)
+    sid = adv._spawn_worker(node_id, "/w", slug, source="ab", verb="/blueprint")
 
     assert sid == "abc12345"
     assert len(calls) == 1  # exactly one worker launch requested
     name = calls[0][calls[0].index("--name") + 1]
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name), name
-    assert name.startswith(f"target-{node_id}-")  # full node identity preserved
+    assert name == f"ab-bp-{node_id}-path-consolidation-wave-0-del"
 
 
 def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypatch):
     """AC5 + AC6: refuse before spawn; the lane fails loudly, never 'launched'."""
     node_id = "n-" + "z" * 70
-    node = {"id": node_id, "title": "irrelevant", "project": "fno", "_resolved_cwd": "/tmp/x"}
+    node = {
+        "id": node_id,
+        "title": "irrelevant",
+        "project": "fno",
+        "_resolved_cwd": "/tmp/x",
+        # a real projection row: planless low dispatches straight to target
+        "difficulty": "low",
+        "dispatch_verb": "",
+    }
     monkeypatch.setattr(adv, "_next_node", lambda project: node)
     monkeypatch.setattr("fno.claims.core.machine_id", lambda: "")
     monkeypatch.setattr(
-        adv.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn")
+        adv.subprocess, "run", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn"))
     )
 
     res = adv.advance(project="fno", events_path=iso)
@@ -3236,17 +3475,20 @@ def test_duplicate_dispatch_converges_on_one_dedup_name():
     # An exact expectation, not f(x) == f(x): a tautology holds for any
     # deterministic implementation, including one that returns "".
     assert adv._worker_agent_name(*args) == (
-        "target-regready-pipeline-2c4f9a1b3d-path-consolidation-wave-0-de"
+        "t-regready-pipeline-2c4f9a1b3d-path-consolidation-wave-0-dele"
     )
-    # A different lifecycle prefix stays distinct (G4 de-stub never collides).
-    assert adv._worker_agent_name(*args) != adv._worker_agent_name(*args, prefix="reconcile")
+    # A different source stays distinct (G4 de-stub never collides).
+    assert adv._worker_agent_name(*args) != adv._worker_agent_name(*args, source="rd")
 
 
 def test_filed_specimen_names_remain_byte_for_byte():
-    """The 43/45-char specimens from the node fit and must not change shape."""
+    """The 43/45-char specimens from the node fit; x-84b2 moves the shape."""
     assert adv._worker_agent_name("x-8096", "path-consolidation-wave-0-delegate") == (
-        "target-x-8096-path-consolidation-wave-0-dele"
+        "t-x-8096-path-consolidation-wave-0-dele"
     )
+    assert adv._worker_agent_name(
+        "x-8096", "path-consolidation-wave-0-delegate", source="rd"
+    ) == ("rd-t-x-8096-path-consolidation-wave-0-dele")
 
 
 # ---------------------------------------------------------------------------
@@ -3265,6 +3507,9 @@ def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         captured["env"] = kw.get("env")
         return _FakeProc(0, _CODEX_THREAD_RECEIPT)
@@ -3290,6 +3535,9 @@ def test_spawn_worker_omits_the_carrier_when_not_a_cutover(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(0, _RECEIPT)
 
@@ -3307,6 +3555,9 @@ def test_spawn_worker_refuses_a_state_root_key_in_extra_env(monkeypatch):
     """
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         pytest.fail("must not spawn with a state-root override on the wrapper")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
@@ -3323,6 +3574,9 @@ def test_spawn_worker_still_accepts_a_non_state_root_extra_env(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
         captured["env"] = kw.get("env")
         return _FakeProc(0, _RECEIPT)
 
@@ -3407,18 +3661,24 @@ def test_spawn_worker_grid_route_rides_the_argv(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(stdout='{"short_id": "sid-route1"}')
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     monkeypatch.setattr(
         adv, "_grid_lane_for",
-        lambda node, *, model, provider: (
+        lambda node, *, model, provider, verb=None: (
             "claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", "zai-main", None
         ),
     )
     adv._spawn_worker(
-        "x-route1", None, "route-slug", node={"difficulty": "high", "priority": "p1"}
+        "x-route1",
+        None,
+        "route-slug",
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
     )
     cmd = captured["cmd"]
     assert "--route" in cmd
@@ -3436,19 +3696,22 @@ def test_spawn_worker_preresolved_grid_route_survives_a_pinned_harness(monkeypat
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(stdout='{"short_id": "sid-route3"}')
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
 
-    def _must_not_consult(node, *, model, provider):
+    def _must_not_consult(node, *, model, provider, verb=None):
         raise AssertionError("grid consulted again under a pinned harness")
 
     monkeypatch.setattr(adv, "_grid_lane_for", _must_not_consult)
     adv._spawn_worker(
         "x-route3", None, "route-slug", harness="claude",
         grid_route="zai/glm-5.3-flash[1m]", grid_account="zai-main",
-        node={"difficulty": "high", "priority": "p1"},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
     )
     cmd = captured["cmd"]
     assert cmd[cmd.index("--route") + 1] == "zai/glm-5.3-flash[1m]"
@@ -3461,19 +3724,22 @@ def test_spawn_worker_explicit_vendor_wins_over_grid_route(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(stdout='{"short_id": "sid-route2"}')
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     monkeypatch.setattr(
         adv, "_grid_lane_for",
-        lambda node, *, model, provider: (
+        lambda node, *, model, provider, verb=None: (
             "claude", "glm-5.3-flash[1m]", "zai/glm-5.3-flash[1m]", None, None
         ),
     )
     adv._spawn_worker(
         "x-route2", None, "route-slug", vendor="zai",
-        node={"difficulty": "high", "priority": "p1"},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
     )
     cmd = captured["cmd"]
     assert "--provider" in cmd and cmd[cmd.index("--provider") + 1] == "zai"
@@ -3486,16 +3752,106 @@ def test_spawn_worker_grid_account_skips_on_a_non_claude_harness(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         captured["cmd"] = cmd
         return _FakeProc(stdout='{"short_id": "sid-route4"}')
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker(
         "x-route4", None, "route-slug", harness="codex", grid_account="zai-main",
-        node={"difficulty": "high", "priority": "p1"},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
     )
     cmd = captured["cmd"]
     assert "--account" not in cmd
+
+
+def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeypatch):
+    """x-ebd2 acceptance: for the four lifecycle shapes, command, worker-name
+    qualifier, and receipt verb all state the SAME derived verb, and a stale
+    stored verb reconciles through the table instead of winning."""
+    design_plan = tmp_path / "design-plan.md"
+    design_plan.write_text("---\nstatus: design\n---\n# draft\n")
+    ready_plan = tmp_path / "ready-plan.md"
+    ready_plan.write_text("---\nstatus: ready\n---\n# contract\n")
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[auto_merge]\nenabled = false\n")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setattr(
+        adv,
+        "_grid_lane_for",
+        lambda node, *, model, provider, verb=None: (
+            None, None, None, None, "grid=test-declined",
+        ),
+    )
+
+    cases = [
+        # (node fields, expected command, expected name verb code, receipt verb,
+        #  verb_source)
+        (
+            {"difficulty": "low", "priority": "p1", "dispatch_verb": ""},
+            "/target --no-merge x-low", "t", "/target", "none-declared",
+        ),
+        (
+            {"difficulty": "medium", "priority": "p1", "dispatch_verb": ""},
+            "/blueprint x-med", "bp", "/blueprint", "none-declared",
+        ),
+        (
+            {
+                "difficulty": "low", "priority": "p1",
+                "dispatch_verb": "/fno:target",
+                "plan_path": str(design_plan), "cwd": str(tmp_path),
+            },
+            "/blueprint x-design", "bp", "/blueprint", "declared",
+        ),
+        (
+            {
+                "difficulty": "high", "priority": "p1",
+                "dispatch_verb": "/fno:blueprint",
+                "plan_path": str(ready_plan), "cwd": str(tmp_path),
+            },
+            "/target --no-merge x-ready", "t", "/target", "declared",
+        ),
+    ]
+    for i, (fields, command, verb_code, verb, source) in enumerate(cases):
+        nid = command.split(" ")[-1]
+        slug = f"matrix-{i}"
+        captured, fake_run = _fake_spawn_run(f"sid-m{i}")
+        monkeypatch.setattr(adv.subprocess, "run", fake_run)
+        events = tmp_path / f"matrix-{i}.jsonl"
+        adv._spawn_worker(
+            nid, None, slug, node={"id": nid, "slug": slug, **fields},
+            events_path=events,
+        )
+        assert captured["cmd"][-1] == command, (i, captured["cmd"][-1])
+        name = captured["cmd"][captured["cmd"].index("--name") + 1]
+        # x-84b2: the name states the verb as a code, no source on a bare call.
+        expected_name = f"{verb_code}-{nid}-{slug}"
+        assert name == expected_name, (i, name)
+        rows = [
+            json.loads(line)
+            for line in events.read_text().splitlines()
+            if line.strip()
+        ]
+        spawned = [r for r in rows if r.get("type") == "dispatch_spawned"]
+        assert spawned, (i, rows)
+        assert spawned[0]["data"]["verb"] == verb, (i, rows)
+        assert spawned[0]["data"]["verb_source"] == source, (i, rows)
+
+
+def test_spawn_worker_planless_without_difficulty_refuses(iso, monkeypatch):
+    """x-ebd2: a planless node with no difficulty cannot answer the intake
+    question; the dispatch refuses before anything is spent."""
+    captured, fake_run = _fake_spawn_run("sid-nodiff")
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+
+    with pytest.raises(Exception, match="difficulty"):
+        adv._spawn_worker(
+            "x-nodiff", None, "nodiff-slug",
+            node={"id": "x-nodiff", "dispatch_verb": "", "priority": "p1"},
+        )
+    assert "cmd" not in captured, "no spawn may run for an unanswerable node"
 
 
 # ---------------------------------------------------------------------------
@@ -3505,6 +3861,9 @@ def test_spawn_worker_grid_account_skips_on_a_non_claude_harness(monkeypatch):
 
 def test_undispatched_observer_timeout_names_command_and_budget(monkeypatch):
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         raise _subprocess_module.TimeoutExpired(cmd, 60)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
@@ -3517,8 +3876,231 @@ def test_undispatched_observer_normal_answer_returned_unchanged(monkeypatch):
     receipt = {"status": "ok", "entries_scanned": 1, "rows": [{"id": "x-open"}]}
 
     def fake_run(cmd, **kwargs):
+        passthrough = _naming_passthrough(cmd, **kwargs)
+        if passthrough is not None:
+            return passthrough
         return _FakeProc(0, json.dumps(receipt))
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
 
     assert adv._undispatched_nodes("fno") == receipt
+
+
+# ---------------------------------------------------------------------------
+# x-4138: advance says what it dropped, and never exits 0 into silence
+# ---------------------------------------------------------------------------
+
+_SPAWN_NOTE = (
+    "fno agents spawn: route skipped (the caller passed --provider 'zai'); "
+    "agents.profiles.target.lanes[0].route 'zai/glm-5.3-flash[1m]' NOT applied "
+    "- this worker bills at the caller default"
+)
+
+
+def _output(r) -> str:
+    """stdout + stderr, tolerant of Click's mix_stderr version differences."""
+    out = r.stdout or ""
+    try:
+        out += r.stderr or ""
+    except (ValueError, AttributeError):
+        pass  # stderr not separately captured on this Click version
+    return out
+
+
+def _streams_runner():
+    """A runner whose .stdout is stdout only, on every Click version: click 8.1
+    merges the streams unless mix_stderr=False; 8.2+ removed the flag and
+    always separates them."""
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:
+        return CliRunner()
+
+
+def _fake_seam_run(stderr):
+    """A subprocess.run stub answering the spawn door with a launch receipt
+    plus the seam stderr under test (name verbs ride the real binary)."""
+    def fake_run(cmd, **kw):
+        passthrough = _naming_passthrough(cmd, **kw)
+        if passthrough is not None:
+            return passthrough
+        return _FakeProc(0, _RECEIPT, stderr)
+    return fake_run
+
+
+def _run_epic(monkeypatch, result):
+    """Drive run_advance_epic against a canned advance_epic outcome through a
+    one-command typer app, so the echo/exit contract is read from the runner,
+    not from the test's own hands."""
+    import typer as _typer
+
+    stub = result if callable(result) else (lambda *a, **k: result)
+    monkeypatch.setattr(adv, "advance_epic", stub)
+    app = _typer.Typer()
+
+    @app.command()
+    def _epic():
+        adv.run_advance_epic(
+            "x-EPIC", stop=False, max_dispatch=None, json_out=False,
+            verbose=False, model=None, provider=None,
+        )
+
+    return _streams_runner().invoke(app, [])
+
+
+def test_spawn_worker_harvests_seam_receipt_from_stderr(monkeypatch):
+    """AC1-HP: the seam's suppression receipt survives a successful launch -
+    matched on the `fno agents spawn: ` prefix, never an allowlist of message
+    shapes (spawn_axes.rs owns the prefix as its one spelling)."""
+    receipt: dict = {}
+    monkeypatch.setattr(
+        adv.subprocess, "run",
+        _fake_seam_run(f"noise before\n{_SPAWN_NOTE}\nnoise after\n"),
+    )
+    sid = adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt)
+
+    assert sid == "abc12345"
+    assert receipt["notes"] == (_SPAWN_NOTE,)
+    assert any("NOT applied" in n for n in receipt["notes"])
+
+
+def test_spawn_worker_note_harvest_caps_at_twenty(monkeypatch):
+    """A pathological spawn must not turn one advance line into a screenful."""
+    receipt: dict = {}
+    flood = "\n".join(f"fno agents spawn: axis {i} ignored" for i in range(25))
+    monkeypatch.setattr(adv.subprocess, "run", _fake_seam_run(flood))
+
+    adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt)
+
+    assert len(receipt["notes"]) == 20
+
+
+def test_advance_carries_notes_onto_result_and_event(iso, monkeypatch):
+    """AC1-HP: the harvested note rides AdvanceResult.notes and the
+    advance_dispatched event - the durable half, readable after the scroll."""
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv.subprocess, "run", _fake_seam_run(_SPAWN_NOTE + "\n"))
+
+    res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    assert res.decision == "dispatched"
+    assert any("NOT applied" in n for n in res.notes)
+    dispatched = [e for e in _events(iso) if e["type"] == "advance_dispatched"]
+    assert len(dispatched) == 1
+    assert any("NOT applied" in n for n in dispatched[0]["data"]["notes"])
+
+
+def test_board_advance_prints_notes_under_the_decision_line(iso, monkeypatch):
+    """AC1-HP print half: the `dispatched ...` verdict is followed by one
+    `advance: <note>` line per seam message."""
+    monkeypatch.setattr(
+        adv, "advance",
+        lambda *a, **k: adv.AdvanceResult(
+            "dispatched", adv.EVENT_DISPATCHED, node_id="ab-2222aaaa",
+            short_id="abc12345", notes=(_SPAWN_NOTE,),
+        ),
+    )
+    from fno.cli import app as cli_app
+
+    r = _streams_runner().invoke(cli_app, ["backlog", "advance"])
+
+    assert r.exit_code == 0
+    assert f"advance: {_SPAWN_NOTE}" in (r.stdout or "")
+
+
+def test_board_advance_json_carries_notes(iso, monkeypatch):
+    """The --json payload carries the receipt too - the scripted-caller lane."""
+    monkeypatch.setattr(
+        adv, "advance",
+        lambda *a, **k: adv.AdvanceResult(
+            "dispatched", adv.EVENT_DISPATCHED, node_id="ab-2222aaaa",
+            short_id="abc12345", notes=(_SPAWN_NOTE,),
+        ),
+    )
+    from fno.cli import app as cli_app
+
+    r = _streams_runner().invoke(cli_app, ["backlog", "advance", "--json"])
+
+    assert r.exit_code == 0
+    assert json.loads(r.stdout)["notes"] == [_SPAWN_NOTE]
+
+
+def test_quiet_spawn_stays_quiet(iso, monkeypatch):
+    """AC3-EDGE: no seam line -> empty notes and no new output; a clean spawn
+    never grows a blank line or an empty notes label."""
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv.subprocess, "run", _fake_seam_run("plain stderr noise\n"))
+
+    res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    assert res.decision == "dispatched" and res.notes == ()
+    dispatched = [e for e in _events(iso) if e["type"] == "advance_dispatched"]
+    assert dispatched[0]["data"]["notes"] == []
+
+
+def test_unreadable_stderr_never_wedges_the_launch(monkeypatch):
+    """AC6-ERR: stderr is None (nothing to read at all) - the dispatch still
+    returns its launch identity and notes stay empty. The launch happened; the
+    receipt read never raises past it."""
+    receipt: dict = {}
+    monkeypatch.setattr(adv.subprocess, "run", _fake_seam_run(None))
+
+    sid = adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt)
+
+    assert sid == "abc12345" and receipt["notes"] == ()
+
+
+@pytest.mark.parametrize("err", ["disabled", "walker-live", "graph-error: journal locked"])
+def test_epic_verdict_errors_reach_stdout(monkeypatch, err):
+    """AC4-EDGE: a verdict error exits 0 with a NAMED stdout line. These used
+    to render stderr-only, leaving stdout empty and byte-identical to a
+    swallowed crash."""
+    r = _run_epic(monkeypatch, adv.AdvanceEpicResult("x-EPIC", error=err))
+
+    assert r.exit_code == 0
+    assert f"epic x-EPIC: {err}" in (r.stdout or "")
+
+
+def test_epic_unexpected_error_names_the_failure_on_stdout(monkeypatch):
+    """AC4-EDGE: the injected-exception path keeps its stderr detail and gains
+    one stdout verdict line."""
+    def boom(*a, **k):
+        raise RuntimeError("journal wedged")
+
+    r = _run_epic(monkeypatch, boom)
+
+    assert r.exit_code == 0
+    assert "epic x-EPIC: failed reason=unexpected-error" in (r.stdout or "")
+    assert "journal wedged" in _output(r)
+
+
+@pytest.mark.parametrize("refusal", ["no-such-node", "not-a-container"])
+def test_epic_refusals_still_exit_nonzero_on_stderr(monkeypatch, refusal):
+    """AC5-EDGE (the AC4 control): a bad invocation still fails - exit 1, the
+    refusal on stderr, never absorbed into the stdout verdict channel."""
+    r = _run_epic(monkeypatch, adv.AdvanceEpicResult("x-EPIC", error=refusal))
+
+    assert r.exit_code == 1
+    assert refusal in (r.stderr or "")
+    assert refusal not in (r.stdout or "")
+
+
+def test_epic_notes_attribute_to_the_dispatched_child(monkeypatch):
+    """AC2-HP: a suppressed child's note prints under ITS node id; the quiet
+    sibling contributes none."""
+    loud = adv.AdvanceResult("dispatched", adv.EVENT_DISPATCHED,
+                             node_id="x-1", short_id="s1", notes=(_SPAWN_NOTE,))
+    quiet = adv.AdvanceResult("dispatched", adv.EVENT_DISPATCHED,
+                              node_id="x-2", short_id="s2")
+    canned = adv.AdvanceEpicResult("x-EPIC", dispatched=("x-1", "x-2"),
+                                   child_results=(loud, quiet))
+
+    r = _run_epic(monkeypatch, canned)
+
+    out = r.stdout or ""
+    assert "epic x-EPIC: dispatched 2" in out
+    assert f"epic x-EPIC: x-1: {_SPAWN_NOTE}" in out
+    assert "x-2:" not in out
+    children = canned.receipt()["children"]
+    assert children[0]["notes"] == [_SPAWN_NOTE]
+    assert children[1]["notes"] == []

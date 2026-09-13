@@ -1501,6 +1501,32 @@ elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
 fi
 
 # -------------------------------------------------------------------
+# Check 6b-quinquies: Python tree allowance (advisory backstop)
+# -------------------------------------------------------------------
+# A bug fix under the allowance is legal, so this is a warn, never an error:
+# the CI gate refuses a size violation, this reminder speaks when the
+# /blueprint gate was skipped. A plan that writes cli/src/fno Python and
+# names no size remedy is the x-7b36 shape - a feature planned in the
+# compatibility shell, discovered only at push time.
+check_python_tree_file() {
+    local file="$1"
+    grep -E 'cli/src/fno/[^[:space:]`)"]*\.py' "$file" >/dev/null || return 0
+    if grep -qE 'crates/|PY_TREE_ALLOWANCE|net \+' "$file"; then
+        return 0
+    fi
+    warn "plan writes cli/src/fno Python but names no size remedy; cli/src/fno grows net +100 per change (scripts/ci/check-file-budget.sh). State the expected net delta, or land the feature in crates/."
+}
+
+echo ""
+echo "--- Python Tree Allowance ---"
+
+if [[ -f "$PLAN_DIR" ]]; then
+    check_python_tree_file "$PLAN_DIR"
+elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    check_python_tree_file "$PLAN_DIR/00-INDEX.md"
+fi
+
+# -------------------------------------------------------------------
 # Check 6c: Wave section headers (parity with Execution Strategy YAML)
 # -------------------------------------------------------------------
 echo ""
@@ -1910,9 +1936,99 @@ if [[ -n "$target_file" ]]; then
 fi
 
 # -------------------------------------------------------------------
+# Check 8: graph bind hint (x-f8b1)
+# -------------------------------------------------------------------
+# A plan that passes here has satisfied every check but one the validator
+# cannot perform: the graph still does not know it exists. x-7760 authored
+# its plan, ran this script, saw it pass, and stopped - nine seconds later
+# the session's last words were that the plan was saved, and the node has
+# been dispatchable-planless ever since. On a passing run, when the
+# frontmatter names a node, print the exact bind command. No graph read:
+# this stays a check, and re-running the bind is idempotent. The id is read
+# with the same node-else-claims rule mutate_doc.py binds by (ported from
+# plan_claims, cli/src/fno/graph/_intake.py:736).
+_fm_node_id() {
+    awk '
+        /^---/{c++; if(c==2) exit; next}
+        c==1 && /^[[:space:]]*node:[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*node:[[:space:]]*/, "", line)
+            sub(/[[:space:]]#.*$/, "", line)
+            gsub(/^["\x27]+|["\x27]+$/, "", line)
+            gsub(/[[:space:]].*$/, "", line)
+            print line
+            exit
+        }
+    ' "$1"
+}
+
+_fm_claims_id() {
+    awk '
+        /^---/{c++; if(c==2) exit; next}
+        c==1 {
+            if (in_claims && /^[[:space:]]*-[[:space:]]/) {
+                line=$0
+                sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+                sub(/[[:space:]].*$/, "", line)
+                gsub(/^["\x27]+|["\x27]+$/, "", line)
+                print line
+                exit
+            }
+            if (/^[[:space:]]*claims:[[:space:]]*[^[:space:]]/) {
+                line=$0
+                sub(/^[[:space:]]*claims:[[:space:]]*/, "", line)
+                sub(/[[:space:]]#.*$/, "", line)
+                if (line ~ /^\[/) {
+                    sub(/^\[[[:space:]]*/, "", line)
+                    p=index(line, "]"); q=index(line, ",")
+                    if (p > 1) line=substr(line, 1, p-1)
+                    else if (q > 1) line=substr(line, 1, q-1)
+                } else {
+                    sub(/[[:space:]].*$/, "", line)
+                }
+                gsub(/^["\x27]+|["\x27]+$/, "", line)
+                print line
+                exit
+            }
+            if (/^[[:space:]]*claims:[[:space:]]*$/) { in_claims=1; next }
+            if (/^[^[:space:]#][^:]*:/) { in_claims=0 }
+        }
+    ' "$1"
+}
+
+_print_bind_hint() {
+    local file="$1"
+    [[ -f "$file" && "$file" == *.md ]] || return 0
+    local node_id claims_id bind_target
+    node_id=$(_fm_node_id "$file")
+    claims_id=$(_fm_claims_id "$file")
+    [[ -z "$node_id" || "$node_id" == "null" ]] && node_id=""
+    [[ -z "$claims_id" || "$claims_id" == "null" ]] && claims_id=""
+    if [[ -n "$node_id" && -n "$claims_id" && "$node_id" != "$claims_id" ]]; then
+        return 0  # two different ids: broken plan, bind nothing
+    fi
+    bind_target="${node_id:-$claims_id}"
+    [[ -z "$bind_target" ]] && return 0
+    # A malformed extraction (an empty flow list, a stray bracket) must never
+    # reach the hint as a copy-paste id. Same shape the dispatch resolver reads.
+    [[ "$bind_target" =~ ^[A-Za-z][A-Za-z0-9]{0,7}-[0-9a-fA-F]{4,8}$ ]] || return 0
+    local abs_path
+    abs_path="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
+    echo "validate-plan.sh: plan validated for $bind_target. Bind it so the graph can see it:" >&2
+    echo "  fno backlog update $bind_target --plan-path $abs_path" >&2
+}
+
+# -------------------------------------------------------------------
 # Summary
 # -------------------------------------------------------------------
 echo ""
+if [[ $ERRORS -eq 0 ]]; then
+    if [[ -f "$PLAN_DIR" ]]; then
+        _print_bind_hint "$PLAN_DIR"
+    elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
+        _print_bind_hint "$PLAN_DIR/00-INDEX.md"
+    fi
+fi
 echo "=== Result ==="
 echo "Errors: $ERRORS | Warnings: $WARNINGS"
 

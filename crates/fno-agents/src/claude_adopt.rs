@@ -50,6 +50,26 @@ pub fn transcript_activity(session_id: &str) -> Option<(String, u64)> {
     Some((stamp, age))
 }
 
+/// The adopted row's `last_message_at` stamp: the truth probe's
+/// `last_event_at`, the NEWEST TIMESTAMPED transcript entry. The file mtime
+/// overstates liveness, never understates it - trailing untimestamped records
+/// keep the file young while the conversation is silent (x-54cf) - so the
+/// mtime reading is only the fallback for a session the probe cannot resolve.
+/// The existence question (`crown_from_king_manifests`) stays on
+/// [`transcript_activity`]: a probe that fails to answer must not read as "no
+/// transcript".
+pub fn transcript_stamp(session_id: &str) -> Option<String> {
+    let probed =
+        crate::truth_probe::family1_truth_probe(session_id).and_then(|probe| probe.last_event_at);
+    transcript_stamp_from_probe(session_id, probed)
+}
+
+/// [`transcript_stamp`] with the probe answer injected, so the precedence is
+/// unit-testable without shelling the truth probe.
+fn transcript_stamp_from_probe(session_id: &str, probed: Option<String>) -> Option<String> {
+    probed.or_else(|| transcript_activity(session_id).map(|(stamp, _)| stamp))
+}
+
 /// The model the session is actually running, read from its transcript (x-98ab).
 /// The LAST `message.model` on the file wins: a session can be switched
 /// mid-run, and the most recent value is the only one that answers "what is
@@ -413,7 +433,7 @@ pub fn adopt(
     }
 
     let mut entry = mint_adopted_entry(worker, &crate::daemon::now_rfc3339_like());
-    entry.last_message_at = transcript_activity(&worker.session_id).map(|(stamp, _)| stamp);
+    entry.last_message_at = transcript_stamp(&worker.session_id);
     // x-98ab: close the missing-model class at adopt - the transcript states
     // the model outright, so an adopted row stops attesting nothing and the
     // attest-model guard gets its premise. Provider comes only from the
@@ -474,6 +494,36 @@ mod tests {
     #[test]
     fn transcript_activity_does_not_fabricate_missing_files() {
         assert_eq!(transcript_activity("not-a-session"), None);
+    }
+
+    #[test]
+    fn transcript_stamp_prefers_the_probed_entry_over_mtime() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let base = seed_transcript("stamp-probe", uuid, &[transcript_line("glm-5.3")]);
+        // The probe answered: its stamp wins no matter how fresh the file stat
+        // is, because the stat rides untimestamped trailing records (x-54cf).
+        assert_eq!(
+            transcript_stamp_from_probe(uuid, Some("2030-01-01T00:00:00Z".into())),
+            Some("2030-01-01T00:00:00Z".into())
+        );
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn transcript_stamp_falls_back_to_mtime_when_the_probe_is_silent() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let uuid = "b2c3d411-1111-2222-3333-444455556666";
+        let base = seed_transcript("stamp-fallback", uuid, &[transcript_line("glm-5.3")]);
+        let stamp = transcript_stamp_from_probe(uuid, None);
+        assert!(stamp.is_some(), "the mtime fallback answers when it can");
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

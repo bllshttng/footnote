@@ -51,7 +51,9 @@ Never hand-edit these state files (a hook rejects it): `~/.fno/graph.json` (use
 `fno backlog`) and `.fno/target-state.md` (immutable after `fno do target init`).
 
 Worktree-first: for repo work use a dedicated feature worktree; keep the main
-checkout pullable. Cancel a running pipeline with `touch .fno/.target-cancelled`.
+checkout pullable. Cancel a running pipeline by writing the sentinel with
+`printf 'author: <who>\nreason: <why>\n' > .fno/.target-cancelled` (a bare
+`touch` also works and reads as unattributed).
 
 Spot a small pre-existing bug while building? Fold the fix into the current PR as
 its own atomic commit. Capture non-small finds with `fno backlog carveout add`."""

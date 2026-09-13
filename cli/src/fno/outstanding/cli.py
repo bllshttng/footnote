@@ -1,8 +1,7 @@
 """`fno inbox outstanding` - read what is waiting on a human; ask and clear questions.
 
-Machine-first, mirroring `fno backlog carveout`: stdout carries the value (the report,
-or a new question id), guidance and warnings go to stderr, and exit codes are
-predictable (0 ok / 1 read or write failure).
+Machine-first, mirroring `fno backlog carveout`: stdout carries the value,
+guidance goes to stderr, exit codes are predictable (0 ok / 1 failure).
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ import typer
 from fno.king.lane import read_lane
 from fno.outstanding.core import OutstandingError, collect, render
 from fno.outstanding.mine import mine_app
+from fno.user import display_name
 
 outstanding_app = typer.Typer(
     help=(
@@ -154,9 +154,45 @@ def report(
         typer.echo(block, nl=False)
 
 
+def _law_match(question: str, subject: str | None, node: str | None) -> dict:
+    """Live law-lane decisions that speak to this question, matched in the
+    fno-agents crate (d-b6cc1a2a puts new code in `crates/`; the matcher is
+    `fno-agents law-match`). This side keeps only the decision-lifecycle read:
+    `list_decisions` owns live-row state, and the verb takes rows, not a
+    filesystem. Losing the lookup is worse than one unneeded ask, so the
+    caller catches everything (d-0fa92eb9, q-8a3bf752: no agent asks a
+    question the operator already settled).
+    """
+    from fno.decide import list_decisions
+    from fno.rust_binary import verb_call
+
+    _, rows, _damaged = list_decisions(None, limit=None, lane="law", state="live")
+    laws = [
+        {key: row.get(key) for key in ("decision_id", "subject", "decision", "ts")}
+        for row in rows
+    ]
+    return verb_call(
+        "law-match",
+        {
+            "mode": "ask",
+            "question": question,
+            "subject": subject,
+            "node": node,
+            "laws": laws,
+        },
+    )
+
+
 @outstanding_app.command("ask")
 def ask(
-    question: str = typer.Argument(..., help="What you need the operator to decide or answer."),
+    question: str | None = typer.Argument(
+        None, help="What you need the operator to decide or answer."
+    ),
+    question_file: Path | None = typer.Option(
+        None,
+        "--question-file",
+        help="Read the question from a file ('-' = stdin); QUESTION_CAP truncation still applies.",
+    ),
     ask: str = typer.Option(None, "--ask", help="One action that closes the question."),
     option: List[str] = typer.Option(
         [], "--option", help="A choice the operator can make; repeatable."
@@ -167,18 +203,30 @@ def ask(
     node: str = typer.Option(
         None, "--node", help="Backlog node the question is about, when there is one."
     ),
+    subject: str = typer.Option(
+        None,
+        "--subject",
+        help="The decision subject this question is about; live law on it refuses the ask.",
+    ),
 ) -> None:
     """Record a question for the operator so it survives the next turn.
 
-    The capture is the point. `session_truth` classifies from the transcript
+    The capture is the point: `session_truth` classifies from the transcript
     tail, so an unrecorded question stops existing the moment another turn
-    lands - and in a mail-driven mesh the very next turn is usually the agent
-    answering some mail.
+    lands.
     """
     from fno.claims.self_identity import resolve_self_identity
     from fno.events import QUESTION_CAP, operator_question
     from fno.harness_identity import canonical_handle
     from fno.outstanding.core import QuestionIndexWriteError, append_question_event
+    from fno.text_or_file import read_text_arg
+
+    question = read_text_arg(question, question_file, what="the question")
+    if not question:
+        typer.echo(
+            "error: provide the question - positionally or --question-file", err=True
+        )
+        raise typer.Exit(code=2)
 
     if len(question) > QUESTION_CAP:
         typer.echo(
@@ -186,6 +234,31 @@ def ask(
             f"characters, the event stores {QUESTION_CAP}.",
             err=True,
         )
+    try:
+        answer = _law_match(question, subject, node)
+    except Exception as exc:  # noqa: BLE001 - fail open: record the question
+        typer.echo(
+            f"outstanding: live-law lookup failed ({exc}); recording anyway",
+            err=True,
+        )
+        answer = {"exact": [], "nearby_refusal": None}
+    for hit in answer.get("exact") or []:
+        key = hit["subject"]
+        ids = hit["ids"]
+        line = (
+            f"outstanding: refused: live law already rules on '{key}' "
+            f"({', '.join(ids)}). Read it: fno inbox decisions {key} "
+            f"--lane law --state live. Act on the law; do not ask {display_name()}."
+        )
+        if not subject:
+            line += " If the question is about another subject, name it with --subject."
+        typer.echo(line, err=True)
+    if answer.get("exact"):
+        raise typer.Exit(2)
+    refusal = answer.get("nearby_refusal")
+    if refusal:
+        typer.echo(refusal, err=True)
+        raise typer.Exit(2)
     qid = f"q-{secrets.token_hex(4)}"
     session_id = _session_id()
     # OWNED (x-20f1): the asker handle lands on a durable question event and is
@@ -203,6 +276,7 @@ def ask(
             ask=ask,
             options=option or None,
             blocks=blocks or None,
+            subject=subject,
         )
         append_question_event(event, _storage_root())
     except QuestionIndexWriteError as exc:
@@ -223,6 +297,40 @@ def ask(
         f'fno inbox outstanding clear {qid} --answer "..."',
         err=True,
     )
+    # A receipt that names an id but says nothing about visibility is the shape
+    # that made two fleet blockers invisible (q-90982503, q-e6dc2881): the
+    # queue prints QUESTION_RENDER_CAP rows, so say where this one lands.
+    # liveness_budget_seconds=0.0: the receipt must not spend a liveness probe
+    # budget on a write path, and an unresolved lane reads None - the position
+    # is a lower bound on visibility, never an optimistic one.
+    position: "int | None" = None
+    total: "int | None" = None
+    try:
+        from fno.outstanding.core import QUESTION_RENDER_CAP, read_open_questions
+
+        ranked = read_open_questions(_storage_root(), liveness_budget_seconds=0.0)
+        position = next(i for i, q in enumerate(ranked) if q.id == qid) + 1
+        total = len(ranked)
+    except Exception:  # noqa: BLE001 - a receipt must never fail the recorded ask
+        position = total = None
+    if position is None:
+        typer.echo(
+            "outstanding: recorded, but its render position could not be read; "
+            "run fno inbox outstanding to check.",
+            err=True,
+        )
+    elif position <= QUESTION_RENDER_CAP:
+        typer.echo(
+            f"outstanding: {qid} renders at position {position} of {total}.",
+            err=True,
+        )
+    else:
+        typer.echo(
+            f"outstanding: {qid} does NOT render: position {position} of {total}, "
+            f"and fno inbox outstanding prints {QUESTION_RENDER_CAP}. Nothing will "
+            "show it to the operator; raise it another way or answer it yourself.",
+            err=True,
+        )
     # stdout carries the value: the new question id.
     typer.echo(qid)
 

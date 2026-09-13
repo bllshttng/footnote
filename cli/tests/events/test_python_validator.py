@@ -810,3 +810,54 @@ def test_a_reasonless_declined_disposition_is_refused(tmp_path, monkeypatch) -> 
             )
         )
     assert "reason" in str(exc.value)
+
+
+def _reign_checkin(data: dict) -> dict:
+    return {
+        "ts": "2026-09-10T12:00:00Z",
+        "type": "reign_checkin",
+        "source": "loop",
+        "data": data,
+    }
+
+
+def test_reign_checkin_canonical_with_extra_evidence_validates() -> None:
+    event = _reign_checkin(
+        {
+            "scope": "x-a792/fleet",
+            "change": "merged PR 1710",
+            "open_prs_fleet": 3,
+            "mine": 1,
+            "blockers": "none",
+        }
+    )
+    assert validate(event) is None
+
+
+def test_reign_checkin_missing_required_field_is_refused() -> None:
+    with pytest.raises(ValidationError, match=r"missing required data field: scope"):
+        validate(_reign_checkin({"change": "armed two arms"}))
+    with pytest.raises(ValidationError, match=r"missing required data field: change"):
+        validate(_reign_checkin({"scope": "x-a792/fleet"}))
+
+
+def test_reign_checkin_forbidden_aliases_are_refused() -> None:
+    for alias, value in (
+        ("crown_scope", "x-a792/fleet"),
+        ("crown", "x-a792/fleet"),
+        ("result", "no change"),
+    ):
+        with pytest.raises(ValidationError, match=f"forbids data field: {alias}"):
+            validate(_reign_checkin({"scope": "x-a792/fleet", "change": "c", alias: value}))
+
+
+def test_reign_checkin_forbidden_alias_beside_canonical_keys_is_refused() -> None:
+    event = _reign_checkin(
+        {
+            "scope": "x-a792/fleet",
+            "change": "drained two arms",
+            "crown_scope": "x-a792/fleet",
+        }
+    )
+    with pytest.raises(ValidationError, match="forbids data field: crown_scope"):
+        validate(event)

@@ -155,6 +155,13 @@ pub struct HarnessCapabilities {
     /// fields are documented in docs/architecture/thread-lanes.md.
     #[serde(default)]
     pub keeper: Option<KeeperArm>,
+    /// The daemon/argv thread lane's carrier row (spawn flag passthrough),
+    /// absent on a keeper-lane harness (whose `keeper` row answers instead).
+    /// `carries` names the launch axes the lane takes in its native form and
+    /// `passthrough` the fenced `--` spellings it maps, or `["*"]` for an
+    /// argv lane; a flag outside both demotes the spawn to the pane.
+    #[serde(default)]
+    pub thread: Option<ThreadArm>,
     /// What this harness can DO, keyed by [`FEATURE_KEYS`] (x-a3e8) - a second
     /// dimension beside the pane mechanics, not a rewrite of them. A key
     /// ABSENT here reads `unmeasured`, which is legal and renders as a
@@ -202,6 +209,24 @@ pub struct KeeperArm {
     /// a live registry row.
     #[serde(default)]
     pub clear_modal: Vec<String>,
+    /// The fenced `--` spellings the launch argv takes. A keeper lane appends
+    /// every token, so its row always carries `["*"]`.
+    #[serde(default)]
+    pub passthrough: Vec<String>,
+}
+
+/// The thread lane's carrier row (spawn flag passthrough). Kept beside
+/// [`KeeperArm`]: a harness answers its carrier question from `thread` when
+/// it has one and from `keeper` when it does not.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadArm {
+    /// The launch axes this lane has a native form for.
+    pub carries: Vec<String>,
+    /// The fenced `--` spellings this lane maps, or `["*"]` when it appends
+    /// every token to its argv.
+    #[serde(default)]
+    pub passthrough: Vec<String>,
 }
 
 /// One feature claim: `state` is the claim, and `verbs` names the

@@ -362,9 +362,11 @@ mod tests {
             reachability: Some("reachable".into()),
             basis: Some("transcript".into()),
             last_activity_age_s: Some(1.0),
+            last_activity_basis: None,
             last_event_at: None,
             last_message: None,
             observed_model: Value::Null,
+            provider_refusal: None,
             harness_title: None,
         }
     }

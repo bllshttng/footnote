@@ -342,6 +342,10 @@ def test_two_live_rows_holding_the_same_territory_is_a_conflict(
     court = gather_court()
 
     assert court["conflicts"] == [{"scope": "alpha", "holders": ["king-a", "king-b"]}]
+    # `agree` answers a different question than `conflicts`, so both rivals read
+    # true here by design. `conflicts` is the only field that detects the rivalry.
+    assert [c["agree"] for c in court["crowns"]] == [True, True]
+    assert court["summary"]["disagreements"] == 0
 
 
 def test_aliases_and_ordered_scopes_share_one_conflict_group(
@@ -464,7 +468,20 @@ def test_render_court_json_matches_gather_court(tmp_path: Path, monkeypatch) -> 
         graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
     )
 
-    assert json.loads(render_court(as_json=True)) == gather_court()
+    rendered = json.loads(render_court(as_json=True))
+    # The render is the gather plus the reads only a render pays for: the
+    # spawn gate, the session-liveness judgement, and the stuck verdict
+    # computed from them. `gather_court` stays cheap for its three other
+    # callers. Popping them by name means a fourth key added silently still
+    # fails here.
+    assert rendered.pop("gate")["verdict"]
+    assert rendered.pop("sessions_readable") is True
+    assert "blind" in rendered["summary"].pop("stuck")
+    # The line's CONTENT depends on whether a native binary is installed to
+    # fold with, so this test pins its presence and test_court_stuck.py pins
+    # what it says. `pop` raises when the key is missing, which is the check.
+    rendered["summary"].pop("stuck_line")
+    assert rendered == gather_court()
 
 
 def test_render_court_table_names_scope_holder_and_agreement(

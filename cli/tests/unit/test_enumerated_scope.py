@@ -89,6 +89,42 @@ def test_pinned_miss_does_not_fire():
     assert enumerated_scope("compare across facilities", MISS_DETAILS) is False
 
 
+# --- negative control: measured incident narrative does NOT fire --------------
+
+# A singular bug report whose measurement prose recounts a two-node incident:
+# cardinals ("two PRs") and a both-and ("both rewrite ... and reap") in the
+# details body fired the old full-text scan and withdrew the cheap exit from a
+# one-line fix. The weak detectors read the title only; the title here carries
+# no cardinal past "one".
+NARRATIVE_TITLE = (
+    "a contained subtask still appears in the undispatched queue, whose own "
+    "note tells a king to put one worker on each row"
+)
+NARRATIVE_DETAILS = (
+    "MEASURED on the board, one beat after containing the node. x-b7f8 and "
+    "x-58a5 both rewrite the reaper's keep and reap decision rules and would "
+    "have collided as two PRs. Two workers on one plan means two branches, and "
+    "the collision surfaces at review or at merge."
+)
+
+
+def test_narrative_incident_does_not_fire():
+    """Cardinals and both-and describing an incident are not a scope enumeration."""
+    assert enumerated_scope(NARRATIVE_TITLE, NARRATIVE_DETAILS) is False
+
+
+def test_weak_detectors_still_fire_on_title_enumeration():
+    """The demotion is to title scope, not a removal: a title that really does
+    declare two deliverables still withdraws the cheap exit."""
+    assert _cardinal_governs_plural("cohort benchmarking across four bands") is True
+    assert enumerated_scope("ship both the CLI and the TUI", "") is True
+
+
+def test_ordinal_run_in_details_still_fires():
+    """Ordinals keep the full text: a details-body numbered enumeration fires."""
+    assert enumerated_scope("single-line title", "THE ASK: (1) alpha; (2) beta") is True
+
+
 # --- structural predicate: denominator_absent + is_code_payload ---------------
 
 

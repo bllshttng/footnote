@@ -29,6 +29,9 @@ async fn off_executor_returns_the_value_on_a_multi_thread_runtime() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn rm_blocking_subprocess_work_does_not_stall_the_runtime() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // AC1-HP, and the regression this node exists for: `handle_rm_with`
     // shells out for up to ~435s, most of it after the registry row is
     // already gone. Run inline it owns a worker thread for that whole

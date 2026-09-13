@@ -1243,9 +1243,9 @@ def test_raw_hosted_audit_uses_stable_sender_without_ambient_identity(
     rows = list(iter_messages(warn=False))
     assert len(rows) == 1
     assert rows[0].from_ == "fno"
-    ledger = budget._ledger_path("fno -> 9a063cd3")
-    state = json.loads(ledger.read_text())
-    assert state["pair"] == "fno -> 9a063cd3"
+    assert not budget._ledger_path("fno -> 9a063cd3").exists(), (
+        "a raw send reserves nothing"
+    )
 
 
 def test_raw_check_writes_nothing_and_does_not_reserve(
@@ -1275,13 +1275,12 @@ def test_raw_check_writes_nothing_and_does_not_reserve(
 
     rows = list(iter_messages(warn=False))
     assert len(rows) == 1
-    ledger = budget._ledger_path(f"{rows[0].from_} -> {rows[0].to}")
-    state = json.loads(ledger.read_text())
-    assert len(state["entries"]) == 1
-    assert state["entries"][0]["words"] == 80
+    assert not budget._ledger_path(f"{rows[0].from_} -> {rows[0].to}").exists(), (
+        "a raw send reserves nothing"
+    )
 
 
-def test_raw_style_exception_permits_overage_and_still_charges_it(
+def test_raw_style_exception_permits_overage_and_writes_no_ledger(
     runner, mailbox, monkeypatch
 ):
     from fno import style
@@ -1312,10 +1311,9 @@ def test_raw_style_exception_permits_overage_and_still_charges_it(
     assert rows[0].delivery == "hosted"
     assert rows[0].body == payload
     assert rows[0].word_count == 81
-    ledger = budget._ledger_path(f"{rows[0].from_} -> {rows[0].to}")
-    state = json.loads(ledger.read_text())
-    assert len(state["entries"]) == 1
-    assert state["entries"][0]["words"] == 81
+    assert not budget._ledger_path(f"{rows[0].from_} -> {rows[0].to}").exists(), (
+        "an exception permits the overage but reserves nothing"
+    )
 
 
 def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):

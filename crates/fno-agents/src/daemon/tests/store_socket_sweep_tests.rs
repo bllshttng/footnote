@@ -1,6 +1,7 @@
 //! Which store sockets the keeper sweep may unlink. Extracted from
 //! daemon.rs's tests mod: daemon.rs is over file budget and may only shrink.
 
+use super::keeper_sweep::keeper_sweep_home;
 use super::*;
 
 #[test]

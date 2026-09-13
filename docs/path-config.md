@@ -2,6 +2,12 @@
 
 footnote stores all user-data files under `~/.fno/` by default. Every path is configurable via `~/.fno/config.toml`. This page documents the full schema, environment variables, template variables, and the migration flow.
 
+## Is this page for you?
+
+You are hunting where fno put a file, or moving state between machines and disks. This page owns every path key, its env override, and the legacy migration flow. Misreading it edits state in a checkout, and the real state lives outside and wins.
+
+Not for: what each state file means or who owns it. Those are the subsystem docs (backlog, target, loop), and the spaces layout is the next section.
+
 ## The project space
 
 Project state lives OUTSIDE the checkout, in one space per repository: `~/.fno/spaces/<slug>/`. The slug is the canonical repo root's path with `/` swapped for `-` (Claude's project-dir shape: read the directory name, see the path), keyed on the canonical checkout (the git common dir's). Every worktree of one repo resolves to the SAME space, so no state is ever committed by accident. Cross-worktree state (the events journal, repo-local claims, kings, plans, inbox, status sinks) sits at the space root. Per-worktree state (the target manifest, the run log, the codemap, the scratchpad) sits at `<space>/worktrees/<worktree basename>/`. The only fno file left inside a checkout is `.fno/config.toml` (committed project config) plus the sandbox-denied breadcrumb. `FNO_SPACES_DIR` overrides the spaces root outright (tests pin it). `config.paths.spaces_dir` is the config form, and unset the root is `<state_dir>/spaces`. The first resolve of a moved file migrates the legacy `<repo>/.fno/<file>` into the space and leaves a `<repo>/.fno/MOVED-TO` pointer naming it.

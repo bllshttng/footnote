@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fno.claims.roster import RosterReading
 
 from fno.graph._constants import LOCK_TTL_HOURS
 
@@ -37,6 +41,10 @@ STATUS_MIGRATION: dict[str, str] = {"claimed": "in_progress"}
 # closure-release hook, the tracker backends' closed set, and the reaper's
 # node settlement, so they cannot drift (x-94f8).
 TERMINAL_RUNGS: frozenset[str] = frozenset({"done", "superseded"})
+
+# The label prefix every unmeasured admit carries. Readers split live from
+# unmeasured admits on this literal, so the wording is a contract, not prose.
+UNMEASURABLE_LABEL_MARK = "(unmeasurable:"
 
 # Sentinel prefix used by the pre-feature workaround that overloaded
 # ``completed_at`` to encode deferral. Detected once in ``recompute_statuses``
@@ -204,22 +212,26 @@ def is_open_do_row(row: object) -> bool:
 
 
 def completed_at_status_divergence(entries: list[dict]) -> list[str]:
-    """Ids where ``completed_at`` is set but the stored ``status`` is not terminal.
+    """Ids where ``completed_at`` and the terminal ``status`` disagree.
 
-    ``_cascade_close_parents`` (graph/cli.py) decides an ancestor is already
-    closed by reading ``completed_at`` alone, never ``status``. That is safe
-    only because, measured across the live graph on 2026-09-05 (2428
-    entries), the two fields agreed on every row. This is the regression pin
-    for that measurement: it names any row where they diverge instead of
-    letting the guard silently trust the wrong field forever.
+    Checked in BOTH directions: the epic close guard now reads the two fields
+    together (``children_all_closed`` in ``graph/_reconcile.py``), and a pin
+    tested one way reads green while its invariant breaks the other. Forward:
+    ``completed_at`` set while ``status`` is not terminal (measured zero on
+    the live graph, 2026-09-05). Reverse: ``status`` ``done`` with no
+    ``completed_at``. Superseded rows carry no ``completed_at`` BY DESIGN -
+    supersede stamps only ``superseded_by`` - so the reverse direction must
+    never name them (measured 147 of 147 without it, 2026-09-12).
     """
     return [
         e["id"]
         for e in entries
         if isinstance(e, dict)
         and isinstance(e.get("id"), str)
-        and e.get("completed_at")
-        and e.get("status") not in TERMINAL_RUNGS
+        and (
+            (e.get("completed_at") and e.get("status") not in TERMINAL_RUNGS)
+            or (e.get("status") == "done" and not e.get("completed_at"))
+        )
     ]
 
 
@@ -249,24 +261,6 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
 
 
 
-
-def pending_supersession_reason(entry: dict) -> str | None:
-    """Describe a proposed supersession that lacks merged-PR proof."""
-    record = entry.get("supersession")
-    if not entry.get("superseded_by") or not isinstance(record, dict):
-        return None
-    if record.get("verified_at"):
-        return None
-    successor = record.get("successor") or entry.get("superseded_by")
-    cause = str(record.get("cause") or "missing cause")
-    surfaces = record.get("surfaces") or []
-    surface_text = ", ".join(str(s) for s in surfaces) or "missing surfaces"
-    return (
-        f"pending supersession: successor={successor}; cause={cause}; "
-        f"surfaces={surface_text}"
-    )
-
-
 def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
     """Node ids that currently hold a LIVE ``node:<id>`` claim.
 
@@ -292,26 +286,51 @@ def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
         return set()
 
 
+def closed_worker_session_ids(entry: dict) -> set[str]:
+    """Session ids whose own phase row on this node closed and none is open
+    (the x-6f98 close receipt): finished with THIS node ahead of the
+    predicate, whatever the transcript did afterwards."""
+    closed: set[str] = set()
+    open_ids: set[str] = set()
+    for row in entry.get("sessions") or []:
+        if not (isinstance(row, dict) and isinstance(row.get("session_id"), str)
+                and isinstance(row.get("phase"), str)):
+            continue
+        # A ship row is a link event (see live_worked_node_ids): it must not
+        # reopen a session this node already saw finish.
+        if row["phase"] == "ship":
+            continue
+        (open_ids if is_open_phase_row(row, row["phase"]) else closed).add(row["session_id"])
+    return closed - open_ids
+
+
 def live_worked_node_ids(
-    *, strict: bool = False, entries: list[dict] | None = None
+    *, strict: bool = False, entries: list[dict] | None = None,
+    reading: RosterReading | None = None,
 ) -> dict[str, list[str]]:
-    """Return open-phase nodes whose session rows name live roster workers.
-    Missing markers are not live work; unreadable roster state fails closed.
+    """Return open-phase nodes whose roster workers are live.
+
+    Sources: the session-row join, the node-attributed fold (registry worker,
+    no graph session row), the unmeasurable fold (no session id, attributed
+    by the fleet-rows probe). Unattributable liveness still refuses.
+
+    ``reading`` hands in an already-paid fleet read; a caller that read the
+    roster itself must pass it here rather than pay a second probe, which is
+    why this is the ONE resolver other readers join through.
     """
     try:
-        from fno.claims.roster import _really_finished, read_roster
+        from fno.agents.reachability import REACHABLE, UNKNOWN
+        from fno.claims.roster import _worker_reachability, read_roster
         from fno.graph.store import read_graph_strict
         from fno.paths import graph_json
 
         if entries is None:
             entries = read_graph_strict(graph_json())
-        if not any(isinstance(row, dict) and isinstance(row.get("phase"), str)
-                   and is_open_phase_row(row, row["phase"])
-                   for entry in entries if isinstance(entry, dict)
-                   for row in entry.get("sessions") or []
-                   if entry.get("status") not in TERMINAL_RUNGS):
+        if not any(isinstance(entry, dict) and entry.get("status") not in TERMINAL_RUNGS
+                   for entry in entries):
             return {}
-        reading = read_roster()
+        if reading is None:
+            reading = read_roster(require_live_probe=False)
         if not reading.consulted:
             raise RuntimeError(reading.reason or "roster not consulted")
 
@@ -322,15 +341,44 @@ def live_worked_node_ids(
             node_id = entry.get("id")
             if not isinstance(node_id, str) or not node_id:
                 continue
+            workers: list[str] = []
+            closed_ids = closed_worker_session_ids(entry)
+
+            def _admit(name, verdict):
+                # x-dead: unmeasured rows are listed marked, never vanished.
+                label = (
+                    name if verdict == REACHABLE
+                    else f"{name} {UNMEASURABLE_LABEL_MARK} no positive liveness evidence)"
+                )
+                if isinstance(label, str) and label and label not in workers:
+                    workers.append(label)
+
             for row in entry.get("sessions") or []:
-                phase = row.get("phase") if isinstance(row, dict) else None
-                if not isinstance(phase, str) or not is_open_phase_row(row, phase):
+                # A ship row is a link event, never occupancy: the PR-link
+                # stamp opens it and no terminal closes it, so it cannot show
+                # that anyone is working the node.
+                if not (isinstance(row, dict) and isinstance(row.get("phase"), str)
+                        and row["phase"] != "ship"
+                        and is_open_phase_row(row, row["phase"])):
                     continue
                 roster_row = reading.row_for_session(row["session_id"])
-                if roster_row and not _really_finished(roster_row):
-                    worker = roster_row.get("name")
-                    if isinstance(worker, str) and worker:
-                        worked.setdefault(node_id, []).append(worker)
+                if roster_row is None or roster_row.get("row_id") in closed_ids:
+                    continue
+                verdict = _worker_reachability(roster_row).verdict
+                if verdict in (REACHABLE, UNKNOWN):
+                    _admit(roster_row.get("name"), verdict)
+            for extra in reading.workers_on(node_id):
+                if extra.get("row_id") in closed_ids:
+                    continue
+                verdict = _worker_reachability(extra).verdict
+                if verdict in (REACHABLE, UNKNOWN):
+                    _admit(extra.get("name"), verdict)
+            for extra_name in reading.unmeasurable_by_node.get(node_id, ()):
+                marker = f"{extra_name} {UNMEASURABLE_LABEL_MARK} no harness session id)"
+                if marker not in workers:
+                    workers.append(marker)
+            if workers:
+                worked[node_id] = workers
         return worked
     except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
         if strict:

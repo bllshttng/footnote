@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -31,15 +32,39 @@ def _isolated_world(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_live_footprint(monkeypatch):
-    """Attribution is stubbed idle unless a test asks otherwise.
+def _no_live_cpu_axis(monkeypatch):
+    """The CPU axis is stubbed admitting unless a test asks otherwise.
 
-    Since x-7c0f the gate consults fleet CPU attribution above the load
-    trigger, and that read is a subprocess against the real machine. Left
-    unstubbed these tests refuse or admit according to what the developer's
-    box happens to be doing.
+    Since x-7783 every spawn takes the footprint reading, and that read is a
+    ps snapshot against the real machine. Left unstubbed these tests refuse
+    or hold according to what the developer's box happens to be doing. The
+    prefetch is pinned too: run_gate takes the read before the decider, and
+    an unpinned read would price a real ps snapshot per pass.
     """
-    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (0.1, 12.0))
+    from fno import doctor_footprint
+    from fno.footprint import Admission, Footprint
+
+    idle = Footprint(0.0, 0.0, 0.1, 0, 0, 0, 0, 0.0, 0.2, [], 0, None)
+    monkeypatch.setattr(
+        spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
+    )
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    admit = Admission(
+        verdict="admit",
+        axis="fleet_cpu_share",
+        reason="test admit",
+        share_low=0.1,
+        share_high=0.1,
+        bound="exact",
+        fleet_cores=1.2,
+        machine_cores=6.0,
+        capacity_cores=12.0,
+        ceiling=0.5,
+        gap=None,
+        load_15m=1.0,
+        backstop=480.0,
+    )
+    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admit)
 
 
 def _write_roster(tmp_path, workers: dict) -> None:
@@ -63,17 +88,16 @@ def _load(load1: float):
     return lambda: (load1, 0.0, 0.0)
 
 
-def test_load_snapshot_exposes_shared_trigger_measurement(monkeypatch):
+def test_load_snapshot_is_display_only(monkeypatch):
+    """x-7783: the load reading is a trend line. Nothing on it gates."""
     monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(141.6))
     monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
 
     snapshot = spawn_gate._load_snapshot(8.0)
 
     assert snapshot.load_1m == pytest.approx(141.6)
-    assert snapshot.max_load_per_cpu == pytest.approx(8.0)
     assert snapshot.load_cpu_count == 12
-    assert snapshot.load_ceiling == pytest.approx(96.0)
-    assert snapshot.spawn_load_status == "exceeded"
+    assert snapshot.load_15m is not None
 
 
 def test_load_snapshot_marks_unreadable_load(monkeypatch):
@@ -86,83 +110,6 @@ def test_load_snapshot_marks_unreadable_load(monkeypatch):
     snapshot = spawn_gate._load_snapshot(8.0)
 
     assert snapshot.load_1m is None
-    assert snapshot.load_ceiling == pytest.approx(96.0)
-    assert snapshot.spawn_load_status == "unavailable"
-
-
-def test_load_gate_decision_admits_quietly_under_trigger(monkeypatch):
-    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(50.0))
-    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-
-    assert spawn_gate.load_gate_decision(8.0) is None
-
-
-def test_load_gate_decision_disabled_is_quiet():
-    assert spawn_gate.load_gate_decision(0.0) is None
-
-
-def test_load_gate_decision_refuses_on_the_backstop(monkeypatch):
-    """309 on 12 cpus crosses the hard backstop (20 x 12) before attribution."""
-    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
-    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-
-    reason, message, event = spawn_gate.load_gate_decision(
-        8.0, hard_max_load_per_cpu=20.0
-    )
-
-    assert reason == "load_backstop" and reason in spawn_gate._LOAD_REFUSAL_REASONS
-    assert "refusing" in message
-    assert event["load_1m"] == pytest.approx(309.0)
-
-
-def test_load_gate_decision_refuses_when_the_fleet_holds_the_box(monkeypatch):
-    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
-    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
-
-    reason, message, event = spawn_gate.load_gate_decision(8.0)
-
-    assert reason == "fleet_cpu_share"
-    assert "fleet holds" in message
-    assert event["share"] == pytest.approx(0.75)
-
-
-def test_load_gate_decision_refuses_when_attribution_is_unreadable(monkeypatch):
-    """Fail closed: an unknown share is not evidence of headroom."""
-    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
-    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: None)
-
-    reason, _message, _event = spawn_gate.load_gate_decision(8.0)
-
-    assert reason == "load_attribution_unavailable"
-
-
-def test_load_gate_decision_admits_a_box_the_fleet_does_not_own(monkeypatch):
-    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(141.6))
-    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (0.79, 12.0))
-
-    reason, message, event = spawn_gate.load_gate_decision(8.0)
-
-    assert reason == "admit_external_load"
-    assert reason not in spawn_gate._LOAD_REFUSAL_REASONS
-    assert "admitting" in message
-    assert event == {}
-
-
-def test_check_load_ceiling_refuses_over_the_shared_decision(monkeypatch, capsys):
-    """The gate keeps refusing through the same decision the preview reads:
-    one implementation, two consumers, no threshold table to drift."""
-    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
-    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
-
-    with pytest.raises(SystemExit) as exc:
-        spawn_gate._check_load_ceiling(8.0)
-
-    assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
-    assert "fleet holds" in capsys.readouterr().err
 
 
 ALIVE = os.getpid()  # a pid that is definitely alive (this test process)
@@ -513,309 +460,174 @@ def _settings(
 
 
 class TestRunGate:
-    def test_footprint_cause_reader_formats_fleet_share(self, monkeypatch):
-        from fno import doctor_footprint
-
-        monkeypatch.setattr(
-            doctor_footprint,
-            "_live_root_pids",
-            lambda **_kwargs: (set(), None),
-        )
-        monkeypatch.setattr(
-            doctor_footprint,
-            "_read_ps",
-            lambda **_kwargs: (
-                """\
-                PID PPID ELAPSED %CPU RSS COMMAND
-                100 1 01:00:00 86.0 1024 fno-agents-worker --run
-                101 100 01:00:00 100.0 1024 cargo test -p fno
-                200 1 01:00:00 134.0 1024 unrelated-build
-                """,
-                None,
-            ),
-        )
-        monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
-        # This assertion is about FOOTPRINT's capacity denominator, not the
-        # gate's, so pin footprint's own helper. The gate seam below cannot
-        # supply it, and reading the host would make the expected string
-        # depend on the runner: "/12.00" here, "/4.00" on a 4-core CI box.
-        monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
-        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
-        monkeypatch.setattr(
-            spawn_gate.os,
-            "sched_getaffinity",
-            lambda _pid: set(range(12)),
-            raising=False,
-        )
-
-        evidence = spawn_gate._footprint_cause_evidence()
-
-        assert evidence is not None
-        assert "footprint attributes 1.86/12.00 cores" in evidence
-        assert "15.5% capacity" in evidence
-
-    def test_footprint_cause_reader_names_the_claude_spare_pool(self, monkeypatch):
-        """Measured 2026-09-07: the pool held 66.5% of a 12-CPU machine while
-        the refusal named only the fleet. It must be named in the same line."""
-        from fno import doctor_footprint
-
-        monkeypatch.setattr(
-            doctor_footprint,
-            "_live_root_pids",
-            lambda **_kwargs: (set(), None),
-        )
-        monkeypatch.setattr(
-            doctor_footprint,
-            "_read_ps",
-            lambda **_kwargs: (
-                """\
-                PID PPID ELAPSED %CPU RSS COMMAND
-                100 1 01:00:00 86.0 1024 fno-agents-worker --run
-                101 100 01:00:00 100.0 1024 cargo test -p fno
-                300 1 00:05:00 200.0 118784 claude bg-spare --bg-spare /tmp/x.claim.sock
-                301 1 00:05:00 190.0 118784 claude bg-pty-host --bg-pty-host /tmp/x.pty.sock 200 50
-                """,
-                None,
-            ),
-        )
-        monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
-        monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
-        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
-        monkeypatch.setattr(
-            spawn_gate.os,
-            "sched_getaffinity",
-            lambda _pid: set(range(12)),
-            raising=False,
-        )
-
-        evidence = spawn_gate._footprint_cause_evidence()
-
-        assert evidence is not None
-        assert "claude spare pool holds 3.90 cores across 2 idle pre-warm" in evidence
-        assert "does not own or bound" in evidence
-
-    def test_footprint_cause_reader_names_no_pool_when_none_is_running(
-        self, monkeypatch
-    ):
-        """Negative control for the assertion above: with no pool rows in the
-        snapshot the evidence line carries no pool claim at all."""
-        from fno import doctor_footprint
-
-        monkeypatch.setattr(
-            doctor_footprint,
-            "_live_root_pids",
-            lambda **_kwargs: (set(), None),
-        )
-        monkeypatch.setattr(
-            doctor_footprint,
-            "_read_ps",
-            lambda **_kwargs: (
-                """\
-                PID PPID ELAPSED %CPU RSS COMMAND
-                100 1 01:00:00 86.0 1024 fno-agents-worker --run
-                """,
-                None,
-            ),
-        )
-        monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
-        monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
-        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
-        monkeypatch.setattr(
-            spawn_gate.os,
-            "sched_getaffinity",
-            lambda _pid: set(range(12)),
-            raising=False,
-        )
-
-        evidence = spawn_gate._footprint_cause_evidence()
-
-        assert evidence is not None
-        assert "spare pool" not in evidence
-
-    def test_footprint_cause_reader_fails_open_when_ps_is_unavailable(
-        self, monkeypatch
-    ):
-        from fno import doctor_footprint
-
-        monkeypatch.setattr(
-            doctor_footprint, "_read_ps", lambda **_kwargs: (None, "ps unavailable")
-        )
-
-        assert spawn_gate._footprint_cause_evidence() is None
-
-    def test_footprint_cause_reader_uses_bounded_ps_timeout(self, monkeypatch):
-        from fno import doctor_footprint
-
-        calls: list[dict[str, object]] = []
-
-        def unavailable_ps(**kwargs):
-            calls.append(kwargs)
-            return None, "ps unavailable: timed out after 5.0s"
-
-        monkeypatch.setattr(doctor_footprint, "_read_ps", unavailable_ps)
-
-        assert spawn_gate._footprint_cause_evidence() is None
-        assert calls == [{"timeout": 5.0}]
-
     def test_under_cap_passes_silently(self, monkeypatch, capsys):
         """AC1-HP: nothing on stderr, no queue, guard holds the mutex."""
         _settings(monkeypatch, max_live=3)
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
         guard = spawn_gate.run_gate("w2", "bg")
         assert capsys.readouterr().err == ""
         guard.release()
 
-    def test_over_load_gathers_cause_after_gate_mutex_release(
-        self, monkeypatch, capsys
-    ):
-        """The cause probe costs seconds of ps/lsof; it must not run inside the
-        held gate mutex (queued spawners would stall behind evidence).
-
-        Driven through the BACKSTOP, the one refusal that still gathers cause:
-        the attribution-aware branches already printed their own sample.
-        """
-        _settings(
-            monkeypatch, max_live=3, max_load_per_cpu=8.0, hard_max_load_per_cpu=20.0
-        )
+    def test_cpu_refusal_releases_the_gate_mutex_first(self, monkeypatch, capsys):
+        """The refusal is decided; the mutex drops BEFORE the refusal raises,
+        so queued spawners never sit behind evidence gathering (the x-7c0f
+        ordering, carried onto the CPU axis)."""
+        _settings(monkeypatch, max_live=3)
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+        from fno.footprint import Admission
+
+        undecidable = Admission(
+            verdict="undecidable",
+            axis="fleet_cpu_share",
+            reason="spawn-gate: cannot decide",
+            share_low=0.2,
+            share_high=0.6,
+            bound="upper",
+            fleet_cores=2.1,
+            machine_cores=7.2,
+            capacity_cores=12.0,
+            ceiling=0.5,
+            gap="3 pidless row(s)",
+            load_15m=45.0,
+            backstop=480.0,
+        )
+        monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: undecidable)
         released: list[str] = []
-        mutex_held_when_probed: list[bool] = []
 
         monkeypatch.setattr(
             spawn_gate,
             "_release_claim_bounded",
             lambda key, holder: released.append(key) or True,
         )
-        monkeypatch.setattr(
-            spawn_gate,
-            "_footprint_cause_evidence",
-            lambda: mutex_held_when_probed.append(spawn_gate.GATE_CLAIM_KEY in released)
-            or None,
-            raising=False,
-        )
 
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
 
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
-        assert mutex_held_when_probed == [True]
+        assert spawn_gate.GATE_CLAIM_KEY in released
 
-    def test_over_load_ceiling_refuses_under_cap(self, monkeypatch, capsys):
-        """x-3f84 W3 wiring: the CPU guard fires beside the RAM floor, with
-        slots FREE - a machine can be oversubscribed while under cap, which is
-        the whole reason the dimension exists."""
-        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+    def test_cpu_axis_refuses_under_cap(self, monkeypatch, capsys):
+        """x-7783 wiring: the CPU axis fires beside the RAM floor, with slots
+        FREE - a machine can be oversubscribed while under cap."""
+        _settings(monkeypatch, max_live=3)
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
-        # 309 on 12 cpus is over the factor-8 trigger; the fleet owning 9 of
-        # 12 cores is what turns that into a refusal (x-7c0f).
-        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
+        from fno.footprint import Admission
+
+        refusal = Admission(
+            verdict="refuse",
+            axis="load_15m",
+            reason=(
+                "spawn-gate: 15-minute load 500.0 against backstop 480.0 "
+                "(hard_max_load_per_cpu 40 x 12 cpus); refusing (--force to bypass)"
+            ),
+            share_low=0.0,
+            share_high=0.0,
+            bound="exact",
+            fleet_cores=0.1,
+            machine_cores=6.9,
+            capacity_cores=12.0,
+            ceiling=0.5,
+            gap=None,
+            load_15m=500.0,
+            backstop=480.0,
+        )
+        monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: refusal)
+
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
+        receipt = exc.value.receipt
+        assert receipt["reason"] == "load_backstop"
+        assert receipt["axis"] == "load_15m"
+        assert receipt["load_15m"] == 500.0
 
-    def test_share_refusal_prints_one_sample_not_two(self, monkeypatch, capsys):
-        """A share refusal names its own numbers and appends no second sample.
-
-        The evidence line is a SEPARATE footprint read taken after the mutex
-        drops, so it disagrees with the sample the gate decided on. Printing
-        both is the exact defect x-7c0f removed, in miniature.
-        """
-        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+    def test_undecidable_refusal_prints_one_sample_not_two(self, monkeypatch, capsys):
+        """The admission sentence IS the refusal message: the gate appends no
+        second reading to a refusal that already named its own sample."""
+        _settings(monkeypatch, max_live=3)
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
-        monkeypatch.setattr(
-            spawn_gate,
-            "_footprint_cause_evidence",
-            lambda: "spawn-gate: footprint attributes 1.86/12.00 cores (15.5% capacity, 58.0% of measured CPU) to the fleet",
-            raising=False,
-        )
-        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
+        from fno.footprint import Admission
 
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("w2", "bg", no_wait=True)
-
-        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
-        error = capsys.readouterr().err
-        # The refusal names the FLEET's cores now, not the machine's load: it
-        # could not say whose load it was refusing until x-7c0f.
-        assert "the fleet holds 9.00/12.00 cores" in error
-        assert "1.86/12.00" not in error
-
-    def test_backstop_refusal_reports_fleet_cause_evidence(self, monkeypatch, capsys):
-        """The backstop is the one branch that refuses without attribution.
-
-        It never read footprint, so the evidence line is the only thing that
-        can say whose load it just refused.
-        """
-        _settings(
-            monkeypatch, max_live=3, max_load_per_cpu=8.0, hard_max_load_per_cpu=20.0
+        undecidable = Admission(
+            verdict="undecidable",
+            axis="fleet_cpu_share",
+            reason="spawn-gate: cannot decide: attributed 17.5%, up to 60.0%",
+            share_low=0.175,
+            share_high=0.6,
+            bound="upper",
+            fleet_cores=2.1,
+            machine_cores=7.2,
+            capacity_cores=12.0,
+            ceiling=0.5,
+            gap="3 pidless row(s)",
+            load_15m=45.0,
+            backstop=480.0,
         )
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
-        )
-        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
-        monkeypatch.setattr(
-            spawn_gate,
-            "_footprint_cause_evidence",
-            lambda: "spawn-gate: footprint attributes 1.86/12.00 cores (15.5% capacity, 58.0% of measured CPU) to the fleet",
-            raising=False,
-        )
+        monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: undecidable)
 
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
 
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
         error = capsys.readouterr().err
-        assert "absolute machine backstop" in error
-        assert "footprint attributes 1.86/12.00 cores" in error
+        assert "attributed 17.5%, up to 60.0%" in error
+        assert error.count("spawn-gate: cannot decide") == 1
 
-    def test_over_load_keeps_refusal_when_fleet_cause_is_unavailable(
+    def test_instrument_unreadable_refusal_names_no_load_number(
         self, monkeypatch, capsys
     ):
-        """Unreadable attribution refuses, and says so without a second probe."""
-        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+        """AC5-ERR: an unreadable instrument refuses naming the failure text,
+        and no load number prints beside it."""
+        _settings(monkeypatch, max_live=3)
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+        from fno.footprint import Admission
 
-        def _no_second_probe():
-            raise AssertionError("re-probed footprint after it just failed")
-
-        monkeypatch.setattr(
-            spawn_gate, "_footprint_cause_evidence", _no_second_probe, raising=False
+        refusal = Admission(
+            verdict="refuse",
+            axis="cpu_instrument",
+            reason=(
+                "spawn-gate: the CPU instrument is unreadable "
+                "(footprint unavailable: ps unavailable: timed out); "
+                "refusing to spawn (--force to bypass)"
+            ),
+            share_low=0.0,
+            share_high=0.0,
+            bound="exact",
+            fleet_cores=0.0,
+            machine_cores=0.0,
+            capacity_cores=0.0,
+            ceiling=0.0,
+            gap=None,
+            load_15m=None,
+            backstop=0.0,
         )
-        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: None)
+        monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: refusal)
 
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
 
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
-        assert "attribution unavailable" in capsys.readouterr().err
+        receipt = exc.value.receipt
+        assert receipt["reason"] == "cpu_instrument_unreadable"
+        error = capsys.readouterr().err
+        assert "ps unavailable: timed out" in error
+        assert "load_15m" not in receipt or receipt.get("load_15m") is None
 
     def test_at_cap_no_wait_refuses(self, monkeypatch, capsys):
         _settings(monkeypatch, max_live=1)
         w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
         )
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
@@ -830,7 +642,7 @@ class TestRunGate:
         w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
         calls = {"n": 0}
 
-        def fake_census():
+        def fake_census(socket_map=None):
             calls["n"] += 1
             if calls["n"] == 1:
                 return spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
@@ -849,7 +661,7 @@ class TestRunGate:
         _settings(monkeypatch, max_live=1)
         w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
         )
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
         monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
@@ -878,7 +690,7 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate,
             "census",
-            lambda: spawn_gate.LiveCensus(workers=[w1, w2], fno_slot_workers=2),
+            lambda socket_map=None: spawn_gate.LiveCensus(workers=[w1, w2], fno_slot_workers=2),
         )
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
         monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
@@ -895,11 +707,12 @@ class TestRunGate:
             ["spawn", "do something", "--name", "w3", "-H", "claude", "-m", "claude-sonnet-4-6"],
         )
         assert res.exit_code == spawn_gate.EXIT_QUEUE_TIMEOUT
-        assert "spawn-gate: queue timeout after 0s at max_live 2" in res.output
+        assert "queue timeout after 0s held on max_live" in res.output
         receipt_line = [line for line in res.output.splitlines() if line.startswith("{")][-1]
         receipt = json.loads(receipt_line)
         assert receipt["status"] == "refused"
         assert receipt["reason"] == "queue_timeout"
+        assert receipt["held_on"] == "max_live"
         assert receipt["max_live"] == 2
         assert receipt["count"] == 2
         assert receipt["current_count"] == 2
@@ -908,7 +721,7 @@ class TestRunGate:
         _settings(monkeypatch, max_live=1)
         w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
         )
         guard = spawn_gate.run_gate("w2", "bg", force=True)
         assert "forced past cap" in capsys.readouterr().err
@@ -946,7 +759,7 @@ class TestRunGate:
         """
         _settings(monkeypatch, max_live=3)
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
         monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", lambda _h: False)
         monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.05)
@@ -967,7 +780,7 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate,
             "census",
-            lambda: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1),
+            lambda socket_map=None: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1),
         )
         monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", lambda _h: True)
         monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.01)
@@ -979,12 +792,10 @@ class TestRunGate:
         assert "proceeding unserialized" not in capsys.readouterr().err
 
     def test_capped_arm_steals_a_dead_gate_and_reacquires(self, monkeypatch, capsys):
-        """AC: a capped provider facing a CORPSE steals it and re-acquires.
-
-        The capped arm used to refuse on the first contended read
-        (reason: provider_cap) while the uncapped arm queued - so every
-        target spawn was refused and every blueprint spawn succeeded, same
-        machine, same minute. Contention is a peer or a corpse, never a cap.
+        """AC3-HP: a capped provider facing a PROVABLY-DEAD holder steals it
+        and re-acquires. The takeover asks the sweep's own decision
+        (sweep_verdict), and the override reason and warning name the native
+        basis - no second state table beside the sweep (x-9c91 change 3).
         """
         _settings(monkeypatch, max_live=9, max_lanes={"zai": 10})
         acquire_calls: list[bool] = []
@@ -994,9 +805,24 @@ class TestRunGate:
             return len(acquire_calls) > 1  # contended once, then the steal lands
 
         monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", _acquire)
+        from fno.claims.core import acquire_claim
+
+        # A real gate claim file; the pid value is inert because the native
+        # door is stubbed below.
+        acquire_claim(
+            spawn_gate.GATE_CLAIM_KEY, "target-session:dead", pid=999_999_999, root=None
+        )
         monkeypatch.setattr(
-            "fno.claims.core.claim_status",
-            lambda key, *, root=None: {"state": "stale"},
+            "fno.claims.verdict.claim_verdicts",
+            lambda keys=None, **_kw: {
+                spawn_gate.GATE_CLAIM_KEY: {
+                    "key": spawn_gate.GATE_CLAIM_KEY,
+                    "state": "stale",
+                    "bucket": "",
+                    "provably_dead": True,
+                    "basis": "ttl-expired-dead-pid",
+                }
+            },
         )
         steals: list[tuple[str, str]] = []
         monkeypatch.setattr(
@@ -1005,7 +831,7 @@ class TestRunGate:
         )
         monkeypatch.setattr(spawn_gate, "provider_live_count", lambda _p: 3)
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
         monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.0)
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
@@ -1016,12 +842,14 @@ class TestRunGate:
         assert steals == [
             (
                 spawn_gate.GATE_CLAIM_KEY,
-                "spawn-gate held past the wait budget by a dead holder",
+                "spawn-gate held past the wait budget; native basis "
+                "ttl-expired-dead-pid",
             )
         ]
         assert acquire_calls == [True, True], "capped arm stays fail_closed"
         err = capsys.readouterr().err
         assert "provider_cap" not in err
+        assert "native basis ttl-expired-dead-pid" in err
         guard.release()
 
     def test_capped_arm_steals_a_corrupted_gate_claim(
@@ -1037,10 +865,9 @@ class TestRunGate:
             return len(calls) > 1  # contended once, then the steal lands
 
         monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", _acquire)
-        monkeypatch.setattr(
-            "fno.claims.core.claim_status",
-            lambda key, *, root=None: {"state": "corrupted"},
-        )
+        gate_dir = Path(os.environ["FNO_CLAIMS_ROOT"]) / ".fno" / "claims"
+        gate_dir.mkdir(parents=True, exist_ok=True)
+        (gate_dir / "gate%3Aspawn.lock").write_text("{ not: [valid")
         steals: list[str] = []
         monkeypatch.setattr(
             "fno.claims.core.force_release_claim",
@@ -1048,7 +875,7 @@ class TestRunGate:
         )
         monkeypatch.setattr(spawn_gate, "provider_live_count", lambda _p: 3)
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
         monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.0)
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
@@ -1063,7 +890,7 @@ class TestRunGate:
         """AC2-FR: a freed slot still refuses when RAM dropped meanwhile."""
         _settings(monkeypatch, max_live=1, min_free_gb=4.0)
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
         monkeypatch.setattr(spawn_gate, "available_ram_gb", lambda: 1.0)
         with pytest.raises(SystemExit) as exc:
@@ -1076,7 +903,7 @@ class TestRunGate:
         _settings(monkeypatch, max_live=3)
         real_census = spawn_gate.census
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
         guard = spawn_gate.run_gate("one-shot", "headless")
@@ -1096,7 +923,7 @@ class TestRunGate:
             spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
         )
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
         for index in (1, 2):
             guard = spawn_gate.run_gate(f"zai-{index}", "pane", route_provider="zai")
@@ -1366,17 +1193,34 @@ class TestRunGate:
     def test_capped_arm_queues_behind_a_live_holder_and_never_says_provider_cap(
         self, monkeypatch, capsys
     ):
-        """AC: a LIVE holder is a live peer; queue to the timeout, and the
-        refusal must never name the cap the gate never read. The old
-        behavior refused on the FIRST contended read with
-        reason: provider_cap, count: null - a cause it never measured."""
+        """AC3-ERR: a LIVE holder is a live peer; queue to the timeout, and
+        the refusal must never name the cap the gate never read. The takeover
+        releases nothing and its warning names the bucket and holder pid."""
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
         monkeypatch.setattr(
             spawn_gate, "_acquire_gate_mutex", lambda _h, **_k: False
         )
+        from fno.claims.core import acquire_claim
+
+        acquire_claim(
+            spawn_gate.GATE_CLAIM_KEY, "target-session:peer", pid=424_242, root=None
+        )
         monkeypatch.setattr(
-            "fno.claims.core.claim_status",
-            lambda key, *, root=None: {"state": "live"},
+            "fno.claims.verdict.claim_verdicts",
+            lambda keys=None, **_kw: {
+                spawn_gate.GATE_CLAIM_KEY: {
+                    "key": spawn_gate.GATE_CLAIM_KEY,
+                    "state": "live",
+                    "bucket": "live",
+                    "provably_dead": False,
+                    "basis": "pid",
+                }
+            },
+        )
+        steals: list[str] = []
+        monkeypatch.setattr(
+            "fno.claims.core.force_release_claim",
+            lambda key, reason, *, root=None: steals.append(key),
         )
         monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.01)
         monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
@@ -1388,6 +1232,9 @@ class TestRunGate:
         assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
         assert exc.value.receipt is not None
         assert exc.value.receipt["reason"] == "gate_mutex_busy"
+        assert steals == [], "a live holder is never force-released"
+        err = capsys.readouterr().err
+        assert "gate claim kept (live), holder pid 424242" in err
 
     def test_provider_count_requires_positive_liveness_and_skips_exited(
         self, monkeypatch
@@ -1425,7 +1272,7 @@ class TestRunGate:
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
 
         first = spawn_gate.run_gate("peer-1", "headless", route_provider="zai")
@@ -1448,7 +1295,7 @@ class TestRunGate:
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
 
         unrelated = spawn_gate.run_gate("codex-peer", "headless")
@@ -1480,7 +1327,7 @@ class TestRunGate:
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
         monkeypatch.setattr(
-            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
         )
         monkeypatch.setattr(
             "fno.claims.core.acquire_claim",
@@ -1693,70 +1540,216 @@ class TestReignTyped:
         assert _reign_typed_message("brief", 2, "epic-x", True) == ("brief", False)
 
 
-# --- the per-territory team cap (x-e221) --------------------------------------
+# ---------------------------------------------------------------------------
+# AC3-HP/EDGE: the durable fleet incident gate (x-77db)
+# ---------------------------------------------------------------------------
+
+def _write_incident_state(tmp_path: Path, state: str) -> Path:
+    """Point FNO_AGENTS_HOME at a home whose fleet-stop.json holds `state`."""
+    home = tmp_path / ".fno" / "agents"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "fleet-stop.json").write_text(json.dumps({
+        "version": 1,
+        "state": state,
+        "generation": 3,
+        "changed_at": "2026-09-11T00:00:00Z",
+        "changed_by": "op",
+        "reason": "wedged lock",
+    }))
+    return home
 
 
-def test_territory_cap_refuses_at_the_cap(monkeypatch):
-    # The verdict (and every count in it) is the binary's; the gate only maps
-    # it to a refusal and passes the receipt through.
+def test_fleet_incident_stop_refuses_before_the_operator_bypass(
+    tmp_path, monkeypatch
+):
+    """AC3-HP: FNO_SPAWN_GATE=0 must NOT reach past the incident gate."""
+    home = _write_incident_state(tmp_path, "stopped")
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+
+    with pytest.raises(spawn_gate.GateRefused) as excinfo:
+        spawn_gate.run_gate("t-fleet-stop", "headless")
+
+    assert excinfo.value.code == spawn_gate.EXIT_FLEET_STOP
+
+
+def test_fleet_incident_force_flag_also_refuses(tmp_path, monkeypatch):
+    """AC3-HP: --force past capacity does not past a fleet stop."""
+    home = _write_incident_state(tmp_path, "stopped")
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
+
+    with pytest.raises(spawn_gate.GateRefused) as excinfo:
+        spawn_gate.run_gate("t-fleet-force", "headless", force=True)
+
+    assert excinfo.value.code == spawn_gate.EXIT_FLEET_STOP
+
+
+def test_fleet_incident_unavailable_fails_closed(tmp_path, monkeypatch):
+    """AC3-EDGE: an unreadable record is a CANNOT-TELL refusal, named as such."""
+    home = _write_incident_state(tmp_path, "sorta-open")
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
+
+    with pytest.raises(spawn_gate.GateRefused) as excinfo:
+        spawn_gate.run_gate("t-fleet-bogus", "headless")
+
+    assert excinfo.value.code == spawn_gate.EXIT_FLEET_STOP_UNAVAILABLE
+
+
+def test_fleet_incident_clear_admits(tmp_path, monkeypatch):
+    """The clear verdict admits: the gate seam itself refuses nothing."""
+    home = _write_incident_state(tmp_path, "clear")
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
     monkeypatch.setattr(
         spawn_gate,
-        "_territory_verdict",
-        lambda node: {
-            "verdict": "territory_cap",
-            "reason": "territory_cap",
-            "territory": "x-epic",
-            "current_count": 4,
-            "max_live_per_territory": 4,
-        },
+        "_refuse",
+        lambda *a, **k: pytest.fail("a clear verdict must refuse nothing"),
     )
-    with pytest.raises(spawn_gate.GateRefused) as err:
-        spawn_gate._check_territory_cap("x-new")
-    receipt = err.value.receipt or {}
-    assert receipt.get("reason") == "territory_cap"
-    assert receipt.get("territory") == "x-epic"
-    assert receipt.get("current_count") == 4
+
+    assert spawn_gate._fleet_incident_gate() is None
 
 
-def test_headroom_verdict_passes(monkeypatch):
+def test_fleet_incident_without_a_runtime_defaults_clear(monkeypatch):
+    """No fno-agents runtime means no incident authority to ask: the python
+    fallback's own contracts (e.g. the exit-13 missing-runtime refusal) hold."""
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
     monkeypatch.setattr(
         spawn_gate,
-        "_territory_verdict",
-        lambda node: {
-            "verdict": "ok",
-            "territory": "x-epic",
-            "current_count": 1,
-            "max_live_per_territory": 4,
-        },
+        "_refuse",
+        lambda *a, **k: pytest.fail("a binary-less machine must not refuse"),
     )
-    spawn_gate._check_territory_cap("x-new")  # no raise
+
+    assert spawn_gate._fleet_incident_gate() is None
 
 
-def test_territory_unknown_refuses_closed(monkeypatch):
-    # An unreadable graph / absent node is an explicit refusal: an unknown
-    # attribution must never silently disappear from the count.
+def test_fleet_incident_stale_runtime_without_the_verb(tmp_path, monkeypatch):
+    """An installed runtime that predates the breaker does not answer for it:
+    unknown-verb on the check is no authority, not a cannot-tell."""
+    from fno import rust_binary
+
+    stale = tmp_path / "stale-fno-agents"
+    stale.write_text("#!/bin/sh\nexit 2\n")
+    stale.chmod(0o755)
+    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: stale)
     monkeypatch.setattr(
         spawn_gate,
-        "_territory_verdict",
-        lambda node: {
-            "verdict": "territory_unknown",
-            "reason": "territory_unknown",
-            "node": node,
-        },
+        "_refuse",
+        lambda *a, **k: pytest.fail("a pre-breaker runtime must not refuse"),
     )
-    with pytest.raises(spawn_gate.GateRefused) as err:
-        spawn_gate._check_territory_cap("x-ghost")
-    receipt = err.value.receipt or {}
-    assert receipt.get("reason") == "territory_unknown"
-    assert receipt.get("node") == "x-ghost"
+
+    assert spawn_gate._fleet_incident_gate() is None
 
 
-def test_nodeless_spawn_skips_the_team_cap(monkeypatch):
-    # Machinery (kings, blueprinters, ad-hoc panes) works no node: the team
-    # cap is out of scope for it, not unknown.
-    called = []
-    monkeypatch.setattr(spawn_gate, "_territory_verdict", lambda n: called.append(n))
-    spawn_gate._check_territory_cap(None)
-    assert called == []
+class TestQuotaLockRefusal:
+    """The gate reads the sweep's quota lock (x-bbc0 change 3): a vendor
+    window on the caller-named account refuses with exit 78, names the
+    reset, and is NOT waitable."""
 
+    @pytest.fixture
+    def locked_account(self, tmp_path, monkeypatch):
+        """Write a real quota lock into an isolated runtime-state file."""
+        from datetime import datetime, timedelta, timezone
 
+        monkeypatch.setenv(
+            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
+        )
+        from fno.agents.quota_lock import record_quota_lock
+
+        reset = datetime.now(timezone.utc) + timedelta(hours=3)
+        body = (
+            "API Error: 429 usage limit reached. Quota exceeded; "
+            f"resets at {reset.strftime('%Y-%m-%dT%H:%M:%S+00:00')}."
+        )
+        assert record_quota_lock("readyrule", body) == "readyrule"
+        return body
+
+    def _admitting_world(self, monkeypatch):
+        _settings(monkeypatch, max_live=3)
+        monkeypatch.setattr(
+            spawn_gate,
+            "census",
+            lambda socket_map=None: spawn_gate.LiveCensus(workers=[]),
+        )
+
+    def test_a_future_lock_refuses_with_78_and_names_the_reset(
+        self, monkeypatch, capsys, locked_account
+    ):
+        self._admitting_world(monkeypatch)
+        emitted: list[tuple] = []
+
+        import fno.agents.events as events_mod
+
+        monkeypatch.setattr(
+            events_mod, "emit", lambda kind, **data: emitted.append((kind, data))
+        )
+
+        with pytest.raises(spawn_gate.GateRefused) as excinfo:
+            spawn_gate.run_gate("w2", "bg", account="readyrule")
+
+        assert excinfo.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        receipt = excinfo.value.receipt
+        assert receipt["reason"] == "provider_quota_lock"
+        assert receipt["account"] == "readyrule"
+        assert receipt["resets_at"] > time.time()
+        assert any(
+            k == "spawn_gate_refused" and d.get("reason") == "provider_quota_lock"
+            for k, d in emitted
+        )
+        err = capsys.readouterr().err
+        assert "readyrule" in err
+        assert "rate-limited until" in err
+
+    def test_the_refusal_sits_ahead_of_force(self, monkeypatch, locked_account):
+        self._admitting_world(monkeypatch)
+
+        with pytest.raises(spawn_gate.GateRefused) as excinfo:
+            spawn_gate.run_gate("w2", "bg", force=True, account="readyrule")
+
+        assert excinfo.value.receipt["reason"] == "provider_quota_lock"
+
+    def test_a_past_lock_passes_silently(self, monkeypatch, capsys, tmp_path):
+        # A lock whose named reset already passed reads not-in-cooldown via
+        # the shared vocabulary. Written directly: a record_quota_lock call
+        # with a past resets_at falls back to a computed backoff step, which
+        # is a different (and still-live) lock.
+        monkeypatch.setenv(
+            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
+        )
+        state = tmp_path / "provider-runtime-state.json"
+        state.write_text(json.dumps({
+            "schema_version": 2,
+            "provider_health": {
+                "readyrule": {
+                    "backoff_level": 1,
+                    "rate_limited_until": time.time() - 5.0,
+                    "last_error_at": time.time(),
+                },
+            },
+        }))
+        self._admitting_world(monkeypatch)
+
+        guard = spawn_gate.run_gate("w2", "bg", account="readyrule")
+        assert capsys.readouterr().err == ""
+        guard.release()
+
+    def test_no_account_or_default_passes_silently(self, monkeypatch, capsys, tmp_path):
+        from fno.agents.quota_lock import record_quota_lock
+
+        monkeypatch.setenv(
+            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
+        )
+        record_quota_lock("readyrule", "quota exceeded", resets_at=time.time() + 3600.0)
+        self._admitting_world(monkeypatch)
+
+        for account in (None, "default"):
+            guard = spawn_gate.run_gate("w2", "bg", account=account)
+            guard.release()
+        assert "quota" not in capsys.readouterr().err
+
+    def test_the_reason_is_not_waitable(self):
+        # A vendor window runs hours; the queue times out at 600s. Waiting
+        # would convert an honest refusal into a hang (x-bbc0).
+        assert "provider_quota_lock" not in spawn_gate.WAITABLE_REFUSAL_REASONS

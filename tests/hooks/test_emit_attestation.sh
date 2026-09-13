@@ -25,8 +25,7 @@ TMP="$(mktemp -d -t emit-attestation-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 # Stub the event sink and CAPTURE ITS ARGV: the assertion must read what was
-# actually handed to `doctor event emit`, not what the receipt claims (same rule as
-# tests/hooks/test_attest_model.sh).
+# actually handed to `doctor event emit`, not what the receipt claims.
 # Discriminates on the verb, like tests/hooks/test_code_review_attest.sh's stub:
 # the emitter shells `fno` for more than the event sink now (it clears the
 # review hold once a verdict exists for the head), and a stub that captured

@@ -108,15 +108,14 @@ require "$CV" "recoverable first" "resume(rust): path-recovery check precedes th
 require "$CV" "nothing resumable" "resume(rust): idless row told the truth, no id claim"
 
 # --- 4. rm-naming refusals: the Rust ask twins ---------------------------------
-# The Python rm-fallback refusals retired with the ask legs (the ask-adapter
-# port): their remedy text now lives only in the Rust twins, and these checks
-# are the live contract. The guard-on-one-of-N-paths trap this section once
-# guarded (dispatch.py rewritten while the twins kept the rm-first text) ends
-# when the Python emitter does.
+# The Python rm-fallback refusals retired with the rm twin (the Python side of
+# rm was deleted): their remedy text now lives only in the Rust twins, and these
+# checks are the live contract. The override-in-help needle greps the Rust
+# refusal builder, where the rm refusals live since the file-budget move.
+RRD="$REPO_ROOT/crates/fno-agents/src/daemon/rm_refusal_detail.rs"
+require "$RRD" "fno agents rm --help\`, not here." \
+    "rm-fallback(rust): override lives in --help, never in the refusal"
 DIS="$REPO_ROOT/cli/src/fno/agents/dispatch.py"
-# The needle matches the single literal line that closes both refusals.
-require "$DIS" "fno agents rm --help\`, not here." \
-    "rm-fallback(py): override lives in --help, never in the refusal"
 require "$DIS" "the exchange finished" "teardown(py): states the exchange finished first"
 
 for pair in "claude:crates/fno-agents/src/claude_ask.rs" "codex:crates/fno-agents/src/codex_ask.rs" "gemini:crates/fno-agents/src/gemini_ask.rs"; do

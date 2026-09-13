@@ -18,6 +18,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         worker: Some(worker.into()),
         harness: Some(harness.into()),
         harness_session_id: Some(session_id.into()),
+        pane_id: None,
     };
     let registry = RegistryAgent {
         name: worker.into(),
@@ -46,7 +47,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         reason: None,
         exited: registry.exited,
         unmeasured: false,
-        liveness_age_s: None,
+        liveness_measured_at: None,
         harness_title: None,
         answerable: None,
         attach_id: None,
@@ -94,6 +95,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         superseded_by_live_peer: None,
         node_merged: false,
         pid_gone: false,
+        release_quiet: false,
     };
     assert_eq!(gc_decide(&live, 900).0, GcAction::Keep);
     assert_eq!(

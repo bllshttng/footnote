@@ -46,6 +46,7 @@ CHECKS: dict[str, str] = {
     "seam-crossings": "seam_crossings",
     "field-coverage": "field_coverage",
     "graph-parity": "graph_parity",
+    "preamble-budget": "preamble_budget",
 }
 
 
@@ -61,7 +62,10 @@ CHECKS: dict[str, str] = {
 # attached: fold or retire before raising this.
 MENU_CAP_ROOT_NAMESPACE = 12
 MENU_CAP_TOP_LEVEL = 10
-MENU_CAP_SUB_APP = 12
+# x-77db allocates `mail team`, the operator's fleet announcement verb, as
+# mail's thirteenth advertised verb: an incident command hidden from the menu
+# is the wedged-lock failure mode again.
+MENU_CAP_SUB_APP = 13
 
 
 # Single-line argv shapes that are intentionally still owned by a provider or
@@ -210,14 +214,9 @@ def graph_parity(
     db: Optional[Path] = None,
 ) -> None:
     """Compare the JSON export with every row in the SQLite graph store."""
-    import sys
+    from fno.graph.parity import compare
 
-    from fno.paths import resolve_plugin_script
-
-    argv = [sys.executable, str(resolve_plugin_script("scripts/analysis/graph-parity.py")),
-            *([] if graph is None else ["--graph", str(graph)]),
-            *([] if db is None else ["--db", str(db)])]
-    raise typer.Exit(subprocess.call(argv))
+    raise typer.Exit(compare(graph=graph, db=db))
 
 
 
@@ -591,16 +590,6 @@ def state_roots() -> None:
         raise typer.Exit(1)
     typer.echo(
         f"state-roots: ok ({len(baseline)} baselined site(s) awaiting their owning node)"
-    )
-
-
-def _dump_state_roots_baseline(repo_root: Path) -> str:
-    """Data lines only, for seeding the ratchet."""
-    return "\n".join(
-        sorted(
-            f"{rule}\t{rel}\t{key}\tunowned\tseeded from the measured census"
-            for rule, rel, key in _state_roots_findings(repo_root)
-        )
     )
 
 
@@ -1059,14 +1048,14 @@ def seam_crossings(update: bool = False) -> None:
 # here so a comment body is checkable at all, and docs/style-rules.md says
 # plainly that nothing enforces it. A surface that reads as a guard and refuses
 # nothing is worse than no surface.
-_STYLE_SURFACES = ("mail", "pr-body", "markdown", "comment")
+_STYLE_SURFACES = ("mail", "encounter", "pr-body", "markdown", "comment")
 
 
 def style(
     surface: str = typer.Option(
         "mail",
         "--surface",
-        help="Where the text is read: mail, pr-body, markdown, or comment. Mail also carries an 80-word message cap.",
+        help="Where the text is read: mail, encounter, pr-body, markdown, or comment. Mail and encounter also carry an 80-word message cap.",
     ),
     stdin: bool = typer.Option(
         False,
@@ -1084,15 +1073,28 @@ def style(
         help="For --surface markdown: check ADDED lines only since this ref (e.g. origin/main). "
         "A whole-file gate is unlandable because existing prose already breaks the rules.",
     ),
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Rewrite the mechanical set (semicolons, wrapped paragraphs) and "
+        "report the rest. With --stdin prints to stdout; with --files rewrites "
+        "in place. Residue exits 1.",
+    ),
 ) -> None:
-    """Check text against the seven style rules in docs/style-rules.md.
+    """Check text against the eight style rules in docs/style-rules.md.
 
     A list-item sentence is 20 words or fewer, and every other sentence is 25
     or fewer. No semicolon. No "should", "would", "may", "might", or "could".
     No contractions. If a sentence carries "if" or "when", that word starts the
     sentence. A paragraph is one physical line, so a newline starts the next
-    block. Code, paths, flags, and quoted output do not count.
-    Mail prose is capped at 80 masked words. Other surfaces do not use this cap.
+    block. No filler or pleasantries: "please", "thanks", "basically", and the
+    phrases "thank you", "of course", "happy to", "feel free". Code, paths,
+    flags, and quoted output do not count.
+    Mail and encounter prose also carry an 80 masked-word cap. Other surfaces
+    do not use this cap.
+
+    With --fix the mechanical rules are rewritten through the same path the
+    check reads; unfixable residue exits 1.
 
     Exit 0 clean, 1 with violations, 2 on bad usage OR on a parser failure in
     this gate. That second 2 fires when git and this verb disagree about how
@@ -1110,6 +1112,12 @@ def style(
         raise typer.Exit(2)
     if diff_base is not None and surface != "markdown":
         typer.echo("style: --diff-base applies to --surface markdown only.", err=True)
+        raise typer.Exit(2)
+    if fix and diff_base is not None:
+        typer.echo(
+            "style: --fix rewrites whole inputs; it does not combine with --diff-base.",
+            err=True,
+        )
         raise typer.Exit(2)
 
     if diff_base is not None:
@@ -1151,8 +1159,16 @@ def style(
         text = sys.stdin.read()
         if style_mod.has_exception(text):
             _style_skip_receipt(["<stdin>"])
+            if fix:
+                sys.stdout.write(text)
             raise typer.Exit(0)
-        violations = style_mod.check(text, surface=surface)
+        if fix:
+            # The write-back mirrors the read path: stdout for stdin, in place
+            # for files. Residue flows to the common tail, which exits 1.
+            text, violations = style_mod.fix(text, surface=surface)
+            sys.stdout.write(text)
+        else:
+            violations = style_mod.check(text, surface=surface)
     elif files:
         violations = []
         skipped: list[str] = []
@@ -1161,7 +1177,13 @@ def style(
             if style_mod.has_exception(text):
                 skipped.append(str(path))
                 continue
-            violations.extend(style_mod.check(text, surface=surface))
+            if fix:
+                fixed, residue = style_mod.fix(text, surface=surface)
+                if fixed != text:
+                    path.write_text(fixed, encoding="utf-8")
+                violations.extend(residue)
+            else:
+                violations.extend(style_mod.check(text, surface=surface))
         _style_skip_receipt(skipped)
     else:
         typer.echo("style: pass --stdin, --files, or --diff-base.", err=True)
@@ -1169,7 +1191,7 @@ def style(
 
     if not violations:
         raise typer.Exit(0)
-    typer.echo(style_mod.format_violations(violations), err=True)
+    typer.echo(style_mod.format_violations(violations, surface=surface), err=True)
     raise typer.Exit(1)
 
 
@@ -1546,6 +1568,35 @@ def _git_added_line_nums(
     return nums
 
 
+def _run_ci_gate(rel_path: str) -> None:
+    """Run a scripts/ci bash gate from the repo root; its exit code passes
+    through. Exit 2 here is the wrapper's alone - the script is missing or
+    unrunnable - since every gate failure path exits 1 itself."""
+    from fno._subprocess_util import propagate_returncode
+    from fno.paths import resolve_repo_root
+
+    root = Path(resolve_repo_root())
+    script = root / rel_path
+    if not script.exists():
+        typer.echo(f"gate script not found at {script}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = subprocess.run(["bash", str(script)], cwd=root)
+    except FileNotFoundError as exc:
+        typer.echo(f"failed to run gate script: {exc}", err=True)
+        raise typer.Exit(code=2)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def preamble_budget() -> None:
+    """Report the SessionStart preamble byte budget; refuse when over it.
+
+    This verb is the local signal, not a second CI registration: the gate
+    already runs in guards.yml on every push and pull_request.
+    """
+    _run_ci_gate("scripts/ci/check-preamble-budget.sh")
+
+
 def stale_skill_refs() -> None:
     """Audit for stale references to cut, demoted, or merged skills.
 
@@ -1554,20 +1605,7 @@ def stale_skill_refs() -> None:
     source-of-truth bash gate scripts/ci/check-no-stale-skill-refs.sh; exit code
     matches it (0 clean, 1 stale references, 2 script error).
     """
-    from fno._subprocess_util import propagate_returncode
-    from fno.paths import resolve_repo_root
-
-    repo_root = Path(resolve_repo_root())
-    script = repo_root / "scripts" / "ci" / "check-no-stale-skill-refs.sh"
-    if not script.exists():
-        typer.echo(f"audit script not found at {script}", err=True)
-        raise typer.Exit(code=2)
-    try:
-        result = subprocess.run(["bash", str(script)], cwd=repo_root)
-    except FileNotFoundError as exc:
-        typer.echo(f"failed to run audit script: {exc}", err=True)
-        raise typer.Exit(code=2)
-    raise typer.Exit(code=propagate_returncode(result.returncode))
+    _run_ci_gate("scripts/ci/check-no-stale-skill-refs.sh")
 
 
 def retired_commands() -> None:
@@ -1579,20 +1617,7 @@ def retired_commands() -> None:
     failure path in the gate goes through its own ``fail()`` and exits 1, so
     the 2 below is this wrapper's alone - the script is missing or unrunnable.
     """
-    from fno._subprocess_util import propagate_returncode
-    from fno.paths import resolve_repo_root
-
-    repo_root = Path(resolve_repo_root())
-    script = repo_root / "scripts" / "ci" / "check-retired-command-strings.sh"
-    if not script.exists():
-        typer.echo(f"gate script not found at {script}", err=True)
-        raise typer.Exit(code=2)
-    try:
-        result = subprocess.run(["bash", str(script)], cwd=repo_root)
-    except FileNotFoundError as exc:
-        typer.echo(f"failed to run gate script: {exc}", err=True)
-        raise typer.Exit(code=2)
-    raise typer.Exit(code=propagate_returncode(result.returncode))
+    _run_ci_gate("scripts/ci/check-retired-command-strings.sh")
 
 
 def _field_names(block: Any) -> set[str]:
@@ -1934,7 +1959,7 @@ def lint(
     ),
     surface: str = typer.Option(
         "mail", "--surface",
-        help="style: where the text is read - mail, pr-body, or markdown.",
+        help="style: where the text is read - mail, encounter, pr-body, markdown, or comment.",
     ),
     stdin: bool = typer.Option(False, "--stdin", help="style: read the body from standard input."),
     files: Optional[list[Path]] = typer.Option(
@@ -1944,6 +1969,10 @@ def lint(
     diff_base: Optional[str] = typer.Option(
         None, "--diff-base",
         help="style: check ADDED lines only since this ref (e.g. origin/main).",
+    ),
+    fix: bool = typer.Option(
+        False, "--fix",
+        help="style: rewrite the mechanical set; report the rest. Residue exits 1.",
     ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="registry/field-coverage: machine-readable output."
@@ -1987,6 +2016,7 @@ def lint(
         "stdin": stdin,
         "files": files,
         "diff_base": diff_base,
+        "fix": fix,
         "as_json": as_json,
         "live": live,
         "base": base,

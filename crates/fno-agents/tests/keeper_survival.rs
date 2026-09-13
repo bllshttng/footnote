@@ -325,3 +325,56 @@ fn keeper_lane_identify_answers_null_when_the_argv_carries_no_id() {
     );
     let _child = KillGuard(reply["child_pid"].as_u64().unwrap() as u32);
 }
+
+#[test]
+fn identify_reports_drift_and_the_pane_survives_a_rewritten_binary() {
+    // AC3-EDGE: a pane keeper whose binary was rewritten answers Identify
+    // with drift "drifted"; the keeper and its child stay alive - a pane
+    // keeper gets no self-retire, because exiting ends the pane.
+    let dir = std::env::temp_dir().join(format!("fno-pane-drift-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join("worker-copy");
+    std::fs::copy(keeper_bin(), &copy).unwrap();
+    let sock = dir.join("drift.sock");
+    let script = format!(
+        "{} --pane --sock {} --session t2 --pane-key 22 --cwd /tmp -- sleep 300 >/dev/null 2>&1 & echo $!",
+        copy.display(),
+        sock.display()
+    );
+    let out = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .stdout(Stdio::piped())
+        .output()
+        .expect("launcher runs");
+    let pid: u32 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("launcher echoed the keeper pid");
+    let fresh = identify(&sock);
+    if fresh.get("drift").is_some() {
+        assert_eq!(fresh["drift"], "fresh", "unrewritten copy reads fresh");
+    }
+    std::fs::remove_file(&copy).unwrap();
+    std::fs::write(&copy, b"newer build bytes").unwrap();
+    // The live re-stat at Identify time reads the rewrite.
+    let drifted = identify(&sock);
+    assert_eq!(
+        drifted["drift"], "drifted",
+        "rewritten build reads drifted: {drifted}"
+    );
+    assert!(
+        drifted["build"]["size"].is_u64(),
+        "the build fingerprint rides the reply: {drifted}"
+    );
+    // The keeper and its child stay alive (no self-retire for a pane).
+    assert!(alive(pid), "the keeper survives");
+    let child = drifted["child_pid"].as_u64().expect("child pid");
+    assert!(alive(child as u32), "the pane's child survives");
+    // Cleanup.
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        libc::kill(child as libc::pid_t, libc::SIGKILL);
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -5,7 +5,7 @@
 //! and its tests are the bulk of what it costs. Keeping it here lets the
 //! dispatcher stay a dispatcher.
 
-use crate::gc_sweep::{GcSummary, StateFilesReapSummary, StateReapFamilySummary};
+use crate::gc_sweep::{GcSummary, StateFilesReapSummary, StateReapFamilySummary, UnresolvedHold};
 use serde_json::{json, Value};
 
 /// Render the file-only reap receipt independently from row retirement.
@@ -19,6 +19,7 @@ pub fn render_state_files_reap(summary: &StateFilesReapSummary, json_out: bool) 
                     "plan_locks": summary.plan_locks,
                     "agent_locks": summary.agent_locks,
                     "pr_status_cache": summary.pr_status_cache,
+                    "claim_tmp": summary.claim_tmp,
                 },
                 "totals": summary.totals,
                 "applied": summary.applied,
@@ -54,6 +55,7 @@ pub fn render_state_files_reap(summary: &StateFilesReapSummary, json_out: bool) 
         ("plan_locks", &summary.plan_locks),
         ("agent_locks", &summary.agent_locks),
         ("pr_status_cache", &summary.pr_status_cache),
+        ("claim_tmp", &summary.claim_tmp),
     ] {
         out.push_str(&family_line(name, family));
     }
@@ -77,12 +79,45 @@ pub fn render_state_files_reap(summary: &StateFilesReapSummary, json_out: bool) 
     out
 }
 
+/// Human clock for a hold line: `2h00m`, `3m48s`, `41s`. The shape the
+/// escalation suffix and the release refusals both print (x-e3cc).
+pub(crate) fn human_duration(secs: i64) -> String {
+    let s = secs.max(0) as u64;
+    if s >= 3600 {
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    } else if s >= 60 {
+        format!("{}m{:02}s", s / 60, s % 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
 /// Render a sweep outcome. Pure, so the one property that matters here is
 /// testable without a registry: every bucket appears at every pass, zero
 /// counts included. A row the pass judged lands in exactly one bucket, and a
 /// bucket nothing prints is not a count - the verb would report zero
 /// retirements while rows were being removed.
 pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String {
+    // The hold clock (x-e3cc): the age suffix on a hold line. Reads the
+    // summary's own `holds` projection, so a bucket line and its hold entry
+    // can never disagree; a row with no hold entry renders bare, exactly as
+    // before this change.
+    let hold_line = |summary: &GcSummary, id: &str| -> String {
+        let Some(h) = summary.holds.iter().find(|h| h.id == id) else {
+            return String::new();
+        };
+        let Some(age) = h.age_s else {
+            return " [held unmeasured]".to_string();
+        };
+        let mut s = format!(" [held {}, {}]", human_duration(age), h.age_basis);
+        if h.escalated {
+            s.push_str(&format!(
+                "; past {}: fno agents reap --release {id}",
+                human_duration(summary.hold_escalate_after_s.unwrap_or(0) as i64)
+            ));
+        }
+        s
+    };
     if json_out {
         let retired: Vec<Value> = summary
             .retired
@@ -143,6 +178,20 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 json!({"node": node, "harness": harness, "session_id": session_id})
             })
             .collect();
+        let holds: Vec<Value> = summary
+            .holds
+            .iter()
+            .map(|h| {
+                json!({
+                    "id": h.id,
+                    "reason": h.reason,
+                    "detail": h.detail,
+                    "age_s": h.age_s,
+                    "age_basis": h.age_basis,
+                    "escalated": h.escalated,
+                })
+            })
+            .collect();
         return format!(
             "{}\n",
             json!({
@@ -170,9 +219,13 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_live_descendants": pair(&summary.kept_live_descendants),
                 "stop_refused": pair(&summary.stop_refused),
                 "needs_live_stop": pair(&summary.needs_live_stop),
+                "dry_run_unverified": pair(&summary.dry_run_unverified),
                 "kept_no_receipt": pair(&summary.kept_no_receipt),
                 "expired_receipts": summary.expired_receipts,
                 "kept_receipts": pair(&summary.kept_receipts),
+                "holds": holds,
+                "hold_escalate_after_s": summary.hold_escalate_after_s,
+                "release_refused": summary.release_refused,
                 "dry_run": dry_run,
             })
         );
@@ -230,7 +283,10 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         ));
     }
     for (id, a, b) in &summary.kept_node_conflict {
-        out.push_str(&format!("  kept {id} (sources disagree: {a} vs {b})\n"));
+        out.push_str(&format!(
+            "  kept {id} (sources disagree: {a} vs {b}){}\n",
+            hold_line(summary, id)
+        ));
     }
     for (id, node, detail) in &summary.kept_pr_contradicts {
         out.push_str(&format!(
@@ -243,7 +299,16 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         ));
     }
     for (id, node) in &summary.kept_open_do_row {
-        out.push_str(&format!("  kept {id} (open do row on done node: {node})\n"));
+        let detail = summary
+            .holds
+            .iter()
+            .find(|h| h.id == *id)
+            .map(|h| h.detail.as_str())
+            .unwrap_or("");
+        out.push_str(&format!(
+            "  kept {id} (open do row on done node: {node}: {detail}){}\n",
+            hold_line(summary, id)
+        ));
     }
     for (id, node) in &summary.kept_planning_unclosed {
         out.push_str(&format!(
@@ -255,9 +320,21 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             "  kept {id} (active: transcript written {age_s}s ago)\n"
         ));
     }
-    for id in &summary.kept_transcript_unresolved {
+    for hold in &summary.kept_transcript_unresolved {
+        let age = hold_age(hold.held_s);
+        let decide = hold.nodes_done && hold.held_s > crate::gc_sweep::UNRESOLVED_HOLD_DECIDE_S;
+        let suffix = if decide {
+            format!("; needs a decision: fno agents rm {}", hold.id)
+        } else {
+            String::new()
+        };
+        // Main's x-1b90 line carries the clock and the 6h rm ask; the hold
+        // projection renders no second age here, so one line reads one
+        // clock. The escalated hold still asks for its release through the
+        // [reap-hold] question lane.
         out.push_str(&format!(
-            "  kept {id} (transcript unresolved: absence is not quiet)\n"
+            "  kept {} (transcript unresolved for {}: absence is not quiet{suffix})\n",
+            hold.id, age
         ));
     }
     for id in &summary.kept_graph_unreadable {
@@ -287,10 +364,24 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!("  kept {id} (live descendant: {child})\n"));
     }
     for (id, reason) in &summary.stop_refused {
-        out.push_str(&format!("  kept {id} (stop refused: {reason})\n"));
+        out.push_str(&format!(
+            "  kept {id} (stop refused: {reason}){}\n",
+            hold_line(summary, id)
+        ));
     }
     for (id, reason) in &summary.needs_live_stop {
-        out.push_str(&format!("  held {id} (needs live stop: {reason})\n"));
+        out.push_str(&format!(
+            "  held {id} (needs live stop: {reason}){}\n",
+            hold_line(summary, id)
+        ));
+    }
+    for (id, gate) in &summary.dry_run_unverified {
+        out.push_str(&format!(
+            "  held {id} (dry-run did not evaluate: {gate}; apply may still refuse)\n"
+        ));
+    }
+    for refused in &summary.release_refused {
+        out.push_str(&format!("  {refused}\n"));
     }
     for (id, reason) in &summary.kept_no_receipt {
         out.push_str(&format!("  kept {id} (no resumable receipt: {reason})\n"));
@@ -473,6 +564,18 @@ pub fn mux_sweep_text_line(mux: &MuxSweep, dry_run: bool) -> String {
     }
 }
 
+/// (x-1b90 change 3) `i64` seconds as `16h31m`, `59m`, `59s`.
+fn hold_age(held_s: i64) -> String {
+    let s = held_s.max(0) as u64;
+    if s >= 3600 {
+        format!("{}h{}m", s / 3600, (s % 3600) / 60)
+    } else if s >= 60 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! `reap` outcome rendering: every bucket, at every pass, including zero.
@@ -519,6 +622,7 @@ mod tests {
             "kept_live_descendants",
             "stop_refused",
             "needs_live_stop",
+            "dry_run_unverified",
             "kept_no_receipt",
             "expired_receipts",
             "kept_receipts",
@@ -826,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn state_file_reap_json_keeps_all_four_zero_count_families() {
+    fn state_file_reap_json_keeps_all_five_zero_count_families() {
         let summary = crate::gc_sweep::StateFilesReapSummary::default();
         let out = render_state_files_reap(&summary, true);
         let value: Value = serde_json::from_str(out.trim()).expect("valid json");
@@ -836,6 +940,7 @@ mod tests {
             "plan_locks",
             "agent_locks",
             "pr_status_cache",
+            "claim_tmp",
         ] {
             assert_eq!(value["families"][family]["scanned"], json!(0));
             assert_eq!(value["families"][family]["deleted"], json!(0));
@@ -866,7 +971,7 @@ mod tests {
         let out = render_state_files_reap(&summary, false);
 
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 6, "four families, total, and dry-run marker");
+        assert_eq!(lines.len(), 7, "five families, total, and dry-run marker");
         assert!(
             out.len() < 1_024,
             "text output grew with kept paths: {}B",
@@ -877,7 +982,57 @@ mod tests {
         assert!(lines[1].contains("within retention window=10000"));
         assert!(lines[2].starts_with("agent_locks:"));
         assert!(lines[3].starts_with("pr_status_cache:"));
-        assert!(lines[4].starts_with("total:"));
-        assert_eq!(lines[5], "(dry-run: no changes made)");
+        assert!(lines[4].starts_with("claim_tmp:"));
+        assert!(lines[5].starts_with("total:"));
+        assert_eq!(lines[6], "(dry-run: no changes made)");
+    }
+
+    /// (x-1b90 change 3) AC3-HP: a 17h hold on done work names its age and
+    /// ends with the decision. AC3-EDGE: a 2h hold carries no decision.
+    /// AC3-ERR: an old hold whose node is not done carries no decision.
+    #[test]
+    fn an_unresolved_hold_names_its_age_and_asks_for_a_decision_when_old_and_done() {
+        let hold = |held_s: i64, nodes_done: bool| UnresolvedHold {
+            id: "bp-ebd2-verb-law".into(),
+            held_s,
+            nodes_done,
+        };
+        // AC3-HP
+        let mut s = summary(&[]);
+        s.kept_transcript_unresolved
+            .push(hold(17 * 3600 + 31 * 60, true));
+        let text = render_reap(&s, false, true);
+        let line = text
+            .lines()
+            .find(|l| l.contains("bp-ebd2-verb-law"))
+            .expect("the hold line renders");
+        assert!(line.contains("transcript unresolved for 17h31m"), "{line}");
+        assert!(
+            line.ends_with("needs a decision: fno agents rm bp-ebd2-verb-law)"),
+            "{line}"
+        );
+
+        // AC3-EDGE
+        let mut s = summary(&[]);
+        s.kept_transcript_unresolved.push(hold(2 * 3600, true));
+        let line = render_reap(&s, false, true);
+        assert!(line.contains("transcript unresolved for 2h0m"), "{line}");
+        assert!(!line.contains("needs a decision"), "{line}");
+
+        // AC3-ERR
+        let mut s = summary(&[]);
+        s.kept_transcript_unresolved.push(hold(9 * 3600, false));
+        let line = render_reap(&s, false, true);
+        assert!(line.contains("transcript unresolved for 9h"), "{line}");
+        assert!(!line.contains("needs a decision"), "{line}");
+
+        // The JSON rows carry the fields the Python projection reads.
+        let mut s = summary(&[]);
+        s.kept_transcript_unresolved.push(hold(7 * 3600, true));
+        let v: Value = serde_json::from_str(render_reap(&s, true, true).trim()).unwrap();
+        let row = &v["kept_transcript_unresolved"][0];
+        assert_eq!(row["id"], "bp-ebd2-verb-law");
+        assert_eq!(row["held_s"], 7 * 3600);
+        assert_eq!(row["nodes_done"], true);
     }
 }

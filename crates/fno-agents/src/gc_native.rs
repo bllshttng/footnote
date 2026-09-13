@@ -12,11 +12,10 @@
 //! history-preserving by construction.
 //!
 //! opencode is the one arm that does NOT run through the shared cascade. The
-//! cascade is also the `rm` verb's, and `rm` has a Python twin
-//! (`fno.agents.dispatch.rm_agent`) that leaves an opencode record alone on
-//! purpose. Archiving inside the cascade would move one of those two legs and
-//! not the other, so the arm lives here, in the retirement lane, which has no
-//! twin.
+//! cascade is also the `rm` verb's, and the deleted Python rm twin left an
+//! opencode record alone on purpose. Archiving inside the cascade would move
+//! one of those two legs and not the other, so the arm lives here, in the
+//! retirement lane, which has no twin.
 //!
 //! Absence is only accepted after a complete enumeration of the exact
 //! identity; a failed read is `Unverified` or `Failed`, never absence.
@@ -76,8 +75,11 @@ impl CascadeOutcome {
 /// The typed effect record for the confirmed stop (x-5aef task 1.1). The
 /// stop seam answers a bare bool, so the vocabulary is two-valued: a
 /// confirmed stop reads `confirmed-removed`, anything else `failed` - and a
-/// `failed` stop holds the row for retry, never retires it.
-pub(crate) fn stop_outcome_effect(confirmed: bool) -> EffectRecord {
+/// `failed` stop holds the row for retry, never retires it. The `detail`
+/// (x-1b90) makes the record a measurement: the pane arm fills it with what
+/// actually ran; every other caller passes `None` and keeps the two-valued
+/// vocabulary.
+pub(crate) fn stop_outcome_effect(confirmed: bool, detail: Option<String>) -> EffectRecord {
     EffectRecord {
         op: "native-stop".into(),
         outcome: if confirmed {
@@ -85,7 +87,7 @@ pub(crate) fn stop_outcome_effect(confirmed: bool) -> EffectRecord {
         } else {
             "failed".into()
         },
-        detail: None,
+        detail,
         at: crate::daemon::now_rfc3339_like(),
     }
 }

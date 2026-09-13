@@ -878,7 +878,7 @@ def test_freshness_detects_same_version_payload_drift(tmp_path: Path) -> None:
     assert report["issue"] == "payload-drift"
     assert report["source_version"] == report["cache_version"] == "0.3.0"
     assert report["source_digest"] != report["cache_digest"]
-    assert report["remedy"] == "fno config setup codex-plugin --channel dev --refresh"
+    assert report["remedy"] == "fno config plugin install codex --force"
 
 
 def test_freshness_refuses_legacy_duplicate_state_before_digest(tmp_path: Path) -> None:
@@ -1498,7 +1498,7 @@ def test_rollback_failure_remedy_preserves_requested_channel(tmp_path: Path) -> 
     )
 
     assert report["status"] == "error"
-    assert report["remedy"] == "fno config setup codex-plugin --channel dev --refresh"
+    assert report["remedy"] == "fno config plugin install codex --force"
 
 
 def test_legacy_plugin_restore_falls_back_to_exact_config(
@@ -1832,35 +1832,56 @@ def test_external_failure_is_named_and_bounded(tmp_path: Path) -> None:
     assert len(caught.value.detail) == 500
 
 
+class _FakeStageRun:
+    """Stands in for the fno-agents plugin-install child: ``--stage-only``
+    prints a stage path, anything else is a no-op success."""
+
+    def __init__(self, argv):
+        self.argv = argv
+        self.returncode = 0
+        self.stdout = (
+            "/tmp/plugin-stage-fno\n" if argv[1:2] == ["--stage-only"] else "fake\n"
+        )
+        self.stderr = ""
+
+
 def test_public_cli_reports_verified_release_and_restart_posture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from fno.setup_cli import app
+    # The `setup codex-plugin` door retired; the public door is
+    # `fno config plugin install codex`.
+    from fno.plugin_install_cli import plugin_app
 
     monkeypatch.setattr(
-        "fno.setup.codex_plugin.converge",
-        lambda **_kwargs: ConvergenceResult("release", "installed", "fno@footnote", "0.3.0"),
+        "fno.plugin_install_cli.subprocess.run",
+        lambda argv, **_kw: _FakeStageRun(argv),
     )
-    result = CliRunner().invoke(app, ["codex-plugin", "--channel", "release"])
+    monkeypatch.setattr(
+        "fno.setup.codex_plugin.converge",
+        lambda **_kwargs: ConvergenceResult("dev", "refreshed", "fno@footnote", "0.3.2"),
+    )
+    result = CliRunner().invoke(plugin_app, ["codex", "--force"])
     assert result.exit_code == 0, result.output
-    assert "channel=release action=installed id=fno@footnote version=0.3.0" in result.output
-    assert "hook approval may be needed" in result.output
-    assert "new Codex session is required after mutation" in result.output
+    assert "converged fno@footnote 0.3.2 (action=refreshed)" in result.output
 
 
 def test_public_cli_exits_nonzero_without_success_on_stage_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from fno.setup_cli import app
+    from fno.plugin_install_cli import plugin_app
 
     def fail(**_kwargs: object) -> ConvergenceResult:
         raise CodexPluginError("plugin-add", "network unavailable")
 
+    monkeypatch.setattr(
+        "fno.plugin_install_cli.subprocess.run",
+        lambda argv, **_kw: _FakeStageRun(argv),
+    )
     monkeypatch.setattr("fno.setup.codex_plugin.converge", fail)
-    result = CliRunner().invoke(app, ["codex-plugin", "--channel", "release"])
+    result = CliRunner().invoke(plugin_app, ["codex"])
     assert result.exit_code == 1
     assert "plugin-add: network unavailable" in result.output
-    assert "verified" not in result.output
+    assert "converged" not in result.output
 
 
 def test_stable_release_noop_skips_offline_preflight_and_only_collects_live_state(

@@ -145,6 +145,10 @@ SOURCE_KINDS = frozenset(
 )
 SOURCE_KIND_DEFAULT = "organic"
 
+# Request-origin buckets; the decision lives in node_origin.rs.
+REQUEST_ORIGINS = frozenset({"operator_request", "agent_discovery", "automated_followup", "unknown"})
+REQUEST_ORIGIN_DEFAULT = "unknown"
+
 
 def validate_source_kind(value: str) -> str:
     """Return ``value`` when it is in the vocabulary; raise ``ValueError`` else.
@@ -362,6 +366,7 @@ DEFERRED_KINDS: tuple[str, ...] = (
     "expired",  # aged out by machinery, no human judgment (maintain drain, stale-quarantine)
     "blocked",  # waiting on a named thing
     "wont_do",  # an operator/author ruled against it
+    "retracted",  # filed on a false premise; stamped only by `fno backlog retract`, halt signal for the blueprint consolidation gate
     "superseded",  # the work moved elsewhere (also its own status; kind only on deferred rows)
     "later",  # real intent, not now
     "contingent",  # fires only if a named condition fires

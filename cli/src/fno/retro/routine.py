@@ -223,6 +223,7 @@ def triage_pr(
         inbox_fn=inbox_fn,
         caused_by=caused_by,
         anchor_scan_fn=scan_addressed_findings,
+        dedup_entries=existing_nodes,
     )
 
     # Autonomous keep-going engine (x-3360): after the carve-out follow-ups are
@@ -344,6 +345,7 @@ def triage_postmortems(
             create_fn=create_fn,
             inbox_fn=inbox_fn,
             anchor_scan_fn=scan_addressed_findings,
+            dedup_entries=existing_nodes,
         )
         report.results.extend(results)
         outcome = results[0].outcome if results else "failed"

@@ -153,6 +153,8 @@ def list_agents(
     not_blocked_minus_working = claude_mod.NOT_BLOCKED_STATUSES_LOWER - {"working"}
 
     rows: list[dict] = []
+    # One batched name-parse for the join, never one subprocess per row.
+    node_by_name = truth_status.parse_node_ids([entry.name for entry in filtered])
     for entry in filtered:
         from fno.agents import session_truth
 
@@ -168,6 +170,14 @@ def list_agents(
         # The transcript stamp + last turn text, same single read.
         last_event_at = truth.get("last_event_at")
         last_message = truth.get("last_message")
+        # The age's instrument, or the resolver's reason word on the
+        # unknown paths (`not-found` | `no-records` | `resolver-error`): the
+        # difference between "no transcript" and "the resolver crashed",
+        # rendered as the same blank before. Read off the SAME truth call,
+        # before `truth` is rebound below to the node-claim reading.
+        activity_basis = truth.get("last_activity_basis") or (
+            truth.get("reason") if truth_state == "unknown" else None
+        )
         # One shared derivation, reached from the truth reading already in hand
         # so no second transcript read is paid. `registry_falsifier` owns which
         # falsifier a row actually carries (a mux-pane row carries none); a row
@@ -176,6 +186,7 @@ def list_agents(
             truth_state=truth_state,
             age_s=truth.get("last_activity_age_s"),
             falsifier=registry_falsifier(entry),
+            observed_model=observed_model,
         )
         # The orthogonal axis, off the SAME truth reading already in hand: no
         # second transcript read is paid. reachability answers "can I reach
@@ -188,15 +199,18 @@ def list_agents(
             harness=entry.harness,
             route_settings_path=entry.route_settings_path,
             last_activity_age_s=truth.get("last_activity_age_s"),
+            provider_refusal=truth.get("provider_refusal"),
         )
         # x-c672 (AC7): the STATUS word is served activity (writing | quiet |
-        # parked, + orphaned for a falsified row, unknown for an unanswered
-        # probe), rendered from the same single truth reading above. The old
-        # `live` token is gone; `--status` filters on these words.
+        # parked, + orphaned for a falsified row, refused for a provider-
+        # refused row, unknown for an unanswered probe), rendered from the same
+        # single truth reading above. The old `live` token is gone; `--status`
+        # filters on these words.
         rendered_status = rendered_activity(
             truth_state=truth_state,
             age_s=reach.age_s,
             reachability=reach.verdict,
+            provider_refusal=truth.get("provider_refusal"),
         )
         if status is not None and rendered_status != status:
             continue
@@ -236,7 +250,7 @@ def list_agents(
             or str(live_status).lower() in not_blocked_minus_working
             or reach.verdict == UNREACHABLE
         ):
-            node_id = truth_status.parse_node_id(entry.name)
+            node_id = node_by_name.get(entry.name)
             if node_id is not None:
                 truth = truth_status.resolve_truth_status(
                     node_id,
@@ -264,6 +278,7 @@ def list_agents(
             progress=prog.verdict,
             progress_basis=prog.basis,
             last_activity_age_s=reach.age_s,
+            last_activity_basis=activity_basis,
             last_event_at=last_event_at,
             last_message=last_message,
             status=rendered_status,

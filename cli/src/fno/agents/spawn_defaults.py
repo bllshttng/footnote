@@ -107,6 +107,12 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         # The join call site's per-worker policy file: its PATH is a value,
         # never a prompt word.
         "--sandbox-write-policy",
+        # A retry budget is a duration, never a prompt word.
+        "--wait",
+        # A prompt-file PATH is never a prompt word.
+        "--prompt-file",
+        # The dispatch-next porcelain's pinned lane name is a value.
+        "--mux-session",
     }
 )
 
@@ -114,17 +120,6 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
 # with any of these -> exit 2). `--headless`/`-p` and `-o/--once` mean headless;
 # `-H` selects the harness and `-P` the vendor, so both are value flags here.
 _EXPLICIT_SUBSTRATE_BOOLS = ("--headless", "-p", "-o", "--once")
-
-#: x-1caa: the pane-only `--` passthrough refusal body, shared by this seam
-#: (explicit-flag substrate, pre-config-injection, covers the Rust-routed lane)
-#: and the Python CLI lane (resolved substrate incl. config defaults). One
-#: string, two triggers - reword it here, not per lane.
-PASSTHROUGH_PANE_ONLY = (
-    "passthrough after -- is pane-only; the "
-    "bg/headless argv builders carry none of the pane's provider "
-    "refusals, so the tokens cannot be forwarded. Use --substrate pane "
-    "(the default) or drop them."
-)
 
 #: A claude thread spawned with no message starts with no prompt: claude's job
 #: state reads `needs: send a prompt to start` and the row holds a worker slot
@@ -277,27 +272,37 @@ def _positional_indices(toks: Sequence[str]) -> List[int]:
     return idxs
 
 
-def _refuse_off_pane_passthrough(toks: Sequence[str], err: IO[str]) -> None:
-    """Refuse `--` passthrough tokens on an explicit bg/headless substrate
-    (x-1caa AC7): those argv builders carry none of the pane's provider
-    refusals, so forwarding there would be a second, unguarded surface.
-
-    Passthrough is fenced tokens in EITHER shape: more than one token after
-    the fence, or any fenced token beside a pre-fence positional message (the
-    legacy flag-shaped-seed idiom is exactly ONE fenced token with NO message
-    before the fence). Runs at the seam on operator argv and again after
-    config injection, so a substrate that arrived by config default - which
-    reroutes to the Rust lane before the Python CLI's own refusal can run -
-    is refused here too.
+def _demote_thread_uncarried_passthrough(toks: List[str], err: IO[str]) -> None:
+    """Rewrite an explicit or injected thread/bg substrate to pane when the
+    harness's thread lane cannot carry the fenced `--` tokens. Runs on
+    operator argv and again after config injection, covering the Rust-routed
+    lane the Python resolver never sees; the daemon-side harness_args parser
+    stays the trust-boundary backstop. Headless keeps its tokens: the
+    one-shot lanes carry them.
     """
     fence = next((i for i, t in enumerate(toks) if t == "--"), None)
     if fence is None:
         return
-    if _has_explicit_substrate(toks) not in ("thread", "bg", "headless"):
+    if _has_explicit_substrate(toks) not in ("thread", "bg"):
         return
-    if len(toks) - fence - 1 > 1 or _positional_indices(toks[:fence]):
-        print(f"fno agents spawn: {PASSTHROUGH_PANE_ONLY}", file=err)
-        raise SystemExit(2)
+    from fno.agents.harness_map import thread_uncarried
+
+    harness = _flag_value(toks, "--harness", "-H") or "claude"
+    uncarried = thread_uncarried(harness, {}, toks[fence + 1 :])
+    if uncarried is None:
+        return
+    for i, t in enumerate(toks[:fence]):
+        if t == "--substrate" and i + 1 < len(toks):
+            toks[i + 1] = "pane"
+            break
+        if t.startswith("--substrate="):
+            toks[i] = "--substrate=pane"
+            break
+    print(
+        f"fno agents spawn: substrate: pane (the {harness} thread lane "
+        f"has no carrier for {uncarried})",
+        file=err,
+    )
 
 
 def _mint_slug(existing: Set[str], rng: random.Random, err: IO[str]) -> str:
@@ -374,15 +379,16 @@ def _mint_node_name(
 ) -> Optional[str]:
     """The ``t-<node>-<slug>-<model>`` mint for a node-driven spawn (x-b80d).
 
-    Routes through :func:`fno.agents.naming.agent_name` - the single owner of
-    the 64-char budget - with the model tag as discriminator. The mint is
+    Routes through :func:`fno.agents.naming.dispatch_agent_name` - the single
+    owner of the 64-char budget - with no source (a manual launch) and the
+    model tag as discriminator. The mint is
     deterministic, so a name already taken by a live worker gets a ``-2``,
     ``-3``... suffix (the same collision-avoidance the adjective-noun mint
     retries for): a re-spawn on one node must not turn into a refusal. Any
     failure (graph read, budget, contract) returns ``None`` so pass 3 falls
     back to the adjective-noun mint: a spawn must never die on a naming lookup.
     """
-    from fno.agents.naming import AgentNameError, agent_name
+    from fno.agents.naming import AgentNameError, dispatch_agent_name
 
     try:
         node_id, slug = _node_slug_from_graph(node)
@@ -391,8 +397,8 @@ def _mint_node_name(
     if slug_flag:
         slug = slug_flag
     try:
-        name = agent_name(
-            "t", node_id or node, slug=slug, discriminator=_model_tag(model)
+        name = dispatch_agent_name(
+            None, "t", node_id or node, slug=slug, discriminator=_model_tag(model)
         )
     except AgentNameError:
         return None
@@ -542,18 +548,12 @@ def normalize_spawn_args(
             toks = toks[:cut] + ["--substrate", "bg"] + toks[cut:]
             print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
 
-    # x-1caa: a bare `--` fence carries provider passthrough (the first fenced
-    # token is the MESSAGE only in the legacy no-message idiom; click fills
-    # positionals in order). The pane substrate splices those tokens into the
-    # provider argv behind the composed-argv refusals; bg/headless build argv
-    # in Rust with none of those guards, so forwarding there would be a second,
-    # unguarded surface. Refuse here - this seam is the one front door both
-    # runtimes share - rather than dropping the tokens or corrupting the seed.
-    # A single fenced token with NO message before the fence stays the legacy
-    # flag-shaped-seed idiom, untouched.
+    # A thread lane carries only what its contract row maps: a spawn pinning
+    # thread/bg with an unmapped fenced token demotes to the pane here, on
+    # both runtimes (the Rust-routed lane never reaches the CLI's resolver).
     fence = next((i for i, t in enumerate(toks) if t == "--"), None)
     if fence is not None:
-        _refuse_off_pane_passthrough(toks, err)
+        _demote_thread_uncarried_passthrough(toks, err)
 
     # Pass 3: the NAME axis. `spawn` takes ONE positional and it is the MESSAGE;
     # the agent name is a handle the caller rarely picks, so it is minted unless
@@ -691,45 +691,122 @@ def _role_resolves(role: str, settings: object, env: Optional[Mapping[str, str]]
         return False
 
 
-def is_verb_seed(seed: Optional[str]) -> bool:
-    """Whether ``seed``'s first token is a leading slash-verb, by a pure
-    string rule: must start with ``/`` and contain no further ``/`` (an
-    absolute path never matches); strip the ``/`` and an optional ``fno:``
-    namespace; the remainder must be lowercase ``^[a-z0-9][a-z0-9_-]*$``.
+def _verb_shape_ok(tok: str) -> bool:
+    """The verb-token shape shared by every reader: a leading ``/`` or ``$``
+    sigil, no second ``/`` inside the token (an absolute path never matches),
+    an optional ``fno:`` namespace, and a lowercase-word remainder."""
+    if len(tok) < 2 or tok[0] not in "/$":
+        return False
+    body = tok[1:]
+    if "/" in body:
+        return False
+    if body.startswith("fno:"):
+        body = body[len("fno:"):]
+    return bool(_PROFILE_KEY_RE.match(body))
 
-    Shared by ``_profile_key`` (which profile row a spawn's seed selects) and
-    the permission-mode built-in rung (x-7198): a slash-verb seed is
-    fire-and-forget work, a seedless or prose seed is a conversation. The
-    attended/unattended axis is DECLARED, never inferred (the response-time
-    instrument was retracted: fno mail is injected as user-shaped text, so no
-    measurement can tell operator chatter from fleet chatter)."""
+
+def _verb_body(tok: str) -> str:
+    """``tok`` (already shape-checked) minus its sigil and ``fno:`` namespace."""
+    body = tok[1:]
+    if body.startswith("fno:"):
+        body = body[len("fno:"):]
+    return body
+
+
+def is_verb_seed(seed: Optional[str]) -> bool:
+    """Whether ``seed``'s FIRST token is a verb-shaped command: a leading
+    ``/`` or ``$`` sigil, no further ``/`` (an absolute path never matches),
+    an optional ``fno:`` namespace, remainder lowercase ``^[a-z0-9][a-z0-9_-]*$``.
+
+    This is the FIRE test, and index 0 is load-bearing: only a position-0
+    command may be rewritten or run unattended (permission-mode rung x-7198,
+    the payload-normalization gates). A verb inside prose must not pass; the
+    routing question is :func:`_verb_token`. Attended/unattended stays
+    DECLARED, never inferred (fno mail injects as user-shaped text)."""
     if not seed:
         return False
     parts = seed.split()
     if not parts:
         return False
-    tok = parts[0]
-    if not tok.startswith("/") or "/" in tok[1:]:
+    return _verb_shape_ok(parts[0])
+
+
+def _verb_token(seed: Optional[str]) -> Optional[str]:
+    """The first verb-shaped token ANYWHERE in ``seed``, sigil and namespace
+    stripped to the bare verb word; None when none. Routing never executes,
+    so ``do a /fno:blueprint`` names the blueprint stage."""
+    if not seed:
+        return None
+    for tok in seed.split():
+        if _verb_shape_ok(tok):
+            return _verb_body(tok)
+    return None
+
+
+def _known_verb_keys(profiles: object, settings: object) -> Tuple[Set[str], bool]:
+    """The vocabulary a verb seed must name, plus whether the shipped roster
+    actually RESOLVED. An unresolvable roster proves nothing about which
+    verbs exist, so the caller degrades open instead of refusing on it."""
+    known = {str(k) for k in profiles} if isinstance(profiles, Mapping) else set()
+    roster_ok = False
+    try:
+        from fno.agents.harness_map import footnote_verbs
+
+        verbs = footnote_verbs()
+        known |= set(verbs)
+        roster_ok = bool(verbs)
+    except Exception:  # noqa: BLE001 - an unreadable roster must not brick spawning
+        pass
+    registry = getattr(getattr(settings, "dispatch", None), "verbs", None)
+    if isinstance(registry, Mapping):
+        try:
+            from fno.config._dispatch_verbs import canonical_verb_key
+
+            for key in registry:
+                canon = canonical_verb_key(str(key)).lstrip("/")
+                if canon:
+                    known.add(canon)
+        except Exception:  # noqa: BLE001
+            pass
+    return known, roster_ok
+
+
+def _carries_fno_namespace(seed: Optional[str], tok: str) -> bool:
+    """Whether the seed's verb token ``tok`` carried the ``fno:`` namespace -
+    the one marker that PROVES the seed names a footnote stage. A bare verb
+    may be any harness's own command (``/code-review`` ships in no fno
+    roster and is still a real dispatch)."""
+    if not seed:
         return False
-    rest = tok[1:]
-    if rest.startswith("fno:"):
-        rest = rest[len("fno:"):]
-    return bool(_PROFILE_KEY_RE.match(rest))
+    for t in seed.split():
+        if _verb_shape_ok(t) and _verb_body(t) == tok and t[1:].startswith("fno:"):
+            return True
+    return False
 
 
-def _profile_key(seed: Optional[str]) -> Optional[str]:
-    """Derive the profile key from a seed's first token (see ``is_verb_seed``).
-
-    A seed with no leading slash-verb - every king seed, and a seedless spawn -
-    resolves to the literal key ``crown`` instead of None, so
-    ``[agents.profiles.crown]`` reaches a crown spawn exactly like every other
-    stage row."""
-    if not is_verb_seed(seed):
+def _profile_key(seed: Optional[str], known: Optional[Set[str]] = None) -> Optional[str]:
+    """Classify a seed into its profile key. THREE outcomes (x-413d): a
+    verb-shaped token that resolves (either sigil, anywhere, via
+    ``_VERB_ALIASES``) returns the canonical key; NO verb-shaped token -
+    every king seed, seedless spawn, path, plain prose - returns ``crown``,
+    so ``[agents.profiles.crown]`` reaches crown spawns like every other
+    stage row; an ``fno:``-namespaced token ``known`` rejects returns None
+    (the caller refuses naming ``_verb_token(seed)``). The namespace proves
+    fno intent, so an unknown one is a typo refusing loudly instead of
+    spawning on the crown fallback - the old two-valued version made a codex
+    dollar seed indistinguishable from a genuine crown spawn and four config
+    axes silently wrong. A BARE unknown verb is a foreign command, not an
+    fno stage, and honestly takes the crown answer. ``known=None`` never
+    returns None."""
+    tok = _verb_token(seed)
+    if tok is None:
         return "crown"
-    rest = seed.split()[0][1:]  # type: ignore[union-attr]
-    if rest.startswith("fno:"):
-        rest = rest[len("fno:"):]
-    return _VERB_ALIASES.get(rest, rest)
+    key = _VERB_ALIASES.get(tok, tok)
+    if known is None or tok in known or key in known:
+        return key
+    if _carries_fno_namespace(seed, tok):
+        return None
+    return "crown"
 
 
 def _has_permission_mode(toks: Sequence[str]) -> bool:
@@ -1068,8 +1145,19 @@ def inject_spawn_defaults(
     # the injection below - so the provider-scoped model rule, effort degrade, and
     # unknown-provider refusal all run once, on the merged fields.
     seed = _seed_of(out[1:])
-    verb = _profile_key(seed)
     profiles = getattr(agents, "profiles", None) or {}
+    known, roster_ok = _known_verb_keys(profiles, settings)
+    verb = _profile_key(seed, known if roster_ok else None)
+    if verb is None:
+        # x-413d: an unknown namespaced verb used to resolve crown silently.
+        print(
+            f"fno agents spawn: seed {seed!r} names verb-shaped token "
+            f"{_verb_token(seed)!r} but no shipped footnote verb or configured "
+            f"profile answers it",
+            file=err,
+        )
+        print("fno agents spawn: refusing; no worker launched", file=err)
+        raise SystemExit(2)
     profile_verb = verb
     profile = profiles.get(verb) if verb else None
     if profile is None and verb:
@@ -1138,7 +1226,8 @@ def inject_spawn_defaults(
     suppressed: List[Tuple[str, str, str, str]] = []
     # The slot walk's structured extras (refusal, fingerprint), empty when unset.
     _slot_meta: dict = {}
-    # Strict inventory: the resolver runs on EVERY spawn; a pin qualifies, never bypasses.
+    # Strict inventory: the resolver runs on EVERY spawn; a typed pin outranks
+    # the declared lanes, every other axis still qualifies against them.
     enforced = routing_enforcement_state(settings) == "enforced"
     if lanes_present or not model_occupied or enforced:
         if not model_occupied or enforced:
@@ -1154,15 +1243,13 @@ def inject_spawn_defaults(
             except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
                 capacity = {}
         if capacity is not None:
-            # Plan-presence, not plan quality: an unplanned target bills planning.
+            # x-ebd2: the resolved leading verb is the phase authority.
+            # blueprint/think bill planning; target never acquires frontier
+            # eligibility merely because its low-difficulty node has no plan -
+            # that model-only plan-presence inference is gone (the derived
+            # verb already routed the node to the blueprint profile).
             grid_role: Optional[str] = None
-            if grid_node_entry and verb == "target":
-                grid_role = (
-                    "execution"
-                    if (grid_node_entry.get("plan_path") or "").strip()
-                    else "planning"
-                )
-            elif verb in ("blueprint", "think"):
+            if verb in ("blueprint", "think"):
                 grid_role = "planning"
             protected_name: Optional[str] = None
             try:
@@ -1189,7 +1276,6 @@ def inject_spawn_defaults(
                     role=grid_role,
                     protected_role=protected_name,
                     model_occupied=model_occupied,
-                    explicit_model=has_model,
                     explicit_lane=_explicit_lane,
                     work_verb=verb,
                     explicit_model_value=_flag_value(out[1:], "--model", "-m") if has_model else None,
@@ -1706,10 +1792,10 @@ def inject_spawn_defaults(
         out = [*out, *_bundle_inject]
     if inject or _bundle_inject:
         # x-1caa: injection can pin the substrate the operator left open, and
-        # the Rust-routed lane never reaches the Python CLI's own refusal - so
-        # the off-pane passthrough gate re-runs on the final argv, not just the
-        # operator's.
-        _refuse_off_pane_passthrough(out[1:], err)
+        # the Rust-routed lane never reaches the Python CLI's own refusal, so
+        # the gate re-runs on the final argv. The helper rewrites `--substrate`
+        # in place and ignores toks[0], so `out` itself is the safe view.
+        _demote_thread_uncarried_passthrough(out, err)
     # `from_config` is the record of what was actually INJECTED, so it is the
     # only honest answer to "did anyone choose this model?". Reading the config
     # value instead would refuse a typed model that merely happens to sit

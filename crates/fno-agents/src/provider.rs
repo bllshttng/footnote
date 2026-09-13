@@ -222,7 +222,7 @@ impl Provider for ClaudeProvider {
             "--name".into(),
             ctx.name.clone(),
             "--".into(),
-            ctx.message.clone(),
+            normalize_claude_command(&ctx.message),
         ]);
         argv
     }
@@ -240,7 +240,7 @@ impl Provider for ClaudeProvider {
             Some(&ctx.session_id),
         )
         .expect("embedded claude headless-resume capability");
-        argv.extend(["--".into(), ctx.message.clone()]);
+        argv.extend(["--".into(), normalize_claude_command(&ctx.message)]);
         argv
     }
 
@@ -439,6 +439,21 @@ pub fn normalize_codex_command(message: &str) -> String {
         format!("$fno:{verb}")
     } else if command.starts_with("$fno:") {
         command.to_string()
+    } else {
+        message.to_string()
+    }
+}
+
+/// Mirror of [`normalize_codex_command`] for the claude target. A seed's
+/// sigil says WHO WROTE it, never which harness runs it (x-413d), so a
+/// codex-authored `$fno:verb` command is rewritten to claude's native
+/// `/fno:verb` spelling before delivery. First token only: commands cannot
+/// be inline but skills can, and rewriting an inline mention would corrupt
+/// prose. A slash seed is already claude's spelling and passes through.
+pub fn normalize_claude_command(message: &str) -> String {
+    let command = message.trim();
+    if let Some(verb) = command.strip_prefix("$fno:") {
+        format!("/fno:{verb}")
     } else {
         message.to_string()
     }
@@ -2041,6 +2056,48 @@ mod tests {
         assert_eq!(
             normalize_codex_command("  review this\n  code  "),
             "  review this\n  code  "
+        );
+    }
+
+    /// x-413d: the sigil says WHO WROTE the seed, never which harness runs
+    /// it. A codex-authored `$fno:verb` command reaching a claude target is
+    /// rewritten to claude's native `/fno:verb`; a slash seed is already
+    /// claude's spelling, and prose or an inline mention is never touched.
+    #[test]
+    fn claude_create_and_resume_normalize_codex_dollar_commands() {
+        let mut create = create_ctx();
+        create.message = "  $fno:target x-81ad  ".into();
+        assert_eq!(
+            ClaudeProvider
+                .create_argv(&create)
+                .last()
+                .map(String::as_str),
+            Some("/fno:target x-81ad")
+        );
+
+        let resume = ResumeContext {
+            session_id: "uuid-1".into(),
+            message: "  $fno:blueprint x-81ad  ".into(),
+            cwd: PathBuf::from("/x"),
+            from_name: None,
+            yolo: false,
+        };
+        assert_eq!(
+            ClaudeProvider
+                .resume_argv(&resume)
+                .last()
+                .map(String::as_str),
+            Some("/fno:blueprint x-81ad")
+        );
+
+        assert_eq!(normalize_claude_command("/fno:target x"), "/fno:target x");
+        assert_eq!(
+            normalize_claude_command("do a $fno:blueprint"),
+            "do a $fno:blueprint"
+        );
+        assert_eq!(
+            normalize_claude_command("build feature X"),
+            "build feature X"
         );
     }
 

@@ -30,12 +30,16 @@ fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
 // the same verb with `--driver king` over a king manifest and a mocked board.
 
 fn king_manifest(dir: &Path, fno_id: &str) -> PathBuf {
+    king_manifest_with_budget(dir, fno_id, 40)
+}
+
+fn king_manifest_with_budget(dir: &Path, fno_id: &str, budget: u64) -> PathBuf {
     let path = dir.join("king-state.md");
     fs::write(
         &path,
         format!(
             "---\nfno_id: {fno_id}\ncreated_at: 2026-08-18T00:00:00Z\nscope: drain\n\
-             harness: claude\nbudget_max_iterations: 40\n---\n"
+             harness: claude\nbudget_max_iterations: {budget}\n---\n"
         ),
     )
     .unwrap();
@@ -311,6 +315,53 @@ const BOARD_CLEAN: &str = r#"{
   ]
 }"#;
 
+/// A quiet board whose drain read answers each count in order (the last
+/// repeats), plus an escalate argv recorder. A `None` count is the unreadable
+/// drain: the stub exits 1, which production records as the i64::MAX
+/// sentinel. Pre-staging wins: king_prepare_fixture stages its default mock
+/// only when the file is absent.
+fn king_quiet_drain_bin(dir: &Path, counts: &[Option<i64>], log: &Path) -> PathBuf {
+    let spec = king_board_bin(dir, BOARD_CLEAN, 0);
+    let counter = dir.join("drain-count");
+    let n = counts.len();
+    let arms: String = counts
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let label = if i + 1 == n {
+                "*"
+            } else {
+                &(i + 1).to_string()
+            };
+            match c {
+                Some(v) => {
+                    format!("  {label}) echo '{{\"scope\":\"drain\",\"undelivered\":{v}}}';;\n")
+                }
+                None => format!("  {label}) exit 1;;\n"),
+            }
+        })
+        .collect();
+    make_script(
+        dir,
+        "escalate-mock",
+        &format!(
+            "if [ \"$1\" = agents ] && [ \"$2\" = king ] && [ \"$3\" = drain ]; then\n\
+             n=$(cat {counter} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {counter}\n\
+             case $n in\n{arms}esac\n\
+             exit 0\nfi\n\
+             if [ \"$1\" = agents ] && [ \"$2\" = king ] && [ \"$3\" = escalate ]; then\n\
+             echo \"$*\" >> {log}\n\
+             echo q-mock\n\
+             exit 0\nfi\n\
+             exit 0",
+            counter = counter.display(),
+            arms = arms,
+            log = log.display(),
+        ),
+    );
+    spec
+}
+
 #[test]
 fn king_arm_blocks_while_the_board_is_not_empty() {
     let tmp = TempDir::new().unwrap();
@@ -397,16 +448,7 @@ fn an_unreadable_question_source_blocks_a_clean_board() {
     let bin_dir = TempDir::new().unwrap();
     let spec = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
     king_prepare_fixture(cwd, bin_dir.path(), &spec);
-    fs::write(
-        bin_dir.path().join("stubs").join("fno-py"),
-        "#!/bin/sh\ncase \"$*\" in\n  *\"inbox outstanding\"*) exit 1;;\n  *\"backlog ready\"*) echo '[]';;\n  *) echo '{}';;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(
-        bin_dir.path().join("stubs").join("fno-py"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
+    write_unreadable_questions_stub(bin_dir.path());
 
     let (code, d) = king_spawn(&state, cwd, &events, bin_dir.path());
 
@@ -420,6 +462,22 @@ fn an_unreadable_question_source_blocks_a_clean_board() {
             .contains("outstanding operator questions are unreadable"),
         "the block must name the unreadable question source: {d}"
     );
+}
+
+/// The stub every fire of an unreadable-questions test needs. `king_fire`
+/// rewrites the fixture's fno-py on every call, so the override happens once,
+/// after the fixture is prepared, and the test spawns directly.
+fn write_unreadable_questions_stub(bin_dir: &Path) {
+    fs::write(
+        bin_dir.join("stubs").join("fno-py"),
+        "#!/bin/sh\ncase \"$*\" in\n  *\"inbox outstanding\"*) exit 1;;\n  *\"backlog ready\"*) echo '[]';;\n  *) echo '{}';;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        bin_dir.join("stubs").join("fno-py"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -1124,4 +1182,176 @@ fn external_read_timeout_king_board_blocks_named() {
             && undispatched_err.contains("slice of the board budget"),
         "the killed source is named in the payload as a budget kill: {undispatched_err}"
     );
+}
+
+// ── the quiet-board bound (x-1959's defect) ──────────────────────────────────
+//
+// A board reading zero actionable while scope nodes sit undelivered used to
+// return above the manifest ceiling and the dry-fire backstop: blocking was
+// unbounded and the parked state was never recorded. These drive the bound.
+
+/// AC1: a constant undelivered count reaches the dry-fire backstop on the
+/// third fire, and the NoProgress terminal escalates.
+#[test]
+fn a_quiet_board_with_undelivered_scope_terminates_noprogress_at_the_dry_ceiling() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let bin_dir = TempDir::new().unwrap();
+    let log = cwd.join("escalations.log");
+    let state = king_manifest(cwd, "k-quiet");
+    let events = cwd.join("events.jsonl");
+    let spec = king_quiet_drain_bin(bin_dir.path(), &[Some(3)], &log);
+
+    let mut last = (0, serde_json::Value::Null);
+    for _ in 0..3 {
+        last = king_fire(&state, cwd, &events, &spec);
+    }
+
+    assert_eq!(last.0, 0, "{:?}", last.1);
+    assert_eq!(last.1["decision"], "allow", "{:?}", last.1);
+    assert_eq!(last.1["termination_reason"], "NoProgress");
+    let logged = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        logged.contains("--reason NoProgress"),
+        "the NoProgress terminal must escalate: {logged}"
+    );
+}
+
+/// AC2: the manifest ceiling terminates Budget on the fire it advertises,
+/// naming both the ceiling and what the reign was waiting on.
+#[test]
+fn a_quiet_board_reaches_the_manifest_ceiling_as_budget() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let bin_dir = TempDir::new().unwrap();
+    let log = cwd.join("escalations.log");
+    let state = king_manifest_with_budget(cwd, "k-budget", 3);
+    let events = cwd.join("events.jsonl");
+    let spec = king_quiet_drain_bin(bin_dir.path(), &[Some(3)], &log);
+
+    let mut last = (0, serde_json::Value::Null);
+    for _ in 0..3 {
+        last = king_fire(&state, cwd, &events, &spec);
+    }
+
+    assert_eq!(last.1["decision"], "allow", "{:?}", last.1);
+    assert_eq!(last.1["termination_reason"], "Budget");
+    let reason = last.1["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("ceiling of 3") && reason.contains("3 scope nodes still undelivered"),
+        "{reason}"
+    );
+}
+
+/// AC3: a shrinking undelivered count is the quiet board's progress signal;
+/// each shrink resets the dry streak, so the reign keeps blocking.
+#[test]
+fn a_shrinking_undelivered_count_resets_the_dry_streak() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let bin_dir = TempDir::new().unwrap();
+    let log = cwd.join("escalations.log");
+    let state = king_manifest(cwd, "k-shrinking");
+    let events = cwd.join("events.jsonl");
+    let spec = king_quiet_drain_bin(bin_dir.path(), &[Some(5), Some(4), Some(3)], &log);
+
+    let mut last = (0, serde_json::Value::Null);
+    for _ in 0..3 {
+        last = king_fire(&state, cwd, &events, &spec);
+    }
+
+    assert_eq!(last.1["decision"], "block", "{:?}", last.1);
+    assert_eq!(last.1["termination_reason"], serde_json::Value::Null);
+}
+
+/// AC4: an unreadable drain is the i64::MAX sentinel and never a baseline, so
+/// a later real count cannot read as a shrink against it.
+#[test]
+fn an_unreadable_drain_is_never_a_progress_baseline() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let bin_dir = TempDir::new().unwrap();
+    let log = cwd.join("escalations.log");
+    let state = king_manifest(cwd, "k-blind-drain");
+    let events = cwd.join("events.jsonl");
+    let spec = king_quiet_drain_bin(bin_dir.path(), &[None, None, Some(5)], &log);
+
+    let fires: Vec<_> = (0..3)
+        .map(|_| king_fire(&state, cwd, &events, &spec))
+        .collect();
+
+    assert_eq!(fires[1].1["decision"], "block", "{:?}", fires[1].1);
+    // Had the sentinel been recorded as a baseline, 5 < i64::MAX would read
+    // as progress and the third fire would block. It must terminate.
+    assert_eq!(
+        fires[2].1["termination_reason"], "NoProgress",
+        "{:?}",
+        fires[2].1
+    );
+}
+
+/// AC5: the unreadable-questions block is bounded, and each blocking fire
+/// emitted its journal row so the counters advanced to the bound.
+#[test]
+fn an_unreadable_question_source_is_bounded_not_eternal() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-questions-bounded");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let spec = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+    king_prepare_fixture(cwd, bin_dir.path(), &spec);
+    write_unreadable_questions_stub(bin_dir.path());
+
+    let mut last = (0, serde_json::Value::Null);
+    for _ in 0..3 {
+        last = king_spawn(&state, cwd, &events, bin_dir.path());
+    }
+
+    assert_eq!(last.1["decision"], "allow", "{:?}", last.1);
+    assert_eq!(last.1["termination_reason"], "NoProgress");
+    let journal = fs::read_to_string(&events).unwrap();
+    let rows = journal
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|v| v["type"] == "king_loop_check")
+        .filter(|v| v["data"]["session_id"] == "k-questions-bounded")
+        .count();
+    assert!(
+        rows >= 2,
+        "every blocking fire must emit a journal row: {rows} rows in {journal}"
+    );
+}
+
+/// AC6: an open operator question still blocks forever, by design - the
+/// parked state is the open question and only the operator's answer
+/// releases it.
+#[test]
+fn an_open_operator_question_never_terminates() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-question");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let spec = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+    let questions = bin_dir.path().join("questions.jsonl");
+    fs::write(
+        &questions,
+        r#"{"ts":"2026-09-06T00:00:00Z","type":"operator_question","data":{"question_id":"q-k-open-forever","question":"choose","session_id":"k-question"}}
+"#,
+    )
+    .unwrap();
+
+    for i in 0..5 {
+        let (code, d) = king_fire(&state, cwd, &events, &spec);
+        assert_eq!(code, 0);
+        assert_eq!(d["decision"], "block", "fire {}: {:?}", i + 1, d);
+        assert_eq!(
+            d["termination_reason"],
+            serde_json::Value::Null,
+            "fire {} must never terminate: {:?}",
+            i + 1,
+            d
+        );
+    }
 }

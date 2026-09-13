@@ -265,6 +265,38 @@ mod tests {
         assert!(!state.read_ok());
     }
 
+    /// The row change gate answers "did the registry change", never "did the
+    /// clock move": derived rows carry the measurement instant, so two ticks
+    /// over the same stamp+bytes derive equal rows and the second publishes
+    /// nothing. This is the test that failed before the `liveness_age_s`
+    /// field stopped ticking.
+    #[test]
+    fn an_unchanged_registry_publishes_nothing_as_time_passes() {
+        let mut state = ReaderState::default();
+        let raw = r#"{"schema_version": 6, "agents": [{"name": "w", "cwd": "/tmp", "status": "running", "liveness": "alive", "liveness_measured_at": "2027-01-15T07:59:00Z"}]}"#;
+        let first = state.tick(
+            stamp(1),
+            || Some(raw.to_string()),
+            None,
+            || None,
+            Vec::new(),
+            1_800_000_000,
+        );
+        assert!(first.is_some(), "the first tick always publishes");
+        let second = state.tick(
+            stamp(1),
+            || panic!("an unchanged stamp must not re-read"),
+            None,
+            || None,
+            Vec::new(),
+            1_800_000_001,
+        );
+        assert!(
+            second.is_none(),
+            "one second later the same bytes derive equal rows: nothing to publish"
+        );
+    }
+
     /// (x-688b, codex P1) A readability flip with unchanged rows must still
     /// publish: garbage-from-startup (not ok) turning into a valid empty
     /// registry (ok) keeps the row set identical, and the core would never

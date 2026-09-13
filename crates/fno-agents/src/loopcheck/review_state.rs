@@ -34,6 +34,16 @@ impl CoverageReport {
         Some(ReviewState::Unreviewed)
     }
 
+    /// The state read at the round budget (d-0fa92eb9): a spent budget on a
+    /// covered row IS reviewed, whatever the verdict freshness says. Under
+    /// the budget, or on an uncovered row, the plain derivation stands.
+    pub fn review_state_at(&self, budget_spent: bool) -> Option<ReviewState> {
+        if budget_spent && matches!(self.coverage, Coverage::Covered(n) if n > 0) {
+            return Some(ReviewState::Reviewed);
+        }
+        self.review_state()
+    }
+
     pub fn refused_reviewers(&self) -> Vec<&str> {
         self.verdicts
             .iter()
@@ -156,7 +166,9 @@ mod tests {
         // One oracle, two readers (the optional_apps_default.json pattern):
         // `CoverageReport::review_state` here and `_derive_review_state` in
         // cli/src/fno/pr/_reviews.py both answer these rows, so a drift on
-        // either side fails its own test against the SAME file.
+        // either side fails its own test against the SAME file. A row that
+        // carries `rounds_exhausted` is read at that budget, mirroring the
+        // Python golden's `rounds_exhausted` pass-through.
         let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../cli/tests/config/review_state_table.json");
         let text = std::fs::read_to_string(&golden)
@@ -172,9 +184,10 @@ mod tests {
                         .unwrap_or_else(|e| panic!("row {}: {e}", row["name"]))
                 })
                 .collect();
+            let spent = row["rounds_exhausted"].as_bool().unwrap_or(false);
             let rep = CoverageReport {
                 github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
+                coverage: Coverage::Covered(if spent { 1 } else { 0 }),
                 verdicts,
             };
             let expected = match row["expected_state"].as_str().unwrap() {
@@ -184,11 +197,72 @@ mod tests {
                 other => panic!("unknown expected_state {other}"),
             };
             assert_eq!(
-                rep.review_state(),
+                rep.review_state_at(spent),
                 Some(expected),
                 "row {} diverged",
                 row["name"].as_str().unwrap_or("?")
             );
         }
+    }
+
+    #[test]
+    fn spent_budget_reads_reviewed_beside_a_stale_verdict() {
+        // The PR 1717 shape: a local pass recorded at an older head reads
+        // stale at the current one, and the optional App refused. The budget
+        // is spent, so the row IS reviewed - only the count (1) carries.
+        let rep = CoverageReport {
+            github_approval_satisfies: false,
+            coverage: Coverage::Covered(1),
+            verdicts: vec![
+                github_verdict_with_required(
+                    "chatgpt-codex-connector",
+                    CoverageVerdict::Refused,
+                    false,
+                ),
+                ReviewerVerdict {
+                    producer: CoverageProducer::LocalAttestation,
+                    name: "code-review".to_string(),
+                    verdict: CoverageVerdict::Stale,
+                    human_approval: false,
+                    author_approval: false,
+                    attestation_origin: AttestationOrigin::Unknown,
+                    reviewed_sha: "444500be".to_string(),
+                    freshness: Some(Freshness::Stale),
+                    scope: None,
+                    refusal_reason: None,
+                    reviewer_context: None,
+                    required: true,
+                    passed: false,
+                },
+            ],
+        };
+        assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+        assert_eq!(rep.review_state_at(true), Some(ReviewState::Reviewed));
+    }
+
+    #[test]
+    fn under_budget_stale_verdict_stays_unreviewed() {
+        // The twin: the same row one round under the budget keeps today's
+        // reading, so the spent-budget pass is the cap's doing alone.
+        let rep = CoverageReport {
+            github_approval_satisfies: false,
+            coverage: Coverage::Covered(0),
+            verdicts: vec![ReviewerVerdict {
+                producer: CoverageProducer::LocalAttestation,
+                name: "code-review".to_string(),
+                verdict: CoverageVerdict::Stale,
+                human_approval: false,
+                author_approval: false,
+                attestation_origin: AttestationOrigin::Unknown,
+                reviewed_sha: "444500be".to_string(),
+                freshness: Some(Freshness::Stale),
+                scope: None,
+                refusal_reason: None,
+                reviewer_context: None,
+                required: true,
+                passed: false,
+            }],
+        };
+        assert_eq!(rep.review_state_at(false), Some(ReviewState::Unreviewed));
     }
 }

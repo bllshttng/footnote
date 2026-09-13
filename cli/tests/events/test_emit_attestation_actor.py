@@ -147,48 +147,69 @@ def test_attestation_marks_missing_sidecar_unjoined(tmp_path: Path) -> None:
     assert _last_event(repo)["data"]["invocation_id"] == "UNJOINED"
 
 
-def test_attestation_records_the_routed_model(tmp_path: Path) -> None:
-    """A routed session -> the attestation names the model that rendered the
-    verdict. Routing stamps ANTHROPIC_MODEL for the whole worker process, so a
-    build-lane worker reviews its own diff on the routed model and no per-spawn
-    role guard can see it."""
-    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: claude\n")
+def _env_without_ambient_identity(**extra: str) -> dict:
+    """The subprocess env with every ambient session marker scrubbed, so the
+    transcript read deterministically answers not-observable on any machine -
+    CI has no markers anyway, but a developer shell runs under a live harness
+    session whose transcript WOULD resolve, and the assertion below must not
+    depend on where pytest ran."""
+    markers = (
+        "CODEX_THREAD_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+        "OPENCODE_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "FNO_HARNESS_NAME",
+        "FNO_HARNESS_SESSION_ID",
+    )
     env = {
-        **os.environ,
-        "FNO": "fno-py",
-        "ANTHROPIC_MODEL": "glm-5.2[1m]",
+        k: v for k, v in os.environ.items()
+        if k not in ("ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL") + markers
+    }
+    env["FNO"] = "fno-py"
+    env.update(extra)
+    return env
+
+
+def test_attestation_drops_the_routed_env_model_claim(tmp_path: Path) -> None:
+    """The routed env names the model the session ASKED for, never the one that
+    answered - a non-Anthropic name over an unset base URL silently falls back
+    to the primary model. The emitter passes no model; the emit chokepoint
+    stamps the transcript, so an unresolvable transcript means the env claim is
+    DROPPED, not laundered into the record. provider stays an honest env fact."""
+    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: claude\n")
+    env = _env_without_ambient_identity(
+        ANTHROPIC_MODEL="glm-5.2[1m]",
         # Userinfo included on purpose: a base_url may carry a credential, and
         # the event log is durable - neither the path nor the key may land in it.
-        "ANTHROPIC_BASE_URL": "https://sk-secret@api.z.ai/api/anthropic",
-    }
+        ANTHROPIC_BASE_URL="https://sk-secret@api.z.ai/api/anthropic",
+    )
     r = subprocess.run(
         ["bash", str(_SCRIPT), "code-review", "pass"],
         cwd=repo, env=env, capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
     data = _last_event(repo)["data"]
-    assert data["model"] == "glm-5.2[1m]"
+    assert "model" not in data
     assert data["provider"] == "api.z.ai"
     assert "sk-secret" not in json.dumps(data) and "sk-secret" not in r.stderr
 
 
-def test_attestation_model_is_empty_not_guessed_when_unrouted(tmp_path: Path) -> None:
-    """No routing -> empty, never a guessed default. A fabricated model name
-    would be read later as evidence of which model reviewed."""
+def test_attestation_model_is_absent_not_guessed_when_unobservable(tmp_path: Path) -> None:
+    """No routing and no ambient identity -> NO model key. A fabricated model
+    name would be read later as evidence of which model reviewed; the schema
+    contract is that empty means not observable, so the key is absent rather
+    than a guess."""
     repo = _temp_git_repo(tmp_path, "session_id: s\nharness: claude\n")
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in ("ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL")
-    }
-    env["FNO"] = "fno-py"
+    env = _env_without_ambient_identity()
     r = subprocess.run(
         ["bash", str(_SCRIPT), "code-review", "pass"],
         cwd=repo, env=env, capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
     data = _last_event(repo)["data"]
-    assert data["model"] == ""
+    assert "model" not in data
     assert data["provider"] == ""
 
 

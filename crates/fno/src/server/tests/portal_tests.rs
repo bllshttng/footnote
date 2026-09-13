@@ -978,6 +978,116 @@ fn thread_pane_ctl_lands_the_reach_and_replies_where() {
 }
 
 #[test]
+fn thread_pane_ctl_new_portal_lands_in_its_own_tab_and_leaves_portal_0_alone() {
+    // AC2-HP (x-3ea6): a machine reach asking for `portal new` takes the
+    // next free index in a NEW tab. Portal 0 still seats row A, tab T's
+    // focus never moves, and the reply names the index the server picked.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let agents = || {
+        vec![
+            bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+            bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+        ]
+    };
+    // Seed: portal 0 seats row A (its viewer is tab T's focus pane P).
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.portal_ctl("deadbee1", 0, PanePlacement::default(), Some(agents()), tx);
+    let _ = rx.blocking_recv().expect("seed reply");
+    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+    let (sid, tab_t) = core.session.find_pane(a_seat).expect("A's pane in tree");
+
+    // Reach row B through the same door with portal_new + TabSel::New.
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.portal_ctl(
+        "deadbee2",
+        0,
+        PanePlacement {
+            portal_new: true,
+            tab: Some(TabSel::New),
+            ..Default::default()
+        },
+        Some(agents()),
+        tx,
+    );
+    match rx.blocking_recv().expect("a reply") {
+        ServerMsg::Notice { text } => assert!(
+            text.contains("thread pane -> target-b") && text.contains("portal 1"),
+            "the reply names B and the resolved index: {text}"
+        ),
+        other => panic!("expected a Notice landing, got {other:?}"),
+    }
+    assert_eq!(
+        core.portals.get(&0).map(|e| e.seat),
+        Some(a_seat),
+        "portal 0 still seats row A"
+    );
+    let b_seat = core
+        .portals
+        .get(&1)
+        .unwrap_or_else(|| panic!("row B at the server-picked index"))
+        .seat;
+    let (_, b_tab) = core.session.find_pane(b_seat).expect("B's pane in tree");
+    assert_ne!(tab_t, b_tab, "row B landed in a tab of its own");
+    assert_eq!(
+        core.session.squad(sid).expect("squad").tabs[tab_t].focus,
+        a_seat,
+        "tab T's focus is still row A's viewer"
+    );
+    assert_eq!(
+        core.session.squad(sid).expect("squad").tabs[b_tab].focus,
+        b_seat,
+        "the new tab's focus is row B's viewer"
+    );
+    core.reap_pane(a_seat);
+    core.reap_pane(b_seat);
+}
+
+#[test]
+fn thread_pane_ctl_new_portal_refuses_when_no_index_is_free() {
+    // AC2-ERR (x-3ea6): a `new` reach on a full portal space replies Err
+    // naming the ceiling and spawns nothing - it never repoints an index.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, p1, _rx) = thread_core();
+    for idx in 0..=u8::MAX {
+        core.portals.insert(
+            idx,
+            Portal {
+                row_key: format!("sentinel-{idx}"),
+                seat: p1, // a live pane, so every index is held
+                tab: 1,
+            },
+        );
+    }
+    let panes_before = core.panes.len();
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.portal_ctl(
+        "deadbee2",
+        0,
+        PanePlacement {
+            portal_new: true,
+            tab: Some(TabSel::New),
+            ..Default::default()
+        },
+        Some(vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))]),
+        tx,
+    );
+    match rx.blocking_recv().expect("a reply") {
+        ServerMsg::Err { msg, .. } => assert!(
+            msg.contains("no free portal"),
+            "the refusal names the exhausted space: {msg}"
+        ),
+        other => panic!("expected an Err refusal, got {other:?}"),
+    }
+    assert_eq!(core.panes.len(), panes_before, "nothing spawned");
+    assert_eq!(
+        core.portals.get(&255).map(|e| e.row_key.as_str()),
+        Some("sentinel-255"),
+        "no index was repointed"
+    );
+}
+
+#[test]
 fn thread_pane_ctl_refuses_an_unknown_name() {
     let (mut core, _client_id, _p1, _rx) = thread_core();
     let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
@@ -1936,6 +2046,7 @@ fn the_restore_notice_names_both_held_kinds() {
             worker: Some("t-live-one".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("live-session".into()),
+            pane_id: None,
         }],
     )
     .unwrap();
@@ -2132,6 +2243,7 @@ fn a_portal_onto_a_done_row_prunes_with_the_done_set() {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }],
     )
     .unwrap();
@@ -2216,4 +2328,95 @@ fn the_notice_latch_holds_through_the_restart_path() {
         "a held portal disarms the discoverability notice: {notices:?}"
     );
     assert!(!core.portal_noticed, "nothing latched");
+}
+
+/// (x-9b37) AC2: with two portals open, the reap of one viewer's subject
+/// closes only that viewer's pane. The neighbour's pane, its portal entry,
+/// and its tab all survive. This pins the two-leaf arithmetic that rules
+/// the reported tab cascade out: a cascade would have taken BOTH panes.
+#[test]
+fn reaping_one_portals_subject_leaves_the_sibling_portal_alone() {
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, _rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    core.command(client_id, portal_reach_cmd("deadbee2", 1));
+    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+    let b_seat = core.portals.get(&1).expect("portal 1 open").seat;
+
+    core.close_pane_reasoned(a_seat, "child exited");
+
+    assert!(
+        !core.panes.contains_key(&a_seat),
+        "the reaped subject's viewer is gone"
+    );
+    assert!(
+        core.panes.contains_key(&b_seat),
+        "the sibling portal's pane survives the neighbour's reap"
+    );
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(b_seat),
+        "portal 1 still seats the sibling viewer"
+    );
+    assert!(
+        core.session.find_pane(b_seat).is_some(),
+        "the tab still exists for the sibling"
+    );
+}
+
+/// (x-9b37) AC3: a portal whose seat pane closes says so, naming the portal
+/// index, the row, and the reason. The x-d545 stand-in swap keeps the view,
+/// so it stays silent: nothing was lost.
+#[test]
+fn a_vanishing_portal_says_so_and_names_its_row() {
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    core.command(client_id, portal_reach_cmd("deadbee2", 1));
+    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+    let b_seat = core.portals.get(&1).expect("portal 1 open").seat;
+    while rx.try_recv().is_ok() {}
+
+    core.close_pane_reasoned(b_seat, "child exited");
+    let loss = collect_until_portal_closed(&mut rx, "portal 1").expect("the loss notice arrived");
+    assert!(
+        loss.contains("deadbee2") && loss.contains("child exited"),
+        "the notice names the row and the reason: {loss:?}"
+    );
+
+    // The LAST portal gets the x-d545 stand-in instead: the view survives,
+    // so there is no loss notice for portal 0.
+    core.close_pane_reasoned(a_seat, "child exited");
+    while let Ok(msg) = rx.try_recv() {
+        if let ServerMsg::Notice { text } = msg {
+            assert!(
+                !text.contains("portal 0"),
+                "the stand-in swap keeps the view and stays silent: {text:?}"
+            );
+        }
+    }
+}
+
+/// Drain `rx` until a Notice naming `needle` arrives, collecting it; the
+/// caller asserts on the text. Returns None at channel exhaustion so a
+/// missing notice fails the caller's expect, never hangs.
+fn collect_until_portal_closed(rx: &mut mpsc::Receiver<ServerMsg>, needle: &str) -> Option<String> {
+    while let Ok(msg) = rx.try_recv() {
+        if let ServerMsg::Notice { text } = msg {
+            if text.contains(needle) {
+                return Some(text);
+            }
+        }
+    }
+    None
 }

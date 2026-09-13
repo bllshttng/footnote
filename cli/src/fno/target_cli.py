@@ -20,6 +20,7 @@ init script owns the owner_cwd worktree binding and all state.
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import io
 import json
 import os
@@ -30,13 +31,41 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, NoReturn, Optional, Tuple
 
 import typer
 
-from fno._subprocess_util import propagate_returncode
+from fno._subprocess_util import propagate_returncode, run_bounded
 from fno.paths import resolve_plugin_script
 from fno.tombstones import tombstone_group_cls
+
+# Below the Claude Bash tool's 600s call cap, well below the 10+ minute stalls this bound targets.
+_START_DEADLINE_S = 540
+_STAGE_GRACE_S = 15  # a stage's process group dies this long before the watchdog would
+
+
+def _stage_timeout(deadline: float) -> float:
+    return max(1.0, deadline - time.monotonic() - _STAGE_GRACE_S)
+
+
+def _stage_timeout_exit(step: str, extra: str) -> NoReturn:
+    typer.echo(
+        f"fno do target start: step: {step} exceeded the {_START_DEADLINE_S}s start "
+        f"bound; its process group was killed. {extra}",
+        err=True,
+    )
+    raise typer.Exit(code=124)
+
+
+def _run_bounded_init(cmd: list[str], cwd: Path, deadline: float, node: str) -> subprocess.CompletedProcess:
+    try:
+        return run_bounded(cmd, timeout=_stage_timeout(deadline), cwd=str(cwd))
+    except subprocess.TimeoutExpired:
+        _stage_timeout_exit(
+            "init",
+            f"Claim state is unknown: check fno agents claim status node:{node}. "
+            f"A rerun of fno do target start {node} resumes idempotently.",
+        )
 
 
 target_app = typer.Typer(
@@ -674,7 +703,7 @@ def _fetch_dispatch_region_file(
     if not isinstance(root, str) or not os.path.isdir(root):
         return None
     try:
-        from fno.graph.cli import _fetch_retro_comment, _read_merged_region
+        from fno.graph.maintain import _fetch_retro_comment, _read_merged_region
 
         comment = _fetch_retro_comment(
             source_pr, finding_hash, root, repo=repo
@@ -1104,15 +1133,18 @@ def _self_review_refusal(
 
 
 def _hold_branch_under_review(
-    cwd: Path, *, head_sha: str, session_id: str, receipt: dict[str, Any], branch: str = ""
+    cwd: Path, *, head_sha: str, session_id: str, receipt: dict[str, Any], branch: str
 ) -> None:
     """Register that a review of ``branch`` at ``head_sha`` is RUNNING.
 
     The requester side, so every pipeline review is held without a reviewer
     remembering. On PR 1575 the merge fired mid-review and discarded eight
-    findings, one HIGH. The hold existed and nothing took it. ``branch`` is the
-    PR's own head ref on the post-push form: a local alias with a matching sha
-    keys a hold the merge guard, which reads GitHub, never looks up.
+    findings, one HIGH. The hold existed and nothing took it. ``branch`` is
+    what the caller resolved: the local branch on the pre-push form, the PR's
+    own head ref on the post-push form - a local alias with a matching sha
+    keys a hold the merge guard, which reads GitHub, never looks up. The cwd
+    is never read for one (x-b5f6): a hold on a guessed branch reports
+    protection of a PR it is not protecting.
 
     Best-effort throughout. An unconfirmed send takes nothing. A refused
     invocation takes nothing, since it emits no attestation and nothing would
@@ -1124,7 +1156,6 @@ def _hold_branch_under_review(
     try:
         from fno.pr._review_hold import acquire_review_hold, review_invocation_refusal
 
-        branch = branch or (_git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
         if not branch or branch == "HEAD":
             return
         if review_invocation_refusal(branch, head_sha, cwd=str(cwd)):
@@ -1152,7 +1183,7 @@ def request_self_review_cmd(
     head_sha = _git_out(cwd, "rev-parse", "HEAD") or ""
     base_branch = ""
     branch = ""
-    hold_branch = ""  # empty: the helper reads the local branch for itself
+    hold_branch = ""
     metadata: dict[str, Any] = {}
     try:
         if not head_sha:
@@ -1171,6 +1202,7 @@ def request_self_review_cmd(
                 raise RuntimeError(
                     "no branch to review; check out the feature branch"
                 )
+            hold_branch = branch
             base_branch = (
                 _git_out(cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
                 or ""
@@ -1779,6 +1811,14 @@ def init(
         typer.echo(_denom_refusal, err=True)
         raise typer.Exit(code=2)
 
+    # First-bind the graph pointer (x-f8b1 change 2), the reverse leg of the
+    # x-39c0 backfill above: init --plan-path wrote only the manifest, so the
+    # graph never learned the plan exists (x-7649). Sits after every refusal
+    # and outside every claim gate - a fact about the node, not about who
+    # holds the claim.
+    if plan_path and isinstance(_dispatch_node, dict):
+        _bind_node_plan_path(_dispatch_node, plan_path)
+
     env = dict(os.environ)
     env["TARGET_START"] = "1"
     # Change D (x-a7be): resolve `attended` from the substrate before the bash
@@ -1849,6 +1889,56 @@ def init(
         _maybe_check_resume_receipt()
         _record_denominator_choice(plan_path, deliverables, _dispatch_node)
     raise typer.Exit(code=propagate_returncode(proc.returncode))
+
+
+def _bind_node_plan_path(node: dict, plan_path: str) -> None:
+    """First-bind the graph node's ``plan_path`` at init (x-f8b1 change 2).
+
+    Shells to ``fno backlog update`` because that verb is the one choke point
+    every plan_path write already goes through (same posture as
+    ``fno.research.deliverable._bind_plan_path``). Never overwrites a
+    non-empty stored value (a group child shares one plan); non-fatal on
+    failure, matching the shell hook's lock-stamp posture.
+    """
+    node_id = str(node.get("id") or "").strip()
+    if not node_id:
+        return
+    stored = node.get("plan_path")
+    stored_str = stored.strip() if isinstance(stored, str) else ""
+    if stored_str:
+        try:
+            same = (
+                Path(stored_str).expanduser().resolve()
+                == Path(plan_path).expanduser().resolve()
+            )
+        except OSError:
+            same = stored_str == plan_path
+        if same:
+            return
+        typer.echo(
+            f"fno do target init: graph node {node_id} is already bound to "
+            f"{stored_str}; leaving it untouched",
+            err=True,
+        )
+        return
+    try:
+        result = subprocess.run(
+            ["fno", "backlog", "update", node_id, "--plan-path", plan_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        typer.echo(f"WARNING: could not bind {plan_path} to {node_id}: {exc}", err=True)
+        return
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[:200]
+        typer.echo(
+            f"WARNING: could not bind {plan_path} to {node_id}: {detail}",
+            err=True,
+        )
+        return
+    typer.echo(f"fno do target init: bound graph node {node_id} to {plan_path}", err=True)
 
 
 def _record_denominator_choice(
@@ -2785,6 +2875,7 @@ def _start_codex_native(
     beastmode: bool,
     no_merge: bool,
     deliverables: Optional[int] = None,
+    deadline: Optional[float] = None,
 ) -> None:
     """Finish target bootstrap inside a worktree Codex Desktop already owns."""
     base = _prepare_codex_native_branch(cwd, node)
@@ -2880,7 +2971,9 @@ def _start_codex_native(
         cmd += ["--no-merge"]
     if deliverables is not None:
         cmd += ["--deliverables", str(deliverables)]
-    init = subprocess.run(cmd, cwd=str(cwd))
+    init = subprocess.run(cmd, cwd=str(cwd)) if deadline is None else _run_bounded_init(
+        cmd, cwd, deadline, node
+    )
     if init.returncode != 0:
         typer.echo(
             f"fno do target start: target init failed in app-owned worktree "
@@ -3292,6 +3385,211 @@ def start(
     manifest into the worktree's space slice, claims the node exactly once) -> receipt.
     Run from INSIDE a valid worktree it is a no-op.
     """
+    deadline = time.monotonic() + _START_DEADLINE_S
+    faulthandler.dump_traceback_later(
+        _START_DEADLINE_S, exit=True, file=sys.__stderr__  # type: ignore[arg-type]
+    )
+    try:
+        _start_body(
+            node, plan_path, size, model, harness, _provider_tombstone,
+            beastmode, no_merge, deliverables, deadline,
+        )
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+def _bind_worktree(
+    node: str, wt_path: Path, *, base_label: str, in_place: bool,
+    node_match_guaranteed: bool, beastmode: bool, no_merge: bool,
+) -> bool:
+    """Classify and re-bind an existing manifest. True when the caller is done.
+
+    ONE copy of the claim-classification block, shared by the cold-start path
+    and the already-isolated path: the isolated branch used to return before
+    any of this, so a session standing in its own worktree could never get its
+    claim back. False means no manifest exists here and the caller should run
+    init against this tree.
+    """
+    from fno.paths import target_state_path_or_legacy
+
+    manifest = target_state_path_or_legacy(wt_path)
+    if not (manifest.exists() and not manifest.is_symlink()):
+        return False
+    # A manifest means init ran. Classify the live node claim from this
+    # session's view: foreign-live -> park; ours -> idempotent already-claimed;
+    # a dead predecessor (or stale-free) -> re-acquire under this session so
+    # the lockfile never keeps naming a dead pid that silently expires
+    # (x-a7ab successor-takeover gap: two sessions once shared one worktree
+    # because start short-circuited here without re-acquiring the claim).
+    verdict, claim_info = _classify_node_claim(node)
+    if verdict == "foreign_live":
+        _print_foreign_holder_park(node, claim_info or {}, wt_path)
+        raise typer.Exit(code=1)
+    # In-place (policy=never) manifests live in the SHARED canonical .fno, and
+    # an isolated caller reached this tree without ensure reserving it for THIS
+    # node - in both cases the fast-path's "manifest => THIS node's init ran"
+    # invariant does not hold. A node mismatch is another node's (stale or
+    # foreign) session; refuse rather than re-acquire under its roof.
+    if in_place or not node_match_guaranteed:
+        mnode = _manifest_node_id(manifest)
+        if mnode is not None and mnode != node:
+            typer.echo(
+                f"fno do target start: {manifest} belongs to node {mnode}, not "
+                f"{node}; refusing to run in place under another node's session. "
+                f"Cancel it (fno do target cancel) or isolate a worktree.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+    # Ghost node: the manifest references a node no longer in the graph
+    # (superseded / removed). Never re-acquire a claim for a ghost. A
+    # free-text/plan-only session (graph_node_id null) has no node by design
+    # and is NOT a ghost - skip so a valid rerun proceeds (F7).
+    _manifest_node = _manifest_node_id(manifest)
+    if _manifest_node is not None and _find_node(_manifest_node) is None:
+        typer.echo(
+            f"fno do target start: node {_manifest_node} is not in the backlog "
+            f"graph (superseded or removed); refusing to re-acquire its claim. "
+            f"Cancel the stale session (fno do target cancel) or pick a live node.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if verdict == "ours":
+        typer.echo(
+            f"worktree={wt_path}  "
+            f"base={_truthful_base(wt_path, base_label, measure=False)}  "
+            f"node=already-claimed holder={(claim_info or {}).get('holder') or '?'} "
+            f"state={(claim_info or {}).get('state') or '?'}"
+        )
+        if beastmode:
+            _warn_if_authority_not_granted(wt_path)
+        if no_merge:
+            _warn_no_merge_dropped()
+        return True
+    if _is_linked_worktree(wt_path):
+        occupancy, occupancy_info = _classify_worktree_occupancy(wt_path)
+        if occupancy != "available":
+            remedy = ""
+            if occupancy == "unknown":
+                remedy = (
+                    " No automatic path re-marks this worktree available; "
+                    "a human must clear it (fno agents watchdog for the "
+                    "fleet sweep, fno agents workspace worktree cleanup for "
+                    "merged leftovers) and retry."
+                )
+            typer.echo(
+                f"fno do target start: refusing takeover of {wt_path}: "
+                f"{occupancy} {occupancy_info or {}}.{remedy}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+    # verdict in {dead_predecessor, free}: a successor inheriting a
+    # predecessor's worktree, or a stale-free claim. Re-acquire under this
+    # session so the lockfile names a live, recognizable holder.
+    _reacquire_node_claim(node, wt_path, claim_info)
+    prior = (
+        f"prior holder {claim_info.get('holder', '?')} "
+        f"(state={claim_info.get('state', '?')})"
+        if claim_info
+        else "no prior claim"
+    )
+    typer.echo(
+        f"worktree={wt_path}  "
+        f"base={_truthful_base(wt_path, base_label, measure=False)}  "
+        f"node=reacquired (successor took over from {prior})"
+    )
+    typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
+    if beastmode:
+        _warn_if_authority_not_granted(wt_path)
+    if no_merge:
+        _warn_no_merge_dropped()
+    return True
+
+
+def _init_from_worktree(
+    node: str,
+    wt_path: Path,
+    *,
+    base_label: str,
+    in_place: bool,
+    created_this_run: bool,
+    from_note: str,
+    plan_path: Optional[str],
+    size: Optional[str],
+    model: Optional[str],
+    harness: Optional[str],
+    beastmode: bool,
+    no_merge: bool,
+    deliverables: Optional[int],
+    deadline: float,
+) -> None:
+    """Init the session FROM an existing worktree: binds owner_cwd and claims
+    the node exactly once (preserve the existing one-call claim)."""
+    fno = _resolve_fno_cmd()
+    # Project the node's model pin into init's dispatch pin (x-d7a7). An
+    # explicit -m wins (precedence, resolved inside the helper); no pin ->
+    # None -> nothing forwarded. When the operator pinned --harness the
+    # worker's spawn argv carries it, which stands the spawn-CLI capacity
+    # grid down - no grid receiving end - so the difficulty band resolves
+    # statically here; unpinned, the band defers to that grid. Never blocks
+    # (Locked 10).
+    model, decision_source = _resolve_node_model(
+        node, explicit=model, provider=harness, include_difficulty=bool(harness)
+    )
+    init_cmd = fno + ["do", "target", "init", "--input", node]
+    if no_merge:
+        init_cmd += ["--no-merge"]
+    if plan_path:
+        init_cmd += ["--plan-path", plan_path]
+    if size:
+        init_cmd += ["--size", size]
+    if model:
+        init_cmd += ["--model", model]
+    if harness:
+        init_cmd += ["--harness", harness]
+    if beastmode:
+        init_cmd += ["--beastmode"]
+    if deliverables is not None:
+        init_cmd += ["--deliverables", str(deliverables)]
+    init = _run_bounded_init(init_cmd, wt_path, deadline, node)
+    if init.returncode != 0:
+        if created_this_run and not in_place:
+            # One receipt line the run currently lacks: the refused init
+            # leaves a fresh tree holding an init-time manifest and no claim,
+            # which a later reader cannot tell from a live session. The tree
+            # is NOT deleted here - it may hold a partial checkout, and
+            # deletion is the more dangerous of the two mistakes.
+            typer.echo(
+                f"fno do target start: target init failed (step: init, exit "
+                f"{init.returncode}); worktree at {wt_path} is created but "
+                f"unclaimed; reclaim with: fno agents workspace worktree "
+                f"archive {wt_path}",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"fno do target start: target init failed (step: init, exit "
+                f"{init.returncode}); worktree at {wt_path} predates this "
+                f"run and was left untouched.",
+                err=True,
+            )
+        raise typer.Exit(code=init.returncode)
+
+    # 4. Receipt - one parse-friendly line a memory-less agent acts on. When a
+    #    model was resolved, record it + its decision_source so the dispatch is
+    #    auditable (x-d7a7); absent -> today's line, byte-identical.
+    model_note = f"  model={model} ({decision_source})" if model else ""
+    typer.echo(
+        f"worktree={wt_path}  "
+        f"base={_truthful_base(wt_path, base_label)}  node=claimed{from_note}{model_note}"
+    )
+    typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
+
+
+def _start_body(
+    node: str, plan_path: Optional[str], size: Optional[str], model: Optional[str],
+    harness: Optional[str], _provider_tombstone: Optional[str], beastmode: bool,
+    no_merge: bool, deliverables: Optional[int], deadline: float,
+) -> None:
     from fno._flag_aliases import refuse_retired_provider
 
     refuse_retired_provider(_provider_tombstone)
@@ -3320,6 +3618,7 @@ def start(
                 beastmode=beastmode,
                 no_merge=no_merge,
                 deliverables=deliverables,
+                deadline=deadline,
             )
             return
         if _under_codex_worktrees(cwd):
@@ -3331,10 +3630,27 @@ def start(
             )
             raise typer.Exit(code=1)
         typer.echo(f"already isolated at {cwd}; nothing created.")
-        if beastmode:
-            _warn_if_authority_not_granted()
-        if no_merge:
-            _warn_no_merge_dropped()
+        try:
+            base_label = _remote_base_ref(cwd)
+        except typer.Exit:
+            # Receipt-only here: nothing branches off the base on this path,
+            # so an unresolvable remote degrades to the unmeasured spelling
+            # instead of refusing a bind the tree does not need the ref for.
+            base_label = "in-place"
+        if _bind_worktree(node_id, cwd, base_label=base_label, in_place=False,
+                          node_match_guaranteed=False, beastmode=beastmode,
+                          no_merge=no_merge):
+            return
+        # No manifest in this tree (a stranded session: mail woke it, so init
+        # never ran and no claim was ever acquired). Bind the EXISTING tree
+        # instead of creating one: skip worktree ensure and setup - it is
+        # already set up.
+        _init_from_worktree(
+            node_id, cwd, base_label=base_label, in_place=False,
+            created_this_run=False, from_note="", plan_path=plan_path,
+            size=size, model=model, harness=harness, beastmode=beastmode,
+            no_merge=no_merge, deliverables=deliverables, deadline=deadline,
+        )
         return
 
     repo_root_s = _git_out(cwd, "rev-parse", "--show-toplevel")
@@ -3415,7 +3731,10 @@ def start(
     ensure_cmd = fno + ["worktree", "ensure", "--repo", str(repo_root), "--name", name]
     if ambient_harness:
         ensure_cmd += ["--harness", ambient_harness]
-    ens = subprocess.run(ensure_cmd, capture_output=True, text=True)
+    try:
+        ens = run_bounded(ensure_cmd, timeout=_stage_timeout(deadline), capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        _stage_timeout_exit("ensure", "Nothing was claimed.")
     wt = ens.stdout.strip()
     if ens.returncode != 0 or not wt:
         typer.echo(
@@ -3469,160 +3788,18 @@ def start(
         # codex-native branch above); resolve the same verified ref locally.
         base_label = _remote_base_ref(repo_root)
 
-    # Idempotent re-run from canonical: a manifest in this worktree's space
-    # slice (or still at the legacy checkout path) means init has run - skip
-    # it, never double-claim or error.
-    from fno.paths import target_state_path_or_legacy
-
-    manifest = target_state_path_or_legacy(wt_path)
-    if manifest.exists() and not manifest.is_symlink():
-        # A manifest means init ran. Classify the live node claim from this
-        # session's view: foreign-live -> park; ours -> idempotent already-claimed;
-        # a dead predecessor (or stale-free) -> re-acquire under this session so
-        # the lockfile never keeps naming a dead pid that silently expires
-        # (x-a7ab successor-takeover gap: two sessions once shared one worktree
-        # because start short-circuited here without re-acquiring the claim).
-        verdict, claim_info = _classify_node_claim(node)
-        if verdict == "foreign_live":
-            _print_foreign_holder_park(node, claim_info or {}, wt_path)
-            raise typer.Exit(code=1)
-        # In-place (policy=never) manifests live in the SHARED canonical .fno, so
-        # unlike a per-node worktree this one may belong to a DIFFERENT node - the
-        # fast-path's "manifest => THIS node's init ran" invariant does not hold.
-        # A node mismatch is another node's (stale/foreign) session; refuse rather
-        # than report already-claimed and let the caller run under its state.
-        if in_place:
-            mnode = _manifest_node_id(manifest)
-            if mnode is not None and mnode != node:
-                typer.echo(
-                    f"fno do target start: {manifest} belongs to node {mnode}, not "
-                    f"{node}; refusing to run in place under another node's session. "
-                    f"Cancel it (fno do target cancel) or isolate a worktree.",
-                    err=True,
-                )
-                raise typer.Exit(code=1)
-        # Ghost node: the manifest references a node no longer in the graph
-        # (superseded / removed). Never re-acquire a claim for a ghost. A
-        # free-text/plan-only session (graph_node_id null) has no node by design
-        # and is NOT a ghost - skip so a valid rerun proceeds (F7).
-        _manifest_node = _manifest_node_id(manifest)
-        if _manifest_node is not None and _find_node(_manifest_node) is None:
-            typer.echo(
-                f"fno do target start: node {_manifest_node} is not in the backlog "
-                f"graph (superseded or removed); refusing to re-acquire its claim. "
-                f"Cancel the stale session (fno do target cancel) or pick a live node.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        if verdict == "ours":
-            typer.echo(
-                f"worktree={wt_path}  "
-                f"base={_truthful_base(cwd, base_label, measure=False)}  "
-                f"node=already-claimed holder={(claim_info or {}).get('holder') or '?'} "
-                f"state={(claim_info or {}).get('state') or '?'}"
-            )
-            if beastmode:
-                _warn_if_authority_not_granted(wt_path)
-            if no_merge:
-                _warn_no_merge_dropped()
-            return
-        if _is_linked_worktree(wt_path):
-            occupancy, occupancy_info = _classify_worktree_occupancy(wt_path)
-            if occupancy != "available":
-                remedy = ""
-                if occupancy == "unknown":
-                    remedy = (
-                        " No automatic path re-marks this worktree available; "
-                        "a human must clear it (fno agents watchdog for the "
-                        "fleet sweep, fno agents workspace worktree cleanup for "
-                        "merged leftovers) and retry."
-                    )
-                typer.echo(
-                    f"fno do target start: refusing takeover of {wt_path}: "
-                    f"{occupancy} {occupancy_info or {}}.{remedy}",
-                    err=True,
-                )
-                raise typer.Exit(code=1)
-        # verdict in {dead_predecessor, free}: a successor inheriting a
-        # predecessor's worktree, or a stale-free claim. Re-acquire under this
-        # session so the lockfile names a live, recognizable holder.
-        _reacquire_node_claim(node, wt_path, claim_info)
-        prior = (
-            f"prior holder {claim_info.get('holder', '?')} "
-            f"(state={claim_info.get('state', '?')})"
-            if claim_info
-            else "no prior claim"
-        )
-        typer.echo(
-            f"worktree={wt_path}  "
-            f"base={_truthful_base(cwd, base_label, measure=False)}  "
-            f"node=reacquired (successor took over from {prior})"
-        )
-        typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
-        if beastmode:
-            _warn_if_authority_not_granted(wt_path)
-        if no_merge:
-            _warn_no_merge_dropped()
+    # Bind an existing manifest (idempotent re-run: never double-claim or
+    # error) or fall through to a fresh init against this tree.
+    if _bind_worktree(node, wt_path, base_label=base_label, in_place=in_place,
+                      node_match_guaranteed=not in_place, beastmode=beastmode,
+                      no_merge=no_merge):
         return
-
-    # Project the node's model pin into init's dispatch pin (x-d7a7). An
-    # explicit -m wins (precedence, resolved inside the helper); no pin ->
-    # None -> nothing forwarded. When the operator pinned --harness the
-    # worker's spawn argv carries it, which stands the spawn-CLI capacity
-    # grid down - no grid receiving end - so the difficulty band resolves
-    # statically here; unpinned, the band defers to that grid. Never blocks
-    # (Locked 10).
-    model, decision_source = _resolve_node_model(
-        node, explicit=model, provider=harness, include_difficulty=bool(harness)
-    )
-
     # 3. Init the session FROM the worktree (binds owner_cwd, claims the node
     #    exactly once - preserve the existing one-call claim).
-    init_cmd = fno + ["do", "target", "init", "--input", node]
-    if no_merge:
-        init_cmd += ["--no-merge"]
-    if plan_path:
-        init_cmd += ["--plan-path", plan_path]
-    if size:
-        init_cmd += ["--size", size]
-    if model:
-        init_cmd += ["--model", model]
-    if harness:
-        init_cmd += ["--harness", harness]
-    if beastmode:
-        init_cmd += ["--beastmode"]
-    if deliverables is not None:
-        init_cmd += ["--deliverables", str(deliverables)]
-    init = subprocess.run(init_cmd, cwd=str(wt_path))
-    if init.returncode != 0:
-        if created_this_run and not in_place:
-            # One receipt line the run currently lacks: the refused init
-            # leaves a fresh tree holding an init-time manifest and no claim,
-            # which a later reader cannot tell from a live session. The tree
-            # is NOT deleted here - it may hold a partial checkout, and
-            # deletion is the more dangerous of the two mistakes.
-            typer.echo(
-                f"fno do target start: target init failed (step: init, exit "
-                f"{init.returncode}); worktree at {wt_path} is created but "
-                f"unclaimed; reclaim with: fno agents workspace worktree "
-                f"archive {wt_path}",
-                err=True,
-            )
-        else:
-            typer.echo(
-                f"fno do target start: target init failed (step: init, exit "
-                f"{init.returncode}); worktree at {wt_path} predates this "
-                f"run and was left untouched.",
-                err=True,
-            )
-        raise typer.Exit(code=init.returncode)
-
-    # 4. Receipt - one parse-friendly line a memory-less agent acts on. When a
-    #    model was resolved, record it + its decision_source so the dispatch is
-    #    auditable (x-d7a7); absent -> today's line, byte-identical.
-    model_note = f"  model={model} ({decision_source})" if model else ""
-    typer.echo(
-        f"worktree={wt_path}  "
-        f"base={_truthful_base(wt_path, base_label)}  node=claimed{from_note}{model_note}"
+    _init_from_worktree(
+        node, wt_path, base_label=base_label, in_place=in_place,
+        created_this_run=created_this_run, from_note=from_note,
+        plan_path=plan_path, size=size, model=model, harness=harness,
+        beastmode=beastmode, no_merge=no_merge, deliverables=deliverables,
+        deadline=deadline,
     )
-    typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)

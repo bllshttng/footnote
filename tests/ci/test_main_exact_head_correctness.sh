@@ -66,26 +66,30 @@ if static is not None:
     setup = [step for step in steps if step.get("uses") == "./.github/actions/guards-setup"]
     check(bool(setup), "Python static-correctness job uses guards-setup")
     run = "\n".join(str(step.get("run", "")) for step in steps)
-    check(any(step.get("working-directory") == "cli" for step in steps),
-          "Python static-correctness commands run from cli")
-    check("set -euo pipefail" in run,
-          "Python static-correctness stops before its success marker on failure")
-    check("uv run ruff check --no-respect-gitignore src/" in run,
-          "Python static-correctness runs the exact Ruff command")
-    check("uv run mypy src/" in run,
-          "Python static-correctness runs the exact MyPy command")
-    ruff_at = run.index("uv run ruff check --no-respect-gitignore src/") if "uv run ruff check --no-respect-gitignore src/" in run else -1
-    mypy_at = run.index("uv run mypy src/") if "uv run mypy src/" in run else -1
-    marker = "main-python-static: checked"
-    marker_at = run.index(marker) if marker in run else -1
-    count_guard_at = run.index('test "$python_files" -gt 0') if 'test "$python_files" -gt 0' in run else -1
-    check(ruff_at >= 0 and mypy_at > ruff_at and marker_at > mypy_at,
-          "Python success marker follows Ruff and MyPy")
-    check(bool(re.search(r"find\s+src\b.*-name ['\"]\*\.py['\"]", run)) and
-          count_guard_at >= 0 and count_guard_at < ruff_at,
-          "Python static-correctness requires a positive Python-file count")
+    check("bash scripts/ci/check-python-static.sh" in run,
+          "Python static-correctness runs the one shared static script")
     check(static.get("if") in (None, ""),
           "Python static-correctness is eligible on PR and main events")
+
+# The pinned commands live in the shared script CI, fno doctor test, and the
+# merge-result probe all run; pin them there.
+script = open("scripts/ci/check-python-static.sh").read()
+check("set -euo pipefail" in script,
+      "static script stops before its success marker on failure")
+check("${RUFF:-uv run ruff} check --no-respect-gitignore --color=never --output-format=concise src/" in script,
+      "static script runs the exact Ruff command")
+check("${MYPY:-uv run mypy} --no-color-output src/" in script,
+      "static script runs the exact MyPy command")
+ruff_at = script.index("${RUFF:-uv run ruff} check") if "${RUFF:-uv run ruff} check" in script else -1
+mypy_at = script.index("${MYPY:-uv run mypy}") if "${MYPY:-uv run mypy}" in script else -1
+marker = "python-static: checked"
+marker_at = script.index(marker) if marker in script else -1
+count_guard_at = script.index('test "$python_files" -gt 0') if 'test "$python_files" -gt 0' in script else -1
+check(ruff_at >= 0 and mypy_at > ruff_at and marker_at > mypy_at,
+      "Python success marker follows Ruff and MyPy")
+check(bool(re.search(r"find\s+src\b.*-name ['\"]\*\.py['\"]", script)) and
+      count_guard_at >= 0 and count_guard_at < ruff_at,
+      "static script requires a positive Python-file count")
 
 rust = load(".github/workflows/rust-ci.yml")
 rust_events = event_map(rust)

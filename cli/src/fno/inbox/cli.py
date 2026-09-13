@@ -31,7 +31,7 @@ inbox_app = typer.Typer(
     name="inbox",
     help="What is waiting on a human: approvals, notifications, outstanding "
     "carve-outs and questions, the king board, decisions, law, and the "
-    "operator conversation queue.",
+    "user conversation queue.",
     no_args_is_help=True,
 )
 
@@ -39,7 +39,10 @@ inbox_app.add_typer(approvals_app, name="approvals")
 inbox_app.add_typer(notify_app, name="notify")
 inbox_app.add_typer(outstanding_app, name="outstanding")
 inbox_app.add_typer(law_app, name="law")
-inbox_app.add_typer(operator_app, name="operator")
+# The queue verb is `user`; the pre-rename spelling stays as a hidden
+# alias so existing scripts keep working.
+inbox_app.add_typer(operator_app, name="user")
+inbox_app.add_typer(operator_app, name="operator", hidden=True)
 inbox_app.command("board")(board_cmd)
 inbox_app.command("decide")(backlog_decide)
 inbox_app.command("decisions")(backlog_decisions)

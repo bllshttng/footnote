@@ -38,7 +38,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence, Tuple
 
 from fno.pr._proc import run
 
@@ -49,7 +49,6 @@ _PR_RE = re.compile(r"^[1-9][0-9]*$")
 # gh merge call and its post-merge followups (typically seconds), so the wait
 # is short and bounded - a peer still holding it past the window is reported
 # as "held" (exit 2) for the caller to retry, never an indefinite block.
-#
 # Scope: the lock + freshness hold cover the IMMEDIATE merge path. There is no
 # queued lane anymore (x-9d11 dropped --auto): require_checks_pass is enforced
 # by reading the checks under the lock and merging only on green, so every
@@ -264,18 +263,22 @@ def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     return str(info.get("head_sha") or "").strip() or None
 
 
-def _pr_head_ref_and_oid(pr_number: int, repo: str) -> Optional[Tuple[str, str, str]]:
+def _pr_head_ref_and_oid(
+    pr_number: int, repo: str, runner: Callable = run
+) -> Optional[Tuple[str, str, str]]:
     """``(branch, head_sha, state)`` for a PR, or None when the read failed.
 
     One REST request answers all three, the same one ``_pr_head_oid`` already
     makes. Deliberately NOT ``_pr_base_head_refs``: that reads through ``gh pr
     view``, which bills the per-user GraphQL quota every watcher on the machine
     shares. The state rides along because it is already in the payload, and the
-    in-flight guard needs it to exempt a terminal PR.
+    in-flight guard needs it to exempt a terminal PR. ``runner`` is injectable
+    so the acquire verb, which runs inside a PreToolUse hook, can bound the
+    network call it sits inside.
     """
     from fno.pr._rest import fetch_pr_info_rest
 
-    info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=run)
+    info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=runner)
     if info is None:
         return None
     branch = str(info.get("head_ref") or "").strip()
@@ -436,7 +439,8 @@ def _coverage_refused_reason(
                 f"{', '.join(stale)} reviewed an older commit and must re-read"
             )
         return (
-            prefix + "0 reviewed (no head-pinned pass attestation; "
+            prefix + f"{_safe_int(cov.get('reviewed_count'))} reviewed "
+            "(no head-pinned pass attestation; "
             f"{'; '.join(waits)} - if a reviewer there is uninstalled or no "
             "longer configured, check config.review)"
         )
@@ -449,7 +453,8 @@ def _coverage_refused_reason(
     # the bare path exits 1 for anyone who copies it verbatim.
     return (
         prefix
-        + "0 reviewed (no head-pinned pass attestation - run the review verb at HEAD"
+        + f"{_safe_int(cov.get('reviewed_count'))} reviewed "
+        + "(no head-pinned pass attestation - run the review verb at HEAD"
         + (f" - `{self_review_hint}`" if self_review_hint else "")
         + " - close every finding, commit and push first, then attest at the "
         + "final head with `bash skills/review/scripts/emit-attestation.sh <reviewer>`)"
@@ -1036,6 +1041,16 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
                 f"{closure_refused}",
                 file=sys.stderr,
             )
+        if obj.get("held"):
+            # The one-in-flight gate: a sweep was already running, so this one
+            # stood down without scanning. Named, never silent - the merged
+            # nodes stay open until a later sweep revisits them.
+            print(
+                f"fno do pr merge: reconcile for PR #{pr_number} held "
+                f"(a sweep is already in flight, requests={obj.get('requests')}); "
+                "a later sweep closes the merged nodes",
+                file=sys.stderr,
+            )
         # `closed` = what the scan closed this run; `closure_bound`/`claims`
         # = the trailer's bindings. The url match backfills a PR whose nodes
         # the trailer never named.
@@ -1284,24 +1299,68 @@ def _merge_request_repo_and_project(cwd: str) -> tuple[str, str]:
     return repo, project
 
 
+def _emit_merge_cleanup_skip(
+    pr_number: int, cwd: str, state_file: str, reason: str,
+    detail: str = "", branch: Optional[str] = None,
+) -> None:
+    """Say that this merge minted no cleanup request, and why. Joined to the
+    merge the same way a request row is, so one reader answers both."""
+    from fno.agents.events import emit_merge_cleanup_skipped
+
+    repo, project = _merge_request_repo_and_project(cwd)
+    emit_merge_cleanup_skipped(
+        repo=repo,
+        project=project,
+        pr=pr_number,
+        reason=reason,
+        detail=detail,
+        branch=branch,
+        session_id=_read_state_field(state_file, "session_id") or None,
+        harness=_read_state_field(state_file, "harness") or None,
+    )
+
+
 def _emit_merge_cleanup_request(
     pr_number: int, cwd: str, state_file: str, bound_node_ids: List[str]
 ) -> None:
     """Mint the machine's reap order - for EVERY confirmed merge, no agent
     in the path (the ritual needed an agent and ran for none of the six PRs
     merged 2026-09-06). Only against a gh-confirmed MERGED state, as the
-    ritual holds."""
+    ritual holds.
+
+    Every call writes exactly one journal row, a request or a skip. Silence
+    is not a legal outcome: a merge that mints nothing must say why."""
     from fno.agents.events import emit_merge_cleanup_requested, rows_for_cleanup
+    from fno.graph._reconcile import repo_slug_from_url
     from fno.worktree_reapable import is_linked_worktree
 
-    res = _gh(["pr", "view", str(pr_number), "--json", "state,headRefName"], cwd)
-    meta = {}
-    if res.ok:
-        try:
-            meta = json.loads(res.stdout or "{}")
-        except json.JSONDecodeError:
-            pass
-    if meta.get("state") != "MERGED" or not meta.get("headRefName"):
+    res = _gh(["pr", "view", str(pr_number), "--json", "state,headRefName,url,mergedAt"], cwd)
+    if not res.ok:
+        _emit_merge_cleanup_skip(
+            pr_number, cwd, state_file, "gh-unavailable",
+            detail=(res.stderr or "").strip()[:200],
+        )
+        return
+    try:
+        meta = json.loads(res.stdout or "{}")
+        if not isinstance(meta, dict):
+            # `null` and a bare array parse fine and then break `.get`.
+            raise ValueError("pr json is not an object")
+    except ValueError as exc:  # JSONDecodeError is a ValueError
+        _emit_merge_cleanup_skip(
+            pr_number, cwd, state_file, "unparseable-pr-json",
+            detail=type(exc).__name__,
+        )
+        return
+    if meta.get("state") != "MERGED":
+        _emit_merge_cleanup_skip(
+            pr_number, cwd, state_file, "not-merged",
+            detail=f"state={meta.get('state')}",
+            branch=meta.get("headRefName") or None,
+        )
+        return
+    if not meta.get("headRefName"):
+        _emit_merge_cleanup_skip(pr_number, cwd, state_file, "no-branch")
         return
     branch = meta["headRefName"]
     repo, project = _merge_request_repo_and_project(cwd)
@@ -1313,9 +1372,13 @@ def _emit_merge_cleanup_request(
         branch=branch,
         worktree=worktree,
         node_ids=bound_node_ids,
+        repo_slug=repo_slug_from_url(meta.get("url") or ""),
         session_id=_read_state_field(state_file, "session_id") or None,
         harness=_read_state_field(state_file, "harness") or None,
-        candidate_row_names=rows_for_cleanup(worktree, bound_node_ids) if worktree else [],
+        merged_at=meta.get("mergedAt") or None,
+        # x-84b2: always emit the exact candidates - name-matched rows count
+        # even when the merge ran outside a linked worktree.
+        candidate_row_names=rows_for_cleanup(worktree, bound_node_ids),
     )
 
 
@@ -1330,6 +1393,13 @@ def _run_post_merge_followups(
         _emit_merge_cleanup_request(pr_number, cwd, state_file, bound_node_ids or [])
     except Exception as exc:  # noqa: BLE001 - best-effort, merge outcome unaffected
         sys.stderr.write(f"pr-merge: merge-cleanup emit failed ({exc}); unaffected\n")
+        try:
+            _emit_merge_cleanup_skip(
+                pr_number, cwd, state_file, "emit-failed",
+                detail=type(exc).__name__,
+            )
+        except Exception:  # noqa: BLE001 - a failing journal write changes no merge
+            pass
 
     # Memory-pass sentinel.
     try:
@@ -1810,7 +1880,6 @@ def run_merge(
     # per-run env grant) AND NOT a per-run refusal. The who-may-merge gate
     # (--invoker + allowed_invokers) was removed (x-04ab): auto-merge is gated
     # by posture plus the CI-green / external-review / stub-manifest guards.
-    #
     # The manifest's `auto_merge_approved` is init's fold of the documented
     # chain (hooks/helpers/init-target-state.sh, references/auto-merge.md). A
     # `false` is a per-run REFUSAL (--no-merge, the `/target bg` injected
@@ -1823,7 +1892,6 @@ def run_merge(
     # promise and that a config-first order made unreachable: consulting
     # `enabled` before the manifest let the config leaf refuse a run init had
     # granted (x-01b9: two workers read this seam the same night).
-    #
     # `enabled` is still re-read LIVE, so a manifest whose `true` merely
     # mirrored config (source: config) does not outlive an operator flipping
     # the switch off mid-flight (x-2270: the manifest is a snapshot; the live
@@ -1832,7 +1900,6 @@ def run_merge(
     # not start refusing. TARGET_AUTO_MERGE is never read HERE - a grant is
     # folded at spawn where it is attributable, never exported on a merge
     # command line by the very worker that wants the merge.
-    #
     # Every refusal names the sanctioned override in its own text (x-3855): a
     # refusal that closes a door without pointing at the key is the one that
     # had two workers improvising config mutations inside sixty seconds.

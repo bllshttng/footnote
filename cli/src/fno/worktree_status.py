@@ -1,23 +1,15 @@
 """List Git worktrees annotated with their registered agent session.
 
-Cross-references each worktree path against ~/.fno/agents/registry.json's
-`cwd` field - the live agents registry the daemon already reconciles - rather
-than reading `.fno/target-state.md`'s `owner_pid`, which names the short-lived
-`fno do target init` CLI invocation and reads as dead within seconds of session
-start (verified live 2026-08-15: a worktree with an active session showed
-owner_pid already exited). The registry's `status` field (spawning/ready/
-idle/busy/live/restarting/orphaned/failed/exited/permanent_dead) is itself
-computed by measurement (the Rust daemon's reconciliation sweep), so this is
-a read, not a second liveness probe.
-
-Packaged here (not loaded from ``scripts/lib``) so an installed wheel keeps
-the behavior; ``scripts/lib/worktree-status.py`` is the thin repo entry point.
+Joins each worktree path on the agents registry's `cwd` field, never
+`.fno/target-state.md`'s `owner_pid` (the short-lived init CLI's pid, dead
+within seconds of session start); the registry `status` is a measurement the
+daemon already computed, so this is a read, not a second probe. Packaged
+outside scripts/lib so an installed wheel keeps the behavior.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -28,38 +20,33 @@ from typing import Optional
 # canonical set (crates/fno-agents `AgentStatus` mirror) keeps the display
 # leg and the stranded classifier agreeing when the vocabulary grows.
 from fno.agents.registry import _OWNERSHIP_LIVE_STATUSES as _ALIVE_STATUSES
+from fno.agents.registry import registry_rows_by_cwd
 
 
 def _load_registry() -> tuple[dict[str, tuple[str, str]], bool]:
-    """Return cwd -> (name, status), preferring a live row, plus read status."""
-    override = os.environ.get("WORKTREE_STATUS_REGISTRY")
-    path = Path(override) if override else Path(os.path.expanduser("~/.fno/agents/registry.json"))
-    if not path.exists():
-        return {}, True
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}, False
-    if not isinstance(data, dict):
+    """Return cwd -> (name, status), preferring a live row, plus read status.
+
+    Builds on the ONE shared occupancy join (x-dead task 0.2); the best-row
+    selection below (live row outranks, then freshest timestamp) stays here
+    because only the display leg needs it."""
+    rows, ok = registry_rows_by_cwd()
+    if not ok:
         return {}, False
     best: dict[str, tuple[int, str, str, str]] = {}
-    for agent in data.get("agents", []):
-        cwd = agent.get("cwd") or ""
-        if not cwd:
-            continue
-        cwd = str(Path(cwd))
-        status = agent.get("status") or "unknown"
-        rank = 1 if status in _ALIVE_STATUSES else 0
-        timestamp = (
-            agent.get("last_reconciled_at")
-            or agent.get("exited_at")
-            or agent.get("created_at")
-            or ""
-        )
-        name = agent.get("name") or "?"
-        current = best.get(cwd)
-        if current is None or (rank, timestamp) > (current[0], current[2]):
-            best[cwd] = (rank, name, timestamp, status)
+    for cwd, agents in rows.items():
+        for agent in agents:
+            status = agent.get("status") or "unknown"
+            rank = 1 if status in _ALIVE_STATUSES else 0
+            timestamp = (
+                agent.get("last_reconciled_at")
+                or agent.get("exited_at")
+                or agent.get("created_at")
+                or ""
+            )
+            name = agent.get("name") or "?"
+            current = best.get(cwd)
+            if current is None or (rank, timestamp) > (current[0], current[2]):
+                best[cwd] = (rank, name, timestamp, status)
     return {
         cwd: (name, status)
         for cwd, (_rank, name, _timestamp, status) in best.items()

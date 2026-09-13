@@ -5,6 +5,8 @@ supervisor daemon that continuously converges ACTIVE MISSIONS - epics with
 `mission_active=true` - by dispatching their ready leaf children across all
 projects, sleeping between drains. Config-gated, default-off, fail-safe.
 
+Two writers arm a mission: the epic advance (`fno backlog advance --epic`) and a crown grant over an epic (`fno agents crown`, `fno agents spawn --crown`). The grant sets the flag at grant time. A crowned epic is never invisible to the drain.
+
 > **Mission-scoped drains (K2).** The daemon originally ran one drain
 > loop **per enabled project**, each acquiring `walker:<cwd>` and dispatching one
 > node per tick through a local `drain_tick`. That per-project interval arm is
@@ -17,6 +19,12 @@ projects, sleeping between drains. Config-gated, default-off, fail-safe.
 > (`reconcile_pending` / `map_outcome` / crash floor) and the `CircuitBreaker`
 > are unchanged. Sections below are updated to this model; a few cross-cutting
 > ones (Why, circuit breaker, nudge) are unaffected.
+
+> **Worker names.** Daemon-dispatched workers are named
+> `ab-<verb>-<node>-<slug>`. The `ab` source says the active-backlog drain
+> launched them. The full vocabulary lives in
+> [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.md).
+> `fno agents autonomy provenance` prints the ratcheted inventory.
 
 ## Why
 
@@ -37,7 +45,7 @@ config.active_backlog (master switch) + epics with mission_active=true
      reconcile prior fire-and-forget dispatches from events -> feed breaker
        -> Closed: active_backlog_dispatched; Parked: breaker++ (defer at limit)
        -> worker died with no termination event: crash floor -> failure
-     dispatch: fno backlog advance --epic <id> --continuation --json
+     dispatch: fno backlog advance --epic <id> --continuation --source ab --json
        -> deactivated / all_done: active_backlog_mission_retired, loop exits
        -> children[] is the enqueue authority:
             decision=dispatched + substrate=headless: SYNCHRONOUS - the

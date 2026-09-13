@@ -32,7 +32,7 @@ use crate::chrome;
 mod rename_overlay;
 mod sweep_scope;
 
-pub(crate) use sweep_scope::{build_sweep_modal, sweep_apply_args};
+use sweep_scope::{build_sweep_modal, parse_sweep_receipt, sweep_apply_args, SweepCounts};
 
 use self::rename_overlay::RenameTarget;
 
@@ -47,9 +47,9 @@ use crate::keys::{
 use crate::lane_colors_panel::LaneColorsUi;
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
-    self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentNoPaneReason,
-    AgentRow, AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg,
-    Color, Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget,
+    self, cell_flags, read_msg, write_msg, AgentBadge, AgentNoPaneReason, AgentRow,
+    AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg, Color,
+    Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget,
     PlacementFallback, ProtoError, ServerMsg, SquadMeta, TabMeta, BUILD_VERSION, MAX_MAIL_TEXT,
     MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
@@ -439,16 +439,15 @@ fn run_inner(session: &str) -> Result<i32, String> {
         let _ = proto::ensure_mux_dir();
         client_log_append(&proto::mux_dir().join("client-warnings.log"), w);
     }
-    // Nested same-session guard (AC3-UI/EDGE): BEFORE any socket, spawn, or
-    // terminal mode change. `FNO_SESSION` is set in every pane the server
-    // spawns, so target == env means "attaching to the session I am already
-    // inside" - an instant hall of mirrors. Different-session nesting is
-    // allowed (the flag already beat the env in resolution).
-    if std::env::var("FNO_SESSION").ok().as_deref() == Some(session) {
+    // Nested same-server guard (AC3-UI/EDGE): BEFORE any socket, spawn, or
+    // terminal mode change. `FNO_SERVER` (and the legacy `FNO_SESSION`) is
+    // set in every pane the server spawns, so target == env means "attaching
+    // to the server I am already inside"; other servers may nest.
+    if crate::mux_cli::env_server().as_deref() == Some(session) {
         return Err(format!(
-            "already inside mux session {session:?} (FNO_SESSION is set). \
-             Attach to another session with `fno --session <other>`, or \
-             `unset FNO_SESSION` if this shell is not really inside a pane."
+            "already inside mux server {session:?} (FNO_SERVER is set). \
+             Attach to another server with `fno --server <other>`, or \
+             `unset FNO_SERVER FNO_SESSION` if this shell is not really inside a pane."
         ));
     }
     let path = proto::socket_path(session)?;
@@ -878,6 +877,10 @@ struct LayoutView {
     /// has been failing. Rendered as a header marker; the cards still show (a
     /// blank section would be worse than an honestly-labelled stale one).
     backlog_stale: bool,
+    /// (v79) Active-mission progress headers, their own lane so `squads` holds
+    /// only real workspaces. Drawn as the `~ missions` band; never a section an
+    /// agent row can be grouped under.
+    missions: Vec<SquadMeta>,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -1351,6 +1354,10 @@ struct View {
     /// A pending sweep verb (counts probe or scoped apply) for the run
     /// loop to spawn off the UI thread, mirroring `conn_action`.
     sweep_action: Option<SweepAction>,
+    /// (x-f188) A queued `fno agents restart` and its one-in-flight bound,
+    /// mirroring the sweep pair.
+    restart_agents_want: bool,
+    restart_inflight: bool,
     /// A sweep verb is in flight; one at a time, so a second tap queues
     /// nothing and is told so.
     sweep_inflight: bool,
@@ -1366,6 +1373,10 @@ enum SweepScope {
     UsedShells,
     Dead,
     Both,
+    /// Named-workspace tabs, gated behind their own row.
+    Named,
+    /// The bare prune: stale squad rows, gated behind their own row.
+    Squads,
 }
 
 /// A sweep verb the run loop should spawn: a counts probe for the choice
@@ -1379,16 +1390,11 @@ enum SweepAction {
 /// What a finished sweep verb reports back to the UI loop.
 #[derive(Debug, Clone)]
 enum SweepMsg {
-    Counts {
-        tabs: usize,
-        dead: usize,
-        /// (x-cf97) The used-shell population, counted on every probe so its
-        /// modal row can carry its own number even though the flag is off.
-        used: usize,
-    },
+    Counts(SweepCounts),
     Applied {
         closed: usize,
         reaped: usize,
+        removed: usize,
     },
     Failed(String),
 }
@@ -2162,9 +2168,13 @@ pub(crate) enum AuxAction {
     /// and the one computed guidance line. Only offered by the menu when the
     /// last probe reported ready (or degraded) - see `build_sideline_menu`.
     OpenUpdate,
+    /// (x-f188 change 7) Queue `fno agents restart` off the UI loop. Never
+    /// `--mux`, never `--force`: the modal named what survives, and the tap
+    /// is the confirmation.
+    RestartAgents,
     /// Probe `mux workspace prune --dry-run` once and open the centered
-    /// sweep-threads choice modal from its counts. Both halves of the prune
-    /// (surplus pristine tabs, dead member rows) live behind this one entry.
+    /// sweep-threads choice modal from its counts. Every scope of the prune
+    /// lives behind this one entry.
     OpenSweep,
     /// Apply the prune with one scope. Each choice is the confirmation: the
     /// modal named the counts, the tap picked the half.
@@ -2175,6 +2185,8 @@ pub(crate) enum AuxAction {
     SweepUsedShells,
     SweepDeadAgents,
     SweepBoth,
+    SweepNamed,
+    SweepSquads,
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
@@ -2293,163 +2305,12 @@ fn card_lane(c: &BacklogCard) -> &str {
 /// The bucket for cards carrying no `_kanban_column`.
 const UNLANED: &str = "unlaned";
 
-/// The client's view of `fno doctor update --check`'s payload - only
-/// the fields the menu row and overlay render. `#[serde(default)]` on
-/// `changelog` tolerates an absent key rather than failing the whole parse;
-/// every other field is required, so a shape the Python resolver no longer
-/// emits degrades the probe instead of silently rendering stale/zeroed data.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-struct UpdateReadiness {
-    update_ready: bool,
-    installed_rev: Option<String>,
-    source_rev: Option<String>,
-    #[serde(default)]
-    changelog: Vec<String>,
-    guidance: String,
-    degraded: Option<String>,
-}
+mod update_menu;
 
-/// The result of one `fno doctor update --check` probe: parsed
-/// readiness, or a degraded reason (missing binary, non-zero exit, timeout,
-/// unparseable JSON). Mirrors `connections_view::ReadOutcome` (Locked
-/// Decision 4) - the TUI computes nothing beyond folding this into rows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum UpdateOutcome {
-    Ok(UpdateReadiness),
-    Degraded(String),
-}
-
-/// Well above the Connections read timeout (1.5s): `--check` shells out to
-/// `mux ls` (5s), `agents list` (15s), and `git log` (5s) SEQUENTIALLY on the
-/// Python side, so its own worst-case latency alone is ~25s. This never
-/// blocks the UI loop (the probe runs off it and the menu opens on whatever
-/// outcome is already in hand), so there is no cost to sizing it well above
-/// that worst case rather than racing it.
-const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(30_000);
-
-/// Run `fno doctor update --check` off the UI loop and fold it into an
-/// [`UpdateOutcome`]. Mirrors `connections_view::read_json` exactly (Locked
-/// Decision 4): the event loop never blocks on this subprocess: a
-/// timeout, non-zero exit, or unparseable JSON all degrade rather than hang
-/// or panic (AC6-EDGE).
-///
-/// `--check` already prints JSON on its own (`update` has no local `--json`
-/// option, and the global `--json` flag only applies before the verb) - do
-/// not add `--json` after `--check` here, it makes the CLI exit 2 and every
-/// probe degrade (P1, codex on PR #881).
-async fn probe_update_readiness() -> UpdateOutcome {
-    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-    command
-        .args(["doctor", "update", "--check"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    let output = match tokio::time::timeout(UPDATE_PROBE_TIMEOUT, fut).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return UpdateOutcome::Degraded(format!("update --check: {e}")),
-        Err(_) => return UpdateOutcome::Degraded("update --check: timed out".into()),
-    };
-    if !output.status.success() {
-        return UpdateOutcome::Degraded(format!(
-            "update --check: exit {}",
-            output.status.code().unwrap_or(-1)
-        ));
-    }
-    match serde_json::from_slice::<UpdateReadiness>(&output.stdout) {
-        Ok(r) => UpdateOutcome::Ok(r),
-        Err(e) => UpdateOutcome::Degraded(format!("update --check: unparseable output ({e})")),
-    }
-}
-
-/// Build the sideline MENU popup (US4), anchored at the footer's menu cell:
-/// an update row (only when the last probe has landed and is ready or
-/// degraded), then keybinds / settings / detach. `reload config` is
-/// intentionally absent - there is no config-reload machinery to route it to
-/// (a net-new capability, not a re-route), so the menu advertises only what
-/// actually works.
-fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
-    let entry = |glyph: &str, label: &str| PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: String::new(),
-        enabled: true,
-    };
-    let mut rows = vec![PopupRow::Header("menu".into()), PopupRow::Rule];
-    let mut actions = Vec::new();
-    // A probe still in flight (or never fired yet) builds the menu
-    // WITHOUT an update row rather than waiting - the menu opens instantly.
-    match update {
-        Some(UpdateOutcome::Ok(r)) if r.update_ready => {
-            rows.push(entry("⬆", "update ready"));
-            actions.push(AuxAction::OpenUpdate);
-        }
-        // A successfully-parsed probe (Python always exits 0) can still be
-        // internally degraded (e.g. `fno mux ls` failed inside the check).
-        // Without this arm that state falls to `_ => {}` and the menu shows
-        // nothing, hiding a real check failure from the operator.
-        Some(UpdateOutcome::Ok(r)) if r.degraded.is_some() => {
-            rows.push(entry("⬆", "update check degraded"));
-            actions.push(AuxAction::OpenUpdate);
-        }
-        Some(UpdateOutcome::Degraded(_)) => {
-            rows.push(entry("⬆", "update check failed"));
-            actions.push(AuxAction::OpenUpdate);
-        }
-        _ => {}
-    }
-    rows.push(entry("♺", "sweep threads"));
-    rows.push(entry("⌨", "keybinds"));
-    rows.push(entry("⚙", "settings"));
-    rows.push(entry("⇄", "connections"));
-    rows.push(entry("⏏", "detach"));
-    actions.push(AuxAction::OpenSweep);
-    actions.push(AuxAction::OpenKeybinds);
-    actions.push(AuxAction::OpenSettings);
-    actions.push(AuxAction::OpenConnections);
-    actions.push(AuxAction::Detach);
-    AuxPopup {
-        popup: Popup::new(rows, anchor),
-        actions,
-    }
-}
-
-/// Build the update-readiness overlay from the last probe outcome:
-/// version pair, up to ten changelog subjects, a rule, then the one computed
-/// guidance line - or, for a degraded probe, the degraded reason in the
-/// guidance line's place. Never an empty body (AC5-HP/AC6-EDGE): `outcome`
-/// is only `None` if this is somehow opened before any probe ever ran, which
-/// `build_sideline_menu` never offers as a way in.
-fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
-    let mut rows = vec![PopupRow::Header("update".into()), PopupRow::Rule];
-    match outcome {
-        Some(UpdateOutcome::Ok(r)) => {
-            let installed = r.installed_rev.as_deref().unwrap_or("unknown");
-            let source = r.source_rev.as_deref().unwrap_or("unknown");
-            rows.push(PopupRow::Header(format!("{installed} -> {source}")));
-            if !r.changelog.is_empty() {
-                rows.push(PopupRow::Rule);
-                for subject in &r.changelog {
-                    rows.push(PopupRow::Header(subject.clone()));
-                }
-            }
-            rows.push(PopupRow::Rule);
-            rows.push(PopupRow::Header(r.guidance.clone()));
-        }
-        Some(UpdateOutcome::Degraded(reason)) => {
-            rows.push(PopupRow::Header(format!("update check failed: {reason}")));
-        }
-        None => {
-            rows.push(PopupRow::Header("update check has not run yet".into()));
-        }
-    }
-    AuxPopup {
-        popup: Popup::new(rows, Anchor::Center)
-            .title("update")
-            .footer("esc close"),
-        actions: Vec::new(),
-    }
-}
+use update_menu::{
+    build_sideline_menu, build_update_modal, probe_update_readiness, run_restart_verb, RunningRow,
+    UpdateOutcome, UpdateReadiness,
+};
 
 /// The operator tapped a choice: the modal named the counts, so the tap IS
 /// the confirmation. Queue the apply for the run loop (or say why not).
@@ -2508,47 +2369,7 @@ async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
         Ok(v) => v,
         Err(e) => return SweepMsg::Failed(format!("prune output unparseable ({e})")),
     };
-    match action {
-        SweepAction::Counts => {
-            // A missing field means the two processes disagree about the JSON
-            // shape (a stale deployed binary): fail the probe rather than open
-            // a modal with fabricated zeros.
-            let (Some(tabs), Some(dead)) = (
-                parsed["tabs_would_close"].as_u64().map(|v| v as usize),
-                parsed["members_reaped"].as_u64().map(|v| v as usize),
-            ) else {
-                return SweepMsg::Failed("prune output missing count fields".into());
-            };
-            // (x-cf97) The used-shell population rides every probe: the field
-            // is missing only when the deployed CLI predates it, which is the
-            // same two-process disagreement the tabs/dead reads refuse on -
-            // but the refusal names the remedy instead of a dead end.
-            // (review) A zero default would grey the row out and LIE about a
-            // population the stale CLI cannot count, so the probe stays
-            // fail-loud.
-            let Some(used) = parsed["tabs_used_shells"].as_u64().map(|v| v as usize) else {
-                return SweepMsg::Failed(
-                    "prune output missing count fields - stale fno CLI? run fno doctor update"
-                        .into(),
-                );
-            };
-            if let Some(notice) = parsed["notice"].as_str() {
-                if !notice.is_empty() {
-                    return SweepMsg::Failed(notice.to_string());
-                }
-            }
-            SweepMsg::Counts { tabs, dead, used }
-        }
-        SweepAction::Apply(_) => {
-            let (Some(closed), Some(reaped)) = (
-                parsed["tabs_closed"].as_u64().map(|v| v as usize),
-                parsed["members_reaped"].as_u64().map(|v| v as usize),
-            ) else {
-                return SweepMsg::Failed("prune output missing count fields".into());
-            };
-            SweepMsg::Applied { closed, reaped }
-        }
-    }
+    parse_sweep_receipt(action, &parsed)
 }
 
 impl View {
@@ -2703,6 +2524,8 @@ impl View {
             update_probe_want: false,
             update_probe_inflight: false,
             sweep_action: None,
+            restart_agents_want: false,
+            restart_inflight: false,
             sweep_inflight: false,
         }
     }
@@ -3366,7 +3189,7 @@ impl View {
             .squads
             .iter()
             .map(|s| s.id)
-            .filter(|id| !is_mission_squad(*id) && Some(*id) != own)
+            .filter(|id| Some(*id) != own)
             .collect()
     }
 
@@ -3382,12 +3205,7 @@ impl View {
     /// already been fixed twice, and the `.take(9)` cap had to be removed
     /// twice. Now there is one.
     fn attach_dst_squads(&self) -> Vec<u64> {
-        self.layout
-            .squads
-            .iter()
-            .map(|s| s.id)
-            .filter(|id| !is_mission_squad(*id))
-            .collect()
+        self.layout.squads.iter().map(|s| s.id).collect()
     }
 
     /// Open the row context menu on `display_rows()` index `i`, anchored at
@@ -5009,10 +4827,8 @@ impl View {
                 // (SelectSquad to the squad you're on); it now toggles the
                 // caret locally instead (x-2f99). Inactive rows keep
                 // SelectSquad - auto-expand in set_layout completes the
-                // gesture when the resulting layout push lands. A mission
-                // squad has no server-side squad to select (SelectSquad would
-                // refuse "no such squad"), so it always just toggles locally.
-                None if row.squad == self.layout.active_squad || is_mission_squad(row.squad) => {
+                // gesture when the resulting layout push lands.
+                None if row.squad == self.layout.active_squad => {
                     Some(ChromeHit::CycleSection(squad_key(&self.layout, row.squad)?))
                 }
                 None => Some(ChromeHit::Cmds(vec![Command::SelectSquad(row.squad)])),
@@ -5607,7 +5423,6 @@ impl View {
             return chosen;
         }
         match key {
-            SectionKey::Mission(_) => self.expanded_or_live_only(key),
             // The `~ missions` band is a progress summary, not a workspace: it
             // opens Expanded (the mission names are the content) and the operator
             // collapses it explicitly. No LiveOnly tier - the names have no
@@ -5813,7 +5628,7 @@ impl View {
     /// keeps the by-key lookup for display-only callers.
     fn section_dead_rows(&self, key: &SectionKey, squad: Option<u64>) -> Vec<&AgentRow> {
         match key {
-            SectionKey::Squad(_) | SectionKey::Mission(_) => {
+            SectionKey::Squad(_) => {
                 let id = squad.or_else(|| {
                     self.layout
                         .squads
@@ -7557,15 +7372,9 @@ impl View {
         // single squad has no groups to separate (US3 verify: absent with 1
         // squad).
         let multi_squad = self.layout.squads.len() > 1;
-        // Real workspaces only: a mission squad renders later under the
-        // `~ missions` band, never as a workspace section (it can hold no agent).
-        let real_squads: Vec<&SquadMeta> = self
-            .layout
-            .squads
-            .iter()
-            .filter(|s| !is_mission_squad(s.id))
-            .collect();
-        for (idx, s) in real_squads.into_iter().enumerate() {
+        // `squads` carries only real workspaces: missions ride their own lane
+        // and render under the `~ missions` band below.
+        for (idx, s) in self.layout.squads.iter().enumerate() {
             // One spacer between consecutive workspace groups (never before the
             // first, so no leading blank and never doubled).
             if multi_squad && idx > 0 {
@@ -7681,11 +7490,7 @@ impl View {
         // Skip the collect entirely when the band is off (the documented reason
         // for the toggle) - display_rows is hot, called per compose.
         let missions: Vec<&SquadMeta> = if self.show_missions {
-            self.layout
-                .squads
-                .iter()
-                .filter(|s| is_mission_squad(s.id))
-                .collect()
+            self.layout.missions.iter().collect()
         } else {
             Vec::new()
         };
@@ -8460,9 +8265,7 @@ fn glyph_cols(ch: char) -> usize {
 /// (no cwd, not a mission) falls back to its name - degenerate, and better
 /// than dropping its state entirely.
 fn section_key(s: &SquadMeta) -> SectionKey {
-    if is_mission_squad(s.id) {
-        SectionKey::Mission(s.id)
-    } else if !s.canonical_cwd.is_empty() {
+    if !s.canonical_cwd.is_empty() {
         SectionKey::Squad(s.canonical_cwd.clone())
     } else {
         SectionKey::Squad(s.name.clone())
@@ -8482,8 +8285,6 @@ fn squad_key(layout: &LayoutView, id: u64) -> Option<SectionKey> {
 /// `section_key_matches_resolver` pins the two to the same answer.
 fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
     match key {
-        SectionKey::Mission(id) => is_mission_squad(s.id) && s.id == *id,
-        SectionKey::Squad(_) if is_mission_squad(s.id) => false,
         SectionKey::Squad(ident) if !s.canonical_cwd.is_empty() => &s.canonical_cwd == ident,
         SectionKey::Squad(ident) => &s.name == ident,
         SectionKey::Elsewhere | SectionKey::WorkQueue | SectionKey::Missions => false,
@@ -8495,12 +8296,10 @@ fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
 /// what counts as a live section.
 fn section_is_live(layout: &LayoutView, key: &SectionKey) -> bool {
     match key {
-        SectionKey::Squad(_) | SectionKey::Mission(_) => {
-            layout.squads.iter().any(|s| squad_matches(s, key))
-        }
-        // The `~ missions` band is live while any mission squad exists; the two
+        SectionKey::Squad(_) => layout.squads.iter().any(|s| squad_matches(s, key)),
+        // The `~ missions` band is live while any mission exists; the two
         // pull-sections are always considered live (their rows come and go).
-        SectionKey::Missions => layout.squads.iter().any(|s| is_mission_squad(s.id)),
+        SectionKey::Missions => !layout.missions.is_empty(),
         SectionKey::Elsewhere | SectionKey::WorkQueue => true,
     }
 }
@@ -10025,7 +9824,7 @@ const PEEK_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 /// (x-9c5f) Humanize an age in seconds to `Ns`/`Nm`/`Nh`/`Nd` for the peek
 /// header's `changed Ns ago` line (Discretion 3). A future stamp (clock skew)
 /// is clamped by the caller to 0 before this, so `0s` is the floor.
-fn humanize_ago(secs: u64) -> String {
+pub(crate) fn humanize_ago(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {
@@ -10369,6 +10168,7 @@ async fn attach_and_run(
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
+            missions: Vec::new(),
         },
     );
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
@@ -10453,6 +10253,7 @@ async fn attach_and_run(
                 backlog,
                 backlog_lanes,
                 backlog_stale,
+                missions,
                 ..
             }) => {
                 view.set_layout(LayoutView {
@@ -10466,6 +10267,7 @@ async fn attach_and_run(
                     backlog,
                     backlog_lanes,
                     backlog_stale,
+                    missions,
                 });
                 break;
             }
@@ -10520,12 +10322,11 @@ async fn attach_and_run(
                 | ServerMsg::LayoutGrafted { .. }
                 | ServerMsg::TabLocation { .. }
                 | ServerMsg::TabClosed { .. }
-                // (v60, x-7b5e) Bulk restore answers a one-shot `fno mux
-                // workspace restore` control connection, never an attached
-                // client. (v71) The prune reload is the same one-shot shape.
-                // (v75) The exact-session retirement, same one-shot shape.
+                // (v60/v71/v75/v78) one-shot control-verb replies: never
+                // attached-client traffic.
                 | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }
-                | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. },
+                | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
+                | ServerMsg::ServerStats { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -10673,6 +10474,11 @@ async fn attach_and_run(
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateOutcome>();
 
+    // (x-f188) The queued `fno agents restart` runs off the UI loop and
+    // reports back its verdict line. One at a time (the View's inflight
+    // flag); the notice is the receipt.
+    let (restart_tx, mut restart_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
     // The resource meter's sampler reports its one-line reading here, same
     // last-wins shape. The task itself is spawned by the toggle (and once at
     // startup when config enables the meter) and exits through the view's
@@ -10779,8 +10585,7 @@ async fn attach_and_run(
             let tx = conn_tx.clone();
             let gen = view.conn_gen;
             tokio::spawn(async move {
-                let outcome = crate::connections_view::load_all().await;
-                let _ = tx.send((gen, outcome));
+                crate::connections_view::load_all(tx, gen).await;
             });
         }
         // x-84d7: run a wanted single-flight mutation off the UI loop. The modal's
@@ -10804,6 +10609,17 @@ async fn attach_and_run(
             tokio::spawn(async move {
                 let outcome = probe_update_readiness().await;
                 let _ = tx.send(outcome);
+            });
+        }
+        // (x-f188) Kick a wanted agents restart off the UI loop, at most
+        // one in flight.
+        if view.restart_agents_want && !view.restart_inflight {
+            view.restart_agents_want = false;
+            view.restart_inflight = true;
+            let tx = restart_tx.clone();
+            tokio::spawn(async move {
+                let verdict = run_restart_verb().await;
+                let _ = tx.send(verdict);
             });
         }
         // Kick a wanted sweep verb off the UI loop, at most one in flight.
@@ -10936,8 +10752,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, .. }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, missions, .. }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, missions });
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -11009,11 +10825,10 @@ async fn attach_and_run(
                     | ServerMsg::LayoutGrafted { .. }
                     | ServerMsg::TabLocation { .. }
                     | ServerMsg::TabClosed { .. }
-                    // (v60, x-7b5e) Bulk restore answers a one-shot control
-                    // connection only. (v71) The prune reload is the same shape.
-                    // (v75) The exact-session retirement, same one-shot shape.
+                    // (v60/v71/v75/v78) one-shot control-verb replies.
                     | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }
-                    | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }) => {}
+                    | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
+                    | ServerMsg::ServerStats { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback
@@ -11366,6 +11181,15 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some(verdict) = restart_rx.recv() => {
+                // (x-f188) The restart verdict line lands as a notice: the
+                // last stdout line the verb printed, whatever it said.
+                view.restart_inflight = false;
+                view.set_notice(verdict);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             Some(text) = meter_rx.recv() => {
                 // Last sample wins; the row renders "sensor unavailable" for
                 // a failed one, so nothing stale survives a sensor going dark.
@@ -11380,23 +11204,24 @@ async fn attach_and_run(
                 // stomped by a landing probe.
                 view.sweep_inflight = false;
                 match msg {
-                    SweepMsg::Counts { tabs, used, dead } => {
+                    SweepMsg::Counts(counts) => {
                         // A popup opened after the tap is the operator's
                         // NEWER intent; it is never stomped by a landing
                         // probe. The tap is answered with a notice instead
                         // of silently dropped.
                         if view.aux.is_none() {
-                            view.aux = Some(build_sweep_modal(tabs, used, dead));
+                            view.aux = Some(build_sweep_modal(&counts));
                             view.aux_esc.clear();
                         } else {
                             view.set_notice(format!(
-                                "sweep ready: tabs {tabs}, used shells {used}, dead agents {dead} - reopen the menu"
+                                "sweep ready: tabs {}, used shells {}, dead agents {}, named tabs {}, stale rows {} - reopen the menu",
+                                counts.tabs, counts.used, counts.dead, counts.named, counts.squads
                             ));
                         }
                     }
-                    SweepMsg::Applied { closed, reaped } => {
+                    SweepMsg::Applied { closed, reaped, removed } => {
                         view.set_notice(format!(
-                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s)"
+                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s), removed {removed} squad row(s)"
                         ));
                     }
                     SweepMsg::Failed(reason) => {
@@ -14080,6 +13905,18 @@ async fn execute_aux_action(
         AuxAction::SweepUsedShells => begin_sweep_apply(view, SweepScope::UsedShells),
         AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
         AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
+        AuxAction::RestartAgents => {
+            // x-f188 change 7: the modal named every effect; the tap is the
+            // confirmation. Close the popup, queue the verb off the UI loop.
+            view.aux = None;
+            if view.restart_inflight {
+                view.set_notice("a restart is already running".into());
+            } else {
+                view.restart_agents_want = true;
+            }
+        }
+        AuxAction::SweepNamed => begin_sweep_apply(view, SweepScope::Named),
+        AuxAction::SweepSquads => begin_sweep_apply(view, SweepScope::Squads),
         AuxAction::OpenConnections => {
             // x-84d7: close the MENU and open the Connections modal in its
             // loading state; arm the first read (the run loop spawns it).
@@ -16739,6 +16576,10 @@ mod tests;
 #[cfg(test)]
 #[path = "client_tests/court_block_tests.rs"]
 mod court_block_tests;
+
+#[cfg(test)]
+#[path = "client_tests/update_modal_tests.rs"]
+mod update_modal_tests;
 
 #[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]

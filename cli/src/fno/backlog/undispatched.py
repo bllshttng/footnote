@@ -115,6 +115,10 @@ def classify_planned_unclaimed(
             "has_pr": _has_pr(entry),
             "batch_owner": bool(entry.get("batch")),
             "blocked": _blocked(entry, by_id),
+            # Containment folds a node into its owner's dispatch ("never
+            # dispatch alone"): it ships inside the owner's PR, so a free
+            # claim of its own does not make it offerable here.
+            "contained": bool(entry.get("contained_in")),
             "claim_state": claim_state,
         }
         if not (
@@ -125,6 +129,7 @@ def classify_planned_unclaimed(
             and not facts["has_pr"]
             and not facts["batch_owner"]
             and not facts["blocked"]
+            and not facts["contained"]
             and claim_state is None
         ):
             continue
@@ -137,7 +142,19 @@ def classify_planned_unclaimed(
                 "facts": facts,
                 **{
                     key: entry.get(key)
-                    for key in ("title", "project", "mission_id", "roadmap_id", "parent")
+                    for key in (
+                        "title",
+                        "project",
+                        "mission_id",
+                        "roadmap_id",
+                        "parent",
+                        # Dispatch overrides ride along so a consumer cannot
+                        # read absent as null (the false zero this queue was
+                        # bitten by): set means encoded, absent means get is
+                        # authoritative and it carries none either.
+                        "dispatch_verb",
+                        "dispatch_brief",
+                    )
                     if entry.get(key) is not None
                 },
             }
@@ -223,7 +240,13 @@ def read_planned_unclaimed_from_entries(
     mission: str | None = None,
     roadmap_id: str | None = None,
     parent: str | None = None,
+    worked: dict[str, list[str]] | None = None,
 ) -> dict:
+    """Classify planned-but-unclaimed rows over an already-read entry list.
+
+    ``worked`` hands in an already-paid strict roster read (``backlog next``
+    pays one per selection). Absent, this reads the roster itself.
+    """
     from fno.graph.statuses import live_worked_node_ids
 
     try:
@@ -232,7 +255,8 @@ def read_planned_unclaimed_from_entries(
         # offerable here either: fold the worked overlay in as synthetic
         # claims, and refuse on an unreadable roster rather than offer nodes
         # whose liveness could not be checked.
-        worked = live_worked_node_ids(strict=True, entries=entries)
+        if worked is None:
+            worked = live_worked_node_ids(strict=True, entries=entries)
     except ValueError as exc:
         raise ObserverReadError(str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - unknown liveness refuses the offer

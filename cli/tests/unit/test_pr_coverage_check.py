@@ -2300,6 +2300,60 @@ def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tm
         assert needle not in note, f"past-cap receipt names {needle}: {note}"
 
 
+def test_a_spent_row_discharges_when_the_rederived_count_is_under(
+    monkeypatch, tmp_path
+):
+    """The producer's budget bit is authority on its own (d-0fa92eb9): the
+    row says rounds_exhausted true, the gate's own re-derivation lands under
+    the cap, and the discharge still fires - a refusal past a spent budget
+    is unsatisfiable by construction. The row's stale verdict is the PR 1717
+    shape: covered at emit, head moved since. The remedy checks are the
+    q-8a3bf752 regression: no gate text at the cap names approval or any
+    override valve."""
+    _specimen_gates(monkeypatch)
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    rows = [
+        json.dumps(_soft_round("2026-08-25T21:00:00Z", "9" * 40)),
+        json.dumps(
+            {
+                "ts": "2026-08-25T22:01:00Z",
+                "type": "review_coverage",
+                "source": "hook",
+                "data": {
+                    "pr": 42,
+                    "coverage": "covered",
+                    "reviewed_count": 1,
+                    "head_sha": FIXTURE_HEAD,
+                    "rounds_used": 2,
+                    "rounds_max": 2,
+                    "rounds_exhausted": True,
+                    "verdicts": [
+                        {
+                            "producer": "local_attestation",
+                            "name": "code-review",
+                            "verdict": "stale",
+                            "attestation_origin": "self_attested",
+                            "reviewed_sha": "444500be",
+                            "freshness": "stale",
+                        }
+                    ],
+                },
+            }
+        ),
+    ]
+    _journal(tmp_path).write_text("\n".join(rows) + "\n")
+    monkeypatch.setattr(_coverage_gate, "_pr_reviews", lambda *a, **k: (None, ""))
+    state, refusal, head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED, f"row-spent must discharge: {refusal}"
+    assert not refusal, f"a discharged budget carries no refusal: {refusal}"
+    assert "review budget discharged (2/2 rounds)" in note, note
+    for needle in ("approval", "coverage-override", "coverage-waive"):
+        assert needle not in note, f"cap receipt names {needle}: {note}"
+        assert needle not in refusal, f"cap refusal names {needle}: {refusal}"
+
+
 def test_rounds_spent_with_zero_attestations_has_a_permitted_merge_path(
     monkeypatch, tmp_path
 ):
@@ -3149,6 +3203,50 @@ def test_cap_verdict_rounds_read_the_max_of_both_axes(tmp_path):
         str(tmp_path), f"{0:040x}", "feature/x-cap", _cap_cov_row()
     )
     assert events_only.rounds_used == 1
+
+
+def test_cap_verdict_mixed_declared_chain_reads_two(tmp_path):
+    """The parity corpus row: an undeclared fail at head A, a declared verify
+    pass (review_round 1) at head B, an undeclared fail at head C. The
+    declared verify does not double-count the fail it verifies; the trailing
+    undeclared round still counts, so both mirrors read 2. The Rust half is
+    cap_the_mixed_declared_chain_reads_two_on_both_mirrors."""
+    rows = []
+    for i, (verdict, declared) in enumerate([("fail", None), ("pass", 1), ("fail", None)]):
+        data = {
+            "reviewer": "code-review",
+            "head_sha": f"{i:040x}",
+            "verdict": verdict,
+            "session_id": "s-cap",
+            "branch": "feature/x-cap",
+            "reviewed_base_sha": "a" * 40,
+            "reviewed_head_sha": f"{i:040x}",
+            "findings_blocking": 1 if verdict == "fail" else 0,
+            "findings": (
+                [
+                    {
+                        "category": "correctness",
+                        "verdict": "CONFIRMED",
+                        "blocking": True,
+                        "has_required_fields": True,
+                        "finding_key": _CAP_HARD_KEY,
+                    }
+                ]
+                if verdict == "fail"
+                else []
+            ),
+        }
+        if declared is not None:
+            data["review_round"] = declared
+        rows.append(
+            {"ts": f"2026-08-31T2{i:02d}:00:00Z", "type": "review_attestation",
+             "source": "hook", "data": data}
+        )
+    _seed_cap_chain(tmp_path, rows)
+    cap = _coverage_gate.cap_verdict(
+        str(tmp_path), f"{2:040x}", "feature/x-cap", _cap_cov_row()
+    )
+    assert cap.rounds_used == 2
 
 
 def test_cap_verdict_on_an_empty_chain_answers_zero(tmp_path):

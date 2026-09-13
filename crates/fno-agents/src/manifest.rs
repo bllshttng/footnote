@@ -33,6 +33,11 @@ use crate::readiness::ScreenView;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::LazyLock;
+
+/// The rule-bordered composer's top-rule shape, compiled once (x-3ea6).
+static COMPOSER_TOP_RULE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^─{3,}( \S.* ─)?$").expect("static regex"));
 
 /// Max nesting depth for a [`Gate`] tree. A pathological manifest (deeply nested
 /// `all`/`any`/`not`) is refused while building the [`Gate`] so `evaluate`'s
@@ -147,31 +152,44 @@ impl Region {
     }
 }
 
-/// Pull the body out of the last box-drawn input box. claude's composer is a
-/// `╭─╮ / │ … │ / ╰─╯` box; the body is the `│`-bordered lines between the last
-/// bottom border (`╰`) and its nearest preceding top border (`╭`), with the
-/// vertical borders stripped. Returns "" when no complete box is present.
+/// Pull the body out of the last input composer on screen. claude draws two
+/// shapes (pinned 2026-09-11 against claude 2.1.268): the `╭─╮ / │ … │ / ╰─╯`
+/// box, and a rule-bordered composer - a top rule carrying the session name
+/// (`─── <session> ─`), the `❯ ` prompt line, then a plain `─` bottom rule with
+/// status lines below it. The box wins when present; otherwise the last
+/// rule-bordered pair is taken. Returns "" when neither shape is present.
 ///
-/// ponytail: a single-heuristic box finder, tuned to claude's box-drawing glyphs;
-/// it does not handle nested boxes or ASCII `+--+` frames, and it does NOT yet
-/// distinguish the live composer from a box-drawn TABLE up in scrollback - it just
-/// takes the bottommost `╰`/`╭` pair, so a scrollback table can be extracted as
-/// stale "prompt body" and let a rule false-match (codex peer P2). Disambiguating
-/// composer-vs-scrollback needs ground truth (the box near the status area / on the
-/// cursor row) against a live claude TUI; deliberately not guessed here. E6.3's
-/// `claude.toml` `live_prompt_box` rule consumes this region, so that
-/// disambiguation is its load-bearing follow-up (carveout, pinned when E2 lands).
+/// ponytail: a single-heuristic finder, tuned to claude's glyphs; it does not
+/// handle nested boxes or ASCII `+--+` frames, and it just takes the bottommost
+/// pair of either shape, so stale scrollback copies can still be extracted (the
+/// `live_prompt_box` rule's `❯` gate is what keeps prose bodies from matching).
 fn prompt_box_body(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let Some(bottom) = lines.iter().rposition(|l| l.contains('╰')) else {
+    if let Some(bottom) = lines.iter().rposition(|l| l.contains('╰')) {
+        if let Some(top) = lines[..bottom].iter().rposition(|l| l.contains('╭')) {
+            return lines[top + 1..bottom]
+                .iter()
+                .map(|l| l.trim().trim_matches('│').trim().to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+    }
+    // Rule-bordered composer. The bottom is the last line that is ONLY `─`
+    // (>= 20 of them, so a prose separator reads as neither edge); the top is
+    // the nearest `─── [name] ─` rule above it.
+    let plain_rule = |l: &str| l.trim().chars().count() >= 20 && l.trim().chars().all(|c| c == '─');
+    let Some(bottom) = lines.iter().rposition(|l| plain_rule(l)) else {
         return String::new();
     };
-    let Some(top) = lines[..bottom].iter().rposition(|l| l.contains('╭')) else {
+    let Some(top) = lines[..bottom]
+        .iter()
+        .rposition(|l| COMPOSER_TOP_RULE.is_match(l.trim()))
+    else {
         return String::new();
     };
     lines[top + 1..bottom]
         .iter()
-        .map(|l| l.trim().trim_matches('│').trim().to_string())
+        .map(|l| l.trim().to_string())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1567,6 +1585,65 @@ mod tests {
             "permission prompt must beat the idle box"
         );
         assert_eq!(v.rule_id, "permission_prompt");
+    }
+
+    // AC1-HP (x-3ea6): claude 2.1.268 draws the composer between plain rules
+    // with the session name set into the top rule. A scrollback frame plus that
+    // rule-bordered composer, no OSC title, reads idle via live_prompt_box.
+    #[test]
+    fn x3ea6_rule_bordered_composer_reads_idle_without_a_title() {
+        let m = bundled("claude");
+        let screen = "some scrollback\n\
+                      more scrollback\n\
+                      ─── t-84b2-ab-names ─\n\
+                      ❯ \n\
+                      ────────────────────\n\
+                      ? for shortcuts\n\
+                      ⏵⏵ accept edits on\n\
+                      token counts\n\
+                      status line\n";
+        let v = m.evaluate(&view(screen)).expect("rule composer matches");
+        assert_eq!(v.state, "idle");
+        assert_eq!(v.rule_id, "live_prompt_box");
+    }
+
+    // AC1-ERR (x-3ea6): the busy shapes never read idle - the pinned spinner
+    // line above the composer, the queued-messages line, or a quarter-circle
+    // title spinner all badge `working`; a lone rule up in scrollback with no
+    // composer below does not match the idle rule.
+    #[test]
+    fn x3ea6_composer_working_markers_badge_working() {
+        let m = bundled("claude");
+        let top = "─── t-84b2-ab-names ─\n";
+        let bottom = "────────────────────\n";
+        let status = "? for shortcuts\n⏵⏵ accept edits on\n";
+        // Spinner line above the composer.
+        let working_screen =
+            format!("✳ Writing… (esc to interrupt · ctrl+t to hide)\n{top}❯ \n{bottom}{status}");
+        let v = m
+            .evaluate(&view(&working_screen))
+            .expect("spinner frame matches");
+        assert_eq!(v.state, "working");
+        assert_eq!(v.rule_id, "composer_working");
+        // Queued-messages line inside the composer body.
+        let queued_screen = format!("{top}❯ Press up to edit queued messages\n{bottom}{status}");
+        let v = m
+            .evaluate(&view(&queued_screen))
+            .expect("queued frame matches");
+        assert_eq!(v.state, "working");
+        assert_eq!(v.rule_id, "composer_working");
+        // Quarter-circle title spinner (the portal-view busy badge).
+        let idle_screen = format!("{top}❯ \n{bottom}{status}");
+        let v = m
+            .evaluate(&view_title(&idle_screen, "◑ king-fno-g5"))
+            .expect("title spinner matches");
+        assert_eq!(v.state, "working");
+        assert_eq!(v.rule_id, "osc_title_working");
+        // A lone plain rule up in scrollback, prose below, no live composer.
+        let stale = format!("─── old-session ─\nprose line\n{bottom}more prose\n");
+        assert!(m
+            .evaluate(&view(&stale))
+            .is_none_or(|v| v.rule_id != "live_prompt_box"));
     }
 
     #[test]

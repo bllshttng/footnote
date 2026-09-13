@@ -32,6 +32,18 @@ Receipts and manifest snapshots have each lied about a live session. Three reads
 
 The fetch is the point: a stale local `origin/main` ref answers zero for a branch that is dozens of commits behind.
 
+## The crown's own verbs
+
+Verbs that exist only for a crowned session. One reign ran a whole territory without knowing three of these shipped.
+
+| You are trying to | Verb | The gotcha |
+|---|---|---|
+| Run one check-in beat | `fno agents king checkin` | Runs the whole check-in body and emits the `reign_checkin` journal row itself. The row carries the numbers it just printed. A failed reader gets its own `READER FAILED` line and the beat continues. `--no-emit` prints and diffs without appending. |
+| Join nodes to PRs, sessions and workers | `fno agents court -n` | Returns the node, PR, session and worker join in one call. Replaces a hand-built join over `fno do pr list`, `fno agents registry-json` and a raw graph read. Implies JSON output. |
+| Count what is left to deliver | `fno agents king drain <scope>` | Answers delivery, not assignment: undelivered as one number. An unreadable graph exits non-zero on purpose, so the count can never read as drained. |
+| Leave an answer for the next king | `fno agents king faq add` | The only crown verb aimed at a successor. Refuses without `--exit`, the change that retires the entry. |
+| Read the reign back | `fno agents king history` | This crown's recorded check-ins, newest first, verbatim. Legacy alias rows count as rejected evidence and are never silently accepted. It never generates a summary. |
+
 ## Observation and pointing
 
 | You are trying to | Verb | The gotcha |
@@ -90,7 +102,7 @@ Driven directly, the claude-native verbs key on the SHORT ID: `claude rm <short_
 
 The `fno agents` verbs resolve the name to the short id for you. Reach for those.
 
-`fno agents rm` talks to the Rust daemon, and a wedged daemon takes the verb down with it. When the daemon is wedged, the working reap path is the in-process call. It skips the daemon and returns at once: `python -c "from fno.agents.dispatch import rm_agent; rm_agent('<name>', force=True)"`.
+`fno agents rm` talks to the Rust daemon, and a wedged daemon takes the verb down with it. The old in-process escape (`python -c "... rm_agent ..."`) is gone: rm has no Python implementation. The remedy is the daemon restart verb, `fno agents restart`: it SIGTERMs the stale daemon and lazy-starts a fresh one, and PTY workers survive the restart. Re-run the rm on the fresh daemon.
 
 `fno agents list` reads every transcript to derive per-row state. On a fleet of dozens it has taken over 120 seconds. Budget for that before you block a reign on the read.
 
@@ -153,7 +165,7 @@ Draft to a file and run `fno doctor lint style --stdin < file` before sending. T
 |---|---|
 | `fno do pr status <n>` | `ready` means green AND `optional_reviews_unresolved == 0`. Advisory, never the exit code. Costs GraphQL quota through its `reviewThreads` read. |
 | `fno do pr merge <n>` | Gates on the `review_coverage` event read from local `events.jsonl`. Never reads threads. |
-| `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` | CI state over REST. Free of the GraphQL budget every `pr status` read shares. |
+| `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` and `/commits/<sha>/status` | CI state over REST: check runs plus legacy commit statuses, which `check-runs` alone cannot see. Free of the GraphQL budget. |
 | `fno-agents review-coverage` | The standalone coverage producer. Exit 4 carries `graphql_exhausted` on stdout. |
 
 ## Backlog

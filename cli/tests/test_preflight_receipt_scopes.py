@@ -38,6 +38,7 @@ def test_optional_scopes_are_registered():
     assert "file-budget:fno" in _PREFLIGHT_OPTIONAL_SCOPE
     assert "tracker-gates:fno" in _PREFLIGHT_OPTIONAL_SCOPE
     assert "squads-leak-guard:fno" in _PREFLIGHT_OPTIONAL_SCOPE
+    assert "reign-arms:fno" in _PREFLIGHT_OPTIONAL_SCOPE
     assert _PREFLIGHT_GATE_SCOPE == _PREFLIGHT_BASE_SCOPE | _PREFLIGHT_OPTIONAL_SCOPE
 
 

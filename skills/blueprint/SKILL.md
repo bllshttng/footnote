@@ -18,6 +18,18 @@ Direct edits are blocked by `hooks/graph-write-protect.sh`.
 
 Create implementation plans scaled to the task. The output shape is always one plan `.md` (`plan == PR == node`); the input decides the path (mutate a `/think` doc in place, or create a fresh doc from an idea). Which gates fire is a READ of the input and the plan, not a guess - the dispatch table below names each trigger.
 
+## Substrate
+
+Read the argument left to right: an optional leading `subagent` token (stripped before Plan Claims Ingestion reads the node id), then the input (node id, design-doc path, or feature description). No token: run it here, inline.
+
+`subagent` runs the whole skill in a subagent of this session, and it still takes the claim, writes the row and runs every gate. The reasons are measured, not speed. A subagent cannot orphan: its completion IS the tool result (four of four returned in one measurement; every codex thread blueprint in that same measurement orphaned, one after 623 minutes, one with a negative span). A subagent spends no spawn share: the gate counts spawned workers, so one king was refused twice at 7 of 7 while two blueprint subagents ran. No timing is claimed. Both wall-clock comparisons on record are confounded, one by unmatched model tiers, one by heavy external machine load, so no trustworthy timing exists in either direction:
+
+1. Run `fno backlog session open <node> --json`. A nonzero exit is the answer. Relay the refusal line and launch nothing.
+2. For several nodes at once, run `fno config assert-subagent-budget --width <n>` first. A refusal means one at a time.
+3. Launch one subagent with the Agent tool. Its whole prompt is: `Use the Skill tool to run fno:blueprint with args "<node>". Follow the skill to its end, including the blueprint close and its readback. Do not edit source files. Report the plan path and the readback line.` Add nothing to it. A rule typed into a prompt is the drift this token removes. A node-specific constraint goes on the node with `fno backlog update <node> --dispatch-brief "..."`, where step 2a reads it.
+4. When it returns, read back two positive markers. `fno backlog get <node>` holds a `blueprint` session row with this session's id and an `ended_at`. `fno agents claim status node:<node> --json` no longer names `blueprint-session:<this session id>`.
+5. When either marker is missing, the subagent did not finish. Run `fno agents claim release node:<node> --holder blueprint-session:<session id>` (never with `--stamp-do`) and report the failure. Never backfill the row with `fno backlog session add`. A row records a completion, and nothing completed.
+
 ## Gates (read by state)
 
 Each gate loads only when its trigger fires. The bodies (with verbatim scripts) live in [references/blueprint-gates.md](references/blueprint-gates.md); read a gate's section there when the trigger below is true. Do NOT run a gate whose trigger is false - a plan that fires no DB/executor/model/impeccable gate never mentions them.
@@ -29,6 +41,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 | Answerer Enumeration Gate | the plan changes a read, write, or feed - step 2b-bis |
 | Consolidation Gate | always, between discovery grounding (2b) and the write (3) - step 2d |
 | Schema Citation Gate | the codemap has a `## Database Schema` section AND the plan touches the DB |
+| Python tree allowance | a Files-to-Modify row targets `cli/src/fno/**.py` |
 | Executor Lock Transcription | a design doc supplies a Locked Decision (executor) |
 | Model Pin / Model Routing | the plan frontmatter sets `model:`, or always for `difficulty:` |
 | Blueprint Provenance Stamp | always, after `$NODE_ID` is minted (tiny, best-effort) |
@@ -143,6 +156,7 @@ fi
    fi
    ```
    If `fno` is unavailable or codemap's deps are missing, skip silently. Read `.fno/codemap.md` if it exists - use it to identify god nodes, module boundaries, and dependency flow before Grep/Glob exploration. Top files in the output are highest-importance; changes to these need extra phases.
+2a. **Verify the premise** - applies to node-seeded and raw-prose input; a supplied design doc already carries cited findings. Read the whole node with `fno backlog get <id>`, including `dispatch_brief` and `progress_notes`; a later correcting note wins over the details. Name the one claim the plan rests on (what a line does, a count, a stall). Measure it again at its source, with a positive control, before writing. When it holds, cite the reading in Context. When it does not, record the real reading with `fno backlog note <id> "<reading>"`, then plan the real defect or halt and say the node is wrong. A plan on a premise nobody re-measured sends a worker after a defect that does not exist.
 2c. **Schema citation gate** - When a `## Database Schema` section exists in the
    codemap, run the **Schema Citation Gate** ([references/blueprint-gates.md](references/blueprint-gates.md#schema-citation-gate-graduated-db-touching-plans)) before adopt.
    Quick mode is `-S`-class, so it WARNS on an uncited DB-touching task and
@@ -154,11 +168,13 @@ fi
 
 2b-bis. **Answerer enumeration** - every plan that changes a read, write, or feed. Run [references/answerer-enumeration.md](references/answerer-enumeration.md)'s four steps: phrase the question in one line, enumerate every answerer (sites repo-wide, feeds measured at each site the plan changes), state the count as the PR estimate, and dispose of every answerer in principle 9's vocabulary. Record the outcome as a `surface:` frontmatter block (schema: [references/quick-template.md](references/quick-template.md)); `validate-plan.sh` refuses a post-2026-09-03 non-quick plan without one. The step sits here, before the Consolidation Gate (2d), because the order is load-bearing: enumerating answerers finds sibling SITES, consolidation finds sibling NODES, and a question with four answerers often already has two nodes filed against it. Sweeping first is what lets 2d see them.
 
-2d. **Consolidation Gate** - every plan, on the full-context main thread, between grounding (2b) and the write (3). A supplied design doc skips 2b, so no receipt exists on that path. Run `fno do think inspect "<node id or seed>" --json` here to get one, because the gate applies to that path too. Read the receipt's `graph` payload: `duplicates` (ranked top-K, each row carrying `id`, `score`, `reason`, and `superseded_by` when set), `closure` for the resolved node (`status`, `pr_number`, `superseded_by`), and `decisions` (the node's own live rulings, newest first, each row carrying `decision_id`, `ts`, `lane`, `subject`, a truncated `text`; a failed read shows in `decisions_status`/`decisions_detail` rather than reading as "no rulings"). The scores are a reading aid, not a verdict. A real family and pure noise both sit near 0.26. A candidate carrying `superseded_by` is a dead row, never a live fold target; that field settles liveness where the score does not. Make the judgment here, with the node details, the plan seed, and the code in hand. Never delegate this call to a subprocess or a spawned agent. A truncated context reading that list decides confidently and is wrong in both directions. On the design-doc path, pass the doc's title and body as the seed, not a phrase: recall tracks seed width, so ten tokens rank noise while the same node's title plus details ranks the true family. Read `graph.recall.lane` alongside `duplicates`: when it reads `seed` and the list is empty, that is not a measured zero, so run `fno backlog find "<2-3 salient terms>"` before recording `proceed_alone` against nothing. Picking that short salient query is the reader's job; the receipt cannot do it for you.
+2d. **Consolidation Gate** - every plan, on the full-context main thread, between grounding (2b) and the write (3). A supplied design doc skips 2b, so no receipt exists on that path. Run `fno do think inspect "<node id or seed>" --json` here to get one, because the gate applies to that path too. Read the receipt's `graph` payload: `duplicates` (ranked top-K, each row carrying `id`, `score`, `reason`, and `superseded_by` when set), `closure` for the resolved node (`status`, `pr_number`, `superseded_by`, `deferred_kind`), and `decisions` (the node's own live rulings, newest first, each row carrying `decision_id`, `ts`, `lane`, `subject`, a truncated `text`; a failed read shows in `decisions_status`/`decisions_detail` rather than reading as "no rulings"). The scores are a reading aid, not a verdict. A real family and pure noise both sit near 0.26. A candidate carrying `superseded_by` is a dead row, never a live fold target; that field settles liveness where the score does not. So is a candidate whose row reads `deferred_kind: retracted` (the stamp `fno backlog retract` writes): a retracted row is a proven false premise, never a fold target. Make the judgment here, with the node details, the plan seed, and the code in hand. Never delegate this call to a subprocess or a spawned agent. A truncated context reading that list decides confidently and is wrong in both directions. On the design-doc path, pass the doc's title and body as the seed, not a phrase: recall tracks seed width, so ten tokens rank noise while the same node's title plus details ranks the true family. Read `graph.recall.lane` alongside `duplicates`: when it reads `seed` and the list is empty, that is not a measured zero, so run `fno backlog find "<2-3 salient terms>"` before recording `proceed_alone` against nothing. Picking that short salient query is the reader's job; the receipt cannot do it for you.
 
-   When `graph.closure.status` is `done` or `superseded`, halt before compiling. Report the closure fields. Do not finalize `status: ready` onto work that already shipped.
+   When `graph.closure.status` is `done` or `superseded`, halt before compiling. The same halt applies to a retraction: status `deferred` with `deferred_kind: retracted` (the stamp `fno backlog retract` writes) is a row filed on a false premise, not a delay; plain `deferred` does not halt. Report the closure fields. Do not finalize `status: ready` onto work that already shipped.
 
    When a ruling in `graph.decisions` records a verdict for the work being planned, halt before compiling and report the ruling - the same halt closure already forces. Closure is the node's own state; a ruling is somebody's judgment about it, so it is weighed here rather than merged into the closure check. Whether a given ruling is closure-bearing is the author's call, made with the ruling in hand, and the call is recorded either way (see `decisions_acknowledged` below).
+
+   Read `graph.plan_rulings` on the same receipt, next to `graph.decisions`. It carries rows from sibling plans' `consolidation.rejected` frontmatter: plans elsewhere that named THIS node and ruled it out. When a row there rejects the node being planned, halt before compiling, the same halt a live ruling forces, and report the plan path and its reason. The decision index cannot hold a plan's ruling (agent sessions cannot write it), so this row is the only place that verdict surfaces to the node it rejects; treat its absence on an `error` status as unknown, never as none.
 
    **Judge the candidates (the three-titles lesson).** Weigh what actually identifies a family over title words: the same file-and-line pair and the verbatim error string. Three sessions filed one bug as three titles sharing almost no words. The file and the error string were the identity. A familiar file alone is not family. A genuinely new bug in a familiar file gets its own node. The failure mode to avoid is a gate so strict that it swallows new work into an old node.
 
@@ -167,6 +183,7 @@ fi
    - **absorb** - the other node is a wave of THIS deliverable. Record its id and a reason a later reader can check. After intake (3b), run `fno backlog supersede <this-node> --replaces <other> --cause "<inherited cause>" --surface <repo-relative-path>`. `--cause` and `--surface` are required; the old row stays active until a merged PR covers every declared surface, which is what `--surface` is for. Record the reversal (`fno backlog unsupersede <other>`) in the block.
    - **append** - THIS node's content belongs on the OTHER node. Record the id and reason, write no second plan, and stop. The validator rejects an append outcome inside a written plan, because the file contradicts the decision. The content reaches the other node through its own channel (`fno backlog update <other> --details ...`).
    - **proceed_alone** - record every id considered under `proceed_alone_against:` with the reason each is not the same work. An empty candidate list is a legal `proceed_alone`.
+   - **rejected** - names a node whose proposal THIS plan rules out. Stronger than "not the same work": this plan's verdict is that the other node should not proceed. Its reason says why, and where the idea belongs instead. It sits beside any outcome - an absorb plan can still reject a third node. If that node is not deferred after intake (3b), run `fno backlog defer <id> -K wont_do -R "rejected by <this node> in <plan path>"` so the board matches the verdict. `fno backlog undefer` and `fno backlog decisions <id>` print the ruling back to whoever reverses it.
 
    Whatever the outcome, also record `decisions_acknowledged:` - one entry per row in `graph.decisions`, each carrying the `decision_id` and one line saying why that ruling does not close this work. An empty list is legal only when `graph.decisions` is itself empty; a live ruling with no matching entry is the same silence `proceed_alone_against` already refuses.
 
@@ -466,6 +483,7 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
 
 | Modifier | Effect |
 |---|---|
+| `subagent` | Run the whole skill in a subagent of this session, see [Substrate](#substrate). |
 | `quick` | Emit ## Execution Strategy as one parallel wave, one task per numbered change (stamp status + kill_criteria) |
 | `group N` | Bounded epic decomposition: after intake, partition the waves into at most `N` cohesive delivery groups (one child node + PR each). See [references/epic-decomposition.md](references/epic-decomposition.md). Omit `N` to fall back to the epic's `max_children`, else `config.blueprint.max_prs_per_epic`. Auto-enabled for `scope: epic` docs. |
 | `no-group` | Opt OUT of auto-decomposition on a `scope: epic` doc: run the single-doc lean mutation (one epic node, one PR), the pre-auto-group behavior. |
@@ -495,7 +513,7 @@ python3 skills/blueprint/scripts/mutate_doc.py <doc-path> \
 
 Exit codes:
 - `0` success
-- `1` doc already at status:ready without --rewrite; or path is a nonexistent file / feature description (redirect to /think)
+- `1` doc already at status:ready without --rewrite; or the argument is not a path or names a missing file (remedy: `fno do plan path`)
 - `2` section ownership violation
 - `3` frontmatter status missing / invalid
 
@@ -539,10 +557,10 @@ Finalize validates the proposed ready + `compiled-v1` contract and atomically st
 
 ## Ordered auto-launch nudge (advance, never a direct spawn)
 
-After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), nudge the ordered drain as the LAST action. Resolve the adopted node's parent first (`fno backlog get <node>` prints `parent`):
+After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), nudge the ordered drain as the LAST action. Resolve the adopted node's parent first (`fno backlog get <node>` prints `parent`). `--source sob` (x-84b2) stamps spawn-on-blueprint into the dispatched worker's name, so an operator can tell it apart from a merge-triggered `ac-` dispatch:
 
-- **live epic parent** → `fno backlog advance --epic <parent>`
-- **no parent** → `fno backlog advance`
+- **live epic parent** → `fno backlog advance --epic <parent> --source sob`
+- **no parent** → `fno backlog advance --source sob`
 - **plan stamped `source: claude-plan-mode`** → skip the nudge entirely
 
 When the plan is stamped `source: claude-plan-mode`, the front door owns the dispatch decision: its "Execute autonomously?" confirm may still be pending, and nudging then can start a worker the human is about to decline. The stamp is read from the plan frontmatter only, never the body.
@@ -566,6 +584,7 @@ A NON-path-shaped argument is a raw feature description, not a missing-doc case:
 
 Environment-specific traps that defy reasonable assumptions.
 
+- **A hand-typed planning prompt in the Agent tool skips the claim, the session row and every gate.** Use `/fno:blueprint subagent <node>` instead. On 2026-09-10 four such prompts produced plans that took no claim, wrote no row, and fail `validate-plan.sh`.
 - **A node-id argument must render `claims:` into the plan frontmatter, or intake DUPLICATES the node.** `/blueprint x-8af8` claims that node only if the plan writes a literal `claims: x-8af8` line; the template's commented `# claims:` is a doc note, not a substitute. The post-write refusal (Plan Claims Ingestion gate) halts before adoption when it is missing.
 - **A design-doc path with a typo must fail loud, never degrade to raw-description mode.** The path-shape classifier treats anything with `/`, `.md`, `~`, `./`, `../`, `/` as a path; a nonexistent one exits 1 with "file not found" rather than silently planning from the literal string.
 - **A malformed epic `max_children` (non-integer, `< 1`) is refused UP FRONT, before grouping** - not deferred to decompose, because a single-group collapse skips decompose entirely and would let the bad cap pass silently.

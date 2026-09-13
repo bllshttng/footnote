@@ -9,7 +9,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{ClientHarness, Scratch};
+use common::{screen_has_line, strip_prompts, ClientHarness, Scratch};
 
 #[test]
 fn client_e2e_prompt_appears_and_echo_roundtrips() {
@@ -22,7 +22,7 @@ fn client_e2e_prompt_appears_and_echo_roundtrips() {
     h.wait_screen(15, |s| !s.trim().is_empty());
     h.type_bytes(b"echo he\"ll\"o\r");
     // Only the OUTPUT line is bare "hello" (the typed line has quotes).
-    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "hello"));
+    h.wait_screen(15, |s| screen_has_line(s, "hello"));
     // The shell draws its NEXT prompt after that output line, so a frame taken
     // the instant `hello` lands can sit between the two and find no prompt row
     // at all. Wait for a `$` row BELOW the output; without this the assertions
@@ -31,7 +31,7 @@ fn client_e2e_prompt_appears_and_echo_roundtrips() {
         let lines: Vec<&str> = s.lines().collect();
         lines
             .iter()
-            .position(|l| l.trim() == "hello")
+            .position(|l| strip_prompts(l) == "hello")
             .is_some_and(|i| lines[i + 1..].iter().any(|l| l.trim_end().ends_with('$')))
     });
     // AC1-UI: the cursor is visible and sits on the fresh prompt row, where
@@ -60,19 +60,19 @@ fn client_e2e_utf8_and_control_keys_pass_through() {
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_screen(15, |s| !s.trim().is_empty());
     h.type_bytes("echo caf\u{00e9}\r".as_bytes());
-    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "caf\u{00e9}"));
+    h.wait_screen(15, |s| screen_has_line(s, "caf\u{00e9}"));
     // Ctrl-C a sleep; the shell survives and answers again. The start marker
     // proves sleep is actually FOREGROUND-RUNNING before the ^C (a bare delay
     // could let ^C hit the prompt and the test pass without exercising it).
     h.type_bytes(b"echo start-sleep; sleep 100\r");
-    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "start-sleep"));
+    h.wait_screen(15, |s| screen_has_line(s, "start-sleep"));
     // ^C, then wait for the shell to regain the foreground before typing:
     // bytes sent while sleep is still dying can be flushed by the line
     // discipline.
     h.type_bytes(&[0x03]);
     h.wait_prompt(15);
     h.type_bytes(b"echo interrupted\r");
-    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "interrupted"));
+    h.wait_screen(15, |s| screen_has_line(s, "interrupted"));
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn client_e2e_output_flood_keeps_the_real_client_responsive() {
     h.wait_screen(30, |s| {
         let mut saw_done = false;
         for line in s.lines() {
-            if line.trim() == "E2E-FLOOD-DONE" {
+            if strip_prompts(line) == "E2E-FLOOD-DONE" {
                 saw_done = true;
             } else if saw_done && line.trim_end().ends_with('$') {
                 return true;
@@ -98,7 +98,7 @@ fn client_e2e_output_flood_keeps_the_real_client_responsive() {
         false
     });
     h.type_bytes(b"echo client-alive\r");
-    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "client-alive"));
+    h.wait_screen(15, |s| screen_has_line(s, "client-alive"));
 }
 
 #[test]
@@ -133,9 +133,7 @@ fn client_e2e_detach_exits_client_and_leaves_server_running() {
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_screen(15, |s| !s.trim().is_empty());
     h.type_bytes(b"BEFORE_DETACH=yes; echo detach-ready=$BEFORE_DETACH\r");
-    h.wait_screen(15, |s| {
-        s.lines().any(|line| line.trim() == "detach-ready=yes")
-    });
+    h.wait_screen(15, |s| screen_has_line(s, "detach-ready=yes"));
     h.type_bytes(b"\x02d"); // prefix+d -> detach (Locked 11)
     let status = h.wait_exit(10);
     assert!(status.success(), "detach must exit 0, got {status:?}");
@@ -145,5 +143,70 @@ fn client_e2e_detach_exits_client_and_leaves_server_running() {
     let mut h2 = ClientHarness::spawn(&scratch);
     h2.wait_screen(15, |s| !s.trim().is_empty());
     h2.type_bytes(b"echo var=$BEFORE_DETACH\r");
-    h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "var=yes"));
+    h2.wait_screen(15, |s| screen_has_line(s, "var=yes"));
+}
+
+#[test]
+fn output_line_matcher_survives_a_late_prompt() {
+    // The 2026-09-10 screen (main run 34438652586, persistence_kill_nine):
+    // CR nudges queued while the shell was still starting printed their
+    // prompts after the next command's echo, so the output rendered as
+    // `$ set-ok` and the exact-trim predicate waited out its deadline on a
+    // screen that was already correct.
+    let fixture = "$ $ $ $ $\nSURVIVED=kill9; echo set-ok\n$ set-ok\n$";
+    assert!(screen_has_line(fixture, "set-ok"));
+    // A command ECHO is never the output line, prompts stripped or not.
+    assert!(!screen_has_line("$ echo he\"ll\"o", "hello"));
+    assert!(!screen_has_line("$ echo var=$SURVIVED", "var=kill9"));
+    // macOS bash-as-sh prompts strip too; a bare prompt row strips to "".
+    assert_eq!(strip_prompts("sh-3.2$ hello"), "hello");
+    assert_eq!(strip_prompts("$"), "");
+}
+
+#[test]
+fn output_line_guard_finds_no_exact_trim_match() {
+    // Retires the x-cd8d class: a pane/screen row compared for exact
+    // trim-equality against a literal misses output that already rendered
+    // when a queued CR nudge prints its prompt onto the line. Port any hit
+    // to common::screen_has_line or common::strip_prompts. The needles are
+    // concat!'d so this file never holds the joined text and cannot match
+    // itself.
+    let needle_a: &str = concat!(".trim()", " ==");
+    let needle_b: &str = concat!(".trim_end()", " ==");
+    // Positive control: each needle must match a line built at runtime, so
+    // a mistyped needle cannot green an empty scan.
+    for needle in [needle_a, needle_b] {
+        let line = format!("if l{} \"x\" {{", needle);
+        assert!(
+            line.contains(needle),
+            "needle {needle:?} failed its own positive control"
+        );
+    }
+    let tests_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut files_read = 0;
+    let mut hits: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&tests_dir).expect("tests dir must be readable") {
+        let path = entry.expect("dir entry readable").path();
+        if path.extension() != Some(std::ffi::OsStr::new("rs")) || !path.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("test source readable");
+        files_read += 1;
+        for (i, line) in text.lines().enumerate() {
+            if line.contains(needle_a) || line.contains(needle_b) {
+                hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        files_read >= 20,
+        "guard read only {files_read} files under {}; a partial scan must not pass",
+        tests_dir.display()
+    );
+    assert!(
+        hits.is_empty(),
+        "exact trim-equality pane/screen matches must move to \
+         common::screen_has_line / common::strip_prompts; hits:\n{}",
+        hits.join("\n")
+    );
 }

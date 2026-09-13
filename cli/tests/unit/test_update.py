@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from fno import update
 from fno.cli import app
+from fno.doctor_cli import doctor_app
 
 
 @pytest.fixture(autouse=True)
@@ -480,13 +481,18 @@ def test_install_then_mark_gates_marker_on_install_success(tmp_path: Path) -> No
     """The shell line writes the marker ONLY after a zero install exit (&&)."""
     marker = tmp_path / "state" / "installed-rev"
     line = update._install_then_mark(
-        ["uv", "tool", "install", "--reinstall", "--compile-bytecode", "/some src"],
+        [
+            "uv", "tool", "install",
+            "--reinstall-package", "fno", "--compile-bytecode", "/some src",
+        ],
         "abc123",
         marker=marker,
         pid=4242,
     )
-    # Install runs first, gated by && before the marker write.
-    assert "uv tool install --reinstall" in line
+    # Install runs first, gated by && before the marker write. Narrow form:
+    # the wide --reinstall strips every package from the shared tool venv.
+    assert "uv tool install --reinstall-package fno" in line
+    assert "--reinstall " not in line
     assert " && " in line
     assert line.index("uv tool install") < line.index("printf")
     # Atomic: write a temp then mv into place (never write the marker directly).
@@ -2341,6 +2347,7 @@ def _make_runner(mux_rows=None, mux_rc=0, agent_rows=None, agent_rc=0):
 def test_update_readiness_no_bump_wire_unchanged(monkeypatch, tmp_path) -> None:
     """AC1-HP: wire unchanged -> not a bump, guidance names surviving shells."""
     _readiness_env(monkeypatch, tmp_path, source_wire=47)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}]
     )
@@ -2362,6 +2369,7 @@ def test_update_readiness_pre_floor_wire_is_a_bump(monkeypatch, tmp_path) -> Non
     wire-59 server refuses a v60 client however the floor numbers read. The
     binary's own `stale` verdict is the truth readiness consumes."""
     _readiness_env(monkeypatch, tmp_path, source_wire=60, source_floor=58)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[
             {"session": "main", "state": "live", "panes": 14, "wire_version": 59, "stale": True}
@@ -2379,6 +2387,7 @@ def test_update_readiness_older_wire_without_stale_field_is_a_bump(monkeypatch, 
     """An older fno that emits no `stale` field falls back to equality for
     the same reason: a pre-floor generation refuses any != client."""
     _readiness_env(monkeypatch, tmp_path, source_wire=60, source_floor=58)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 59}]
     )
@@ -2396,6 +2405,7 @@ def test_update_readiness_downgrade_wire_is_a_bump(monkeypatch, tmp_path) -> Non
     comparison the readiness probe answers "wire unchanged, shells survive"
     on exactly the install that breaks them."""
     _readiness_env(monkeypatch, tmp_path, source_wire=60, source_floor=58)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "new", "state": "live", "panes": 14, "wire_version": 61}]
     )
@@ -2412,6 +2422,7 @@ def test_update_readiness_wire_bump_names_ended_and_revivable(monkeypatch, tmp_p
     """AC2-HP: differing wire_version -> bump, guidance names ended shells and
     revivable worker count."""
     _readiness_env(monkeypatch, tmp_path, source_wire=48)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
         agent_rows=[
@@ -2439,6 +2450,7 @@ def test_update_readiness_revivable_excludes_non_live_rows(monkeypatch, tmp_path
     must not inflate the `--revive` count - same candidate scope as
     `_revive_orphans`' `pre_live` snapshot in restart.py."""
     _readiness_env(monkeypatch, tmp_path, source_wire=48)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
         agent_rows=[
@@ -2455,6 +2467,7 @@ def test_update_readiness_revivable_excludes_non_live_rows(monkeypatch, tmp_path
 def test_update_readiness_not_ready_when_revs_match(monkeypatch, tmp_path) -> None:
     """AC3-HP: installed_rev == source_rev -> update_ready False."""
     _readiness_env(monkeypatch, tmp_path, installed_rev="same", source_rev="same")
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(mux_rows=[])
 
     result = update.update_readiness(runner=runner)
@@ -2468,6 +2481,7 @@ def test_update_readiness_degraded_when_mux_ls_fails(monkeypatch, tmp_path) -> N
     input, never asserts shells survive, and never states a false shell count -
     a fetch that never happened is not evidence of zero live shells."""
     _readiness_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(mux_rc=1)
 
     result = update.update_readiness(runner=runner)
@@ -2490,6 +2504,7 @@ def test_update_readiness_degraded_when_agents_list_fails(monkeypatch, tmp_path)
     not the "unknown, treated as a bump" line reserved for a genuinely
     unreadable wire. A degraded `agents list` is unrelated to the wire."""
     _readiness_env(monkeypatch, tmp_path, source_wire=47)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
         agent_rc=1,
@@ -2518,6 +2533,7 @@ def test_update_readiness_degraded_when_source_wire_unreadable(monkeypatch, tmp_
     monkeypatch.setattr(doctor, "_source_rev", lambda source: "bbb2222")
     monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/fno")
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(mux_rows=[])
 
     result = update.update_readiness(runner=runner)
@@ -2536,11 +2552,12 @@ def test_update_readiness_never_empty_guidance_on_full_failure(monkeypatch, tmp_
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: None)
     monkeypatch.setattr(update.shutil, "which", lambda name: None)
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+    monkeypatch.setattr(update, "running_components", lambda runner: None)
 
     result = update.update_readiness(runner=_make_runner())
 
     assert result["guidance"].strip() != ""
-    assert result["degraded"] is not None
+    assert "census unavailable" in result["degraded"]
     assert result["update_ready"] is False
 
 
@@ -2554,9 +2571,17 @@ def test_update_check_flag_prints_readiness_json(monkeypatch, tmp_path) -> None:
     )
 
     runner = CliRunner()
-    result = runner.invoke(app, ["doctor", "update", "--check"])
+    # The doctor sub-app, not the root app: this test's subject is the
+    # update command and its --check flag, and routing through the root adds
+    # the lazy stub load, the verb-move registry, and the root callback -
+    # three process-global layers where an xdist sibling's leftover state
+    # turned this test red twice (7d476fad2814, ac341e3a1, exit 2) with the
+    # polluter unidentifiable from the assertion alone.
+    result = runner.invoke(doctor_app, ["update", "--check"])
 
-    assert result.exit_code == 0
+    # Print the usage-error text, not just the code: an xdist-only exit 2 with
+    # no output was undiagnosable twice (7d476fad2814, ac341e3a1).
+    assert result.exit_code == 0, f"exit={result.exit_code} output={result.output!r}"
     payload = json.loads(result.output)
     assert payload["update_ready"] is True
     assert "guidance" in payload
@@ -2592,6 +2617,7 @@ def test_update_readiness_not_ready_ignores_unrelated_degraded_input(monkeypatch
     "treated as a wire bump ... at risk" guidance - there is no update for
     anything to be at risk from."""
     _readiness_env(monkeypatch, tmp_path, installed_rev="same", source_rev="same")
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(mux_rc=1)
 
     result = update.update_readiness(runner=runner)
@@ -2608,6 +2634,7 @@ def test_update_readiness_shells_and_revivable_none_when_unknown(monkeypatch, tm
     `shells`/`revivable` directly (not parsing `guidance`) must not see a false
     zero for a count that was never fetched."""
     _readiness_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
     runner = _make_runner(mux_rc=1, agent_rc=1)
 
     result = update.update_readiness(runner=runner)
@@ -2856,3 +2883,76 @@ def test_component_lines_name_repair_and_unknown_instrument() -> None:
     assert any("repair: cargo install --path /x --bins" in line for line in lines), lines
     assert any("hung on `version --json`" in line for line in lines), lines
     assert not any("fno-agents: fresh" in line for line in lines)
+
+
+def test_update_readiness_names_stale_running_when_current(monkeypatch, tmp_path) -> None:
+    """x-f188 AC7 (Python half): current + stale rows -> guidance names the restart split."""
+    _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="aaa1111")
+    monkeypatch.setattr(
+        update,
+        "running_components",
+        lambda runner: [
+            {
+                "component": "daemon",
+                "name": "agents home",
+                "verdict": "stale",
+                "on_restart": "restarts",
+                "survives": "workers and panes",
+            },
+            {
+                "component": "pane-keeper",
+                "name": "main-1991",
+                "verdict": "stale",
+                "on_restart": "kept",
+                "survives": "its pane; current only when that pane ends",
+            },
+            {
+                "component": "store-keeper",
+                "name": "g",
+                "verdict": "current",
+                "on_restart": "cycles; the next read respawns it",
+                "survives": "the graph on disk",
+            },
+        ],
+    )
+    runner = _make_runner(mux_rows=[])
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["update_ready"] is False
+    assert result["running_stale"] == 2
+    assert len(result["running"]) == 2, "the payload carries the STALE rows"
+    assert "installed aaa1111 is current" in result["guidance"]
+    assert "2 running process(es) are older builds" in result["guidance"]
+    assert "restart cycles 1" in result["guidance"]
+    assert "keeps 1 pane keeper(s)" in result["guidance"]
+
+def test_running_components_adapter_carries_rows(monkeypatch) -> None:
+    """x-f188: rows carry through; a census that cannot run reads None, never []."""
+    rows_payload = [
+        {"component": "daemon", "verdict": "stale", "evidence": "build self-report"},
+        {"component": "store-keeper", "verdict": "current", "sock": "/tmp/g.store.sock"},
+    ]
+
+    # The binary gate must not decide the outcome: a runner without an
+    # installed fno still gets the adapter verdict from its own stub.
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: "/usr/bin/true")
+
+    def _run(cmd, **kwargs):
+        assert cmd[1:2] == ["census"]
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(rows_payload), stderr="")
+
+    assert update.running_components(runner=_run) == rows_payload
+
+    def _fail(cmd, **kwargs):
+        return types.SimpleNamespace(returncode=9, stdout="", stderr="boom")
+
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: "/usr/bin/true")
+    assert update.running_components(runner=_fail) is None
+    assert update.running_components(runner=lambda *a, **k: (_ for _ in ()).throw(OSError("no"))) is None
+
+    # No installed binary is the dark-census arm, independent of the runner.
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+    assert update.running_components(runner=_run) is None

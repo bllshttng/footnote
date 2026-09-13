@@ -104,6 +104,63 @@ def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
     assert saved["status"] == "idea"
 
 
+def test_session_reap_open_without_node_settles_every_node_holding_the_identity(tmp_graph):
+    """The death-cascade form: no node named, every node with an open row
+    for the identity settles and node_ids names them all."""
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {
+                "id": "x-reap0002",
+                "title": "First holder",
+                "sessions": [{
+                    "phase": "ship",
+                    "harness": "codex",
+                    "session_id": "dead-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+            {
+                "id": "x-reap0003",
+                "title": "Second holder",
+                "sessions": [{
+                    "phase": "review",
+                    "harness": "codex",
+                    "session_id": "dead-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+            {
+                "id": "x-reap0004",
+                "title": "Other session",
+                "sessions": [{
+                    "phase": "ship",
+                    "harness": "codex",
+                    "session_id": "alive-session",
+                    "started_at": "2026-08-20T00:00:00Z",
+                }],
+            },
+        ]
+    }) + "\n")
+
+    result = _invoke(
+        "backlog", "session", "reap-open",
+        "--harness", "codex", "--session-id", "dead-session", "--phase", "all", "--json",
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    assert receipt["settled"] is True
+    assert sorted(receipt["node_ids"]) == ["x-reap0002", "x-reap0003"]
+    assert receipt["row_closed"] is True
+    saved = {e["id"]: e for e in _read_graph(tmp_graph)}
+    assert all(
+        row.get("ended_at")
+        for node in ("x-reap0002", "x-reap0003")
+        for row in saved[node]["sessions"]
+    )
+    assert "ended_at" not in saved["x-reap0004"]["sessions"][0]
+
+
 # --- x-30f6: ambient provenance stamp at node birth ---
 
 def test_ac_hp_idea_stamps_ambient_session(tmp_graph, tmp_path, monkeypatch):
@@ -918,7 +975,7 @@ def test_rank_top_names_when_no_live_dispatcher_reaches_node(tmp_graph, monkeypa
     monkeypatch.setattr(
         rank,
         "_drain_receipt",
-        lambda: [{"mission": "x-beef"}],
+        lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -949,7 +1006,7 @@ def test_rank_top_names_the_epic_activation_command(tmp_graph, monkeypatch):
     monkeypatch.setattr(
         rank,
         "_drain_receipt",
-        lambda: [{"mission": "x-beef"}],
+        lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -967,13 +1024,44 @@ def test_rank_top_names_the_epic_activation_command(tmp_graph, monkeypatch):
     assert "Activate its epic: fno backlog advance --epic x-feed" in result.output
 
 
+def test_rank_top_names_the_config_when_the_drain_is_disabled(tmp_graph, monkeypatch):
+    """x-338c: a switched-off drain is a config fact, not a mission fact.
+
+    The epic-activation lever cannot work while the drain reads nothing, so the
+    note prescribes the config fix and never tells the reader to activate an
+    epic that may already be active."""
+    import fno.active_backlog as active_backlog
+
+    monkeypatch.setattr(
+        active_backlog,
+        "resolve_drain_reading",
+        lambda **_: active_backlog.DrainReading(targets=[], missions=6, skip_reason="drain_disabled"),
+    )
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {"id": "x-beef", "title": "Mission", "type": "epic",
+             "status": "in_progress", "priority": "p1", "project": "fno"},
+            {"id": "x-0eef", "title": "Orphan", "status": "ready",
+             "priority": "p1", "project": "fno", "parent": "x-beef"},
+        ]
+    }) + "\n")
+
+    result = _invoke("backlog", "rank", "x-0eef", "--top")
+
+    assert result.exit_code == 0, result.output
+    assert "the drain is disabled in config" in result.output
+    assert "6 active missions" in result.output
+    assert "fno config set active_backlog.enabled true" in result.output
+    assert "advance --epic" not in result.output
+
+
 def test_rank_top_keeps_normal_receipt_when_mission_reaches_node(tmp_graph, monkeypatch):
     import fno.graph.rank as rank
 
     monkeypatch.setattr(
         rank,
         "_drain_receipt",
-        lambda: [{"mission": "x-beef"}],
+        lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -996,7 +1084,7 @@ def test_rank_top_names_unavailable_dispatcher_scope_without_absence_claim(
 ):
     import fno.graph.rank as rank
 
-    def _raise_scope_error():
+    def _raise_scope_error(*, strict=False):
         raise RuntimeError("scope read failed")
 
     monkeypatch.setattr(rank, "_drain_receipt", _raise_scope_error)
@@ -1995,6 +2083,127 @@ def test_update_completion_note_unknown_node_errors(tmp_graph):
     assert r.exit_code != 0
 
 
+# --- note evidence: a note is a fact on the node ─────────────────────────────
+
+
+def _note_node():
+    node_id = json.loads(_invoke("backlog", "add", "NoteTarget").output)["id"]
+    return node_id
+
+
+def test_note_citing_a_contradicted_line_refuses_before_append(tmp_graph, monkeypatch):
+    """AC18-ERR: exit 1, nothing appended, nothing mailed."""
+    node_id = _note_node()
+    monkeypatch.setattr(
+        "fno.decide._evidence_gate",
+        lambda payload: {
+            "ok": False,
+            "kind": "citation",
+            "message": "cli/src/fno/law.py:99999: the file has 250 lines.",
+        },
+    )
+
+    r = _invoke(
+        "backlog", "note", node_id,
+        "cli/src/fno/law.py:99999 is the classifier",
+    )
+
+    assert r.exit_code == 1, r.output
+    node = json.loads(_invoke("backlog", "get", node_id).output)
+    assert node["progress_notes"] == []
+
+
+def test_note_with_an_unmeasured_claim_appends_and_warns(tmp_graph, monkeypatch):
+    """AC19-HP: the note verb advises, never refuses a body."""
+    node_id = _note_node()
+    monkeypatch.setattr(
+        "fno.decide._evidence_gate",
+        lambda payload: {"ok": True, "rows": None, "claims": ["167 lines"]},
+    )
+
+    r = _invoke("backlog", "note", node_id, "the drain loop is 167 lines", "-q")
+
+    assert r.exit_code == 0, r.output
+    assert "unmeasured code fact" in r.stderr, r.stderr
+    assert "--read" in r.stderr, r.stderr
+    node = json.loads(_invoke("backlog", "get", node_id).output)
+    assert node["progress_notes"][0]["text"] == "the drain loop is 167 lines"
+
+
+def test_note_with_a_read_stores_rows_and_prints_no_warning(tmp_graph, monkeypatch):
+    """AC20-HP: executed reads land on the note beside ts/text."""
+    node_id = _note_node()
+    monkeypatch.setattr(
+        "fno.decide._evidence_gate",
+        lambda payload: {
+            "ok": True,
+            "rows": [
+                {"cmd": "echo measured", "exit": 0, "out_head": "measured",
+                 "ts": "2026-09-10T00:00:00Z", "head_sha": ""}
+            ],
+            "claims": None,
+        },
+    )
+
+    r = _invoke(
+        "backlog", "note", node_id, "advance.py is 200 lines",
+        "--read", "echo measured", "--json", "-q",
+    )
+
+    assert r.exit_code == 0, r.output
+    assert "unmeasured" not in r.stderr, r.stderr
+    note = json.loads(r.stdout)["note"]
+    assert note["reads"][0]["cmd"] == "echo measured"
+    assert note["reads"][0]["exit"] == 0
+
+
+def test_note_whose_read_failed_refuses_cleanly(tmp_graph, monkeypatch):
+    """A read that cannot run is not evidence: the note refuses on the same
+    ladder as a contradicted citation, never a traceback."""
+    node_id = _note_node()
+    monkeypatch.setattr(
+        "fno.decide._evidence_gate",
+        lambda payload: {
+            "ok": False,
+            "kind": "unmeasured",
+            "message": "read 'nosuchcmd arg' did not run (exit 127) and stored no row.",
+        },
+    )
+
+    r = _invoke(
+        "backlog", "note", node_id, "advance.py is 200 lines",
+        "--read", "nosuchcmd arg",
+    )
+
+    assert r.exit_code == 1, r.output
+    assert "note refused" in r.stderr, r.stderr
+    node = json.loads(_invoke("backlog", "get", node_id).output)
+    assert node["progress_notes"] == []
+
+
+def test_quiet_still_refuses_a_contradicted_citation(tmp_graph, monkeypatch):
+    """AC21-EDGE: a silent annotation is still a fact on the node."""
+    node_id = _note_node()
+    monkeypatch.setattr(
+        "fno.decide._evidence_gate",
+        lambda payload: {
+            "ok": False,
+            "kind": "citation",
+            "message": "cli/src/fno/law.py:99999: the file has 250 lines.",
+        },
+    )
+
+    r = _invoke(
+        "backlog", "note", node_id,
+        "cli/src/fno/law.py:99999 is the classifier",
+        "--quiet",
+    )
+
+    assert r.exit_code == 1, r.output
+    node = json.loads(_invoke("backlog", "get", node_id).output)
+    assert node["progress_notes"] == []
+
+
 # --- --parent setter ---
 
 def _add_with_parent_chain(g: Path) -> tuple[str, str, str]:
@@ -2725,12 +2934,98 @@ def test_update_dispatch_verb_and_brief_write(tmp_graph):
     assert node["dispatch_brief"] == "brainstorm the retry design"
 
 
+def test_update_over_budget_dispatch_brief_warns_at_write(tmp_graph):
+    """A brief over the 8 KB env budget says so at write time, in the
+    spawn path's wording, and still lands (warn, not refuse)."""
+    over = "x" * 8193
+    r = _invoke("backlog", "add", "Over-budget node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("backlog", "update", nid, "--dispatch-brief", over)
+    assert r2.exit_code == 0, r2.output
+    assert (
+        "dispatch brief is 8193 bytes, over the 8192-byte (8 KB) env budget; "
+        "shorten it (no silent truncation)" in r2.output
+    )
+    assert _read_graph(tmp_graph)[0]["dispatch_brief"] == over
+    # At exactly the budget the spawn gate accepts it, so nothing warns.
+    _invoke("backlog", "update", nid, "--dispatch-brief", "null")
+    r3 = _invoke("backlog", "update", nid, "--dispatch-brief", "x" * 8192)
+    assert r3.exit_code == 0, r3.output
+    assert "dispatch brief is" not in r3.output
+
+
 def test_update_dispatch_verb_null_clears(tmp_graph):
     r = _invoke("backlog", "add", "Verb node")
     nid = json.loads(r.output)["id"]
     _invoke("backlog", "update", nid, "--dispatch-verb", "/think")
     _invoke("backlog", "update", nid, "--dispatch-verb", "null")
     assert _read_graph(tmp_graph)[0]["dispatch_verb"] is None
+
+
+def test_update_dispatch_verb_with_argument_refused(tmp_graph):
+    """A verb carrying an argument wrote fine and only failed at the
+    name mint three drains later, after the auto-defer. Refused at write."""
+    r = _invoke("backlog", "add", "Argument node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("backlog", "update", nid, "--dispatch-verb",
+                 f"/fno:blueprint {nid}")
+    assert r2.exit_code == 2, r2.output
+    assert "not one bare" in r2.output
+    assert "accepted:" in r2.output
+    assert _read_graph(tmp_graph)[0].get("dispatch_verb") is None
+
+
+def test_update_dispatch_verb_dollar_prefix_refused(tmp_graph):
+    """'$fno:' passes the name mint but the dispatch resolver canonicalizes
+    only '/fno:', so the value would still fail at drain. Refused here."""
+    r = _invoke("backlog", "add", "Dollar node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("backlog", "update", nid, "--dispatch-verb", "$fno:think")
+    assert r2.exit_code == 2, r2.output
+    assert "canonicalizes only '/fno:'" in r2.output
+    assert _read_graph(tmp_graph)[0].get("dispatch_verb") is None
+
+
+def test_update_dispatch_verb_configured_allowlist_verb_writes(tmp_graph):
+    """A verb outside the static name table but inside the configured
+    allowlist writes, with a warning naming the drain's name-mint gap."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    settings = SimpleNamespace(
+        dispatch=SimpleNamespace(
+            allowed_verbs=["/target", "/marketing"], verb_registry=None
+        )
+    )
+    r = _invoke("backlog", "add", "Configured verb node")
+    nid = json.loads(r.output)["id"]
+    with patch("fno.config.load_settings", return_value=settings):
+        r2 = _invoke("backlog", "update", nid, "--dispatch-verb", "/marketing")
+    assert r2.exit_code == 0, r2.output
+    assert "resolves only in" in r2.output
+    assert _read_graph(tmp_graph)[0]["dispatch_verb"] == "/marketing"
+    with patch("fno.config.load_settings", return_value=settings):
+        r3 = _invoke("backlog", "update", nid, "--dispatch-verb",
+                     "/marketing extra")
+    assert r3.exit_code == 2, r3.output
+    assert _read_graph(tmp_graph)[0]["dispatch_verb"] == "/marketing"
+
+
+def test_update_dispatch_verb_unknown_word_refused(tmp_graph):
+    r = _invoke("backlog", "add", "Unknown verb node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("backlog", "update", nid, "--dispatch-verb", "/fno:fix-now")
+    assert r2.exit_code == 2, r2.output
+    assert "accepted here:" in r2.output
+    assert _read_graph(tmp_graph)[0].get("dispatch_verb") is None
+
+
+def test_update_dispatch_verb_bare_qualified_still_writes(tmp_graph):
+    r = _invoke("backlog", "add", "Bare node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("backlog", "update", nid, "--dispatch-verb", "/fno:blueprint")
+    assert r2.exit_code == 0, r2.output
+    assert _read_graph(tmp_graph)[0]["dispatch_verb"] == "/fno:blueprint"
 
 
 def test_dispatch_fields_default_absent(tmp_graph):

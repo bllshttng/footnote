@@ -213,6 +213,7 @@ pub(super) fn render_prune_json(
         "tabs_closed": tabs.closed,
         "tabs_would_close": tabs.would_close,
         "tabs_skipped_named": tabs.skipped_named,
+        "tabs_named_would_close": tabs.named_would_close,
         "tabs_kept": tabs.kept,
         // (x-cf97) The kept split and the opt-in used-shell population:
         // the four reasons sum to `tabs_kept` whenever the fold ran, and

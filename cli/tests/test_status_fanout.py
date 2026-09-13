@@ -816,7 +816,7 @@ def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     )
 
     _seed(tmp_graph, {"id": "x-9", "title": "t"})
-    res = CliRunner().invoke(app, ["backlog", "note", "x-9", "shipped wave 1", "-J"],
+    res = CliRunner().invoke(app, ["backlog", "note", "x-9", "shipped wave 1", "-J", "-q"],
                              catch_exceptions=False)
     assert res.exit_code == 0
     import json as _json
@@ -847,7 +847,7 @@ def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph
 
     appended = cli.invoke(
         app,
-        ["backlog", "note", "x-9", "second finding", "-J"],
+        ["backlog", "note", "x-9", "second finding", "-J", "-q"],
         catch_exceptions=False,
     )
     assert appended.exit_code == 0, appended.output

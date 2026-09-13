@@ -133,6 +133,7 @@ pub fn build_argv_create(
     model: Option<&str>,
     reasoning_effort: Option<&str>,
     add_dir: Option<&str>,
+    harness_args: &[String],
 ) -> Vec<String> {
     // Approval is a GLOBAL flag and must precede `exec`; sandbox is an `exec`
     // flag and follows it. See `approval_flag` / `sandbox_flag`.
@@ -181,6 +182,9 @@ pub fn build_argv_create(
         argv.push(format!("model_reasoning_effort={effort}"));
     }
     argv.extend(sandbox_flag(yolo));
+    // Fenced `--` tokens the operator typed (codex maps -c/--config and
+    // --add-dir here), before the prompt fence like every other flag.
+    argv.extend(harness_args.iter().cloned());
     // Behind `--` like the Python twins: a leading-flag seed must be the
     // prompt positional, not a codex flag.
     argv.push("--".to_string());
@@ -758,6 +762,7 @@ pub fn codex_create(
     model: Option<&str>,
     reasoning_effort: Option<&str>,
     add_dir: Option<&str>,
+    harness_args: &[String],
 ) -> Result<CodexResult, CodexAskError> {
     let effective_prompt = normalize_codex_command(prompt);
     let full_prompt = inject_from_name(&effective_prompt, from_name);
@@ -783,7 +788,15 @@ pub fn codex_create(
             message,
         });
     }
-    let argv = build_argv_create(cwd, &full_prompt, eff, model, reasoning_effort, add_dir);
+    let argv = build_argv_create(
+        cwd,
+        &full_prompt,
+        eff,
+        model,
+        reasoning_effort,
+        add_dir,
+        harness_args,
+    );
     run_codex(&argv, output_path, timeout, true, None, agent_self, None)
 }
 
@@ -1030,6 +1043,7 @@ pub fn dispatch_codex_once(
     model: Option<&str>,
     reasoning_effort: Option<&str>,
     add_dir: Option<&str>,
+    harness_args: &[String],
 ) -> AskOutcome {
     use crate::claude_ask::py_repr;
 
@@ -1104,6 +1118,7 @@ pub fn dispatch_codex_once(
         model,
         reasoning_effort,
         add_dir,
+        harness_args,
     );
     if inner.exit_code != 0 {
         // create failed; dispatch_create only writes the registry post-success,
@@ -1161,6 +1176,7 @@ fn dispatch_create(
     model: Option<&str>,
     reasoning_effort: Option<&str>,
     add_dir: Option<&str>,
+    harness_args: &[String],
 ) -> AskOutcome {
     let output_path = derive_log_path(home, name);
     let timeout_sec = timeout.unwrap_or(DEFAULT_FOLLOWUP_TIMEOUT);
@@ -1176,6 +1192,7 @@ fn dispatch_create(
         model,
         reasoning_effort,
         add_dir,
+        harness_args,
     ) {
         Ok(r) => r,
         Err(e) => {

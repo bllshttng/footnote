@@ -93,11 +93,16 @@ fn sentinel_cancelled(path: &Path, clear_hint: String) -> Cancelled {
                 .unwrap_or_default()
                 .as_secs()
         });
+    let (author, reason) = fs::read_to_string(path)
+        .map(|content| crate::cancel_sentinel::parse_cancel_payload(&content))
+        .unwrap_or((None, None));
     Cancelled {
         cause: "sentinel",
         path: Some(path.to_path_buf()),
         age_secs,
         clear_hint,
+        author,
+        reason,
     }
 }
 
@@ -883,6 +888,8 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 path: None,
                 age_secs: None,
                 clear_hint: String::new(),
+                author: None,
+                reason: None,
             });
         }
         if sentinel.is_file() {

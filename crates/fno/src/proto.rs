@@ -179,7 +179,7 @@ fn default_true() -> bool {
 /// v33 (x-c914): the account-scoped dispatch verbs carry the client's
 /// session-local active account. `ClientMsg::DispatchNext { account }` and
 /// `Command::DispatchNode { node, account }` append `--account <id>` to the
-/// server's `fno agents dispatch one` shell so a mux-initiated spawn bills the chosen
+/// server's `fno agents dispatch next` shell so a mux-initiated spawn bills the chosen
 /// claude account; `None` = today's default (no flag). `AgentRow { account }`
 /// carries the birth/roster account for the sideline glyph.
 ///
@@ -315,7 +315,14 @@ fn default_true() -> bool {
 /// v76 : `ControlVerb::AgentRowsGet` + `ServerMsg::AgentRowsReceipt`
 /// + `AgentRowReceipt`, the row-set receipt behind `fno mux rows`; floor
 /// stays 58.
-pub const PROTO_VERSION: u32 = 76;
+/// v77 : `AgentRow.liveness_age_s` (a per-second server-computed age) is
+/// replaced by `liveness_measured_at`, the measurement instant; the client
+/// derives the age at render. Same decode both ways; floor stays 58.
+/// v78 : `ControlVerb::ServerStats` + `ServerMsg::ServerStats`, the
+/// scoreboard's read-only emission-failure counter read; floor stays 58.
+/// v79 : `ServerMsg::Layout.missions` carries the active-mission headers, so
+/// `squads` holds only real workspaces; additive, floor stays 58.
+pub const PROTO_VERSION: u32 = 79;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -566,6 +573,8 @@ pub struct RestoreRow {
 pub enum ControlVerb {
     /// Every pane across every squad -> [`ServerMsg::PaneList`].
     PaneLs,
+    /// (v78) Server-instance telemetry -> [`ServerMsg::ServerStats`].
+    ServerStats,
     /// One pane's text -> [`ServerMsg::PaneText`]. Without `block`, `lines`
     /// selects the last N logical rows and (v6) reaches into scrollback history
     /// (full visible grid when `None`; AC5-UI keeps the no-flag behavior). With
@@ -1086,13 +1095,16 @@ pub struct AgentRow {
     /// an old client that cannot render the third state).
     #[serde(default)]
     pub unmeasured: bool,
-    /// (v67) Age of the served liveness measurement in seconds
+    /// (v77) The served liveness measurement's instant, in epoch seconds
     /// (`liveness_measured_at` on the registry row); `None` = never measured
-    /// by the sweep. Lets the render say "probe older than N s" instead of a
-    /// bare unmeasured glyph. `#[serde(default)]` keeps a v66 reader
-    /// wire-tolerant (defaults None, nothing renders).
+    /// by the sweep. The age is derived at render against the client's own
+    /// clock, so an idle sideline never re-renders from a ticking field.
+    /// Replaces the v67 `liveness_age_s` (a value that grew every second on
+    /// the server and made the row change gate fire each tick). A v76 client
+    /// decodes `None` (`#[serde(default)]`, no `deny_unknown_fields`) and
+    /// only loses the "last probe" suffix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub liveness_age_s: Option<u64>,
+    pub liveness_measured_at: Option<u64>,
     /// (v67) The last title the harness reported for this session
     /// (claude's Ctrl+R agent-name record), from the registry row. The render
     /// joins it into the subline when it differs from the label; `name` is
@@ -1572,7 +1584,7 @@ pub enum Command {
     },
     /// (v15) Start a targeted interactive session on a clicked work-queue card's
     /// node (id or slug), behind the client's one-keypress confirm. Reuses the
-    /// `DispatchNext` porcelain (`fno agents dispatch one`) pinned to `--node`, so the
+    /// `DispatchNext` porcelain (`fno agents dispatch next`) pinned to `--node`, so the
     /// lane cap, the same-node claim race (a node claimed between click and Enter
     /// bounces `already-dispatching`), and the "read-only observer refused"
     /// guarantee all hold exactly as prefix+g. Value over `DispatchNext`: the
@@ -2077,6 +2089,12 @@ pub enum ServerMsg {
         /// classifier, used by the sideline menu label.
         #[serde(default)]
         sweep_dead_count: usize,
+        /// (v79) Active-mission progress headers, in their own lane so `squads`
+        /// carries only real workspaces. A mission is a header the client draws
+        /// as the `~ missions` band, never a workspace section, so a row grouped
+        /// under one would be drawn by no section at all and vanish.
+        #[serde(default)]
+        missions: Vec<SquadMeta>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -2102,6 +2120,14 @@ pub enum ServerMsg {
     // -- v4 control-verb replies (one per Control connection, then close) --
     /// Answer to [`ControlVerb::PaneLs`].
     PaneList { panes: Vec<PaneInfo> },
+    /// (v78) Answer to [`ControlVerb::ServerStats`]: the in-memory
+    /// human_touch emission-failure count with its measurement window
+    /// (instance start + measured time); never an all-time fact.
+    ServerStats {
+        touch_emit_failures: u64,
+        started_at: String,
+        measured_at: String,
+    },
     /// Answer to [`ControlVerb::PaneRead`]: the pane's text (matches
     /// [`crate::vt::frame_text`]). `block` (v6) carries the command-block
     /// metadata when the request selected a block; `None` for a plain grid/
@@ -2143,7 +2169,17 @@ pub enum ServerMsg {
     /// (v75) Answer to [`ControlVerb::RetireSession`]: how many members the
     /// store tombstoned and how many attached panes closed. Both are zero on
     /// a repeat call: retirement is idempotent, never an error.
-    SessionRetired { retired: usize, panes_closed: usize },
+    /// (x-9b37) The closed panes are NAMED, and any tab the closes emptied
+    /// and removed is named too; both lists ride default-skipped so an older
+    /// reader is unaffected.
+    SessionRetired {
+        retired: usize,
+        panes_closed: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        closed_panes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tabs_removed: Vec<String>,
+    },
     /// Answer to [`ControlVerb::PaneWait`].
     WaitDone { outcome: WaitOutcome },
     /// A control verb failed (dead pane, spawn failure, version skew, ...).
@@ -2403,6 +2439,11 @@ pub struct PaneInfo {
     /// tab. `#[serde(default)]`: a v68 payload reads false.
     #[serde(default)]
     pub orphaned_worker: bool,
+    /// (x-1b90) When the release tier fired, the evidence the release rode:
+    /// `reaped <harness> <session id> at <ts>: <basis>`. Additive like
+    /// `orphaned_worker`; absent on every other pane and every other tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
     /// (x-dfe7) The joined row's classified lineage: the CURRENT harness
     /// session the row answers as, the succession chain it retired, and the
     /// fork edge of a parallel branch. `fno_id` stays the stable thread join;
@@ -2985,6 +3026,14 @@ fn legacy_state_root() -> PathBuf {
 #[cfg(not(test))]
 pub(crate) fn legacy_mux_root() -> PathBuf {
     legacy_state_root().join("mux")
+}
+
+/// The pre-config-chain global agents home (`<legacy_state_root>/agents`):
+/// where `mux doctor` looks for a historical squads store that no code
+/// reads (see `mux_cli::agents_squads_orphan_check`).
+#[cfg(not(test))]
+pub(crate) fn legacy_agents_home() -> PathBuf {
+    legacy_state_root().join("agents")
 }
 
 /// The pre-state-root sidecar path (squads.json, mux-view.json): a SIBLING of
@@ -4072,38 +4121,12 @@ mod tests {
 
     #[test]
     fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_version_is_pinned() {
-        // The mux-crown wire lift bumped PROTO_VERSION 40 -> 41; the templates
-        // node (x-c4d4) bumped it 41 -> 42; the US9 drag faces (x-d6a8) bumped it
-        // 42 -> 43; the anchored-layout node (x-6928) bumped it 43 -> 44;
-        // clickable links (x-a2d0) bumped it 44 -> 45; pane focus (x-3e17) 45 ->
-        // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47; the
-        // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
-        // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
-        // the tab dictionary (x-1499) bumped it 50 -> 51; pane identity
-        // receipts (x-588a) bumped it 51 -> 52; the typed paneless recovery
-        // reason bumps it 52 -> 53; backend-not-live classification bumps it
-        // 53 -> 54; guarded tab close bumps it 54 -> 55; the hover-affordance
-        // message pair bumps it 55 -> 56; the LivenessUnmeasured reason (x-d401)
-        // bumps it 56 -> 57; the ThreadPane control verb (x-07c2) bumps it
-        // 57 -> 58; the classified-lineage pair bumped it 58 -> 59; the
-        // workspace-restore verb (x-7b5e) re-bumped it 59 -> 60 (second to
-        // merge); DND presence (x-7d02) bumps it 60 -> 61; the sideline lane
-        // axes (x-1b35) bump it 62 -> 63; the portals fields (x-8f9d) bump it
-        // 63 -> 64; the tab-organization pair (x-cf97) bumps it 64 -> 65; the
-        // ThreadPane placement field (x-9b60) bumps it 65 -> 66.
-        // The additive crown fields, `unmeasured`, `resumable`, and now the
-        // lineage pair, stay skew-tolerant both ways regardless of the
-        // version number.
-        //
-        // This is the ONE canonical pin, as this test's name says. Two sibling
-        // roundtrip tests used to re-assert the same literal, which caught
-        // nothing a single pin does not and turned every bump into a three-file
-        // edit; they now assert only their own wire shapes. Per-bump history
-        // lives on the PROTO_VERSION const; v74 (x-b5d1) took 74 so the
-        // version never moves backwards whichever branch lands first.
-        // v75 (x-7649) took 75; floor stays 58.
-        // v76  took 76; floor stays 58.
-        assert_eq!(PROTO_VERSION, 76);
+        // The per-bump history lives on the PROTO_VERSION const doc; this is
+        // the ONE canonical pin. Two sibling roundtrip tests used to
+        // re-assert the same literal, which caught nothing a single pin does
+        // not and turned every bump into a three-file edit; they now assert
+        // only their own wire shapes.
+        assert_eq!(PROTO_VERSION, 79);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4408,7 +4431,7 @@ mod tests {
                         exited: false,
                         dnd: false,
                         unmeasured: false,
-                        liveness_age_s: None,
+                        liveness_measured_at: None,
                         harness_title: None,
                         answerable: Some(AnswerablePrompt {
                             prompt: "Do you want to proceed?".into(),
@@ -4462,7 +4485,7 @@ mod tests {
                         exited: true,
                         dnd: false,
                         unmeasured: false,
-                        liveness_age_s: None,
+                        liveness_measured_at: None,
                         harness_title: None,
                         answerable: None,
                         attach_id: None,
@@ -4518,6 +4541,7 @@ mod tests {
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
                 backlog_stale: false,
                 sweep_dead_count: 0,
+                missions: Vec::new(),
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),

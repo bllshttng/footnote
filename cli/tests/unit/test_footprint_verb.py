@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import typer
 from typer.testing import CliRunner
 
-from fno.footprint import parse_footprint
+from fno import doctor_footprint
+from fno.footprint import Footprint, parse_footprint
 from fno.cli import app
 
 # Import the mux_spawn -> dispatch chain at collection, before any test
@@ -43,6 +46,19 @@ def no_worker_roots(monkeypatch):
         "_codex_app_server_serve",
         lambda _snapshot: (set(), "absent"),
     )
+    # Settings resolution shells git on a cold cache (repo-root discovery);
+    # a shard that runs a footprint test first must not pay it, or the
+    # ps-is-the-only-subprocess assertions see a git argv.
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(agents=SimpleNamespace(max_load_per_cpu=4.0)),
+    )
+    monkeypatch.setattr(
+        "fno.config.load_settings_for_repo",
+        lambda _root: SimpleNamespace(
+            agents=SimpleNamespace(footprint_sustained_cpu_cores=None)
+        ),
+    )
 
 
 def _fake_runner(
@@ -72,10 +88,18 @@ def _fake_runner(
     return run
 
 
-def _pin_load(monkeypatch, *, status: str, load: float = 1.0, ceiling: float = 96.0):
+def _pin_load(
+    monkeypatch,
+    *,
+    status: str,
+    load: float = 1.0,
+    ceiling: float = 96.0,
+    load_15m: float | None = None,
+):
     """Pin the spawn-load snapshot so a verdict test is hermetic: the real
     snapshot reads the host's live load average, which no exit-code assertion
-    should ride on."""
+    should ride on. The 15-minute figure feeds the CPU axis's backstop; the
+    1-minute load is display-only under x-7783."""
     from types import SimpleNamespace
 
     from fno import doctor_footprint
@@ -86,8 +110,18 @@ def _pin_load(monkeypatch, *, status: str, load: float = 1.0, ceiling: float = 9
         load_ceiling=ceiling,
         load_cpu_count=int(ceiling // 8),
         spawn_load_status=status,
+        load_5m=None,
+        load_15m=load_15m,
     )
     monkeypatch.setattr(doctor_footprint, "_spawn_load_snapshot", lambda: snapshot)
+
+
+def _pin_admission(monkeypatch, share: float = 0.5, hard: float = 40.0):
+    """Pin the CPU axis's config pair so a verdict test never reads the real
+    config roots (the defaults match a stock install)."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (share, hard))
 
 
 def _pin_capacity(monkeypatch, cores: int):
@@ -1190,10 +1224,9 @@ def test_spawn_load_snapshot_is_rendered_in_text_and_json(
     )
     snapshot = SimpleNamespace(
         load_1m=141.6,
-        max_load_per_cpu=8.0,
-        load_ceiling=96.0,
         load_cpu_count=12,
-        spawn_load_status="exceeded",
+        load_5m=141.0,
+        load_15m=140.0,
     )
     monkeypatch.setattr("fno.config.load_settings", lambda: settings)
     monkeypatch.setattr(spawn_gate, "_load_snapshot", lambda _factor: snapshot)
@@ -1204,16 +1237,25 @@ def test_spawn_load_snapshot_is_rendered_in_text_and_json(
     )
 
     assert payload["load_1m"] == pytest.approx(141.6)
-    assert payload["max_load_per_cpu"] == pytest.approx(8.0)
-    assert payload["load_ceiling"] == pytest.approx(96.0)
     assert payload["load_cpu_count"] == 12
-    assert payload["spawn_load_status"] == "exceeded"
+    assert "max_load_per_cpu" not in payload
+    assert "spawn_load_status" not in payload
 
     with pytest.raises(typer.Exit):
         doctor_footprint._emit_result(
             reading, process_threshold=None, json_output=False
         )
-    assert "spawn load: 141.6 against 96.0" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # x-7783 AC8: one cpu admission line, one load_15m line, no spawn load.
+    assert (
+        "cpu admission: fleet 0.490 of 12.00 cores (4.1%) against "
+        "max_fleet_cpu_share 50.0% -> admit" in out
+    )
+    assert (
+        "load_15m: 140.0 against backstop 480.0 "
+        "(hard_max_load_per_cpu 40 x 12 cpus)" in out
+    )
+    assert "spawn load:" not in out
 
 
 def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(
@@ -1254,7 +1296,7 @@ def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(
     # Git calls the config-root resolver may shell are not the cause-only
     # contract's subject; what it promises is ONE ps read and no roster walk.
     assert [call for call in calls if call[0] == "ps"] == [
-        ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"]
+        ["ps", "-Ao", "pid,ppid,state,etime,%cpu,rss,command"]
     ]
     assert not [call for call in calls if "agents" in call]
 
@@ -1323,6 +1365,212 @@ def test_ac6_edge_cause_only_refuses_root_missing_from_snapshot(
     assert "missing from ps snapshot" in result.stdout
 
 
+def _ps_with(header: str, *rows: str) -> str:
+    return header + "\n" + "\n".join(rows) + "\n"
+
+
+def test_ac1_hp_one_bad_row_keeps_the_reading_and_the_gate_admits(
+    monkeypatch, no_worker_roots
+) -> None:
+    from fno import doctor_footprint
+    from fno.agents.spawn_gate import _cpu_axis
+
+    good = "\n".join(
+        f"{1000 + n} 1 01:00:00 0.5 1024 /usr/bin/tool{n}" for n in range(200)
+    )
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        good,
+        "9999 1 - 20.0 1024 /bin/echo oops",
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps_output, [], []),
+    )
+    monkeypatch.setattr(os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+    monkeypatch.setattr("fno.agents.spawn_gate._load_cpus", lambda: 12)
+
+    reading, error = doctor_footprint.cause_reading()
+
+    assert error is None
+    assert reading is not None
+    assert reading.unparsed_lines == 1
+    # The 200 good rows all parsed: unattributed (no fno root), so they ride
+    # in the measured whole-machine number, not the attributed process count.
+    assert reading.process_count == 0
+    assert reading.measured_cpu_cores == pytest.approx(1.0)
+
+    admission = _cpu_axis((reading, None))
+    assert admission.verdict == "admit"
+    assert admission.axis == "fleet_cpu_share"
+    assert admission.axis != "cpu_instrument"
+
+
+def test_ac1_edge_all_bad_rows_still_refuse_and_name_the_rows(
+    monkeypatch, no_worker_roots
+) -> None:
+    from fno import doctor_footprint
+
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        "12345 1 00:01 - 4096 /usr/bin/true",
+        "second bad row here",
+        "third bad row here",
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps_output, [], []),
+    )
+
+    reading, error = doctor_footprint.cause_reading()
+
+    assert reading is None
+    assert error is not None
+    # The floor arm: every data row failing means the instrument is
+    # unreadable, and the refusal names the count and the masked first row.
+    assert "all 3 ps row(s) failed to parse" in error
+    assert "12345 1 00:01 <tok:1> 4096" in error
+
+
+def test_ac2_hp_the_refusal_names_the_masked_row_and_the_failing_field(
+    monkeypatch, no_worker_roots
+) -> None:
+    from fno import doctor_footprint
+
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        "12345 1 00:01 - 4096 /usr/bin/true",
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps_output, [], []),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+
+    assert result.exit_code == 4
+    payload = json.loads(result.stdout)
+    assert "all 1 ps row(s) failed to parse" in payload["error"]
+    assert "12345 1 00:01 <tok:1> 4096" in payload["error"]
+    assert "cpu" in payload["error"]
+
+
+def test_ac1_root_a_bad_row_on_a_discovered_root_refuses(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_root_pids",
+        lambda **_kwargs: ({500}, None),
+    )
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        "500 1 - 0.0 1024 fno-agents-worker --run",
+        "501 1 01:00:00 0.0 1024 /usr/bin/tool",
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps_output, [], []),
+    )
+
+    reading, error = doctor_footprint.cause_reading()
+
+    assert reading is None
+    assert error is not None
+    # The root's whole subtree would read zero CPU, so this refuses like the
+    # missing-root guard above it.
+    assert "fleet root pid 500" in error
+    assert "missing from ps snapshot" not in error
+
+
+def test_ac2_sec_no_argv_token_reaches_any_render(
+    monkeypatch, no_worker_roots
+) -> None:
+    from fno import doctor_footprint
+
+    def ps(rows: str) -> str:
+        return _ps_with("PID PPID ELAPSED %CPU RSS COMMAND", *rows.splitlines())
+
+    secret_row = (
+        "12345 1 00:01 - 4096 /usr/bin/curl -H Authorization:Bearer SUPERSECRET1234"
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps(secret_row + "\n200 1 - 0.0 1024 tool"), [], []),
+    )
+    # The refusal renders twice: json error payload and text readout.
+    for argv in (
+        ["doctor", "footprint", "--json", "--cause-only"],
+        ["doctor", "footprint", "--cause-only"],
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 4, (argv, result.output)
+        for secret in ("SUPERSECRET1234", "Authorization", "curl", "Bearer"):
+            assert secret not in result.output, argv
+
+    # The surviving reading renders twice: json payload and text readout.
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(
+            monkeypatch,
+            ps(secret_row + "\n200 1 01:00:00 0.0 1024 /usr/bin/tool"),
+            [],
+            [],
+        ),
+    )
+    for argv in (
+        ["doctor", "footprint", "--json", "--cause-only"],
+        ["doctor", "footprint", "--cause-only"],
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 0, (argv, result.output)
+        for secret in ("SUPERSECRET1234", "Authorization", "curl", "Bearer"):
+            assert secret not in result.output, argv
+        if "--json" in argv:
+            payload = json.loads(result.stdout)
+            assert payload["unparsed_lines"] == 1
+            assert payload["unparsed_samples"][0]["masked"].startswith("12345 1")
+
+
+def test_ac3_hp_two_bad_rows_print_as_samples_under_the_count(
+    monkeypatch, no_worker_roots
+) -> None:
+    from fno import doctor_footprint
+
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        "200 1 01:00:00 0.0 1024 /usr/bin/tool",
+        "201 1 - 0.0 1024 fno-agents-worker --run",
+        "202 1 ??:??:?? 0.0 1024 fno-agents-worker --run",
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(monkeypatch, ps_output, [], []),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint", "--cause-only"])
+
+    assert result.exit_code == 0, result.output
+    assert "unparsed lines: 2" in result.output
+    assert "  row 2 (pid 201, etime): " in result.output
+    assert "  row 3 (pid 202, etime): " in result.output
+    # The verb still prints its verdict beside the evidence.
+    assert "verdict:" in result.output
+
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+    payload = json.loads(result.stdout)
+    assert payload["unparsed_lines"] == 2
+    assert [s["row"] for s in payload["unparsed_samples"]] == [2, 3]
+    assert payload["unparsed_samples"][0]["reason"] == "etime"
+
+
 def test_sustained_cpu_threshold_derives_from_capacity_and_honors_override(
     monkeypatch,
 ) -> None:
@@ -1348,6 +1596,8 @@ def test_ac7_edge_short_lived_descendant_counts_in_fleet_cpu(
     from fno import doctor_footprint
 
     _pin_load(monkeypatch, status="within")
+    _pin_admission(monkeypatch)
+    _pin_capacity(monkeypatch, 12)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -1367,7 +1617,7 @@ def test_ac7_edge_short_lived_descendant_counts_in_fleet_cpu(
 
     assert result.exit_code == 0, result.output
     assert "fleet CPU: 1.200 cores" in result.stdout
-    assert "verdict: within on load_1m" in result.stdout
+    assert "verdict: admit on fleet_cpu_share (10.0% against 50.0%)" in result.stdout
 
 
 def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(
@@ -1437,6 +1687,13 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     calls: list[list[str]] = []
     _pin_load(monkeypatch, status="within")
     _pin_capacity(monkeypatch, 4)
+    # Path resolution and the settings load shell git on cold caches, and CI
+    # sharding decides which test pays the cold read. Pin the repo root (the
+    # wrapper reads the env var per call and answers without a subprocess)
+    # and the override seam, so the exact-call-list contract is
+    # order-independent.
+    monkeypatch.setenv("FNO_REPO_ROOT", str(Path(__file__).resolve().parents[3]))
+    monkeypatch.setattr(doctor_footprint, "_footprint_cpu_override", lambda: None)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -1462,19 +1719,21 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     # ps is the only subprocess left: the roster count reads the registry
     # in process, so there is no second shell-out to budget.
     assert [call for call in calls] == [
-        ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"],
+        ["ps", "-Ao", "pid,ppid,state,etime,%cpu,rss,command"],
     ]
 
 
 def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
     monkeypatch, no_worker_roots
 ) -> None:
-    """Capacity and leak BOTH fire; the capacity exit (3) wins as the more
-    urgent alarm and the leak still prints with its own words."""
+    """The backstop over its ceiling and a leak BOTH fire; the CPU axis keeps
+    the exit (3) as the more urgent alarm and the leak still prints with its
+    own words. The 1-minute load pinned beside it decides nothing (x-7783)."""
     from fno import doctor_footprint
 
-    _pin_load(monkeypatch, status="exceeded")
-    _pin_capacity(monkeypatch, 4)
+    _pin_load(monkeypatch, status="within", load=110.4, load_15m=500.0)
+    _pin_admission(monkeypatch)
+    _pin_capacity(monkeypatch, 12)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -1493,7 +1752,7 @@ def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 3
-    assert "verdict: capacity over on load_1m" in result.stdout
+    assert "verdict: refuse on load_15m (500.0 against 480.0)" in result.stdout
     assert "unexplained processes: 1 (2 direct, roster explains 1)" in result.stdout
     assert "fno mux serve (80.0%)" in result.stdout
     assert "fno-agents-daemon --serve (40.0%)" in result.stdout
@@ -1503,10 +1762,13 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
     monkeypatch, no_worker_roots
 ) -> None:
     """A leak without a capacity breach exits 5 - the leak's own code, not the
-    capacity code the old merged verdict borrowed (defect 1 in the plan)."""
+    capacity code the old merged verdict borrowed (defect 1 in the plan). The
+    verdict names the unexplained processes as the cause; the admitted CPU
+    axis is context, not the cause."""
     from fno import doctor_footprint
 
     _pin_load(monkeypatch, status="within")
+    _pin_admission(monkeypatch)
     _pin_capacity(monkeypatch, 4)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
@@ -1526,18 +1788,27 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 5
-    assert "verdict: leak on load_1m" in result.stdout
+    assert (
+        "verdict: leak on unexplained processes (1 of 2 direct, roster explains 1; "
+        "cpu admission: admit on fleet_cpu_share (5.0% against 50.0%), a separate "
+        "axis - it did not decide the verdict) (exit 5)" in result.stdout
+    )
     assert "sustained CPU: 0.200 cores" in result.stdout
     assert "processes: 2" in result.stdout
     assert "unexplained processes: 1 (2 direct, roster explains 1)" in result.stdout
 
 
 def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
-    monkeypatch, no_worker_roots
+    monkeypatch, no_worker_roots, tmp_path
 ) -> None:
     """x-e040: the roster is an enrichment. On roster failure the measurement
     still prints, with the threshold degraded away and the reason named. The
     old contract killed the whole report (exit 4, no reading)."""
+    # A cold HOME sends config resolution climbing to the canonical root,
+    # whose resolver shells `git worktree list` through the SAME global
+    # subprocess module this test pins. Pin the root so the startup probe is
+    # an env read, and the pinned budget below stays the verdict's alone.
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     from fno import doctor_footprint
 
     calls: list[list[str]] = []
@@ -1554,8 +1825,27 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
     def unreadable_registry():
         raise OSError("registry is a directory")
 
+    # The CLI app resolves config roots through git when the process cache is
+    # cold, and the admission pair and CPU override read config per verdict.
+    # Warm the cache and pin the seams before the recorder goes in, so the
+    # recorded window holds only what a footprint run itself executes.
+    import contextlib
+
+    from fno.config import load_settings
+
+    with contextlib.suppress(Exception):
+        load_settings()
+    _pin_admission(monkeypatch)
+    monkeypatch.setattr(doctor_footprint, "_footprint_cpu_override", lambda: None)
     monkeypatch.setattr(doctor_footprint.subprocess, "run", ps_only)
     monkeypatch.setattr("fno.agents.registry.load_registry", unreadable_registry)
+    # ps is the only subprocess this report may spend. The roster is not the
+    # only enrichment anymore: repo-root and worktree attribution also shell
+    # out when their declarations are cold, so pin both seams hermetic.
+    monkeypatch.setenv("FNO_REPO_ROOT", str(os.getcwd()))
+    import fno.paths as _paths
+
+    monkeypatch.setattr(_paths, "resolve_canonical_worktree", lambda *a, **k: None)
     _pin_load(monkeypatch, status="within")
     _pin_capacity(monkeypatch, 4)
 
@@ -1601,7 +1891,8 @@ def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
     assert payload["sustained_cpu_threshold_cores"] == pytest.approx(1.0)
     assert payload["direct_process_count_threshold"] == 2
     assert payload["leak_verdict"] == "clean"
-    assert payload["capacity_verdict"] == "within"
+    assert payload["capacity_verdict"] == "admit"
+    assert payload["admission"]["verdict"] == "admit"
     assert payload["exit_code"] == 0
 
 
@@ -1795,10 +2086,11 @@ def test_no_pidless_rows_still_yields_a_clean_reading(monkeypatch):
     assert doctor_footprint._live_root_pids() == (set(), None)
 
 
-def test_gap_reading_still_prints_the_measurement_and_exits_four(monkeypatch):
-    """The acceptance: the verb prints a CPU and process-count reading WITH a
-    named degradation. Exit 4 stays (gating unavailable), but the measurement
-    is present in exactly the condition that used to print only an error."""
+def test_gap_reading_prints_the_measurement_and_admits_on_the_upper_bound(monkeypatch):
+    """x-7783 LD3: an attribution gap no longer forces exit 4. The reading
+    stands, the share becomes an interval, and a ceiling above the interval
+    admits with `bound` recording that the upper edge decided. Both gates
+    read the admission object, not the exit code."""
     from fno import doctor_footprint
 
     reading = doctor_footprint.parse_footprint(
@@ -1806,72 +2098,90 @@ def test_gap_reading_still_prints_the_measurement_and_exits_four(monkeypatch):
         excluded_root_pids=set(),
         attributed_root_pids=set(),
         threshold_excluded_root_pids=set(),
-    )._replace(attribution_gap="1 pidless codex row(s) unresolved")
-    monkeypatch.setattr(
-        doctor_footprint, "cause_reading", lambda: (reading, None)
-    )
-    _pin_load(monkeypatch, status="within")
-    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
-    assert result.exit_code == 4, result.output
-    payload = json.loads(result.stdout)
-    assert payload["process_count"] >= 1
-    assert "fleet_cpu_cores" in payload
-    assert "codex" in payload["attribution_gap"]
-    assert payload["exit_code"] == 4
-
-
-def test_cause_only_reports_a_real_capacity_verdict(monkeypatch):
-    """x-a457's done probe: a clean cause-only reading answers the capacity
-    question (within/near/over) instead of a structural unknown, and carries
-    no attribution_gap key. Exit codes do not move: 0 clean, 4 gapped - the
-    Rust gate reads stdout only on exit 0."""
-    from fno import doctor_footprint
-
-    reading = doctor_footprint.parse_footprint(
-        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
-        excluded_root_pids=set(),
-        attributed_root_pids=set(),
-        threshold_excluded_root_pids=set(),
+    )._replace(
+        attribution_gap="1 pidless codex row(s) unresolved",
+        measured_cpu_cores=0.02,
     )
     monkeypatch.setattr(
         doctor_footprint, "cause_reading", lambda: (reading, None)
     )
-    _pin_load(monkeypatch, status="within")
+    _pin_load(monkeypatch, status="within", load_15m=2.0)
+    _pin_admission(monkeypatch)
+    _pin_capacity(monkeypatch, 12)
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["capacity_verdict"] == "within"
+    assert payload["process_count"] >= 1
+    assert "codex" in payload["attribution_gap"]
+    assert payload["admission"]["verdict"] == "admit"
+    assert payload["admission"]["bound"] == "upper"
+    assert payload["exit_code"] == 0
+
+
+def test_cause_only_reports_a_real_capacity_verdict(monkeypatch):
+    """x-a457's done probe, carried onto the new axis: a clean cause-only
+    reading answers the admission question instead of a structural unknown,
+    and `capacity_verdict` aliases the admission verdict for one release."""
+    from fno import doctor_footprint
+
+    reading = doctor_footprint.parse_footprint(
+        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
+        excluded_root_pids=set(),
+        attributed_root_pids=set(),
+        threshold_excluded_root_pids=set(),
+    )
+    monkeypatch.setattr(
+        doctor_footprint, "cause_reading", lambda: (reading, None)
+    )
+    _pin_load(monkeypatch, status="within")
+    _pin_admission(monkeypatch)
+    _pin_capacity(monkeypatch, 12)
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["capacity_verdict"] == "admit"
+    assert payload["admission"]["axis"] == "fleet_cpu_share"
     assert "attribution_gap" not in payload
     assert payload["exit_code"] == 0
 
 
-def test_spawn_gate_treats_a_gap_reading_as_not_headroom(monkeypatch):
-    """A gapped fleet share is an undercount; None is the gate's existing
-    never-headroom answer, so the gate refuses above the trigger with the gap
-    named instead of admitting on an undercount."""
+def test_spawn_gate_carries_a_gap_reading_into_the_interval(monkeypatch):
+    """x-7783 LD3: a gap no longer voids the reading. The gate's prefetch
+    hands the gapped reading to the decider, and the share becomes an
+    interval - never a bare None, never silent headroom."""
     from fno import doctor_footprint
     from fno.agents import spawn_gate
 
     reading = doctor_footprint.parse_footprint(
-        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
+        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 30.0 1024 fno daemon\n",
         excluded_root_pids=set(),
         attributed_root_pids=set(),
         threshold_excluded_root_pids=set(),
-    )._replace(attribution_gap="1 pidless codex row(s) unresolved")
+    )._replace(
+        attribution_gap="1 pidless codex row(s) unresolved",
+        measured_cpu_cores=0.3,
+    )
     monkeypatch.setattr(
         "fno.doctor_footprint.cause_reading", lambda: (reading, None)
     )
-    assert spawn_gate._fleet_cpu_reading() is None
-    assert spawn_gate._footprint_cause_evidence() is None
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+
+    got_reading, error = spawn_gate._prefetch_fleet_reading()
+    assert error is None and got_reading is reading
+
+    admission = spawn_gate._cpu_axis((got_reading, error))
+    assert admission.bound == "upper"
+    assert admission.verdict in ("admit", "hold", "undecidable")
+    assert admission.gap is not None
 
 
-def test_capacity_verdict_names_its_axis_and_deciding_numbers(monkeypatch):
-    """AC7-HP (x-5283): load over its ceiling while sustained CPU is under
-    its threshold - the verdict names load_1m as its axis and prints the
-    numbers that decided it, and the sustained line disclaims the verdict.
-    On main neither surface said which axis produced the verdict, so the
-    footprint's headroom reading and the gate's saturation refusal looked
-    like a contradiction."""
+def test_admission_names_its_axis_and_deciding_numbers(monkeypatch):
+    """AC7's naming contract (x-5283) carried onto the new axis (x-7783):
+    the 15-minute backstop over its ceiling names load_15m as its axis and
+    prints the numbers that decided it, and the sustained line disclaims the
+    verdict. No one-minute figure appears on the deciding line."""
     from fno import doctor_footprint
 
     reading = doctor_footprint.parse_footprint(
@@ -1883,17 +2193,228 @@ def test_capacity_verdict_names_its_axis_and_deciding_numbers(monkeypatch):
     monkeypatch.setattr(
         doctor_footprint, "cause_reading", lambda: (reading, None)
     )
-    _pin_load(monkeypatch, status="exceeded", load=110.4, ceiling=96.0)
+    _pin_load(monkeypatch, status="within", load=110.4, load_15m=500.0)
+    _pin_admission(monkeypatch)
+    _pin_capacity(monkeypatch, 12)
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
     payload = json.loads(result.stdout)
-    assert payload["capacity_verdict"] == "over"
-    assert payload["capacity_verdict_axis"] == "load_1m"
+    assert payload["capacity_verdict"] == "refuse"
+    assert payload["admission"]["axis"] == "load_15m"
+    assert payload["admission"]["load_15m"] == 500.0
+    assert payload["admission"]["backstop"] == 480.0
     assert payload["load_1m"] == 110.4
-    assert payload["load_ceiling"] == 96.0
 
     shown = runner.invoke(app, ["doctor", "footprint", "--cause-only"])
-    assert "verdict: over on load_1m (110.4 against 96.0)" in shown.output
+    assert "verdict: refuse on load_15m (500.0 against 480.0)" in shown.output
     assert "a separate axis - it did not decide the verdict" in shown.output
+
+
+def test_cpu_admission_pins_the_shared_gate_fixture():
+    """x-7783 AC9: the four payloads both gates consume. The Python decider
+    reproduces every admission from the case inputs; the Rust suite reads the
+    same file and must take the same branch per payload."""
+    from pathlib import Path
+
+    from fno import doctor_footprint
+    from fno.footprint import Footprint
+
+    fixture_path = (
+        Path(__file__).parent.parent / "agents" / "fixtures" / "spawn_gate_admission.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert len(fixture["cases"]) == 4
+    for case in fixture["cases"]:
+        inputs = case["inputs"]
+        reading = Footprint(
+            sustained_cpu_cores=0.0,
+            descendant_cpu_cores=0.0,
+            fleet_cpu_cores=inputs["fleet_cpu_cores"],
+            descendant_process_count=0,
+            direct_process_count=0,
+            transient_call_count=0,
+            process_count=0,
+            rss_gb=0.0,
+            measured_cpu_cores=inputs["measured_cpu_cores"],
+            top=[],
+            unparsed_lines=0,
+            attribution_gap=inputs["attribution_gap"],
+        )
+        adm = doctor_footprint.cpu_admission(
+            reading,
+            capacity_cores=inputs["capacity_cores"],
+            share_ceiling=inputs["share_ceiling"],
+            load_15m=inputs["load_15m"],
+            hard_max_load_per_cpu=inputs["hard_max_load_per_cpu"],
+            cpus=inputs["cpus"],
+        )
+        expected = case["payload"]["admission"]
+        assert adm.verdict == expected["verdict"], case["name"]
+        assert adm.axis == expected["axis"], case["name"]
+        assert adm.bound == expected["bound"], case["name"]
+        assert adm.reason == expected["reason"], case["name"]
+        assert adm.share_low == pytest.approx(expected["share_low"]), case["name"]
+        assert adm.share_high == pytest.approx(expected["share_high"]), case["name"]
+
+
+def test_machine_pressure_pins_the_shared_fixture():
+    """x-d6ad AC11: the three payloads both suites consume. The Python decider
+    reproduces every verdict from the case inputs; the Rust machine_watch arm
+    reads the same file and must take the branch the verdict names."""
+    fixture_path = (
+        Path(__file__).parent.parent / "agents" / "fixtures" / "machine_pressure.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert len(fixture["cases"]) == 3
+    for case in fixture["cases"]:
+        inputs = case["inputs"]
+        reading = (
+            None
+            if inputs["measured_cpu_cores"] is None
+            else Footprint(
+                sustained_cpu_cores=0.0,
+                descendant_cpu_cores=0.0,
+                fleet_cpu_cores=0.0,
+                descendant_process_count=0,
+                direct_process_count=0,
+                transient_call_count=0,
+                process_count=0,
+                rss_gb=0.0,
+                measured_cpu_cores=inputs["measured_cpu_cores"],
+                top=[],
+                unparsed_lines=0,
+                machine_process_count=inputs["machine_process_count"],
+                runnable_count=inputs["runnable_count"],
+            )
+        )
+        pressure = doctor_footprint.machine_pressure(
+            reading,
+            capacity_cores=inputs["capacity_cores"],
+            busy_band=inputs["busy_band"],
+            load_15m=inputs["load_15m"],
+            throttle_minutes=inputs["throttle_minutes"],
+            failure=inputs.get("failure"),
+        )
+        expected = case["payload"]["machine"]
+        assert pressure.verdict == expected["verdict"], case["name"]
+        assert pressure.busy_fraction == expected["busy_fraction"], case["name"]
+        assert pressure.band == expected["band"], case["name"]
+        assert pressure.runnable == expected["runnable"], case["name"]
+        assert pressure.processes == expected["processes"], case["name"]
+        assert pressure.throttle_minutes == expected["throttle_minutes"], case["name"]
+        assert pressure.reason == expected["reason"], case["name"]
+
+
+def test_ac1_hp_hot_reason_names_band_before_load():
+    """x-d6ad AC1: the hot reason names the busy fraction and the band first,
+    then load and the runnable count."""
+    pressure = doctor_footprint.machine_pressure(
+        _reading_with_machine(11.0, 1010, 66),
+        capacity_cores=12.0,
+        busy_band=0.9,
+        load_15m=112.96,
+        throttle_minutes=60,
+    )
+    assert pressure.verdict == "hot"
+    assert pressure.busy_fraction == pytest.approx(0.917)
+    band_at = pressure.reason.index("band")
+    load_at = pressure.reason.index("load_15m")
+    runnable_at = pressure.reason.index("runnable")
+    assert band_at < load_at < runnable_at
+
+
+def test_ac2_hp_calm_reason_carries_load_beside_a_busy_fraction():
+    """x-d6ad AC2: load 112.96 sits beside a 43 percent busy box, and the
+    verdict stays calm."""
+    pressure = doctor_footprint.machine_pressure(
+        _reading_with_machine(5.186, 1010, 66),
+        capacity_cores=12.0,
+        busy_band=0.9,
+        load_15m=112.96,
+        throttle_minutes=60,
+    )
+    assert pressure.verdict == "calm"
+    assert pressure.busy_fraction == pytest.approx(0.432)
+    assert "43.2%" in pressure.reason
+    assert "113.0" in pressure.reason
+    assert "66 runnable of 1010 processes" in pressure.reason
+
+
+def test_ac10_hp_machine_census_is_machine_wide():
+    """x-d6ad AC10: machine_process_count and runnable_count count every
+    parsed row, distinct from the roster-scoped counts beside them."""
+    rows = [
+        "  50    1 R      10:00 90.0 1024 /bin/run-top",
+        "  51    1 S      10:00  0.0 1024 /bin/sleeper",
+        "  52    1 Z      10:00  0.0 1024 (defunct)",
+        "  53    1 RN     10:00 12.0 1024 cargo test",
+        "  54    1 S      10:00  0.0 1024 /bin/other",
+    ]
+    reading = parse_footprint("\n".join(rows), attributed_root_pids={50})
+    assert reading.machine_process_count == 5
+    assert reading.runnable_count == 2  # R and RN; Z is not runnable
+    # The roster-scoped counts sit beside them, unchanged in meaning.
+    assert reading.process_count == 1
+    assert reading.direct_process_count == 1
+    assert reading.measured_cpu_cores == pytest.approx(1.02)
+
+
+def test_parse_accepts_stateless_and_legacy_snapshots():
+    """The six-column shape without state and the legacy five-column shape
+    still parse; without a state column the runnable count reads zero."""
+    six_col = "  60    1 10:00 5.0 1024 /bin/one\n  61    1 10:00 0.0 1024 /bin/two"
+    reading = parse_footprint(six_col)
+    assert reading.machine_process_count == 2
+    assert reading.runnable_count == 0
+    legacy = "  70 10:00 5.0 1024 /bin/three"
+    reading = parse_footprint(legacy)
+    assert reading.machine_process_count == 1
+    assert reading.runnable_count == 0
+
+
+def test_parse_reads_a_headered_state_snapshot():
+    """A real headered `ps -Ao pid,ppid,state,etime,%cpu,rss,command` snapshot
+    routes to the state shape."""
+    headered = (
+        "  PID  PPID STAT     ELAPSED  %CPU   RSS COMMAND\n"
+        "   80     1 S+       10:00   5.0  1024 /bin/watcher\n"
+        "   81     1 R        10:00  90.0  1024 /bin/spinner"
+    )
+    reading = parse_footprint(headered)
+    assert reading.machine_process_count == 2
+    assert reading.runnable_count == 1
+    assert reading.measured_cpu_cores == pytest.approx(0.95)
+
+
+def test_parse_reads_the_linux_state_header():
+    """procps names the state column `S`, macOS names it `STATE`; both route
+    to the state shape. A missed header read every row as unparsed on the
+    CI runner (172 lines, 2026-09-12)."""
+    linux = (
+        "    PID  PPID S      ELAPSED  %CPU    RSS COMMAND\n"
+        "    90     1 Ss      10:00   5.0   1024 /sbin/init-ish\n"
+        "    91     1 R+      10:00  90.0   1024 /bin/burner"
+    )
+    reading = parse_footprint(linux)
+    assert reading.machine_process_count == 2
+    assert reading.runnable_count == 1
+
+
+def _reading_with_machine(measured: float, processes: int, runnable: int) -> Footprint:
+    return Footprint(
+        sustained_cpu_cores=0.0,
+        descendant_cpu_cores=0.0,
+        fleet_cpu_cores=0.0,
+        descendant_process_count=0,
+        direct_process_count=0,
+        transient_call_count=0,
+        process_count=0,
+        rss_gb=0.0,
+        measured_cpu_cores=measured,
+        top=[],
+        unparsed_lines=0,
+        machine_process_count=processes,
+        runnable_count=runnable,
+    )
 
 
 # ---------------------------------------------------------------------------

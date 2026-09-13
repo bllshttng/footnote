@@ -179,13 +179,23 @@ def _coerce(value: str, ann: Any) -> Any:
     is_optional = base is not ann
     if is_optional and value.strip().lower() in ("null", "none", ""):
         return None
-    if base is bool:
+    import types as _types
+    import typing as _typing
+
+    if base is bool or (
+        get_origin(base) in (_typing.Union, _types.UnionType)
+        and bool in get_args(base)
+    ):
+        # A bool arm inside a union (e.g. `bool | dict[str, bool]`) must still
+        # coerce: falling through stores the raw string, which compares equal
+        # to a stored quoted bool and no-ops the write while reporting success.
         v = value.strip().lower()
         if v in ("true", "1", "yes", "on"):
             return True
         if v in ("false", "0", "no", "off"):
             return False
-        raise ConfigSetError(f"expected a boolean (true/false); got {value!r}", 2)
+        if base is bool:
+            raise ConfigSetError(f"expected a boolean (true/false); got {value!r}", 2)
     if base is int:
         try:
             return int(value)

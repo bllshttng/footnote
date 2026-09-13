@@ -294,7 +294,7 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
     _HANDOVER_STATUS_VALID="$(printf '%s' "$_HANDOVER_STATUS" | jq -r '
       if (type == "object") and
          (.state == "free" or .state == "live" or .state == "suspect" or
-          .state == "stale" or .state == "corrupted") and
+          .state == "stale" or .state == "corrupted" or .state == "unknown") and
          ((.holder == null) or (.holder | type) == "string")
       then 1 else 0 end' 2>/dev/null)"
     _RECORDED_HANDOVER_STATE="$(printf '%s' "$_HANDOVER_STATUS" \
@@ -477,7 +477,7 @@ PRE_EXPIRES="$(printf '%s' "$_STATUS_ONCE" | jq -r "$_JQ_INTEGRAL_EXPIRES" 2>/de
 _STATUS_SHAPE_OK="$(printf '%s' "$_STATUS_ONCE" | jq -r '
   if (type == "object") and ((.state | type) == "string")
      and (.state == "free" or .state == "live" or .state == "suspect"
-          or .state == "stale" or .state == "corrupted")
+          or .state == "stale" or .state == "corrupted" or .state == "unknown")
   then 1 else 0 end' 2>/dev/null)"
 if [[ -z "$_STATUS_ONCE" || "$_STATUS_SHAPE_OK" != 1 ]]; then
   # Empty or unparseable output is the instrument failing (bound fired,

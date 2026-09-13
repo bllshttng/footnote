@@ -988,7 +988,7 @@ def test_merge_grant_malformed_is_refused(tmp_path, monkeypatch, bad, frag):
     time, never stored to be guessed at resolve time."""
     g = _make_graph(tmp_path, [{"id": "ab-grant002", "title": "t"}])
     _patch_graph(monkeypatch, g)
-    from fno.graph.store import append_session_record, read_graph
+    from fno.graph.store import append_session_record
 
     with pytest.raises(ValueError, match=frag):
         append_session_record(g, "ab-grant002", phase="do", harness="claude",
@@ -1002,7 +1002,7 @@ def test_merge_grant_duplicate_fills_but_never_overwrites(tmp_path, monkeypatch)
     which is a NEWER row and wins at resolve time."""
     g = _make_graph(tmp_path, [{"id": "ab-grant003", "title": "t"}])
     _patch_graph(monkeypatch, g)
-    from fno.graph.store import append_session_record, read_graph
+    from fno.graph.store import append_session_record
 
     refusal = {**_GRANT, "approved": False, "source": "no-merge-flag"}
     append_session_record(g, "ab-grant003", phase="do", harness="claude",
@@ -1312,6 +1312,179 @@ def test_cli_session_close_refuses_without_identity(tmp_path, monkeypatch):
 
     assert r.exit_code == 2
     assert "no ambient identity" in r.output
+
+
+def test_cli_session_open_holds_node_for_this_session(tmp_path, monkeypatch):
+    """AC1-HP: a free node comes back claimed under blueprint-session:<id>,
+    and the open writes no session row and no status change."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import claim_status
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "x-open001", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open1")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open001", "--json"])
+
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["status"] == "opened"
+    assert out["claim_key"] == "node:x-open001"
+    assert out["holder"] == "blueprint-session:sess-open1"
+    assert out["session_id"] == "sess-open1"
+    assert "acquired_at" in out
+    status = claim_status("node:x-open001")
+    assert status["state"] == "live"
+    assert status["holder"] == "blueprint-session:sess-open1"
+    node = read_graph(g)[0]
+    assert node["status"] != "in_progress"
+    assert node.get("sessions") in (None, [])
+
+
+def test_cli_session_open_refuses_live_foreign_holder(tmp_path, monkeypatch):
+    """AC2-ERR: a live spawn-handover claim is named and left intact."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import acquire_claim, claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-open002", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open2")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    acquire_claim("node:x-open002", "spawn-handover:worker-a", ttl_ms=60_000)
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open002"])
+
+    assert r.exit_code == 1
+    assert "held by spawn-handover:worker-a" in r.output
+    assert "no planner started" in r.output
+    status = claim_status("node:x-open002")
+    assert status["state"] == "live"
+    assert status["holder"] == "spawn-handover:worker-a"
+
+
+def test_cli_session_open_refuses_second_open_same_session(tmp_path, monkeypatch):
+    """AC3-ERR: a second open by the same session exits 1 without touching
+    the claim's acquire time."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-open003", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open3")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+
+    first = CliRunner().invoke(C.cli, ["session", "open", "x-open003", "--json"])
+    assert first.exit_code == 0, first.output
+    before = claim_status("node:x-open003")["acquired_at"]
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open003"])
+
+    assert r.exit_code == 1
+    assert "already open for this session" in r.output
+    assert claim_status("node:x-open003")["acquired_at"] == before
+
+
+def test_cli_session_open_refuses_without_identity(tmp_path, monkeypatch):
+    """AC4-ERR: no ambient identity, no claim taken."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-open004", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open004"])
+
+    assert r.exit_code == 2
+    assert "no ambient identity" in r.output
+    assert claim_status("node:x-open004")["state"] == "free"
+
+
+def test_cli_session_close_releases_blueprint_session_claim(tmp_path, monkeypatch):
+    """AC5-HP: open then close in one session releases the blueprint holder
+    and bounds the row with the claim's acquire time."""
+    from datetime import datetime, timezone
+
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import claim_status
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "x-open010", "title": "t", "plan_path": "p.md"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open10")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+
+    opened = CliRunner().invoke(C.cli, ["session", "open", "x-open010", "--json"])
+    assert opened.exit_code == 0, opened.output
+    acquired_at = json.loads(opened.output)["acquired_at"]
+    expected_start = datetime.fromtimestamp(
+        acquired_at / 1000, tz=timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    closed = CliRunner().invoke(C.cli, [
+        "session", "close", "x-open010",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-open010",
+        "--json",
+    ])
+
+    assert closed.exit_code == 0, closed.output
+    out = json.loads(closed.output)
+    assert out["claim_released"] is True
+    assert out["claim_holder"] == "blueprint-session:sess-open10"
+    assert claim_status("node:x-open010")["state"] == "free"
+    row = read_graph(g)[0]["sessions"][0]
+    assert row["phase"] == "blueprint"
+    assert row["started_at"] == expected_start
+    assert "ended_at" in row
+
+
+def test_cli_session_close_leaves_foreign_blueprint_claim_intact(tmp_path, monkeypatch):
+    """AC6-ERR: another session's blueprint claim is left held; the close
+    still writes its row and answers claim_released false."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import acquire_claim, claim_status
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "x-open011", "title": "t", "plan_path": "p.md"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open11")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+    acquire_claim("node:x-open011", "blueprint-session:other-sess", ttl_ms=60_000)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-open011",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-open011",
+        "--json",
+    ])
+
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output.strip().splitlines()[-1])
+    assert out["claim_released"] is False
+    assert "claim_holder" not in out
+    status = claim_status("node:x-open011")
+    assert status["state"] == "live"
+    assert status["holder"] == "blueprint-session:other-sess"
+    assert read_graph(g)[0]["sessions"][0]["session_id"] == "sess-open11"
 
 
 def test_cli_session_close_releases_spawn_handover_claim(tmp_path, monkeypatch):
@@ -2466,3 +2639,154 @@ def test_observed_model_not_file_backed_harness_is_not_called_prefix_shaped(tmp_
 
     assert got == {"kind": "not-file-backed"}
     assert _observe_model("gemini", "whatever-id")["kind"] == "not-file-backed"
+
+
+# ---------------------------------------------------------------------------
+# Request origin (x-1005) - birth stamping through the native transport
+# ---------------------------------------------------------------------------
+
+
+def test_origin_hp_build_stamps_native_receipt(monkeypatch):
+    """AC1-HP: the birth dict carries the transport's category and the
+    caller's evidence reference, once, at birth."""
+    import fno.graph.node_builder as nb
+
+    def fake_transport(*, source_kind, birth_channel, origin_evidence):
+        assert source_kind == "operator_request"
+        assert birth_channel == "new"
+        return "operator_request", origin_evidence
+
+    monkeypatch.setattr(nb, "stamp_request_origin", fake_transport)
+    node = nb._build_backlog_node(
+        title="Operator asked",
+        difficulty="medium",
+        source_kind="operator_request",
+        origin_evidence="brief:20260905.md",
+    )
+    assert node["request_origin"] == "operator_request"
+    assert node["origin_evidence"] == "brief:20260905.md"
+
+
+def test_origin_fail_open_stamps_unknown_and_keeps_evidence(monkeypatch):
+    """A missing binary fail-opens to unknown; the evidence reference is the
+    caller's own birth fact and never depends on the transport resolving."""
+    import fno.graph.node_builder as nb
+
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+    node = nb._build_backlog_node(
+        title="Stale binary",
+        difficulty="medium",
+        origin_channel="capture_promote",
+        origin_evidence="fu-a1b2c3 source: PR#1700",
+    )
+    assert node["request_origin"] == "unknown"
+    assert node["origin_evidence"] == "fu-a1b2c3 source: PR#1700"
+
+
+def test_origin_blank_evidence_normalizes_to_none():
+    """Whitespace evidence is no evidence; the field stays None, not ''."""
+    from fno.graph.node_builder import _build_backlog_node
+
+    node = _build_backlog_node(title="Blank", difficulty="medium", origin_evidence="   ")
+    assert node["origin_evidence"] is None
+    assert node["request_origin"] == "unknown"
+
+
+def test_origin_decompose_child_record_carries_parent_evidence(monkeypatch):
+    """A decomposed child declares the automated channel and its parent as
+    the producing reference, so it never silently gains human origin."""
+    import fno.graph.node_builder as nb
+
+    captured: list[dict] = []
+
+    def fake_transport(**kwargs):
+        captured.append(kwargs)
+        return "unknown", kwargs["origin_evidence"]
+
+    monkeypatch.setattr(nb, "stamp_request_origin", fake_transport)
+    nb._build_backlog_node(
+        title="Child",
+        difficulty="medium",
+        origin_channel="decompose",
+        origin_evidence="parent:x-37af",
+    )
+    assert captured[0]["birth_channel"] == "decompose"
+    assert captured[0]["origin_evidence"] == "parent:x-37af"
+
+
+def test_origin_ac2_edge_update_never_rewrites_birth(tmp_path, monkeypatch):
+    """AC2-EDGE: updating a born node leaves its birth origin and evidence
+    byte-stable; later rulings are separate fields the update path writes."""
+    g = _make_graph(
+        tmp_path,
+        [
+            {
+                "id": "ab-origin01",
+                "title": "Born operator",
+                "status": "idea",
+                "domain": "code",
+                "project": "fno",
+                "source_kind": "operator_request",
+                "request_origin": "operator_request",
+                "origin_evidence": "fu-a1b2c3 source: PR#1700",
+            }
+        ],
+    )
+    _patch_graph(monkeypatch, g)
+
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["backlog", "update", "ab-origin01", "--details", "a later ruling"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    entries = json.loads(g.read_text())["entries"]
+    node = next(e for e in entries if e["id"] == "ab-origin01")
+    assert node["details"] == "a later ruling"
+    assert node["request_origin"] == "operator_request"
+    assert node["origin_evidence"] == "fu-a1b2c3 source: PR#1700"
+
+
+def test_origin_intake_preserves_plan_sources_without_claiming_origin(
+    tmp_path, monkeypatch
+):
+    """AC2-HP (intake half): the plan's own references land as birth evidence
+    and the category stays unknown when the plan declares no source kind."""
+    from fno.graph import _intake
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("# t\n", encoding="utf-8")
+    monkeypatch.setattr(
+        _intake,
+        "resolve_node_project_and_cwd",
+        lambda *_a, **_k: (None, str(tmp_path), {"sources": ["brief-a.md", "brief-b.md"]}),
+    )
+    node = _intake._build_intake_node(
+        {"plan_path": str(plan), "title": "From plan", "priority": "p2", "deps": [], "roadmap_id": None},
+        [],
+    )
+    assert node["request_origin"] == "unknown"
+    assert node["origin_evidence"] == "brief-a.md; brief-b.md"
+
+
+def test_origin_intake_without_sources_falls_back_to_plan_path(tmp_path, monkeypatch):
+    from fno.graph import _intake
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("# t\n", encoding="utf-8")
+    monkeypatch.setattr(
+        _intake,
+        "resolve_node_project_and_cwd",
+        lambda *_a, **_k: (None, str(tmp_path), {}),
+    )
+    node = _intake._build_intake_node(
+        {"plan_path": str(plan), "title": "From plan", "priority": "p2", "deps": [], "roadmap_id": None},
+        [],
+    )
+    assert node["request_origin"] == "unknown"
+    assert node["origin_evidence"] == f"plan:{plan}"

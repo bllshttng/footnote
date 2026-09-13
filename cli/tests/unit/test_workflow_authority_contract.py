@@ -181,9 +181,41 @@ def test_reign_branches_on_harness_capability_before_arming():
     text = _skill("skills/reign/SKILL.md")
     arm = text[text.index("## Arm the beat") :]
     assert "Branch once on what the harness supports" in arm
-    assert "On Claude, arm six monitors" in arm
+    assert "On Claude, arm ONE monitor, not six" in arm
+    assert "Fleet settled-PR wake" in arm
     assert "arm nothing native" in arm
     assert "wake arm" in arm  # the codex beat is the external wake contract
+
+
+def test_reign_checkin_binds_worker_age_to_the_top_json_payload():
+    # x-bd3f: the check-in required a live-worker count and an oldest-worker
+    # stamp while naming no field a machine payload actually carries, so a king
+    # following the skill reported both lines as unmeasurable while live workers
+    # ran. The contract is the top view's served payload, and an unreadable
+    # instrument prints a refusal, never a default that reads healthy.
+    text = _skill("skills/reign/SKILL.md")
+    checkin = text[text.index("## The check-in body") :]
+    checkin = checkin[: checkin.index("## Recording a ruling")]
+    assert "fno agents top --json" in checkin
+    assert "status_age_s" in checkin
+    assert "predicate" in checkin
+    assert "worker activity unmeasured" in checkin
+    assert "oldest worker last-seen stamp" not in checkin
+
+
+def test_reign_checkin_names_the_merge_finish_line():
+    # The check-in printed open-PR indicators and a lever list that never
+    # merged, so a king following the skill read a ready PR as report-only and
+    # escalated it instead of merging. The merge law makes the team the
+    # merger, so the skill must carry the verb, the gate, and the law id
+    # together: a lever the file cannot name is a law rediscovered by
+    # exhaustion.
+    text = _skill("skills/reign/SKILL.md")
+    checkin = text[text.index("## The check-in body") :]
+    checkin = checkin[: checkin.index("## Recording a ruling")]
+    assert "fno do pr status" in checkin
+    assert "fno do pr merge" in checkin
+    assert "d-a44a5a00" in checkin
 
 
 def test_review_empty_diff_guard_resolves_the_named_target():

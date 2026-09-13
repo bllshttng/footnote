@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from fno.agents.naming import AgentNameError, dispatch_agent_name
 from fno.evals import history as _history
 from fno.evals.bank import TaskSpec
 from fno.evals.grading import GradeOutcome, grade
@@ -37,7 +38,7 @@ SpawnFn = Callable[[str, Path, int], SpawnResult]
 
 
 def _observe_worker(name: str) -> Optional[dict]:
-    """Registry identity, when a lookupable row exists (never for the default headless spawn)."""
+    """Registry identity, when the spawn left a registry row to read back."""
     try:
         from fno.agents.registry import load_registry
         for entry in load_registry():
@@ -45,7 +46,7 @@ def _observe_worker(name: str) -> Optional[dict]:
                 return {"harness": entry.harness, "model": entry.model,
                         "model_basis": entry.model_basis, "effort": entry.effort,
                         "harness_session_id": entry.harness_session_id}
-    except Exception:  # noqa: BLE001
+    except (AttributeError, KeyError):
         return None
     return None
 
@@ -55,8 +56,8 @@ def _lane_evidence(lane: Optional[Any], observed: Optional[dict], *,
     """Requested vs. observed config; a harness/model mismatch is ``substituted``.
     No ``observed`` dict is one of three things: never attempted (grade-only,
     ``not-applicable``), a real spawn failure (``unavailable``), or a spawn that
-    succeeded but left nothing to check - the default headless lane always -
-    which is ``unverified``, not a capacity refusal."""
+    succeeded but left no readable registry row - which is ``unverified``, not
+    a capacity refusal."""
     if lane is None:
         return {}
     fields: dict[str, object] = {
@@ -144,8 +145,17 @@ def _default_spawn(
 ) -> SpawnResult:
     """Run the worker via ``fno agents spawn --substrate headless`` in *workdir*.
     A non-zero exit, missing binary, or timeout is a graded failure, never a
-    sweep crash. A *lane* is a complete coordinate: its harness wins over *provider*."""
-    name = f"eval-{os.getpid()}-{int(time.time())}"
+    sweep crash. A *lane* is a complete coordinate: its harness wins over *provider*.
+    The worker name is the x-84b2 ``ev-th-evals-<run>``: typed non-node identity,
+    per-invocation run token as the never-shaved discriminator."""
+    try:
+        name = dispatch_agent_name(
+            "ev", "th", "evals", discriminator=f"{os.getpid()}-{int(time.time())}"
+        )
+    except AgentNameError as exc:
+        # The mint reads the binary; its absence is the same graded failure as
+        # a missing `fno`, never a sweep crash.
+        return SpawnResult(False, f"spawn failed: worker name unmintable ({exc})")
     cmd = [
         "fno", "agents", "spawn", "--name", name,
         "--substrate", "headless", "--cwd", str(workdir),

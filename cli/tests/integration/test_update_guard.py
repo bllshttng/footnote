@@ -263,6 +263,41 @@ def test_update_without_source_rev_skips_marker_chain(
     assert "do pr watch refresh" in joined
 
 
+def _invoke_update_capturing_execvp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rev: str | None
+) -> str:
+    """Run `fno doctor update` with a pinned rev and return the exec'd shell line."""
+    import fno.update as update_mod
+
+    monkeypatch.setattr(update_mod, "_source_rev", lambda src: rev)
+    marker = tmp_path / "state" / "installed-rev"
+    monkeypatch.setattr(update_mod, "_INSTALLED_REV_FILE", marker)
+
+    captured: dict[str, object] = {}
+
+    def _fake_execvp(file: str, args: list[str]) -> None:
+        captured["args"] = args
+
+    monkeypatch.setattr(update_mod.os, "execvp", _fake_execvp)
+
+    result = runner.invoke(app, ["doctor", "update"])
+    assert result.exit_code == 0
+    return " ".join(captured.get("args") or [])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="execvp shell-chain is the Unix path")
+def test_ordinary_update_keeps_both_refreshes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2-HP: the post-install chain installs, then refreshes both launchd
+    agents (watcher first, then groom)."""
+    joined = _invoke_update_capturing_execvp(tmp_path, monkeypatch, rev="cafef00d")
+
+    assert "cafef00d" in joined
+    assert "do pr watch refresh" in joined
+    assert "backlog groom --refresh-agent" in joined
+
+
 def test_update_without_source_rev_execs_retry_wrapped_install_when_no_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

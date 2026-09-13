@@ -45,11 +45,25 @@ from fno.agents.reachability import (
     registry_falsifier,
 )
 from fno.harness_identity import (
-    canonical_handle,
     session_handle_tier,
     session_identity_key,
 )
 from fno.time_budget import validate_timeout_budget
+
+
+def canonical_handle(session_id: str) -> str:
+    """Lazy delegate to ``fno.harness_identity.canonical_handle``.
+
+    Imported per call, never bound at module import: a test monkeypatching
+    ``harness_identity.canonical_handle`` poisons every module that from-imported
+    the name while the patch was live, and monkeypatch's teardown only reverts
+    the attribute on ``fno.harness_identity`` -- the same regression
+    ``fno.mail.reply_resolve`` documented for ``resolve_harness_identity``.
+    """
+    from fno.harness_identity import canonical_handle as _impl
+
+    return _impl(session_id)
+
 
 # A real per-session registry file is named ``<pid>.json``. The strict guard
 # is load-bearing: a 7000+ entry sessions dir holds ``.sync-conflict-*.json``
@@ -1062,6 +1076,9 @@ class DiscoveredSession:
     #: set alongside ``truth_state`` from the same truth probe. Feeds
     #: ``classify_progress``; ``None`` before that probe has run.
     observed_model: Optional[dict] = None
+    #: The provider refusal the truth probe classified off the last assistant
+    #: turn (x-e594). Feeds both renderers; ``None`` before that probe has run.
+    provider_refusal: Optional[str] = None
 
     def _reachability(self) -> Reachability:
         """This session's verdict from the one shared derivation.
@@ -1079,6 +1096,7 @@ class DiscoveredSession:
             # row has no usable pid of its own, and a scanned row has no registry
             # entry, so in practice at most one of these is ever present.
             falsifier=pid_falsifier(self.pid or None) or self.registry_falsifier,
+            observed_model=self.observed_model,
         )
 
     @property
@@ -1131,6 +1149,7 @@ class DiscoveredSession:
             harness=self.agent,
             route_settings_path=None,
             last_activity_age_s=self.last_activity_age_s,
+            provider_refusal=self.provider_refusal,
         )
         return {
             "handle": self.handle,
@@ -1151,6 +1170,7 @@ class DiscoveredSession:
                 truth_state=self.truth_state,
                 age_s=reach.age_s,
                 reachability=reach.verdict,
+                provider_refusal=self.provider_refusal,
             ),
             # The evidence, not just the word derived from it. Reducing the
             # verdict to a bare `status` here left this lane unable to say
@@ -1165,19 +1185,6 @@ class DiscoveredSession:
             "last_activity_age_s": reach.age_s,
             "agent": self.agent,
         }
-
-
-def _session_handle_matches(
-    token: Optional[str], sessions: Iterable[DiscoveredSession]
-) -> list[DiscoveredSession]:
-    """Every session matching the full, canonical, or legacy identity token."""
-    if not token:
-        return []
-    return [
-        session
-        for session in sessions
-        if session_handle_tier(token, session.session_id) is not None
-    ]
 
 
 def _exact_address_matches(
@@ -1277,10 +1284,6 @@ def _read_registry_file(path: Path) -> Optional[dict]:
 # Whether a given CC version preserves ``_`` is version-specific, so we try both
 # the underscore-collapsing and underscore-preserving forms and use whichever
 # directory actually exists (the common no-underscore path yields one name).
-def _encode_cwd(cwd: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
-
-
 def _candidate_dir_names(cwd: str) -> list[str]:
     names: list[str] = []
     for pat in (r"[^a-zA-Z0-9]", r"[^a-zA-Z0-9_]"):
@@ -2825,6 +2828,7 @@ def discover_live_sessions(
         age = truth.get("last_activity_age_s")
         session.last_activity_age_s = int(age) if isinstance(age, (int, float)) else None
         session.observed_model = truth.get("observed_model")
+        session.provider_refusal = truth.get("provider_refusal")
     # Stable render order: by handle.
     sessions.sort(key=lambda s: s.handle)
     return sessions

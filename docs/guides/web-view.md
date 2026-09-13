@@ -7,8 +7,8 @@ The view is read-only by construction, not by policy. The bridge sends one attac
 ## Start it
 
 ```bash
-fno mux serve --web                      # the default session, on 127.0.0.1:8722
-fno mux serve --web --session work       # a named mux session
+fno mux serve --web                      # the default server, on 127.0.0.1:8722
+fno mux serve --web --server work        # a named mux server
 fno mux serve --web --port 9000          # a different port
 ```
 
@@ -18,7 +18,20 @@ The page's **backlog** link opens the current private `fno backlog view` file th
 
 The bridge also writes these values to `<mux dir>/web-<session>.json` at mode 0600. You can get the URL again from this file. The bridge removes the file on exit.
 
-`--session` names the mux SERVER, not an agent. It selects which socket the bridge attaches to. To reach one agent, see the next section.
+`--server` names the mux server, not an agent. It selects which socket the bridge attaches to. The old `--session` spelling still works and warns. To reach one agent, see the next section.
+
+## Stop it, and clean up after a dead one
+
+`fno mux serve --web --stop` ends the running bridge for one session.
+
+```bash
+fno mux serve --web --stop                # the default session
+fno mux serve --web --stop --server work  # the bridge that serves session work
+```
+
+Stop reads the bridge's own state file, checks the pid still names that bridge, and sends the gentle signal first. If the bridge hangs, stop escalates. It removes the marker file either way.
+
+A bridge that died some other way, such as a kill or a reboot, leaves the marker behind with its token. `fno mux web reap` finds every marker whose port refuses and removes those corpses. Unreadable markers are named and left alone. It prints one receipt line, and `--json` prints rows instead.
 
 ## Get the link for one agent
 

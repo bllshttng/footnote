@@ -211,7 +211,7 @@ impl EventEmitter {
     }
 }
 
-fn rotated_path(path: &Path) -> PathBuf {
+pub(crate) fn rotated_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".1");
     PathBuf::from(s)

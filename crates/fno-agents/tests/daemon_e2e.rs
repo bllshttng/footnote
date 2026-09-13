@@ -123,13 +123,17 @@ fn start_daemon(home: &AgentsHome) -> DaemonChild {
 }
 
 fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
-    let seen = count_events(home, "daemon_started");
+    let seen = common::count_events(home, "daemon_started");
+    let stderr =
+        std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(daemon_bin);
     cmd.env("FNO_AGENTS_HOME", home.root())
-        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+        .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        .stderr(std::process::Stdio::from(stderr));
     let child = cmd.spawn().expect("daemon spawns");
-    wait_for(&home.supervisor_sock(), Duration::from_secs(10));
-    wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
+    common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
+    common::wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
     DaemonChild(child)
 }
 
@@ -139,68 +143,22 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
 /// an artificially-seeded mid-flight source row intact for a promote-admission
 /// assertion.
 fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
-    let seen = count_events(home, "daemon_started");
+    let seen = common::count_events(home, "daemon_started");
+    let stderr =
+        std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
-        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+        .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        .stderr(std::process::Stdio::from(stderr));
     for (k, v) in extra {
         cmd.env(k, v);
     }
     let child = cmd.spawn().expect("daemon spawns");
-    wait_for(&home.supervisor_sock(), Duration::from_secs(10));
-    wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
+    common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
+    common::wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
     DaemonChild(child)
-}
-
-/// How many lines of the daemon's event log carry `needle`.
-fn count_events(home: &AgentsHome, needle: &str) -> usize {
-    std::fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| line.contains(needle))
-        .count()
-}
-
-/// Wait until `needle` has been written at least `at_least` times.
-///
-/// [`wait_for_event`] asks whether the log CONTAINS the needle, which is a
-/// no-op for every daemon after the first under one home: the log is
-/// append-only, so a `daemon_started` line left by the previous daemon
-/// satisfies it instantly and the caller races a socket the new daemon has not
-/// accepted on yet. Counting lines makes the wait about THIS spawn.
-fn wait_for_event_count(home: &AgentsHome, needle: &str, at_least: usize, budget: Duration) {
-    let start = Instant::now();
-    while start.elapsed() < budget {
-        if count_events(home, needle) >= at_least {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    panic!(
-        "event {needle} reached {} of {at_least} within {budget:?}",
-        count_events(home, needle)
-    );
-}
-
-/// Wait for `needle` to appear in the daemon's event log.
-///
-/// The startup reconcile sweep runs CONCURRENTLY with the accept loop (x-ef7f),
-/// so a served response no longer implies the sweep has landed. A test that
-/// reads post-sweep state waits for the event that says it did, rather than
-/// inferring it from response ordering.
-fn wait_for_event(home: &AgentsHome, needle: &str, budget: Duration) {
-    let start = Instant::now();
-    while start.elapsed() < budget {
-        if std::fs::read_to_string(home.events_jsonl())
-            .unwrap_or_default()
-            .contains(needle)
-        {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    panic!("event never appeared within {budget:?}: {needle}");
 }
 
 fn wait_for_successor_reconcile_order(home: &AgentsHome, successor_pid: u32, budget: Duration) {
@@ -333,14 +291,6 @@ fn daemon_env_bin(
     path
 }
 
-fn wait_for(path: &Path, budget: Duration) {
-    let start = Instant::now();
-    while !path.exists() && start.elapsed() < budget {
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    assert!(path.exists(), "path never appeared: {}", path.display());
-}
-
 /// AC1-HP (Architecture B, plan ab-70faa65b): a cold daemon start runs ONE
 /// bounded reconcile sweep BEFORE serving, so the first `list` reads truthful
 /// liveness. A stale `ask` row recorded `live` at creation (its one-shot process
@@ -421,7 +371,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     // The sweep now runs concurrently with the accept loop (x-ef7f), so a served
     // RPC no longer implies it has landed. This test is about WHAT the sweep
     // settles, not when, so wait for the sweep's own event before reading.
-    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
 
     let resp = call(
         &home,
@@ -488,7 +438,7 @@ async fn startup_reconcile_failure_degrades_to_serving() {
     let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_FAIL_STARTUP_RECONCILE", "1")]);
     // Concurrent sweep (x-ef7f): wait for the failure to land before asserting
     // on what it did or did not write.
-    wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
 
     // The daemon still serves despite the failed startup sweep (did not abort).
     let resp = call(
@@ -591,7 +541,7 @@ async fn cold_start_serves_while_the_startup_sweep_is_still_running() {
          runs; took {served_at:?}"
     );
 
-    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(60));
+    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(60));
     let done_at = t0.elapsed();
     // The sweep cannot finish before its own delay elapses, so this reading
     // proves it was still running when the response came back. Both readings
@@ -702,7 +652,13 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
 
     let mut incumbent = start_daemon(&home);
     let incumbent_pid = incumbent.id();
-    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    // The pid-confirmed termination needs the incumbent REAPED, not only
+    // dead: this test process is the parent, so an unwaited child lingers as
+    // a zombie and kill(pid, 0) answers alive through the whole grace. A
+    // waiter thread reaps the moment TERM lands - the shape launchd gives
+    // production orphans for free.
+    let reaper = std::thread::spawn(move || incumbent.wait());
 
     // The storm: a restart and a burst of ordinary client verbs at the same
     // moment. Every verb routes through `ensure_daemon`, which is the site that
@@ -797,10 +753,10 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
         "restart must replace the incumbent this test started"
     );
 
-    // Reap the incumbent before counting. It is our child, so until it is
-    // waited on it lingers as a zombie, and `kill(pid, 0)` answers ALIVE for a
-    // zombie -- the count would then report two supervisors for one live one.
-    let _ = incumbent.wait();
+    // The reaper thread joined below reaped the incumbent the moment TERM
+    // landed; without that reap it would linger as a zombie and the count
+    // would report two supervisors for one live one.
+    reaper.join().expect("incumbent reaper joins");
 
     // The successor serves. `status` stays on the async runtime, so this reads
     // the event loop's liveness rather than a handler's own work.
@@ -864,6 +820,9 @@ async fn daemon_child_env_isolated_probe() {
     let sibling_bin = daemon_env_bin(&sibling_home, "sibling", Some(&marker), &[]);
 
     let mut incumbent = start_daemon(&intended_home);
+    // Reap DURING the restart: the pid-confirmed termination cannot see an
+    // unwaited zombie child of this test process die.
+    let reaper = std::thread::spawn(move || incumbent.wait());
     let restart = {
         let home = intended_home.clone();
         let bin = intended_bin.clone();
@@ -871,7 +830,7 @@ async fn daemon_child_env_isolated_probe() {
     };
     let mut sibling = start_daemon_with_bin(&sibling_home, &sibling_bin);
     let outcome = restart.await.unwrap().expect("probe restart succeeds");
-    let _ = incumbent.wait();
+    reaper.join().expect("incumbent reaper joins");
     terminate_untracked(outcome.new_pid);
     let sibling_pid = sibling.id();
     unsafe { libc::kill(sibling_pid as libc::pid_t, libc::SIGTERM) };
@@ -1010,7 +969,7 @@ fn a_daemon_restart_over_a_loss_shaped_registry_loses_no_rows() {
     seed_loss_shaped_registry(&home);
 
     let child = start_daemon(&home);
-    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
     drop(child);
 
     let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -1052,7 +1011,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
     // The sweep reads the store, computes changes, then refuses the write.
     // The meta-event substitution still names the intended kind, so the
     // substring matches either the plain or the capped form.
-    wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
     drop(child);
 
     assert_eq!(
@@ -1270,7 +1229,7 @@ exit 2
         &shim_dir.join("fno"),
         r#"#!/bin/sh
 if [ "$1" = "mux" ] && [ "$2" = "pane" ] && [ "$3" = "kill" ] && \
-   [ "$4" = "--session" ] && [ "$5" = "main" ] && [ "$6" = "10" ]; then
+   [ "$4" = "--server" ] && [ "$5" = "main" ] && [ "$6" = "10" ]; then
   /bin/rm -f "$MUX_STATE"
   exit 0
 fi
@@ -1395,15 +1354,22 @@ exit 2
 /// A pane-hosted row must never be answered by `agent.stop` with a success:
 /// stop reaches no pane (the row's one live ref is the mux ref), so a success
 /// receipt would report work it did not perform over a live pane. The refusal
-/// names the pane-kill one-liner with the row's own session and pane id, and
-/// the registry row stays live. Keys on `entry.mux`, never the harness, so it
-/// covers claude, codex, opencode, and agy pane rows in one branch.
+/// names the row's own session:pane and the clearing verb, and the registry
+/// row stays live. Keys on `entry.mux`, never the harness, so it covers
+/// claude, codex, opencode, and agy pane rows in one branch.
 #[tokio::test]
-async fn stop_refuses_a_pane_row_and_names_the_pane_kill() {
+async fn stop_refuses_a_pane_row_and_names_the_row_ref() {
     let home = short_home();
     home.ensure_root().unwrap();
     seed_pane_row(&home, "pane-worker-stop");
-    let _daemon = start_daemon(&home);
+    // An empty FNO_MUX_DIR strands the probe's `fno mux pane read`: it cannot
+    // reach the session there, which mux_pane_is_absent reads as Absent, so
+    // this test never probes a developer's live `main` mux server. Whether
+    // `fno` resolves decides the probe's verdict (not on PATH -> Unknown ->
+    // today's text), so assert only markers both outcomes print; the
+    // pane-kill wording is pinned on the builder's unit tests.
+    let mux_dir = home.root().join("empty-mux");
+    let _daemon = start_daemon_env(&home, &[("FNO_MUX_DIR", mux_dir.to_str().unwrap())]);
 
     let daemon_bin = PathBuf::from(DAEMON_BIN);
     let resp = call(
@@ -1419,12 +1385,11 @@ async fn stop_refuses_a_pane_row_and_names_the_pane_kill() {
         resp.result()
     );
     let msg = resp.error().unwrap().message.clone();
+    assert!(msg.contains("main:10"), "refusal names session:pane: {msg}");
     assert!(
-        msg.contains("fno mux pane kill"),
-        "refusal names the working verb: {msg}"
+        msg.contains("fno agents rm pane-worker-stop"),
+        "refusal names the clearing verb: {msg}"
     );
-    assert!(msg.contains("main"), "refusal names the session: {msg}");
-    assert!(msg.contains("10"), "refusal names the pane id: {msg}");
 
     let registry = state::load_registry(&home.registry_json()).unwrap();
     assert_eq!(
@@ -1699,7 +1664,7 @@ async fn drift_warned_on_list_stderr_only() {
             }
         }
     };
-    wait_for(&home.supervisor_sock(), Duration::from_secs(10));
+    common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
 
     // One real row, so this is also the only coverage of a row projection
     // travelling the whole client -> socket -> daemon -> stdout path. The unit
@@ -1967,7 +1932,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
     // the suite runs fast enough to reach the write before the sweep. Its
     // sibling `registry_lookup_distinguishes_unreadable_from_absent` already
     // waits for this event, which is why the same shape is stable there.
-    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
 
     // Break the registered lane out from under the running daemon.
     write_divergent_registry(&home);
@@ -2359,5 +2324,33 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
         libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
     }
     let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// status --json carries the drift verdict as a field (x-f188 change 4,
+/// AC4-HP): the census reads it from JSON instead of regex-parsing the
+/// stderr sentence.
+#[tokio::test]
+async fn status_json_carries_the_drift_label() {
+    const CLIENT_BIN: &str = env!("CARGO_BIN_EXE_fno-agents");
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let _daemon = start_daemon(&home);
+    let out = Command::new(CLIENT_BIN)
+        .args(["status", "--json"])
+        .env("FNO_AGENTS_HOME", home.root())
+        .output()
+        .expect("client runs");
+    assert!(
+        out.status.success(),
+        "status exits 0 against a live daemon: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("status json");
+    let label = v["drift"].as_str().unwrap_or("MISSING");
+    assert!(
+        matches!(label, "fresh" | "drifted" | "unknown"),
+        "a drift label rides status --json, got {label}"
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }

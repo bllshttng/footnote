@@ -4,6 +4,12 @@ This document describes the `fno agents claim` primitive, its on-disk format, th
 key namespace, and the relationship to the older coordination paths it
 replaces.
 
+## Is this page for you?
+
+You debug a claim refusal ("already held"), or you design anything that must give one worker one node. This page owns the claim primitive and what it replaced. Misreading it makes you reach for the older coordination paths, and then two workers hold one node.
+
+Not for: who dispatches work or where a worker runs. That is the spawn substrate and the loop docs. The caller rule this page enforces: target init claims the node, and callers never claim manually.
+
 ## Problem
 
 Before this work, three partially-overlapping coordination mechanisms ran
@@ -100,7 +106,7 @@ manifest fields are an init-time snapshot and graph `status: claimed` names no
 holder, so all guidance compares `fno agents claim status` against the session's own
 id, never a snapshot.
 
-**A held claim proves a holder, never a worker.** A hand `fno agents claim acquire` takes `node:<id>` with nothing launched. A `spawn-handover:` claim covers a launch window whose worker can die before it boots. So the guard reports three reasons, not two. `live-claim` means a holder AND a `fno target init` behind it. `unproven-claim` means a holder and nothing more. That is what `spawn.sh` and `dispatch-node.sh` render as "no worker has reached target init" instead of the old "live worker holds node". `suspect-claim` is unchanged. The discriminator is `_init_reached` in `cli/src/fno/agents/cli.py`. It reads two markers. The `target-session:` holder prefix is a convention, not proof, since a hand acquire writes the same string. The manifest under the dispatcher's cwd must bind `target_claim_key: node:<id>` AND name the observed holder. That holder match is the non-forgeable half. A read fault answers unproven, because an unreadable manifest must never manufacture a worker. `fno backlog next --claim H --external` needs two things to protect the node it hands out, and it had neither. It now routes through `claims_root_for`, because a `node:` lock in the cwd-default tree reads free to every dispatch surface. It also carries `EXTERNAL_SELECTION_TTL`, because selection exits as soon as it prints the node. A pid-liveness claim from a process that exits reads `stale`, and `stale` does not block a dispatch. A free/stale node claim is still not enough to take over a dirty worktree: the exact worktree must be matched to one registry row and its transcript must be positively stale. Dirty plus recent transcript is `occupied_worktree`; any unreadable or non-unique evidence is `unknown`, and both refuse takeover.
+**A held claim proves a holder, never a worker.** A hand `fno agents claim acquire` takes `node:<id>` with nothing launched. A `spawn-handover:` claim covers a launch window whose worker can die before it boots. So the guard reports four reasons, not two. `live-claim` means a holder AND a `fno target init` behind it. `unproven-claim` means a holder and nothing more. That is what `spawn.sh` and `dispatch-node.sh` render as "no worker has reached target init" instead of the old "live worker holds node". `suspect-claim` is unchanged. `worker-row` is the inverse case. A worker ROW occupies the node while the claim does not hold it. The receipt names the row, carries a peek-then-stop remedy, and omits the claim holder. Naming the claim there sent an operator to a claim `fno agents claim status` read as UNCLAIMED. Releasing it frees nothing. An overlay that cannot measure that row's liveness says so on the receipt. It sends the reader to the claim too, because peek can come back showing nothing. The discriminator is `_init_reached` in `cli/src/fno/agents/cli.py`. It reads two markers. The `target-session:` holder prefix is a convention, not proof, since a hand acquire writes the same string. The manifest under the dispatcher's cwd must bind `target_claim_key: node:<id>` AND name the observed holder. That holder match is the non-forgeable half. A read fault answers unproven, because an unreadable manifest must never manufacture a worker. `fno backlog next --claim H --external` needs two things to protect the node it hands out, and it had neither. It now routes through `claims_root_for`, because a `node:` lock in the cwd-default tree reads free to every dispatch surface. It also carries `EXTERNAL_SELECTION_TTL`, because selection exits as soon as it prints the node. A pid-liveness claim from a process that exits reads `stale`, and `stale` does not block a dispatch. A free/stale node claim is still not enough to take over a dirty worktree. Match the exact worktree to one registry row. Its transcript must read positively stale. Dirty plus recent transcript is `occupied_worktree`. Any unreadable or non-unique evidence is `unknown`. Both refuse takeover.
 
 **The reservation is taken after the launch is proven.** `cmd_spawn` runs its node guard below the resume-provider resolution. An exit on that stretch now strands neither `dispatch:<id>` nor the handover `node:<id>`. Below it the only exit is `run_gate`, whose `except BaseException` releases both. On the way out, the reservation is released whenever the substrate is a one-shot (`--once` or `--substrate headless`), as well as on a failed spawn. When the call returns, a one-shot's worker has already exited, so nobody is left to inherit it. `pane` and `bg` keep it, because their worker outlives the caller.
 
@@ -181,7 +187,7 @@ The agents lifecycle store at `~/.fno/agents/events.jsonl` owns `agent_spawned` 
 
 The registry's primary key is the pair `(harness, harness_session_id)`. The row's `name` is a mutable label and an alias. Two rows can share a label. A writer that cannot prove the identity it is writing to must refuse. Every lifecycle verb (stop, remove, mail, respawn) resolves its target by identity first. Only a caller that supplied no identity falls back to the label. A stored snapshot field is never the truth about a live session. Status, a pid, an init-time manifest claim: each is at best a stale measurement.
 
-Readers get facts served with their measurement time instead. The reconcile sweep is the only writer of `liveness` (`alive|dead|unmeasured`). It always pairs the word with `liveness_measured_at`. While the stamp is young, a reader trusts the pair. An old stamp sends the reader back to the status ladder. The sweep's transcript-tail batch also reads the harness's own title for the session. Sources: claude's Ctrl+R `agent-name` transcript record, codex's threads index, opencode's session store. The sweep stores the title only as its diff baseline, emits `agent_renamed` on change, and never rewrites the label. A `/model` inside a worker reports through the PostModelSwitch hook. The daemon stamps `model_basis: verified` on a real change and emits `agent_model_changed`. The spawn-time `requested_model` is untouched.
+Readers get facts served with their measurement time instead. The reconcile sweep is the only writer of the served pair, `liveness` (`alive|dead|unmeasured`) and `liveness_measured_at`. A serve-only tick re-runs the sweep's measurement every 60 seconds (`SERVED_LIVENESS_CADENCE`, mirrored per crate in `served_liveness.rs` and pinned by a contract test). It writes the served pair and nothing else: no status transition, no orphan flip, no exit reap. The word is served while its stamp is younger than twice that cadence. `liveness_basis` rides beside it: `fresh` inside the window, `stale` after it, `never-measured` with no measurement. Past the window the word reads null and the reader falls back to the status ladder. A pane row (mux ref or interactive host) with a recorded pid serves from the pid. Alive while it is ours and live, dead once gone. The session-store probe does not matter for these rows. That includes its normal `Err` refusal on a claude row that carries no session id. The sweep's transcript-tail batch also reads the harness's own title for the session. Sources: claude's Ctrl+R `agent-name` transcript record, codex's threads index, opencode's session store. The sweep stores the title only as its diff baseline, emits `agent_renamed` on change, and never rewrites the label. A `/model` inside a worker reports through the PostModelSwitch hook. The daemon stamps `model_basis: verified` on a real change and emits `agent_model_changed`. The spawn-time `requested_model` is untouched.
 
 The daemon's `agent.watch` RPC is the subscription face of that registry. It serves the full document on connect. It serves again whenever the registry's (mtime, len) stamp moves, which is what any write does to the file. Otherwise it answers a bare version echo, so a subscriber pays one stat per idle tick. The mux sideline subscribes through it. Reading `registry.json` directly is the degraded fallback for the supported no-daemon shape. The fallback announces itself with one log line.
 
@@ -191,7 +197,7 @@ Mail `origin` is a channel claim and is floored to `peer` whenever the caller ha
 
 ### Registry row removal is never silent
 
-Every registry row removal announces itself at the write choke point, whatever door drops the row. The remover stages a recovery receipt under `<agents home>/reap-receipts/` first. It then emits one `registry_row_removed` event per row into the same lifecycle store, naming the row and the remover. A row with no resumable identity still announces, with `receipt_staged: false`. `update_registry` is the only removal door in both languages (Rust `state.rs`, Python `registry.py`), so a removal with no event cannot exist. `agent_row_reaped` remains the reap door's own richer event. `registry_row_removed` fires for every door beside it.
+Every registry row removal announces itself at the write choke point, whatever door drops the row. The remover stages a recovery receipt under `<agents home>/reap-receipts/` first. It then emits one `registry_row_removed` event per row into the same lifecycle store, naming the row and the remover. A row with no resumable identity still announces, with `receipt_staged: false`. `update_registry` is the only removal door in both languages (Rust `state.rs`, Python `registry.py`), so a removal with no event cannot exist. `agent_row_reaped` remains the reap door's own richer event. `registry_row_removed` fires for every door beside it. A reaped row finds its node through the one provenance cascade the sweep already trusts (the sessions witness, the registry field, then the name route). The event's `node_id` carries the answer and `node_resolution` names the source that answered, so `node_id` null reads as "no node", never "we did not look".
 
 Squad cleanup uses positive member liveness. A tombstone or exact terminal identity is dead, a current exact identity is live, and an unreadable or unjoinable identity is unknown and remains stored. A missing row alone is not proof of death.
 
@@ -210,20 +216,20 @@ Concurrency is bounded where the spawn is refused. Two caps bind: `agents.max_li
 
 ## Per-territory team cap
 
-`_territory_verdict` (`cli/src/fno/agents/spawn_gate.py`) asks the Rust gate
-for one node's territory verdict and recomputes nothing: Python passes the
-node through the binary door. A binary or payload fault reads as
-`territory_unknown`, never as headroom, since an unreadable verdict must
-never count as free capacity.
+`check_territory_cap` (`crates/fno-agents/src/spawn_gate.rs`) is the one
+enforcement home for the per-territory team cap. The Rust client's own gate
+passes the node through, and the binary door (`fno-agents territory-verdict`)
+serves the readout surfaces; nothing recomputes the verdict elsewhere. A
+binary or payload fault reads as `territory_unknown`, never as headroom,
+since an unreadable verdict must never count as free capacity.
 
-`_check_territory_cap` refuses (never queues) when that verdict is
-`territory_cap`. The cap stays enforced under `--force`: force speaks for
-the machine being busy, never for one territory overrunning its team.
-Waiting cannot help, since the team is full where the caller is standing,
-so this refuses the same way the provider cap does. `EXIT_TERRITORY_CAP`
-(82) separates this from the machine-wide cap so a caller can tell "the
-fleet is full" (queueable) from "this territory's team is over the line"
-(the other territories keep their headroom).
+The cap refuses (never queues) at `territory_cap`. It stays enforced under
+`--force`: force speaks for the machine being busy, never for one territory
+overrunning its team. Waiting cannot help, since the team is full where the
+caller is standing, so this refuses the same way the provider cap does.
+`EXIT_TERRITORY_CAP` (82) separates this from the machine-wide cap so a
+caller can tell "the fleet is full" (queueable) from "this territory's team
+is over the line" (the other territories keep their headroom).
 
 Two CLI verbs read the same Rust territory projection so no two surfaces
 disagree. `fno config active-backlog` (`config_cli.py`) passes through the
@@ -236,7 +242,9 @@ standing blueprinter's handle. Both are read-only.
 
 ## A dispatch outcome is dispatched, skipped, or failed
 
-Every dispatcher verdict answers one question: is the condition a property of the node, or of the machine? A dispatch failure records `advance_failed` and charges the node's failure budget. A dispatch refusal records `advance_skipped` and leaves the row ready. The discriminator is the spawn gate's own exit code, read once in `cli/src/fno/backlog/advance.py` (`gate_refusal`). Exits 75 to 80 are capacity conditions true for every caller equally: queue timeout, no-wait, RAM, provider cap, load, king share. They skip as `capacity-refused`. Exit 81 (registry schema) is a spawn path no row can pass, so it skips as `gate-unavailable`. Nothing outside that closed family is machine-scoped. A node fault can only enter it through a gate change.
+Every dispatcher verdict answers one question: is the condition a property of the node, or of the machine? A dispatch failure records `advance_failed` and charges the node's failure budget. A dispatch refusal records `advance_skipped` and leaves the row ready. The discriminator is the spawn gate's own exit code, read once in `cli/src/fno/backlog/advance.py` (`gate_refusal`). Exits 75 to 80 are capacity conditions true for every caller equally: queue timeout, no-wait, RAM, provider cap, load, king share. They skip as `capacity-refused`. Exit 81 (registry schema) is a spawn path no row can pass, so it skips as `gate-unavailable`. Exit 82 comes from the codex sandbox probe at the spawn seam. The sandbox blocks a tool that every code payload on that lane needs, so it skips as `sandbox-unreachable`. Its provenance marker is `sandbox-probe:`, not `spawn-gate:`. Nothing outside that closed family is machine-scoped. A node fault can only enter it through a gate change.
+
+The sandbox probe (`cli/src/fno/agents/sandbox_probe.py`) runs each check through `codex sandbox`, under the worker's own seatbelt policy, `config.toml`, and git grant. `gh api rate_limit` must print a positive limit. A `git update-ref --stdin` transaction must print `prepare: ok`. It takes the lock a commit takes and then aborts, so it never creates a ref. Two controls keep a refusal honest. A sandboxed echo must return its nonce, or the probe never ran. A tool that fails inside the sandbox runs again outside it. Only a tool that answers outside and fails inside is blocked by the sandbox. A tool that fails in both places (gh logged out, GitHub down) says nothing about the sandbox, so it reads unknown and the spawn launches with a note.
 
 The refusal must name its own cause. The gate prints warnings before its verdict, so the last human-readable line before a bare exit code can name an unrelated condition. The consumer therefore carries the gate's own refusal sentence (the last `spawn-gate:` line) beside the code. A reader of the arm output or the journal sees the axis and the numbers, never the warning.
 

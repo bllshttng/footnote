@@ -29,7 +29,9 @@
 #
 # The release therefore lives at the two markers that mean the review is REALLY
 # done: `skills/review/scripts/emit-attestation.sh` (a verdict now exists for
-# this head) and the TTL (the reviewer died). A review that found findings holds
+# this head) and the TTL. The TTL is a lease the review did not attest inside,
+# not proof that the reviewer died: the holder's session can keep running long
+# after the review it was running is over. A review that found findings holds
 # the lane until a clean re-review attests, which is the intended behavior: the
 # findings are unfixed.
 #
@@ -86,14 +88,50 @@ esac
 cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [[ -n "$cwd" && -d "$cwd" ]] || cwd="$PWD"
 
-branch="$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-[[ -n "$branch" && "$branch" != "HEAD" ]] || exit 0
+plugin_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || true)"
+helper_path="${plugin_root:+$plugin_root/cli/src}"
+parsed="$(PYTHONPATH="$helper_path${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -c 'import json, sys; from fno.review.invocation import parse_review_invocation; print(json.dumps(parse_review_invocation(sys.argv[1]) or {}))' \
+  "$skill_raw" 2>/dev/null || true)"
+args_raw="$(printf '%s' "$parsed" | jq -r '.args_raw // empty' 2>/dev/null || true)"
+level="$(printf '%s' "$parsed" | jq -r '.level // "unset"' 2>/dev/null || echo unset)"
+level_source="$(printf '%s' "$parsed" | jq -r '.level_source // "fallback"' 2>/dev/null || echo fallback)"
+flags="$(printf '%s' "$parsed" | jq -c '.flags // []' 2>/dev/null || echo '[]')"
+[[ -n "$level" ]] || level="unset"
+[[ -n "$level_source" ]] || level_source="fallback"
+[[ -n "$flags" ]] || flags='[]'
+pr_number="$(printf '%s' "$parsed" | jq -r '.pr_number // empty' 2>/dev/null || true)"
+target="$(printf '%s' "$parsed" | jq -r '.target // empty' 2>/dev/null || true)"
 
-# A review of the protected branch is not a PR review, and a hold there would
-# key on a branch no PR ever merges.
-case "$branch" in
-  main|master|develop|dev) exit 0 ;;
-esac
+# x-b5f6: the hold keys the review's NAMED target, never the branch this
+# checkout happens to stand on - the observed wedge held PR 1709's branch for
+# a review of PR 1713 and left 1713 unprotected. A PR number resolves to
+# nothing here: the acquire verb reads the PR's head ref from GitHub, so a PR
+# review from a checkout on main still holds its PR. A branch target is
+# verified against local then origin refs. Only an invocation with no target
+# reads the cwd.
+branch=""
+head=""
+if [[ -z "$pr_number" ]]; then
+  if [[ -n "$target" ]]; then
+    target_head="$(git -C "$cwd" rev-parse --verify --quiet "refs/heads/$target" 2>/dev/null || true)"
+    [[ -n "$target_head" ]] || target_head="$(git -C "$cwd" rev-parse --verify --quiet "refs/remotes/origin/$target" 2>/dev/null || true)"
+    if [[ -n "$target_head" ]]; then
+      branch="$target"
+      head="$target_head"
+    fi
+  fi
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    [[ -n "$branch" && "$branch" != "HEAD" ]] || exit 0
+    head="$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)"
+  fi
+  # A review of the protected branch is not a PR review, and a hold there would
+  # key on a branch no PR ever merges.
+  case "$branch" in
+    main|master|develop|dev) exit 0 ;;
+  esac
+fi
 
 # The session is the holder: a second review verb fired inside the same session
 # on the same branch re-takes its OWN hold rather than colliding with a
@@ -101,12 +139,9 @@ esac
 session="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
 holder="review-session:${session:-unknown}"
 
-head="$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)"
 # The helper is best-effort because this hook must never block the review. The
 # shell fallback still creates a join id when an installed fno package cannot
 # be imported by the hook process.
-plugin_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || true)"
-helper_path="${plugin_root:+$plugin_root/cli/src}"
 # Adopt the sender's pending id when one exists (the mail-path join: the
 # sent row and this started row then carry ONE id), and only mint-plus-write
 # a fresh sidecar on a miss, so a second review never re-adopts the first
@@ -126,17 +161,6 @@ print(i)' \
 if [[ -z "$invocation_id" ]]; then
   invocation_id="ri-$(date -u +%s 2>/dev/null || echo 0)-$$"
 fi
-
-parsed="$(PYTHONPATH="$helper_path${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 -c 'import json, sys; from fno.review.invocation import parse_review_invocation; print(json.dumps(parse_review_invocation(sys.argv[1]) or {}))' \
-  "$skill_raw" 2>/dev/null || true)"
-args_raw="$(printf '%s' "$parsed" | jq -r '.args_raw // empty' 2>/dev/null || true)"
-level="$(printf '%s' "$parsed" | jq -r '.level // "unset"' 2>/dev/null || echo unset)"
-level_source="$(printf '%s' "$parsed" | jq -r '.level_source // "fallback"' 2>/dev/null || echo fallback)"
-flags="$(printf '%s' "$parsed" | jq -c '.flags // []' 2>/dev/null || echo '[]')"
-[[ -n "$level" ]] || level="unset"
-[[ -n "$level_source" ]] || level_source="fallback"
-[[ -n "$flags" ]] || flags='[]'
 model_sidecar="${FNO_HOME:-$HOME/.fno}/attest/${session}.json"
 model_family="$(jq -r '.model_family // .model // empty' "$model_sidecar" 2>/dev/null || true)"
 data="$(jq -cn \
@@ -153,7 +177,10 @@ data="$(jq -cn \
   --arg head_sha "$head" \
   --arg branch "$branch" \
   --arg model_family "$model_family" \
-  '{invocation_id:$invocation_id,stage:$stage,verb:$verb,args_raw:$args_raw,level:$level,level_source:$level_source,flags:$flags,transport:$transport,initiator:$initiator,target_session_id:$target_session_id,head_sha:$head_sha,branch:$branch} | if $model_family == "" then . else .model_family=$model_family end' \
+  '{invocation_id:$invocation_id,stage:$stage,verb:$verb,args_raw:$args_raw,level:$level,level_source:$level_source,flags:$flags,transport:$transport,initiator:$initiator,target_session_id:$target_session_id,head_sha:$head_sha,branch:$branch}
+   | if $head_sha == "" then del(.head_sha) else . end
+   | if $branch == "" then del(.branch) else . end
+   | if $model_family == "" then . else .model_family=$model_family end' \
   2>/dev/null || true)"
 if [[ -n "$data" ]]; then
   # The resolver owns the default; --events is only for the hermeticity pin.
@@ -175,12 +202,23 @@ fi
 # refusal `acquire` answers with - a fixed stdout prefix naming the spent
 # budget and the law's remedy - becomes a denial decision here. Every other
 # outcome still exits 0 with nothing said.
-cap_out="$("$FNO_BIN" do pr review-hold acquire \
-  --branch "$branch" --head "$head" --holder "$holder" --verb "/$skill" \
-  --invocation-id "$invocation_id" \
-  --args-raw "$args_raw" --level "$level" --level-source "$level_source" \
-  --flags-json "$flags" \
-  --repo "$cwd" 2>/dev/null || true)"
+if [[ -n "$pr_number" ]]; then
+  # The PR's head ref and head resolve inside the verb, from GitHub. No
+  # resolution here, no guessed --branch: an unresolvable PR takes no hold.
+  cap_out="$("$FNO_BIN" do pr review-hold acquire "$pr_number" \
+    --holder "$holder" --verb "/$skill" \
+    --invocation-id "$invocation_id" \
+    --args-raw "$args_raw" --level "$level" --level-source "$level_source" \
+    --flags-json "$flags" \
+    --repo "$cwd" 2>/dev/null || true)"
+else
+  cap_out="$("$FNO_BIN" do pr review-hold acquire \
+    --branch "$branch" --head "$head" --holder "$holder" --verb "/$skill" \
+    --invocation-id "$invocation_id" \
+    --args-raw "$args_raw" --level "$level" --level-source "$level_source" \
+    --flags-json "$flags" \
+    --repo "$cwd" 2>/dev/null || true)"
+fi
 reason="$(printf '%s\n' "$cap_out" | sed -n 's/^review-invocation-refused: //p' | head -1)"
 if [[ -n "$reason" ]]; then
   jq -n --arg reason "$reason" \

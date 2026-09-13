@@ -691,6 +691,8 @@ fn repeating_queue_under_resume_guard_terminates_on_budget() {
                 path: None,
                 age_secs: None,
                 clear_hint: String::new(),
+                author: None,
+                reason: None,
             })
         } else {
             None
@@ -810,6 +812,8 @@ fn cancel_returns_interrupted() {
                 path: None,
                 age_secs: None,
                 clear_hint: String::new(),
+                author: None,
+                reason: None,
             })
         },
         None,

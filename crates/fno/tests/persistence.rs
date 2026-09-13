@@ -8,7 +8,10 @@ mod common;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use common::{connect_with_retry, spawn_server, ClientHarness, FakeClient, Scratch};
+use common::{
+    connect_with_retry, screen_has_line, sidecar_pid_field, spawn_server, ClientHarness,
+    FakeClient, Scratch, ServerProc,
+};
 use fno::proto::{
     read_msg_sync, write_msg_sync, Cell, ClientMsg, ControlVerb, Frame, ProtoError, ServerMsg,
     BUILD_VERSION, PROTO_VERSION,
@@ -28,10 +31,6 @@ static PTY_GATE: Mutex<()> = Mutex::new(());
 /// exactly the servers of this test's session (the path is unique per test,
 /// so no cross-talk). Each line is `pid args`, so a count failure names the
 /// extra process instead of reporting a bare `left: 2`.
-fn server_count(scratch: &Scratch) -> usize {
-    server_processes(scratch).len()
-}
-
 fn server_processes(scratch: &Scratch) -> Vec<String> {
     let out = std::process::Command::new("ps")
         .args(["-eo", "pid=,args="])
@@ -44,6 +43,60 @@ fn server_processes(scratch: &Scratch) -> Vec<String> {
         .map(str::trim)
         .map(str::to_string)
         .collect()
+}
+
+/// The loser's worst case before it gives up: WAIT_STARTUP_DEADLINE (10s)
+/// plus one last 3-attempt probe (1s connect, 1s write, 1s read), about
+/// 19.2s. A real second owner serves until the 60s FNO_E2E idle grace, so it
+/// cannot exit inside this bound.
+const LOSER_EXIT_BOUND: Duration = Duration::from_secs(25);
+
+/// Structural proof that exactly one server owns the session, read from the
+/// owner's own records instead of argv. A losing starter (marker create
+/// failed, parked by the test seam or just slow to give up, then exits 0)
+/// still shows a second `--server` process for up to ~19s, which is what the
+/// old one-sample process count read as a second server (8 of 1,261 stress
+/// trials). Ownership lives where the loser never writes: `main.pid` is
+/// written only by the bind winner, exactly one `fno mux: serving` line is
+/// printed once per won bind, and a lost bind logs `cannot bind`. Polls until
+/// one process remains or `bound` passes, so a normal run pays nothing (the
+/// loser is gone before the first poll) and a late loser still converges
+/// inside the bound.
+fn one_owner(scratch: &Scratch, bound: Duration) -> Result<u32, String> {
+    let started = std::time::Instant::now();
+    loop {
+        let processes = server_processes(scratch);
+        let sidecar = std::fs::read_to_string(scratch.0.join("main.pid"));
+        let log = std::fs::read_to_string(scratch.0.join("main.log"));
+        if processes.len() == 1 {
+            if let (Ok(sidecar), Ok(log)) = (&sidecar, &log) {
+                if let Some(owner_pid) = sidecar_pid_field(sidecar) {
+                    let serving = log
+                        .lines()
+                        .filter(|l| l.starts_with("fno mux: serving "))
+                        .count();
+                    let refused = log.lines().any(|l| l.contains("cannot bind"));
+                    let lone_pid = processes[0]
+                        .split_whitespace()
+                        .next()
+                        .and_then(|p| p.parse::<i32>().ok());
+                    if serving == 1 && !refused && lone_pid == Some(owner_pid) {
+                        return Ok(owner_pid as u32);
+                    }
+                }
+            }
+        }
+        if started.elapsed() >= bound {
+            let sidecar_text = sidecar.unwrap_or_else(|e| format!("unreadable: {e}"));
+            let log_text = log.unwrap_or_else(|e| format!("unreadable: {e}"));
+            return Err(format!(
+                "one owner never proved out after {}ms; processes: {:?}; main.pid: {sidecar_text:?}; main.log:\n{log_text}",
+                started.elapsed().as_millis(),
+                processes
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn kill_server(scratch: &Scratch) {
@@ -97,7 +150,7 @@ fn persistence_reattach_restores_the_exact_screen() {
     let mut h = ClientHarness::spawn(&scratch);
     h.wait_prompt(15);
     h.type_bytes(b"echo marker-one; echo marker-two\r");
-    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "marker-two"));
+    h.wait_screen(15, |s| screen_has_line(s, "marker-two"));
     // Snapshot only once the screen has been STABLE for two consecutive
     // polls, so a late-rendering prompt can never make the byte-exact
     // comparison below unreachable on a loaded runner.
@@ -157,7 +210,7 @@ fn persistence_alt_screen_program_survives_detach_reattach() {
     h2.type_bytes(&[0x03]);
     h2.wait_prompt(15);
     h2.type_bytes(b"printf '\\033[?1049l'; echo back-on-main\r");
-    h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "back-on-main"));
+    h2.wait_screen(15, |s| screen_has_line(s, "back-on-main"));
 }
 
 #[test]
@@ -209,7 +262,7 @@ fn persistence_kill_nine_of_the_client_leaves_the_pty_running() {
     // The echo marker proves the assignment traversed client -> server ->
     // PTY -> shell BEFORE the kill; a bare sleep could race a loaded runner.
     h.type_bytes(b"SURVIVED=kill9; echo set-ok\r");
-    h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "set-ok"));
+    h.wait_screen(15, |s| screen_has_line(s, "set-ok"));
     let pid = h.child.process_id().expect("client pid") as i32;
     unsafe {
         libc::kill(pid, libc::SIGKILL);
@@ -220,7 +273,7 @@ fn persistence_kill_nine_of_the_client_leaves_the_pty_running() {
     let mut h2 = ClientHarness::spawn(&scratch);
     h2.wait_prompt(15);
     h2.type_bytes(b"echo var=$SURVIVED\r");
-    h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "var=kill9"));
+    h2.wait_screen(15, |s| screen_has_line(s, "var=kill9"));
 }
 
 #[test]
@@ -273,8 +326,9 @@ fn persistence_dead_server_respawns_fresh_instead_of_hanging() {
 fn persistence_two_cold_clients_converge_on_one_server() {
     let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // AC4-EDGE / exit criterion 5: two clients launch simultaneously from a
-    // cold start. Exactly one server may exist, and both clients must be
-    // attached to it - proven structurally (process count) and semantically
+    // cold start. Exactly one server may own the session, and both clients
+    // must be attached to it - proven structurally (the owner's pid sidecar
+    // and its single serving line, not an argv count) and semantically
     // (input typed in one client renders in the other).
     let scratch = Scratch::new("race");
     let mut a = ClientHarness::spawn(&scratch);
@@ -283,15 +337,146 @@ fn persistence_two_cold_clients_converge_on_one_server() {
     b.wait_screen(15, |s| !s.trim().is_empty());
 
     a.type_bytes(b"echo shared-pane-proof\r");
-    a.wait_screen(15, |s| s.lines().any(|l| l.trim() == "shared-pane-proof"));
-    b.wait_screen(15, |s| s.lines().any(|l| l.trim() == "shared-pane-proof"));
+    a.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
+    b.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
 
+    let owner = one_owner(&scratch, LOSER_EXIT_BOUND)
+        .unwrap_or_else(|e| panic!("exactly one server must own the session: {e}"));
+    assert!(owner > 0);
+}
+
+/// A `--server` starter whose stderr appends to main.log, so the loser's
+/// `a server is already running` line lands where one_owner and the
+/// positive-marker assert read it. common::spawn_server pins stderr to
+/// null, which is right for its callers and starves this one.
+fn spawn_starter(scratch: &Scratch, envs: &[(&str, &str)]) -> std::process::Child {
+    let mut cmd = scratch.command();
+    cmd.args(["--server"]).arg(scratch.main_sock());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(scratch.0.join("main.log"))
+        .unwrap();
+    cmd.stderr(log);
+    cmd.spawn().unwrap()
+}
+
+#[test]
+fn persistence_late_loser_is_not_a_second_owner() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    // The CI shape (8 of 1,261 stress trials): a slow client forks its server
+    // AFTER the other client already attached, so the old one-sample argv
+    // count reads the losing starter as a second server while it waits out
+    // its 10s startup deadline. Both servers are spawned by the test, back
+    // to back, with FNO_TEST_MARKER_HOLD_MS parking only the loser (after
+    // its marker create fails AlreadyExists). Two client forks cannot
+    // promise a contender: a client that reaches a live socket never spawns
+    // one, so under client scheduling the loser count could read zero. The
+    // client attaches only after the socket exists, so exactly two starters
+    // ever exist and the loser is deterministic.
+    let scratch = Scratch::new("lateloser");
+    // The pane shell + prompt ride the SERVER's env on this path (the
+    // client-side spawn would inherit them from the harness), so pin them
+    // here exactly like spawn_full does.
+    let envs = [
+        ("FNO_TEST_MARKER_HOLD_MS", "3000"),
+        ("SHELL", "/bin/sh"),
+        ("PS1", "$ "),
+    ];
+    let _s1 = ServerProc(spawn_starter(&scratch, &envs));
+    let _s2 = ServerProc(spawn_starter(&scratch, &envs));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !scratch.main_sock().exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the bind winner never created main.sock"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut a = ClientHarness::spawn(&scratch);
+    a.wait_prompt(15);
+
+    a.type_bytes(b"echo shared-pane-proof\r");
+    a.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
+
+    let owner = one_owner(&scratch, LOSER_EXIT_BOUND)
+        .unwrap_or_else(|e| panic!("exactly one server must own the session: {e}"));
+    // Positive marker: a loser really ran and converged. Without this the
+    // test could pass on a run where no loser existed at all.
+    let log = std::fs::read_to_string(scratch.0.join("main.log")).unwrap();
     assert_eq!(
-        server_count(&scratch),
+        log.lines()
+            .filter(|l| l.contains("a server is already running"))
+            .count(),
         1,
-        "exactly one server may own the session; matching processes: {:?}",
-        server_processes(&scratch)
+        "exactly one loser must have converged; main.log:\n{log}"
     );
+    assert!(owner > 0);
+    // Clear the stale socket before the drops: the ServerProc kills land
+    // without a live listener, and Scratch::drop then skips its dead
+    // kill-server attempt and removes the directory.
+    let _ = std::fs::remove_file(scratch.main_sock());
+}
+
+#[test]
+fn persistence_one_owner_catches_a_real_second_owner() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("secondowner");
+    let mut a = ClientHarness::spawn(&scratch);
+    a.wait_prompt(15);
+    let sidecar = std::fs::read_to_string(scratch.0.join("main.pid")).unwrap();
+    let first_pid = sidecar_pid_field(&sidecar).expect("first server pid");
+
+    // Dismantle the session files. The first server keeps serving on its
+    // open listener; the second starter sees no marker and binds fresh.
+    std::fs::remove_file(scratch.main_sock()).unwrap();
+    std::fs::remove_file(scratch.0.join("main.start")).unwrap();
+    std::fs::remove_file(scratch.0.join("main.pid")).unwrap();
+
+    // `--server <path>` with a `/` in it is the internal server role.
+    let mut second = scratch.command();
+    second.args(["--server"]).arg(scratch.main_sock());
+    second.stdin(std::process::Stdio::null());
+    second.stdout(std::process::Stdio::null());
+    let log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(scratch.0.join("main.log"))
+        .unwrap();
+    second.stderr(log);
+    let mut second_child = second.spawn().unwrap();
+
+    // The new owner must recreate the socket before the check can mean anything.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !scratch.main_sock().exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "second server never bound main.sock"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let err = one_owner(&scratch, Duration::from_secs(2))
+        .expect_err("one_owner must refuse a session with a real second owner");
+    assert_eq!(
+        err.matches("fno mux: serving").count(),
+        2,
+        "the refusal must name both serving lines: {err}"
+    );
+
+    // Cleanup: second child first, then the first server's SIGTERM. The
+    // scratch Drop handles the rest.
+    let _ = second_child.kill();
+    let _ = second_child.wait();
+    let _ = std::process::Command::new("kill")
+        .arg(first_pid.to_string())
+        .status();
+    let _ = std::fs::remove_file(scratch.main_sock());
 }
 
 #[test]
@@ -401,9 +586,7 @@ fn persistence_zero_client_session_survives_and_resyncs_fully() {
         .focus;
     c.wait_prompt(pane);
     c.input(b"echo survives-detach#\r");
-    c.wait_pane_text(15, pane, |t| {
-        t.lines().any(|l| l.trim() == "survives-detach#")
-    });
+    c.wait_pane_text(15, pane, |t| screen_has_line(t, "survives-detach#"));
     c.detach();
     drop(c);
     std::thread::sleep(Duration::from_millis(800));
@@ -444,7 +627,7 @@ fn persistence_last_pane_exit_with_zero_clients_ends_the_server() {
     // then detach. A control send releases the read after the client is gone,
     // so the pane child exits while the registered client count is zero.
     c.input(b"echo armed#; read _; exit\r");
-    c.wait_pane_text(15, pane, |t| t.lines().any(|l| l.trim() == "armed#"));
+    c.wait_pane_text(15, pane, |t| screen_has_line(t, "armed#"));
     c.detach();
     drop(c);
     pane_send(&scratch, pane, b"\r");
@@ -566,6 +749,7 @@ fn build_tree_guard_refuses_a_write_without_agents_home() {
         worker: None,
         harness: None,
         harness_session_id: None,
+        pane_id: None,
     };
     let refused = upsert("", "guardprobe", &["/no/such/origin".into()], &[member]);
     assert!(

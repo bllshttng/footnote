@@ -666,7 +666,14 @@ def _ordinary_verdict(
     # second one is the last.
     # The waiver is NAMED in the note, never silent, so a merge that happened
     # on a spent budget is legible afterward.
-    if rounds >= max_rounds:
+    # The row's own budget bit discharges too (d-0fa92eb9): the producer is
+    # the one counter, and a refusal past its spent budget would be
+    # unsatisfiable by construction. Its rounds_used lifts the printed
+    # count when the re-derivation landed under the cap.
+    row_spent = isinstance(cov, dict) and cov.get("rounds_exhausted") is True
+    if isinstance(cov, dict) and row_spent:
+        rounds = max(rounds, _merge._safe_int(cov.get("rounds_used")))
+    if rounds >= max_rounds or row_spent:
         # The waiver names what it waived. Past the cap this arm preempts
         # every sized refusal below - the posture and reviewer conjuncts
         # included, and a CONFIRMED correctness or security finding with

@@ -138,12 +138,7 @@ def configured_dispatch_harness(
             settings = load_settings()
         except Exception:  # noqa: BLE001 - a bad config must not brick resolution
             return None, None
-    profile_verb = (verb or "target").strip().lstrip("/")
-    if profile_verb.startswith("fno:"):
-        profile_verb = profile_verb[len("fno:"):] or "target"
-    agents = getattr(settings, "agents", None)
-    profiles = getattr(agents, "profiles", None) or {}
-    profile = profiles.get(profile_verb) if profile_verb else None
+    profile, profile_verb = _stage_profile(settings, verb)
     stage = (getattr(profile, "provider", "") or "").strip()
     legacy = (getattr(getattr(settings, "dispatch", None), "harness", "") or "").strip()
     if stage:
@@ -157,6 +152,44 @@ def configured_dispatch_harness(
     if legacy:
         return legacy, None
     return None, None
+
+
+def _stage_profile(settings: object, verb: str) -> tuple[object, str]:
+    """The stage-table profile row for VERB plus its normalized name (leading
+    slash, fno: namespace strip), one home for every reader. (None, "target")
+    when unset."""
+    profile_verb = (verb or "target").strip().lstrip("/")
+    if profile_verb.startswith("fno:"):
+        profile_verb = profile_verb[len("fno:"):] or "target"
+    agents = getattr(settings, "agents", None)
+    profiles = getattr(agents, "profiles", None) or {}
+    return (profiles.get(profile_verb) if profile_verb else None), profile_verb
+
+
+def configured_dispatch_route(
+    settings: object = None,
+    *,
+    verb: str = "target",
+) -> str:
+    """The stage table's vendor route for the dispatch verb, read once.
+
+    ``agents.profiles.<verb>.route`` is the vendor/model lane (e.g.
+    ``zai,glm-5.3-flash[1m]``) beside the ``provider`` harness field
+    :func:`configured_dispatch_harness` reads. The route is what selects a
+    worker's route settings file (endpoint+auth+model as one unit): a dispatch
+    that forwards the harness but not the route sends a routed model to the
+    default endpoint, where it dies on the first inference. Read-only and
+    total: a missing block or field reads as "", never raises.
+    """
+    if settings is None:
+        try:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        except Exception:  # noqa: BLE001 - a bad config must not brick resolution
+            return ""
+    profile, _profile_verb = _stage_profile(settings, verb)
+    return (getattr(profile, "route", "") or "").strip()
 
 
 def reject_empty_model(model: Optional[str]) -> Optional[str]:

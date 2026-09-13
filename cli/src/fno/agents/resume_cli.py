@@ -424,12 +424,14 @@ def _resume_claude_wake(
     name: str,
     short_id: str,
     session_id: Optional[str],
+    confirm_session_id: Optional[str] = None,
     cwd: str,
     harness: str,
     route_settings_path: Optional[str],
     launch_account: Optional[str] = None,
     provider: Optional[str] = None,
     message: str,
+    message_explicit: bool = False,
     emit_event: Any,
     wake_fn: Any,
     agents_state_fn: Any,
@@ -440,10 +442,10 @@ def _resume_claude_wake(
     ``fno agents attach`` already owns the interactive hand-off (exec into
     the TUI, hand the terminal to the operator); this is the headless
     counterpart -- allocate a pty, restore the row's own route, inject the
-    message, and confirm the message reached the transcript (or the live
-    state moved to Working). Every step here
-    can exit 0 having done nothing; the verification read is what makes
-    that detectable instead of a lie.
+    message, and confirm the message reached the transcript. Exit 0
+    requires that transcript marker (x-6ac3): a status word that reads
+    Working proves a session moved, never that THIS wake landed, so the
+    content read alone decides success.
 
     ``claim_fn`` is acquired only once a wake attempt is actually about to
     run (gated on ``not skipped``, below), not for an already-Working/
@@ -488,6 +490,30 @@ def _resume_claude_wake(
     # the five call sites would silently reintroduce the exact misreport bug
     # the surrounding comments already describe as fixed once.
     skipped = before.lower() in WAKE_SKIP_STATUSES_LOWER
+
+    # The transcript confirm id: the row's full uuid, never the transport
+    # short_id. The claude transcript FILE is named by the uuid, so a
+    # short-id confirm could never resolve a transcript and only the status
+    # word was left to decide success - the x-6ac3 false receipt. Falls back
+    # to the resolved session_id (the exact lane's matched uuid) for a row
+    # that records no canonical uuid.
+    confirm_id = confirm_session_id or session_id
+
+    if skipped and message_explicit:
+        # The skip is a green no-op only for a BARE resume. An operator who
+        # named a message expects it delivered; exiting 0 here is the false
+        # receipt this lane exists to kill. Name the state and the
+        # undelivered payload; attach owns the interactive hand-off.
+        return ResumeResult(
+            exit_code=16,
+            stderr=(
+                f"fno agents resume: {name!r} ({short_id}) is {before!r}; it "
+                f"was not woken and the message {message!r} was NOT "
+                "delivered. Re-run without --message for a bare no-op "
+                f"resume, or `fno agents attach {name}` to deliver it "
+                "yourself.\n"
+            ),
+        )
 
     # Claim before waking, gated on `not skipped` (see docstring): this
     # function is also a standalone entrypoint (FNO_AGENTS_RUNTIME=python, or
@@ -578,7 +604,7 @@ def _resume_claude_wake(
         from fno.agents.watchdog import confirm_wake_landed, tail_facts
 
         before_facts = (
-            tail_facts(session_id, cwd, agent=harness) if session_id else None
+            tail_facts(confirm_id, cwd, agent=harness) if confirm_id else None
         )
         before_epoch = (
             before_facts.last_event_epoch if before_facts is not None else None
@@ -639,22 +665,27 @@ def _resume_claude_wake(
     # `before` state even when that state isn't the wake target: nothing was
     # attempted, so "did it reach Working" is the wrong question to ask.
     #
-    # Landed means the transcript shows the wake, not that a status word
-    # said Working: a short turn starts and finishes inside one ~19s attempt,
-    # so the post-attempt state of a DELIVERED wake can read Idle again.
-    # Content is the marker the watchdog's own wake lane already trusts.
+    # Landed means the transcript shows the message, never that a status
+    # word said Working (x-6ac3): a short turn starts and finishes inside
+    # one ~19s attempt, so a DELIVERED wake can read Idle again, and a row
+    # recovering from an API error flips to Working on its own with nothing
+    # injected. Content is the marker the watchdog's own wake lane already
+    # trusts; the status read above only stops retries early and feeds the
+    # before -> after line.
     #
     # Check the outcome BEFORE emitting: the event is named "agent_resumed",
     # so emitting it unconditionally would misreport a wake that never
     # reached Working as a success, the same pre-fix shape a sigma review
     # already caught below for the exec-based harnesses' chdir failure.
     landed = False
-    if not skipped:
-        landed = after.lower() == _WAKE_TARGET_STATUS.lower()
-        if not landed and session_id:
-            landed = confirm_wake_landed(
-                session_id, cwd, message, before_epoch, agent=harness
-            )
+    if not skipped and confirm_id and before_facts is not None:
+        # Gated on a resolvable PRE-wake transcript: if the transcript store
+        # could not be read before the wake, no marker can land in it after,
+        # so polling the confirm cadence here would only burn its full
+        # window before the same refusal.
+        landed = confirm_wake_landed(
+            confirm_id, cwd, message, before_epoch, agent=harness
+        )
     if not skipped and not landed:
         # A wake cannot reach a session that has exited. An adopted row carries
         # a uuid and a short_id but no answering supervisor, so it takes the
@@ -689,11 +720,11 @@ def _resume_claude_wake(
         return ResumeResult(
             exit_code=16,
             stderr=(
-                f"fno agents resume: {name!r} ({short_id}) did not reach "
-                f"{_WAKE_TARGET_STATUS!r} after {_WAKE_ATTEMPTS} wake "
-                f"attempt(s): before={before!r} after={after!r}"
-                + (f" ({last_err})" if last_err else "")
-                + "."
+                f"fno agents resume: {name!r} ({short_id}) wake NOT "
+                f"confirmed: {message!r} is not in the transcript after "
+                f"the wake (before={before!r} after={after!r}"
+                + (f"; {last_err}" if last_err else "")
+                + ")."
                 + (relaunch or "\n")
             ),
         )
@@ -784,6 +815,7 @@ def resume_logic(
     name: str,
     print_command: bool = False,
     message: str = _DEFAULT_WAKE_MESSAGE,
+    message_explicit: bool = False,
     cwd_override: Optional[str] = None,
     cross_project: bool = False,
     registry_loader: Optional[Any] = None,
@@ -803,6 +835,10 @@ def resume_logic(
             instead of resuming.
         message: Text to inject once the claude session is woken.
             Ignored for every other harness, which resume via exec instead.
+        message_explicit: Whether the caller actually passed ``--message``
+            (vs the default). A skip-eligible row (Working/Done) with an
+            explicit message refuses exit 16 instead of reporting a no-op
+            that silently dropped the payload.
         cwd_override: Use this cwd instead of the registry's recorded one.
             The Rust binary resolves a claude row's EnterWorktree-moved
             transcript dir before delegating here (`resolve_resume_cwd`);
@@ -1049,12 +1085,17 @@ def resume_logic(
             name=name,
             short_id=getattr(entry, "short_id", "") or "",
             session_id=session_id,
+            confirm_session_id=(
+                getattr(entry, "harness_session_id", None)
+                or getattr(entry, "claude_session_uuid", None)
+            ),
             cwd=cwd,
             harness=harness,
             route_settings_path=getattr(entry, "route_settings_path", None),
             launch_account=getattr(entry, "launch_account", None),
             provider=getattr(entry, "provider", None),
             message=message,
+            message_explicit=message_explicit,
             emit_event=emit_event,
             wake_fn=wake_fn if wake_fn is not None else _default_wake_fn,
             agents_state_fn=(
@@ -1119,11 +1160,12 @@ def cmd_resume(
         False, "--print-command",
         help="Emit a shell-pasteable resume command and exit (no exec).",
     ),
-    message: str = typer.Option(
-        _DEFAULT_WAKE_MESSAGE, "--message", "-m",
+    message: Optional[str] = typer.Option(
+        None, "--message", "-m",
         help=(
             "Text to inject once a claude session is woken. Ignored for "
-            "every other harness, which resume via exec instead."
+            "every other harness, which resume via exec instead. Default: "
+            "the wake word."
         ),
     ),
     cwd: Optional[str] = typer.Option(
@@ -1145,14 +1187,15 @@ def cmd_resume(
     """Resume an agent in its recorded cwd via the provider's resume CLI.
 
     A claude agent is woken headlessly: allocate a pty, restore its route,
-    inject `message`, and verify the live state moved to Working (exit 16
-    if it did not). Every other harness execs into the provider's own
+    inject `message`, and verify the message reached the transcript (exit
+    16 if it did not). Every other harness execs into the provider's own
     resume CLI in the recorded cwd, handing over the terminal.
     """
     result = resume_logic(
         name=name,
         print_command=print_command,
-        message=message,
+        message=message if message is not None else _DEFAULT_WAKE_MESSAGE,
+        message_explicit=message is not None,
         cwd_override=cwd,
         cross_project=cross_project,
     )

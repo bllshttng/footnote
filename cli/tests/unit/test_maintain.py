@@ -255,6 +255,50 @@ def test_single_owner_plan_is_not_reported():
     assert m.detect_shared_plan_cost_violations(entries) == []
 
 
+def test_cost_guard_skips_normalize_for_uncosted_nodes(monkeypatch):
+    """AC1: the cheap guard runs first. normalize_plan_path is a keeper round
+    trip, so normalizing before the cost check paid it for every node and
+    discarded the answer for all but the costed few."""
+    calls: list = []
+
+    def counting_normalize(p):
+        calls.append(p)
+        return os.path.normpath(p) if p else None
+
+    monkeypatch.setattr("fno.graph.store.normalize_plan_path", counting_normalize)
+    entries = [_n(f"ab-{i:04x}", plan_path="/plans/p.md", cost_usd=None) for i in range(10)]
+    entries += [
+        _n("ab-cost1", plan_path="/plans/p.md", cost_usd=1.0),
+        _n("ab-cost2", plan_path="/plans/p.md", cost_usd=2.0),
+    ]
+    violations = m.detect_shared_plan_cost_violations(entries)
+    assert calls == ["/plans/p.md", "/plans/p.md"]
+    assert len(violations) == 1 and violations[0].nodes == ["ab-cost1", "ab-cost2"]
+
+
+def test_normalize_plan_path_caches_the_keeper_round_trip(monkeypatch):
+    """AC2: the keeper fold is pure, so one request serves every repeat of the
+    same input for the life of the process."""
+    from fno.graph import store
+
+    requests: list = []
+
+    class _FakeClient:
+        def request(self, method, params):
+            requests.append(params["path"])
+            return {"path": os.path.normpath(params["path"])}
+
+    monkeypatch.setattr(store, "_client_for", lambda _graph: _FakeClient())
+    store.normalize_plan_path.cache_clear()
+    try:
+        first = store.normalize_plan_path("/plans/./p.md")
+        second = store.normalize_plan_path("/plans/./p.md")
+        assert first == second == "/plans/p.md"
+        assert requests == ["/plans/./p.md"]
+    finally:
+        store.normalize_plan_path.cache_clear()
+
+
 # --- leg 4: drain stale ----------------------------------------------------
 
 
@@ -513,6 +557,31 @@ def test_maintain_config_rejects_non_positive_max_failed_attempts():
 
     with pytest.raises(ValidationError):
         MaintainBlock(max_failed_attempts=0)
+
+
+def test_maintain_config_default_abandoned_do_row_hours():
+    from fno.config import ConfigBlock
+
+    assert ConfigBlock().backlog.maintain.abandoned_do_row_hours == 24
+
+
+def test_maintain_config_custom_abandoned_do_row_hours():
+    from fno.config import BacklogBlock
+
+    assert (
+        BacklogBlock(maintain={"abandoned_do_row_hours": 48}).maintain.abandoned_do_row_hours
+        == 48
+    )
+
+
+def test_maintain_config_rejects_non_positive_abandoned_do_row_hours():
+    import pytest
+    from pydantic import ValidationError
+
+    from fno.config import MaintainBlock
+
+    with pytest.raises(ValidationError):
+        MaintainBlock(abandoned_do_row_hours=0)
 
 
 # --- failure-streak helper (ab-5b7cf63a / #34, task 1.2) -------------------
@@ -1094,7 +1163,6 @@ def test_cli_retro_seam_selects_comment_and_reads_region(monkeypatch, tmp_path):
     bounded merged region - all hermetic (no live gh/git)."""
     import subprocess
 
-    from fno.graph import cli
 
     comment = json.loads(_PR525_FIXTURE.read_text())
     node = {"id": "ab-retro", "details": f"finding\n{_RETRO_TRAILER}", "cwd": str(tmp_path)}
@@ -1108,7 +1176,7 @@ def test_cli_retro_seam_selects_comment_and_reads_region(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(args, 1, "", "boom")
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
-    items = cli._validity_retro_source(node)
+    items = m._validity_retro_source(node)
     # Picked the fixture comment (its path), not the decoy.
     assert "tests/test-agents-heal-token.sh" in items["pr:review-comment"]
     assert any(k.startswith("git:merged-region:") for k in items)
@@ -1121,20 +1189,19 @@ def test_cli_retro_seam_fails_open(monkeypatch, tmp_path):
     invalid cwd each return {} so collect_evidence records `retro` unavailable."""
     import subprocess
 
-    from fno.graph import cli
 
     monkeypatch.setattr(
         subprocess, "run",
         lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "gh down"),
     )
-    assert cli._validity_retro_source(
+    assert m._validity_retro_source(
         {"id": "ab", "details": f"x\n{_RETRO_TRAILER}", "cwd": str(tmp_path)}
     ) == {}
-    assert cli._validity_retro_source(
+    assert m._validity_retro_source(
         {"id": "ab", "details": "y <!-- retro-triage source_pr=None finding_hash=abc -->",
          "cwd": str(tmp_path)}
     ) == {}
-    assert cli._validity_retro_source(
+    assert m._validity_retro_source(
         {"id": "ab", "details": f"z\n{_RETRO_TRAILER}", "cwd": "/no/such/dir"}
     ) == {}
 
@@ -1142,7 +1209,6 @@ def test_cli_retro_seam_fails_open(monkeypatch, tmp_path):
 def test_read_merged_region_rejects_traversal(monkeypatch, tmp_path):
     """CWE-22: a parent-escaping / absolute / non-str path is rejected before any
     read (gemini review). git show never runs for such a path."""
-    from fno.graph import cli
 
     called = {"git": False}
 
@@ -1153,8 +1219,8 @@ def test_read_merged_region_rejects_traversal(monkeypatch, tmp_path):
 
     monkeypatch.setattr("subprocess.run", _fake_run)
     for bad in ("../../etc/passwd", "/etc/passwd", "..", "a/../../b"):
-        assert cli._read_merged_region(str(tmp_path), bad, 1) == ""
-    assert cli._read_merged_region(str(tmp_path), 123, 1) == ""  # non-str path
+        assert m._read_merged_region(str(tmp_path), bad, 1) == ""
+    assert m._read_merged_region(str(tmp_path), 123, 1) == ""  # non-str path
     assert called["git"] is False  # never reached the subprocess
 
 
@@ -1344,6 +1410,47 @@ def test_run_validity_analysis_refuses_real_call_under_pytest(monkeypatch):
         m._run_validity_analysis([_packet("ab-x")])
 
 
+def test_run_validity_analysis_timeout_defaults_then_takes_the_budget(monkeypatch):
+    """AC6: the analyzer's subprocess timeout follows the pass budget, not the
+    120s default, when the pass is nearly out of time."""
+    import types
+
+    captured = {}
+
+    def fake_llm_call(prompt, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return types.SimpleNamespace(stdout=json.dumps({"results": []}))
+
+    monkeypatch.setattr(m, "llm_call", fake_llm_call)
+    m._run_validity_analysis([])
+    assert captured["timeout"] == m.VALIDITY_RUN_TIMEOUT_S
+    m._run_validity_analysis([], timeout=20.0)
+    assert captured["timeout"] == 20.0
+
+
+def test_run_validity_sweep_hands_remaining_budget_to_analyzer(tmp_path, monkeypatch):
+    """AC6 wiring: run_timeout flows through the sweep into the default analyzer."""
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    entries = [_idea("ab-bounded", 90, now, title="t", plan_path=None)]
+    seen = {}
+
+    def fake_analysis(packets, model=None, timeout=None):
+        seen["timeout"] = timeout
+        return {
+            p.node_id: {"classification": "keep", "confidence": 0.8,
+                        "rationale": "still good", "evidence_ids": []}
+            for p in packets
+        }
+
+    monkeypatch.setattr(m, "_run_validity_analysis", fake_analysis)
+    res = m.run_validity_sweep(
+        entries, validity_days=60, batch_size=25, out_dir=tmp_path,
+        now=now, run_timeout=20.0,
+    )
+    assert seen["timeout"] == 20.0
+    assert res.eligible == 1
+
+
 def test_run_validity_analysis_parses_stub(tmp_path, monkeypatch):
     stub = tmp_path / "stub.sh"
     stub.write_text(
@@ -1380,6 +1487,22 @@ def test_backlog_staleness_days_rejects_non_positive():
 
     with pytest.raises(ValidationError):
         BacklogBlock(staleness_days=0)
+
+
+def test_maintain_budget_seconds_defaults_to_300():
+    from fno.config import MaintainBlock
+
+    assert MaintainBlock().budget_seconds == 300
+
+
+def test_maintain_budget_seconds_rejects_non_positive():
+    import pytest
+    from pydantic import ValidationError
+
+    from fno.config import MaintainBlock
+
+    with pytest.raises(ValidationError):
+        MaintainBlock(budget_seconds=0)
 
 
 def test_node_has_movement_field_signals():
@@ -1651,3 +1774,167 @@ def test_apply_harness_shape_fixes_rewrites_under_the_lock_recheck():
         [{"id": "x-fix", "sessions": []}], fixes, set()
     )
     assert applied == []
+
+
+# --- leg 9: abandoned do rows (x-f714) --------------------------------------
+
+_CLAUDE_SID = "9f06a492-1111-4222-8333-444455556666"
+
+
+def _write_transcript(tmp_path, monkeypatch, sid, records):
+    """A real fixture transcript under a temp projects root, wired in as the
+    resolver default so the prover reads files, not mocks."""
+    root = tmp_path / "projects" / "-some-worktree"
+    root.mkdir(parents=True)
+    (root / f"{sid}.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in records)
+    )
+    import fno.provenance.resolver as resolver
+
+    monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
+
+
+def _do_record(role, text, stamp):
+    return {
+        "type": role,
+        "timestamp": stamp,
+        "message": {"role": role, "content": [{"type": "text", "text": text}]},
+    }
+
+
+def test_do_row_session_gone_true_on_quiet_disengaged_tail(tmp_path, monkeypatch):
+    """Positive control: quiet past the bar AND a <promise> tail -> gone, with
+    the quiet duration named."""
+    from datetime import datetime, timezone
+
+    quiet_at = "2026-09-07T10:00:00Z"
+    _write_transcript(
+        tmp_path, monkeypatch, _CLAUDE_SID,
+        [
+            _do_record("user", "build the thing", quiet_at),
+            _do_record("assistant", "<promise>MISSION COMPLETE: shipped</promise>", quiet_at),
+        ],
+    )
+    now = datetime(2026, 9, 10, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+    gone, reason = m.do_row_session_gone(
+        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=24 * 3600, now_s=now
+    )
+    assert gone is True
+    assert "quiet 4320m" in reason
+    assert "tail not engaged" in reason
+
+
+def test_do_row_session_gone_holds_on_active_transcript(tmp_path, monkeypatch):
+    """Positive control for the refusal: a transcript whose last event is
+    inside the bar is held as active, never reaped."""
+    from datetime import datetime, timezone
+
+    fresh_at = "2026-09-10T09:55:00Z"
+    _write_transcript(
+        tmp_path, monkeypatch, _CLAUDE_SID,
+        [_do_record("assistant", "still mid-task", fresh_at)],
+    )
+    now = datetime(2026, 9, 10, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+    gone, reason = m.do_row_session_gone(
+        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=24 * 3600, now_s=now
+    )
+    assert (gone, reason) == (False, "transcript active")
+
+
+def test_do_row_session_gone_holds_when_transcript_unresolved(tmp_path, monkeypatch):
+    import fno.provenance.resolver as resolver
+
+    monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "absent")
+    assert m.do_row_session_gone(
+        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=1, now_s=1.0
+    ) == (False, "transcript unresolved")
+
+
+def test_do_row_session_gone_holds_when_transcript_unreadable(tmp_path, monkeypatch):
+    _write_transcript(tmp_path, monkeypatch, _CLAUDE_SID, [])
+    p = tmp_path / "projects" / "-some-worktree" / f"{_CLAUDE_SID}.jsonl"
+    p.write_bytes(b"\xff\xfe not utf-8")
+    assert m.do_row_session_gone(
+        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=1, now_s=1.0
+    ) == (False, "transcript unreadable")
+
+
+def test_do_row_session_gone_holds_opencode_without_a_file():
+    """An opencode row can never be proven gone here: the harness is held by
+    name, before any file lookup."""
+    assert m.do_row_session_gone(
+        "opencode", "sess_abc", "/some/worktree", quiet_after_s=1, now_s=1.0
+    ) == (False, "harness not file-backed")
+
+
+def _do_node(nid, sid=_CLAUDE_SID, **over):
+    base = {
+        "id": nid,
+        "title": nid,
+        "status": "in_progress",
+        "locked_by": None,
+        "cwd": "/some/worktree",
+        "sessions": [
+            {"phase": "do", "harness": "claude", "session_id": sid,
+             "started_at": "2026-09-09T15:46:29Z"}
+        ],
+    }
+    base.update(over)
+    return base
+
+
+def _gone_prover(harness, sid, cwd, *, quiet_after_s, now_s):
+    return True, "transcript quiet 999m, tail not engaged"
+
+
+def _active_prover(harness, sid, cwd, *, quiet_after_s, now_s):
+    return False, "transcript active"
+
+
+def test_detect_abandoned_do_rows_stamps_a_proven_gone_row():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-gone1")],
+        live_claimed=set(), live_worked={},
+        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
+    )
+    assert [(r.node, r.verdict) for r in rows] == [("x-gone1", "gone")]
+
+
+def test_detect_abandoned_do_rows_holds_a_live_claim():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-clm01")],
+        live_claimed={"x-clm01"}, live_worked={},
+        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
+    )
+    assert len(rows) == 1
+    assert rows[0].verdict == "held"
+    assert "live claim" in rows[0].reason
+
+
+def test_detect_abandoned_do_rows_holds_a_rostered_worker():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-wrk01")],
+        live_claimed=set(), live_worked={"x-wrk01": ["worker-a"]},
+        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
+    )
+    assert rows[0].verdict == "held"
+    assert "live roster worker worker-a" in rows[0].reason
+
+
+def test_detect_abandoned_do_rows_skips_a_locked_node():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-lck01", locked_by="someone")],
+        live_claimed=set(), live_worked={},
+        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
+    )
+    assert rows == []
+
+
+def test_detect_abandoned_do_rows_carries_the_prover_verdict():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-hld01")],
+        live_claimed=set(), live_worked={},
+        prover=_active_prover, now_s=0.0, quiet_after_s=1.0,
+    )
+    assert rows[0].verdict == "held"
+    assert rows[0].reason == "transcript active"

@@ -5,7 +5,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::agents_view::RegistryAgent;
-use crate::proto::AgentNoPaneReason;
 use crate::spawn_journal::{receipt_for_member, HeldWorker};
 use crate::squad_store::StoredMember;
 
@@ -136,6 +135,7 @@ mod tests {
             worker: worker.map(String::from),
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }
     }
 

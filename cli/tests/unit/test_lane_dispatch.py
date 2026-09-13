@@ -40,6 +40,10 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     ready_rows = [dict(node) for node in ready]
     for node in ready_rows:
         node.setdefault("cwd", str(canonical))
+        # A real selection projection row (x-0961): planless low is the law's
+        # straight-to-target intake (d-834b6ff1), so lane placement derives.
+        node.setdefault("difficulty", "low")
+        node.setdefault("dispatch_verb", "")
     monkeypatch.setattr(
         advance, "_ready_nodes", lambda project=None, mission=None: list(ready_rows)
     )

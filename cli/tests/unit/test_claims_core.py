@@ -771,6 +771,41 @@ class TestStatus:
         free = claim_status("never-existed", root=tmp_path)
         assert "basis" not in free
 
+    def test_rootless_node_key_routes_to_global_root(self, tmp_path, monkeypatch):
+        """A rootless read of node:<id> must answer the global root, not the
+        repo space (x-74aa): the repo space holds no node locks, so the
+        pre-fix default read every live node claim as free."""
+        monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+        monkeypatch.setattr("fno.paths.space_dir", lambda: tmp_path / "space")
+        acquire_claim("node:ab-1234", HOLDER_A, root=None)
+        # Control: the repo space really is the wrong tree for this key.
+        assert claim_status("node:ab-1234", root=tmp_path / "space")["state"] == (
+            ClaimState.FREE.value
+        )
+        result = claim_status("node:ab-1234")
+        assert result["state"] == ClaimState.LIVE.value
+        assert result["holder"] == HOLDER_A
+
+    def test_explicit_root_still_wins_over_key_routing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+        acquire_claim("node:ab-1234", HOLDER_A, root=tmp_path / "explicit")
+        result = claim_status("node:ab-1234", root=tmp_path / "explicit")
+        assert result["state"] == ClaimState.LIVE.value
+        assert result["holder"] == HOLDER_A
+
+    def test_node_shaped_colonless_key_is_unknown_not_free(self):
+        result = claim_status("ab-1234")
+        assert result["state"] == "unknown"
+        assert result["basis"] == "key-unrouted"
+        assert "node:ab-1234" in result["detail"]
+        assert result["state"] != ClaimState.FREE.value
+
+    def test_non_node_colonless_key_keeps_repo_space_default(self, tmp_path):
+        free = claim_status("some-repo-token", root=tmp_path)
+        assert free["state"] == ClaimState.FREE.value
+        walker = claim_status("walker:/tmp/repo", root=tmp_path)
+        assert walker["state"] == ClaimState.FREE.value
+
 
 # ---------------------------------------------------------------------------
 # list

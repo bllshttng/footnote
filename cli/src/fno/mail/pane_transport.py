@@ -46,8 +46,9 @@ class PaneSendRefused(Exception):
 class PaneIdentity:
     """One registry row's identity for a pane, resolved as a single snapshot.
 
-    The budget keys the pair on ``session_id`` (the full id, collision-proof
-    for time-ordered codex siblings), the envelope addresses ``handle``, and
+    The control ledger keys the pair on ``session_id`` (the full id,
+    collision-proof for time-ordered codex siblings), the envelope addresses
+    ``handle``, and
     the identity gate pins ``name``/``fno_id``. Resolving them together from
     ONE registry read is what makes a pane reassignment between resolve and
     gate a refusal instead of a stale-attribution send.
@@ -184,7 +185,7 @@ def _identity_receipt_refusal(
                 "mux",
                 "pane",
                 "read",
-                "--session",
+                "--server",
                 str(session),
                 str(pane_id),
                 "--lines",
@@ -288,7 +289,7 @@ def prompt_refusal(
         try:
             frame = _run_mux(
                 [
-                    "mux", "pane", "read", "--session", str(session), str(pane_id),
+                    "mux", "pane", "read", "--server", str(session), str(pane_id),
                     "--lines", str(GATE_FRAME_LINES),
                 ],
                 runner,
@@ -355,7 +356,7 @@ def wrap(
     ``resolve_harness_identity`` and never ``--from-self``: both stamp the shared
     ambient id.
 
-    ``msg_id`` lets a caller that also charges the word budget share ONE
+    ``msg_id`` lets a caller that also charges the control ledger share ONE
     identity between the envelope and the ledger entry; unset, an id is minted
     here.
     """
@@ -367,27 +368,19 @@ def wrap(
             "submit keystroke."
         )
     from fno.agents.self_stamp import (
-        resolve_self_model,
         resolve_self_session_id,
         stamp_from,
     )
-    from fno.dispatch_flags import infer_invoking_harness
     from fno.inbox.store import generate_msg_id
     from fno.mail.envelope import (
         ForgedEnvelopeError,
-        harness_for_provider,
         wrap_fno_mail,
     )
 
-    sender_harness = infer_invoking_harness()
     try:
         return wrap_fno_mail(
             text,
             from_=stamp_from(sender),
-            # "cli" is the honest no-harness value: harness_for_provider renders
-            # a MISSING provider as "unknown", never a vendor guess.
-            harness=harness_for_provider(sender_harness) if sender_harness else "cli",
-            model=resolve_self_model(),
             to=to,
             # The collision-safe reply address rides the typed envelope too: a
             # pane drive is exactly the message a recipient most needs to answer.

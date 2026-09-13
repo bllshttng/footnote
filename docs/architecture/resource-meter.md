@@ -2,13 +2,21 @@
 
 The operator ask behind this feature was a live monitor. It must say how the machine is doing and make a best guess on how many more lanes the fleet can take. Three surfaces answer it. `fno doctor lanes` is the on-demand verb: one number and its reasoning. The status row carries the same reading as a live one-line meter, once you switch the meter on. The court panel puts both in front of a person, behind `prefix` then `C` in the mux.
 
+## Is this page for you?
+
+You ask whether the machine can take more workers, or why a dispatch held instead of spawning. This page owns the meter, the lane advisor, and their surfaces. Misreading it reads a stale or switched-off meter as a full machine, or spawns onto a saturated one.
+
+Not for: process-level facts about one worker (is it alive, what holds its pane). Those are the roster and [reaping-faq.md](reaping-faq.md). The meter measures the machine, not the worker.
+
 ## The feature is conditional
 
 The meter needs `macmon` on PATH. Install it with `brew install macmon`. It is Apple Silicon only and needs no sudo. fno core does not depend on it. If it is absent, nothing breaks, and `config.resource_meter.enabled` ships false. Turn the meter on with `fno config set resource_meter.enabled true`, or in the settings modal's general tab beside the status-row toggle.
 
+One threshold now has a runtime consumer without the meter. `resource_meter.thresholds.cpu_busy_fraction` (default 0.9) is the band the `machine_watch` arm and the `machine` payload object band whole-machine CPU against. The arm reads `ps` and the load average through the footprint payload, so it works on every machine. It does not read `resource_meter.enabled`, and it has no enable key of its own: `reap` and `retire` carry none either. The throttle key `resource_meter.notifications.throttle_minutes` (default 60) spaces its repeat notices.
+
 ## What you get without macmon
 
-Two arms still work, because they read fno's own numbers. The spawn-load arm compares the 1-minute load against `max_load_per_cpu x ncpu`. The unexplained-processes arm compares direct processes against the roster. The arms that go dark are whole-machine CPU, memory, and power and thermals. `fno doctor lanes` names which arms are dark and which still work, and refuses to print a lane number. A dark sensor is never treated as headroom.
+Two arms still work, because they read fno's own numbers. The cpu-admission arm reads the fleet's share of CPU capacity through `cpu_admission`, the same decider the spawn gate uses. The advisor can never disagree with a refusal. The unexplained-processes arm compares direct processes against the roster. The arms that go dark are whole-machine CPU, memory, and power and thermals. `fno doctor lanes` names which arms are dark and which still work, and refuses to print a lane number. A dark sensor is never treated as headroom.
 
 ## Why whole-machine
 
@@ -20,13 +28,13 @@ Swap is the pressure signal, but only for a machine that has a swap file. On the
 
 ## The two verdicts are different alarms
 
-`fno doctor footprint` prints two readings and they must never share one exit code. "Unexplained processes" is a leak alarm: processes the roster cannot explain, exit 5. "Capacity" is a planning alarm: the spawn load against its ceiling, exit 3. When both fire, capacity takes the exit and the leak still prints. Conflating the two already caused a competent reader to misread the leak detector as a capacity ceiling repeatedly in a single session.
+`fno doctor footprint` prints two readings and they must never share one exit code. "Unexplained processes" is a leak alarm: processes the roster cannot explain, exit 5. "Admission" is a planning alarm: the fleet's CPU share against its ceiling, exit 3 on a hold, an undecidable band, or the fifteen-minute backstop. When both fire, admission takes the exit and the leak still prints. Conflating the two already caused a competent reader to misread the leak detector as a capacity ceiling repeatedly in a single session.
 
 ## The court panel
 
-Press `prefix` then `C` in the mux. The panel shows the 1-minute load against the cap, whole-machine CPU, and free memory. Below those it shows the census, the lane advisor's own answer, and the age of the reading. Every number comes from one `fno doctor lanes --json` call. The panel adds no capacity model of its own, because two estimators that disagree is a worse problem than an invisible one.
+Press `prefix` then `C` in the mux. The panel shows the fleet's CPU share against the cap, whole-machine CPU, and free memory. Below those it shows the census, the lane advisor's own answer, and the age of the reading. Every number comes from one `fno doctor lanes --json` call. The panel adds no capacity model of its own, because two estimators that disagree is a worse problem than an invisible one.
 
-The cap is the thing the panel exists to make visible. It is `max_load_per_cpu` times the CPU count, and it is the only gate on a spawn. Before this panel, only an agent running a hidden verb saw it.
+The cap is the thing the panel exists to make visible. It is the fleet's share of CPU capacity (`agents.max_fleet_cpu_share`), checked on every spawn. Before this panel, only an agent running a hidden verb saw it.
 
 Three render rules keep the panel honest, and each closes a way a monitor can lie.
 

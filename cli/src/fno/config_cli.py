@@ -65,6 +65,14 @@ _LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] 
         {"hidden": True},
     ),
     "setup": ("fno.setup_cli:app", "Interactive settings.yaml wizard", {"hidden": True}),
+    # One local-dev install door for every plugin harness. VISIBLE on
+    # purpose and distinct from the hidden `plugins` function-pack group: this
+    # installs the footnote plugin itself, from the filtered stage, in one
+    # action per harness (claude|codex|opencode|agy).
+    "plugin": (
+        "fno.plugin_install_cli:plugin_app",
+        "Install the footnote plugin into a harness from the filtered stage.",
+    ),
 }
 
 app = typer.Typer(
@@ -955,23 +963,47 @@ def _report_harness_overlays() -> None:
 @app.command("active-backlog")
 def active_backlog_cmd(
     json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit a JSON list of drain targets for the daemon."
+        False, "--json", "-J", help="Emit a JSON receipt of the drain reading for the daemon."
     ),
 ) -> None:
-    """Print the active-backlog drain targets. Full contract:
+    """Print the active-backlog drain reading. Full contract:
     docs/architecture/coordination.md#per-territory-team-cap
     """
+    import json as _json
+
     from fno.rust_binary import call_binary_json
 
-    error, targets = call_binary_json("active-backlog-receipt")
+    error, reading = call_binary_json("active-backlog-receipt")
     if error is not None:
         typer.echo(f"active-backlog: {error}", err=True)
         raise typer.Exit(code=1)
+    if isinstance(reading, list):
+        # A pre-338c binary prints a bare target list.
+        reading = {"targets": reading, "missions": len(reading), "skip_reason": None}
+    targets = reading["targets"]
     if json_out:
-        typer.echo(json.dumps(targets))
+        typer.echo(_json.dumps(reading))
         return
     if not targets:
-        typer.echo("active-backlog: no territories to drain")
+        reason = reading["skip_reason"] or "no_missions"
+        if reason == "no_missions":
+            typer.echo("active-backlog: no territories to drain")
+            return
+        causes = {
+            "drain_disabled": "the drain is disabled: config.active_backlog.enabled",
+            "bad_interval": "invalid interval: config.active_backlog.interval",
+            "project_disabled": (
+                "the most common drop is a disabled project: "
+                "config.active_backlog.enabled"
+            ),
+            "no_workspace_path": (
+                "the most common drop is a missing workspace path"
+            ),
+        }
+        typer.echo(
+            f"active-backlog: {reading['missions']} drainable territories, 0 targets "
+            f"({causes.get(reason, reason)})"
+        )
         return
     for tg in targets:
         mission = f" mission={tg['mission']}" if tg.get("mission") else ""
@@ -1099,9 +1131,9 @@ def get_cmd(
     home-vs-project override is the defect this fixes, so the resolved value
     alone on stdout would keep the confusion. stdout stays value-only because
     callers pipe it (normalize.sh compares the whole stream); the source line,
-    including an ``overrides`` clause exactly when a lower-precedence file
-    also sets the key, is stderr-only. ``--json`` carries both streams' facts
-    as one object.
+    including an ``overrides`` clause exactly when a lower-precedence file set
+    a value the merge discarded, is stderr-only. ``--json`` carries both
+    streams' facts as one object.
     """
     import json
     import os

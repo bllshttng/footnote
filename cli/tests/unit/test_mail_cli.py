@@ -306,7 +306,9 @@ def _passing_mail_body(word_total: int) -> str:
     return body
 
 
-def test_project_kind_send_refuses_the_second_79_word_body(runner, mailbox):
+def test_project_kind_send_delivers_repeated_bodies_without_a_ledger(runner, mailbox):
+    from fno import paths
+
     body = _passing_mail_body(79)
     args = [
         "mail", "send", "--to-project", "web", "--kind", "fyi",
@@ -318,18 +320,53 @@ def test_project_kind_send_refuses_the_second_79_word_body(runner, mailbox):
 
     assert first.exit_code == 0, first.output
     assert "queued (durable)" in first.stdout
-    assert second.exit_code == 1
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in second.stderr
+    assert second.exit_code == 0, second.output
+    assert not (paths.bus_dir() / "word-budget").exists()
+
+
+def test_send_without_kind_reads_body_file(runner, mailbox):
+    """Rank 3: --body-file binds in EVERY mode, not only --kind.
+
+    The blank line is load-bearing: a wrapped second line is a rule-6
+    refusal, so multiline content ships as two paragraphs.
+    """
+    body_file = mailbox / "msg.md"
+    body_file.write_text('body with "quotes"\n\nand a newline\n', encoding="utf-8")
+    sent = runner.invoke(
+        app,
+        ["agents", "mail", "send", "--to-project", "web", "--from-name", "etl",
+         "--body-file", str(body_file)],
+    )
+    assert sent.exit_code == 0, sent.output
+
+    listing = runner.invoke(app, ["agents", "mail", "unread", "--name", "web", "--json"])
+    assert listing.exit_code == 0, listing.output
+    msgs = json.loads(listing.stdout.strip().splitlines()[-1])
+    assert msgs, "the file-fed body never landed"
+    assert 'body with "quotes"' in msgs[0]["body"]
+    assert "and a newline" in msgs[0]["body"]
+
+
+def test_send_body_and_body_file_refused(runner, mailbox):
+    body_file = mailbox / "msg.md"
+    body_file.write_text("from the file\n", encoding="utf-8")
+    sent = runner.invoke(
+        app,
+        ["agents", "mail", "send", "--to-project", "web", "--from-name", "etl",
+         "--body", "inline", "--body-file", str(body_file)],
+    )
+    assert sent.exit_code == 1
+    assert "not both" in sent.stderr
 
 
 @pytest.mark.parametrize("error_type", [OSError, RuntimeError])
-def test_project_kind_known_failure_releases_the_reservation(
+def test_project_kind_known_failure_writes_no_ledger(
     runner,
     mailbox,
     monkeypatch,
     error_type,
 ):
-    from fno.mail import budget
+    from fno import paths
 
     monkeypatch.setattr(
         "fno.inbox.store.post_inbox_message",
@@ -353,16 +390,12 @@ def test_project_kind_known_failure_releases_the_reservation(
     )
 
     assert isinstance(result.exception, error_type)
-    retry = budget.reserve(
-        sender="etl",
-        recipient="web",
-        words=79,
-        msg_id=f"msg-retry-{error_type.__name__}",
-    )
-    assert retry.running_before == 0
+    assert not (paths.bus_dir() / "word-budget").exists()
 
 
-def test_project_anycast_send_refuses_the_second_79_word_body(runner, mailbox):
+def test_project_anycast_send_delivers_repeated_bodies_without_a_ledger(runner, mailbox):
+    from fno import paths
+
     body = _passing_mail_body(79)
     args = [
         "mail", "send", "--to-project", "web", body,
@@ -374,11 +407,12 @@ def test_project_anycast_send_refuses_the_second_79_word_body(runner, mailbox):
 
     assert first.exit_code == 0, first.output
     assert "queued (durable) for project web" in first.stdout
-    assert second.exit_code == 1
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in second.stderr
+    assert second.exit_code == 0, second.output
+    assert not (paths.bus_dir() / "word-budget").exists()
 
 
-def test_thread_reply_refuses_the_second_79_word_body(runner, mailbox):
+def test_thread_reply_delivers_repeated_bodies_without_a_ledger(runner, mailbox):
+    from fno import paths
     from fno.inbox.store import write_new_thread
 
     inbound = write_new_thread(
@@ -397,8 +431,8 @@ def test_thread_reply_refuses_the_second_79_word_body(runner, mailbox):
     second = runner.invoke(app, args)
 
     assert first.exit_code == 0, first.output
-    assert second.exit_code == 1
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in second.stderr
+    assert second.exit_code == 0, second.output
+    assert not (paths.bus_dir() / "word-budget").exists()
 
 
 def test_ack_refuses_hosted_audit_without_skipping_durable_mail(runner, mailbox):
@@ -1132,7 +1166,7 @@ def test_us3_rostered_claude_hosted_short_circuits_durable(
     assert payload == []
 
 
-def test_ac3_hp_envelope_carries_real_from_and_model(
+def test_ac3_hp_envelope_carries_real_from_and_the_model_rides_the_bus(
     runner, mailbox, monkeypatch, tmp_path
 ):
     recipient_sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
@@ -1167,14 +1201,14 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
     assert 'from="abcd1234"' in body
-    assert 'model="claude-opus-4-8"' in body
-    # Pinned to the shared mapper, not spelled literally: the name lane once
-    # stamped a raw "claude" here while dispatch, the relay, and the Rust
-    # contract all said "claude-code", and no test noticed.
-    from fno.mail.envelope import harness_for_provider
+    # The compact envelope renders no model or harness attribute; the model
+    # survives in the bus record, where audit reads it.
+    assert 'model=' not in body
+    assert 'harness=' not in body
+    from fno.bus.log import iter_messages
 
-    assert f'harness="{harness_for_provider("claude")}"' in body
-    assert 'harness="claude-code"' in body
+    row = next(m for m in iter_messages() if 'from="abcd1234"' in m.body)
+    assert row.from_model == "claude-opus-4-8"
 
 
 # ---------------------------------------------------------------------------

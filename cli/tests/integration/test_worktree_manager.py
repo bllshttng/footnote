@@ -430,6 +430,14 @@ def test_cleanup_mode_stale_excludes_ephemeral(tmp_repo, isolated_env):
     # Create three worktrees: one feature/, one discover/, one speculate/
     feat = run_wtm("create", ".", "feat-stale", cwd=tmp_repo, env=isolated_env)
     feat_path = parse_json(feat.stdout)["path"]
+    # A stale-candidate tree carries a commit: a fresh worktree on an unmoved
+    # branch is refused by the reapable gate (reason=unborn) and its SKIP row
+    # names no branch, so the dispatch assertion below would lose its marker.
+    # Identity comes from tmp_repo's local git config, shared by the worktree.
+    subprocess.run(
+        ["git", "-C", str(feat_path), "commit", "--allow-empty", "-m", "work"],
+        check=True, capture_output=True,
+    )
     disc = run_wtm("create", ".", "disc-skip",
                    "--mode=ephemeral", "--branch=discover/x",
                    cwd=tmp_repo, env=isolated_env)

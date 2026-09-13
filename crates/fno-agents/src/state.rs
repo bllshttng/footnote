@@ -804,6 +804,16 @@ pub struct RegistryEntry {
     pub requested_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_effort: Option<String>,
+    /// The fenced `--` tokens a codex thread spawn carried, verbatim (schema
+    /// v31). Startup recovery re-parses them into the same `thread/resume.config`
+    /// the start built, so a daemon restart does not silently drop the
+    /// operator's per-thread codex config the way the state-root grant was
+    /// once lost. Rust-set on the codex thread mint; skip-when-empty keeps
+    /// every other row slim, and Python's `load_registry` reads named keys,
+    /// so the extra one round-trips. Absence means no fenced tokens, never
+    /// unknown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harness_args: Vec<String>,
     /// Explicit model-route identity captured by the spawn path (v25),
     /// mirroring Python's `AgentEntry.route_provider_id`/`model_name`/
     /// `account_record_id`. These fields contain stable identifiers only;
@@ -1903,6 +1913,45 @@ fn source_root_for_exe(exe: &Path, home: Option<&Path>) -> Option<PathBuf> {
             return Some(parent.to_path_buf());
         }
     }
+    // Under build.build-dir the exe is an intermediate: it lives in the
+    // shared build base, outside any checkout, so the walk above finds no
+    // `.git`. A cargo marker on an ancestor proves the tree is a build tree
+    // (deployed binaries have none), and the compile-time manifest dir then
+    // names the crate it was built from, so the guard stays armed.
+    let build_tree = exe
+        .ancestors()
+        .skip(1)
+        .take(6)
+        .any(|p| p.join("CACHEDIR.TAG").is_file() || p.join(".rustc_info.json").is_file());
+    if !build_tree {
+        return None;
+    }
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.ancestors().nth(2).unwrap_or(manifest);
+    if home == Some(root) {
+        return None;
+    }
+    Some(root.to_path_buf())
+}
+
+/// Recover the source root for a build whose binary a path walk cannot place:
+/// a build-dir override (cargo's build.build-dir, e.g. the machine pool)
+/// detaches the exe from its checkout, so [`source_root_for_exe`] finds no
+/// `.git`. When this build's own OUT_DIR was likewise detached, the exe is a
+/// dev build and the manifest dir - baked in at compile time, present only on
+/// the build machine - recovers the root. A deployed binary never takes this
+/// arm: its OUT_DIR sat inside its build checkout, and on a user machine
+/// neither baked path exists.
+fn source_root_for_detached_build() -> Option<PathBuf> {
+    let out_dir = Path::new(env!("FNO_AGENTS_BUILD_OUT_DIR"));
+    if out_dir.ancestors().any(|p| p.join(".git").exists()) {
+        return None;
+    }
+    for parent in Path::new(env!("CARGO_MANIFEST_DIR")).ancestors() {
+        if parent.join(".git").exists() {
+            return Some(parent.to_path_buf());
+        }
+    }
     None
 }
 
@@ -1981,7 +2030,21 @@ fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateE
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|h| h.canonicalize().unwrap_or(h));
-    let Some(root) = source_ahead_root(&exe, home.as_deref(), &resolved, &shared, found) else {
+    let Some(root) = source_ahead_root(&exe, home.as_deref(), &resolved, &shared, found)
+        // A detached dev build (a build-dir override, e.g. the machine pool)
+        // defeats the path walk inside source_ahead_root; recover the checkout
+        // from the baked manifest dir. Caller-side on purpose:
+        // source_ahead_root is a pure function of its inputs (tests construct
+        // synthetic deployed shapes there), and only the real current_exe may
+        // consult build-time baked facts.
+        .or_else(|| {
+            if found < REGISTRY_SCHEMA_VERSION && resolved == shared.as_path() {
+                source_root_for_detached_build()
+            } else {
+                None
+            }
+        })
+    else {
         return Ok(());
     };
     Err(StateError::SourceAheadSchemaBump {

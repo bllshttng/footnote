@@ -30,7 +30,9 @@
 # larger than the allowance - does. The remedy is to port the verb to crates/,
 # land the feature in Rust, or refactor the growth away: per-harness DATA
 # belongs in the capability contract, long prose belongs in docs/, and
-# duplicate blocks belong behind one loop.
+# duplicate blocks belong behind one loop. An operator can grant a one-PR
+# exception with the file-budget-exception label; agents never apply it, and
+# it waives the tree tally alone, never a per-file grow.
 #
 # Run: bash scripts/ci/check-file-budget.sh [--quiet]
 # Exit: 0 pass, 1 a refused grow (a grown over-budget file, a new over-budget
@@ -42,6 +44,10 @@
 #   FILE_BUDGET_LINES  per-file line budget. Default 5000.
 #   PY_TREE_ALLOWANCE  net lines cli/src/fno Python may grow per change.
 #                      Default 100.
+#   FILE_BUDGET_EXCEPTION_LABEL  name of the operator-applied PR label that
+#                      waives the tree allowance (guards.yml passes it only
+#                      when the PR carries the label). Waives the tree tally
+#                      alone. Default: empty.
 #   PR_BASE_REF        base branch name, no remote prefix. Default: main.
 #   PR_REMOTE          remote holding the base. Default: origin.
 #   FILE_BUDGET_BASE_SHA  explicit base sha to diff instead of the merge base;
@@ -82,8 +88,27 @@ case "$PY_ALLOWANCE" in '' | *[!0-9]*)
     echo "check-file-budget: PY_TREE_ALLOWANCE must be a number, got '$PY_ALLOWANCE'" >&2
     exit 2 ;;
 esac
+# AGENTS.md restates this allowance on the SessionStart surface, because the
+# number decides a language before any gate runs. A restatement that drifts is
+# the failure that restatement exists to prevent, so the owner asserts it.
+# Two anchors: a repo whose AGENTS.md names this gate clearly opted to
+# restate; and the pitfalls corpus pins THIS repo's own surface even if the
+# whole bullet is deleted (the corpus outlives any one bullet). Skipped under
+# an env override (that value is caller configuration, not the stated rule)
+# and in repos that ship this script with neither anchor.
+if [[ -z "${PY_TREE_ALLOWANCE:-}" && -f AGENTS.md ]] \
+        && { grep -q 'check-file-budget\.sh' AGENTS.md || grep -q '## Pitfalls corpus' AGENTS.md; } \
+        && ! grep -qF "net +$PY_ALLOWANCE" AGENTS.md; then
+    echo "check-file-budget: AGENTS.md no longer quotes the tree allowance (net +$PY_ALLOWANCE)." >&2
+    echo "       The file-budget bullet must state the number an agent reads before choosing a language." >&2
+    exit 2
+fi
 REMOTE="${PR_REMOTE:-origin}"
 BASE_REF="${PR_BASE_REF:-main}"
+EXC_LABEL="${FILE_BUDGET_EXCEPTION_LABEL:-}"
+# The source types this gate measures. The diffs and the uncommitted-work check
+# read this one list, so a new type cannot reach one and miss the other.
+GATED=('*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
 
 # Base resolution follows check-proto-version-bump.sh: an EXPLICIT refspec, so
 # a narrowed fetch config cannot leave a stale ref reading as current, and a
@@ -153,7 +178,7 @@ live_count() {
         # diffs below read with -z for the same reason - a changed file that
         # arrives quoted or brace-compacted would fail cat-file and silently
         # escape the gate.
-        _CACHED_COUNT="$(git -c core.quotepath=off ls-files -z '*.rs' '*.py' '*.sh' '*.ts' '*.tsx' \
+        _CACHED_COUNT="$(git -c core.quotepath=off ls-files -z "${GATED[@]}" \
             | xargs -0 wc -l | awk -v b="$BUDGET" '$1 > b && $2 != "total"' \
             | wc -l | tr -d ' ')"
     fi
@@ -225,7 +250,7 @@ while IFS= read -r -d '' row; do
 # are identical there; on the explicit-sha path a sha that is not an ancestor
 # (a force-push overwrite) must still be honored as pinned, which three-dot
 # would silently widen to the merge base.
-done < <(git diff --numstat -z -M "$BASE"..HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
+done < <(git diff --numstat -z -M "$BASE"..HEAD -- "${GATED[@]}")
 
 # The tree tally is its own pass because it needs no HEAD blob: a deleted
 # module banks its lines here. --no-renames counts a module moved into or out
@@ -242,9 +267,22 @@ while IFS= read -r -d '' row; do
 done < <(git diff --numstat -z --no-renames "$BASE"..HEAD -- 'cli/src/fno/*.py')
 
 py_net=$((py_added - py_deleted))
+exc_waived=0
 if [[ "$py_net" -gt "$PY_ALLOWANCE" ]]; then
-    echo "check-file-budget: cli/src/fno grew by +$py_added/-$py_deleted net +$py_net (allowance $PY_ALLOWANCE). Python is the compatibility shell; port the verb you touched to crates/ or land the feature in Rust. Or refactor the growth away in THIS PR: move data to the capability contract or another data file, move the long prose to docs/, cut duplicate and dead code, and extract or compose what is left. Raising $PY_ALLOWANCE and splitting the PR are both refused: they move the number and leave the bloat." >> "$findings"
-    fails=1
+    if [[ -n "$EXC_LABEL" ]]; then
+        exc_waived=1
+    else
+        echo "check-file-budget: cli/src/fno grew by +$py_added/-$py_deleted net +$py_net (allowance $PY_ALLOWANCE). Python is the compatibility shell; port the verb you touched to crates/ or land the feature in Rust. Or refactor the growth away in THIS PR: move data to the capability contract or another data file, move the long prose to docs/, cut duplicate and dead code, and extract or compose what is left. Raising $PY_ALLOWANCE and splitting the PR are both refused: they move the number and leave the bloat. The one escape is an operator-applied file-budget-exception label on the PR; agents never apply it." >> "$findings"
+        fails=1
+    fi
+fi
+
+# A worker runs this locally mid-change to learn its number before CI does.
+# Every diff above reads commits, so uncommitted work would print as no growth.
+# It never changes the exit code.
+if ! git diff --quiet HEAD -- "${GATED[@]}" \
+        || [[ -n "$(git ls-files --others --exclude-standard -- "${GATED[@]}")" ]]; then
+    echo "check-file-budget: WARN uncommitted changes to gated files are not counted. The numbers here measure commits only. Commit, then re-run." >&2
 fi
 
 if [[ -s "$findings" ]]; then
@@ -254,6 +292,8 @@ if [[ "$fails" -eq 1 ]]; then
     exit 1
 fi
 if [[ "$QUIET" -eq 0 ]]; then
-    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno net $(printf '%+d' "$py_net"), allowance $PY_ALLOWANCE)"
+    waived=""
+    [[ "$exc_waived" -eq 1 ]] && waived="; label $EXC_LABEL waives the tree allowance"
+    echo "check-file-budget: ok (no over-budget file grew; cli/src/fno net $(printf '%+d' "$py_net"), allowance $PY_ALLOWANCE$waived)"
 fi
 exit 0

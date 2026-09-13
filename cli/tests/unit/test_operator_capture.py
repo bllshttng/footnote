@@ -68,7 +68,7 @@ def test_naive_timestamp_reads_as_utc_not_local(tmp_path, tmp_ledger, monkeypatc
     from fno.inbox import operator_turns as ot
 
     _pin(monkeypatch, tmp_path, [_user_row("ask", "u-naive", ts="2026-09-06T21:00:00.000000")])
-    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
+    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
     assert result.exit_code == 0, result.output
     rows = json.loads(result.stdout)
     expected = datetime(2026, 9, 6, 21, 0, tzinfo=timezone.utc).timestamp()
@@ -88,7 +88,7 @@ def test_duplicate_rows_derive_distinct_ids(tmp_path, tmp_ledger, monkeypatch):
     )
     monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "s-test")
     monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(tp))
-    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
+    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
     assert result.exit_code == 0, result.output
     rows = json.loads(result.stdout)
     assert len(rows) == 2
@@ -110,7 +110,7 @@ def test_tail_window_drops_no_prose_turn(tmp_path, tmp_ledger, monkeypatch):
     )
     monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "s-test")
     monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(tp))
-    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
+    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
     assert result.exit_code == 0, result.output
     rows = json.loads(result.stdout)
     assert [r["turn_id"] for r in rows] == ["u-new"]
@@ -133,7 +133,7 @@ def test_prose_turn_queues_and_mail_turn_does_not(tmp_path, tmp_ledger, monkeypa
             ),
         ],
     )
-    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
+    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
     assert result.exit_code == 0, result.output
     rows = json.loads(result.stdout)
     assert [r["turn_id"] for r in rows] == ["u-prose-1"]
@@ -157,7 +157,7 @@ def test_bare_command_and_system_only_turns_never_queue(tmp_path, tmp_ledger, mo
             ),
         ],
     )
-    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
+    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
 
@@ -169,7 +169,7 @@ def test_command_with_following_prose_still_queues(tmp_path, tmp_ledger, monkeyp
         tmp_path,
         [_user_row("/fno:target x-1. A plan already exists at /tmp/plan.md, execute it", "u-arg-1")],
     )
-    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
+    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
     assert result.exit_code == 0, result.output
     assert [r["turn_id"] for r in json.loads(result.stdout)] == ["u-arg-1"]
 
@@ -185,18 +185,18 @@ def test_status_counts_pending_and_ack_disposes(tmp_path, tmp_ledger, monkeypatc
             _user_row("third ask", "u-3", ts="2026-09-06T22:00:00.000Z"),
         ],
     )
-    result = runner.invoke(app, ["inbox", "operator", "status", "--json"])
+    result = runner.invoke(app, ["inbox", "user", "status", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["depth"] == 3
     assert payload["oldest_turn_id"] == "u-1"
 
     ack = runner.invoke(
-        app, ["inbox", "operator", "ack", "u-1", "--outcome", "nothing"]
+        app, ["inbox", "user", "ack", "u-1", "--outcome", "nothing"]
     )
     assert ack.exit_code == 0, ack.output
 
-    result = runner.invoke(app, ["inbox", "operator", "status", "--json"])
+    result = runner.invoke(app, ["inbox", "user", "status", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["depth"] == 2
     ledger = tmp_ledger / "s-test.jsonl"
@@ -210,7 +210,7 @@ def test_ack_with_ref_names_the_artifact(tmp_path, tmp_ledger, monkeypatch):
     _pin(monkeypatch, tmp_path, [_user_row("record this as law", "u-law-1")])
     ack = runner.invoke(
         app,
-        ["inbox", "operator", "ack", "u-law-1", "--outcome", "law:da1b2c3d", "--why", "operator said so"],
+        ["inbox", "user", "ack", "u-law-1", "--outcome", "law:da1b2c3d", "--why", "operator said so"],
     )
     assert ack.exit_code == 0, ack.output
     row = json.loads(ack.stdout)
@@ -221,7 +221,7 @@ def test_ack_with_ref_names_the_artifact(tmp_path, tmp_ledger, monkeypatch):
 def test_invalid_outcome_refused_naming_legal_values(tmp_path, tmp_ledger, monkeypatch):
     """AC: a nonsense --outcome exits non-zero and names the legal forms."""
     _pin(monkeypatch, tmp_path, [_user_row("ask", "u-x")])
-    ack = runner.invoke(app, ["inbox", "operator", "ack", "u-x", "--outcome", "nonsense"])
+    ack = runner.invoke(app, ["inbox", "user", "ack", "u-x", "--outcome", "nonsense"])
     assert ack.exit_code != 0
     assert "law:" in ack.output and "capture:" in ack.output and "node:" in ack.output
 
@@ -234,7 +234,7 @@ def test_status_without_session_refuses(tmp_path, tmp_ledger, monkeypatch):
         "fno.claims.self_identity.resolve_self_identity",
         lambda *a, **k: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
     )
-    result = runner.invoke(app, ["inbox", "operator", "status", "--json"])
+    result = runner.invoke(app, ["inbox", "user", "status", "--json"])
     assert result.exit_code != 0
     assert "session" in result.output
 
@@ -244,7 +244,7 @@ def test_status_with_missing_transcript_refuses(tmp_path, tmp_ledger, monkeypatc
     absent = tmp_path / "absent.jsonl"
     monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "s-ghost")
     monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(absent))
-    result = runner.invoke(app, ["inbox", "operator", "status", "--json"])
+    result = runner.invoke(app, ["inbox", "user", "status", "--json"])
     assert result.exit_code != 0
     assert "transcript" in result.output
     assert "s-ghost" in result.output
@@ -333,3 +333,103 @@ def test_find_filters_by_source_kind(tmp_graph):
     assert result.exit_code == 0, result.output
     rows = json.loads(result.stdout)
     assert [r["id"] for r in rows] == ["ab-opr000001"]
+
+
+def test_operator_spelling_still_reaches_the_queue(tmp_path, tmp_ledger, monkeypatch):
+    """The pre-rename `fno inbox operator` spelling is a hidden alias, not a removal."""
+    _pin(monkeypatch, tmp_path, [_user_row("old spelling", "u-alias-1")])
+    result = runner.invoke(app, ["inbox", "operator", "status", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["depth"] == 1
+
+
+# -- machine shapes never queue --
+
+
+def test_machine_shapes_never_queue_and_are_counted(tmp_path, tmp_ledger, monkeypatch):
+    """AC: one row per measured machine shape plus prose queues only the prose,
+    and the skip line names every refused shape and count."""
+    _pin(
+        monkeypatch,
+        tmp_path,
+        [
+            _user_row(
+                "<task-notification><task-id>b55cj2z2z</task-id>"
+                "<output-file>/tmp/out</output-file></task-notification>",
+                "u-tn",
+            ),
+            _user_row(
+                'Another Claude session sent a message:\n'
+                '<teammate-message teammate_id="t1" color="blue">{}</teammate-message>',
+                "u-tm",
+            ),
+            _user_row(
+                "This session is being continued from a previous conversation "
+                "that ran out of context. The summary below covers the work.",
+                "u-cp",
+            ),
+            _user_row("[Request interrupted by user]", "u-int1"),
+            _user_row("[Request interrupted by user for tool use]", "u-int2"),
+            _user_row("<bash-input>git status</bash-input>", "u-bi"),
+            _user_row("<bash-stdout>nothing to commit</bash-stdout>", "u-bs"),
+            _user_row(
+                "<command-message>fno:target</command-message>\n"
+                "<command-name>/fno:target</command-name>",
+                "u-cm",
+            ),
+            _user_row("status on your nodes?", "u-prose"),
+        ],
+    )
+    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    assert [r["turn_id"] for r in json.loads(result.stdout)] == ["u-prose"]
+    assert "skipped 8 machine turn(s)" in result.output
+    for shape in (
+        "task_notification=1",
+        "teammate_message=1",
+        "compaction_preamble=1",
+        "interrupt_marker=2",
+        "bash_echo=2",
+        "command_invocation=1",
+    ):
+        assert shape in result.output
+
+
+def test_status_depth_excludes_machine_turns_and_carries_skipped(tmp_path, tmp_ledger, monkeypatch):
+    """AC: a task-notification turn does not raise depth; the JSON names the skip."""
+    _pin(
+        monkeypatch,
+        tmp_path,
+        [
+            _user_row(
+                "<task-notification><task-id>t9</task-id></task-notification>",
+                "u-tn",
+                ts="2026-09-06T20:30:00.000Z",
+            ),
+            _user_row("status on your nodes?", "u-real", ts="2026-09-06T21:00:00.000Z"),
+        ],
+    )
+    result = runner.invoke(app, ["inbox", "user", "status", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["depth"] == 1
+    assert payload["oldest_turn_id"] == "u-real"
+    assert payload["skipped"] == {"task_notification": 1}
+
+
+def test_status_human_path_names_skips_even_at_depth_zero(tmp_path, tmp_ledger, monkeypatch):
+    """A queue that is all machine noise reads depth 0 AND says what was skipped."""
+    _pin(
+        monkeypatch,
+        tmp_path,
+        [
+            _user_row("<task-notification><task-id>t1</task-id></task-notification>", "u-tn"),
+            _user_row("[Request interrupted by user]", "u-int"),
+        ],
+    )
+    result = runner.invoke(app, ["inbox", "user", "status"])
+    assert result.exit_code == 0, result.output
+    assert "user queue: 0" in result.output
+    assert "skipped 2 machine turn(s)" in result.output
+    assert "interrupt_marker=1" in result.output
+    assert "task_notification=1" in result.output

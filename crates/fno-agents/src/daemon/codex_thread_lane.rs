@@ -77,6 +77,31 @@ pub(super) async fn spawn_codex_thread_lane(
                 .collect()
         })
         .unwrap_or_default();
+    // Fenced `--` tokens the front door carried here BECAUSE this lane takes
+    // them. A token the lane does not carry is a router bug, refused by name
+    // rather than dropped: the operator typed it expecting it to land.
+    let harness_args: Vec<String> = req
+        .params
+        .get("harness_args")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let carry = match crate::codex_thread::parse_harness_args(&harness_args) {
+        Ok(carry) => carry,
+        Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
+    };
+    let mut state_dirs = state_dirs;
+    for dir in carry.add_dirs {
+        if !state_dirs.iter().any(|existing| existing == &dir) {
+            state_dirs.push(dir);
+        }
+    }
     let seed = req
         .params
         .get("message")
@@ -89,6 +114,7 @@ pub(super) async fn spawn_codex_thread_lane(
         yolo,
         effort,
         &state_dirs,
+        Some(&carry.config),
     )
     .await
     {
@@ -110,6 +136,7 @@ pub(super) async fn spawn_codex_thread_lane(
         yolo,
         node,
         req.params.get("account").and_then(Value::as_str),
+        &harness_args,
     );
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {

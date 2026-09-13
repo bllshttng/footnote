@@ -163,6 +163,80 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3c. The fno:user block: seeded around the placeholder on first write,
+# round-tripped verbatim on re-fire, emptied stays emptied, and a partial
+# edit (missing closing marker) heals without dropping a byte. The machine
+# never writes this block; only the seed on a doc that has no block yet.
+# ---------------------------------------------------------------------------
+if grep -q "## User notes (you write here; the machine only ever reads this)" "$DOC" \
+  && grep -q "<!-- fno:user -->" "$DOC" && grep -q "<!-- /fno:user -->" "$DOC"; then
+  pass "user block section fenced and headed"
+else
+  fail "user block section missing or unfenced"
+fi
+if grep -q "_(write here; the machine reads this every refresh and never edits it)_" "$DOC"; then
+  pass "user block seeded with the placeholder line"
+else
+  fail "user block placeholder missing on first write"
+fi
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$DOC\"}" >/dev/null 2>&1
+PLACEHOLDER_COUNT="$(grep -c "write here; the machine reads this every refresh" "$DOC")"
+if [[ "$PLACEHOLDER_COUNT" == "1" ]]; then
+  pass "re-fire round-trips the placeholder exactly once (no re-seed)"
+else
+  fail "re-fire placeholder count=$PLACEHOLDER_COUNT (expected 1)"
+fi
+
+# A partial user edit: text after the open marker, closing marker gone. The
+# next fire must carry the text through byte-for-byte and repair the fence.
+python3 - "$DOC" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s = re.sub(r"(?s)<!-- fno:user -->\n.*?(?=<!-- /fno:user -->)",
+           "<!-- fno:user -->\nSENTINEL_USER_11 partial edit body\n",
+           s, count=1)
+s = s.replace("<!-- /fno:user -->", "", 1)
+open(p, "w").write(s)
+PY
+if grep -q "SENTINEL_USER_11" "$DOC" && ! grep -q "<!-- /fno:user -->" "$DOC"; then
+  pass "partial-edit fixture planted (closing marker gone)"
+else
+  fail "partial-edit fixture not planted"
+fi
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$DOC\"}" >/dev/null 2>&1
+if grep -q "SENTINEL_USER_11 partial edit body" "$DOC" && grep -q "<!-- /fno:user -->" "$DOC"; then
+  pass "partial edit: text preserved verbatim, closing marker repaired"
+else
+  fail "partial edit: text lost or fence not repaired"
+fi
+
+# A block the user emptied stays emptied: no placeholder re-seed into a block
+# whose markers exist (the machine never writes user content).
+python3 - "$DOC" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s = re.sub(r"(?s)<!-- fno:user -->\n.*?<!-- /fno:user -->",
+           "<!-- fno:user -->\n<!-- /fno:user -->", s, count=1)
+open(p, "w").write(s)
+PY
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$DOC\"}" >/dev/null 2>&1
+python3 - "$DOC" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+m = re.search(r"(?s)<!-- fno:user -->\n(.*?)<!-- /fno:user -->", s)
+body = m.group(1) if m else "MARKERS-GONE"
+sys.exit(0 if body.strip() == "" else 1)
+PY
+if [[ $? == 0 ]]; then
+  pass "emptied user block stays empty on re-fire (never re-seeded)"
+else
+  fail "emptied user block was re-seeded or lost"
+fi
+
+# ---------------------------------------------------------------------------
 # 4. PR section omitted when gh is absent (degrade, never a failed hook).
 # ---------------------------------------------------------------------------
 rm -f "$DOC"
@@ -255,6 +329,9 @@ case "$*" in
   *"do pr list"*)
     echo '[]'
     ;;
+  *"config paths handoff"*)
+    echo "${CANON_PATH_OUT:?}"
+    ;;
   *)
     exit 1
     ;;
@@ -320,6 +397,57 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 9b. A crown's spawned children partition into alive vs unresolved liveness,
+# same rule as hooks/context-nudge.sh: a served "alive" word lists a child
+# under live workers, and anything else (missing, or the literal "unmeasured"
+# word liveness_sweep.rs can write) lists it separately as unresolved, never
+# silently among the alive - a broken reader must never clear the guard.
+# ---------------------------------------------------------------------------
+LIVENESS_BIN="$(mktemp -d -t canon-fake-fno-liveness-XXXXXX)"
+cat > "$LIVENESS_BIN/fno" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"agents registry-json"*)
+    echo '[
+      {"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"king-fixture"},
+      {"spawned_by_session":"c35abbca-bd2d-4407-8365-cf468baa7eea","name":"alive-child","status":"live","liveness":"alive"},
+      {"spawned_by_session":"c35abbca-bd2d-4407-8365-cf468baa7eea","name":"unmeasured-child","status":"live","liveness":"unmeasured"}
+    ]'
+    ;;
+  *"backlog epic status x-9e1e-fixture"*)
+    echo '{"children":[]}'
+    ;;
+  *"do pr list"*)
+    echo '[]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+chmod +x "$LIVENESS_BIN/fno"
+trap 'rm -rf "$TMP" "$FAKE_BIN" "$PORTFOLIO_BIN" "$LIVENESS_BIN"' EXIT
+
+LIVENESS_DOC="$TMP/liveness-canon.md"
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$LIVENESS_DOC" \
+  | env PATH="$LIVENESS_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
+if grep -q "^- .*alive-child" "$LIVENESS_DOC"; then
+  pass "liveness partition: alive child listed on a top-level live-worker line"
+else
+  fail "liveness partition: alive child missing from the live-worker lines"
+fi
+if grep -q "^- unresolved liveness:" "$LIVENESS_DOC" && grep -q "^  - .*unmeasured-child" "$LIVENESS_DOC"; then
+  pass "liveness partition: a served 'unmeasured' word lands under unresolved, not alive"
+else
+  fail "liveness partition: unmeasured-child missing from the unresolved sub-list"
+fi
+if grep -q "^- .*unmeasured-child" "$LIVENESS_DOC"; then
+  fail "liveness partition: unmeasured child leaked into a top-level alive line"
+else
+  pass "liveness partition: unmeasured child never lands in a top-level alive line"
+fi
+
+# ---------------------------------------------------------------------------
 # 10. A king hand-writes ONLY the two crown headings (the shape context-nudge.sh
 # now tells a king to write on a FIRST compaction, when the doc - and its
 # headings 1/2 - do not exist yet). The hook must bind each by heading text,
@@ -345,6 +473,25 @@ if grep -q "Unsure whether the blocked_child queue drains fairly" "$HANDWRITTEN_
   pass "hand-written crown-only headings bind by label, not ordinal position"
 else
   fail "hand-written crown headings lost or misplaced by the refire"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. A crowned session with NO custom_instructions keys its doc on the crown
+# scope, not the session id: a crown outlives its sessions, so a successor
+# resolves the same rolling doc. The fake fno answers the --scope form with a
+# fixture path; the doc must land THERE, titled for the crown, still carrying
+# the authoritative session id line.
+# ---------------------------------------------------------------------------
+CANON_PATH_OUT="$TMP/handoffs/crown-rolling.md"
+export CANON_PATH_OUT
+printf '{"trigger":"manual"}' \
+  | env PATH="$FAKE_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
+if [[ -f "$CANON_PATH_OUT" ]] \
+  && grep -q "# Canon doc: crown x-9e1e-fixture" "$CANON_PATH_OUT" \
+  && grep -q "Session id (authoritative): \`$SID\`" "$CANON_PATH_OUT"; then
+  pass "crowned default doc keys on the crown scope at the --scope answer"
+else
+  fail "crowned default doc missing or not scope-keyed"
 fi
 
 echo

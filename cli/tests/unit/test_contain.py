@@ -118,7 +118,10 @@ def test_contain_is_idempotent_on_rerun(tmp_graph):
 
 def test_contain_refuses_a_done_owner_and_stamps_nothing(tmp_graph):
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
-    _invoke("backlog", "done", owner)
+    # --force: closing over live children is refused without it (x-a31a), and
+    # the forced close re-parents the kids - irrelevant here, the owner is
+    # done either way and contain must still refuse.
+    _invoke("backlog", "done", owner, "--force", "--reason", "setup: done owner")
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
     assert "is done" in r.output
@@ -345,6 +348,37 @@ def test_cascade_close_contained_sets_completion_with_the_shipped_inside_note():
     c1 = next(e for e in entries if e["id"] == "c1")
     assert c1["completed_at"]
     assert "shipped inside o (PR #77)" in c1["completion_note"]
+
+
+def test_cascade_close_contained_stamps_merged_when_merged_at_is_set():
+    # AC4-HP: reconcile passes merged_at only after gh read MERGED, so the
+    # child records the ship; a merge reaper that re-reads merge_status no
+    # longer holds the request the node shipped in.
+    from fno.graph.cli import _cascade_close_contained
+
+    entries = [
+        {"id": "o", "pr_number": 77},
+        {"id": "c", "contained_in": "o"},
+    ]
+    closed = _cascade_close_contained(entries, "o", merged_at="2026-09-10T12:00:00Z")
+    assert closed == ["c"]
+    c = next(e for e in entries if e["id"] == "c")
+    assert c["merge_status"] == "merged"
+
+
+def test_cascade_close_contained_without_merged_at_leaves_merge_status_unset():
+    # AC4-EDGE: no merged_at means gh was not consulted on this path; the
+    # contract bars asserting a merge nobody resolved.
+    from fno.graph.cli import _cascade_close_contained
+
+    entries = [
+        {"id": "o", "pr_number": 77},
+        {"id": "c", "contained_in": "o"},
+    ]
+    closed = _cascade_close_contained(entries, "o")
+    assert closed == ["c"]
+    c = next(e for e in entries if e["id"] == "c")
+    assert c.get("merge_status") is None
 
 
 def test_strandable_contained_ids_names_open_nodes_of_a_done_owner():

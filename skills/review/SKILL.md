@@ -29,7 +29,7 @@ This is a **router**, not a monolith. It parses the first argument as a mode, an
 
 ## Review-cap gate
 
-The round cap is enforced at the review invocation itself, not only at the merge decision: the hold hook denies a review whose PR's rounds are spent, and the denial text is the instruction - decline the remaining findings with a recorded reason and merge on green CI. At the configured rounds the review phase is complete and the PR merges on green CI; open findings stay in the PR conversation. Two shapes pass the gate, both the attestation law's own. `--verify-fixes` in the invocation flags declares a scoped fix-verification of named findings, which is not a round. And a rebase delta measuring at or over the interdiff budget reviews freely.
+The round cap is enforced at the review invocation itself, not only at the merge decision: the hold hook denies a review whose PR's rounds are spent, and the denial text is the instruction - decline the remaining findings with a recorded reason and merge on green CI. At the configured rounds the review phase is complete and the PR merges on green CI; open findings stay in the PR conversation. Two shapes pass the gate, both the attestation law's own. `--verify-fixes` in the invocation flags declares a scoped fix-verification of named findings, which is not a round: the hold half lives in `review_invocation_refusal`, and the count half is the `review_round` the emitter stamps onto the pass when the flags carry the flag, so the counter reads the round the pass verified. An undeclared pass counts a fresh round. And a rebase delta measuring at or over the interdiff budget reviews freely.
 
 ## Active skill freshness preflight
 
@@ -143,7 +143,7 @@ The second thing you run after a code review: a different CLASS of evidence, wit
 bash "${SKILL_DIR}/scripts/validate-prove-it.sh" <report-file>
 ```
 
-The validator REFUSES a PASS whose Steps list carries no marked probe - a happy-path replay is not a verification - and REFUSES a PASS whose `### Claims` section is missing or carries a claim row with no `CMD:` - an unproven claim is a claim nobody checked - and passes FAIL, BLOCKED, and SKIP through untouched (they carry no verdict on the change). prove-it emits no attestation of its own; a PASS satisfies a declared `done_probe`, a FAIL is a blocking finding, and BLOCKED/SKIP read as unanswered.
+The validator REFUSES a PASS whose Steps list carries no marked probe - a happy-path replay is not a verification - and REFUSES a PASS whose `### Claims` section is missing or carries a claim row with no `CMD:` - an unproven claim is a claim nobody checked - and passes FAIL, BLOCKED, and SKIP through untouched (they carry no verdict on the change). prove-it emits no attestation of its own; a PASS satisfies a declared `done_probe`, a FAIL is a blocking finding, and BLOCKED/SKIP read as unanswered; an ad-hoc report saved under the audited plan's `.artifacts/` gets a reader through `fno-agents prove-it-verdicts`, which notes an open FAIL on the node and holds its close.
 
 ## Step 2c: cleanup mode (apply-or-skip terminus)
 
@@ -188,7 +188,7 @@ The event is pinned to the current HEAD; if a new commit lands afterward, the de
 
 Head-pinning is mandatory: the helper stamps `git rev-parse HEAD`, and loop-check only counts an attestation whose `head_sha` equals the current HEAD (a pass on a superseded commit is discarded). Absence holds the gate (fail closed).
 
-**Termination (the round budget).** A blocking finding is cleared by fixing it. The next review covers the fix delta. Nothing else clears it on your own signature. A non-blocking finding needs no action to clear the gate. Answer it in thread or skip it. Note the skip rather than arguing with it. When the gate reports IMPOSSIBLE, stop. Do not request another review. At the round cap without a hard finding the gate FILES the remainder and the PR merges, so a fourth round is never the answer. Report the blocking findings and the two remedies to the operator. The remedies are a non-author GitHub approval on the PR, or the coverage-override label. A refused gate escalates.
+**Termination (the round budget).** A blocking finding is cleared by fixing it. The next review covers the fix delta. Nothing else clears it on your own signature. A non-blocking finding needs no action to clear the gate. Answer it in thread or skip it. Note the skip rather than arguing with it. When the gate reports IMPOSSIBLE, stop. Do not request another review. At the round cap the review phase is complete, hard findings included. The PR merges on green CI, open findings stay in the PR conversation, and nobody asks the operator. The live law is in `fno inbox decisions review-coverage`. If a gate still refuses at the cap, that is a gate defect: record it with `fno backlog encounter` and merge once it clears. Below the cap the gate can report IMPOSSIBLE. Then stop and report the blocking findings and the two remedies: a non-author GitHub approval on the PR, or the coverage-override label. A refused gate escalates.
 
 ## The manual coverage emit (sanctioned, with preconditions)
 

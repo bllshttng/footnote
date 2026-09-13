@@ -27,6 +27,7 @@ fn print_help_lists_every_routable_verb() {
         "reconcile",
         "drive-authority",
         "trace",
+        "registry-json",
         "ping",
         "resume",
         "adopt",
@@ -484,6 +485,28 @@ fn format_success_rm() {
     assert_eq!(out, Some("removed: bar-agent (fno + claude)".to_string()));
 }
 
+/// The transport-failure line names the row and answers from the registry
+/// verdict the caller passed, never from the past-tense pre-exec banner. An
+/// unread store (`None`) says so instead of wearing an absent verdict.
+#[test]
+fn rm_failure_line_names_the_row_and_the_registry_verdict() {
+    assert_eq!(
+        rm_failure_line("bar-agent", "protocol: connection closed", Some(true)),
+        "fno-agents: rm bar-agent: protocol: connection closed; \
+         nothing was removed - the row is still registered"
+    );
+    assert_eq!(
+        rm_failure_line("bar-agent", "protocol: connection closed", Some(false)),
+        "fno-agents: rm bar-agent: protocol: connection closed; \
+         the row is no longer registered"
+    );
+    assert_eq!(
+        rm_failure_line("bar-agent", "protocol: connection closed", None),
+        "fno-agents: rm bar-agent: protocol: connection closed; \
+         the registry could not be read to confirm whether anything was removed"
+    );
+}
+
 #[test]
 fn format_success_rm_warns_when_a_worktree_was_removed() {
     let result = json!({
@@ -620,6 +643,32 @@ fn format_success_rm_names_a_forced_mux_orphan() {
     );
 }
 
+// x-9485: a confirmed pane stop prints its measurement - the pid that died -
+// not a bare surface name.
+#[test]
+fn format_success_rm_names_the_confirmed_pane_death() {
+    let result = json!({
+        "removed": true,
+        "registry_removed": true,
+        "harness": "claude",
+        "harness_removed": false,
+        "harness_reason": "claude row already absent",
+        "pane_session": "x9485live",
+        "pane_id": 0,
+        "pane_removed": true,
+        "pane_reason": "pane x9485live:0 (child 43225) killed; pid 43225 gone"
+    });
+    let out = format_success("rm", "bar-agent", &result, false, true, false);
+    assert_eq!(
+        out,
+        Some(
+            "removed: bar-agent (fno + mux; claude row already absent; \
+             pane x9485live:0 (child 43225) killed; pid 43225 gone)"
+                .to_string()
+        )
+    );
+}
+
 #[test]
 fn format_success_rm_names_an_event_write_failure() {
     let result = json!({
@@ -741,6 +790,25 @@ fn render_restart_reports_fresh_when_down() {
 }
 
 #[test]
+fn render_restart_escalated_says_escalated() {
+    // AC1-HP: an escalation after a starved SIGTERM reads as a restart that
+    // had to kill, with the note on stderr, exit 0.
+    let note = "pid 91627 kept serving 30s after SIGTERM; escalated to SIGKILL".to_string();
+    let (out, err, code) = render_restart(&Ok(RestartOutcome {
+        old_pid: Some(91627),
+        new_pid: 91999,
+        forced: true,
+        note: Some(note.clone()),
+    }));
+    assert_eq!(
+        out.as_deref(),
+        Some("restarted (escalated): pid 91627 -> 91999")
+    );
+    assert_eq!(err.as_deref(), Some(note.as_str()), "the note is heard");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn render_restart_failure_is_loud() {
     // AC2-FR: a SIGTERM failure carries a stderr line naming the pid + reason
     // and a nonzero exit; no false "restarted" on stdout.
@@ -754,9 +822,9 @@ fn render_restart_failure_is_loud() {
     assert!(err.contains("SIGTERM"), "names the failure");
     assert_ne!(code, 0, "failure exits nonzero");
 
-    // A did-not-exit timeout is equally loud and names the pid.
-    let (_o, err2, code2) = render_restart(&Err(RestartError::DidNotExit { pid: 5, secs: 5 }));
-    assert!(err2.unwrap().contains("did not exit"));
+    // A daemon that survives even the SIGKILL is equally loud and names the pid.
+    let (_o, err2, code2) = render_restart(&Err(RestartError::DidNotDie { pid: 5 }));
+    assert!(err2.unwrap().contains("survived SIGKILL"));
     assert_ne!(code2, 0);
 }
 
@@ -1965,7 +2033,7 @@ fn render_list_json_shape_matches_python_contract() {
         "missing 'discovered_sessions' key"
     );
     assert_eq!(parsed["discovered_count"], 0);
-    assert_eq!(parsed["schema_version"], 6);
+    assert_eq!(parsed["schema_version"], 7);
     assert_eq!(parsed["count"], 1);
     assert_eq!(
         parsed["fields_omitted"], result["fields_omitted"],
@@ -2047,13 +2115,20 @@ fn render_list_with_discovered_lane() {
         "status": "busy",
         "agent": "claude",
     })];
-    let out = render_list_json(&agents, &filters, &json!(["model"]), &discovered);
+    let out = render_list_json(
+        &agents,
+        &filters,
+        &json!(["model"]),
+        &discovered,
+        Some(3),
+        Some(3),
+    );
     let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
     assert_eq!(parsed["discovered_count"], 1);
     assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
-    assert_eq!(parsed["schema_version"], 6);
+    assert_eq!(parsed["schema_version"], 7);
 
-    let table = render_list_table(&agents, &discovered);
+    let table = render_list_table(&agents, &discovered, Some(3), Some(3));
     assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));
     // ADDRESS leads and the alias is demoted to LABEL. The alias led this
     // table for its whole life, so it was the leftmost thing a reader
@@ -2106,7 +2181,7 @@ fn render_list_table_carries_the_mailbox_address() {
         }
     ]);
 
-    let table = render_list_table(&agents, &[]);
+    let table = render_list_table(&agents, &[], Some(3), Some(3));
     let lines: Vec<&str> = table.lines().collect();
 
     assert!(
@@ -2159,7 +2234,7 @@ fn render_list_table_has_checked_and_pid_columns_not_live() {
             "log_path": null,
         }
     ]);
-    let table = render_list_table(&agents, &[]);
+    let table = render_list_table(&agents, &[], Some(3), Some(3));
     let lines: Vec<&str> = table.lines().collect();
     // AC5-UI: header shows STATUS + CHECKED + PID, and LIVE is gone.
     assert!(
@@ -2235,7 +2310,7 @@ fn render_list_table_has_event_age_and_last_message_columns() {
             "log_path": null
         }
     ]);
-    let table = render_list_table(&agents, &[]);
+    let table = render_list_table(&agents, &[], Some(3), Some(3));
     let lines: Vec<&str> = table.lines().collect();
 
     assert!(
@@ -2259,6 +2334,45 @@ fn render_list_table_has_event_age_and_last_message_columns() {
     assert!(
         !gone.contains("0s"),
         "absent stamp never reads fresh: {gone}"
+    );
+}
+
+/// x-e3cc: a total probe outage is named in the table, not left to read as a
+/// wall of `unknown` statuses. The daemon's stderr WARN is write-only; this
+/// line is the receipt the operator actually sees.
+#[test]
+fn render_list_table_names_a_total_probe_outage() {
+    let agents = json!([
+        {
+            "name": "any-worker",
+            "harness": "claude",
+            "status": "unknown",
+            "address": null,
+            "short_id": null,
+            "session_id": null,
+            "cwd": "/home/user/proj",
+            "created_at": "2026-05-25T00:00:00Z",
+            "last_message_at": null,
+            "live_status": null,
+            "pid": null,
+            "last_reconciled_at": null,
+            "log_path": null
+        }
+    ]);
+    let table = render_list_table(&agents, &[], Some(43), Some(0));
+    assert!(
+        table.contains("truth probe failed: 0 of 43 rows answered"),
+        "outage must be named, got: {table}"
+    );
+    assert!(
+        table.contains("unmeasured, not healthy"),
+        "the statuses must be disclaimed: {table}"
+    );
+
+    let healthy = render_list_table(&agents, &[], Some(43), Some(43));
+    assert!(
+        !healthy.contains("truth probe failed"),
+        "a healthy page carries no outage line: {healthy}"
     );
 }
 
@@ -2418,4 +2532,84 @@ fn spawn_seam_marker_rejects_an_unknown_verdict() {
     )
     .expect_err("bogus verdict refuses");
     assert!(err.contains("--defaults-applied"), "{err}");
+}
+
+#[test]
+fn place_thread_portal_after_spawn_routes_through_fno_bin() {
+    // The placement crossing resolves FNO_BIN like every other crossing:
+    // a stubbed binary receives the exact `mux thread` argv, so tests and
+    // non-PATH installs never depend on a PATH `fno` (scrape.rs:867 pattern).
+    let dir = std::env::temp_dir().join(format!("fno-c4d5-{}", std::process::id()));
+    // A crashed prior run on a reused pid would leave a stale argv log the
+    // stub appends onto; clear the dir so the assert only reads this run.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let stub = dir.join("fno-stub.sh");
+    let argv_path = dir.join("argv.txt");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\n",
+            argv_path.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::env::set_var("FNO_BIN", &stub);
+
+    let params: Value = serde_json::from_str(r#"{"portal": 1, "squad": "sq"}"#).unwrap();
+    let result = place_thread_portal_after_spawn(&params, "worker-a");
+
+    assert!(result.is_ok(), "placement failed: {result:?}");
+    let argv = std::fs::read_to_string(&argv_path).unwrap();
+
+    std::env::remove_var("FNO_BIN");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        argv,
+        "mux\nthread\nworker-a\n--portal\n1\n--workspace\nsq\n"
+    );
+}
+
+#[test]
+fn harness_arg_parses_repeatable_into_params() {
+    let (_m, params) = build_request(
+        "spawn",
+        &[
+            "wk".into(),
+            "--harness".into(),
+            "codex".into(),
+            "--substrate".into(),
+            "thread".into(),
+            "--harness-arg=-c".into(),
+            "--harness-arg".into(),
+            "key=1".into(),
+        ],
+    )
+    .expect("harness args parse");
+    assert_eq!(
+        params["harness_args"],
+        serde_json::json!(["-c", "key=1"]),
+        "both spellings land in one array"
+    );
+}
+
+#[test]
+fn a_codex_thread_add_dir_leads_the_state_dirs() {
+    let mut params = serde_json::json!({"add_dir": "/tmp/x"});
+    attach_codex_thread_state_dirs(&mut params);
+    assert_eq!(
+        params["state_dirs"][0], "/tmp/x",
+        "the operator's add-dir leads the state-root grant"
+    );
+
+    // No add-dir and no published set: today's request, no key at all.
+    let mut bare = serde_json::json!({});
+    attach_codex_thread_state_dirs(&mut bare);
+    assert!(bare.get("state_dirs").is_none(), "{bare}");
 }

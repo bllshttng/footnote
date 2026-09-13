@@ -24,7 +24,7 @@ Both halves earn their place. Without the bound the process outlives you. `yes` 
 
 ## Two classes, two mechanisms
 
-A process that can never end on its own is a different defect from an ordinary command that outlived its parent. One is refusable at creation time. The other is not. A `grep` is a legitimate command, and nothing in its text says its parent is about to die.
+A process that can never end on its own is a different defect from an ordinary command that outlived its parent. The first is refusable at creation time. An ordinary `grep` is a legitimate command, and nothing in its text says its parent is about to die.
 
 | Specimen, measured 2026-08-13 | Prevented by the guard? |
 |---|---|
@@ -32,7 +32,7 @@ A process that can never end on its own is a different defect from an ordinary c
 | one `grep -rn --include=*.py`, PPID 1, 64% CPU | no. Reported by the sweep. |
 | background Bash tasks that outlived their session | no. Reported by the sweep. |
 
-One of three. That number is the honest coverage of the preventive layer, and the sweep is what covers the rest.
+One of three. That number is the honest coverage of the preventive layer, and the sweep is what covers the rest. One marked exception landed since: the recursive cache walk is refusable too. When the repository holds a CACHEDIR.TAG-confirmed Cargo cache, `hooks/recursive-grep-guard.py` refuses a recursive `grep` at the Bash boundary. That is the shape that burns cores walking nested worktree build artifacts.
 
 ## The guard: `hooks/bg-process-guard.py`
 

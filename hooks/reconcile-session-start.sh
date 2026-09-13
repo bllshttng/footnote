@@ -39,7 +39,7 @@ if [[ -f "$RESULT" ]] && command -v jq >/dev/null 2>&1; then
     # the consume-after-show mv and before reconcile_maybe_fire: every session
     # re-surfaced the same stale reminder and no reconcile ever fired again. A
     # cosmetic line must never be able to kill the trigger below it.
-    cu=$(jq -r '.sync_catchup // empty | select(.outcome | test("failed|unknown|error|marked|skipped")) | "\(.outcome)\(if .detail != "" then " (" + .detail + ")" else "" end)"' "$RESULT" 2>/dev/null || true)
+    cu=$(jq -r '.sync_catchup // empty | select((.outcome | test("failed|unknown|error|marked|skipped")) or (.stale == true and .outcome != "synced")) | "\(.outcome)\(if .detail != "" then " (" + .detail + ")" else "" end)"' "$RESULT" 2>/dev/null || true)
     [[ -n "$cu" ]] && echo "reconcile: canonical-sync catch-up ${cu}. The canonical checkout may be behind; run \`fno doctor\` for the outcome-keyed report."
     # Promise-gate held-open nodes (condition D, plus #794's probes/ship-count):
     # a node the sweep refused to close lands in .promise_unmet. Surfacing only
@@ -87,7 +87,9 @@ fi
 # 1c. Self-heal: a dead pr-watch daemon (enabled but not ticking) once ran
 #     silent for 18h. On `dead` we now fire `fno do pr watch heal` (enabled-gated,
 #     claim single-flighted, detached so session start never waits on launchctl)
-#     instead of only advising. Best-effort; never blocks session start.
+#     instead of only advising. A `wedged` verdict (ticking, every tick failing)
+#     takes the refresh cure: a bounce re-runs the same plist, a re-render does
+#     not. Best-effort; never blocks session start.
 if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     if pw_json="$(fno do pr watch status --json 2>/dev/null || true)" && [[ -n "$pw_json" ]]; then
         pw_verdict="$(printf '%s' "$pw_json" | jq -r '.verdict // empty' 2>/dev/null || true)"
@@ -95,6 +97,10 @@ if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
             pw_detail="$(printf '%s' "$pw_json" | jq -r '.detail // ""' 2>/dev/null || true)"
             echo "pr-watch: dead (${pw_detail}); self-heal started (fno do pr watch heal)"
             (fno do pr watch heal >/dev/null 2>&1 &)
+        elif [[ "$pw_verdict" == "wedged" ]]; then
+            pw_detail="$(printf '%s' "$pw_json" | jq -r '.detail // ""' 2>/dev/null || true)"
+            echo "pr-watch: wedged (${pw_detail}); self-heal started (fno do pr watch refresh)"
+            (fno do pr watch refresh >/dev/null 2>&1 &)
         fi
     fi
 fi

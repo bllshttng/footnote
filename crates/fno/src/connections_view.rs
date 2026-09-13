@@ -23,6 +23,15 @@ use crate::server::fno_bin;
 /// never blocks the UI loop.
 const READ_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// Budget for the phase-2 identity read (plain `config accounts list`, whose
+/// last column is the identity cell). Wider than phase 1: the binding fold
+/// costs one binding read per claude record (a profile call on a cold cache),
+/// and identity is enrichment that lands after the rows are visible.
+const IDENTITY_TIMEOUT: Duration = Duration::from_millis(5000);
+
+/// Longest account name cell before an ellipsis clamp.
+const MAX_NAME_COL: usize = 18;
+
 /// One account record, as emitted by `fno config accounts list -J` (task 1.1).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Account {
@@ -47,6 +56,10 @@ pub struct Account {
     /// Snapshot age label for managed accounts; None for oauth/api-key records.
     #[serde(default)]
     pub snapshot: Option<String>,
+    /// The identity cell parsed from plain `list`'s own last column (the
+    /// phase-2 read), taken verbatim, problems and all. None until it lands.
+    #[serde(skip)]
+    pub identity_cell: Option<String>,
 }
 
 fn unknown_headroom() -> String {
@@ -82,7 +95,9 @@ pub enum ModalState {
     Degraded(String),
 }
 
-/// The result of a full read fold: both lists, or a degrade reason.
+/// The result of a read fold. `Ok`/`Degraded` are the phase-1 fold (both
+/// lists); `Identity`/`IdentityFailed` are the slower phase-2 read that lands
+/// after the rows are already on screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
     Ok {
@@ -90,6 +105,13 @@ pub enum ReadOutcome {
         combos: Vec<ComboRow>,
     },
     Degraded(String),
+    /// Phase 2 landed: `(id, identity cell)` pairs parsed from plain `list`,
+    /// merged into the rows by id.
+    Identity(Vec<(String, String)>),
+    /// Phase 2 failed or blew its budget: every identity cell reads `?` and
+    /// the modal stays Ready, never Degraded (identity is enrichment, not the
+    /// list itself).
+    IdentityFailed(String),
 }
 
 /// What a key press asks the async wrapper to do. The reducer stays pure by
@@ -298,6 +320,21 @@ pub struct ConnectionsView {
     /// `SetActiveAccount` intent back into its own authoritative copy. Never a
     /// credential mutation (Locked Decisions 1-2).
     pub active_account: Option<String>,
+    /// Where the phase-2 identity read stands. Pending shows `…` in every
+    /// identity cell; Ready shows each row's verdict; Failed shows `?` on
+    /// every row while the modal stays Ready.
+    pub identity_phase: IdentityPhase,
+}
+
+/// The phase-2 identity read's lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityPhase {
+    /// Rows are on screen; the slower identity read (plain `list`) is running.
+    Pending,
+    /// Phase 2 landed and merged into the rows.
+    Ready,
+    /// Phase 2 failed or blew its budget: cells read `?`, modal stays Ready.
+    Failed,
 }
 
 impl ConnectionsView {
@@ -320,6 +357,7 @@ impl ConnectionsView {
             pending: Vec::new(),
             gen: 0,
             active_account: None,
+            identity_phase: IdentityPhase::Pending,
         }
     }
 
@@ -381,10 +419,26 @@ impl ConnectionsView {
                 self.state = ModalState::Ready;
                 // Fresh data is the committed truth; drop any stale reorder buffer.
                 self.dirty_order = None;
+                // Fresh rows carry no identity yet: the slower phase-2 read
+                // follows and flips this to Ready/Failed when it lands.
+                self.identity_phase = IdentityPhase::Pending;
                 self.clamp_selection();
             }
             ReadOutcome::Degraded(reason) => {
                 self.state = ModalState::Degraded(reason);
+            }
+            ReadOutcome::Identity(cells) => {
+                // Merge by id; never touches selection, dirty_order, or view
+                // state (enrichment, not a re-read).
+                for (id, cell) in cells {
+                    if let Some(a) = self.accounts.iter_mut().find(|a| a.id == id) {
+                        a.identity_cell = Some(cell);
+                    }
+                }
+                self.identity_phase = IdentityPhase::Ready;
+            }
+            ReadOutcome::IdentityFailed(_) => {
+                self.identity_phase = IdentityPhase::Failed;
             }
         }
     }
@@ -1040,6 +1094,71 @@ impl ConnectionsView {
             out.push("no accounts registered - press a to add".to_string());
             return;
         }
+        // One width per column, shared by the header and every row, so the
+        // body reads as a table. A column with no values still gets its
+        // header's width (AC4-EDGE). Name cells render through client::pad_to,
+        // which truncates with an ellipsis at the column cap (AC4-HP).
+        let name_w = |id: &str| id.chars().count().min(MAX_NAME_COL);
+        let w_name = self
+            .accounts
+            .iter()
+            .map(|a| name_w(&a.id))
+            .chain(self.pending.iter().map(|p| name_w(&p.id)))
+            .max()
+            .unwrap_or(0)
+            .max("ACCOUNT".len());
+        let names: Vec<String> = self
+            .accounts
+            .iter()
+            .map(|a| a.id.clone())
+            .chain(self.pending.iter().map(|p| p.id.clone()))
+            .collect();
+        let clis: Vec<String> = self
+            .accounts
+            .iter()
+            .map(|a| a.harness.clone())
+            .chain(self.pending.iter().map(|p| p.cli.clone()))
+            .collect();
+        let auths: Vec<String> = self.accounts.iter().map(|a| a.auth.clone()).collect();
+        let headrooms: Vec<String> = self.accounts.iter().map(|a| a.headroom.clone()).collect();
+        let snaps: Vec<String> = self
+            .accounts
+            .iter()
+            .map(|a| a.snapshot.clone().unwrap_or_default())
+            .collect();
+        let idents: Vec<String> = self
+            .accounts
+            .iter()
+            .map(|a| self.identity_cell(a))
+            .collect();
+        let w = |label: &str, cells: &[String]| -> usize {
+            cells
+                .iter()
+                .map(|c| c.chars().count())
+                .max()
+                .unwrap_or(0)
+                .max(label.chars().count())
+        };
+        let w_cli = w("CLI", &clis);
+        let w_auth = w("AUTH", &auths);
+        let w_head = w("HEADROOM", &headrooms);
+        let w_snap = w("SNAP", &snaps);
+        // Header is inert: no cursor row ever points at it (selection clamps
+        // to data rows), so nothing routes a keypress here.
+        out.push(format!(
+            "    {name:<wname$}  {cli:<wcli$}  {auth:<wauth$}  {head:<whead$}  {snap:<wsnap$}  {ident}",
+            name = "ACCOUNT",
+            wname = w_name,
+            cli = "CLI",
+            wcli = w_cli,
+            auth = "AUTH",
+            wauth = w_auth,
+            head = "HEADROOM",
+            whead = w_head,
+            snap = "SNAP",
+            wsnap = w_snap,
+            ident = "IDENTITY",
+        ));
         for (i, a) in self.accounts.iter().enumerate() {
             let cursor = if i == self.acct_sel { ">" } else { " " };
             let badge = if a.active { "●" } else { " " };
@@ -1051,17 +1170,19 @@ impl ConnectionsView {
             } else {
                 " "
             };
-            let snap = a
-                .snapshot
-                .as_deref()
-                .map(|s| format!("  snap={s}"))
-                .unwrap_or_default();
             out.push(format!(
-                "{cursor}{badge}{spawn} {id}  [{cli}] {auth}  {headroom}{snap}",
-                id = a.id,
+                "{cursor}{badge}{spawn} {name:<wname$}  {cli:<wcli$}  {auth:<wauth$}  {head:<whead$}  {snap:<wsnap$}  {ident}",
+                name = crate::client::pad_to(&names[i], w_name),
+                wname = w_name,
                 cli = a.harness,
+                wcli = w_cli,
                 auth = a.auth,
-                headroom = a.headroom,
+                wauth = w_auth,
+                head = a.headroom,
+                whead = w_head,
+                snap = snaps[i],
+                wsnap = w_snap,
+                ident = idents[i],
             ));
         }
         // Session-local pending logins render after the real records; `r`
@@ -1070,10 +1191,24 @@ impl ConnectionsView {
             let idx = self.accounts.len() + j;
             let cursor = if idx == self.acct_sel { ">" } else { " " };
             out.push(format!(
-                "{cursor}   {id}  [{cli}] …login pending  (r: register)",
-                id = p.id,
-                cli = p.cli,
+                "{cursor}   {name:<wname$}  {cli:<wcli$}  …login pending  (r: register)",
+                name = crate::client::pad_to(&names[self.accounts.len() + j], w_name),
+                wname = w_name,
+                cli = clis[self.accounts.len() + j],
+                wcli = w_cli,
             ));
+        }
+    }
+
+    /// The identity cell for one row, per phase. The modal renders the cell
+    /// `fno config accounts list` printed for the id verbatim, so one
+    /// renderer (Python) states every token; Pending shows `…` and Failed or
+    /// a missing phase-2 row shows `?`.
+    fn identity_cell(&self, a: &Account) -> String {
+        match self.identity_phase {
+            IdentityPhase::Pending => "…".to_string(),
+            IdentityPhase::Failed => "?".to_string(),
+            IdentityPhase::Ready => a.identity_cell.clone().unwrap_or_else(|| "?".to_string()),
         }
     }
 
@@ -1208,15 +1343,75 @@ pub fn parse_combos(stdout: &[u8]) -> Option<Vec<ComboRow>> {
     serde_json::from_slice(stdout).ok()
 }
 
+/// Parse the human `fno config accounts list` table into `(id, identity cell)`
+/// pairs. A row line carries the cell in its own last column behind a
+/// two-space `  identity=` separator; the left side is `<marker><id> ...`
+/// (one active marker char, one space). Footer text has no separator and is
+/// skipped. `None` on non-UTF-8 output or when zero cells parse, so a shape
+/// the modal cannot read fails open as a named phase-2 miss instead of a
+/// silent all-`-` render.
+pub fn parse_identity_cells(stdout: &[u8]) -> Option<Vec<(String, String)>> {
+    let text = std::str::from_utf8(stdout).ok()?;
+    let mut cells = Vec::new();
+    for line in text.lines() {
+        let Some((left, cell)) = line.split_once("  identity=") else {
+            continue;
+        };
+        let Some(id) = left
+            .get(2..)
+            .and_then(|rest| rest.split_whitespace().next())
+        else {
+            continue;
+        };
+        cells.push((id.to_string(), cell.trim_end().to_string()));
+    }
+    if cells.is_empty() {
+        None
+    } else {
+        Some(cells)
+    }
+}
+
 /// Run both reads in parallel and fold into a [`ReadOutcome`]. Any read failing
 /// (missing `fno`, nonzero exit, unparseable JSON, timeout) degrades the whole
 /// modal with a named reason (AC2-ERR) - the CLI is the single source, so a
 /// partial render would be a silent lie.
-pub async fn load_all() -> ReadOutcome {
+///
+/// Two-phase: phase 1 sends `Ok`/`Degraded` as soon as the two fast reads
+/// fold; phase 2 then re-runs
+/// `config accounts list` (plain; the human listing whose last column is the
+/// identity cell) under its own budget and sends `Identity`/`IdentityFailed`.
+/// A phase-2 result landing after a refresh or close is dropped by the
+/// client's gen check, and the modal stays usable throughout (identity is
+/// enrichment, never a gate).
+pub async fn load_all(tx: tokio::sync::mpsc::UnboundedSender<(u64, ReadOutcome)>, gen: u64) {
     let (acc, com) = tokio::join!(
-        read_json(&["config", "accounts", "list", "-J"]),
-        read_json(&["config", "accounts", "combos", "list", "-J"]),
+        read_json(&["config", "accounts", "list", "-J"], READ_TIMEOUT),
+        read_json(
+            &["config", "accounts", "combos", "list", "-J"],
+            READ_TIMEOUT
+        ),
     );
+    let outcome = fold_phase1(acc, com);
+    let degraded = matches!(outcome, ReadOutcome::Degraded(_));
+    let _ = tx.send((gen, outcome));
+    if degraded {
+        return;
+    }
+    let identity = match read_json(&["config", "accounts", "list"], IDENTITY_TIMEOUT).await {
+        Ok(bytes) => match parse_identity_cells(&bytes) {
+            Some(cells) => ReadOutcome::Identity(cells),
+            None => ReadOutcome::IdentityFailed(
+                "identity: no identity column in accounts list output".into(),
+            ),
+        },
+        Err(e) => ReadOutcome::IdentityFailed(format!("identity: {e}")),
+    };
+    let _ = tx.send((gen, identity));
+}
+
+/// Fold the two phase-1 reads into one [`ReadOutcome`].
+fn fold_phase1(acc: Result<Vec<u8>, String>, com: Result<Vec<u8>, String>) -> ReadOutcome {
     let accounts = match acc {
         Ok(bytes) => match parse_accounts(&bytes) {
             Some(v) => v,
@@ -1236,7 +1431,7 @@ pub async fn load_all() -> ReadOutcome {
 
 /// One `fno <args>` read shell-out with the fail-open budget. Resolves the `fno`
 /// binary from `$FNO_BIN` else PATH (the mux shells the deployed CLI).
-async fn read_json(args: &[&str]) -> Result<Vec<u8>, String> {
+async fn read_json(args: &[&str], budget: Duration) -> Result<Vec<u8>, String> {
     let mut command = crate::process_admission::tokio_command(fno_bin());
     command
         .args(args)
@@ -1244,7 +1439,7 @@ async fn read_json(args: &[&str]) -> Result<Vec<u8>, String> {
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
-    let output = tokio::time::timeout(READ_TIMEOUT, fut)
+    let output = tokio::time::timeout(budget, fut)
         .await
         .map_err(|_| "timed out".to_string())?
         .map_err(|e| e.to_string())?;
@@ -1409,10 +1604,10 @@ mod tests {
         let v = ready_view();
         let out = v.render().join("\n");
         assert!(out.contains("ccm"));
-        assert!(out.contains("[claude] managed"));
+        assert!(out.contains("managed"));
         assert!(out.contains("●")); // active badge on ccm
         assert!(out.contains("unknown")); // glm headroom shown, not hidden
-        assert!(out.contains("snap=2h"));
+        assert!(out.contains("2h")); // snap age cell, no snap= prefix
     }
 
     // x-c914 piece 1: set-active-account (`s`) is a session-local spawn-routing
@@ -1490,7 +1685,7 @@ mod tests {
         assert_eq!(v.tab, Tab::Order);
         let out = v.render().join("\n");
         assert!(out.contains("main"));
-        assert!(out.contains("[fallback]"));
+        assert!(out.contains("fallback"));
         assert!(out.contains("●")); // active combo badge
                                     // members numbered in rotation order under the selected combo
         assert!(out.contains("1. ccm"));
@@ -1692,7 +1887,7 @@ mod tests {
         assert_eq!(v.pending.len(), 1);
         assert!(v.pending[0].dir.is_empty()); // shared slot -> register snapshots ~/.claude
         let out = v.render().join("\n");
-        assert!(out.contains("ccm2  [claude] …login pending"));
+        assert!(out.contains("ccm2") && out.contains("claude") && out.contains("…login pending"));
     }
 
     // The opt-in isolated path: an explicit own CLAUDE_CONFIG_DIR (a separate
@@ -1999,5 +2194,169 @@ mod tests {
         assert_eq!(v.on_key(b'l'), ConnIntent::Redraw); // -> combo b
         assert_eq!(v.combo_sel, 1);
         assert_eq!(v.member_sel, 0); // reset
+    }
+
+    // ── identity readout (AC3) + aligned columns (AC4) ──────────────────────
+
+    /// The phase-2 fixture is captured from the real listing's line grammar:
+    /// `<marker> <id>  ...  identity=<cell>`, with a footer line that must be
+    /// skipped.
+    #[test]
+    fn parse_identity_cells_reads_the_list_rows() {
+        let cells = parse_identity_cells(
+            b"* makers  [claude] managed  priority=10  headroom=ok  usage=3m  identity=readyrule\n\
+              \x20 ccr  [claude] managed  priority=20  headroom=low  identity=-\n\
+              \x20 readyrule  [claude] managed  priority=30  headroom=ok  identity=!serves ccr !expired-credential\n\
+              \x20 glm  [claude] api_key  priority=40  identity=?unbound-principal\n\
+              \nquota observation is OFF: accounts.quota.observe = false and nothing probes.\n",
+        )
+        .expect("cells parse");
+        assert_eq!(
+            cells,
+            vec![
+                ("makers".to_string(), "readyrule".to_string()),
+                ("ccr".to_string(), "-".to_string()),
+                (
+                    "readyrule".to_string(),
+                    "!serves ccr !expired-credential".to_string()
+                ),
+                ("glm".to_string(), "?unbound-principal".to_string()),
+            ]
+        );
+    }
+
+    // A listing with rows but no `  identity=` column states nothing: no cells
+    // parse, which load_all renders as a named phase-2 miss (`?` everywhere).
+    #[test]
+    fn parse_identity_cells_refuses_output_without_the_column() {
+        let out = b"* makers  [claude] managed  priority=10  headroom=ok\n\
+                    \x20 ccr  [claude] managed  priority=20\n\
+                    quota observation is OFF: nothing probes.\n";
+        assert!(parse_identity_cells(out).is_none());
+    }
+
+    fn identity_cells() -> Vec<(String, String)> {
+        vec![
+            (
+                "ccm".to_string(),
+                "!serves ccr !expired-credential".to_string(),
+            ),
+            ("ccr".to_string(), "ccr".to_string()),
+            ("glm".to_string(), "-".to_string()),
+        ]
+    }
+
+    // AC3-HP: phase-1 rows render a pending placeholder, phase 2 fills the
+    // list's own cells in without touching the selection or an unsaved order.
+    #[test]
+    fn identity_placeholder_until_phase_two_then_tokens() {
+        let mut v = ready_view();
+        let out = v.render().join("\n");
+        assert!(out.contains('…')); // every identity cell pending
+        v.acct_sel = 1;
+        v.on_key(b'\t'); // -> Order, build an unsaved reorder buffer
+        assert!(matches!(v.on_key(b'J'), ConnIntent::Redraw));
+        assert!(v.dirty_order.is_some());
+        v.apply_read(ReadOutcome::Identity(identity_cells()));
+        assert!(v.dirty_order.is_some()); // untouched by phase 2
+        assert_eq!(v.acct_sel, 1);
+        assert_eq!(v.state, ModalState::Ready); // still Ready, not Degraded
+        assert_eq!(
+            v.accounts[0].identity_cell.as_deref(),
+            Some("!serves ccr !expired-credential")
+        );
+        // Back on Accounts, the cells render the list's own tokens verbatim.
+        v.on_key(b'\t'); // -> Accounts (discards the dirty buffer)
+        let out = v.render().join("\n");
+        assert!(out.contains("!serves ccr"));
+        assert!(out.contains("!expired-credential"));
+        // The api_key row has nothing to state: the list printed `-` and the
+        // modal takes it verbatim, not `?reason`.
+        let glm_row = out.lines().find(|l| l.contains("glm")).expect("glm row");
+        assert!(glm_row.trim_end().ends_with('-'), "dash cell: {glm_row}");
+        assert!(!out.contains("?api-key-route"));
+    }
+
+    // AC2-EDGE: a phase-1 id absent from the phase-2 output reads `?` while
+    // the rows that did land show their cells.
+    #[test]
+    fn a_row_missing_from_phase_two_reads_question_mark() {
+        let mut v = ready_view();
+        v.apply_read(ReadOutcome::Identity(vec![(
+            "ccr".to_string(),
+            "ccr".to_string(),
+        )]));
+        assert_eq!(v.identity_phase, IdentityPhase::Ready);
+        let out = v.render().join("\n");
+        let ccm_row = out
+            .lines()
+            .find(|l| l.contains(" managed") && l.contains("ccm"))
+            .expect("ccm row");
+        assert!(ccm_row.contains('?'), "missing id reads ?: {ccm_row}");
+        let ccr_row = out
+            .lines()
+            .find(|l| l.contains(" managed") && l.contains("ccr"))
+            .expect("ccr row");
+        assert!(ccr_row.contains("ccr"));
+    }
+
+    // AC3-ERR: a failed/late phase 2 renders every cell `?` and stays Ready.
+    #[test]
+    fn identity_failure_marks_cells_and_stays_ready() {
+        let mut v = ready_view();
+        v.apply_read(ReadOutcome::IdentityFailed("identity: timed out".into()));
+        assert_eq!(v.state, ModalState::Ready);
+        let out = v.render().join("\n");
+        for line in out.lines().filter(|l| l.contains("managed")) {
+            assert!(line.contains('?'), "cell must read ?: {line}");
+        }
+        assert!(!out.contains("!serves"));
+    }
+
+    // AC4-HP: a header row and aligned columns; the name clamps; exactly one
+    // blank line at each seam.
+    #[test]
+    fn aligned_columns_header_and_seams() {
+        let mut v = ready_view();
+        let long: String = "a-very-long-account-name".into();
+        v.accounts[0].id = long.clone();
+        let out = v.render();
+        // tab-bar/body seam: exactly one blank line after the tab bar (pad_block
+        // pads blanks to the rectangle, so "blank" means whitespace-only)
+        assert!(out[1].trim().is_empty());
+        assert!(!out[2].trim().is_empty());
+        // body/footer seam: exactly one blank line before the footer
+        let footer_pos = out.iter().position(|l| l.contains("Tab: order")).unwrap();
+        assert!(out[footer_pos - 1].trim().is_empty());
+        // header is present and inert (no cursor on it)
+        let header = out.iter().find(|l| l.contains("IDENTITY")).expect("header");
+        assert!(header.starts_with(' '));
+        assert!(!header.contains('>'));
+        // name clamped with an ellipsis, never truncated silently
+        assert!(out
+            .iter()
+            .any(|l| l.contains('…') && l.contains("a-very-long")));
+    }
+
+    // AC4-EDGE: an empty list prints no header; an all-empty column is sized
+    // to its header label (no negative pad).
+    #[test]
+    fn empty_list_no_header_and_empty_column_sized_to_label() {
+        let mut v = ConnectionsView::new();
+        v.apply_read(ReadOutcome::Ok {
+            accounts: vec![],
+            combos: vec![],
+        });
+        assert!(!v.render().join("\n").contains("IDENTITY"));
+        // glm is the only snapshot-less row if alone: every snap cell empty.
+        let mut v = ConnectionsView::new();
+        v.apply_read(ReadOutcome::Ok {
+            accounts: parse_accounts(br#"[{"id":"glm","harness":"claude","auth":"api_key"}]"#)
+                .unwrap(),
+            combos: sample_combos(),
+        });
+        let out = v.render().join("\n");
+        // renders at all and the SNAP header exists even with no values
+        assert!(out.contains("SNAP"));
     }
 }

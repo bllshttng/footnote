@@ -107,6 +107,50 @@ pub fn classify(running: Option<&ExeFingerprint>, on_disk: Option<&ExeFingerprin
     }
 }
 
+/// Self-drift for a long-lived process: compare the fingerprint the process
+/// captured at startup against what its own executable path holds NOW. This
+/// is the census question ("is this running process an older build than the
+/// binary it was launched from?"), answered without a daemon round-trip.
+pub fn self_drift(startup: &ExeFingerprint) -> DriftState {
+    classify(Some(startup), ExeFingerprint::of(&startup.path).as_ref())
+}
+
+/// The one-word label every consumer prints. No second rule.
+pub fn drift_label(state: &DriftState) -> &'static str {
+    match state {
+        DriftState::Fresh => "fresh",
+        DriftState::Drifted { .. } => "drifted",
+        DriftState::DaemonDown | DriftState::Unknown => "unknown",
+    }
+}
+
+/// The live store keeper's path note (x-d6ad AC13): name the path the keeper
+/// runs from, and mark it against the installed release path. The keeper's
+/// identity comes from the footprint payload's `top` array - its own argv
+/// string - so no new probe is needed. The note always names the path (a
+/// positive marker), and marks it "not the installed release path" whenever
+/// that equality cannot be proven, not only when drift is proven.
+pub fn keeper_path_note(top_commands: &[String], installed_exe: Option<&Path>) -> Option<String> {
+    let argv0 = top_commands.iter().find_map(|command| {
+        let mut words = command.split_whitespace();
+        let program = words.next()?;
+        if Path::new(program).file_name()?.to_str()? != "fno-agents" {
+            return None;
+        }
+        if !words.any(|word| word == "--store-keeper") {
+            return None;
+        }
+        Some(program)
+    })?;
+    let running = ExeFingerprint::of(Path::new(argv0));
+    let installed = installed_exe.and_then(ExeFingerprint::of);
+    let kind = match (running, installed) {
+        (Some(r), Some(d)) if r.path == d.path => "the installed release path",
+        _ => "not the installed release path",
+    };
+    Some(format!("store keeper: {argv0} ({kind})"))
+}
+
 /// Format the operator-facing drift warning, or `None` when there is nothing to
 /// warn about (`Fresh`/`DaemonDown`/`Unknown`). The message is advisory and
 /// names the exact remedy verb. The caller routes it to **stderr** only, so a
@@ -124,7 +168,9 @@ pub fn drift_warning(state: &DriftState, pid: Option<u32>) -> Option<String> {
             };
             Some(format!(
                 "fno agents: {who} is an older build than the installed binary; \
-                 run `fno agents restart` to pick up the new build."
+                 `fno agents restart` fixes it but restarts every worker on the \
+                 shared daemon, so it is an operator action - surface it to the \
+                 operator instead of running it from an agent session."
             ))
         }
         DriftState::Fresh | DriftState::DaemonDown | DriftState::Unknown => None,
@@ -243,21 +289,103 @@ mod tests {
     }
 
     #[test]
-    fn drift_warning_names_restart_verb() {
-        // AC1-HP (message half): a Drifted state warns, names the restart verb,
-        // and weaves in the pid when present.
+    fn self_drift_reads_fresh_then_drifted_after_a_rewrite() {
+        let p = tmp_path("self");
+        write_file(&p, b"bin");
+        let fp = ExeFingerprint::of(&p).unwrap();
+        assert_eq!(drift_label(&self_drift(&fp)), "fresh");
+        write_file(&p, b"bin by a newer build");
+        assert_eq!(drift_label(&self_drift(&fp)), "drifted");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn drift_label_maps_every_state() {
         let fp = ExeFingerprint {
             path: PathBuf::from("/x"),
             mtime_nanos: 1,
             size: 1,
         };
-        let state = DriftState::Drifted {
-            running: fp.clone(),
-            on_disk: fp,
-        };
-        let msg = drift_warning(&state, Some(91627)).expect("warns on drift");
+        assert_eq!(drift_label(&classify(Some(&fp), Some(&fp))), "fresh");
+        assert_eq!(drift_label(&classify(Some(&fp), None)), "unknown");
+        let drifted = classify(
+            Some(&fp),
+            Some(&ExeFingerprint {
+                size: 2,
+                ..fp.clone()
+            }),
+        );
+        assert_eq!(drift_label(&drifted), "drifted");
+    }
+
+    #[test]
+    fn drift_warning_names_restart_verb() {
+        // AC1-HP (message half): a Drifted state warns, names the restart verb,
+        // and weaves in the pid when present.
+        let msg = drift_warning(&drift_state(), Some(91627)).expect("warns on drift");
         assert!(msg.contains("fno agents restart"), "names the remedy verb");
         assert!(msg.contains("build"), "describes a build mismatch");
         assert!(msg.contains("91627"), "names the pid when known");
+        assert!(msg.contains("operator"), "names who can act");
+        assert!(!msg.contains('\n'), "stays on one line");
+    }
+
+    fn drift_state() -> DriftState {
+        let fp = ExeFingerprint {
+            path: PathBuf::from("/x"),
+            mtime_nanos: 1,
+            size: 1,
+        };
+        DriftState::Drifted {
+            running: fp.clone(),
+            on_disk: fp,
+        }
+    }
+
+    #[test]
+    fn keeper_note_names_the_path_and_marks_a_worktree_build() {
+        // AC13: the note is a positive marker - it names the path the keeper
+        // runs from, and marks what it is, by its own string.
+        let commands = vec![
+            "Google Chrome Helper (Renderer)".to_string(),
+            "/Users/dev/.fno/worktrees/footnote/x-d6ad/target/debug/fno-agents --store-keeper --sock /tmp/x".to_string(),
+        ];
+        let note = keeper_path_note(&commands, None).expect("note");
+        assert!(
+            note.contains("/Users/dev/.fno/worktrees/footnote"),
+            "{note}"
+        );
+        assert!(note.contains("not the installed release path"), "{note}");
+    }
+
+    #[test]
+    fn keeper_note_says_when_the_keeper_is_the_installed_release() {
+        // The keeper detector matches argv0's basename, so the staged file
+        // must be named like the real binary.
+        let dir = std::env::temp_dir().join(format!(
+            "fno_drift_keeper_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("fno-agents");
+        write_file(&p, b"bin");
+        let commands = vec![format!("{} --store-keeper --sock /tmp/x", p.display())];
+        let note = keeper_path_note(&commands, Some(&p)).expect("note");
+        assert!(note.contains("the installed release path"), "{note}");
+        fs::remove_file(&p).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn keeper_note_is_none_without_a_keeper_row() {
+        let commands = vec![
+            "/usr/bin/rustc --edition=2021".to_string(),
+            "claude bg-spare --bg-spare /tmp/spare".to_string(),
+        ];
+        assert_eq!(keeper_path_note(&commands, None), None);
     }
 }

@@ -28,7 +28,8 @@ Termination events land in `.fno/events.jsonl`. The loop terminates on `DonePRGr
 ## Cancel
 
 ```bash
-touch .fno/.target-cancelled   # the loop checks this sentinel between iterations
+printf 'author: operator\nreason: stopping the walk\n' > .fno/.target-cancelled
+# the loop checks this sentinel between iterations and echoes author/reason
 ```
 
 ## Parked nodes

@@ -61,6 +61,10 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/truncation-guard.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/recursive-grep-guard.py"
           }
         ]
       },
@@ -109,6 +113,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-mail-notify.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-announce.sh prompt"
           }
         ]
       }
@@ -358,6 +366,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id operator-capture-nudge --expected using-fno,inject-project-vision,setup-nudge-session-start,frontdoor-nudge-session-start,inject-fno-agent-whoami,worktree-peers-session-start,cache-keepalive-inject,register-session-start,inject-mail-drain-session-start,reconcile-session-start,attest-model,eval-sweep-session-start,groom-self-heal-session-start,outstanding-session-start,spawn-seed-provenance-session-start,law-session-start,operator-capture-nudge -- ${CLAUDE_PLUGIN_ROOT}/hooks/operator-capture-nudge.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-announce.sh start"
           }
         ]
       },

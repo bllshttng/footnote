@@ -25,6 +25,7 @@ fn main() {
     // copies fresh.
     sync_harness_capabilities();
     sync_merge_posture();
+    sync_spawn_phase();
     sync_registry_schema();
     sync_events_limits();
     sync_check_supersession();
@@ -43,6 +44,13 @@ fn main() {
     println!("cargo:rustc-env=FNO_AGENTS_GIT_REV={rev}");
     println!("cargo:rustc-env=FNO_AGENTS_GIT_DIRTY={}", u8::from(dirty));
     println!("cargo:rustc-env=FNO_AGENTS_CRATES_REV={crates_rev}");
+    // Baked for state::source_root_for_exe: a detached OUT_DIR (a build-dir
+    // override like the machine pool) marks this binary as a dev build whose
+    // manifest dir can recover the source root.
+    println!(
+        "cargo:rustc-env=FNO_AGENTS_BUILD_OUT_DIR={}",
+        std::env::var("OUT_DIR").unwrap_or_default()
+    );
 
     // Rebuild when HEAD moves so an incremental dev build does not bake a stale
     // rev. (The install path -- `cargo install` -- always does a clean build, so
@@ -192,6 +200,25 @@ fn sync_merge_posture() {
     };
     let Some(root) = repo_root() else { return };
     let cli_copy = root.join("cli/src/fno/agents/merge_posture.toml");
+    if !cli_copy.is_file() {
+        return;
+    }
+    write_if_different(&cli_copy, &bytes);
+}
+
+/// PRODUCE the downstream copy of the spawn verb-to-phase table (x-007c).
+///
+/// Same shape as [`sync_merge_posture`]: the canonical TOML lives in this
+/// crate, and the Python package reads a byte copy as package data so
+/// `infer_phase` and any future Rust reader cannot drift.
+fn sync_spawn_phase() {
+    println!("cargo:rerun-if-changed=src/spawn_phase.toml");
+    let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/spawn_phase.toml");
+    let Ok(bytes) = std::fs::read(&canonical) else {
+        return;
+    };
+    let Some(root) = repo_root() else { return };
+    let cli_copy = root.join("cli/src/fno/agents/spawn_phase.toml");
     if !cli_copy.is_file() {
         return;
     }

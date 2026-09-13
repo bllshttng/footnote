@@ -654,3 +654,75 @@ def test_batch_undefer_warns_for_non_deferred(tmp_graph, tmp_path, monkeypatch):
     assert deferred in emitted and fresh not in emitted, (
         f"event should fire only for deferred nodes; got {emitted}"
     )
+
+
+# -- undefer prints what it clears (x-6f98) --
+
+
+def test_undefer_prints_the_cleared_reason_and_any_plan_ruling(
+    tmp_graph, tmp_path, monkeypatch
+):
+    """AC5-HP (x-6f98): the reversal reads back what it erased."""
+    node_id = _seed_with_plan(tmp_path, "Ruled Out Node")
+    _invoke("backlog", "defer", node_id, "--kind", "wont_do", "--reason", "R")
+
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    (plans / "plan-x-aaaa.md").write_text(
+        f"---\nclaims: x-aaaa\ntitle: T\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  rejected:\n"
+        f"    - id: {node_id}\n"
+        "      reason: R\n"
+        "---\n\n# T\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: plans)
+
+    r = _invoke("backlog", "undefer", node_id)
+
+    assert r.exit_code == 0, r.output
+    assert f"undefer: cleared the deferral of {node_id} (wont_do): R" in r.stderr
+    assert f"undefer: {node_id} is rejected by x-aaaa" in r.stderr
+    assert str(plans / "plan-x-aaaa.md") in r.stderr
+    assert f"Undeferred {node_id}" in r.stdout
+    node = next(e for e in _read_entries(tmp_graph) if e["id"] == node_id)
+    assert not node.get("deferred_at")
+
+
+def test_undefer_without_a_ruling_prints_no_ruling_line(tmp_graph, tmp_path, monkeypatch):
+    """AC5-EDGE: a cleared reason stands alone when no plan rejects the node."""
+    node_id = _seed_with_plan(tmp_path, "Plain Deferred")
+    _invoke("backlog", "defer", node_id, "--kind", "later", "--reason", "parked for now")
+
+    empty = tmp_path / "plans-empty"
+    empty.mkdir()
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: empty)
+
+    r = _invoke("backlog", "undefer", node_id)
+
+    assert r.exit_code == 0, r.output
+    assert (
+        f"undefer: cleared the deferral of {node_id} (later): parked for now"
+        in r.stderr
+    )
+    assert "rejected by" not in r.stderr
+
+
+def test_undefer_names_an_unreadable_plans_dir_and_still_succeeds(
+    tmp_graph, tmp_path, monkeypatch
+):
+    """AC5-EDGE: a broken scan is named, never folded into silence or a refusal."""
+    node_id = _seed_with_plan(tmp_path, "Unreadable Plans")
+    _invoke("backlog", "defer", node_id, "--reason", "stale")
+
+    missing = tmp_path / "no" / "such" / "dir"
+    monkeypatch.setattr("fno.paths.plans_content_dir", lambda project_root=None: missing)
+
+    r = _invoke("backlog", "undefer", node_id)
+
+    assert r.exit_code == 0, r.output
+    assert "plan rulings for" in r.stderr
+    assert "not read" in r.stderr
+    assert f"Undeferred {node_id}" in r.stdout

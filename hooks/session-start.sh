@@ -257,6 +257,16 @@ if [[ -f "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" ]]; then
     mail_content=$(bash "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" 2>/dev/null || echo "")
 fi
 
+# 6a. fleet announcements (x-8cfb) - one bus line every session reads by its
+#     own cursor. The sub-hook maps the SessionStart input's source:compact to
+#     the compact boundary itself, so a compacted session re-sees standing
+#     announcements. Fails open; silent when there is nothing standing.
+announce_content=""
+if [[ -f "${SCRIPT_DIR}/inject-announce.sh" ]]; then
+    announce_content=$(bash "${SCRIPT_DIR}/inject-announce.sh" start \
+        <"${CONTEXT_HOOK_INPUT:-/dev/null}" 2>/dev/null || true)
+fi
+
 # 7. outstanding — unharvested carve-outs + open operator questions. Delegates
 #    to the same hook Claude registers directly in hooks.json, so both harnesses
 #    run ONE implementation. `|| true` guards the assignment because this script
@@ -379,6 +389,7 @@ append_section "$whoami_content"
 append_section "$hygiene_content"
 append_section "$nudge_content"
 append_section "$mail_content"
+append_section "$announce_content"
 append_section "$outstanding_content"
 append_section "$law_content"
 append_section "$seed_prov_content"

@@ -143,6 +143,12 @@ echo "== 3. archive-worktree.sh declines cleanly without a tty =="
 S=$(new_sandbox)
 ( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
 WT="$S/wt"
+# The tty-decline test needs a finished-candidate tree: a fresh worktree on an
+# unmoved branch is refused by the reapable gate (reason=unborn) before the
+# confirmation prompt, which is the unborn bucket's job, not this test's.
+( cd "$WT" && printf 'x = 1\n' > f.py \
+  && git -c user.email=t@t -c user.name=t add f.py \
+  && git -c user.email=t@t -c user.name=t commit -qm work ) >/dev/null 2>&1
 ( cd "$WT" && exec sleep 300 ) & HOLD=$!
 disown "$HOLD" 2>/dev/null || true
 sleep 0.6
@@ -158,6 +164,27 @@ else
     echo "  SKIP: perl unavailable (needed for setsid)"
 fi
 kill "$HOLD" 2>/dev/null
+rm -rf "$S"
+
+echo "== 3b. archive: an unborn tree named by a human goes, named by a sweep it stays =="
+
+# Orphan recovery: `target init` advertises a plain `worktree archive` for a
+# tree that outlived its session, and that tree is often still unborn. A
+# manual archive names ONE tree a human decided about, so the setup-window
+# refusal must not stand in front of it; an automatic leg (the sweep or the
+# ritual passes FNO_WT_REMOVE_CALLER) keeps the refusal.
+S=$(new_sandbox)
+( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
+WT="$S/wt"
+out=$(bash "$ARCHIVE" "$WT" --yes 2>&1); rc=$?
+if [[ $rc -eq 0 && ! -d "$WT" ]]; then pass "manual archive removes an unborn tree"; else fail "manual unborn archive" "rc=$rc exists=$([[ -d "$WT" ]] && echo y || echo n) out=$out"; fi
+rm -rf "$S"
+
+S=$(new_sandbox)
+( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
+WT="$S/wt"
+out=$(FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$WT" --yes 2>&1); rc=$?
+if [[ $rc -eq 2 && -d "$WT" ]] && echo "$out" | grep -q 'reason=unborn'; then pass "sweep-caller archive still refuses an unborn tree"; else fail "sweep unborn refuse" "rc=$rc exists=$([[ -d "$WT" ]] && echo y || echo n) out=$out"; fi
 rm -rf "$S"
 
 echo "== 4. sweep reaps dead bg-job records =="
@@ -194,13 +221,31 @@ S=$(new_sandbox)
 git -C "$S" worktree add -q "$S/wt" >/dev/null 2>&1
 COMMON=$(git -C "$S" rev-parse --git-common-dir)
 case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
-LOCKDIR="$COMMON/fno-wt-sweep.lock"
+# Physical path: the sweep's guidance line prints what its own rev-parse
+# resolved, and macOS /var is a symlink to /private/var.
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
 rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"; echo $$ > "$LOCKDIR/pid"   # this test process is alive
 out=$(cd "$S/wt" && bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
 if [[ $rc -eq 0 ]] && echo "$out" | grep -q "already running" && ! echo "$out" | grep -q "^STATUS"; then
     pass "second sweep exits immediately, no scan (exit 0)"
 else
     fail "concurrent sweep exclusion" "rc=$rc out=$out"
+fi
+# A pid-only stamp is a legacy stamp: the holder may be a pre-upgrade sweep, so
+# the refusal tells the operator which path to clear by hand.
+if echo "$out" | grep -qF "remove $LOCKDIR"; then
+    pass "pid-only refusal names the lock path to remove"
+else
+    fail "legacy lock guidance" "no remove-the-lock line in: $out"
+fi
+# The birth certificate is created before the lock check; the already-running
+# exit must not leak it into the common dir. Positive controls: the
+# already-running line above proves this exit path ran, and the planted lock
+# still being here proves this is the directory the sweep resolves.
+if [[ -d "$LOCKDIR" ]] && [[ -z "$(find "$COMMON" -maxdepth 1 -name '.fno-wt-sweep-started.*' 2>/dev/null)" ]]; then
+    pass "already-running exit leaves no birth certificate"
+else
+    fail "birth certificate leak" "leftovers: $(find "$COMMON" -maxdepth 1 -name '.fno-wt-sweep-started.*' 2>/dev/null)"
 fi
 rm -rf "$LOCKDIR"
 rm -rf "$S"
@@ -464,11 +509,27 @@ LOCKDIR="$COMMON/fno-wt-sweep.lock"
 rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
 ( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null   # pid now dead
 echo "$DEAD" > "$LOCKDIR/pid"
+# The winner must still HOLD when the contender makes its next decision: a
+# sweep that finishes and tears down inside the contender's retry budget lets
+# the second sweep legitimately acquire a FREE path, which reads as
+# proceeded=2 while mutual exclusion never broke. Slowing the acquirer's
+# fetch past the contender's whole decision window pins the interleaving the
+# case exists to test.
+RACESTUB=$(mktemp -d -t race-stub.XXXXXX)
+REALGIT="$(command -v git)"
+cat > "$RACESTUB/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "-C" && "\$3" == "fetch" ]]; then
+    sleep 1
+fi
+exec "$REALGIT" "\$@"
+EOF
+chmod +x "$RACESTUB/git"
 OUT_A=$(mktemp -t race-a.XXXXXX)
 OUT_B=$(mktemp -t race-b.XXXXXX)
-( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_A" 2>&1 ) &
+( cd "$S" && PATH="$RACESTUB:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_A" 2>&1 ) &
 RACE_A=$!
-( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_B" 2>&1 ) &
+( cd "$S" && PATH="$RACESTUB:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_B" 2>&1 ) &
 RACE_B=$!
 wait "$RACE_A" 2>/dev/null
 wait "$RACE_B" 2>/dev/null
@@ -482,7 +543,7 @@ else
     fail "concurrent reclaim race" "proceeded=$PROCEEDED (want 1) A=[$(cat "$OUT_A")] B=[$(cat "$OUT_B")]"
 fi
 rm -f "$OUT_A" "$OUT_B"
-rm -rf "$LOCKDIR" "$S" "$BARE"
+rm -rf "$RACESTUB" "$LOCKDIR" "$S" "$BARE"
 
 # 5h2. ABA, staged deterministically - no timing, no concurrency. The
 # reclaimer observes a stale lock (dead pid), and between that observation
@@ -762,6 +823,12 @@ rm -rf "$LOCKDIR"
 ( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null
 mkdir -p "$LOCKDIR.stale.999001"; echo "$DEAD" > "$LOCKDIR.stale.999001/pid"
 mkdir -p "$LOCKDIR.stale.999002"; echo "$$" > "$LOCKDIR.stale.999002/pid"
+# A two-line stamp naming this live test shell with an impossible start time:
+# the sibling GC must read the start line, not just the pid.
+mkdir -p "$LOCKDIR.stale.999003"; printf '%s\n%s\n' "$$" "Thu Jan 1 00:00:00 1970" > "$LOCKDIR.stale.999003/pid"
+# Birth certificates: one older than the five-minute reap bound, one fresh.
+: > "$COMMON/.fno-wt-sweep-started.999010"; touch -t 202001010000 "$COMMON/.fno-wt-sweep-started.999010"
+: > "$COMMON/.fno-wt-sweep-started.999011"
 OUT_ABA6=$(mktemp -t aba6.XXXXXX)
 ( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA6" 2>&1 )
 if grep -q "^STATUS" "$OUT_ABA6"; then
@@ -779,8 +846,18 @@ if [[ -d "$LOCKDIR.stale.999002" ]]; then
 else
     fail "sibling GC ate a live-stamp leftover" "a claim naming a live process was reaped"
 fi
+if [[ ! -d "$LOCKDIR.stale.999003" ]]; then
+    pass "sibling GC reaped the reused-pid leftover"
+else
+    fail "sibling GC kept a reused-pid leftover" "a two-line stamp naming a live pid with a foreign start time survived"
+fi
+if [[ ! -e "$COMMON/.fno-wt-sweep-started.999010" && -e "$COMMON/.fno-wt-sweep-started.999011" ]]; then
+    pass "birth certificate GC reaped the old one, kept the fresh one"
+else
+    fail "birth certificate GC" "old-present=$([[ -e "$COMMON/.fno-wt-sweep-started.999010" ]] && echo y || echo n) fresh-present=$([[ -e "$COMMON/.fno-wt-sweep-started.999011" ]] && echo y || echo n)"
+fi
 rm -f "$OUT_ABA6"
-rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE" "$LOCKDIR".stale.* 2>/dev/null
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE" "$LOCKDIR".stale.* "$COMMON"/.fno-wt-sweep-started.* 2>/dev/null
 
 # 5h7. The deepest wedge: a PID-LESS dir WITH content (an interrupted steal's
 # nested copy, whose owner's trap unlinked the pid but could not rmdir) is
@@ -869,6 +946,589 @@ else
 fi
 rm -f "$OUT_W3"
 rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
+
+# 5h9. A recycled pid: the lock's stamp names this LIVE test shell but carries
+# an impossible start time (the epoch, which no process can claim). kill -0
+# alone reads the holder as alive and every sweep no-ops forever; the start
+# comparison must read the stamp as reused, reclaim the lock, and proceed.
+# No stubs: the mismatch is planted, not raced.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare9.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$COMMON/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+printf '%s\n%s\n' "$$" "Thu Jan 1 00:00:00 1970" > "$LOCKDIR/pid"
+OUT_RECYCLED=$(mktemp -t recycled.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_RECYCLED" 2>&1 )
+if grep -q "^STATUS" "$OUT_RECYCLED"; then
+    pass "reused-pid lock reclaimed, sweep proceeds"
+else
+    fail "reused pid wedges the sweep" "no STATUS; the sweep read a live foreign stamp as a live holder: [$(tail -1 "$OUT_RECYCLED")]"
+fi
+if grep -q "the pid was reused" "$OUT_RECYCLED"; then
+    pass "reused-pid receipt printed"
+else
+    fail "no reused-pid receipt" "the reclaim happened silently or not at all: [$(tail -1 "$OUT_RECYCLED")]"
+fi
+rm -f "$OUT_RECYCLED"
+rm -rf "$LOCKDIR" "$S" "$BARE"
+
+# 5h10. The control for 5h9: a two-line stamp whose start time REALLY belongs
+# to the live pid must keep the already-running refusal - the new check must
+# never steal from a genuine holder. The stamp is written from the same
+# identity primitive the sweep uses, so any mismatch here is instrument error,
+# not behavior.
+source "$REPO_ROOT/scripts/lib/events-lock.sh"
+eval "$(sed -n '/^_wt_stamp_identity()/,/^}/p' "$LIFECYCLE")"
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare10.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$COMMON/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+REAL_STARTED="$(_wt_stamp_identity $$)"
+if [[ -n "$REAL_STARTED" ]]; then
+    pass "identity instrument answered for a live pid"
+else
+    fail "identity instrument empty" "ps -o lstart= answered nothing; the planted stamp below proves nothing"
+fi
+printf '%s\n%s\n' "$$" "$REAL_STARTED" > "$LOCKDIR/pid"
+OUT_HOLDER=$(mktemp -t holder.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_HOLDER" 2>&1 )
+if grep -q "already running" "$OUT_HOLDER" && ! grep -q "^STATUS" "$OUT_HOLDER"; then
+    pass "genuine two-line holder still refused politely"
+else
+    fail "live holder stolen" "the sweep took a lock whose stamp matched reality: [$(tail -1 "$OUT_HOLDER")]"
+fi
+if ! grep -q "the pid was reused" "$OUT_HOLDER"; then
+    pass "no false reused-pid receipt for a matched stamp"
+else
+    fail "false reused receipt" "a matching start time was read as a recycled pid"
+fi
+rm -f "$OUT_HOLDER"
+rm -rf "$LOCKDIR" "$S" "$BARE"
+
+# 5h11. Writer round trip: an acquiring sweep must stamp TWO lines - its pid
+# and its own UTC start identity. A git stub captures the lock's pid file at
+# the sweep's first post-acquire git worktree call and, while the sweep is
+# still alive, recomputes the identity of the stamped pid from the same
+# primitive. Fails while the writer stamps only $$.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare11.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"
+REALGIT="$(command -v git)"
+STUBDIR=$(mktemp -d -t stamp-stub.XXXXXX)
+CAPFILE="$STUBDIR/captured-pid"
+IDENTFILE="$STUBDIR/computed-identity"
+STUBRAN="$STUBDIR/stub-ran"
+cat > "$STUBDIR/git" <<EOF
+#!/usr/bin/env bash
+# One-time at the first post-acquire worktree listing: capture the stamp the
+# sweep wrote, then recompute the stamped pid's start identity from the same
+# helper while the sweep is alive to answer ps.
+if [[ "\$1" == "worktree" && ! -e "$STUBRAN" ]]; then
+    : > "$STUBRAN"
+    /bin/cat "$LOCKDIR/pid" > "$CAPFILE" 2>/dev/null
+    source "$REPO_ROOT/scripts/lib/events-lock.sh"
+    eval "\$(sed -n '/^_wt_stamp_identity()/,/^}/p' "$LIFECYCLE")"
+    _wt_stamp_identity "\$(head -1 "$CAPFILE")" > "$IDENTFILE" 2>/dev/null
+fi
+exec "$REALGIT" "\$@"
+EOF
+chmod +x "$STUBDIR/git"
+OUT_STAMP=$(mktemp -t stamp.XXXXXX)
+( cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_STAMP" 2>&1 )
+if grep -q "^STATUS" "$OUT_STAMP"; then
+    pass "writer round-trip sweep acquired and listed"
+else
+    fail "writer round-trip sweep never ran" "[$(tail -1 "$OUT_STAMP")]"
+fi
+if [[ -f "$STUBRAN" ]]; then
+    pass "stamp capture instrument ran"
+else
+    fail "stamp capture instrument never ran" "the stub git was never consulted; a green here would be vacuous"
+fi
+if [[ "$(wc -l < "$CAPFILE" 2>/dev/null | tr -d ' ')" == "2" ]]; then
+    pass "stamp carries exactly two lines"
+else
+    fail "stamp shape" "want 2 lines, got $(wc -l < "$CAPFILE" 2>/dev/null | tr -d ' '): [$(/bin/cat "$CAPFILE" 2>/dev/null)]"
+fi
+if [[ -s "$IDENTFILE" ]] && [[ "$(sed -n 2p "$CAPFILE" 2>/dev/null)" == "$(cat "$IDENTFILE")" ]]; then
+    pass "stamp line 2 equals the pid's computed start identity"
+else
+    fail "stamp identity mismatch" "line2=[$(sed -n 2p "$CAPFILE" 2>/dev/null)] computed=[$(/bin/cat "$IDENTFILE" 2>/dev/null)]"
+fi
+rm -f "$OUT_STAMP"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
+
+echo "== 6. the sweep lock resolves its own directory, honestly =="
+
+# 6a. The regression: from a subdirectory the lock must still land in the
+# real common dir and the sweep must produce its normal listing. The lock
+# path is `git rev-parse --path-format=absolute --git-common-dir`; a join of
+# the raw relative answer onto the toplevel only holds at the toplevel.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare6.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+mkdir -p "$S/sub"
+OUT_SUB=$(mktemp -t sub-out.XXXXXX)
+ERR_SUB=$(mktemp -t sub-err.XXXXXX)
+( cd "$S/sub" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_SUB" 2>"$ERR_SUB" )
+if grep -q "^STATUS" "$OUT_SUB" && ! grep -q "could not acquire sweep lock" "$ERR_SUB" \
+    && ! grep -q "No such file or directory" "$ERR_SUB"; then
+    pass "sweep runs from a subdirectory, no lock error"
+else
+    fail "sweep from subdirectory" "out=[$(cat "$OUT_SUB")] err=[$(cat "$ERR_SUB")]"
+fi
+rm -f "$OUT_SUB" "$ERR_SUB"
+rm -rf "$S" "$BARE"
+
+# 6b. An unusable lock directory refuses honestly: non-zero exit, and the
+# message names the real cause instead of calling it contention. A caller
+# who reads "after retries" waits out a race that does not exist.
+NONREPO=$(mktemp -d -t wt-nonrepo.XXXXXX)
+OUT_NR=$(mktemp -t nr-out.XXXXXX)
+ERR_NR=$(mktemp -t nr-err.XXXXXX)
+( cd "$NONREPO" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_NR" 2>"$ERR_NR" ); rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "not lock contention" "$ERR_NR" && ! grep -q "after retries" "$ERR_NR"; then
+    pass "unusable lock dir refuses honestly"
+else
+    fail "unusable lock dir refusal" "rc=$rc err=[$(cat "$ERR_NR")]"
+fi
+rm -f "$OUT_NR" "$ERR_NR"
+rm -rf "$NONREPO"
+
+# 6c. Genuine contention keeps its honest shape: a live holder is reported
+# by pid and exits 0, so the honest refusal above can never collapse every
+# lock outcome into one message.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare6c.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$COMMON/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+echo "$$" > "$LOCKDIR/pid"   # this test's own pid: alive for the whole run
+OUT_C=$(mktemp -t cont-out.XXXXXX)
+ERR_C=$(mktemp -t cont-err.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_C" 2>"$ERR_C" ); rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "another sweep (pid" "$ERR_C"; then
+    pass "genuine contention still reports pid, exit 0"
+else
+    fail "genuine contention shape" "rc=$rc err=[$(cat "$ERR_C")]"
+fi
+rm -f "$OUT_C" "$ERR_C"
+rm -rf "$LOCKDIR" "$S" "$BARE"
+
+echo "== 7. cleanup --merged consumes the occupancy classifier (x-0396) =="
+
+# A merged, pushed, clean sandbox tree: branch tip reachable from origin/main,
+# nothing unpushed, so step 4 (processes) is the first guard the tree meets.
+# --no-verify: a machine-local pre-push hook refuses branch main on some
+# operator boxes (see section 5b); the fixture is throwaway, the hook is not
+# under test.
+new_merged_tree() {
+    local S BARE
+    S=$(new_sandbox)
+    git -C "$S" branch -M main >/dev/null 2>&1
+    BARE=$(mktemp -d -t wt-occ-bare.XXXXXX); rmdir "$BARE"
+    git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+    git -C "$S" remote add origin "$BARE"
+    git -C "$S" push -q --no-verify origin main >/dev/null 2>&1
+    git -C "$S" worktree add -q -b feature/occ "$S/wt" >/dev/null 2>&1
+    git -C "$S/wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m wip >/dev/null 2>&1
+    git -C "$S/wt" push -q --no-verify -u origin feature/occ >/dev/null 2>&1
+    git -C "$S" -c user.email=t@t -c user.name=t merge -q -m merge origin/feature/occ >/dev/null 2>&1
+    git -C "$S" push -q --no-verify origin main >/dev/null 2>&1
+    printf '%s\n' "$S"
+}
+
+# Stub classifier: rows driven by OCC_STUB_MODE, calls logged to OCC_STUB_LOG.
+make_occupancy_stub() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/classify" <<'EOF'
+#!/usr/bin/env bash
+wt="$1"; shift
+printf 'called %s %s\n' "$wt" "$*" >> "$OCC_STUB_LOG"
+mode="${OCC_STUB_MODE:-inert}"
+if [[ "$mode" == "exit2" ]]; then exit 2; fi
+if [[ "$mode" == "short" ]]; then
+  printf '%s\tinert\tterminate\t-\tstub\tstub\n' "$1"
+  exit 0
+fi
+first=1
+for p in "$@"; do
+  m="$mode"
+  if [[ "$mode" == "mixed" ]]; then
+    if [[ $first -eq 1 ]]; then m="holds"; else m="inert"; fi
+    first=0
+  fi
+  if [[ "$mode" == "flip" ]]; then
+    n="$(wc -l < "$OCC_STUB_LOG" | tr -d ' ')"
+    if [[ "$n" -gt 1 ]]; then m="holds"; else m="inert"; fi
+  fi
+  if [[ "$m" == "holds" ]]; then
+    printf '%s\tholds\tkeep\t-\tstub holder\tsleep 300\n' "$p"
+  else
+    printf '%s\tinert\tterminate\t-\tstub inert\tsleep 300\n' "$p"
+  fi
+done
+exit 0
+EOF
+    chmod +x "$dir/classify"
+}
+
+# 6a. AC8-HP: all-inert stub releases the tree in dry run: would-archive plus
+# one indented row per pid, Summary counts it under "would archive".
+S=$(new_merged_tree)
+STUB=$(mktemp -d -t occ-stub.XXXXXX)
+OCCLOG="$STUB/calls.log"; : > "$OCCLOG"
+make_occupancy_stub "$STUB"
+( cd "$S/wt" && exec sleep 300 ) & HOLD=$!
+disown "$HOLD" 2>/dev/null || true
+sleep 0.6
+out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && echo "$out" | grep -q "would-archive"; then
+    pass "all-inert tree prints would-archive (AC8)"
+else
+    fail "AC8 would-archive" "rc=$rc out=[$out]"
+fi
+if echo "$out" | grep -q "    $HOLD inert stub inert | sleep 300"; then
+    pass "would-archive carries the indented per-pid row (AC8)"
+else
+    fail "AC8 indented row" "pid $HOLD missing from [$out]"
+fi
+if echo "$out" | grep -q "^Summary: 1 would archive" && ! echo "$out" | grep -qE "^Summary:.*[1-9] processes"; then
+    pass "Summary counts the tree under would archive, not processes (AC8)"
+else
+    fail "AC8 summary" "[$(echo "$out" | grep '^Summary:')]"
+fi
+
+# 6b. AC9-HP: one holds + one inert -> kept with both rows, counted as processes.
+S=$(new_merged_tree)
+OCCLOG="$STUB/mixed.log"; : > "$OCCLOG"
+( cd "$S/wt" && exec sleep 301 ) & HOLD1=$!
+( cd "$S/wt" && exec sleep 302 ) & HOLD2=$!
+disown "$HOLD1" "$HOLD2" 2>/dev/null || true
+sleep 0.6
+out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" OCC_STUB_MODE=mixed FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && echo "$out" | grep -q "kept (processes: 1 held, 1 inert)"; then
+    pass "mixed verdicts print the held/inert receipt (AC9)"
+else
+    fail "AC9 receipt" "rc=$rc out=[$out]"
+fi
+if echo "$out" | grep -q "stub holder" && echo "$out" | grep -q "stub inert"; then
+    pass "both rows named beside the kept tree (AC9)"
+else
+    fail "AC9 rows" "[$out]"
+fi
+echo "$out" | grep -qE "^Summary:.* 1 processes" && pass "Summary processes count includes the held tree (AC9)" || fail "AC9 summary" "[$(echo "$out" | grep '^Summary:')]"
+
+# 6c. AC10-EDGE: stub exits 2, or prints fewer rows than pids -> fail closed.
+for badmode in exit2 short; do
+    S=$(new_merged_tree)
+    OCCLOG="$STUB/$badmode.log"; : > "$OCCLOG"
+    ( cd "$S/wt" && exec sleep 303 ) & HOLD3=$!
+    ( cd "$S/wt" && exec sleep 304 ) & HOLD4=$!
+    disown "$HOLD3" "$HOLD4" 2>/dev/null || true
+    sleep 0.6
+    out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" OCC_STUB_MODE=$badmode FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
+    if [[ $rc -eq 0 ]] && echo "$out" | grep -q "kept (processes: 2 held, 0 inert)" && echo "$out" | grep -q "classifier unavailable"; then
+        pass "$badmode stub fails closed to holds (AC10)"
+    else
+        fail "AC10 $badmode" "rc=$rc out=[$out]"
+    fi
+    kill "$HOLD3" "$HOLD4" 2>/dev/null
+    rm -rf "$S"
+done
+
+# 6d. AC11-EDGE: an unpushed tree is decided at step 2; the stub never runs.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE11=$(mktemp -d -t wt-occ-bare.XXXXXX); rmdir "$BARE11"
+git clone -q --bare "$S" "$BARE11" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE11"
+git -C "$S" worktree add -q -b feature/unpushed "$S/wt" >/dev/null 2>&1
+( cd "$S/wt" && echo x > f.txt && git -c user.email=t@t -c user.name=t add f.txt && git -c user.email=t@t -c user.name=t commit -qm wip ) >/dev/null 2>&1
+OCCLOG="$STUB/unpushed.log"; : > "$OCCLOG"
+out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && echo "$out" | grep -q "kept (unpushed)" && [[ ! -s "$OCCLOG" ]]; then
+    pass "unpushed tree kept before the classifier is consulted (AC11)"
+else
+    fail "AC11 unpushed-first" "rc=$rc log=[$(cat "$OCCLOG")] out=[$out]"
+fi
+rm -rf "$S"
+
+# 6e. AC12-HP: --kill-orphans is retired: one stderr line, verdicts unchanged.
+S=$(new_merged_tree)
+OCCLOG="$STUB/retired.log"; : > "$OCCLOG"
+( cd "$S/wt" && exec sleep 305 ) & HOLD5=$!
+disown "$HOLD5" 2>/dev/null || true
+sleep 0.6
+out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc1=$?
+out_flag=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --dry-run --kill-orphans 2>&1); rc2=$?
+if [[ $rc2 -eq 0 ]] && echo "$out_flag" | grep -q -- "--kill-orphans is retired"; then
+    pass "retirement line on stderr (AC12)"
+else
+    fail "AC12 retirement line" "rc=$rc2 out=[$out_flag]"
+fi
+if [[ "$rc1" -eq 0 ]] && [[ "$(echo "$out" | grep -c 'would-archive')" -eq 1 ]] && [[ "$(echo "$out_flag" | grep -c 'would-archive')" -eq 1 ]]; then
+    pass "verdicts equal a run without the flag (AC12)"
+else
+    fail "AC12 verdict parity" "plain=[$out] flagged=[$out_flag]"
+fi
+kill "$HOLD5" 2>/dev/null
+rm -rf "$S"
+rm -rf "$STUB"
+
+echo "== 8. archive-worktree.sh classifies at removal time (x-0396) =="
+
+# 7a. AC13-HP: all re-enumerated pids inert terminate -> signalled exactly,
+# removal proceeds headless with no exit 3. The holder runs in its OWN
+# session (perl setsid) so the archive's self-PGID filter cannot drop it.
+S=$(new_merged_tree)
+STUB=$(mktemp -d -t occ-stub2.XXXXXX)
+OCCLOG="$STUB/ac13.log"; : > "$OCCLOG"
+make_occupancy_stub "$STUB"
+( cd "$S/wt" && exec perl -e 'use POSIX; setsid(); exec "sleep", "300"' ) & HOLD=$!
+disown "$HOLD" 2>/dev/null || true
+sleep 0.6
+out=$(perl -e 'use POSIX; setsid(); open(STDIN,"<","/dev/null"); exec @ARGV' env OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$ARCHIVE" "$S/wt" 2>&1); rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" ]]; then
+    pass "all-inert tree archives headless (AC13)"
+else
+    fail "AC13 archive" "rc=$rc exists=$([[ -d "$S/wt" ]] && echo y || echo n) out=[$out]"
+fi
+sleep 1
+if kill -0 "$HOLD" 2>/dev/null; then
+    fail "AC13 signal" "terminate pid $HOLD survived"
+else
+    pass "terminate pid signalled (AC13)"
+fi
+rm -rf "$S"
+
+# 7b. AC14-EDGE: one re-enumerated pid holds -> exit 3 headless, nothing signalled.
+S=$(new_merged_tree)
+OCCLOG="$STUB/ac14.log"; : > "$OCCLOG"
+( cd "$S/wt" && exec perl -e 'use POSIX; setsid(); exec "sleep", "300"' ) & HOLD=$!
+disown "$HOLD" 2>/dev/null || true
+sleep 0.6
+out=$(perl -e 'use POSIX; setsid(); open(STDIN,"<","/dev/null"); exec @ARGV' env OCC_STUB_MODE=holds OCC_STUB_LOG="$OCCLOG" FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$ARCHIVE" "$S/wt" 2>&1); rc=$?
+if [[ $rc -eq 3 && -d "$S/wt" ]] && echo "$out" | grep -q 'no tty for confirmation'; then
+    pass "holds row keeps the headless decline (AC14)"
+else
+    fail "AC14 decline" "rc=$rc exists=$([[ -d "$S/wt" ]] && echo y || echo n) out=[$out]"
+fi
+if kill -0 "$HOLD" 2>/dev/null; then
+    pass "no pid signalled on the holds path (AC14)"
+else
+    fail "AC14 no-signal" "holder $HOLD was signalled"
+fi
+kill "$HOLD" 2>/dev/null
+rm -rf "$S"
+
+# 7c. AC14 sweep combo: the removal-time re-read overrules the sweep's older
+# read - a process that turned holds between step 4 and archive keeps the tree.
+# The sweep resolves archive-worktree.sh from ITS OWN repo root, so the fixture
+# carries a thin wrapper that execs the REAL archive: a copy would resolve the
+# reapable probe against the sandbox (no venv, no installed fno on CI) and die
+# rc=2 before the occupancy recheck this test exists to exercise.
+S=$(new_merged_tree)
+mkdir -p "$S/scripts/setup"
+printf '#!/usr/bin/env bash\nexec bash "%s" "$@"\n' "$REPO_ROOT/scripts/setup/archive-worktree.sh" > "$S/scripts/setup/archive-worktree.sh"
+chmod +x "$S/scripts/setup/archive-worktree.sh"
+OCCLOG="$STUB/flip.log"; : > "$OCCLOG"
+( cd "$S/wt" && exec perl -e 'use POSIX; setsid(); exec "sleep", "300"' ) & HOLD=$!
+disown "$HOLD" 2>/dev/null || true
+sleep 0.6
+out=$(cd "$S" && OCC_STUB_LOG="$OCCLOG" OCC_STUB_MODE=flip FNO_WT_OCCUPANCY_CMD="$STUB/classify" bash "$LIFECYCLE" cleanup --merged --apply 2>&1); rc=$?
+if [[ $rc -eq 0 && -d "$S/wt" ]] && echo "$out" | grep -q "kept (needs-confirmation)"; then
+    pass "flip between reads keeps the tree as needs-confirmation (AC14)"
+else
+    fail "AC14 flip" "rc=$rc exists=$([[ -d "$S/wt" ]] && echo y || echo n) log=[$(cat "$OCCLOG" 2>/dev/null)] out=[$out]"
+fi
+if grep -q 'called' "$OCCLOG" && [[ "$(grep -c called "$OCCLOG")" -ge 2 ]]; then
+    pass "both reads went through the classifier (AC14)"
+else
+    fail "AC14 two reads" "log=[$(cat "$OCCLOG")]"
+fi
+kill "$HOLD" 2>/dev/null
+rm -rf "$S" "$STUB"
+
+echo "== 9. disposable deletes + build-hash-dir removal at worktree teardown =="
+
+# A trash-alias stand-in: bare rm on a wrapped host relocates instead of
+# unlinking, so the stub records the call and deletes NOTHING. A green
+# assertion needs the hash dir gone AND this log empty - either alone is
+# vacuous (a sweep that deletes nothing passes the log check; a trashed
+# delete passes the gone-check for the wrong reason).
+new_rm_stub() {
+    local bin="$1" log="$2"
+    mkdir -p "$bin"
+    : > "$log"
+    cat > "$bin/rm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+exit 0
+EOF
+    chmod +x "$bin/rm"
+}
+
+# A cargo stand-in that answers one canned build_directory, or fails on
+# demand: no real cargo manifest is needed to exercise resolution.
+new_cargo_stub() {
+    local bin="$1" dir="$2"
+    mkdir -p "$bin"
+    if [[ "$dir" == "FAIL" ]]; then
+        cat > "$bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+    else
+        cat > "$bin/cargo" <<EOF
+#!/usr/bin/env bash
+printf '{"build_directory":"%s"}\n' "$dir"
+EOF
+    fi
+    chmod +x "$bin/cargo"
+}
+
+new_hash_dir() {
+    local dir="$1"
+    mkdir -p "$dir"
+    printf 'Signature: 87496387e5a84b3bb5c64e56a51a4e63\n' > "$dir/CACHEDIR.TAG"
+    printf 'artifact' > "$dir/blob"
+}
+
+# 9a. AC1-HP: the sweep's build-base delete unlinks; no bare rm ran.
+S=$(new_sandbox)
+STUB=$(mktemp -d -t srm-sweep.XXXXXX)
+RM_LOG="$STUB/rm.log"
+new_rm_stub "$STUB/bin" "$RM_LOG"
+mkdir -p "$S/base/ab/c001"
+new_hash_dir "$S/base/ab/c001"
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" bash "$LIFECYCLE" cleanup --cargo-targets --apply --cap-bytes 1 --target-max-age 0 2>&1)
+if [[ ! -d "$S/base/ab/c001" ]] && echo "$out" | grep -q 'cargo-target reaped'; then
+    pass "sweep unlinked the build-base hash dir (AC1)"
+else
+    fail "AC1 sweep unlink" "gone=$([[ -d "$S/base/ab/c001" ]] && echo n || echo y) out=[$out]"
+fi
+if [[ ! -s "$RM_LOG" ]]; then
+    pass "sweep delete never resolved through bare rm (AC1)"
+else
+    fail "AC1 stub-rm never ran" "log=[$(cat "$RM_LOG")]"
+fi
+rm -rf "$S" "$STUB"
+
+# Shared fixture for the removal-lane tests: a sandbox worktree whose
+# workspace resolves to a planted hash dir under a managed base.
+new_removal_fixture() {
+    S=$(new_sandbox)
+    git -C "$S" worktree add -q "$S/wt" >/dev/null 2>&1
+    mkdir -p "$S/wt/crates/x" "$S/base/ab/c002"
+    : > "$S/wt/crates/x/Cargo.toml"
+    # Untracked content makes the tree dirty and every removal refuses;
+    # record the workspace so the tree stays clean.
+    ( cd "$S/wt" && git -c user.email=t@t -c user.name=t add crates \
+        && git -c user.email=t@t -c user.name=t commit -qm crates ) >/dev/null 2>&1
+    new_hash_dir "$S/base/ab/c002"
+    STUB=$(mktemp -d -t srm-lane.XXXXXX)
+    RM_LOG="$STUB/rm.log"
+    new_rm_stub "$STUB/bin" "$RM_LOG"
+    new_cargo_stub "$STUB/bin" "$S/base/ab/c002"
+}
+
+# 9b. AC2-HP: the WorktreeRemove hook reclaims the hash dir, then removes.
+new_removal_fixture
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+    bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
+rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" && ! -d "$S/base/ab/c002" ]]; then
+    pass "hook removed worktree and reclaimed its hash dir (AC2)"
+else
+    fail "AC2 hook" "rc=$rc wt=$([[ -d "$S/wt" ]] && echo y || echo n) hash=$([[ -d "$S/base/ab/c002" ]] && echo y || echo n) out=[$out]"
+fi
+[[ ! -s "$RM_LOG" ]] && pass "hook delete never resolved through bare rm (AC2)" || fail "AC2 stub-rm" "log=[$(cat "$RM_LOG")]"
+rm -rf "$S" "$STUB"
+
+# 9c. AC2b-HP: the archive lane reclaims the hash dir too.
+new_removal_fixture
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+    bash "$ARCHIVE" "$S/wt" --yes 2>&1)
+rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" && ! -d "$S/base/ab/c002" ]]; then
+    pass "archive removed worktree and reclaimed its hash dir (AC2b)"
+else
+    fail "AC2b archive" "rc=$rc wt=$([[ -d "$S/wt" ]] && echo y || echo n) hash=$([[ -d "$S/base/ab/c002" ]] && echo y || echo n) out=[$out]"
+fi
+rm -rf "$S" "$STUB"
+
+# 9d. AC2-EDGE: a resolution OUTSIDE the managed base is never ours to
+# delete, even tagged; the worktree still goes.
+S=$(new_sandbox)
+git -C "$S" worktree add -q "$S/wt" >/dev/null 2>&1
+mkdir -p "$S/wt/crates/x" "$S/outside/c003"
+: > "$S/wt/crates/x/Cargo.toml"
+( cd "$S/wt" && git -c user.email=t@t -c user.name=t add crates \
+    && git -c user.email=t@t -c user.name=t commit -qm crates ) >/dev/null 2>&1
+new_hash_dir "$S/outside/c003"
+STUB=$(mktemp -d -t srm-edge.XXXXXX)
+new_cargo_stub "$STUB/bin" "$S/outside/c003"
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+    bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
+rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" && -d "$S/outside/c003" ]]; then
+    pass "out-of-base resolution kept, worktree still removed (AC2-EDGE)"
+else
+    fail "AC2-EDGE out-of-base" "rc=$rc wt=$([[ -d "$S/wt" ]] && echo y || echo n) hash=$([[ -d "$S/outside/c003" ]] && echo y || echo n) out=[$out]"
+fi
+rm -rf "$S" "$STUB"
+
+# 9e. AC2-EDGE: cargo failing to answer is best-effort - removal proceeds,
+# the unresolved dir stays for the sweep.
+S=$(new_sandbox)
+git -C "$S" worktree add -q "$S/wt" >/dev/null 2>&1
+mkdir -p "$S/wt/crates/x" "$S/base/ab/c004"
+: > "$S/wt/crates/x/Cargo.toml"
+( cd "$S/wt" && git -c user.email=t@t -c user.name=t add crates \
+    && git -c user.email=t@t -c user.name=t commit -qm crates ) >/dev/null 2>&1
+new_hash_dir "$S/base/ab/c004"
+STUB=$(mktemp -d -t srm-fail.XXXXXX)
+new_cargo_stub "$STUB/bin" "FAIL"
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+    bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
+rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" && -d "$S/base/ab/c004" ]]; then
+    pass "unreadable resolution degrades to the sweep (AC2-EDGE)"
+else
+    fail "AC2-EDGE best-effort" "rc=$rc wt=$([[ -d "$S/wt" ]] && echo y || echo n) hash=$([[ -d "$S/base/ab/c004" ]] && echo y || echo n) out=[$out]"
+fi
+rm -rf "$S" "$STUB"
+
+# 9f. AC3: the guard passes with the third lane allowlisted and zero hits.
+if bash "$REPO_ROOT/scripts/ci/check-disposable-rm.sh" >/dev/null 2>&1; then
+    pass "disposable-rm gate green with the lifecycle lib guarded (AC3)"
+else
+    fail "AC3 gate" "check-disposable-rm.sh failed with the new allowlist entry"
+fi
 
 echo ""
 echo "worktree lifecycle: $PASS passed, $FAIL failed"

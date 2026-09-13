@@ -139,6 +139,63 @@ def test_registry_lock_replacement_loop_honors_timeout(
 # ---------------------------------------------------------------------------
 
 
+def test_xdead_heal_own_cwd_stamps_the_working_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Task 0.1 (x-dead): the spawner mints the row with the SPAWN directory;
+    the worker's own SessionStart heal moves the cwd field to the directory
+    it actually works in, so every cwd-keyed occupancy join can find it."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import (
+        AgentEntry,
+        heal_own_cwd,
+        load_registry,
+        registry_rows_by_cwd,
+        write_registry,
+    )
+
+    write_registry(
+        [
+            AgentEntry(
+                name="t-b7f8-worker",
+                harness="claude",
+                cwd="/Users/bb16/code/footnote/footnote",
+                short_id="deadbeef",
+                harness_session_id="aaaaaaaa-1111-7222-8333-4444deadbeef",
+                log_path="/tmp/t-b7f8-worker.log",
+            )
+        ]
+    )
+
+    moved = heal_own_cwd(
+        name="t-b7f8-worker",
+        harness="claude",
+        cwd="/Users/bb16/.fno/worktrees/footnote/x-b7f8",
+    )
+    assert moved == (
+        "/Users/bb16/code/footnote/footnote",
+        "/Users/bb16/.fno/worktrees/footnote/x-b7f8",
+    )
+    by_cwd, ok = registry_rows_by_cwd()
+    assert ok is True
+    assert list(by_cwd) == ["/Users/bb16/.fno/worktrees/footnote/x-b7f8"]
+    assert load_registry()[0].cwd == "/Users/bb16/.fno/worktrees/footnote/x-b7f8"
+    # Idempotent: a second SessionStart writes nothing and answers None.
+    assert (
+        heal_own_cwd(
+            name="t-b7f8-worker",
+            harness="claude",
+            cwd="/Users/bb16/.fno/worktrees/footnote/x-b7f8",
+        )
+        is None
+    )
+    # No such row: a no-op, never a raise.
+    assert (
+        heal_own_cwd(name="nobody", harness="claude", cwd="/somewhere") is None
+    )
+
+
 def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
     """AC1-HP: write + read back a single agent entry preserving all fields."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -826,7 +883,9 @@ def test_us2_schema_version_is_three() -> None:
     # beside the v19 `sandbox_posture` REQUEST that a resume re-applies.
     # v30: additive `git_grant` - the effective Git common-dir path carried by
     # a bounded Codex thread.
-    assert SCHEMA_VERSION == 30
+    # v31: additive `harness_args` - the fenced codex thread tokens a daemon
+    # restart re-parses onto thread/resume.
+    assert SCHEMA_VERSION == 31
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2263,7 +2322,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 30
+    assert SCHEMA_VERSION == 31
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2329,7 +2388,7 @@ def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) ->
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
 
-    assert SCHEMA_VERSION == 30
+    assert SCHEMA_VERSION == 31
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     entry = AgentEntry(
         name="requested-axis",

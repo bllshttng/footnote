@@ -347,9 +347,10 @@ class AgentEntry:
     - ``last_message_at`` is the UTC ISO timestamp of the most recent
       OBSERVED activity on the session. Two writers, and only the first is
       monotone: a successful follow-up send bumps it post-send under the
-      ``update_registry`` flock, and an adoption stamps the mtime of the
-      session's own transcript file (never a shared store's - see
-      ``store_fallback._transcript_last_write``). Read it as "newest activity
+      ``update_registry`` flock, and an adoption stamps the newest timestamped
+      entry of the session's own transcript file (never the file mtime, which
+      untimestamped trailing records keep artificially young, and never a
+      shared store's - see ``store_fallback._transcript_last_write``). Read it as "newest activity
       anything has seen", not as "last send": an adoption of a long-dead
       session writes an old stamp here on purpose, and re-adopting after the
       store changed can move it backwards.
@@ -1546,15 +1547,19 @@ def _is_identity_token(value: object) -> bool:
 
 
 def live_row_holding_session_id(
-    session_id: str, registry_path: Optional[Path] = None
+    session_id: str,
+    registry_path: Optional[Path] = None,
+    *,
+    rows: Optional[list[AgentEntry]] = None,
 ) -> Optional[AgentEntry]:
     """The live registry row whose ``harness_session_id`` is ``session_id``.
 
     The one ownership match loop: the ownership-live status filter plus the
     identity-key comparison, shared by every caller that must read the row
     itself (:func:`row_owning_session_id` reports the row's name; the owned-
-    identity prover reads its harness). Degrades to None on an absent,
-    unreadable, or alien-shape registry, the same contract as the detector.
+    identity prover reads its harness). ``rows`` is a caller's read. Degrades
+    to None on an absent, unreadable, or alien-shape registry, the same
+    contract as the detector.
     """
     if not session_id:
         return None
@@ -1562,7 +1567,7 @@ def live_row_holding_session_id(
 
     needle = session_identity_key(session_id)
     try:
-        entries = load_registry(registry_path)
+        entries = rows if rows is not None else load_registry(registry_path)
     except Exception:
         # Unreadable / wrong-schema / absent: cannot prove ownership either way.
         return None
@@ -2456,6 +2461,82 @@ def heal_mux_ref(
     if healed is None or healed.mux != new_mux:
         return None  # write did not land, or a racing writer replaced the row
     return before, new_mux
+
+
+def heal_own_cwd(
+    *,
+    name: str,
+    harness: str,
+    cwd: str,
+    registry_path: Optional[Path] = None,
+) -> Optional[tuple[Optional[str], str]]:
+    """Stamp the directory the worker WORKS in (x-dead task 0.1).
+
+The spawner mints the row with the spawn directory; the worker's own
+SessionStart heal makes the registry's cwd field answer "where does this
+worker work" for every reader that joins on it. Returns ``(old, new)`` when
+the row moved, else None; the idempotent no-op never rewrites the file.
+"""
+    if not name or not harness or not cwd:
+        return None
+
+    def _find(entries: list[AgentEntry]) -> Optional[AgentEntry]:
+        for e in entries:
+            if e.harness == harness and (e.name == name or name in e.aliases):
+                return e
+        return None
+
+    # Pre-read so the idempotent no-op never rewrites the file; the updater
+    # re-decides under the lock so a racing writer cannot double-write.
+    row = _find(load_registry(path=registry_path))
+    if row is None or row.cwd == cwd:
+        return None
+    before = row.cwd
+
+    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        target = _find(entries)
+        if target is not None and target.cwd != cwd:
+            target.cwd = cwd
+        return entries
+
+    persisted = update_registry(_updater, path=registry_path)
+    healed = _find(persisted)
+    if healed is None or healed.cwd != cwd:
+        return None
+    return before, cwd
+
+
+def registry_rows_by_cwd(
+    path: Optional[Path] = None,
+) -> tuple[dict[str, list[dict]], bool]:
+    """Raw registry rows indexed by each row's own ``cwd``, plus an ok flag.
+
+    The ONE occupancy join for every reader that asks "which worker holds
+    this tree" (x-dead task 0.2, folding x-73df); three copies used to live
+    in unfinished_work and the worktree status legs. A missing registry is a
+    legitimate empty fleet (ok); one that exists and fails to parse reads
+    every candidate unmeasurable.
+    """
+    import json
+    import os
+
+    from fno.paths import agents_registry_path
+
+    override = os.environ.get("WORKTREE_STATUS_REGISTRY")
+    target = Path(override) if override else (path or agents_registry_path())
+    if not target.exists():
+        return {}, True
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}, False
+    if not isinstance(data, dict):
+        return {}, False
+    by_cwd: dict[str, list[dict]] = {}
+    for row in data.get("agents", []):
+        if isinstance(row, dict) and row.get("cwd"):
+            by_cwd.setdefault(str(Path(row["cwd"])), []).append(row)
+    return by_cwd, True
 
 
 #: Outcome of one SessionStart id observation (see

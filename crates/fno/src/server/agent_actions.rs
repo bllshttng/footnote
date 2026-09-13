@@ -23,6 +23,83 @@ pub(crate) fn stage_reentry_plan(plan: Option<Result<ReentryVerdict, String>>) {
     REENTRY_PLAN_STUB.with(|stub| *stub.borrow_mut() = plan);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Hermetic seam over the off-loop resume-argv shell-out: a staged argv
+    /// (or failure) comes back without shelling out. Same runtime contract as
+    /// [`REENTRY_PLAN_STUB`].
+    static RESUME_ARGV_STUB: std::cell::RefCell<Option<Result<Vec<String>, String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Stage (or clear, with `None`) the argv `run_resume_argv` returns.
+#[cfg(test)]
+pub(crate) fn stage_resume_argv(argv: Option<Result<Vec<String>, String>>) {
+    RESUME_ARGV_STUB.with(|stub| *stub.borrow_mut() = argv);
+}
+
+/// (x-eb79) Shell `fno-agents resume-argv <harness> <sid> --cwd <dir> [--cd]
+/// --json` OFF the core loop, bounded like `run_reentry_plan`. The one
+/// implementation of the codex resume argv the gestures consume - this
+/// server never rebuilds it. Every failure shape (timeout, missing binary,
+/// non-zero exit, unparseable JSON) is a typed `Err` the caller fail-opens
+/// to the declared-form render.
+pub(super) async fn run_resume_argv(
+    harness: &str,
+    session_id: &str,
+    grant_cwd: &str,
+    pin_cd: bool,
+) -> Result<Vec<String>, String> {
+    #[cfg(test)]
+    if let Some(staged) = RESUME_ARGV_STUB.with(|stub| stub.borrow().clone()) {
+        return staged;
+    }
+    const ARGV_TIMEOUT: Duration = Duration::from_secs(20);
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command.args([
+        "resume-argv",
+        harness,
+        session_id,
+        "--cwd",
+        grant_cwd,
+        "--json",
+    ]);
+    if pin_cd {
+        command.arg("--cd");
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
+    match tokio::time::timeout(ARGV_TIMEOUT, fut).await {
+        Err(_) => Err(format!("resume argv for {harness}: timed out")),
+        Ok(Err(_)) => Err(format!("resume argv for {harness}: fno-agents unavailable")),
+        Ok(Ok(o)) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let v: serde_json::Value = serde_json::from_str(stdout.trim())
+                .map_err(|e| format!("resume argv for {harness}: {e}"))?;
+            let argv: Vec<String> = v
+                .get("argv")
+                .and_then(|a| a.as_array())
+                .ok_or_else(|| format!("resume argv for {harness}: no argv in reply"))?
+                .iter()
+                .filter_map(|t| t.as_str().map(str::to_string))
+                .collect();
+            if argv.is_empty() {
+                return Err(format!("resume argv for {harness}: empty argv"));
+            }
+            Ok(argv)
+        }
+        Ok(Ok(o)) => Err(first_line_or(
+            &String::from_utf8_lossy(&o.stderr),
+            &format!("resume argv for {harness}: refused"),
+        )),
+    }
+}
+
 /// Shell `fno-agents <verb> <name>` for a sideline lifecycle gesture (x-76ea),
 /// bounded + fail-open (the `run_dispatch_one` idiom): a short outcome notice,
 /// never a wedge. The registry poll owns the row's truth, so a lost/failed

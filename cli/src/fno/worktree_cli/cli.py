@@ -63,8 +63,8 @@ def stranded(
     apply: bool = typer.Option(
         False,
         "--apply",
-        help="Act on the classification: push+file STRANDED rows, record UNKNOWN rows. "
-        "Default is classify-and-print only.",
+        help="Act on the classification: push STRANDED rows and record the recovery "
+        "as a sweep event, record UNKNOWN rows. Default is classify-and-print only.",
     ),
 ) -> None:
     """Classify every worktree git+graph+fleet can't otherwise tell apart.
@@ -126,8 +126,9 @@ def cleanup(
     kill_orphans: bool = typer.Option(
         False,
         "--kill-orphans",
-        help="With --merged, SIGTERM ppid-1 orphan processes squatting in a "
-        "candidate worktree instead of skipping it. Live process trees are never killed.",
+        hidden=True,
+        help="Retired: classified processes release a tree by default, "
+        "unclassified ones always keep it.",
     ),
     cargo_targets: bool = typer.Option(
         False,
@@ -190,31 +191,6 @@ def cleanup(
                 target_max_age,
             ]
         )
-    raise typer.Exit(code=_run_lifecycle(*args))
-
-
-@app.command("cargo-offload")
-def cargo_offload(
-    apply: bool = typer.Option(
-        False,
-        "--apply",
-        help="Move the caches and leave symlinks at the old paths. Default is dry-run.",
-    ),
-) -> None:
-    """Relocate every crates/<crate>/target cache out of the repo root.
-
-    The repo root is what a harness plugin update copies, and nearly all of
-    its bulk is regenerable cargo build output, so the lever is MOVING the
-    bytes, not deleting them: each tree keeps its own directory under
-    <base>/<repo>/<tree>/<crate> (paths.cargo_targets_base, default
-    ~/.fno/cargo-targets) with a symlink back, so built-binary paths stay
-    valid and sibling builds never share an artifact lock. Trees with a live
-    process are reported and left for the next run. The cleanup sweep follows
-    the symlinks, so relocated caches stay reclaimable.
-    """
-    args = ["cargo-offload"]
-    if apply:
-        args.append("--apply")
     raise typer.Exit(code=_run_lifecycle(*args))
 
 
@@ -565,6 +541,10 @@ def _worktree_ensure(
 @app.command()
 def reapable(
     path: str = typer.Argument(..., help="Worktree path to classify."),
+    allow_unborn: bool = typer.Option(
+        False, "--allow-unborn",
+        help="Lift the setup-window refusal for a tree a human named.",
+    ),
 ) -> None:
     """Say whether removing <path> can destroy anything. Read-only.
 
@@ -577,10 +557,13 @@ def reapable(
     loses nothing. Nor do the symlinks setup-worktree.sh writes, which
     `reason=setup-links` and `detail` name. Modified tracked content, other
     untracked files, unmerged conflicts and an unanswerable probe do block.
+    A worktree inside its 30-minute setup window on a branch that never
+    moved blocks too (`reason=unborn`); `--allow-unborn` lifts exactly that,
+    for the one-tree orphan recovery, never for a bulk sweep.
     """
     from fno.worktree_reapable import reapable as _classify
 
-    verdict = _classify(path)
+    verdict = _classify(path, allow_unborn=allow_unborn)
     typer.echo(verdict.line())
     raise typer.Exit(code=0 if verdict.reapable else 1)
 
@@ -615,10 +598,9 @@ def policy(
 ) -> None:
     """Print the resolved worktree policy for <repo>. Read-only.
 
-    Line 1 is the policy (never|harness-native|external); for a non-never result
-    line 2 is `base=<worktrees-base>`. Shares the SAME resolver `ensure` uses, so
-    bash callers get the identical verdict with no second precedence impl. A
-    parse error / out-of-enum value exits 1 with the reason on stderr.
+    Line 1 is the policy word; later lines: base= (non-never), source=, and a
+    requested=/degraded=true clause. Same resolver `ensure` uses; a parse
+    error exits 1 with the reason on stderr.
     """
     from fno.worktree_paths import resolve_worktree_policy
 
@@ -632,6 +614,9 @@ def policy(
     typer.echo(pol.policy)
     if pol.policy != "never":
         typer.echo(f"base={pol.base}")
+    typer.echo(f"source={pol.source}")
+    if pol.degraded:
+        typer.echo(f"requested={pol.requested_policy} degraded=true")
     raise typer.Exit(0)
 
 

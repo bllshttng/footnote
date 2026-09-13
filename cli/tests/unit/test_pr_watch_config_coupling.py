@@ -184,3 +184,16 @@ def test_unrelated_key_does_not_touch_watcher(tmp_home, monkeypatch):
     r = CliRunner().invoke(app, ["set", "config.pr_watch.interval_seconds", "300"])
     assert r.exit_code == 0, r.output
     assert "activate" not in calls and "deactivate" not in calls
+
+
+def test_is_node_live_sees_global_claim(tmp_path, monkeypatch):
+    """Regression (x-74aa): the node read routes by key to the global root, so
+    a claim held there reads live from any cwd instead of free off the empty
+    repo space."""
+    from fno.claims import acquire_claim
+    from fno.pr_watch.cli import ClaimAdapter
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+    monkeypatch.setattr("fno.paths.space_dir", lambda: tmp_path / "space")
+    acquire_claim("node:ab-1234", holder="target-session:sid-x")
+    assert ClaimAdapter().is_node_live("ab-1234") is True

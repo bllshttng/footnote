@@ -191,7 +191,7 @@ def stop_source_exact(
         try:
             killed = runner(
                 [*_subprocess_util.fno_py_cmd(), "mux", "pane", "kill",
-                 "--session", str(session), str(pane_id)],
+                 "--server", str(session), str(pane_id)],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -281,6 +281,7 @@ def spawn_successor_exact(
     proved account env is REFUSED here: spawning against credentials nothing
     proved is the failure the canary exists to prevent."""
     from fno import _subprocess_util
+    from fno.agents.naming import AgentNameError, dispatch_agent_name
 
     if not request.destination_account_env:
         raise UnprovenCredentialsRefused(
@@ -289,6 +290,15 @@ def spawn_successor_exact(
             f"unproven credentials for account "
             f"{request.destination_account!r}"
         )
+
+    # x-84b2: the handoff source is stamped, not left to the --node mint's
+    # manual t- shape (which would hide that an outage moved this worker). An
+    # unrepresentable node id drops the stamp and keeps the failover alive
+    # under the --node auto-name - the move outranks the label.
+    try:
+        _name_flag = ["--name", dispatch_agent_name("oh", "t", request.node)]
+    except AgentNameError:
+        _name_flag = []
 
     command = [
         *_subprocess_util.fno_py_cmd(),
@@ -303,6 +313,11 @@ def spawn_successor_exact(
         snapshot.owner_cwd,
         "--node",
         request.node,
+        # x-84b2: the handoff source is stamped, not left to the --node mint's
+        # manual t- shape (which would hide that an outage moved this worker).
+        # An unrepresentable node id drops the stamp and keeps the failover
+        # alive under the --node auto-name - the move outranks the label.
+        *_name_flag,
         f"--recorded-provider={request.destination_provider}",
         "--model",
         request.destination_model,
@@ -408,6 +423,11 @@ def _revalidate_persisted_and_raw_evidence(
         session_id = snapshot.source.harness_session_id
         if not session_id:
             return EvidenceProof(False, 0, "source transcript identity is unknown")
+        from fno.adapters.providers.runtime_state import record_reset_timezone
+
+        # Revalidate with the SAME admission rule the breaker was built on: a
+        # reset-admitted stale record must re-collect here, or the fingerprint
+        # set can never match and every real handoff drifts.
         records, refusals = collect_transcript_evidence(
             [EvidenceIdentity(
                 row_id=request.source_row_id, harness=snapshot.source.harness,
@@ -416,6 +436,7 @@ def _revalidate_persisted_and_raw_evidence(
             )],
             now_s=now, transcript_path_for=transcript_path_for,
             evidence_freshness_s=evidence_freshness_s,
+            reset_timezone_for=record_reset_timezone,
         )
         raw = {record.fingerprint for record in records}.intersection(expected)
         if refusals or raw != transcript_expected:

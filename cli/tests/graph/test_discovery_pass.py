@@ -203,3 +203,56 @@ def test_idea_fold_includes_fts_only_lane(tmp_graph: Path, monkeypatch: pytest.M
     receipt = json.loads(result.stdout)
     assert receipt["candidates"][0]["lanes"] == ["fts"]
     assert "fts-only" in receipt["candidates"][0]["evidence"]
+
+
+def test_candidates_floor_passthrough_keeps_caller_floors(
+    tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # x-low shares exactly one token with the incoming text: raw Jaccard
+    # 1/16 = 0.0625 (the slug's tokens live inside the title). Above an
+    # explicit 0.05 floor, below the 0.30 default. domain="" keeps the score
+    # equal to the raw Jaccard: a seed has no domain to earn the bonus with.
+    _seed(
+        tmp_graph,
+        [
+            _node(
+                "x-low",
+                slug="hotel-india-juliet",
+                title="hotel india juliet kilo lima mike nov oscar papa",
+            )
+        ],
+    )
+    monkeypatch.setattr(fts, "search", lambda *args, **kwargs: [])
+
+    default_floor = discovery.candidates(
+        "alfa bravo charlie delta echo foxtrot golf hotel", "", graph_path=tmp_graph, domain=""
+    )
+    widened = discovery.candidates(
+        "alfa bravo charlie delta echo foxtrot golf hotel",
+        "",
+        graph_path=tmp_graph,
+        floor=0.05,
+        domain="",
+    )
+
+    assert not [c for c in default_floor if "relatedness" in c.lanes]
+    low = [c for c in widened if c.node_id == "x-low" and "relatedness" in c.lanes]
+    assert low and low[0].score == pytest.approx(0.0625)
+
+
+def test_filing_paths_ignores_quoted_log_spans() -> None:
+    quoted = (
+        "Verbatim from the log: 'ok cli/src/fno/graph/cli.py 12353 lines, "
+        "change +4/-4 (net 0), no grow'"
+    )
+    assert "cli/src/fno/graph/cli.py" not in discovery.filing_paths(quoted)
+
+    # an apostrophe inside a word opens no span, so the real surface survives
+    mixed = quoted + " The node's surface is scripts/ci/check-file-budget.sh"
+    assert "scripts/ci/check-file-budget.sh" in discovery.filing_paths(mixed)
+
+
+def test_filing_paths_keeps_backticked_paths() -> None:
+    assert "cli/src/fno/think_inspect.py" in discovery.filing_paths(
+        "`cli/src/fno/think_inspect.py`"
+    )

@@ -11,7 +11,6 @@ class _MailCtx:
     """Sender identity stamped into the ``<fno_mail>`` envelope (node x-1f23)."""
 
     from_: str
-    harness: str
     model: str
     node: Optional[str] = None
     to: Optional[str] = None
@@ -52,7 +51,6 @@ def _build_mail_ctx(
     ``node`` stays None because dispatch has no truthful source for it today."""
     from fno.agents.self_stamp import resolve_self_model
     from fno.harness_identity import canonical_handle
-    from fno.mail.envelope import harness_for_provider
 
     from_ = canonical_handle(from_session) if from_session else from_name
     from fno.decide import enforce_origin_floor
@@ -60,7 +58,6 @@ def _build_mail_ctx(
     return _MailCtx(
         origin=enforce_origin_floor(origin),
         from_=from_,
-        harness=harness_for_provider(provider_from),
         model=resolve_self_model(),
         to=to or None,
         id=id or None,

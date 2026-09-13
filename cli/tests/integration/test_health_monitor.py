@@ -520,6 +520,48 @@ def test_trend_verb_prints_summary_when_history_empty(tmp_graph, tmp_path, monke
     assert "no history yet" in result.output.lower()
 
 
+# --- summarize_trend: a partial pass never reads as a cleaner board ---------
+
+
+def _hist_entry(counts: dict, complete=None) -> dict:
+    report = dict(counts)
+    if complete is not None:
+        report["complete"] = complete
+    return {"report": report}
+
+
+def test_summarize_trend_skips_partial_entries():
+    """AC7: one partial entry between two complete ones contributes to no
+    metric - it carries fewer findings because some legs never ran, not
+    because the board got cleaner."""
+    from fno.health_monitor import summarize_trend
+
+    # Newest first: complete, partial, complete. Without the filter the
+    # partial (oldest) would be read as `first`.
+    entries = [
+        _hist_entry({"idea_pile_depth": 5}, complete=True),
+        _hist_entry({"idea_pile_depth": 0}, complete=False),
+        _hist_entry({"idea_pile_depth": 4}, complete=True),
+    ]
+    summary = summarize_trend(entries)
+    assert summary["idea_pile_depth"]["first"] == 4
+    assert summary["idea_pile_depth"]["latest"] == 5
+    assert summary["idea_pile_depth"]["delta"] == 1
+
+
+def test_summarize_trend_counts_legacy_entries_without_complete_key():
+    """AC8: entries written before `complete` existed carry no key and still count."""
+    from fno.health_monitor import summarize_trend
+
+    entries = [
+        _hist_entry({"stale_ready_nodes": 7}),
+        _hist_entry({"stale_ready_nodes": 3}),
+    ]
+    summary = summarize_trend(entries)
+    assert summary["stale_ready_nodes"]["first"] == 3
+    assert summary["stale_ready_nodes"]["latest"] == 7
+
+
 def test_check_to_history_to_throttle_to_trend_journey(tmp_graph, tmp_path, monkeypatch):
     """End-to-end wiring: --check breach -> history append -> throttle write
     -> repeat --check still breaches but throttle suppresses dispatch ->

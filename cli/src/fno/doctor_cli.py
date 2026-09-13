@@ -18,11 +18,13 @@ from fno.agents.harness_probe import harness_probe_command
 from fno.doctor_footprint import footprint_command
 from fno.doctor_graph import graph_app
 from fno.doctor_lanes import lanes_command
+from fno.doctor_reclaim import reclaim_command
 from fno.evals.cli import evals_app
 from fno.events.cli import cli as event_app
 from fno.lint_cli import lint
 from fno.observer.cli import observer_app
 from fno.route_cli import inventory_cmd
+from fno.scratch_cli import scratch_app
 from fno.skill_diff.cli import skill_diff_app
 from fno.status_fanout import status_fanout_app
 from fno.test_cmd import test_command
@@ -64,6 +66,8 @@ doctor_app.add_typer(evals_app, name="evals")
 doctor_app.add_typer(doctor_event_app, name="event")
 doctor_app.add_typer(graph_app, name="graph")
 doctor_app.command("lint")(lint)
+# Machine janitor for dev-built disk bloat; hidden, `fno help doctor --all`.
+doctor_app.command("reclaim", hidden=True)(reclaim_command)
 doctor_app.command("footprint", hidden=True)(footprint_command)
 # Bash-call shape over this project's transcripts (x-997a); hidden, `fno help doctor --all`.
 doctor_app.command("bash-census", hidden=True)(bash_census_command)
@@ -102,6 +106,9 @@ doctor_app.command("plugin-file", hidden=True)(plugin_file_command)
 # this" gap). Hidden per the new-verb convention; `fno help doctor --all`.
 doctor_app.command("route", hidden=True)(inventory_cmd)
 doctor_app.add_typer(observer_app, name="observer")
+# `doctor scratch` is the scratch-shape sweep (x-caf8); the Rust binary is
+# the only implementation and the leaf refuses without it.
+doctor_app.add_typer(scratch_app, name="scratch")
 doctor_app.add_typer(skill_diff_app, name="skill-diff")
 # `doctor test` is the canonical spelling (x-6233, d-df6c29a6): the root
 # `fno test` is a VERB_MOVES shim. `doctor update` resolves the same command

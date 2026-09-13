@@ -10,7 +10,8 @@ via ``fno do pr watch tick``.  ONE agent globally -- no per-repo plists.
 Design constraints (locked):
   - NO ANTHROPIC_API_KEY in EnvironmentVariables (auth via macOS keychain OAuth)
   - RunAtLoad = false (human gate: operator runs `launchctl load` themselves)
-  - ProcessType = Background
+  - ProcessType = Standard (Background throttled the tick 15.8x slower than
+    Standard at load 161-178: 103.38s against 6.54s on one A/B loop, x-c79d)
   - PATH captured at install time so launchd's minimal PATH can resolve fno/gh/claude
 """
 
@@ -83,7 +84,9 @@ _PLIST_TEMPLATE = """\
   <key>ProgramArguments</key>
   <array>
     <string>{fno_binary}</string>
-    <string>pr-watch</string>
+    <string>do</string>
+    <string>pr</string>
+    <string>watch</string>
     <string>tick</string>
   </array>
 
@@ -106,7 +109,7 @@ _PLIST_TEMPLATE = """\
   <false/>
 
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
 
   <!-- Belt-and-suspenders: set cwd to $HOME so any code that constructs a
        relative path at least lands somewhere writable rather than in /.
@@ -582,6 +585,44 @@ def uninstall(*, launch_agents_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: x-d211: which timeout mechanism fired; the self-kill is not a budget outcome.
+_WHY_PHRASES = {
+    "deadline_exceeded": "deadline exceeded",
+    "slice_starved": "phase slice starved",
+    "self_killed": "killed mid-sync (update bounce probable)",
+    "killed": "killed by a signal",
+}
+
+
+#: "the tick broke" - lock_held, quota_skip and disabled are benign.
+_BROKEN_OUTCOMES = ("timeout", "error")
+
+#: How many tail end records the watermark pass keeps for the wedged streak
+#: (oldest first). Caps the streak any config knob can see.
+_RECENT_ENDS_KEEP = 16
+
+
+def tick_end_bits(end: dict) -> list[str]:
+    """The parenthesised detail bits after a tick outcome: duration, sweep
+    failures, the phase name only when the tick broke (timeout or error), and
+    the phases that spent their whole slice.
+    Shared by `fno do pr watch status` and the pr_watch_merge arm row, so the
+    arm row names the phase only when the tick broke."""
+    bits: list[str] = []
+    if end.get("duration_s") is not None:
+        bits.append(f"{end['duration_s']:.1f}s")
+    if end.get("sweep_failures"):
+        bits.append(f"{end['sweep_failures']} sweep failures")
+    if end.get("why"):
+        bits.append(_WHY_PHRASES.get(end["why"], end["why"]))
+    saturated = end.get("saturated")
+    if isinstance(saturated, list) and saturated:
+        bits.append("saturated: " + ", ".join(str(s) for s in saturated))
+    if end.get("phase") and end.get("outcome") in _BROKEN_OUTCOMES:
+        bits.append(f"phase: {end['phase']}")
+    return bits
+
+
 def status(
     *,
     launch_agents_dir: Path,
@@ -613,13 +654,7 @@ def status(
     if end is None:
         typer.echo("Last tick outcome: (no end record)")
     else:
-        bits: list[str] = []
-        if end.get("duration_s") is not None:
-            bits.append(f"{end['duration_s']:.1f}s")
-        if end.get("sweep_failures"):
-            bits.append(f"{end['sweep_failures']} sweep failures")
-        if end.get("phase") and end.get("outcome") in ("timeout", "error"):
-            bits.append(f"phase: {end['phase']}")
+        bits = tick_end_bits(end)
         detail = f" ({', '.join(bits)})" if bits else ""
         typer.echo(f"Last tick outcome: {end['outcome']}{detail}")
     completed = marks.get("completed_tick")
@@ -633,7 +668,8 @@ def status(
     if isinstance(scan, dict):
         typer.echo(
             f"Merge scan:   completed_at={scan.get('completed_at')} "
-            f"eligible={scan.get('eligible')} attempted={scan.get('attempted')}"
+            f"scanned={scan.get('scanned')} eligible={scan.get('eligible')} "
+            f"attempted={scan.get('attempted')}"
         )
     else:
         typer.echo("Merge scan:   (no scan receipt from a merge_scan-capable tick)")
@@ -695,6 +731,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
         "last_attempt": None,
         "last_end": None,
         "completed_tick": None,
+        "recent_ends": [],
     }
     if events_path is None:
         try:
@@ -740,6 +777,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                         "completed_at": ev.get("ts"),
                         "eligible": scan.get("eligible"),
                         "attempted": scan.get("attempted"),
+                        "scanned": scan.get("scanned"),
                     }
                 completed = _valid_completed_tick(
                     ev.get("ts"), ev.get("data"), chunks_by_receipt
@@ -757,7 +795,11 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                     "phase": data.get("phase"),
                     "duration_s": data.get("duration_s"),
                     "sweep_failures": data.get("sweep_failures"),
+                    "saturated": data.get("saturated"),
                 }
+                recent = marks["recent_ends"]
+                recent.append(marks["last_end"])
+                del recent[:-_RECENT_ENDS_KEEP]
     except OSError:
         pass
     return marks
@@ -863,7 +905,7 @@ def _parked_prs(state_path: Optional[Path]) -> dict:
 
 def _parse_ts(ts: Optional[str]) -> Optional[float]:
     """Parse a canonical UTC envelope timestamp to epoch seconds."""
-    if not ts:
+    if not isinstance(ts, str) or not ts:
         return None
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -872,6 +914,19 @@ def _parse_ts(ts: Optional[str]) -> Optional[float]:
         return dt.timestamp()
     except (ValueError, TypeError):
         return None
+
+
+def _broken_streak(ends: Optional[list]) -> int:
+    """Consecutive broken tick ends at the tail of an oldest-first list."""
+    if not ends:
+        return 0
+    streak = 0
+    for end in reversed(ends):
+        if isinstance(end, dict) and end.get("outcome") in _BROKEN_OUTCOMES:
+            streak += 1
+        else:
+            break
+    return streak
 
 
 def liveness_report(
@@ -883,16 +938,45 @@ def liveness_report(
     plist_exists: bool,
     plist_mtime: Optional[float],
     now: float,
+    last_end: Optional[dict] = None,
+    recent_ends: Optional[list] = None,
+    wedged_after_ticks: int = 3,
 ) -> dict:
     """Pure verdict: is an enabled pr-watch actually running?  (fully injectable)
 
-    ``verdict`` is one of ``disabled | healthy | healthy-pending | dead``.
-    Derives from tick recency (ground truth), not config alone (locked decision
-    #4).  A freshly-installed agent with no tick yet reads ``healthy-pending``,
-    not ``dead`` (AC1-UI boundary); enabled-but-not-loaded, or a stale/absent
-    tick past 2x the interval, reads ``dead`` with a fix command.
+    ``verdict`` is one of ``disabled | healthy | healthy-pending | wedged |
+    dead``.  Derives from tick recency (ground truth), not config alone
+    (locked decision #4).  A freshly-installed agent with no tick yet reads
+    ``healthy-pending``, not ``dead`` (AC1-UI boundary); enabled-but-not-
+    loaded, or a stale/absent tick past 2x the interval, reads ``dead`` with
+    a fix command.
+    A post-install tick that ended broken (``last_end``, outcome timeout or
+    error, newer than the plist) defeats that grace: the watcher HAD its tick
+    and it died, so the verdict reads ``dead`` naming ``fno agents status``.
+    A fresh watermark with ``wedged_after_ticks`` consecutive broken ends
+    reads ``wedged``, not ``healthy``: the process is up and completing its
+    sweeps, so recency alone cannot see that every tick still fails; the fix
+    re-renders the plist onto the current binary.
     """
     threshold = 2 * max(interval_seconds, 1)
+
+    # The post-install grace must not cover a tick that already ran and broke:
+    # an end newer than the plist IS the first post-install tick's outcome.
+    broke = None
+    if (
+        plist_mtime is not None
+        and isinstance(last_end, dict)
+        and last_end.get("outcome") in _BROKEN_OUTCOMES
+    ):
+        end_epoch = _parse_ts(last_end.get("ts"))
+        if end_epoch is not None and end_epoch > plist_mtime:
+            broke = last_end
+
+    def broke_suffix(end: dict) -> str:
+        return (
+            f"post-install tick ended {end.get('outcome')} "
+            f"({', '.join(tick_end_bits(end))}) without completing"
+        )
 
     def verdict(v: str, detail: str, fix: Optional[str] = None) -> dict:
         return {
@@ -917,13 +1001,20 @@ def liveness_report(
     # before it fires). Grace it regardless of whether an OLD tick predates the
     # (re)install - otherwise a re-enabled watcher reads a transient false
     # "dead" until the next tick.
-    if plist_mtime is not None and (now - plist_mtime) < threshold:
+    if broke is None and plist_mtime is not None and (now - plist_mtime) < threshold:
         tick_epoch = _parse_ts(last_tick_ts)
         if tick_epoch is None or plist_mtime > tick_epoch:
             return verdict("healthy-pending", "installed recently; awaiting first tick")
 
     tick_epoch = _parse_ts(last_tick_ts)
     if tick_epoch is None:
+        if broke is not None:
+            assert plist_mtime is not None
+            return verdict(
+                "dead",
+                f"installed {int(now - plist_mtime)}s ago; {broke_suffix(broke)}",
+                "fno agents status",
+            )
         return verdict(
             "dead",
             f"no tick recorded and installed more than 2x interval ({threshold}s) ago",
@@ -932,10 +1023,25 @@ def liveness_report(
 
     age = now - tick_epoch
     if age > threshold:
+        if broke is not None:
+            return verdict(
+                "dead",
+                f"last tick {int(age)}s ago (> 2x interval {threshold}s); {broke_suffix(broke)}",
+                "fno agents status",
+            )
         return verdict(
             "dead",
             f"last tick {int(age)}s ago (> 2x interval {threshold}s)",
             "fno do pr watch install",
+        )
+    streak = _broken_streak(recent_ends)
+    if streak >= max(wedged_after_ticks, 1):
+        return verdict(
+            "wedged",
+            f"last tick {int(age)}s ago but each of the last {streak} ticks "
+            "ended broken; the watermark is fresh, so the watcher is up and "
+            "delivering nothing",
+            "fno do pr watch refresh",
         )
     return verdict("healthy", f"last tick {int(age)}s ago")
 
@@ -971,6 +1077,9 @@ def liveness_report_live(
         plist_exists=plist_exists,
         plist_mtime=plist_mtime,
         now=time.time(),
+        last_end=marks.get("last_end"),
+        recent_ends=marks.get("recent_ends"),
+        wedged_after_ticks=cfg.wedged_after_ticks,
     )
     # The last completed grant scan rides the same report the liveness verdict
     # uses: a done-probe can then assert "a healthy watcher completed a scan

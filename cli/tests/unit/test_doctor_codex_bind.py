@@ -38,6 +38,10 @@ def _proc(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
 
 def _patch_common(monkeypatch, *, run_returncode: int = 0, pane_id_out: str = "7\n"):
     monkeypatch.setattr(doctor, "_codex_version", lambda: "codex-cli 0.148.0")
+    # build_pane_argv consults the installed codex version by exec'ing the
+    # real binary; the provider-exec guard blocks that, so pin it like the
+    # agents suite's _stub_codex_cli_version fixture does.
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: (0, 148, 0))
     monkeypatch.setattr(mux_spawn, "resolve_mux_session", lambda: "main")
     monkeypatch.setattr(
         mux_spawn, "_run_mux", lambda *a, **k: _proc(run_returncode, pane_id_out)

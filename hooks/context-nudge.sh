@@ -115,12 +115,18 @@ TBASE="$(basename "$TRANSCRIPT" .jsonl 2>/dev/null || echo "$TRANSCRIPT")"
 GENERAL_TRIGGER="50"
 KING_TRIGGER="40"
 if command -v fno >/dev/null 2>&1; then
-    _t=$(with_timeout 3 fno config get target.handoff.used_pct_trigger 2>/dev/null || true)
+    # ONE boot for the whole block. Each `fno config get` pays ~1.7s of
+    # interpreter startup, so a read per scalar costs a boot per scalar; a Stop
+    # hook that wants two numbers from one block asks for the block.
+    # stdout is `{"enabled":...,"used_pct_trigger":50,"king_used_pct_trigger":40}`;
+    # provenance goes to stderr. sed, not jq: jq is optional in this hook.
+    _blk=$(with_timeout 3 fno config get target.handoff 2>/dev/null || true)
+    _t=$(printf '%s' "$_blk" | sed -n 's/.*"used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     case "$_t" in
         ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 50
         *) GENERAL_TRIGGER="$_t" ;;
     esac
-    _t=$(with_timeout 3 fno config get target.handoff.king_used_pct_trigger 2>/dev/null || true)
+    _t=$(printf '%s' "$_blk" | sed -n 's/.*"king_used_pct_trigger"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     case "$_t" in
         ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 40
         *) KING_TRIGGER="$_t" ;;
@@ -179,8 +185,12 @@ CROWN_LEVEL=""
 CROWN_SCOPE=""
 ORPHANS=""
 ORPHAN_COUNT=0
+ORPHAN_UNKNOWN=""
+ORPHAN_UNKNOWN_COUNT=0
 UNLINKED_ORPHANS=""
 UNLINKED_ORPHAN_COUNT=0
+UNLINKED_UNKNOWN=""
+UNLINKED_UNKNOWN_COUNT=0
 if command -v fno >/dev/null 2>&1; then
     AGENTS_JSON=$(with_timeout 5 fno agents registry-json 2>/dev/null || true)
     if printf '%s' "$AGENTS_JSON" | jq -e '.agents' >/dev/null 2>&1; then
@@ -194,47 +204,62 @@ if command -v fno >/dev/null 2>&1; then
         # Active children this session spawned. Computed ONLY when crowned: the
         # orphan check below is crown-only, so scanning the registry for children
         # on every non-king Stop (the common case) is wasted work on a hot path.
-        # Active = NOT in the terminal set (exited/orphaned/failed/permanent_dead);
-        # covers spawning, ready, idle, busy, live, restarting - all are workers
-        # that may still need their king at review. Uses explicit inequalities
-        # (not jq IN(), which is jq 1.7+ and absent on CI's ubuntu jq 1.6 - the
-        # P1 fix's first attempt used IN() and failed silently on Linux).
+        # The stored `status` word lies (a dead row can read `live`
+        # indefinitely), so this reads the SERVED `liveness` field instead -
+        # `fno agents registry-json` derives it from the freshness rule
+        # (served_liveness.rs) and withholds a stale word as null. A row whose
+        # liveness is null (never measured, or stale past the window) is
+        # unresolved, not alive: it is reported separately and never silently
+        # folded into either the alive count or a dropped-dead bucket, so a
+        # broken reader can never clear this guard by going quiet.
         if [[ -n "$CROWN_LEVEL" ]]; then
-            ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+            # One jq call per bucket, emitting the name list then the count as
+            # two output lines from the same filtered array - the count is
+            # `length` of the identical `select(...)`, so a second jq pass
+            # over the same JSON would only re-derive what the first already
+            # computed. `head`/`tail` split the two lines; no second parse.
+            _bucket=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
                 [.agents[] | select(
                     .spawned_by_session == $sid
-                    and (.status // "exited") != "exited"
-                    and (.status // "exited") != "orphaned"
-                    and (.status // "exited") != "failed"
-                    and (.status // "exited") != "permanent_dead"
-                )] | map(.name) | join(", ")' \
+                    and .liveness == "alive"
+                )] | (map(.name) | join(", ")), length' \
                 2>/dev/null)
-            ORPHAN_COUNT=$(printf '%s' "$ORPHANS" | wc -w | tr -d ' ')
-            UNLINKED_ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+            ORPHANS=$(printf '%s\n' "$_bucket" | head -n1)
+            ORPHAN_COUNT=$(printf '%s\n' "$_bucket" | tail -n1)
+            case "$ORPHAN_COUNT" in ''|*[!0-9]*) ORPHAN_COUNT=0 ;; esac
+            _bucket=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+                [.agents[] | select(
+                    .spawned_by_session == $sid
+                    and (.liveness != "alive" and .liveness != "dead")
+                )] | (map(.name) | join(", ")), length' \
+                2>/dev/null)
+            ORPHAN_UNKNOWN=$(printf '%s\n' "$_bucket" | head -n1)
+            ORPHAN_UNKNOWN_COUNT=$(printf '%s\n' "$_bucket" | tail -n1)
+            case "$ORPHAN_UNKNOWN_COUNT" in ''|*[!0-9]*) ORPHAN_UNKNOWN_COUNT=0 ;; esac
+            _bucket=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
                 [.agents[] | select(
                     ((.spawned_by_session // "") == "")
                     and ((.origin // "") != "operator")
                     and ((.crown_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
-                    and (.status // "exited") != "exited"
-                    and (.status // "exited") != "orphaned"
-                    and (.status // "exited") != "failed"
-                    and (.status // "exited") != "permanent_dead"
-                )] | map(.name) | join(", ")' \
+                    and .liveness == "alive"
+                )] | (map(.name) | join(", ")), length' \
                 2>/dev/null)
-            UNLINKED_ORPHAN_COUNT=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
-                [.agents[] | select(
-                    ((.spawned_by_session // "") == "")
-                    and ((.origin // "") != "operator")
-                    and ((.crown_level // 0) == 0)
-                    and ((.session_id // .harness_session_id // "") != $sid)
-                    and (.status // "exited") != "exited"
-                    and (.status // "exited") != "orphaned"
-                    and (.status // "exited") != "failed"
-                    and (.status // "exited") != "permanent_dead"
-                )] | length' \
-                2>/dev/null)
+            UNLINKED_ORPHANS=$(printf '%s\n' "$_bucket" | head -n1)
+            UNLINKED_ORPHAN_COUNT=$(printf '%s\n' "$_bucket" | tail -n1)
             case "$UNLINKED_ORPHAN_COUNT" in ''|*[!0-9]*) UNLINKED_ORPHAN_COUNT=0 ;; esac
+            _bucket=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+                [.agents[] | select(
+                    ((.spawned_by_session // "") == "")
+                    and ((.origin // "") != "operator")
+                    and ((.crown_level // 0) == 0)
+                    and ((.session_id // .harness_session_id // "") != $sid)
+                    and (.liveness != "alive" and .liveness != "dead")
+                )] | (map(.name) | join(", ")), length' \
+                2>/dev/null)
+            UNLINKED_UNKNOWN=$(printf '%s\n' "$_bucket" | head -n1)
+            UNLINKED_UNKNOWN_COUNT=$(printf '%s\n' "$_bucket" | tail -n1)
+            case "$UNLINKED_UNKNOWN_COUNT" in ''|*[!0-9]*) UNLINKED_UNKNOWN_COUNT=0 ;; esac
         fi
     fi
 fi
@@ -395,7 +420,14 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         # doc already exists or not.
         CANON_DOC=""
         if command -v fno >/dev/null 2>&1; then
-            CANON_DOC=$(with_timeout 3 fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
+            # The same door precompact-canon-doc.sh uses: a scoped crown's
+            # rolling doc is scope-keyed, so this ask must name THAT file or
+            # the king's judgment lands where the pipeline never reads.
+            if [[ -n "$CROWN_SCOPE" ]]; then
+                CANON_DOC=$(with_timeout 3 fno config paths handoff --scope "${CROWN_SCOPE}" 2>/dev/null | head -1 || true)
+            else
+                CANON_DOC=$(with_timeout 3 fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
+            fi
         fi
         _king_doc_ask="fill its two crown-only headings yourself - gaps and open thinking, and workarounds in force - since nothing else knows what only you hold."
         if [[ -n "$CANON_DOC" ]]; then
@@ -444,7 +476,7 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
 fi
 
 # ── 7. Check (b): orphaned live children (CROWN-ONLY; latches INDEPENDENTLY). ─
-if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$UNLINKED_ORPHAN_COUNT" -gt 0 ) && ! -f "$ORPHAN_LATCH" ]]; then
+if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$ORPHAN_UNKNOWN_COUNT" -gt 0 || "$UNLINKED_ORPHAN_COUNT" -gt 0 || "$UNLINKED_UNKNOWN_COUNT" -gt 0 ) && ! -f "$ORPHAN_LATCH" ]]; then
     # Resolution 1: the crown holder DECLARED this reign a court. Choosing
     # court had no machine-visible act before `fno agents king shape` existed,
     # so this hook offered three options and could detect two - and the
@@ -457,8 +489,7 @@ if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$UNLINKED_ORPHAN_COUNT" -g
     RESOLVED=0
     if command -v fno >/dev/null 2>&1 && [[ -n "$SESSION_ID" ]]; then
         KING_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout 5 fno agents king \
-            manifest-path --harness-session-id "$SESSION_ID" \
-            --state-root "$REPO_ROOT/.fno" 2>/dev/null || true)
+            manifest-path --harness-session-id "$SESSION_ID" 2>/dev/null || true)
         if [[ -n "$KING_MANIFEST" && -f "$KING_MANIFEST" ]]; then
             KING_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$KING_MANIFEST" | head -1 | tr -d '[:space:]')
             [[ "$KING_SHAPE" == "court" ]] && RESOLVED=1
@@ -491,8 +522,8 @@ if [[ "$IS_KING" -eq 1 && ( "$ORPHAN_COUNT" -gt 0 || "$UNLINKED_ORPHAN_COUNT" -g
     if [[ "$RESOLVED" -eq 0 ]]; then
         touch "$ORPHAN_LATCH" 2>/dev/null || true
         emit_event "king_orphan_block" \
-            "{\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"unlinked_workers\":\"${UNLINKED_ORPHANS}\",\"unlinked_count\":${UNLINKED_ORPHAN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
-        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE} and ${ORPHAN_COUNT} worker(s) you spawned are still live (${ORPHANS:-none}). Linked count: ${ORPHAN_COUNT}. ${UNLINKED_ORPHAN_COUNT} active worker row(s) have no spawned_by link (${UNLINKED_ORPHANS:-none}); ownership unknown, so they cannot be excluded from this crown's obligations. A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave with 'fno agents king shape court'; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review. Check 'fno agents registry-json' for spawned_by_session null to close the ownership gap."
+            "{\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"unknown_workers\":\"${ORPHAN_UNKNOWN}\",\"unknown_count\":${ORPHAN_UNKNOWN_COUNT},\"unlinked_workers\":\"${UNLINKED_ORPHANS}\",\"unlinked_count\":${UNLINKED_ORPHAN_COUNT},\"unlinked_unknown_workers\":\"${UNLINKED_UNKNOWN}\",\"unlinked_unknown_count\":${UNLINKED_UNKNOWN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
+        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE}. The served liveness word from 'fno agents registry-json' says ${ORPHAN_COUNT} worker(s) you spawned are still alive (${ORPHANS:-none}). Linked count: ${ORPHAN_COUNT}. ${ORPHAN_UNKNOWN_COUNT} spawned worker row(s) have unresolved liveness (${ORPHAN_UNKNOWN:-none}); a broken reader never clears this guard, so they count on their own and stay out of the linked obligation above. ${UNLINKED_ORPHAN_COUNT} active worker row(s) have no spawned_by link (${UNLINKED_ORPHANS:-none}); ownership unknown, so they cannot be excluded from this crown's obligations. ${UNLINKED_UNKNOWN_COUNT} unlinked worker row(s) also have unresolved liveness (${UNLINKED_UNKNOWN:-none}); same reason, they count on their own. A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave with 'fno agents king shape court'; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review. Check 'fno agents registry-json' for spawned_by_session null to close the ownership gap."
         if [[ -n "$REASON" ]]; then
             REASON="${REASON}  ||  ${ORPHAN_REASON}"
         else

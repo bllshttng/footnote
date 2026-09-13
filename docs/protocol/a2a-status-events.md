@@ -33,6 +33,7 @@ type-specific payload stays in `data`. The family validates with
 | `task` | as applicable | Task id within the plan. Omitted for a flat plan with no task ids. |
 | `parent` | when spawned | Parent spawn-lineage handle. |
 | `outcome` | `task_done` / `run_summary` only | Return-contract enum: `SUCCESS` \| `DONE_WITH_CONCERNS` \| `FAILED` \| `BLOCKED`. |
+| `harness` | when known | Producer's harness (`claude`, `codex`, `agy`, ...). Metadata only, never part of the routing address; omitted (never `null`) when unresolved. |
 
 ## Handle grammar
 

@@ -1,9 +1,12 @@
 current-leaf	tier	post-collapse-typing	refs	reason-if-not-T1
 agents adopt	T1	agents adopt	6
+agents announce	T1	agents announce	0
 agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
 agents attach	T1	agents attach	13
 agents autonomy status	T1	agents autonomy status	9
+agents autonomy provenance	T1	agents autonomy provenance	0
 agents bash-census	T1	agents bash-census	0
+agents census	T1	agents census	0
 agents claim acquire	T1	agents claim acquire	27
 agents claim list	T1	agents claim list	9
 agents claim reap	T1	agents claim reap	1
@@ -26,24 +29,34 @@ agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
 agents dispatch capabilities	T1	agents dispatch capabilities	0
 agents dispatch family	T1	agents dispatch family	1
-agents dispatch one	T1	agents dispatch one	9
+agents dispatch next	T1	agents dispatch next	9
+agents dispatch one	T1	agents dispatch one	0
 agents dispatch resolve	T1	agents dispatch resolve	23
+agents distress-scan	T1	agents distress-scan	0
 agents distress-verdicts	T1	agents distress-verdicts	0
+agents gate-status	T1	agents gate-status	0
 agents drive-authority	T1	agents drive-authority	9
 agents finalize	T1	agents finalize	26
+agents fleet-incident	T1	agents fleet-incident	0
 agents gate	T1	agents gate	6
 agents graph-get	T1	agents graph-get	0
 agents heal-token	T1	agents heal-token	8
 agents history	T1	agents history	3
+agents incident	T1	agents incident	0
 agents kill-check	T1	agents kill-check	4
 agents king cancel	T1	agents king cancel	0
+agents king checkin	T1	agents king checkin	8
+agents king-checkin	T1	agents king-checkin	0
 agents king done	T1	agents king done	5
 agents king drain	T1	agents king drain	1
 agents king escalate	T1	agents king escalate	1
 agents king faq add	T1	agents king faq add	2
 agents king faq list	T1	agents king faq list	2
+agents king history	T1	agents king history	0
 agents king init	T1	agents king init	7
 agents king manifest-path	T1	agents king manifest-path	3
+agents king ledger	T1	agents king ledger	0
+agents king-history	T1	agents king-history	0
 agents list	KEEP	agents list	81	deliberate readability slack for a high-traffic distinct operation
 agents logs	KEEP	agents logs	73	deliberate readability slack for a high-traffic distinct operation
 agents loop	KEEP	agents loop	61	deliberate readability slack for a high-traffic distinct operation
@@ -64,6 +77,7 @@ agents mail seed-provenance	T1	agents mail seed-provenance	0
 agents mail send	T1	agents mail send	184
 agents mail sent	T1	agents mail sent	2
 agents mail status	T1	agents mail status	9
+agents mail team	T1	agents mail team	0
 agents mail triage	T1	agents mail triage	8
 agents mail unread	T1	agents mail unread	16
 agents mail view	T1	agents mail view	2
@@ -81,6 +95,7 @@ agents probe-run	T1	agents probe-run	3
 agents reap	T1	agents reap	15
 agents reconcile	T1	agents reconcile	12
 agents recover	T1	agents recover	0
+agents reign-ledger	T1	agents reign-ledger	0
 agents register	T1	agents register	2
 agents registry-json	T1	agents registry-json	3
 agents registry-repair	T1	agents registry-repair	4	
@@ -119,7 +134,6 @@ agents worker ship	T1	agents worker ship	2
 agents workspace register-worker	T1	agents workspace register-worker	1
 agents workspace reap	T1	agents workspace reap	0
 agents workspace worktree archive	T1	agents workspace worktree archive	4
-agents workspace worktree cargo-offload	T1	agents workspace worktree cargo-offload	0
 agents workspace worktree cleanup	T1	agents workspace worktree cleanup	15
 agents workspace worktree ensure	T1	agents workspace worktree ensure	24
 agents workspace worktree overlap-record	T1	agents workspace worktree overlap-record	3
@@ -211,6 +225,7 @@ backlog remove	T1	backlog remove	7
 backlog render-views	T1	backlog render-views	5
 backlog reopen	T1	backlog reopen	3
 backlog reprioritize	T1	backlog reprioritize	1
+backlog retract	T1	backlog retract	3
 backlog retro drain-postmortems	T1	backlog retro drain-postmortems	1	
 backlog retro run	T1	backlog retro run	16	
 backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7	
@@ -218,6 +233,7 @@ backlog roadmap	T1	backlog roadmap	1
 backlog stuck-epics	T1	backlog stuck-epics	1
 backlog session add	T1	backlog session add	4
 backlog session close	T1	backlog session close	3
+backlog session open	T1	backlog session open	1
 backlog session reap-open	T1	backlog session reap-open	3
 backlog status	T1	backlog status	1
 backlog supersede	T1	backlog supersede	10
@@ -279,7 +295,8 @@ cost	KEEP	cost	7	single-leaf group
 delivery	KEEP	delivery	7	single-leaf group
 dispatch capabilities	T1	dispatch capabilities	0
 dispatch family	T1	dispatch family	3
-dispatch one	T1	dispatch one	9
+dispatch next	T1	dispatch next	9
+dispatch one	T1	dispatch one	0
 dispatch resolve	T1	dispatch resolve	23
 do delivery evaluate	T1	do delivery evaluate	7
 do loops ls	T1	do loops ls	1
@@ -317,7 +334,9 @@ do pr info	T1	do pr info	10
 do pr list	T1	do pr list	3
 do pr logs	T1	do pr logs	1
 do pr merge	T1	do pr merge	55
+do pr merge-result-check	T1	do pr merge-result-check	0
 do pr next-receipt-generation	T1	do pr next-receipt-generation	0
+do pr publish-review	T1	do pr publish-review	0
 do pr rebase	T1	do pr rebase	21
 do pr review-hold	T1	do pr review-hold	0
 do pr ritual	T1	do pr ritual	24
@@ -382,7 +401,9 @@ doctor lint	T1	doctor lint	39
 doctor observer replay	T1	doctor observer replay	2
 doctor observer sweep	T1	doctor observer sweep	4
 doctor plugin-file	T1	doctor plugin-file	2
-doctor route	T1	doctor route	6	
+doctor route	T1	doctor route	6
+doctor scratch report	T1	doctor scratch report	0
+doctor scratch sweep	T1	doctor scratch sweep	1
 doctor skill-diff reconcile	T1	doctor skill-diff reconcile	1
 doctor skill-diff tick	T1	doctor skill-diff tick	4
 doctor test	T1	doctor test	107
@@ -419,6 +440,7 @@ mail seed-provenance	T1	mail seed-provenance	0
 mail send	KEEP	mail send	184	deliberate readability slack for a high-traffic distinct operation
 mail sent	T1	mail sent	2
 mail status	T1	mail status	9
+mail team	T1	mail team	0
 mail triage	T1	mail triage	8
 mail unread	T1	mail unread	16
 mail view	T1	mail view	2
@@ -496,7 +518,9 @@ pr info	T1	pr info	10
 pr list	T1	pr list	3
 pr logs	T1	pr logs	1
 pr merge	KEEP	pr merge	55	deliberate readability slack for a high-traffic distinct operation
+pr merge-result-check	T1	pr merge-result-check	0
 pr next-receipt-generation	T1	pr next-receipt-generation	0
+pr publish-review	T1	pr publish-review	4
 pr rebase	T1	pr rebase	21
 pr review-hold	T1	pr review-hold	0
 pr ritual	T1	pr ritual	24
@@ -533,7 +557,8 @@ route unset	T1	route unset	1
 scoreboard	KEEP	scoreboard	13	single-leaf group
 setup cli-hooks	T1	setup cli-hooks	8
 setup cli-hooks-codex	T1	setup cli-hooks-codex	4
-setup codex-plugin	T1	setup codex-plugin	10
+config plugin	T1	config plugin	0
+doctor reclaim	T1	doctor reclaim	0
 setup github-cli	T1	setup github-cli	0
 setup migrate-config	T1	setup migrate-config	1
 setup migrate-paths	T1	setup migrate-paths	8
@@ -574,7 +599,6 @@ worker reconcile	T1	worker reconcile	0
 worker review	T1	worker review	0
 worker ship	T1	worker ship	2
 worktree archive	T1	worktree archive	2
-worktree cargo-offload	T1	worktree cargo-offload	0
 worktree cleanup	T1	worktree cleanup	6
 worktree ensure	T1	worktree ensure	30
 worktree overlap-record	T1	worktree overlap-record	3
@@ -591,3 +615,5 @@ agents king shape	T1	agents king shape	5
 do review invocations	T1	do review invocations	3	
 do review post-dispositions	T1	do review post-dispositions	1	
 doctor graph export	T1	doctor graph export	0
+backlog version	T1	backlog version	19	
+agents prove-it-verdicts	T1	agents prove-it-verdicts	1	

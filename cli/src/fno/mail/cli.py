@@ -113,9 +113,6 @@ mail_app = typer.Typer(
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 _OLD_PATH_WARNED = False
 
@@ -174,12 +171,13 @@ def _read_body(
 ) -> str:
     """The reply body, from whichever of the three forms was used.
 
-    ``positional`` exists so ``reply`` accepts a bare body like ``send`` does.
-    Without it the two verbs disagreed about their own call shape, and the
-    failure was quiet in the worst way: click rejected the stray argument with
-    exit 2 and echoed the body back, which reads like a delivery receipt rather
-    than a refusal.
+    ``positional`` exists so ``reply`` accepts a bare body like ``send``
+    does: without it click rejected the stray argument with exit 2 and
+    echoed the body back, which reads like a delivery receipt. File reads
+    (and ``-`` for stdin) live in ``fno.text_or_file.read_text_arg``.
     """
+    from fno.text_or_file import read_text_arg
+
     supplied = [x for x in (positional, body, body_file) if x is not None]
     if len(supplied) > 1:
         typer.echo(
@@ -187,10 +185,9 @@ def _read_body(
             err=True,
         )
         raise typer.Exit(code=1)
-    if body_file is not None:
-        return body_file.read_text(encoding="utf-8")
-    if body is not None:
-        return body
+    text = read_text_arg(body, body_file, what="the body")
+    if text is not None:
+        return text
     if positional is not None:
         return positional
     typer.echo(
@@ -282,15 +279,19 @@ def _record_mail_origin(
         pass
 
 
+def _vet_body(body: str, *, allow_reason: str | None = None) -> None:
+    """The three checks every outgoing body runs, in reader order."""
+    _refuse_forged_envelope(body)
+    _enforce_body_cap(body)
+    _enforce_style(body, allow_reason=allow_reason)
+
+
 def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
     """Warn over WARN bytes, refuse over REFUSE bytes.
 
-    Fail-open: a disabled tier (0) or an unset body never blocks coordination.
-    The refusal teaches the rule: put the detail in a node or doc and send a
-    short pointer, since the mail is re-read far more often than the node.
-    ``usage=True`` exits 2: under ``--raw --check`` an over-cap payload is a
-    malformed CALL, and exit 1 there would read as a not-injectable verdict
-    about a session the run never measured.
+    Fail-open: a disabled tier (0) or an unset body never blocks
+    coordination. Under ``--raw --check`` an over-cap payload is a malformed
+    CALL, hence exit 2.
     """
     warn, refuse = _BODY_WARN_BYTES, _BODY_REFUSE_BYTES
     if warn <= 0 and refuse <= 0:
@@ -319,17 +320,13 @@ _CROSS_SESSION_TAG_RE = re.compile(r"</?cross-session-message", re.IGNORECASE)
 
 
 def _refuse_forged_envelope(body: str) -> None:
-    """Refuse a body containing an ``<fno_mail`` open tag or ``</fno_mail>`` close
-    tag (x-4ce4), with a CLI-friendly error before the body ever reaches
-    ``wrap_fno_mail`` (which enforces the same invariant as the backstop for
-    every producer, not only these CLI entry points).
+    """Refuse a body carrying an ``<fno_mail`` open tag or ``</fno_mail>`` close
+    tag (x-4ce4), before it reaches ``wrap_fno_mail``.
 
-    The envelope's trailer (``wrap_fno_mail``) is only trustworthy if a peer
-    cannot forge one: a body containing a close tag followed by a fabricated
-    trailer would render as two envelopes to a reader, and the second could say
-    the opposite of the first. Refuse at send time and name the reason, rather
-    than silently stripping or escaping - the body is prose a human reads, and a
-    mangled body is worse than a refused send.
+    The trailer is only trustworthy if a peer cannot forge one: a close tag
+    plus a fabricated trailer renders as two envelopes, and the second could
+    say the opposite of the first. Refuse at send time; a mangled body is
+    worse than a refused send.
     """
     from fno.mail.envelope import ForgedEnvelopeError, refuse_if_forged
 
@@ -341,11 +338,11 @@ def _refuse_forged_envelope(body: str) -> None:
 
 
 def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
-    """Refuse a body over the relay word cap (rules 1 to 6 do not run on
-    mail: the cap is the part a machine decides). Fail-open: an empty body,
-    the kill switch, a ``style-exception:`` line, or a non-empty
-    ``--style-exception`` reason skips the check. The refusal prints both
-    word counts; stderr is not a mail body, so it is exempt from the cap.
+    """Refuse a body that breaks the style rules (1 to 8). Fail-open: an empty
+    body, the kill switch, a ``style-exception:`` line, or a non-empty
+    ``--style-exception`` reason skips the check. The refusal prints the
+    offending rule and text; stderr is not a mail body, so it is exempt from
+    the cap.
     """
     if os.environ.get("FNO_STYLE_ENFORCE") == "0" or not body:
         return
@@ -365,7 +362,7 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
     violations = style.check(body, surface="mail", word_cap=load_settings().style.word_cap.mail)
     if violations:
         _emit_style_refusal(violations)
-        print(style.format_violations(violations), file=sys.stderr)
+        print(style.format_violations(violations, surface="mail"), file=sys.stderr)
         raise typer.Exit(code=1)
 
 
@@ -379,9 +376,12 @@ def _reserve_budget(
     sender_key: str | None = None,
     recipient_key: str | None = None,
 ):
-    """Reserve the authored count after both pair identities are canonical."""
+    """Reserve a control send after both pair identities are canonical.
+
+    An ordinary body reserves nothing: rule 7 is its only word gate, so the
+    return is ``(None, words)`` and callers release unconditionally.
+    """
     from fno import style
-    from fno.config import load_settings
     from fno.mail import budget
 
     words = style.word_count(body)
@@ -394,38 +394,7 @@ def _reserve_budget(
             sender_key=sender_key,
             recipient_key=recipient_key,
         )
-    exempt = not _budget_enforced(body, allow_reason=allow_reason)
-    try:
-        reservation = budget.reserve(
-            sender=sender,
-            recipient=recipient,
-            words=words,
-            msg_id=msg_id,
-            enforce=not exempt,
-            sender_key=sender_key,
-            recipient_key=recipient_key,
-            cap=load_settings().style.pair_budget_words,
-        )
-    except budget.BudgetRefused as exc:
-        print(
-            f"refused: rolling word budget for {exc.pair}: {exc.marker()}",
-            file=sys.stderr,
-        )
-        # The refusal is the one moment the sender is listening: teach the
-        # control lane here, or the next incident re-derives nothing.
-        print(_CONTROL_HINT, file=sys.stderr)
-        raise typer.Exit(code=1) from exc
-    except budget.BudgetUnavailable as exc:
-        print(f"refused: {exc}", file=sys.stderr)
-        raise typer.Exit(code=1) from exc
-    return reservation, words
-
-
-_CONTROL_HINT = (
-    "operational control (stop, resume, scope change)? resend with the body's "
-    "first line starting `control:` -- its own lane, 60 words, exempt from "
-    "this budget"
-)
+    return None, words
 
 
 def _reserve_control_budget(
@@ -439,10 +408,9 @@ def _reserve_control_budget(
 ):
     """Reserve a control send against the control lane's own ledger.
 
-    Never touches the ordinary window: a stop must not spend the budget the
-    conversation after it needs. The stderr note is the receipt's lane marker,
-    in one place, for every lane that routes through here; it reads RESERVED
-    because delivery is proven later, by the lane's own receipt.
+    The stderr note is the receipt's lane marker, in one place, for every
+    lane that routes through here; it reads RESERVED because delivery is
+    proven later, by the lane's own receipt.
     """
     from fno.mail import budget
 
@@ -465,22 +433,10 @@ def _reserve_control_budget(
         print(f"refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=1) from exc
     print(
-        "control lane: reserved against its own 60-word window; "
-        "the pair budget is untouched",
+        "control lane: reserved against its own 60-word rolling window",
         file=sys.stderr,
     )
     return reservation, words
-
-
-def _budget_enforced(body: str, *, allow_reason: str | None = None) -> bool:
-    """Whether this send refuses over-budget; all sends still reserve."""
-    from fno import style
-
-    return not (
-        os.environ.get("FNO_STYLE_ENFORCE") == "0"
-        or bool(allow_reason and allow_reason.strip())
-        or style.has_exception(body)
-    )
 
 
 def _release_budget(reservation) -> None:
@@ -541,13 +497,8 @@ def _validate_kind(kind: str) -> str:
     raise typer.Exit(code=1)
 
 
-# ---------------------------------------------------------------------------
-# Notification helpers
-# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
 # Status helpers
-# ---------------------------------------------------------------------------
 
 def _daemon_loaded(project: str) -> DaemonState:
     import subprocess
@@ -722,9 +673,6 @@ def _collect_status(project: str, repo_root: Path) -> StatusSnapshot:
     )
 
 
-# ---------------------------------------------------------------------------
-# Refs collection
-# ---------------------------------------------------------------------------
 
 def _collect_refs(
     ref_pr: Optional[int],
@@ -750,9 +698,6 @@ def _collect_refs(
     return refs
 
 
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
 
 def _is_job_name(name: Optional[str]) -> bool:
     """True when ``name`` is a ``node:<id>`` / ``pr:<n>`` job address."""
@@ -1055,12 +1000,8 @@ def cmd_reply(
     sender_session: str | None = typer.Option(
         None, "--sender-session",
         help=(
-            "Full session id to answer when the stored sender handle is "
-            "ambiguous. A legacy message carries only a head-8 handle, and under "
-            "UUIDv7 that is a ~65.536-second clock bucket, so two workers started "
-            "in one minute share it. Naming the full id here keeps the thread: "
-            "the reply still carries the original in_reply_to. A value that is "
-            "not one of the candidates sends nothing."
+            "Full session id when the stored sender handle is ambiguous; a "
+            "non-candidate value sends nothing."
         ),
     ),
     style_exception: str | None = typer.Option(
@@ -1070,31 +1011,17 @@ def cmd_reply(
 ) -> None:
     """Reply to a message, routed by the answered message's lane.
 
-    The id is resolved against the durable bus FIRST. A directed message (to_kind
-    is name, session, or node) goes back to its original sender without you
-    re-typing the handle, correlated via in_reply_to. A ``node``-addressed job
-    message is answered at its sender too (the job address is the routing key on
-    the way IN; the reply goes back to who sent it). Any other target falls
-    through to the thread-store reply.
+    The id resolves against the durable bus FIRST (directed mail answers
+    at its original sender), then in this session's transcript; only an
+    id absent from BOTH is a hard error. Routing contract:
+    docs/architecture/mail-reply-routing.md.
 
-    If the id is not on the bus, this session's own TRANSCRIPT is searched next.
-    That path is the common one, not a fallback for odd cases: a live-confirmed
-    delivery writes no durable thread, so an id that arrived live is absent from
-    the bus by design, and resolve_live_sender recovers the sender from the
-    injected <fno_mail id=...> envelope instead.
-
-    Only an id absent from BOTH is a hard error. This text used to describe the
-    bus step alone, and two agents read that as proof the verb could not answer
-    live mail at all.
-
-    The body is positional, or --body, or --body-file. Exactly one of the three;
-    giving two is refused rather than resolved by precedence.
+    The body is positional, or --body, or --body-file. Exactly one of the
+    three; giving two is refused rather than resolved by precedence.
     """
     kind = _validate_kind(kind)
     body_text = _read_body(body, body_file, body_arg)
-    _refuse_forged_envelope(body_text)
-    _enforce_body_cap(body_text)
-    _enforce_style(body_text, allow_reason=style_exception)
+    _vet_body(body_text, allow_reason=style_exception)
     classified_origin = classify_origin()
     _record_mail_origin(origin=classified_origin, lane="reply", sender=from_project)
     mail_origin: str | None = (
@@ -1524,8 +1451,8 @@ def cmd_pane_prepare(
     ),
     style_exception: Optional[str] = typer.Option(
         None, "--style-exception",
-        help="Reasoned one-send exception to the style and word-budget gates "
-        "on enveloped prose (a --raw send never enters them).",
+        help="Reasoned one-send exception to the style gates on enveloped "
+        "prose (a --raw send never enters them).",
     ),
 ) -> None:
     """Gate and envelope a pane payload read from stdin; print it on stdout.
@@ -1537,7 +1464,7 @@ def cmd_pane_prepare(
 
     Exit 0 prints the bytes to type. Exit 3 refuses and names why on stderr: the
     pane is showing an option prompt, hosts no registered agent, or the body
-    cannot be attributed. Exit 1 refuses on the style, body-cap, or word-budget
+    cannot be attributed. Exit 1 refuses on the style or body-cap
     gates the mail verbs enforce: this is the sole renderer every non-raw pane
     send passes through, so a sender refused by mail must not deliver the
     identical prose here instead.
@@ -1633,8 +1560,8 @@ def cmd_pane_prepare(
     # collides for codex siblings spawned inside one ~65s bucket, which fused
     # two distinct workers into one pair and refused normal parallel fanout.
     # The inbound-reset lookup keeps the display handles (bus envelopes carry
-    # handles). A row without a session id still gets a budget, keyed on the
-    # pane address rather than skipped.
+    # handles). A control body without a session id still reserves, keyed on
+    # the pane address rather than skipped.
     pane_address = f"pane {session}:{pane}"
     recipient = identity.handle if identity and identity.handle else pane_address
     _reserve_budget(
@@ -1695,9 +1622,7 @@ def cmd_lint(
     typer.echo(f"lint: {project} OK ({good} thread(s))")
 
 
-# ---------------------------------------------------------------------------
 # Output helpers
-# ---------------------------------------------------------------------------
 
 def _thread_to_dict(h: ThreadHandle) -> dict:
     return {
@@ -1737,9 +1662,7 @@ def _print_thread_summary(h: ThreadHandle) -> None:
     typer.echo(f"  {h.path}")
 
 
-# ---------------------------------------------------------------------------
 # Publish + cursor-consume (relocated from `fno agents`, ab-cee91152 Move B)
-# ---------------------------------------------------------------------------
 # `fno agents mail send` is the durable-first publish (the envelope lands on the bus
 # log before any live delivery is attempted). `fno agents mail unread`/`ack` are the
 # cursor-based consume over that log: unread lists messages addressed to me
@@ -2183,7 +2106,7 @@ def _name_lane_send(
         generate_msg_id,
         write_new_thread,
     )
-    from fno.mail.envelope import harness_for_provider, wrap_fno_mail
+    from fno.mail.envelope import wrap_fno_mail
 
     self_send = False
     # The recipient's full session id when a lane resolved one; it stamps that
@@ -2282,15 +2205,9 @@ def _name_lane_send(
     # head-8 clock bucket. None when unprovable, and then omitted, never guessed.
     sender_session = _reply_session_for(from_name)
     def _envelope(to_session: Optional[str] = None) -> str:
-        # Through harness_for_provider like every other send path: the wire
-        # vocabulary is claude-code, and a raw "claude" here made the name lane
-        # the one producer disagreeing with dispatch, the relay, and the Rust
-        # contract. "cli" is the honest no-harness value.
         return wrap_fno_mail(
             message,
             from_=sender,
-            harness=harness_for_provider(sender_harness) if sender_harness else "cli",
-            model=sender_model,
             to=recipient,
             id=msg_id,
             reply_to=reply_to,
@@ -2613,6 +2530,11 @@ def _name_lane_send(
             # envelope does, so a drained reply resolves the collision-safe
             # address exactly as a live one does (node x-3a64).
             from_session=sender_session,
+            # And the same sender provenance the hosted and typed rows carry:
+            # the compact envelope no longer renders the model, so the durable
+            # row is where audit reads it.
+            provider_from=sender_harness,
+            from_model=sender_model,
             word_count=authored_words,
             origin=origin,
         )
@@ -2813,27 +2735,25 @@ def _codex_default_review_base(cwd: str | None) -> str | None:
     """Return the repository-declared origin default branch, never a guessed name."""
     if not cwd:
         return None
+    return _git_out(
+        cwd, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"
+    ) or None
+
+
+def _git_out(cwd: str | None, *args: str) -> str | None:
+    """One bounded `git -C <cwd>` read: stripped stdout on 0, None on failure."""
     import subprocess
 
     try:
         proc = subprocess.run(
-            [
-                "git",
-                "-C",
-                cwd,
-                "symbolic-ref",
-                "--quiet",
-                "--short",
-                "refs/remotes/origin/HEAD",
-            ],
+            ["git", "-C", cwd or ".", *args],
             capture_output=True,
             text=True,
             timeout=2,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    ref = proc.stdout.strip()
-    return ref if proc.returncode == 0 and ref else None
+    return proc.stdout.strip() if proc.returncode == 0 else None
 
 
 def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool, str]:
@@ -2865,16 +2785,7 @@ def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool
         )
 
     def _git(*args: str) -> str | None:
-        try:
-            proc = subprocess.run(
-                ["git", "-C", cwd, *args],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return proc.stdout.strip() if proc.returncode == 0 else None
+        return _git_out(cwd, *args)
 
     head = _git("rev-parse", "HEAD")
     if not head:
@@ -3555,13 +3466,9 @@ def cmd_send(
     name: str | None = typer.Argument(
         None,
         help=(
-            "Agent name, short-id (first 8 of the session id), or full session "
-            "id. Codex: use the full session_id or pane; never head-8. A codex "
-            "session id is UUIDv7, so its first 8 characters are a "
-            "65.536-second timestamp bucket rather than random - siblings "
-            "spawned in one minute share them - and a head-8 aimed at a codex "
-            "row is refused outright, not merely when it happens to be "
-            "ambiguous today. Claude ids are UUIDv4, so either form works there."
+            "Agent name, short-id, or full session id. A codex head-8 is a "
+            "65.536-second UUIDv7 bucket, not random, and is refused against "
+            "a codex row; claude ids are UUIDv4, so either form works."
         ),
     ),
     message: str | None = typer.Argument(
@@ -3581,9 +3488,8 @@ def cmd_send(
     from_name: str | None = typer.Option(
         None, "--from-name",
         help=(
-            "Identity advertised in the envelope (must be XML-attribute-safe). "
-            "Unset defaults to 'fno' for an agent send, or the working "
-            "dir's project for an inbox-kind send."
+            "Envelope identity (XML-attribute-safe). Unset: 'fno' for an "
+            "agent send, the working dir's project for an inbox-kind send."
         ),
     ),
     origin: str | None = typer.Option(
@@ -3595,18 +3501,14 @@ def cmd_send(
     ruling: str | None = typer.Option(
         None,
         "--ruling",
-        help=(
-            "Append this authored message to the governed node's details as a "
-            "dated ruling block before named-worker transport."
-        ),
+        help="Append the message to the governed node's details as a dated ruling block.",
     ),
     from_self: bool = typer.Option(
         False, "--from-self",
         help=(
             "Stamp the sender with this session's own canonical mail handle "
-            "(the reply handle `fno whoami` shows) instead of the project. "
-            "Use with --to-project when you will hold for the reply. Fails loud "
-            "(exit 2) with no ambient harness identity - never a silent floor."
+            "(the reply handle `fno whoami` shows). Fails loud (exit 2) with "
+            "no ambient harness identity."
         ),
     ),
     to_project: str | None = typer.Option(
@@ -3619,9 +3521,8 @@ def cmd_send(
     to_king: str | None = typer.Option(
         None, "--to-king",
         help=(
-            "Anycast over the crown: deliver to whoever holds this crown scope "
-            "RIGHT NOW, resolved at send time. Refuses and queues nothing when no "
-            "live row holds it. Use instead of <name> for the role."
+            "Anycast over the crown: deliver to whoever holds this scope "
+            "RIGHT NOW, resolved at send time; no live holder queues nothing."
         ),
     ),
     any_live: bool = typer.Option(
@@ -3631,10 +3532,8 @@ def cmd_send(
     kind: str | None = typer.Option(
         None, "--kind", "-k",
         help=(
-            "Inbox kind (heads-up | question | fyi). A project-inbox drain "
-            "contract, so pair it with --to-project; question/fyi to a bare "
-            "session handle is refused (a handle has no drain that reads them). "
-            "Omit --kind for a default agent-to-agent send (live if a peer is hosted)."
+            "Inbox kind (heads-up | question | fyi); pair with --to-project. "
+            "Omit for a plain agent-to-agent send."
         ),
     ),
     reply_to: str | None = typer.Option(
@@ -3647,11 +3546,11 @@ def cmd_send(
     ),
     body: str | None = typer.Option(
         None, "--body", "-b",
-        help="With --kind: message body (alternative to the positional arg).",
+        help="Message body in ANY mode (alternative to the positional arg).",
     ),
     body_file: Path | None = typer.Option(
         None, "--body-file",
-        help="With --kind: read the message body from a file.",
+        help="Read the body from a file ('-' = stdin); binds in every mode.",
     ),
     ref_pr: int | None = typer.Option(
         None, "--ref-pr", help="With --kind: PR number reference for triage."
@@ -3670,59 +3569,37 @@ def cmd_send(
         False, "--raw",
         help=(
             "Inject the payload UNWRAPPED at the recipient's prompt line so the "
-            "REPL slash parser fires it - the only way to make a verb the model "
-            "is barred from invoking actually run. One axis binds it: an actor "
-            "OTHER than the model must supply the trigger (cross-session, the "
-            "king-mediated path; self-injection is barred unless --to-self). Keeping "
-            "the reviewer off the author is the aim of this lane, not a second "
-            "axis it enforces: a self-attested review counts as coverage and "
-            "merges. Payload must start with / and be "
-            "a single line. Never queues durable. A payload-varying retry is a "
-            "two-variable experiment - report any refusal verbatim and stop."
+            "REPL slash parser fires it. Payload must start with / and be a "
+            "single line. Never queues durable. An actor OTHER than the model "
+            "must supply the trigger; self-injection is barred unless --to-self. "
+            "Mechanics and the reviewer-off-the-author rationale: "
+            "docs/architecture/review-lanes.md."
         ),
     ),
     check: bool = typer.Option(
         False, "--check",
         help=(
             "With --raw: report whether an injection path EXISTS and inject "
-            "nothing. Prints 'injectable: <lane>' (exit 0), 'not-injectable: "
-            "<reason>' (exit 1), or 'unmeasurable: <reason>' (exit 3) when it "
-            "could not resolve at all - that third answer is separate on purpose, "
-            "since an absent probe binary or an unreadable registry says nothing "
-            "about the session. A malformed payload stays a usage error (exit 2), "
-            "never a verdict about the session. Gate on "
-            "this before you TELL anyone to "
-            "self-inject: a session with no registry row, a non-keystroke lane, or "
-            "no control socket has no path at all, and advice naming a mechanism "
-            "that cannot fire is worse than no advice. It resolves through the "
-            "same path the real send uses, so it cannot say yes where the send "
-            "says no. It reports a PATH, never a landing: no probe can see whether "
-            "the prompt line is idle."
+            "nothing: 'injectable: <lane>' (exit 0), 'not-injectable' (1), "
+            "'unmeasurable' (3), malformed payload (2). Reports a PATH only."
         ),
     ),
     to_self: bool = typer.Option(
         False, "--to-self",
         help=(
-            "Address this session as the recipient (no <id> needed). With --raw "
-            "the envelope is stripped so a slash command parses at your own "
-            "prompt line - this is how an agent reaches a verb the harness serves "
-            "to a typed invocation. The audit event records the sender, since an "
-            "unwrapped payload carries no `from`."
+            "Address this session as the recipient (no <id> needed); with "
+            "--raw the envelope is stripped so a slash command parses at your "
+            "own prompt line."
         ),
     ),
     force: bool = typer.Option(
         False, "--force", "-F",
         help=(
             "Deliver over the PANE transport: type the wrapped body at the "
-            "recipient's prompt instead of running the live-inject ladder. Every "
-            "mail semantic is kept - same envelope, same msg-id, same reply "
-            "handle, same outbox row - and only the transport changes, so a "
-            "live-miss no longer forces you to switch verbs and lose all four. "
-            "The receipt says `typed (pane <id>)`, NEVER `delivered`: bytes "
-            "written to a PTY is not delivery and is certainly not action. Opt-in "
-            "on purpose - the pane path asks permission from nothing, so it can "
-            "also select a showing prompt's default; it reads the pane first and "
-            "refuses one."
+            "recipient's prompt, keeping every mail semantic. The receipt says "
+            "`typed (pane <id>)`, NEVER `delivered` - bytes written to a PTY "
+            "is not action. It reads the pane first and refuses a showing "
+            "prompt."
         ),
     ),
     style_exception: str | None = typer.Option(
@@ -3732,24 +3609,15 @@ def cmd_send(
 ) -> None:
     """Send a message asynchronously to a registered agent or a project.
 
-    Name mode (``send <name> <message>``) requires the agent to already exist;
-    unknown names exit 16. Project mode (``send --to-project <X> <message>``)
-    resolves over the registry: one live peer delivers live, none queues durable
-    for project X, many errors with the candidate list unless ``--any``. Crown
-    mode (``send --to-king <scope> <message>``) resolves the crown holder at
-    send time, then delivers by name; nobody or a split crown refuses.
+    Name mode requires the agent to exist (unknown names exit 16). Project
+    mode resolves over the registry; crown mode resolves the holder at send
+    time. Delivery is live-inject-FIRST, the durable envelope the fallback.
+    Address it by the ADDRESS column of ``fno agents list`` - the NAME
+    column is a spawn label, not a mailbox. A stranded send:
+    ``fno agents mail sent --unclaimed`` / ``mail withdraw <id>``.
 
-    Delivery is live-inject-FIRST; the durable envelope is the fallback tier.
-    Sustained agent-lock contention writes nothing and exits 11.
-
-    Address it by the ADDRESS column of ``fno agents list`` (or the full session
-    id). The NAME column is a spawn label and a discovered lane's LABEL is an
-    alias; neither is a mailbox. If a send does strand, ``fno agents mail sent
-    --unclaimed`` finds it and ``fno agents mail withdraw <id>`` retracts it.
-
-    Stdout contract: exactly one line, either ``msg-<id> delivered (hosted)`` or
-    ``msg-<id> queued (durable) [<reason>]``, where ``<reason>`` is the live
-    lane's own cause. Exit 0 for both; failures go to stderr with a nonzero exit.
+    Stdout: one line, ``msg-<id> delivered (hosted)`` or
+    ``msg-<id> queued (durable) [<reason>]``. Exit 0 for both.
     """
     from fno.agents.dispatch import (
         DispatchAskError,
@@ -3760,6 +3628,14 @@ def cmd_send(
     from fno._flag_aliases import refuse_retired_provider
 
     refuse_retired_provider(_provider_tombstone)
+
+    # --body/--body-file bind in EVERY mode, not only --kind. One resolution
+    # here; each mode below falls back to its own positional slots.
+    from fno.text_or_file import read_text_arg
+
+    body_text = read_text_arg(body, body_file, what="the body")
+    if body_text is not None and message is None:
+        message = body_text
 
     # --to-king addresses a ROLE, resolved HERE at send time and handed to the
     # ordinary name lane. Any second address would decide the destination, and
@@ -3986,15 +3862,10 @@ def cmd_send(
             raise typer.Exit(code=2)
 
         recipient = to_project or name
-        # Body: --body-file wins, then --body, then the positional (which
-        # parks in `name` under --to-project, or in `message` in name mode).
-        if body is not None and body_file is not None:
-            print("error: provide --body or --body-file, not both", file=sys.stderr)
-            raise typer.Exit(code=2)
-        if body_file is not None:
-            content: str | None = body_file.read_text(encoding="utf-8")
-        elif body is not None:
-            content = body
+        # Body: --body-file/--body (resolved above), then the positional
+        # (which parks in `name` under --to-project, or in `message`).
+        if body_text is not None:
+            content: str | None = body_text
         elif to_project:
             content = message if message is not None else name
         else:
@@ -4006,9 +3877,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        _refuse_forged_envelope(content)
-        _enforce_body_cap(content)
-        _enforce_style(content, allow_reason=style_exception)
+        _vet_body(content, allow_reason=style_exception)
 
         # US10 kind-scoped guard: question/fyi are project-inbox drain contracts
         # (question -> wake-signal, fyi -> memory). Addressed to an agent they
@@ -4107,13 +3976,7 @@ def cmd_send(
             print(f"error: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
 
-        refs: dict[str, str] = {}
-        if ref_pr is not None:
-            refs["ref_pr"] = str(ref_pr)
-        if ref_node is not None:
-            refs["ref_node"] = ref_node
-        if ref_gate is not None:
-            refs["ref_gate"] = ref_gate
+        refs = _collect_refs(ref_pr, ref_node, ref_gate, None, None, None)
 
         from fno.inbox.store import generate_msg_id
 
@@ -4185,16 +4048,17 @@ def cmd_send(
     # Project mode: the message is the sole positional, so `send --to-project X
     # "msg"` parks "msg" in the `name` slot - accept it from either slot.
     if to_project:
-        content = message if message is not None else name
+        content = (
+            body_text if body_text is not None
+            else (message if message is not None else name)
+        )
         if not content:
             print(
                 "usage: fno agents mail send --to-project <project> <message>",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        _refuse_forged_envelope(content)
-        _enforce_body_cap(content)
-        _enforce_style(content, allow_reason=style_exception)
+        _vet_body(content, allow_reason=style_exception)
         try:
             result = dispatch_send_to_project(
                 to_project,
@@ -4204,9 +4068,6 @@ def cmd_send(
                 from_name=stamp_from(from_name),
                 origin=mail_origin,
                 any_=any_live,
-                budget_enforce=_budget_enforced(
-                    content, allow_reason=style_exception
-                ),
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
@@ -4261,16 +4122,15 @@ def cmd_send(
         from fno.mail.job_address import is_job_token
 
         if is_job_token(name):
-            if message is None:
+            payload = body_text if body_text is not None else message
+            if payload is None:
                 print(f"usage: fno agents mail send {name} <message>", file=sys.stderr)
                 raise typer.Exit(code=2)
-            _refuse_forged_envelope(message)
-            _enforce_body_cap(message)
-            _enforce_style(message, allow_reason=style_exception)
+            _vet_body(payload, allow_reason=style_exception)
             from fno.mail.job_lane import job_lane_send
 
             job_lane_send(
-                message,
+                payload,
                 name,
                 from_name=stamp_from(from_name),
                 style_exception=style_exception,
@@ -4279,6 +4139,8 @@ def cmd_send(
             return
 
     # Name mode.
+    if body_text is not None:
+        message = body_text
     if not name or message is None:
         print(
             "usage: fno agents mail send <name> <message>  "
@@ -4287,9 +4149,7 @@ def cmd_send(
         )
         raise typer.Exit(code=2)
 
-    _refuse_forged_envelope(message)
-    _enforce_body_cap(message)
-    _enforce_style(message, allow_reason=style_exception)
+    _vet_body(message, allow_reason=style_exception)
 
     if ruling is not None:
         ruling_graph = _ruling_graph_path(workdir) if cwd else paths.graph_json()
@@ -4347,9 +4207,6 @@ def cmd_send(
             cwd=workdir,
             from_name=stamp_from(from_name),
             origin=mail_origin,
-            budget_enforce=_budget_enforced(
-                message, allow_reason=style_exception
-            ),
         )
     except DispatchAskError as exc:
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
@@ -4453,6 +4310,80 @@ def cmd_send(
             reason_tok += _live_miss_age_suffix(name)
         _warn_deferred(name, reason=result.reason)
         print(f"{result.msg_id} queued (durable) [{reason_tok}]")
+
+
+def _team_sender_kind_and_from(from_name: Optional[str]) -> tuple[str, str]:
+    """Resolve the announce envelope identity.
+
+    A session whose harness identity this process can PROVE it owns stamps its
+    own handle as ``agent`` (Rust then demands a crown of that row); everything
+    else (a bare shell, cron, an explicit alias) stamps ``operator``.
+    """
+    from fno.agents.self_stamp import stamp_from
+    from fno.harness_identity import resolve_owned_identity
+
+    try:
+        ident = resolve_owned_identity()
+    except Exception:  # noqa: BLE001 - identity is best-effort, never a crash
+        ident = None
+    owned = bool(ident is not None and ident.session_id and ident.harness)
+    return ("agent" if owned else "operator"), stamp_from(from_name)
+
+
+@mail_app.command("team", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def cmd_team(
+    ctx: typer.Context,
+    scope: str = typer.Option(..., "--scope", help="Fleet scope: all | kings | <crown scope> | project:<p>."),
+    message: str | None = typer.Argument(None, help="One announcement body."),
+    from_name: str | None = typer.Option(None, "--from-name", help="Envelope identity (see send)."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Send receipt as JSON."),
+) -> None:
+    """Announce one body to a fleet scope as ONE bus line.
+
+    The bus line IS the announcement: every session reads it through its own
+    cursor at its next hook boundary, so a send costs one write at any fleet
+    size. Delivery proofs are a separate read (`fno-agents announce status
+    <id>`). The body is linted here (the single style implementation); the
+    Rust writer owns authority, the audience snapshot, and the locked append.
+
+    Announcement flags belong to the Rust writer and are relayed verbatim:
+    `--subject S` (supersede key), `--expires 45m|24h|7d` (standing window,
+    default 24h, max 7d), `--urgent`. Any unrecognized flag is passed through
+    the same way and refused there, so this shim adds no Python flag surface.
+    """
+    import shutil
+
+    if not message:
+        print("usage: fno agents mail team --scope <all|kings|<crown>|project:<p>> <message>", file=sys.stderr)
+        raise typer.Exit(code=2)
+    _refuse_forged_envelope(message)
+    _enforce_body_cap(message)
+    _enforce_style(message, allow_reason=None)
+
+    sender_kind, sender = _team_sender_kind_and_from(from_name)
+
+    binary = shutil.which("fno-agents")
+    if binary is None:
+        print(
+            "error: mail team needs the fno-agents binary on PATH (the announce writer)",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+
+    args = [
+        binary, "announce", "send",
+        "--scope", scope,
+        "--from", sender,
+        "--sender-kind", sender_kind,
+        *ctx.args,
+    ]
+    if json_out:
+        args.append("--json")
+    proc = subprocess.run(args, input=message, capture_output=True, text=True)
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    if proc.returncode != 0:
+        raise typer.Exit(code=proc.returncode if proc.returncode > 0 else 1)
 
 
 @mail_app.command("unread")
@@ -4780,21 +4711,10 @@ def cmd_bus_ack(
         )
         raise typer.Exit(code=2)
     if not is_deliverable(target):
-        # Name the delivery this row actually carries. `is_deliverable` excludes
-        # `typed` alongside `hosted`, so a forced pane message reported itself as
-        # "delivered (hosted)" here, which is the one claim the pane transport
-        # must never make: bytes at a prompt can be discarded by that prompt.
-        from fno.bus.log import TYPED_DELIVERY
+        # Each refusal names what the row is; the lines live in mail.ack_refusal.
+        from fno.mail.ack_refusal import refusal_line
 
-        how = (
-            "typed into a pane (delivery unconfirmed)"
-            if target.delivery == TYPED_DELIVERY
-            else "already delivered (hosted)"
-        )
-        print(
-            f"message {msg_id!r} was {how}; cursor not advanced",
-            file=sys.stderr,
-        )
+        print(refusal_line(target), file=sys.stderr)
         raise typer.Exit(code=2)
 
     # The advance consumes every message addressed to `name` up through msg_id.
@@ -5282,143 +5202,10 @@ def cmd_drain_self(
                 )
 
 
-def _emit_drain_marker(
-    msg_id: str,
-    recipient: str,
-    address_form: str,
-    sender: "str | None",
-    reason: str = "printed",
-) -> None:
-    """Best-effort ``agent_mail_drained`` receipt, one per drained message id (W1.1).
+# Moved to fno.mail.hold (file budget); the ack/drain commands below import it.
+from fno.mail.hold import _emit_drain_marker, cmd_notify_self  # noqa: E402,F401
 
-    Lets a sender join ``events.jsonl`` on ``msg_id`` to a terminal 'drained'
-    state, and lets the dead-letter sweep prefer a positive marker over cursor
-    inference. ``reason`` distinguishes a message that was printed from one
-    skipped as a duplicate (W2), so the receipt never silently swallows a
-    message. Swallowed on any failure: the caller has already printed and acked
-    the message, so a missing receipt degrades to the cursor fallback rather than
-    failing the drain (AC9-ERR).
-    """
-    from fno.agents import events
-
-    try:
-        events.emit(
-            events.KIND_AGENT_MAIL_DRAINED,
-            msg_id=msg_id,
-            recipient=recipient,
-            address_form=address_form,
-            sender=sender or "",
-            reason=reason,
-        )
-    except (OSError, ValueError, TypeError):
-        pass
-
-
-@mail_app.command("notify-self", hidden=True)
-def cmd_notify_self() -> None:
-    """Write one atomic ``UserPromptSubmit`` mail payload, then acknowledge it.
-
-    The CLI owns the complete hook envelope so no shell capture can advance the
-    cursor before the JSON is ready. A write or flush failure leaves the cursor
-    unchanged; the next SessionStart or active-turn boundary can retry.
-    """
-    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
-    from fno.bus.cursor import advance_cursor, scan_unread
-    from fno.config import load_settings
-    from fno.harness_identity import canonical_handle
-
-    try:
-        ident = require_self_identity()
-    except IdentityAmbiguousError as exc:
-        print(f"error: notify-self: {exc}", file=sys.stderr)
-        return
-    if not ident.harness or not ident.session_id:
-        return
-
-    handle = canonical_handle(ident.session_id)
-
-    # Busy mode (x-481e). This hook fires on every UserPromptSubmit. For an idle
-    # hold that is the re-arm signal. For a wall hold it only keeps the policy
-    # live without moving its fixed deadline. A lapsed one is tidied here rather
-    # than on the send path, where the gate stays a pure read to avoid a
-    # re-entrant registry lock.
-    # Both calls WRITE, so both are wrapped: a hold that cannot be extended or
-    # tidied must degrade to rendering the mail, never to swallowing this
-    # turn's delivery. Busy mode is a convenience layered over the bus, and it
-    # does not get to break the bus.
-    try:
-        from fno.mail import hold as hold_mod
-
-        if hold_mod.extend(handle) is not None:
-            return
-        hold_mod.tidy_lapsed(handle)
-    except Exception:  # noqa: BLE001 - a hold failure never costs a delivery
-        pass
-
-    lines: list[str] = []
-
-    unread = scan_unread(handle)
-    from fno.mail.reply_resolve import present_mail_ids
-
-    present = present_mail_ids()
-
-    def _dup(m: object) -> bool:
-        return present is not None and getattr(m, "id", "") in present
-
-    to_render = [m for m in unread if not _dup(m)]
-    if to_render:
-        lines.append(f"[fno agents mail] {len(to_render)} message(s) for {handle}:")
-        for message in to_render:
-            lines.extend(
-                (
-                    f"\n--- from {message.from_} ({message.ts})  id:{message.id} ---",
-                    message.body.rstrip("\n"),
-                )
-            )
-        lines.append(
-            '\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."'
-        )
-
-    from fno.mail.landed import _defang_reminder, _sent_unclaimed, nag_line
-
-    ttl = load_settings().inbox.unclaimed_ttl
-    unclaimed = _sent_unclaimed(handle, ttl)
-    line = nag_line(unclaimed)
-    if line:
-        lines.append(line)
-
-    if not lines:
-        if unread:
-            advance_cursor(handle, unread[-1].id)
-            for m in unread:
-                _emit_drain_marker(m.id, handle, handle, m.from_, "skipped-duplicate")
-        return
-
-    try:
-        context = (
-            f"<system-reminder>\n"
-            f"{_defang_reminder(chr(10).join(lines))}\n"
-            f"</system-reminder>"
-        )
-        payload = json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "UserPromptSubmit",
-                    "additionalContext": context,
-                }
-            },
-            ensure_ascii=False,
-        )
-        sys.stdout.write(payload + "\n")
-        sys.stdout.flush()
-    except (OSError, TypeError, ValueError):
-        return
-
-    if unread:
-        advance_cursor(handle, unread[-1].id)
-        for m in unread:
-            reason = "skipped-duplicate" if _dup(m) else "printed"
-            _emit_drain_marker(m.id, handle, handle, m.from_, reason)
+mail_app.command("notify-self", hidden=True)(cmd_notify_self)
 
 
 @mail_app.command("rebuild-render", hidden=True)

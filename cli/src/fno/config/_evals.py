@@ -30,6 +30,11 @@ class EvalsBlock(BaseModel):
 
     schedule_days: int = 7
     stale_days: int = 7
+    # Scratch-shape sweep (x-caf8): a shape crossing this many distinct jobs
+    # inside the window files one p1 node; the window matches the observer
+    # sweep's default.
+    scratch_threshold: int = 3
+    scratch_window_days: int = 28
 
     @model_validator(mode="before")
     @classmethod
@@ -38,12 +43,23 @@ class EvalsBlock(BaseModel):
         if not isinstance(v, dict):
             return v
         out = dict(v)
-        for key in ("schedule_days", "stale_days"):
+        for key in ("schedule_days", "stale_days", "scratch_window_days"):
             if key not in out:
                 continue
             raw = out[key]
             try:
                 ok = not isinstance(raw, bool) and int(raw) >= 0
+            except (TypeError, ValueError):
+                ok = False
+            if not ok:
+                _LOG.warning("config.evals.%s=%r invalid; using default", key, raw)
+                out.pop(key)
+        for key in ("scratch_threshold",):
+            if key not in out:
+                continue
+            raw = out[key]
+            try:
+                ok = not isinstance(raw, bool) and int(raw) > 0
             except (TypeError, ValueError):
                 ok = False
             if not ok:

@@ -13,6 +13,7 @@ per-callsite edit could ever keep up with.
 """
 
 import sys
+import time
 
 # No `from __future__ import annotations` here on purpose: it costs a measured
 # ~154us of `__future__` import on EVERY `fno` process, and nothing below needs
@@ -36,58 +37,71 @@ def _is_fno_module(name: str) -> bool:
     return name == "fno" or name.startswith("fno.")
 
 
-def _module_is_now_on_disk(name: str) -> bool:
-    """True when ``name`` resolves RIGHT NOW, after dropping the finder caches.
+# Mirror of the front door's VERIFY_ATTEMPTS / VERIFY_POLL in
+# crates/fno/src/bootstrap.rs (15 * 200ms = 3s); the budget is shared as
+# numbers because the implementations cannot cross the language boundary.
+_VERIFY_ATTEMPTS = 15
+_VERIFY_POLL_SECONDS = 0.2
 
-    The import that just failed proves nothing about the present: a reinstall
-    replaces the package tree between two statements, so a module absent one
-    moment is present the next.  Re-checking is what keeps the retry
-    falsifiable rather than a hopeful sleep -- a genuinely missing module
-    answers False here and fails exactly as it does today.
+# Once one import has exhausted the wait budget in this process, every later
+# absence answers after a single look: all of a stale install's absent modules
+# are that install answering again, and re-paying 3s per import would turn one
+# legible failure into a process-wide stall.
+_recheck_budget_spent = False
 
-    ``invalidate_caches()`` is belt-and-braces, and the honest scope is small:
-    ``FileFinder`` memoizes a directory listing but re-lists when the directory
-    mtime changes, which covers a reinstall on any filesystem with fine mtime
-    granularity (measured: APFS self-invalidates, so this call is not what makes
-    the check work there).  It is kept for the cases that granularity does not
-    cover -- a coarse-mtime filesystem where the rewrite lands inside one mtime
-    tick -- and because it is the documented thing to do when files change
-    underneath a running process.
 
-    It is NOT free, and the cost is worth naming: ``PathFinder.invalidate_caches``
-    ends in ``from importlib.metadata import MetadataPathFinder``, so the FIRST
-    call in a process that has not already loaded that module pulls in
-    ``importlib.metadata``, ``email`` and ``zipfile``.  Measured on a bare
-    interpreter: 17.9ms and 84 modules for that first call, 0.003ms for every
-    call after it.  The exact figure moves with what the process has already
-    imported, so treat it as "tens of milliseconds, once".
+def _module_appears_on_disk(name: str) -> bool:
+    """True when ``name`` resolves within a bounded re-check budget.
 
-    It is TRIGGERED only by an import that has already failed, but it is not
-    free for the imports that follow: ``invalidate_caches()`` is process-global
-    and drops ``sys.path_importer_cache`` for every ``sys.path`` entry, so the
-    next import of anything re-lists its directory.  That is the honest cost,
-    and it is still the right trade -- the alternative is answering the retry
-    question from a cache that a reinstall just made a lie.
+    A reinstall replaces the package tree between two statements, so one
+    immediate re-check loses races an installer in flight is about to win.
+    This polls instead, and returns the moment the module appears.  Every pass
+    re-runs the real predicate, which keeps the wait falsifiable: a genuinely
+    missing module stays absent through every pass and fails exactly as it did
+    before the wait existed, within a bounded, once-per-process delay.  Full
+    mechanics and measured costs: docs/architecture/cli-lazy-imports.md.
     """
+    global _recheck_budget_spent
+
     import importlib.util
 
-    importlib.invalidate_caches()
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, AttributeError, ValueError):
-        # A parent package that is itself mid-replacement cannot answer the
-        # question; treat "cannot tell" as "no" so we never retry on a guess.
-        return False
+    def look():
+        importlib.invalidate_caches()
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, AttributeError, ValueError):
+            # A parent package that is itself mid-replacement cannot answer the
+            # question; treat "cannot tell" as "no" so we never retry on a guess.
+            return None
+        if spec is not None and spec.loader is None:
+            # A namespace portion: the directory exists but the package's own
+            # __init__.py does not. Importing it "succeeds" as an empty module
+            # and every submodule lookup after it fails, so answer "absent".
+            return False
+        return spec is not None
+
+    answer = look()
+    if answer is None or answer or _recheck_budget_spent:
+        return bool(answer)
+    for _ in range(_VERIFY_ATTEMPTS):
+        time.sleep(_VERIFY_POLL_SECONDS)
+        answer = look()
+        if answer:
+            return True
+        if answer is None:
+            return False
+    _recheck_budget_spent = True
+    return False
 
 
 def _reinstall_hint(name: str) -> str:
     """Suffix explaining a missing ``fno`` submodule, or "" for anything else.
 
     Because imports here happen at INVOCATION time, a subcommand's module is
-    read off disk long after startup -- so ``uv tool install --reinstall``
-    (which ``fno doctor update`` runs) replaces the package underneath a running
-    process and every not-yet-imported subcommand fails for the length of the
-    install.  Two very different things produce that same ModuleNotFoundError
+    read off disk long after startup -- so the ``uv tool install`` that
+    ``fno doctor update`` runs replaces the package underneath a running
+    process and every not-yet-imported subcommand can fail for the length of
+    the swap.  Two very different things produce that same ModuleNotFoundError
     and they need opposite responses: a reinstall in flight (transient, retry)
     or a stale/incomplete install (persistent, reinstall properly).  Naming only
     the flattering transient one would assert a cause we have not established,
@@ -108,7 +122,7 @@ def _reinstall_hint(name: str) -> str:
 class _ReinstallWindowFinder:
     """Last-resort meta-path finder: re-check the disk before conceding.
 
-    ``uv tool install --reinstall`` deletes and rewrites this package under
+    ``uv tool install`` deletes and rewrites this package under
     running processes, so an ``fno.*`` import can fail against a tree that is
     whole again microseconds later.  ``_LazyStub._load_real`` already retries
     the lazy command-group import that way, but that is one of two import paths:
@@ -119,16 +133,19 @@ class _ReinstallWindowFinder:
     reader of the window.  A guard on only one of the two paths is decorative.
 
     Appended to the END of ``sys.meta_path``, so it is consulted only once every
-    normal finder has already said "no such module".  At that point it drops the
-    finder caches and asks the path finder ONE more time:
+    normal finder has already said "no such module".  At that point it re-asks
+    the disk on a bounded poll (``_VERIFY_ATTEMPTS`` x ``_VERIFY_POLL_SECONDS``,
+    the ``install_verified_within`` shape from ``crates/fno/src/bootstrap.rs``):
 
-    - present now -> hand back the spec and the import proceeds;
-    - still absent -> a stale or broken install, which is neither waited on nor
-      masked.  It raises the same dual-cause message the lazy group raises, in
-      place of the bare ``ModuleNotFoundError`` those ~2000 sites produce today.
+    - present within the budget -> hand back the spec and the import proceeds;
+    - still absent after it -> a stale or broken install, which is not masked.
+      It raises the same dual-cause message the lazy group raises, in place of
+      the bare ``ModuleNotFoundError`` those ~2000 sites produce today.
 
-    The disk re-check is the whole difference between this and a hopeful
-    sleep-retry, and it is why an absent module is still a hard, legible failure.
+    Every pass re-runs the real on-disk predicate, which is the whole
+    difference between this and a hopeful sleep-retry, and why an absent
+    module is still a hard, legible failure -- now by at most one budget
+    later.
 
     Two limits, both deliberate.
 
@@ -154,26 +171,39 @@ class _ReinstallWindowFinder:
     # would see a stranger and stack a second guard onto the same meta path.
     _fno_reinstall_window_guard = True
 
-    # A plain flag rather than thread-local state, because its only job is to
-    # stop the re-check below from recursing back into this finder: it goes
-    # through `importlib.util.find_spec`, which DOES walk `sys.meta_path`. Two
-    # threads racing it lose one retry and fall back to the pre-guard behavior,
-    # which is a hard failure either way. Neither can be handed a wrong answer.
-    _rechecking = False
+    # Thread-local, not a plain class flag. The flag's only job is to stop
+    # THIS thread's re-check from recursing back into this finder: it goes
+    # through `importlib.util.find_spec`, which DOES walk `sys.meta_path`, and
+    # recursion is always same-thread, so per-thread state guards it fully. A
+    # plain flag also silenced every OTHER thread's import for the whole hold,
+    # which used to be one lookup and is now a bounded wait -- a plain flag
+    # would trade one thread's reinstall wait for another thread's bare
+    # failure. Created lazily because `import threading` on the startup path
+    # costs more than anything else in this module; the first FAILED import
+    # pays it instead. Concurrent first use is safe: each thread captures the
+    # object it set and clears that one, and a stranger's overwrite only means
+    # the other thread's recursion stop rides its own fresh local.
+    _rechecking = None
 
     def find_spec(self, fullname: str, path=None, target=None):  # noqa: ANN001
         cls = type(self)
-        if cls._rechecking or not _is_fno_module(fullname):
+        tl = cls._rechecking
+        if tl is None:
+            import threading
+
+            tl = cls._rechecking = threading.local()
+        if getattr(tl, "active", False) or not _is_fno_module(fullname):
             return None
-        cls._rechecking = True
+        tl.active = True
         try:
-            # `_module_is_now_on_disk` rather than an inlined PathFinder probe,
-            # even though inlining would save this second lookup: `_load_real`
-            # asks the same question, and two implementations of "is it on disk
-            # now" is the one-of-N-paths trap this guard exists to close. The
-            # duplicate lookup costs microseconds and only ever runs on an
-            # import that has already failed.
-            if not _module_is_now_on_disk(fullname):
+            # `_module_appears_on_disk` rather than an inlined PathFinder
+            # probe, even though inlining would save this second lookup:
+            # `_load_real` asks the same question, and two implementations of
+            # "is it on disk now" is the one-of-N-paths trap this guard exists
+            # to close. The duplicate lookup costs microseconds and only ever
+            # runs on an import that has already failed; its bounded wait is
+            # the helper's, not a second one here.
+            if not _module_appears_on_disk(fullname):
                 raise ModuleNotFoundError(
                     f"No module named {fullname!r}{_reinstall_hint(fullname)}",
                     name=fullname,
@@ -182,19 +212,60 @@ class _ReinstallWindowFinder:
 
             return PathFinder.find_spec(fullname, path, target)
         finally:
-            cls._rechecking = False
+            tl.active = False
+
+
+class _FnoNamespaceRefuser:
+    """Sits BEFORE ``PathFinder`` and refuses namespace portions of ``fno.*``.
+
+    A mid-swap directory without its ``__init__.py`` is something PathFinder
+    SAYS YES to: the namespace spec caches an empty module and the last-resort
+    guard below is never consulted, and that poison breaks every
+    ``from fno.pkg import name`` for the process lifetime. Refusing it makes
+    the import the dual-cause ModuleNotFoundError instead; a retry after the
+    swap lands on the real package. Cost: one prefix check per import walk.
+    Ships no namespace subpackage under ``fno``, so refusing the shape is safe
+    here. Full story: docs/architecture/cli-lazy-imports.md.
+    """
+
+    # How the installer recognizes an already-installed refuser.
+    _fno_namespace_refuser = True
+
+    def find_spec(self, fullname: str, path=None, target=None):  # noqa: ANN001
+        if not _is_fno_module(fullname):
+            return None
+        from importlib.machinery import PathFinder
+
+        spec = PathFinder.find_spec(fullname, path, target)
+        if spec is not None and spec.loader is None:
+            raise ModuleNotFoundError(
+                f"No module named {fullname!r}{_reinstall_hint(fullname)}",
+                name=fullname,
+            )
+        return spec
 
 
 def _install_reinstall_window_finder() -> None:
-    """Append the guard once, behind every other finder.
+    """Install both guards once: the namespace refuser before ``PathFinder``,
+    the wait-and-hint guard at the very end.
 
     Idempotent because ``fno`` can be imported more than once in a process (a
     reload, a test that reaches in): stacking finders would multiply the
     re-check per failed import for no gain.
     """
-    if any(getattr(finder, "_fno_reinstall_window_guard", False) for finder in sys.meta_path):
+    if not any(getattr(finder, "_fno_reinstall_window_guard", False) for finder in sys.meta_path):
+        sys.meta_path.append(_ReinstallWindowFinder())
+    if any(getattr(finder, "_fno_namespace_refuser", False) for finder in sys.meta_path):
         return
-    sys.meta_path.append(_ReinstallWindowFinder())
+    path_finder_at = next(
+        (
+            i
+            for i, finder in enumerate(sys.meta_path)
+            if getattr(finder, "__name__", "") == "PathFinder"
+        ),
+        len(sys.meta_path),
+    )
+    sys.meta_path.insert(path_finder_at, _FnoNamespaceRefuser())
 
 
 _install_reinstall_window_finder()

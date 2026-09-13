@@ -484,6 +484,12 @@ def test_deferred_warning_on_inject_miss(runner, mailbox, monkeypatch, tmp_path)
         lambda *_args, **_kwargs: {"state": "unknown", "last_activity_age_s": None},
     )
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
+    # The wake rung revives by exec'ing `claude -r`; this test's subject is
+    # the deferred warning on the inject miss, so the wake misses by stub.
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_and_deliver",
+        lambda *a, **k: (False, "stub-miss"),
+    )
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
 
     msg = _seed_name_lane_inbound(

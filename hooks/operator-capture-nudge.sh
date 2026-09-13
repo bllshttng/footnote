@@ -88,6 +88,18 @@ age_text = f", oldest {age}s old" if isinstance(age, int) else ""
 excerpt = payload.get("oldest_excerpt") or ""
 print(f"## Operator capture: {depth} undispositioned operator turn(s){age_text}")
 print()
+# Machine turns capture already refused, named so the depth reads as
+# filtered, not lucky: a silent filter that drops a real operator turn
+# would be worse than the noise it removes.
+skipped = payload.get("skipped")
+if isinstance(skipped, dict) and skipped:
+    total = sum(v for v in skipped.values() if isinstance(v, int))
+    detail = ", ".join(
+        f"{k}={v}" for k, v in sorted(skipped.items()) if isinstance(v, int)
+    )
+    if total:
+        print(f"Skipped at capture: {total} machine turn(s) ({detail})")
+        print()
 print("Disposition each before the tick ends: record with `fno backlog idea "
       "--source-kind operator_request`, `fno backlog capture add`, or `fno "
       "inbox law set`, then `fno inbox operator ack <turn-id> --outcome "

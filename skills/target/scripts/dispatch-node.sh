@@ -12,8 +12,15 @@
 #   dispatch-node.sh <node-id...> [--flags "<extra /target flags>"]
 #                                 [--allow-merge|--no-merge] [--max N] [--dry-run] [--here]
 #                                 [--permission-mode <mode>] [--route provider/model]
+#                                 [--source <ab|sob|...>]
 #   dispatch-node.sh --all-ready  [--flags "..."] [--allow-merge|--no-merge] [--max N] [--dry-run] [--here]
 #                                 [--permission-mode <mode>] [--route provider/model]
+#                                 [--source <ab|sob|...>]
+#
+# --source <code>: the dispatch origin stamped into every worker name (x-84b2),
+#   e.g. ab (active-backlog daemon) or sob (spawn on blueprint). Forwarded to
+#   `fno agents name --source`; the vocabulary is validated there, never here.
+#   An attended manual run omits it and the name carries no source segment.
 #
 # --allow-merge / --no-merge: per-run merge posture override (x-4391). Neither
 #   flag => posture from config.auto_merge.grant (default none = no-merge).
@@ -21,11 +28,18 @@
 #
 # --route provider/model: per-dispatch explicit model route (x-b0b4), forwarded
 #   to every worker spawn. Fails CLOSED in the spawn (unknown/non-anthropic/
-#   keyless refuses -> the node stays dispatchable). Wins over the build lane.
-#   A CLAUDE worker carries --role build (the build lane is a fail-safe no-op
-#   until `fno config route set build ...` opts in). Non-claude workers do NOT: the
+#   keyless refuses -> the node stays dispatchable). Wins over the build lane
+#   AND over the verb lane route (below). A CLAUDE worker carries --role build
+#   (the build lane is a fail-safe no-op until `fno config route set build ...`
+#   opts in). Non-claude workers do NOT: the
 #   build/route lane is claude-specific, and a role-bearing spawn is classified
 #   Python-owned by the runtime, which rejects opencode/agy (x-567d / codex P1).
+#
+# Verb lane route (x-14d4): with no explicit --route, a claude worker also
+#   carries the stage table's route (config.agents.profiles.<verb>.route) when
+#   the per-node resolve returns one - the vendor lane that selects the
+#   worker's route settings file. A cutover dispatch drops it (the destination
+#   account owns billing).
 #
 # --here / --in-place: keep a worker without a recorded node cwd in the
 #   dispatcher's cwd. Default (no node cwd) is --fresh: start from canonical
@@ -102,6 +116,7 @@ DRY_RUN=0
 HERE=0         # 1 => keep the worker in the dispatcher's cwd (opt out of --fresh)
 PERMISSION_MODE=""  # x-dfa4: forwarded as --permission-mode to each worker spawn
 ROUTE=""       # x-b0b4: per-dispatch explicit provider,model route (fail-closed)
+SOURCE=""      # x-84b2: dispatch origin stamped into every worker name (validated by the bridge)
 # The operator's exported refusal, captured before the loop arms/unsets the
 # carrier per node, so non-family dispatches restore it rather than a prior
 # iteration's value (round 12).
@@ -124,6 +139,7 @@ while [[ $# -gt 0 ]]; do
     --here|--in-place) HERE=1; shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
     --route)      [[ $# -ge 2 ]] || { echo "failed: --route reason=\"requires a provider/model value\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 2; }; ROUTE="$2"; shift 2 ;;
+    --source)     [[ $# -ge 2 ]] || { echo "failed: --source reason=\"requires a dispatch origin code\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 2; }; SOURCE="$2"; shift 2 ;;
     --) shift; while [[ $# -gt 0 ]]; do NODES+=("$1"); shift; done ;;
     -*) echo "failed: $1 reason=\"unknown flag\"" >&2; exit 2 ;;
     *)  NODES+=("$1"); shift ;;
@@ -200,12 +216,6 @@ resolve_json="$(fno agents dispatch resolve --json 2>/dev/null)"; resolve_rc=$?
 # fallback (repo rule) - a resolver that ever returned "" must read as absent.
 DISPATCH_PROVIDER="$(printf '%s' "$resolve_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
 DISPATCH_SUBSTRATE="$(printf '%s' "$resolve_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
-# Per-harness command TEMPLATE (x-567d): a native skill invocation where one is
-# verified (claude `/target`, codex `$fno:target`, agy `/target`) or a prose
-# brief (opencode/gemini, which have no footnote slash surface). `{id}` is
-# substituted per node below. claude keeps its local tgt_cmd builder (FLAGS /
-# --allow-merge), so a missing template only matters for the non-claude lanes.
-DISPATCH_COMMAND="$(printf '%s' "$resolve_json" | jq -r '.command | select(. != null and . != "")' 2>/dev/null)"
 if [[ "$resolve_rc" -ne 0 || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
   reason="no autonomous substrate resolved (rc=$resolve_rc); set config.agents.profiles.target.provider to a harness with an autonomous substrate (deprecated config.dispatch.harness still reads for one release; run fno agents dispatch resolve --harness <name> to see what each supports)"
   fno doctor event emit -t dispatch_no_autonomous_substrate -s backlog \
@@ -223,12 +233,11 @@ if [[ "$DISPATCH_SUBSTRATE" == "headless" ]]; then
     -d "{\"harness\":\"$DISPATCH_PROVIDER\",\"from\":\"$DISPATCH_SUBSTRATE\",\"to\":\"headless\"}" >/dev/null 2>&1 || true
 fi
 
-# The resolve above is node-agnostic, so it is the BASE every node starts from.
-# A per-node quota cutover overrides the loop-local copies below; keeping the
-# base separate is what stops one node's cutover leaking into the next node.
+# The resolve above is node-agnostic, so it is the BASE: the fail-fast
+# substrate check ran against it, and an explicit --route pins the per-node
+# resolve to this harness (never to a cutover destination).
 DISPATCH_PROVIDER_BASE="$DISPATCH_PROVIDER"
 DISPATCH_SUBSTRATE_BASE="$DISPATCH_SUBSTRATE"
-DISPATCH_COMMAND_BASE="$DISPATCH_COMMAND"
 
 # ---- per-node dispatch ------------------------------------------------------
 n_launched=0; n_parked=0; n_already=0; n_skipped=0
@@ -309,141 +318,11 @@ for id in "${NODES[@]}"; do
     continue
   fi
 
-  # ---- The shared quota route decision (same seam as backlog advance / fno
-  # dispatch). This shell rung used to reach only `fno agents dispatch resolve`, which
-  # answers "which harness is configured", never "does that harness have quota
-  # left" - so /target bg and the advance drain stayed on a walled account
-  # while an idle harness sat there. `--autonomous` folds the route in.
-  # No --harness is passed: an explicit harness IS a pin, and passing the
-  # configured default as if it were one would disable the reroute it gates.
-  # Reset from the base first so a previous node's cutover never leaks forward.
-  DISPATCH_PROVIDER="$DISPATCH_PROVIDER_BASE"
-  DISPATCH_SUBSTRATE="$DISPATCH_SUBSTRATE_BASE"
-  DISPATCH_COMMAND="$DISPATCH_COMMAND_BASE"
+  # x-ebd2: stay/cutover/defer and the command are ONE authoritative resolve
+  # below. The separate --autonomous route call this block used to make
+  # resolved quota against a node-agnostic command, so the pair could
+  # disagree; the consolidated tuple answers both from the same node read.
   cutover_args=(); route_account=""; spawn_runtime=()
-  # An explicit --route is a human's model-and-billing choice, and precedence
-  # puts every explicit pin above quota policy. Passing the configured harness
-  # makes the resolver treat this launch as pinned: it may still DEFER, but it
-  # is never rerouted onto another harness, which would discard the route.
-  route_pin_args=()
-  [[ -n "$ROUTE" ]] && route_pin_args=(--harness "$DISPATCH_PROVIDER_BASE")
-  route_json="$(fno agents dispatch resolve --autonomous --node "$id" "${route_pin_args[@]+"${route_pin_args[@]}"}" -J 2>/dev/null)"; route_rc=$?
-  route_action="$(printf '%s' "$route_json" | jq -r '.route_action | select(. != null and . != "")' 2>/dev/null)"
-  # Fail OPEN but never SILENT. A stale `fno` without --autonomous, or any
-  # unreadable verdict, leaves quota routing off for this node - the pre-quota
-  # behaviour, so the node still dispatches rather than wedging the fleet, but
-  # the degrade is announced. Silence here would be indistinguishable from
-  # "quota said proceed", which is how a routing seam quietly stops existing.
-  if [[ "$route_rc" -ne 0 || -z "$route_action" ]]; then
-    echo "note: $id quota routing unavailable (dispatch resolve --autonomous rc=$route_rc); dispatching on the configured harness '$DISPATCH_PROVIDER_BASE'" >&2
-  fi
-  if [[ "$route_action" == "defer" ]]; then
-    # The node stays ready and nothing is claimed; the next run after the reset
-    # dispatches it. Same outcome the Python launchers report as quota-deferred.
-    route_retry="$(printf '%s' "$route_json" | jq -r '.route_retry_at // ""' 2>/dev/null)"
-    echo "parked $id reason=\"quota-deferred on $(printf '%s' "$route_json" | jq -r '.route_source // "?"') (retry_at=${route_retry:-unknown})\""
-    n_parked=$((n_parked + 1))
-    continue
-  fi
-  if [[ "$route_action" == "cutover" ]]; then
-    route_account="$(printf '%s' "$route_json" | jq -r '.route_account | select(. != null and . != "")' 2>/dev/null)"
-    route_harness="$(printf '%s' "$route_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
-    route_substrate="$(printf '%s' "$route_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
-    route_command="$(printf '%s' "$route_json" | jq -r '.command | select(. != null and . != "")' 2>/dev/null)"
-    # All four or none. Falling back to the BASE harness here would launch on the
-    # very account the selector just ruled out, so an incomplete tuple parks the
-    # node instead - fail closed, leaving it ready and re-dispatchable.
-    if [[ -z "$route_account" || -z "$route_harness" || -z "$route_substrate" || -z "$route_command" ]]; then
-      echo "parked $id reason=\"cutover selected but its destination is incomplete; not launching on the exhausted harness\""
-      n_parked=$((n_parked + 1))
-      continue
-    fi
-    DISPATCH_PROVIDER="$route_harness"
-    DISPATCH_SUBSTRATE="$route_substrate"
-    DISPATCH_COMMAND="$route_command"
-    # The record id travels on argv; spawn resolves its credentials itself.
-    cutover_args=(--dispatch-account "$route_account")
-    # `spawn` auto-routes to the Rust client, which does not know this flag
-    # ("fno-agents: unknown flag: --dispatch-account") and would kill the launch
-    # before it starts. The overlay resolver is Python, so pin the runtime for a
-    # cutover spawn - the same pin spawn-guard and `agents name` already use for
-    # Python-only surfaces in this script.
-    spawn_runtime=(env FNO_AGENTS_RUNTIME=python)
-    echo "note: $id cutting over to harness '$route_harness' (account $route_account); $(printf '%s' "$route_json" | jq -r '.route_reason // "quota"')" >&2
-  fi
-
-  # Provenance-carrying name: target-<full-node-id>-<slug> so the bg thread title
-  # reads at a glance which node a /target worker is on (e.g.
-  # target-ab-4040eee8-cargo-bootstrapper). The slug is the node's title-derived
-  # handle; a node with no slug degrades to target-<full-node-id>.
-  node_slug="$(printf '%s' "$node_json" | jq -r '.slug // .title // empty' 2>/dev/null)"
-  # x-3218: the canonical owner (`fno.agents.naming`) sanitizes the slug AND
-  # budgets the assembled name against the runtime's 64-char limit; this site
-  # used to assemble it uncapped, so a long configured node id produced a name
-  # the runtime rejects - the dispatch vanished with no session and no event.
-  # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
-  # EVERY `fno agents` verb to the binary, which has no `name` port. Exit 3 (not
-  # 2) is the naming refusal - Click spends 2 on usage errors including "no such
-  # command", so an `fno` too old to know this verb would otherwise read as
-  # "unrepresentable" and refuse the whole fleet.
-  # Streams are merged so a refusal's cause survives; the exit code disambiguates
-  # which stream it came from. Merging means a stray warning on stderr rides
-  # along, so the name is read as the LAST line of the capture and that line
-  # alone must match the runtime contract. `grep -q` would not do: it matches
-  # per line, so a warning followed by a valid name would pass the guard and
-  # then be adopted in full.
-  #
-  # Matching the WHOLE capture instead rejected any run that warned at all, and
-  # the degrade path below assembles an UNCAPPED name that a long node id then
-  # refuses outright. A live config notice on stderr reproduced exactly that on
-  # 2026-09-03: a 28-char node id dispatched no worker and said almost nothing.
-  # The last line keeps a warning unadoptable, because a warning is not it,
-  # without discarding the name the canonical owner actually returned.
-  name_out="$(FNO_AGENTS_RUNTIME=python fno agents name target "$id" --slug "$node_slug" 2>&1)"
-  name_rc=$?
-  name_last="${name_out##*$'\n'}"
-  agent_name=""
-  [[ "$name_rc" -eq 0 && "$name_last" =~ ^[A-Za-z0-9_-]{1,64}$ ]] && agent_name="$name_last"
-  if [[ "$name_rc" -eq 3 ]]; then
-    # Exit 3 covers every refusal cause (over-budget identity, invalid
-    # characters, empty identity), so relay the real message rather than
-    # asserting a length problem the operator may not actually have. Newlines
-    # and double quotes are squeezed out first: this line has a documented
-    # grammar other tools parse, and the message embeds a repr of the node id.
-    name_msg="$(printf '%s' "${name_out:-agent name cannot be represented}" | tr '\n"' '  ')"
-    echo "failed $id reason=\"$name_msg\""
-    n_failed=$((n_failed + 1))
-    continue
-  elif [[ "$name_rc" -ne 0 || -z "$agent_name" ]]; then
-    # Degraded: fno unreachable or too old for this verb. Keep the historical
-    # assembly, and say so - an invisible degrade means the whole fleet can be
-    # named by the fallback with nothing in the receipt to show it.
-    # rc=0 here means the owner ran but its output was unusable (noise on the
-    # merged stream), which is a different story from an unreachable owner - say
-    # which, or the receipt reads as "unavailable (rc=0)" and puzzles the reader.
-    if [[ "$name_rc" -eq 0 ]]; then
-      name_why="canonical naming returned an unusable name"
-    else
-      name_why="canonical naming unavailable (rc=$name_rc)"
-    fi
-    echo "degraded-name $id reason=\"$name_why; using the fallback assembly\""
-    node_slug="$(printf '%s' "$node_slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
-      | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed -E 's/-+$//')"
-    if [[ -n "$node_slug" ]]; then
-      agent_name="target-${id}-${node_slug}"
-    else
-      agent_name="target-${id}"
-    fi
-    # The fallback is uncapped, and nothing downstream enforces 64 here: this
-    # spawn passes --node, which forces the Python path (_NAME_MAX_LEN = 128),
-    # so the daemon's 64-char validator is never reached. Refuse rather than
-    # launch a worker under a name the runtime contract does not allow.
-    if [[ "${#agent_name}" -gt 64 ]]; then
-      echo "failed $id reason=\"fallback name is ${#agent_name} chars, over the 64-char runtime limit\""
-      n_failed=$((n_failed + 1))
-      continue
-    fi
-  fi
 
   # x-571f: per-node model pin. Read once from the node JSON we already hold; a
   # non-empty value is applied as `--model <m>` to every spawn branch below (and
@@ -455,6 +334,8 @@ for id in "${NODES[@]}"; do
   # error (the same trap the --cwd branches below avoid). Empty pin -> zero args =
   # byte-identical to today; fail-open on a bad read since jq // empty yields "".
   model_pin="$(printf '%s' "$node_json" | jq -r '.model // empty' 2>/dev/null || true)"
+  model_pin_source=""  # "node" (operator pin) | "band" (resolve-model), for the lane-route coordinate rule
+  [[ -n "$model_pin" ]] && model_pin_source="node"
   # x-d7a7: no exact `.model` pin? resolve the node's band via the single
   # Python projection (`fno do target resolve-model` -> route_resolve) so a
   # pinned node's worker spawns on the resolved model too - bash never
@@ -466,6 +347,7 @@ for id in "${NODES[@]}"; do
   # pin, cross-harness pick, or any resolve error) -> zero args.
   if [[ -z "$model_pin" ]]; then
     model_pin="$(fno do target resolve-model "$id" --harness "$DISPATCH_PROVIDER" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    [[ -n "$model_pin" ]] && model_pin_source="band"
   fi
   model_args=()
   [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")
@@ -589,6 +471,17 @@ for id in "${NODES[@]}"; do
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
         echo "already-running $id reason=\"node:$id is held by $holder but no target init took that claim; no worker has reached target init\""
         n_already=$((n_already + 1))
+      elif [[ "$reason" == "worker-row" ]]; then
+        # The worker ROW is the occupant, not the claim. The old text named the
+        # claim, sent the reader hunting a release remedy for a claim nobody
+        # holds, and hid the one actionable field: who is on the node.
+        worker="$(printf '%s' "$guard_json" | jq -r '.worker // empty' 2>/dev/null)"
+        if [[ "$(printf '%s' "$guard_json" | jq -r '.worker_unmeasured // empty' 2>/dev/null)" == "true" ]]; then
+          echo "already-running $id reason=\"worker row ${worker:-unmeasured} is on node:$id with liveness never measured; peek it, read fno agents claim status node:$id, and stop it if its run is finished\""
+        else
+          echo "already-running $id reason=\"worker row ${worker:-unmeasured} is on node:$id; peek it, and stop it if its run is finished\""
+        fi
+        n_already=$((n_already + 1))
       elif [[ "$reason" == "suspect-claim" ]]; then
         # x-ba4b: TTL-unexpired dead-pid claim (a respawned worker). Contested
         # liveness degrades to SKIP, never steal and never park the lane -
@@ -653,46 +546,30 @@ for id in "${NODES[@]}"; do
   esac
 
   # ---- Build the worker command + resolve the launch cwd ----
-  # x-8151: ONE resolver call builds the command for every branch, with the
-  # merge posture as an input. This shell no longer re-derives the carrier:
-  # the old prefix-matching inject missed /fno:target (opencode refusals were
-  # silently dropped), and the claude branch built /target by hand. The resolve
-  # runs in the node's project cwd so from-config honors THIS node's
-  # config.auto_merge.grant in a batch spanning repos (codex P2, x-4391).
-  # Command precedence (unchanged): node dispatch_verb / dispatch_brief (US3,
-  # x-f78d) > claude native /target > per-harness builtin (x-567d).
+  # x-8151 + x-ebd2: ONE authoritative resolve per node builds the command for
+  # every branch, merge posture and lifecycle alike. The resolver loads the
+  # node itself and derives the workflow verb from its plan rung and
+  # difficulty, so this shell no longer pre-reads dispatch_verb/dispatch_brief
+  # and carries no local /target or DISPATCH_COMMAND fallback - a fallback
+  # here would bypass the derivation exactly the way the old hand-built claude
+  # /target did. --autonomous rides the quota route (stay/cutover/defer) on
+  # the same tuple. The resolve runs in the node's project cwd so from-config
+  # honors THIS node's config.auto_merge.grant in a batch spanning repos
+  # (codex P2, x-4391).
   node_cwd="$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)"
   case "$ALLOW_MERGE" in
     1) posture_args=(--merge-posture allow) ;;
     0) posture_args=(--merge-posture no-merge) ;;
     *) posture_args=(--merge-posture from-config) ;;
   esac
-  # select(. != "") before // empty: jq's // treats "" as truthy (repo idiom).
-  dispatch_verb="$(printf '%s' "$node_json" | jq -r '.dispatch_verb | select(. != "") // empty' 2>/dev/null)"
-  dispatch_brief="$(printf '%s' "$node_json" | jq -r '.dispatch_brief | select(. != "") // empty' 2>/dev/null)"
-  resolve_args=(dispatch resolve --node "$id" --harness "$DISPATCH_PROVIDER" "${posture_args[@]}" -J)
-  if [[ -n "$dispatch_verb" || -n "$dispatch_brief" ]]; then
-    # --harness so the resolver normalizes the verb per-harness (x-a5e4): a
-    # `/target` verb resolves to `$fno:target {id}` on codex, `/target {id}` on
-    # claude/agy, a prose brief on gemini/opencode.
-    [[ -n "$dispatch_verb" ]] && resolve_args+=(--verb "$dispatch_verb")
-    [[ -n "$dispatch_brief" ]] && resolve_args+=(--brief "$dispatch_brief")
-  elif [[ "$DISPATCH_PROVIDER" == "claude" ]]; then
-    # claude native /target (Locked Decision 4). --flags rides the template
-    # verbatim; the resolver normalizes, migrates a legacy bare token, and
-    # applies the posture (Locked Decision 6 lives in from-config now: every
-    # config error shape degrades to no-merge).
-    resolve_args+=(--command "/target${FLAGS:+ $FLAGS} {id}")
-  elif [[ -n "$DISPATCH_COMMAND" ]]; then
-    # non-claude per-harness builtin (x-567d): codex `$fno:target`, agy
-    # `/target`, opencode/gemini prose brief. Same posture input.
-    resolve_args+=(--command "$DISPATCH_COMMAND")
-  else
-    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
-    echo "failed $id reason=\"resolver returned no command for harness '$DISPATCH_PROVIDER'; update fno or set config.dispatch.command\""
-    n_failed=$((n_failed + 1))
-    continue
-  fi
+  resolve_args=(dispatch resolve --autonomous --node "$id" "${posture_args[@]}" -J)
+  # An explicit --route is a human's model-and-billing choice, and precedence
+  # puts every explicit pin above quota policy. Passing the harness pin ONLY
+  # here makes the resolver treat this launch as pinned: it may still DEFER,
+  # but it is never rerouted onto another harness, which would discard the
+  # route. Unpinned launches stay rerouteable - the cutover answers ride the
+  # same tuple.
+  [[ -n "$ROUTE" ]] && resolve_args+=(--harness "$DISPATCH_PROVIDER_BASE")
   if [[ -n "$node_cwd" && -d "$node_cwd" ]]; then
     resolved_json="$( ( cd "$node_cwd" && fno "${resolve_args[@]}" 2>/dev/null ) )"; resolve_rc=$?
   else
@@ -721,6 +598,149 @@ for id in "${NODES[@]}"; do
     continue
   fi
   tgt_cmd="$(printf '%s' "$resolved_json" | jq -r '.command')"
+  # x-ebd2: the same tuple is the harness authority for stay AND cutover. On a
+  # cutover the command is ALREADY rendered for the destination, and
+  # harness/substrate/account ride beside it; on stay they name the configured
+  # (or pinned) harness. Reset from the base resolve is unnecessary - one
+  # tuple, one truth, no leak between nodes.
+  DISPATCH_PROVIDER="$(printf '%s' "$resolved_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
+  DISPATCH_SUBSTRATE="$(printf '%s' "$resolved_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
+  route_action="$(printf '%s' "$resolved_json" | jq -r '.route_action // "stay"')"
+  if [[ "$route_action" == "defer" ]]; then
+    # The node stays ready and re-dispatchable; the reservation is released so
+    # the next run after the window dispatches it.
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    route_retry="$(printf '%s' "$resolved_json" | jq -r '.route_retry_at // ""' 2>/dev/null)"
+    echo "parked $id reason=\"quota-deferred on $(printf '%s' "$resolved_json" | jq -r '.route_source // "?"') (retry_at=${route_retry:-unknown})\""
+    n_parked=$((n_parked + 1))
+    continue
+  fi
+  if [[ "$route_action" == "cutover" ]]; then
+    route_account="$(printf '%s' "$resolved_json" | jq -r '.route_account | select(. != null and . != "")' 2>/dev/null)"
+    if [[ -z "$route_account" || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
+      # An incomplete destination parks the node: launching on the exhausted
+      # harness is the exact wrong-billing launch the selector ruled out.
+      fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+      echo "parked $id reason=\"cutover selected but its destination is incomplete; not launching on the exhausted harness\""
+      n_parked=$((n_parked + 1))
+      continue
+    fi
+    # The record id travels on argv; spawn resolves its credentials itself.
+    cutover_args=(--dispatch-account "$route_account")
+    # `spawn` auto-routes to the Rust client, which does not know this flag
+    # ("fno-agents: unknown flag: --dispatch-account") and would kill the launch
+    # before it starts. The overlay resolver is Python, so pin the runtime for a
+    # cutover spawn - the same pin spawn-guard and `agents name` already use for
+    # Python-only surfaces in this script.
+    spawn_runtime=(env FNO_AGENTS_RUNTIME=python)
+    echo "note: $id cutting over to harness '$DISPATCH_PROVIDER' (account $route_account); $(printf '%s' "$resolved_json" | jq -r '.route_reason // "quota"')" >&2
+  fi
+  if [[ -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    echo "failed $id reason=\"dispatch resolve returned no harness/substrate (route_action=$route_action); node not dispatched\""
+    n_failed=$((n_failed + 1))
+    continue
+  fi
+  # Provenance-carrying name (x-84b2): [<source>-]<verb-code>-<node>-<slug>,
+  # minted AFTER the resolve so the verb comes from the same authoritative
+  # tuple (resolved .verb; the node's declared verb reconciles the out-of-family
+  # case; the builtin target path is the one literal default). The vocabulary
+  # (codes, budget, refusals) lives in the bridge, never here.
+  # x-3218: the canonical owner (`fno.agents.naming`) sanitizes the slug AND
+  # budgets the assembled name against the runtime's 64-char limit.
+  # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
+  # EVERY `fno agents` verb to the binary, which has no `name` port. Exit 3 (not
+  # 2) is the naming refusal - Click spends 2 on usage errors including "no such
+  # command", so an `fno` too old to know this verb would otherwise read as
+  # "unrepresentable" and refuse the whole fleet.
+  # Streams are merged so a refusal's cause survives; the name is read as the
+  # LAST line of the capture and that line alone must match the runtime
+  # contract (a live config notice on stderr reproduced a false refusal on
+  # 2026-09-03 when the WHOLE capture was matched).
+  node_slug="$(printf '%s' "$node_json" | jq -r '.slug // .title // empty' 2>/dev/null)"
+  verb_word="$(printf '%s' "$resolved_json" | jq -r '.verb | select(. != null and . != "")' 2>/dev/null)"
+  if [[ -z "$verb_word" ]]; then
+    verb_word="$(printf '%s' "$node_json" | jq -r '.dispatch_verb | select(. != null and . != "")' 2>/dev/null)"
+  fi
+  if [[ -z "$verb_word" ]]; then
+    verb_word="target"  # the builtin target path: the one default the bridge maps to t
+  fi
+  name_args=("$id" --slug "$node_slug" --verb "$verb_word")
+  [[ -n "$SOURCE" ]] && name_args+=(--source "$SOURCE")
+  name_out="$(FNO_AGENTS_RUNTIME=python fno agents name "${name_args[@]}" 2>&1)"
+  name_rc=$?
+  name_last="${name_out##*$'\n'}"
+  agent_name=""
+  [[ "$name_rc" -eq 0 && "$name_last" =~ ^[A-Za-z0-9_-]{1,64}$ ]] && agent_name="$name_last"
+  if [[ "$name_rc" -eq 3 ]]; then
+    # Exit 3 covers every refusal cause (unknown source/verb, over-budget
+    # identity, invalid characters), so relay the real message. Newlines and
+    # double quotes are squeezed out first: this line has a documented grammar
+    # other tools parse, and the message embeds a repr of the node id.
+    name_msg="$(printf '%s' "${name_out:-agent name cannot be represented}" | tr '\n"' '  ')"
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    echo "failed $id reason=\"$name_msg\""
+    n_failed=$((n_failed + 1))
+    continue
+  elif [[ "$name_rc" -ne 0 || -z "$agent_name" ]]; then
+    # Degraded: fno unreachable or too old for this verb. Keep the historical
+    # assembly, and say so - an invisible degrade means the whole fleet can be
+    # named by the fallback with nothing in the receipt to show it. The legacy
+    # shape stays legible to rollout readers (AC3-EDGE); the vocabulary is never
+    # re-implemented here.
+    # rc=0 here means the owner ran but its output was unusable (noise on the
+    # merged stream), which is a different story from an unreachable owner - say
+    # which, or the receipt reads as "unavailable (rc=0)" and puzzles the reader.
+    if [[ "$name_rc" -eq 0 ]]; then
+      name_why="canonical naming returned an unusable name"
+    else
+      name_why="canonical naming unavailable (rc=$name_rc)"
+    fi
+    echo "degraded-name $id reason=\"$name_why; using the fallback assembly\""
+    node_slug="$(printf '%s' "$node_slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
+      | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed -E 's/-+$//')"
+    if [[ -n "$node_slug" ]]; then
+      agent_name="target-${id}-${node_slug}"
+    else
+      agent_name="target-${id}"
+    fi
+    # The fallback is uncapped, and nothing downstream enforces 64 here: this
+    # spawn passes --node, which forces the Python path (_NAME_MAX_LEN = 128),
+    # so the daemon's 64-char validator is never reached. Refuse rather than
+    # launch a worker under a name the runtime contract does not allow.
+    if [[ "${#agent_name}" -gt 64 ]]; then
+      fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+      echo "failed $id reason=\"fallback name is ${#agent_name} chars, over the 64-char runtime limit\""
+      n_failed=$((n_failed + 1))
+      continue
+    fi
+  fi
+
+  # x-14d4: the verb lane vendor rides the SAME resolve that named the harness.
+  # The stage table's route (config.agents.profiles.<verb>.route) is what
+  # selects the worker's route settings file (endpoint+auth+model as one
+  # unit); a claude spawn carrying only --harness sends a routed model to the
+  # default endpoint, where it dies on first inference (HTTP 404
+  # model_not_found). An explicit --route outranks it, and a cutover's
+  # destination account owns billing instead.
+  lane_route=""
+  if [[ "$route_action" != "cutover" && -z "$ROUTE" && "$DISPATCH_PROVIDER" == "claude" ]]; then
+    lane_route="$(printf '%s' "$resolved_json" | jq -r '.route | select(. != null and . != "")' 2>/dev/null)"
+    if [[ -n "$lane_route" ]]; then
+      route_args=("--route" "$lane_route")
+      route_val="$lane_route"
+      # The lane is a COMPLETE coordinate (route/model stop at the lane, the
+      # same rule spawn_defaults enforces): a band-resolved --model would win
+      # over the route's model at the claude CLI and split the coordinate
+      # across two owners. A node .model pin (operator authority) keeps it.
+      case "$lane_route" in
+        *,*|*/*)
+          if [[ "$model_pin_source" != "node" ]]; then
+            model_args=(); model_pin=""
+          fi ;;
+      esac
+    fi
+  fi
   # Auto-brief (x-d1f4): the SAME resolve auto-resolves the node's brief chain
   # (explicit dispatch_brief > sidecar > details > transcript tail) whenever
   # --node is passed with no --brief, so a plain node cold-starts with context.
@@ -763,8 +783,10 @@ for id in "${NODES[@]}"; do
     dry_cwd="<fno-worktree-ensure>"
   fi
 
+  route_hint=""
+  [[ ${#route_args[@]} -gt 0 ]] && route_hint="--route ${route_args[1]} "
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --harness $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${squad_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${perm_hint}${route_account:+--dispatch-account $route_account }--name $agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --harness $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${squad_hint}${role_hint}${route_hint}${model_pin:+--model $model_pin }${perm_hint}${route_account:+--dispatch-account $route_account }--name $agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -912,6 +934,15 @@ for id in "${NODES[@]}"; do
           echo "already-running $id reason=\"node:$id is held but no target init took that claim; no worker has reached target init\""
           n_already=$((n_already + 1))
           continue ;;
+        worker-row)
+          guard_worker="$(printf '%s' "$spawn_err" | sed -n 's/.* worker=\([^ ;]*\).*/\1/p;q')"
+          if printf '%s' "$spawn_err" | grep -qF 'worker_unmeasured=true'; then
+            echo "already-running $id reason=\"worker row ${guard_worker:-unmeasured} is on node:$id with liveness never measured; peek it, read fno agents claim status node:$id, and stop it if its run is finished\""
+          else
+            echo "already-running $id reason=\"worker row ${guard_worker:-unmeasured} is on node:$id; peek it, and stop it if its run is finished\""
+          fi
+          n_already=$((n_already + 1))
+          continue ;;
         reservation-held|duplicate-claim)
           echo "already-running $id reason=\"skipped: duplicate-claim (peer dispatcher holds dispatch:$id); no worker launched\""
           n_already=$((n_already + 1))
@@ -990,11 +1021,11 @@ for id in "${NODES[@]}"; do
   if [[ -n "$route_account" ]]; then
     fno doctor event emit -t dispatch_failover -s backlog -d "$(jq -nc \
       --arg node_id "$id" \
-      --arg from "$(printf '%s' "$route_json" | jq -r '.route_source // ""')" \
+      --arg from "$(printf '%s' "$resolved_json" | jq -r '.route_source // ""')" \
       --arg to "$route_account" \
       --arg harness_to "$DISPATCH_PROVIDER" \
-      --arg window "$(printf '%s' "$route_json" | jq -r '.route_window // ""')" \
-      --arg reason "$(printf '%s' "$route_json" | jq -r '.route_reason // ""')" \
+      --arg window "$(printf '%s' "$resolved_json" | jq -r '.route_window // ""')" \
+      --arg reason "$(printf '%s' "$resolved_json" | jq -r '.route_reason // ""')" \
       '{node_id:$node_id,from:$from,to:$to,harness_to:$harness_to,window:$window,reason:$reason}' \
       2>/dev/null)" >/dev/null 2>&1 || true
   fi

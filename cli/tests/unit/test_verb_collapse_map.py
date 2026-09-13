@@ -95,6 +95,8 @@ def test_map_covers_current_surface_once():
     # their own-surface rows: 562 -> 565.
     # x-a3e8 allocates `doctor harness-matrix`, the matrix regenerator:
     # counted from the merged file, 565 -> 566.
+    # x-a238 allocates `agents king history`, the crown-scope reign readback:
+    # 566 -> 567.
     # This branch adds `agents king cancel`, the isolated cancellation
     # control: counted from the merged file, 566 -> 567, and `agents king
     # shape` (reign) lands on the same count: 567 total from 565.
@@ -123,25 +125,26 @@ def test_map_covers_current_surface_once():
     # spawn seam's client invokes directly (hidden verb): 577 -> 578. The
     # harness-keyed-defaults branch allocates `agents spawn-overlay` and
     # `agents fallback-chain`, the two client verbs the spawn seam degrades
-    # open around (hidden verbs): 578 -> 580. This branch reallocated the
-    # retired `agents worker blueprint-feed` pair onto the direct binary
-    # verb `agents blueprint-feed`, and the one-authorized-merge branch
-    # allocates `agents authorized-merge`, the merge/arm decision every
-    # merge path asks through the single Python door (hidden verb):
-    # 580 -> 583. x-9e1e allocates `agents king faq add` and `agents king
-    # faq list`, the king FAQ recipe-becomes-verb: 583 -> 585. Main
-    # independently allocates `agents distress-verdicts`, the king board's
-    # watchdog-verdict lookup (hidden verb): 585 -> 586. The court scope
-    # fold allocates `agents court-fold`, the native read `fno agents
-    # court -n` relays to (hidden verb): 586 -> 587. Upstream allocates
-    # `agents spawn-axes`, the spawn seam's axes round-trip (hidden verb):
-    # 587 -> 588, then allocates `agents workspace reap`: 588 -> 589. This
-    # branch also allocates `agents test-run`, the native test-suite
-    # process-group owner, and `backlog worked`, the one-read live-worker
-    # surface the ready gate and king board consume (hidden verbs): 589 ->
-    # 591. Upstream adds `doctor graph export`: 591 -> 592. Counted from
-    # the merged file, never taken from either side: 592.
-    assert len(mapped) == 592, (
+    # open around (hidden verbs): 578 -> 580. Both branches grew the map in
+    # this window, and the count below is derived from the merged TSV, never
+    # taken from either side. This branch (x-e221) allocated `agents
+    # test-run`, the native test-suite process-group owner, and `backlog
+    # worked`, the one-read live-worker surface the ready gate and king board
+    # consume - rows main also allocated in the same window, counted once -
+    # then `agents blueprint-feed`, the native blueprinter feed door, and
+    # `config active-backlog-territories`, the territory readout (x-e221).
+    # Main's window allocated, among others: authorized-merge, king faq
+    # add/list, distress-verdicts, court-fold, spawn-axes, workspace reap,
+    # graph export, merge-result-check + its pr view, gate-status, census,
+    # session open, king history + king-history, scratch sweep/report,
+    # incident + fleet-incident, mail team + mail team, config plugin +
+    # doctor reclaim (retiring setup codex-plugin), autonomy provenance,
+    # king ledger + reign-ledger, dispatch next (one stays as a hidden
+    # alias), publish-review pair, prove-it-verdicts, retract, announce,
+    # bash-census, ask, drive-authority, probe-run, verify-evidence, the
+    # deleted cargo-offload pair, and the workers' alias rows - each branch's
+    # full running ledger stays in its own git history.
+    assert len(mapped) == 618, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -236,7 +239,12 @@ def test_live_baseline_matches_the_projected_allocation():
     # collapsed `agents` group (mapped-count only), not the top-level `king`
     # hidden alias.
     # +1 for `workspace reap`, the explicit state-retention operator control.
-    assert len(leaves) <= 130
+    # +3 for the inbox user queue leaves (ack/list/status under the renamed
+    # verb); the pre-rename operator spelling stays as a hidden alias the
+    # ratchet still counts, so the rename nets +3, not 0. Counted from the
+    # merged file, not taken from either side: 133, with `agents autonomy
+    # provenance` (x-84b2) among them - the group row split into leaves.
+    assert len(leaves) <= 133
     assert "fno-agents" in leaves
 
 

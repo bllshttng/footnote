@@ -249,18 +249,29 @@ fn transcript_last(paths: Option<&[PathBuf]>, ids: &HashSet<String>) -> Option<S
 }
 
 /// x-1379's name route, ported verbatim from
-/// `git show 76144e5c1:cli/src/fno/agents/retirement.py`. Only tokens 1 and
-/// 2 are consulted, so a hex-looking slug word in a later position, such as
-/// `feed` in `t-d15a-feed-timeout`, is never read as an id. A bare hex that
-/// matches two graph ids is ambiguous and answers nothing.
-fn name_route(name: &str, ids: &HashSet<String>) -> Option<String> {
+/// `git show 76144e5c1:cli/src/fno/agents/retirement.py`, widened in x-a634
+/// to scan for the node token instead of hard-indexing position 1, so a
+/// wrapper prefix (`k-t-c08a-...`) does not shift it out of view. Pass one
+/// walks adjacent token pairs and returns the first pair naming a full id.
+/// Pass two walks tokens from index 1 and returns the first unambiguous
+/// bare hex, but only while every token before it is shorter than 4
+/// characters, the minimum hex width of a node id - a hex-looking slug
+/// word behind real words (`feed` in `k-t-lane-feed-timeout`) is never
+/// read as an id. The rule tests length, not value: no prefix list, any
+/// wrapper depth resolves. A bare hex matching two graph ids is ambiguous
+/// and answers nothing.
+/// `pub(crate)`: the merge reaper's row join reads the same vocabulary,
+/// not a second prefix parser.
+pub(crate) fn name_route(name: &str, ids: &HashSet<String>) -> Option<String> {
     let tokens: Vec<&str> = name.split('-').collect();
     if tokens.len() < 2 {
         return None;
     }
-    let joined = tokens[1..tokens.len().min(3)].join("-");
-    if ids.contains(&joined) {
-        return Some(joined);
+    for pair in tokens.windows(2) {
+        let joined = format!("{}-{}", pair[0], pair[1]);
+        if ids.contains(&joined) {
+            return Some(joined);
+        }
     }
     let mut hex_index: HashMap<&str, &str> = HashMap::new();
     let mut ambiguous: HashSet<&str> = HashSet::new();
@@ -273,11 +284,17 @@ fn name_route(name: &str, ids: &HashSet<String>) -> Option<String> {
         }
         hex_index.insert(hex_part, id);
     }
-    let bare = tokens[1];
-    if ambiguous.contains(bare) {
-        return None;
+    for (n, bare) in tokens.iter().enumerate().skip(1) {
+        if ambiguous.contains(bare) {
+            return None;
+        }
+        if let Some(id) = hex_index.get(bare) {
+            if tokens[1..n].iter().all(|t| t.len() < 4) {
+                return Some(id.to_string());
+            }
+        }
     }
-    hex_index.get(bare).map(|id| id.to_string())
+    None
 }
 
 /// Run the cascade for one row. `graph` supplies every graph-side source;
@@ -291,6 +308,16 @@ pub fn resolve(
     let ids: HashSet<String> = graph.statuses.keys().cloned().collect();
     let key = crate::graph_store::work_state_key(sid);
     let mut route = NodeRoute::default();
+    // The sessions witness is the whole set (x-e3cc): a session dispatched
+    // under several nodes carries one sessions[] row per node, so a later
+    // source answering ANY of them agrees with the witness - only an answer
+    // outside the set is a conflict. `graph_store::work_state` already reads
+    // the set the same way; this comparison was the one row left behind.
+    let sessions_set: HashSet<String> = graph
+        .index
+        .get(&key)
+        .map(|rows| rows.iter().map(|(node, _)| node.clone()).collect())
+        .unwrap_or_default();
     // The strong tier: dispatch records, all in-memory reads.
     let strong = [
         (
@@ -305,6 +332,14 @@ pub fn resolve(
         (NodeSource::Name, name_route(&e.name, &ids)),
     ];
     for (source, answer) in strong {
+        if source != NodeSource::Sessions && route.node.is_some() {
+            if let Some(node) = &answer {
+                if sessions_set.contains(node) {
+                    route.agreeing.push(source);
+                    continue;
+                }
+            }
+        }
         if !merge(&mut route, source, answer) {
             return route;
         }
@@ -566,6 +601,49 @@ mod tests {
         assert!(route.agreeing.is_empty());
     }
 
+    // AC1-HP (x-e3cc): a session dispatched under several nodes carries one
+    // sessions[] row per node, so a later strong source answering ANY of
+    // them agrees with the witness. Only an answer outside the set is a
+    // conflict, and `route.node` stays the first row so the work verdict
+    // does not move.
+    #[test]
+    fn a_session_named_under_several_nodes_agrees_with_any_member_of_the_set() {
+        let mut g = graph(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
+        g.index.insert(
+            "sid-set".to_string(),
+            vec![
+                ("x-aaaa".to_string(), "done".to_string()),
+                ("x-bbbb".to_string(), "done".to_string()),
+            ],
+        );
+        let e = entry("unidentified-row", Some("x-bbbb"));
+        let route = resolve(&e, "sid-set", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(route.source, Some(NodeSource::Sessions));
+        assert_eq!(route.agreeing, vec![NodeSource::Registry]);
+        assert_eq!(route.conflict, None);
+    }
+
+    // AC1-EDGE (x-e3cc): an answer outside the set is still a conflict.
+    #[test]
+    fn a_registry_answer_outside_the_sessions_set_conflicts() {
+        let mut g = graph(&[("x-aaaa", "done"), ("x-cccc", "done")]);
+        g.index.insert(
+            "sid-conflict".to_string(),
+            vec![("x-aaaa".to_string(), "done".to_string())],
+        );
+        let mut e = entry("unidentified-row", Some("x-cccc"));
+        e.harness_session_id = Some("sid-conflict".into());
+        let route = resolve(&e, "sid-conflict", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(route.source, Some(NodeSource::Sessions));
+        assert_eq!(
+            route.conflict,
+            Some((NodeSource::Registry, "x-cccc".to_string()))
+        );
+        assert!(route.agreeing.is_empty());
+    }
+
     // AC8-EDGE: a bare hex matching two ids is ambiguous and answers
     // nothing; the cascade falls through.
     #[test]
@@ -587,6 +665,61 @@ mod tests {
         let route = resolve(&e, "sid-none", &g, None);
         assert_eq!(route.node.as_deref(), Some("x-d15a"));
         assert_eq!(route.source, Some(NodeSource::Name));
+    }
+
+    // AC1-HP (x-a634): a wrapper prefix no longer shifts the node token
+    // out of the name route's view.
+    #[test]
+    fn k_wrapped_target_row_resolves() {
+        let g = graph(&[("x-c08a", "done")]);
+        let e = entry("k-t-c08a-lane-reap-glm", None);
+        let route = resolve(&e, "sid-none", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-c08a"));
+        assert_eq!(route.source, Some(NodeSource::Name));
+    }
+
+    // AC2-HP: the blueprint wrapper shape resolves too, so the fix is not
+    // shaped to one wrapper.
+    #[test]
+    fn k_wrapped_blueprint_row_resolves() {
+        let g = graph(&[("x-6436", "done")]);
+        let e = entry("k-bp-6436-settings-filename-opus", None);
+        let route = resolve(&e, "sid-none", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-6436"));
+        assert_eq!(route.source, Some(NodeSource::Name));
+    }
+
+    // AC3-EDGE: the unwrapped path that already worked still resolves.
+    #[test]
+    fn unwrapped_row_still_resolves() {
+        let g = graph(&[("x-c08a", "done")]);
+        let e = entry("t-c08a-lane-reap-glm", None);
+        let route = resolve(&e, "sid-none", &g, None);
+        assert_eq!(route.node.as_deref(), Some("x-c08a"));
+        assert_eq!(route.source, Some(NodeSource::Name));
+    }
+
+    // AC4-EDGE: a wrapped row encoding no node answers nothing. The window
+    // rule, not a blanket match, keeps `feed` inert behind `lane`.
+    #[test]
+    fn wrapped_row_encoding_no_node_answers_nothing() {
+        let g = graph(&[("x-feed", "done")]);
+        let e = entry("k-t-lane-feed-timeout", None);
+        let route = resolve(&e, "sid-none", &g, None);
+        assert_eq!(route.node, None);
+        assert_eq!(route.source, None);
+        assert_eq!(route.work_state(&g.statuses), WorkState::NoProvenance);
+    }
+
+    // The pair arm keeps answering the census shapes it answered before
+    // the scan replaced the hard index.
+    #[test]
+    fn pair_arm_census_shapes_still_resolve() {
+        let g = graph(&[("x-338c", "done"), ("x-d135", "done")]);
+        let a = resolve(&entry("t-x-338c", None), "sid-none", &g, None);
+        assert_eq!(a.node.as_deref(), Some("x-338c"));
+        let b = resolve(&entry("bp-x-d135", None), "sid-none", &g, None);
+        assert_eq!(b.node.as_deref(), Some("x-d135"));
     }
 
     // AC7-EDGE shape: no source resolves, nothing is invented.

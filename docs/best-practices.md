@@ -62,6 +62,8 @@ fno backlog decisions                         # the recent decisions across ever
 
 When a node exists, its id is the subject. Otherwise use `pr-<n>`, or the area. When a ruling changes what a worker does next, record it. An answered question is already recorded for you, because `fno inbox outstanding clear --answer` writes the decision on the same call.
 
+Agents have no decide lane: the verb refuses agent sessions. An agent records its rulings on the artifacts it can write. A ruling about a node goes on the node with `fno backlog note`. A ruling that kills another node's work defers it with `fno backlog defer <id> -K wont_do -R "<ruling>"`. A plan records the same verdict in `consolidation.rejected`. `fno backlog decisions <id>`, the inspect receipt, and `fno backlog undefer` read it back.
+
 Full contract in [decision-record](architecture/decision-record.md).
 
 ## One worktree per feature, in the right place

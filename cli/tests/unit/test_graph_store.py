@@ -1073,6 +1073,68 @@ def test_read_nodes_by_ids_returns_none_when_the_keeper_predates_the_verb(tmp_pa
     assert store_mod.read_nodes_by_ids(path, ["ab-1"]) is None
 
 
+def test_run_op_derives_the_rung_map_from_the_light_plan_refs_read(tmp_path, monkeypatch):
+    """x-8a09 site one: the typed op derives its plan-rung map from the light
+    plan_refs read. A call that needs one derived map must not pay the
+    most expensive read in the system (a full begin) for it."""
+    from fno.graph import store as store_mod
+
+    plan = tmp_path / "p.md"
+    plan.write_text("---\nstatus: design\n---\n# plan\n")
+    methods: list[str] = []
+    seen: dict = {}
+
+    def fake_request(self, method, params):
+        methods.append(method)
+        if method == "plan_refs":
+            return {"entries": [
+                {"id": "ab-1"},
+                {"id": "ab-2", "plan_path": str(plan), "cwd": str(tmp_path)},
+            ]}
+        if method == "op":
+            seen.update(params["params"]["plan_rungs"])
+            return {"outcome": {"version": "v2"}, "op": {"found": True, "plan_path": "p.md"}}
+        raise AssertionError(f"unexpected keeper method {method}")
+
+    monkeypatch.setattr(store_mod._Keeper, "request", fake_request)
+    monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
+    result = store_mod._run_op(
+        tmp_path / "graph.json", "append_progress_note",
+        {"node_id": "ab-1", "note": {"ts": "t", "text": "x"}},
+    )
+    assert result == {"found": True, "plan_path": "p.md"}
+    assert methods == ["plan_refs", "op"], "a full begin never fires"
+    assert seen == {"ab-1": "none", "ab-2": "design"}
+
+
+def test_run_op_falls_back_to_begin_when_the_keeper_predates_the_verb(tmp_path, monkeypatch):
+    """An installed worker behind the source answers `unknown store method`;
+    the op then derives the same map over a begin snapshot instead of
+    breaking, the same degrade the read_ids fast path takes."""
+    from fno.graph import store as store_mod
+
+    methods: list[str] = []
+
+    def stale_request(self, method, params):
+        methods.append(method)
+        if method == "plan_refs":
+            raise RuntimeError("store error (invalid): unknown store method \"plan_refs\"")
+        if method == "begin":
+            return {"entries": [{"id": "ab-1"}]}
+        if method == "op":
+            return {"outcome": {"version": "v2"}, "op": {"found": True, "plan_path": None}}
+        raise AssertionError(f"unexpected keeper method {method}")
+
+    monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
+    monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
+    result = store_mod._run_op(
+        tmp_path / "graph.json", "append_progress_note",
+        {"node_id": "ab-1", "note": {"ts": "t", "text": "x"}},
+    )
+    assert result == {"found": True, "plan_path": None}
+    assert methods == ["plan_refs", "begin", "op"]
+
+
 def test_resolve_node_id_serves_the_exact_hit_from_the_by_id_read(tmp_path):
     """Change 4's resolve site: exact id and exact slug through one row,
     no whole-graph begin."""
@@ -1244,3 +1306,41 @@ def test_the_spent_budget_raises_the_existing_error_unchanged(tmp_path, monkeypa
         "graph mutated under us 5 times at /tmp/x1601-tx.json; retrying stopped"
     )
     assert len(delays) == 4, "the fifth conflict raises without a trailing sleep"
+
+def test_seat_owned_spawn_polls_for_the_incumbent(tmp_path, monkeypatch):
+    """x-f188 AC2-EDGE: the spawned keeper exits 3 (seat owned by an
+    incumbent); _client_for keeps polling and rides the incumbent instead of
+    raising spawn_failed."""
+    import socket as _socket
+    import threading
+    import time as _time
+
+    graph = tmp_path / "graph.json"
+    graph.write_text('{"entries": []}')
+    sock = store_mod.store_socket_for(graph)
+
+    class _Exit3Proc:
+        returncode = 3
+        args = ("fno-agents-worker", "--store-keeper")
+
+        def poll(self):
+            return 3
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(store_mod, "_spawn_keeper", lambda _path: _Exit3Proc())
+
+    def incumbent():
+        _time.sleep(0.3)
+        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        srv.bind(str(sock))
+        srv.listen(1)
+        _time.sleep(3.0)
+        srv.close()
+
+    threading.Thread(target=incumbent, daemon=True).start()
+    keeper = store_mod._client_for(graph)
+    assert keeper.sock == sock
+    srv_sock = sock
+    assert srv_sock.exists()

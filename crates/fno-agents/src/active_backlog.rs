@@ -703,22 +703,35 @@ fn resolve_sync_child(
     );
 }
 
+/// `#[serde(default)]` covers a MISSING key, never an explicit `null`, and the
+/// Python writer emits `"reason": null` on every dispatched child
+/// (`AdvanceResult.reason` is Optional; null is the honest value there). Read
+/// a null as the field default so the writer's truthful receipt parses.
+fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 /// One child row from the `advance --epic --json` receipt's `children[]`, the
 /// shared vocabulary with the per-child journal events at advance.py:3638.
-/// Every field defaulted so an evolving receipt never fails the parse.
+/// Every field defaulted so an evolving receipt never fails the parse; a
+/// null-valued string field reads as its default (`null_as_default`).
 #[derive(Debug, Default, Deserialize)]
 struct AdvanceChild {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     node_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     decision: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     reason: String,
     /// The failure text behind a `failed` row (the exception string), empty on
     /// skipped rows and on an older CLI's receipt, which serialized only the
     /// generic `reason`. The breaker's defer reason carries it so an operator
     /// reading `auto-failure: N (last: ...)` sees what actually broke.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     detail: String,
     /// Resolved launch substrate. `Some("headless")` is SYNCHRONOUS:
     /// `subprocess.run` returned only after the one-shot worker finished, so
@@ -751,6 +764,14 @@ struct AdvanceEpicReceipt {
     /// with no children, distinct from a truly exhausted mission.
     #[serde(default)]
     error: Option<String>,
+    /// A held receipt: another advance for this scope was still in flight and
+    /// the CLI stood this one down instead of stacking a second copy (the
+    /// x-ef2c one-in-flight gate). Held is a skip, never a retirement.
+    #[serde(default)]
+    held: bool,
+    /// Held requests the gate has counted for this scope.
+    #[serde(default)]
+    requests: u64,
 }
 
 /// Facts about one `dispatch_mission` pass beyond the fire-and-forget dispatch
@@ -764,6 +785,11 @@ struct DispatchFacts {
     ready: usize,
     reason: Option<String>,
     error: Option<String>,
+    /// The CLI reported the scope held: no children were considered because a
+    /// previous advance for the same scope is still running (x-ef2c).
+    held: bool,
+    /// Held requests the gate has counted for this scope; readout only.
+    requests: u64,
     /// Children resolved synchronously this pass (dispatched headless rows):
     /// real work the tick did even though nothing entered `pending`.
     sync_resolved: usize,
@@ -809,6 +835,8 @@ fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
         ready,
         reason,
         error: receipt.error.clone(),
+        held: receipt.held,
+        requests: receipt.requests,
         // Set later, by the dispatch loop that actually resolves the rows.
         sync_resolved: 0,
     }
@@ -831,6 +859,31 @@ fn dispatch_member(
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> (MissionDispatch, DispatchFacts) {
+    // x-77db: the durable fleet incident stop gates BEFORE the advance
+    // subprocess, and the file is re-read EVERY tick - a daemon that starts
+    // mid-incident takes this branch on its first tick, proving the stop is
+    // durable state rather than a missed announcement. Reconciliation and tick
+    // reporting continue; only new dispatch is refused. An unreadable state
+    // fails closed with its own reason, never as clear.
+    let incident = crate::fleet_incident::verdict();
+    if !matches!(incident, crate::fleet_incident::Verdict::Clear(_)) {
+        let (state, generation, detail) = match &incident {
+            crate::fleet_incident::Verdict::Stopped(r) => (
+                "fleet-stop",
+                Some(r.generation),
+                format!("generation {}", r.generation),
+            ),
+            crate::fleet_incident::Verdict::Unavailable(d) => {
+                ("fleet-stop-unavailable", None, d.clone())
+            }
+            crate::fleet_incident::Verdict::Clear(_) => unreachable!(),
+        };
+        let _ = journal.append(
+            "active_backlog_skip",
+            json!({"reason": state, "mission": cfg.mission, "generation": generation, "detail": detail}),
+        );
+        return (MissionDispatch::Continue, DispatchFacts::default());
+    }
     let (mode, extra): (&str, &[&str]) = if member.epic {
         // --continuation: never reactivate the mission and retire an inactive
         // one, so an operator `--stop` between drain ticks is not undone.
@@ -838,6 +891,8 @@ fn dispatch_member(
     } else {
         ("--loose", &[])
     };
+    let out = match retry_etxtbsy(|| {
+        fno_cmd(&cfg.fno_bin)
     let out = match retry_etxtbsy(|| {
         fno_cmd(&cfg.fno_bin)
             .args([
@@ -848,6 +903,8 @@ fn dispatch_member(
                 "advance",
                 mode,
                 member.id.as_str(),
+                "--source",
+                "ab",
             ])
             .args(extra)
             .arg("--json")
@@ -878,7 +935,17 @@ fn dispatch_member(
                 "active_backlog_skip",
                 json!({"reason": "advance-epic-unparseable", "mission": cfg.mission, "detail": format!("{e}")}),
             );
-            return (MissionDispatch::Continue, DispatchFacts::default());
+            // Not no_work: `DispatchFacts::default()` made mission_drain_tick
+            // read a refused receipt as an exhausted mission (ready=0 +
+            // stranded=N) - exactly the reading that hid real dispatches.
+            // The gate:{err} arm names the tick honestly instead.
+            return (
+                MissionDispatch::Continue,
+                DispatchFacts {
+                    error: Some("receipt-unparseable".to_string()),
+                    ..DispatchFacts::default()
+                },
+            );
         }
     };
     let mut facts = facts_from_receipt(&receipt);
@@ -1197,6 +1264,10 @@ pub fn mission_drain_tick(
     let skip_reason: Option<String> = match outcome {
         MissionDispatch::Retire => Some("mission_retired".to_string()),
         MissionDispatch::Continue if closed + newly_dispatched + sync_closed > 0 => None,
+        // The gate held this tick's converge: name HELD, never no_work - an
+        // empty child set from a held receipt is the amplifier reporting
+        // itself, not an exhausted mission (x-ef2c).
+        MissionDispatch::Continue if facts.held => Some("held".to_string()),
         // Something dispatched by an earlier tick is still running: a full
         // spawn lane on THIS pass does not make that stale.
         MissionDispatch::Continue if !pending.is_empty() => Some("in_flight".to_string()),
@@ -1235,12 +1306,22 @@ pub fn mission_drain_tick(
         "{}{}{} ready={} closed={} dispatched={} sync={} pending={}{}",
         label,
         kingless_mark,
+    let held_requests = if facts.held {
+        format!(" requests={}", facts.requests)
+    } else {
+        String::new()
+    };
+    let detail = format!(
+        "{}{}{} ready={} closed={} dispatched={} sync={} pending={}{}{}",
+        label,
+        kingless_mark,
         rotation,
         facts.ready,
         closed,
         newly_dispatched,
         sync_closed,
         pending.len(),
+        held_requests,
         match skip_reason.as_deref() {
             Some("no_work") => match undispatched_count(cfg) {
                 Ok(count) => format!(" stranded={count}"),
@@ -1370,11 +1451,69 @@ impl ConvergeGate {
     }
 }
 
+/// What `fno config active-backlog --json` printed, read apart from whether
+/// the shell ran at all. A current CLI emits the object receipt; one built
+/// before x-338c emits a bare list, which carries no mission count and no
+/// zero-path, so its rows keep the pre-338c wording.
+///
+/// The two shapes are told apart by input shape (map vs sequence), never by
+/// an untagged enum: untagged serde reports the LAST variant's error, so a
+/// map that Report rejected for a real field reason read as "invalid type:
+/// map, expected a sequence" and hid the true cause behind a phantom shape
+/// fault (x-4a55).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DrainReport {
+    targets: Vec<ResolvedTarget>,
+    #[serde(default)]
+    missions: u64,
+    #[serde(default)]
+    skip_reason: Option<String>,
+}
+
+/// Parse a successful receipt by input shape: a map is the current object
+/// receipt and keeps its own field error on failure; a sequence (or anything
+/// else) is the pre-x-338c Legacy list.
+fn parse_drain_receipt(stdout: &[u8]) -> Result<DrainResolve, serde_json::Error> {
+    match serde_json::from_slice::<serde_json::Value>(stdout) {
+        Ok(v) if v.is_object() => serde_json::from_value::<DrainReport>(v).map(|r| DrainResolve {
+            targets: r.targets,
+            missions: r.missions,
+            skip_reason: r.skip_reason,
+            failure: None,
+        }),
+        Ok(v) => serde_json::from_value::<Vec<ResolvedTarget>>(v).map(|targets| DrainResolve {
+            targets,
+            missions: 0,
+            skip_reason: None,
+            failure: None,
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`resolve_targets`] plus what the supervisor's tick row needs to say WHY:
+/// the receipt's own zero-path token and mission count (a disabled drain is
+/// `drain_disabled`, not `no_missions` - x-338c), beside the shell-level
+/// failure (`env_broken`, the missing-click class) that predates the receipt.
+#[derive(Debug, Clone)]
+pub struct DrainResolve {
+    pub targets: Vec<ResolvedTarget>,
+    /// Active missions counted by the CLI whatever the config says; a legacy
+    /// receipt reports none.
+    pub missions: u64,
+    /// The receipt's zero-path token (`drain_disabled`, `bad_interval`, ...);
+    /// absent from a legacy receipt and whenever targets resolved.
+    pub skip_reason: Option<String>,
+    /// Why the resolver never produced a reading (missing fno, non-zero exit,
+    /// unparseable output); `None` when it ran clean.
+    pub failure: Option<String>,
+}
+
 /// Shell `fno config active-backlog --json` to discover enabled drain targets.
 /// Best-effort: any failure (missing fno, non-zero exit, unparseable output)
 /// yields an empty list, so the feature simply stays dormant.
 pub fn resolve_targets(config_cwd: &Path, registry_path: &Path) -> Vec<ResolvedTarget> {
-    resolve_targets_report(config_cwd, registry_path).0
+    resolve_targets_report(config_cwd, registry_path).targets
 }
 
 /// The drain-target receipt, computed natively from the territory fact set
@@ -1388,22 +1527,36 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
     if !facts.any_enabled() {
         return Ok(Vec::new());
     }
-    let interval = match facts.interval_seconds {
-        Some(s) => s as u64,
-        None => return Ok(Vec::new()),
-    };
     let territories = territory::resolve_territories(config_cwd, registry_path).map_err(|e| e.0)?;
+    Ok(drain_targets_json(&facts, &territories).0)
+}
+
+/// Target rows for one resolved territory set, plus the drop counts the
+/// zero-path reason needs: `(rows, project_disabled_drops, missing_path_drops)`.
+/// The config gate runs BEFORE the rootability check so a drop counts exactly
+/// once, in the order the reason rule reads them.
+fn drain_targets_json(
+    facts: &territory::ActiveBacklogFacts,
+    territories: &[territory::Territory],
+) -> (Vec<Value>, usize, usize) {
+    let Some(interval) = facts.interval_seconds else {
+        return (Vec::new(), 0, 0);
+    };
     let mut targets = Vec::new();
+    let mut disabled = 0;
+    let mut missing_path = 0;
     for territory in territories {
+        let root_project = territory.project.clone();
+        if !facts.is_enabled_for(Some(&root_project)) {
+            disabled += 1;
+            continue;
+        }
         // `Territory::project` already carries the right root for both cases
         // (the first member epic's own project at rung 2, the project itself
         // at rungs 0/1 - see `resolve_territories`), so there is one path.
-        let root_project = territory.project.clone();
         if root_project.is_empty() || territory.cwd.is_empty() {
+            missing_path += 1;
             continue; // unrootable: skipped, never guessed
-        }
-        if !facts.is_enabled_for(Some(&root_project)) {
-            continue;
         }
         let mission = if territory.rung == 2 {
             territory.members.first().cloned()
@@ -1413,7 +1566,7 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
         targets.push(json!({
             "project": territory.project,
             "cwd": territory.cwd,
-            "interval_seconds": interval,
+            "interval_seconds": interval as u64,
             "failure_limit": facts.failure_limit,
             "mission": mission,
             "scope": territory.key,
@@ -1431,36 +1584,70 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
             .unwrap_or("")
             .cmp(b["scope"].as_str().unwrap_or(""))
     });
-    Ok(targets)
+    (targets, disabled, missing_path)
 }
 
-/// [`resolve_targets`] plus the failure detail the supervisor reports in its
-/// tick row: an empty target list from a broken resolver (`env_broken`, the
-/// missing-click class) is a different arm state from an empty list because
-/// nothing is enabled (`no_missions`).
+/// [`resolve_targets`] plus what the supervisor's tick row needs to say WHY
+/// (x-338c), computed on one native pass: the receipt's own zero-path token
+/// (`drain_disabled`, `bad_interval`, `no_missions`, `project_disabled`,
+/// `no_workspace_path`) and the territory count, taken BEFORE the config
+/// gates so the count is the truth even when the drain is off. An unreadable
+/// source is `failure` (`env_broken`, the missing-click class), never an
+/// empty list read as "nothing enabled".
 pub fn resolve_targets_report(
     config_cwd: &Path,
     registry_path: &Path,
-) -> (Vec<ResolvedTarget>, Option<String>) {
-    // The crossing is gone: the receipt is computed natively from the
-    // territory fact set in this crate (seam-crossings-baseline lost the
-    // active-backlog line in the same change).
-    match native_receipt(config_cwd, registry_path) {
-        Ok(targets) => match targets
-            .into_iter()
-            .map(|t| serde_json::from_value::<ResolvedTarget>(t))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(targets) => (targets, None),
-            Err(e) => (
-                Vec::new(),
-                Some(format!("active-backlog receipt unrepresentable: {e}")),
-            ),
+) -> DrainResolve {
+    let facts = territory::active_backlog_facts(config_cwd);
+    let territories = territory::resolve_territories(config_cwd, registry_path);
+    let missions = territories.as_ref().map_or(0, |t| t.len() as u64);
+    let mut skip_reason: Option<String> = None;
+    if !facts.any_enabled() {
+        skip_reason = Some("drain_disabled".to_string());
+    } else if facts.interval_seconds.is_none() {
+        skip_reason = Some("bad_interval".to_string());
+    }
+    match territories {
+        Err(e) => DrainResolve {
+            targets: Vec::new(),
+            missions,
+            skip_reason,
+            failure: Some(e.0.chars().take(200).collect::<String>()),
         },
-        Err(reason) => (
-            Vec::new(),
-            Some(reason.chars().take(200).collect::<String>()),
-        ),
+        Ok(territories) => {
+            if skip_reason.is_none() && territories.is_empty() {
+                skip_reason = Some("no_missions".to_string());
+            }
+            let (rows, disabled, missing_path) = drain_targets_json(&facts, &territories);
+            match rows
+                .into_iter()
+                .map(|t| serde_json::from_value::<ResolvedTarget>(t))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(targets) => {
+                    if targets.is_empty() && skip_reason.is_none() {
+                        skip_reason = Some(if disabled >= missing_path {
+                            "project_disabled".to_string()
+                        } else {
+                            "no_workspace_path".to_string()
+                        });
+                    }
+                    DrainResolve {
+                        targets,
+                        missions,
+                        skip_reason,
+                        failure: None,
+                    }
+                }
+                Err(e) => DrainResolve {
+                    targets: Vec::new(),
+                    missions,
+                    skip_reason,
+                    failure: Some(format!("active-backlog receipt unrepresentable: {e}")),
+                },
+            }
+        }
+    }
     }
 }
 
@@ -1680,10 +1867,13 @@ pub async fn run_supervisor(
         tasks.retain(|_, h| !h.is_finished());
         fanout_tasks.retain(|_, h| !h.is_finished());
 
-        let (targets, resolve_failure) = resolve_targets_report(
-            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            &crate::paths::AgentsHome::from_env().registry_json(),
-        );
+        let report = resolve_targets_report(&fno_bin);
+        let DrainResolve {
+            targets,
+            missions: receipt_missions,
+            skip_reason: receipt_reason,
+            failure: resolve_failure,
+        } = report;
         // Re-sync the cap every recheck so `fno config set` lands without a
         // daemon restart. With no targets there is nothing to gate.
         if let Some(cap) = targets.iter().map(|t| t.max_concurrent).max() {
@@ -1702,18 +1892,25 @@ pub async fn run_supervisor(
         // The arm's supervisor-level tick row, ONLY while no mission loop is
         // live to write its own (fresher) rows: it says why the drain has
         // nothing to do - a broken resolver (env_broken, the class that ticked
-        // silently for hours because its Python env lacked click) or simply no
-        // enabled missions. ab_live covers the fanout family too.
+        // silently for hours because its Python env lacked click), the
+        // receipt's own zero-path (drain_disabled names the config switch;
+        // x-338c), or genuinely no missions. ab_live covers the fanout family.
         if targets.is_empty() {
+            let skip = if resolve_failure.is_some() {
+                "env_broken".to_string()
+            } else {
+                receipt_reason.unwrap_or_else(|| "no_missions".to_string())
+            };
             let _ = emitter.emit(
                 crate::tick_ledger::EVENT_TYPE,
                 &serde_json::json!({
                     "arm": "active_backlog",
                     "scheduler": "daemon",
                     "acted": 0,
-                    "skip_reason": if resolve_failure.is_some() { "env_broken" } else { "no_missions" },
+                    "skip_reason": skip,
                     "detail": format!(
-                        "targets=0 ab_live={} fanouts={}{}",
+                        "missions={} targets=0 ab_live={} fanouts={}{}",
+                        receipt_missions,
                         !fanout_targets.is_empty(),
                         fanout_targets.len(),
                         resolve_failure.as_deref().map(|f| format!(" resolve={f}")).unwrap_or_default()
@@ -1920,6 +2117,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn object_receipt_carries_reason_and_count() {
+        // The x-338c receipt: a disabled drain names the config switch and
+        // still counts the missions it is not draining.
+        let resolve =
+            parse_drain_receipt(br#"{"targets":[],"missions":6,"skip_reason":"drain_disabled"}"#)
+                .expect("object receipt must parse");
+        assert!(resolve.failure.is_none());
+        assert!(resolve.targets.is_empty());
+        assert_eq!(resolve.missions, 6);
+        assert_eq!(resolve.skip_reason.as_deref(), Some("drain_disabled"));
+    }
+
+    #[test]
+    fn bare_list_receipt_reads_as_legacy() {
+        // A CLI built before x-338c emits a bare list; it parses as Legacy and
+        // the tick row degrades to today's no_missions wording (AC5).
+        let resolve = parse_drain_receipt(
+            br#"[{"project":"fno","cwd":"/repo/fno","interval_seconds":300,
+                  "failure_limit":3,"mission":"x-a","max_concurrent":1}]"#,
+        )
+        .expect("bare list must parse");
+        assert!(resolve.failure.is_none());
+        assert_eq!(resolve.missions, 0);
+        assert_eq!(resolve.skip_reason, None);
+        assert_eq!(resolve.targets.len(), 1);
+        assert_eq!(resolve.targets[0].mission.as_deref(), Some("x-a"));
+    }
+
+    #[test]
+    fn object_receipt_without_targets_is_not_a_reading() {
+        // An object that carries no targets (an error envelope, a foreign
+        // shape) must FAIL to parse, not default into an empty Report: a
+        // masked fault reads as no_missions and the missing-click class of
+        // silence comes back. The shell-level failure (env_broken) is the
+        // honest row for an unparseable receipt.
+        let receipt = parse_drain_receipt(br#"{"error":"boom"}"#);
+        assert!(receipt.is_err(), "a targets-less object must not decode");
+    }
+
+    #[test]
+    fn report_shape_error_names_the_field_not_the_other_variant() {
+        // x-4a55: a map that fails the object receipt must report ITS OWN
+        // field reason, never the bare-list variant's "invalid type: map,
+        // expected a sequence" - that phantom hid a build drift behind a
+        // shape fault that did not exist.
+        let missing_targets = parse_drain_receipt(br#"{"missions":6}"#)
+            .expect_err("a map without targets must not decode");
+        let msg = missing_targets.to_string();
+        assert!(msg.contains("missing field"), "unexpected message: {msg}");
+        assert!(msg.contains("targets"), "unexpected message: {msg}");
+        assert!(
+            !msg.contains("expected a sequence"),
+            "unexpected message: {msg}"
+        );
+
+        let bad_field = parse_drain_receipt(br#"{"targets":[],"missions":"six"}"#)
+            .expect_err("a non-numeric missions must not decode");
+        let msg = bad_field.to_string();
+        assert!(
+            !msg.contains("expected a sequence"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
     fn status_fanout_targets_parse_from_json() {
         let json = br#"[{"project":"fno","cwd":"/repo/fno","interval_seconds":5}]"#;
         let targets: Vec<FanoutTarget> = serde_json::from_slice(json).unwrap();
@@ -1965,8 +2227,10 @@ mod tests {
         let r: AdvanceEpicReceipt = serde_json::from_slice(
             br#"{"epic_id":"x-e","error":null,"activated":true,"deactivated":false,
                  "all_done":false,"dispatched":["x-a"],
-                 "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"},
-                             {"node_id":"x-b","decision":"dispatched","substrate":"headless"}]}"#,
+                 "children":[{"node_id":"x-a","decision":"dispatched","reason":null,"detail":null,
+                              "short_id":"84a8d946","substrate":"thread","notes":[]},
+                             {"node_id":"x-b","decision":"dispatched","reason":null,"detail":null,
+                              "short_id":"84a8d947","substrate":"headless","notes":[]}]}"#,
         )
         .unwrap();
         assert_eq!(r.children.len(), 2);
@@ -1977,12 +2241,49 @@ mod tests {
     }
 
     #[test]
+    fn advance_epic_receipt_parses_a_dispatched_child_with_null_strings() {
+        // The verbatim shape the CLI prints on a dispatch: reason and detail
+        // are Optional on AdvanceResult and null is the honest value there
+        // (advance.py AdvanceEpicResult.receipt). Before null_as_default this
+        // failed with "invalid type: null, expected a string" and every
+        // dispatching tick read as no_work.
+        let r: AdvanceEpicReceipt = serde_json::from_slice(
+            br#"{"epic_id":"x-epic","error":null,"activated":false,"deactivated":false,
+                 "all_done":false,"dispatched":["x-a"],
+                 "children":[{"node_id":"x-a","decision":"dispatched","reason":null,"detail":null,
+                              "short_id":"84a8d946","substrate":"thread","notes":[]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.children[0].decision, "dispatched");
+        assert_eq!(r.children[0].reason, "");
+        assert_eq!(r.children[0].detail, "");
+    }
+
+    #[test]
     fn advance_epic_receipt_defaults_on_partial_json() {
         // A minimal / evolving receipt must never fail the parse (every field
         // defaults benignly): no children, mission still live.
         let r: AdvanceEpicReceipt = serde_json::from_slice(br#"{"epic_id":"x-e"}"#).unwrap();
         assert!(r.children.is_empty());
         assert!(!r.deactivated && !r.all_done);
+    }
+
+    #[test]
+    fn a_held_receipt_parses_and_reads_as_held_not_no_work() {
+        // x-ef2c: the CLI's one-in-flight gate answers `held` with an empty
+        // child set. Without the field that receipt read as no_work - a lie
+        // that hides exactly the stacking this gate exists to delete. Held is
+        // never a retirement, so the mission flags must stay false.
+        let r: AdvanceEpicReceipt =
+            serde_json::from_slice(br#"{"epic_id":"x-e","held":true,"requests":4}"#).unwrap();
+        assert!(r.held);
+        assert_eq!(r.requests, 4);
+        assert!(!r.deactivated && !r.all_done);
+        let facts = facts_from_receipt(&r);
+        assert!(facts.held);
+        assert_eq!(facts.ready, 0);
+        assert_eq!(facts.error, None);
+        assert_eq!(facts.requests, 4);
     }
 
     #[test]
@@ -2847,8 +3148,10 @@ mod tests {
         let fno = stub_fno_advance(
             &tmp.path().join("bin"),
             r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a","x-b"],
-                "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"},
-                            {"node_id":"x-b","decision":"dispatched","substrate":"thread"}]}"#,
+                "children":[{"node_id":"x-a","decision":"dispatched","reason":null,"detail":null,
+                             "short_id":"84a8d946","substrate":"thread","notes":[]},
+                            {"node_id":"x-b","decision":"dispatched","reason":null,"detail":null,
+                             "short_id":"84a8d947","substrate":"thread","notes":[]}]}"#,
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, project_journal) = test_journal(tmp.path());
@@ -2867,6 +3170,74 @@ mod tests {
         assert!(journal_lines(&project_journal)
             .iter()
             .any(|l| l.contains("active_backlog_dispatched") && l.contains("x-a")));
+    }
+
+    #[test]
+    fn dispatch_mission_refuses_to_mint_work_while_a_fleet_stop_is_active() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // The stub's observer marker is the positive control: if the gate
+        // fails and advance RUNS, this file exists and the test fails on it.
+        let marker = tmp.path().join("advance-ran");
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,
+                "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"}]}"#,
+            r#"{"status":"ok","rows":[{}]}"#,
+            Some(&marker),
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending: Vec<PendingDispatch> = Vec::new();
+
+        // The stop lives in the agents home the verdict reader resolves; a
+        // stopped record, not a missing one.
+        let saved_home = std::env::var_os("FNO_AGENTS_HOME");
+        let home = tmp.path().join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &home);
+        let record = crate::fleet_incident::IncidentRecord {
+            version: crate::fleet_incident::STATE_VERSION,
+            state: "stopped".into(),
+            generation: 5,
+            changed_at: "2026-09-11T00:00:00Z".into(),
+            changed_by: "op".into(),
+            reason: "wedged lock".into(),
+            source: Some("file".into()),
+        };
+        std::fs::write(
+            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&home)),
+            serde_json::to_string(&record).unwrap(),
+        )
+        .unwrap();
+
+        let (outcome, facts) = dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
+
+        // Restore before asserts so a panic does not leak the pin.
+        match saved_home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+
+        // AC3-DAEMON: the tick continues (reconciliation/tick reporting alive),
+        // advance was NEVER invoked, and the skip row names fleet-stop + the
+        // generation the stop was written at.
+        assert_eq!(outcome, MissionDispatch::Continue);
+        assert!(pending.is_empty(), "no child may enter pending");
+        assert!(facts.ready == 0);
+        assert!(!marker.exists(), "advance must not run while stopped");
+        let skips: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["data"]["reason"] == "fleet-stop")
+            .collect();
+        assert!(
+            skips
+                .iter()
+                .any(|v| v["data"]["generation"] == 5 && v["data"]["mission"] == cfg.mission),
+            "skip row must carry state generation and mission: {skips:?}"
+        );
     }
 
     #[test]
@@ -3215,6 +3586,85 @@ mod tests {
             .filter(|v| v["type"] == "control_plane_tick")
             .collect();
         assert_eq!(rows[0]["data"]["skip_reason"], "gate:disabled");
+    }
+
+    #[test]
+    fn mission_drain_tick_names_receipt_unparseable_instead_of_no_work() {
+        // A receipt the parse refuses is a gate error, never an exhausted
+        // mission: the tick names gate:receipt-unparseable, the stranded
+        // observer is not read, and the detail carries no stranded token -
+        // the reading that sent a king after a stall that was really this
+        // parse failure.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("observer-called");
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"children":[{"reason":7}]}"#,
+            r#"{"status":"ok","rows":[{}]}"#,
+            Some(&marker),
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        assert_eq!(row["data"]["skip_reason"], "gate:receipt-unparseable");
+        let detail = row["data"]["detail"].as_str().unwrap();
+        assert!(!detail.contains("stranded="), "detail was {detail}");
+        assert!(!marker.exists(), "stranded observer is no-work only");
+    }
+
+    #[test]
+    fn mission_drain_tick_dispatches_the_real_null_bearing_receipt() {
+        // The receipt the CLI actually prints on a dispatch carries
+        // "reason": null on the child. The tick must read acted=1 with no
+        // skip reason and the child in pending - never no_work.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","error":null,"activated":false,"deactivated":false,
+                "all_done":false,"dispatched":["x-a"],
+                "children":[{"node_id":"x-a","decision":"dispatched","reason":null,"detail":null,
+                             "short_id":"84a8d946","substrate":"thread","notes":[]}]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        assert_eq!(pending.len(), 1, "dispatched child must enter pending");
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        assert_eq!(row["data"]["acted"], 1);
+        assert!(row["data"]["skip_reason"].is_null());
+        assert!(
+            row["data"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("dispatched=1"),
+            "detail was {:?}",
+            row["data"]["detail"]
+        );
+        assert!(
+            journal_lines(&project_journal)
+                .iter()
+                .any(|l| l.contains("active_backlog_dispatched")),
+            "a dispatching tick must journal its dispatch"
+        );
     }
 
     // ── synchronous children (x-7f1f) ────────────────────────────────────────

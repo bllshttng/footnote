@@ -5,7 +5,7 @@
 //! types, the selector parsers) in exactly one place.
 use super::*;
 
-/// `fno mux thread <name> [--portal N] [--tab SEL] [--split DIR]
+/// `fno mux thread <name> [--portal N|new] [--tab SEL] [--split DIR]
 /// [--workspace NAME] [--at PANE]` (x-07c2, hidden): the outside-the-TUI
 /// reach behind `fno agents attach <name>`. Sends the ThreadPane control verb,
 /// which runs the exact command a TUI reach runs, and prints where it landed.
@@ -15,6 +15,10 @@ use super::*;
 /// (x-8f9d) `--portal N` names which portal to reach through; omitted is
 /// portal 0. This is the addressing door: two calls naming 0 and 1 put two
 /// threads in two panes, which the tab menu's Join actions then tile.
+///
+/// (x-3ea6) `--portal new` asks the server for a portal of its own in a new
+/// tab: a MACHINE reach (retask, mail force) must never repoint a seat a
+/// person is using, and portal 0 is usually the operator's own.
 ///
 /// (x-9b60) The placement flags reuse the pane path's spellings and ride the
 /// verb's `placement` field. They steer a FRESH open; a portal that already
@@ -53,9 +57,18 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
         if text == "--portal" {
             let value = flag_value!("--portal");
             match value.parse::<u8>() {
-                Ok(n) => portal = Some(n),
+                Ok(n) => {
+                    portal = Some(n);
+                    // Last --portal flag wins, so an explicit index clears a
+                    // `new` spelled earlier.
+                    placement.portal_new = false;
+                }
+                Err(_) if value == "new" => {
+                    placement.portal_new = true;
+                    portal = None;
+                }
                 Err(_) => {
-                    eprintln!("fno mux thread: --portal takes an index 0-255");
+                    eprintln!("fno mux thread: --portal takes an index 0-255 or new");
                     return EXIT_USAGE;
                 }
             }
@@ -63,9 +76,16 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
         }
         if let Some(value) = text.strip_prefix("--portal=") {
             match value.parse::<u8>() {
-                Ok(n) => portal = Some(n),
+                Ok(n) => {
+                    portal = Some(n);
+                    placement.portal_new = false;
+                }
+                Err(_) if value == "new" => {
+                    placement.portal_new = true;
+                    portal = None;
+                }
                 Err(_) => {
-                    eprintln!("fno mux thread: --portal takes an index 0-255");
+                    eprintln!("fno mux thread: --portal takes an index 0-255 or new");
                     return EXIT_USAGE;
                 }
             }
@@ -142,14 +162,13 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
         eprintln!("fno mux thread: takes exactly one name");
         return EXIT_USAGE;
     }
-    // A paneless row owns no session routing: the operator's ambient session
-    // (FNO_SESSION / the default) is the server whose portal this drives.
+    // A paneless row owns no session routing: the operator's ambient server
+    // (the flag, FNO_SERVER / FNO_SESSION, or the default) is the one whose
+    // portal this drives. Flag and env stay separate so resolve_session can
+    // tell an env-decided server from a flag-decided one (x-f209).
     let session = resolve_session(
-        session_flag
-            .as_deref()
-            .or(env_session)
-            .filter(|s| !s.is_empty()),
-        None,
+        session_flag.as_deref().filter(|s| !s.is_empty()),
+        env_session,
     );
     let sock = match proto::socket_path(&session) {
         Ok(p) => p,

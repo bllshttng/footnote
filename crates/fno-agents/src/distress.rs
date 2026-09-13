@@ -7,10 +7,13 @@
 //! loopcheck further (x-6aca).
 
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::claims::append_event_line;
-use crate::loopcheck::{bounded_read, log_bounded_read_error, now_rfc3339_utc, parse_xml_attr};
+use crate::loopcheck::{
+    bounded_read, log_bounded_read_error, loopcheck_fno_bin, now_rfc3339_utc, parse_xml_attr,
+    try_flag_value,
+};
 
 /// A `<help reason="..." evidence="...">` distress tag parsed from the
 /// stopping message. Deliberately NOT an `Intent` variant: a help tag never
@@ -120,6 +123,43 @@ fn blocked_distress_already_emitted(project_events: &Path, run: &str, reason: &s
 /// rows every other producer writes.
 const BLOCKED_DATA_STR_CAP: usize = 500;
 
+/// Read the stopping message for a `<help>` tag and, on a hit, append the
+/// blocked row - the read+emit chain shared by loop_check's manifest-bearing
+/// stop and a pre-manifest visitor-allowed exit, so there is one
+/// implementation and no second copy to drift. `last_assistant_message` wins
+/// when present; otherwise the transcript reader supplies the NEWEST entry
+/// (mirroring the intent read's newest-entry rule for `watching`, since an
+/// older entry's distress was already handled at its own stop) - the
+/// fallback the agy, opencode, and codex stop hooks need, as those
+/// invocations carry no `last_assistant_message` payload. Returns whether a
+/// row was written.
+pub(crate) fn scan_and_emit(
+    project_events: &Path,
+    global_events: &Path,
+    cwd: &Path,
+    run: &str,
+    node: Option<&str>,
+    harness: Option<&str>,
+    transcript_path: &Path,
+    last_assistant_message: Option<&str>,
+) -> bool {
+    let distress_text: Option<String> = last_assistant_message
+        .map(str::to_string)
+        .or_else(|| newest_assistant_text_via_reader(&loopcheck_fno_bin(), transcript_path, cwd));
+    let Some(distress) = distress_text.as_deref().and_then(extract_help_distress) else {
+        return false;
+    };
+    emit_help_distress_blocked(
+        project_events,
+        global_events,
+        cwd,
+        run,
+        node,
+        harness,
+        &distress,
+    )
+}
+
 /// Emit the `blocked` x-dbaf event natively (x-77a0) and push it to the
 /// parent handle. The push leg and the emit-CLI auto-push shipped with zero
 /// emitters (the advisory `--emit-boundary blocked` instruction demonstrably
@@ -135,12 +175,14 @@ pub(crate) fn emit_help_distress_blocked(
     cwd: &Path,
     run: &str,
     node: Option<&str>,
+    harness: Option<&str>,
     distress: &HelpDistress,
-) {
-    if !append_blocked_event(project_events, global_events, run, node, distress) {
-        return;
+) -> bool {
+    if !append_blocked_event(project_events, global_events, run, node, harness, distress) {
+        return false;
     }
     push_blocked_to_parent(cwd, run, node, &distress.reason);
+    true
 }
 
 /// Append the deduped `blocked` envelope to both logs. Returns whether a row
@@ -152,13 +194,16 @@ fn append_blocked_event(
     global_events: &Path,
     run: &str,
     node: Option<&str>,
+    harness: Option<&str>,
     distress: &HelpDistress,
 ) -> bool {
     let cap = |s: &str| -> String { s.chars().take(BLOCKED_DATA_STR_CAP).collect() };
     let reason = cap(&distress.reason);
     // Dedup on the CAPPED reason (codex round on PR 1282): the stored row
     // carries the capped value, so comparing the raw one missed on every
-    // >500-char distress and re-emitted on each stop.
+    // >500-char distress and re-emitted on each stop. Keyed on run + reason
+    // only: a retry that resolves its harness differently is still the
+    // same distress.
     if blocked_distress_already_emitted(project_events, run, &reason) {
         return false;
     }
@@ -176,6 +221,9 @@ fn append_blocked_event(
     });
     if let Some(n) = node {
         env["node"] = serde_json::json!(n);
+    }
+    if let Some(h) = harness {
+        env["harness"] = serde_json::json!(h);
     }
     if let Err(error) = append_event_line(project_events, &env, std::time::Duration::from_secs(2)) {
         eprintln!(
@@ -220,7 +268,7 @@ fn push_blocked_to_parent(cwd: &Path, run: &str, node: Option<&str>, reason: &st
         args.push(n);
     }
     match bounded_read(
-        std::ffi::OsStr::new("fno"),
+        std::ffi::OsStr::new(&loopcheck_fno_bin()),
         &args,
         cwd,
         "blocked_parent_push",
@@ -235,10 +283,112 @@ fn push_blocked_to_parent(cwd: &Path, run: &str, node: Option<&str>, reason: &st
     }
 }
 
+const DISTRESS_SCAN_USAGE: &str = "\
+usage: fno-agents distress-scan --transcript <path> --run <id> [--node <id>]
+       [--harness <name>] [--cwd <dir>] [--events <p>] [--global-events <p>]
+
+Reads a transcript for a <help> tag and, on a hit, appends a blocked row -
+the pre-manifest counterpart of the read loop_check runs inline. Best-effort
+throughout: always exits 0. Prints 'distress: emitted <reason>' on a write,
+'distress: none' otherwise (no tag, no --run, or a transcript that does not
+exist).";
+
+/// `fno-agents distress-scan --transcript <path> --run <id> [--node <id>]
+/// [--harness <name>] [--cwd <dir>] [--events <p>] [--global-events <p>].
+/// The pre-manifest counterpart of the inline read `loop_check`
+/// runs: a stop hook that finds no manifest for the session has no
+/// `last_assistant_message` binding to reuse, so it calls this instead of
+/// inlining a second copy of the read. Event paths resolve the same way
+/// `loop_check` resolves them (project path from cwd, global path under
+/// `$HOME/.fno`), overridable for tests. Always exits 0: a failure here must
+/// never turn into a stop-hook failure.
+pub fn run_distress_scan(args: &[String]) -> i32 {
+    let args = if args.first().map(String::as_str) == Some("distress-scan") {
+        &args[1..]
+    } else {
+        args
+    };
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{DISTRESS_SCAN_USAGE}");
+        return 0;
+    }
+    let mut transcript: Option<PathBuf> = None;
+    let mut run: Option<String> = None;
+    let mut node: Option<String> = None;
+    let mut harness: Option<String> = None;
+    let mut cwd: Option<PathBuf> = None;
+    let mut events_path: Option<PathBuf> = None;
+    let mut global_events_path: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(val) = try_flag_value(&args[i], "--transcript", args, &mut i) {
+            transcript = Some(PathBuf::from(val));
+        } else if let Some(val) = try_flag_value(&args[i], "--run", args, &mut i) {
+            run = Some(val);
+        } else if let Some(val) = try_flag_value(&args[i], "--node", args, &mut i) {
+            node = Some(val);
+        } else if let Some(val) = try_flag_value(&args[i], "--harness", args, &mut i) {
+            harness = Some(val);
+        } else if let Some(val) = try_flag_value(&args[i], "--cwd", args, &mut i) {
+            cwd = Some(PathBuf::from(val));
+        } else if let Some(val) = try_flag_value(&args[i], "--events", args, &mut i) {
+            events_path = Some(PathBuf::from(val));
+        } else if let Some(val) = try_flag_value(&args[i], "--global-events", args, &mut i) {
+            global_events_path = Some(PathBuf::from(val));
+        }
+        i += 1;
+    }
+    let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let (Some(run), Some(transcript)) = (run, transcript) else {
+        println!("distress: none");
+        return 0;
+    };
+    if !transcript.exists() {
+        println!("distress: none");
+        return 0;
+    }
+    let text = newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript, &cwd);
+    let Some(distress) = text.as_deref().and_then(extract_help_distress) else {
+        println!("distress: none");
+        return 0;
+    };
+    let project_events = events_path.unwrap_or_else(|| crate::paths::events_path(&cwd));
+    let global_events =
+        global_events_path.unwrap_or_else(crate::loopcheck::default_global_events_path);
+    // Already parsed above (line ~351): call the emitter directly instead of
+    // scan_and_emit, which would parse the same text for a <help> tag again.
+    let reason = distress.reason.clone();
+    let wrote = emit_help_distress_blocked(
+        &project_events,
+        &global_events,
+        &cwd,
+        &run,
+        node.as_deref(),
+        harness.as_deref(),
+        &distress,
+    );
+    if wrote {
+        println!("distress: emitted {reason}");
+    } else {
+        println!("distress: none");
+    }
+    0
+}
+
+/// `FNO_LOOPCHECK_FNO_BIN` is process-global; `cargo test` runs unit tests
+/// on multiple threads by default, so two tests mutating it concurrently
+/// (here and in loopcheck.rs) can hand each other's stub answer to the
+/// wrong call. Every test that sets this var holds this lock across the
+/// set/run/restore section.
+#[cfg(test)]
+pub(crate) fn fno_bin_env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     /// Mirrors the loopcheck test helper: a shell script on disk, executable.
     fn write_exec(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -323,7 +473,14 @@ mod tests {
             reason: "missing dependency".to_string(),
             evidence: Some("plan 4.2".to_string()),
         };
-        append_blocked_event(&project, &global, "run-a", Some("x-77a0"), &d);
+        append_blocked_event(
+            &project,
+            &global,
+            "run-a",
+            Some("x-77a0"),
+            Some("codex"),
+            &d,
+        );
         let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
             .unwrap()
             .lines()
@@ -336,6 +493,7 @@ mod tests {
         assert_eq!(row["source"], "target");
         assert_eq!(row["run"], "run-a");
         assert_eq!(row["node"], "x-77a0");
+        assert_eq!(row["harness"], "codex");
         assert_eq!(row["data"]["reason"], "missing dependency");
         assert_eq!(row["data"]["evidence"], "plan 4.2");
         assert_eq!(
@@ -349,6 +507,7 @@ mod tests {
             &global,
             "run-a",
             Some("x-77a0"),
+            Some("codex"),
             &d
         ));
         assert_eq!(
@@ -356,15 +515,24 @@ mod tests {
             1,
             "identical distress must not append a second row"
         );
-        // A different reason is a new distress: it appends.
+        // A different reason with no known harness is a new distress: it
+        // appends, and carries no harness key at all (not a null one).
         let d2 = HelpDistress {
             reason: "second wall".to_string(),
             evidence: None,
         };
-        assert!(append_blocked_event(&project, &global, "run-a", None, &d2));
-        assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
-            2
+        assert!(append_blocked_event(
+            &project, &global, "run-a", None, None, &d2
+        ));
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[1].get("harness").is_none(),
+            "no harness known must omit the key, not write null"
         );
     }
 
@@ -378,7 +546,9 @@ mod tests {
             reason: long.clone(),
             evidence: None,
         };
-        assert!(append_blocked_event(&project, &global, "run-a", None, &d));
+        assert!(append_blocked_event(
+            &project, &global, "run-a", None, None, &d
+        ));
         let row: serde_json::Value = serde_json::from_str(
             std::fs::read_to_string(&project)
                 .unwrap()
@@ -392,7 +562,9 @@ mod tests {
         // Dedup joins on the CAPPED value (codex round on PR 1282): the
         // stored row carries the capped reason, so comparing the raw one
         // missed on every re-fire of the same oversized distress.
-        assert!(!append_blocked_event(&project, &global, "run-a", None, &d));
+        assert!(!append_blocked_event(
+            &project, &global, "run-a", None, None, &d
+        ));
         assert_eq!(
             std::fs::read_to_string(&project).unwrap().lines().count(),
             1
@@ -433,6 +605,7 @@ mod tests {
             &global,
             "cx-run",
             Some("x-6aca"),
+            None,
             &distress.unwrap()
         ));
         let row: serde_json::Value =
@@ -451,5 +624,188 @@ mod tests {
             tmp.path(),
         );
         assert_eq!(text, None);
+    }
+
+    #[test]
+    fn scan_and_emit_writes_nothing_without_a_help_tag() {
+        // AC2-EDGE: a message with no help tag returns false and appends
+        // nothing to either log.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("events.jsonl");
+        let global = tmp.path().join("global.jsonl");
+        let transcript = tmp.path().join("t.jsonl");
+        let wrote = scan_and_emit(
+            &project,
+            &global,
+            tmp.path(),
+            "run-a",
+            None,
+            None,
+            &transcript,
+            Some("all clear, nothing stuck here"),
+        );
+        assert!(!wrote);
+        assert!(!project.exists());
+        assert!(!global.exists());
+    }
+
+    #[test]
+    fn scan_and_emit_takes_the_transcript_fallback_and_stamps_harness() {
+        // AC1-HP / AC3-HP, exercised through the same entry point both stop
+        // paths call: no `last_assistant_message` (the agy/opencode/codex
+        // shape), so the transcript reader supplies the tag, and the caller's
+        // harness lands on the envelope.
+        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let var = "FNO_LOOPCHECK_FNO_BIN";
+        let prior = std::env::var(var).ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = tmp.path().join("rollout-2026-09-06T00-00-00-cx-1.jsonl");
+        std::fs::write(&transcript, "rollout bytes the stub vouches for\n").unwrap();
+        let stub = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\n[ \"$1\" = agents ] && [ \"$2\" = newest-assistant-text ] && [ \"$3\" = --transcript ] && [ -f \"$4\" ] || exit 42\nprintf '%s' '<help reason=\"worktree-init-blocked\" evidence=\"Operation not permitted\">'\n",
+        );
+        std::env::set_var(var, stub.to_str().unwrap());
+
+        let project = tmp.path().join("events.jsonl");
+        let global = tmp.path().join("global.jsonl");
+        let wrote = scan_and_emit(
+            &project,
+            &global,
+            tmp.path(),
+            "cx-run",
+            Some("x-6aca"),
+            Some("codex"),
+            &transcript,
+            None,
+        );
+
+        match prior {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
+
+        assert!(wrote);
+        let row: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+        assert_eq!(row["data"]["reason"], "worktree-init-blocked");
+        assert_eq!(row["data"]["evidence"], "Operation not permitted");
+        assert_eq!(row["node"], "x-6aca");
+        assert_eq!(row["harness"], "codex");
+    }
+
+    /// The `agents newest-assistant-text --transcript <path>` contract this
+    /// crate cannot itself parse (that reader lives in Python, `peek.py`):
+    /// read the record's `payload.content[0].text`, the same field the real
+    /// reader returns for a codex rollout line.
+    fn write_transcript_reader_stub(dir: &Path) -> PathBuf {
+        write_exec(
+            dir,
+            "fno",
+            r#"#!/bin/sh
+[ "$1" = agents ] && [ "$2" = newest-assistant-text ] && [ "$3" = --transcript ] || exit 42
+python3 -c '
+import json, sys
+with open(sys.argv[1]) as fh:
+    rec = json.loads(fh.readline())
+print(rec["payload"]["content"][0]["text"], end="")
+' "$4"
+"#,
+        )
+    }
+
+    #[test]
+    fn run_distress_scan_reads_the_checked_in_codex_fixture() {
+        // AC10-HP / AC11-EDGE, run through the actual verb entry point
+        // (run_distress_scan), against the real rollout line checked in at
+        // tests/fixtures/rollout-codex-help.jsonl. AC11-EDGE's positive
+        // control lives in THIS run: the tag-free variant is asserted
+        // against the row the tagged fixture already proved it can write,
+        // never as an absence on its own.
+        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let var = "FNO_LOOPCHECK_FNO_BIN";
+        let prior = std::env::var(var).ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_transcript_reader_stub(tmp.path());
+        std::env::set_var(var, stub.to_str().unwrap());
+
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rollout-codex-help.jsonl");
+        let project = tmp.path().join("events.jsonl");
+        let global = tmp.path().join("global.jsonl");
+        let args: Vec<String> = [
+            "distress-scan",
+            "--transcript",
+            fixture.to_str().unwrap(),
+            "--run",
+            "fixture-run",
+            "--harness",
+            "codex",
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "--events",
+            project.to_str().unwrap(),
+            "--global-events",
+            global.to_str().unwrap(),
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let code = run_distress_scan(&args);
+
+        // AC11-EDGE control: the same wiring against a tag-free copy of the
+        // same line must add no second row.
+        let text = std::fs::read_to_string(&fixture).unwrap();
+        let mut rec: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        rec["payload"]["content"][0]["text"] = serde_json::json!("all clear, nothing stuck here");
+        let no_help_fixture = tmp.path().join("no-help.jsonl");
+        std::fs::write(&no_help_fixture, serde_json::to_string(&rec).unwrap()).unwrap();
+        let args2: Vec<String> = [
+            "distress-scan",
+            "--transcript",
+            no_help_fixture.to_str().unwrap(),
+            "--run",
+            "fixture-run-2",
+            "--harness",
+            "codex",
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "--events",
+            project.to_str().unwrap(),
+            "--global-events",
+            global.to_str().unwrap(),
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let code2 = run_distress_scan(&args2);
+
+        match prior {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
+
+        assert_eq!(code, 0);
+        assert_eq!(code2, 0);
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the tag-free rerun must add no second row: {rows:?}"
+        );
+        assert_eq!(rows[0]["harness"], "codex");
+        assert!(
+            rows[0]["data"]["evidence"]
+                .as_str()
+                .unwrap()
+                .contains("Operation not permitted"),
+            "got: {:?}",
+            rows[0]["data"]["evidence"]
+        );
     }
 }

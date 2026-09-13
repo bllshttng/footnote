@@ -326,27 +326,60 @@ def test_single_fenced_seed_still_the_message():
     assert out == ["spawn", "--name", "w", "--", "--flag-shaped seed"]
 
 
-@pytest.mark.parametrize(
-    "substrate_args",
-    [
-        ["--substrate", "bg"],
-        ["--substrate", "headless"],
-        ["--headless"],
-        ["-p"],
-    ],
-)
-def test_off_pane_substrate_refuses_multi_token_passthrough(substrate_args):
-    # AC7: bg/headless argv builders carry none of the pane's guards, so fenced
-    # passthrough is refused at the seam - the one front door both runtimes
-    # share - rather than silently becoming seed text on the Rust lane.
+def test_off_pane_substrate_with_uncarried_tokens_demotes_to_pane():
+    # A thread lane carries only the spellings its contract row maps, so an
+    # unmapped fenced token demotes the spawn to the pane at the seam - the
+    # one front door both runtimes share - instead of refusing on the
+    # substrate or silently dropping the token on the Rust lane.
     err = io.StringIO()
-    with pytest.raises(SystemExit) as exc:
-        _norm(
-            ["spawn", "--name", "w", *substrate_args, "hi", "--", "--verbose", "x"],
-            stderr=err,
-        )
-    assert exc.value.code == 2
-    assert "pane-only" in err.getvalue()
+    out = _norm(
+        [
+            "spawn", "--name", "w", "-H", "codex",
+            "--substrate", "bg", "hi", "--", "--verbose", "x",
+        ],
+        stderr=err,
+    )
+    assert out[out.index("--substrate") + 1] == "pane"
+    assert "no carrier for --verbose" in err.getvalue()
+
+
+def test_thread_substrate_with_carried_tokens_stays():
+    # codex thread maps -c/--config/--add-dir: the spawn keeps its lane.
+    err = io.StringIO()
+    out = _norm(
+        [
+            "spawn", "--name", "w", "-H", "codex",
+            "--substrate", "thread", "hi", "--", "-c", "key=1",
+        ],
+        stderr=err,
+    )
+    assert out[out.index("--substrate") + 1] == "thread"
+    assert "no carrier" not in err.getvalue()
+
+
+def test_claude_bg_carries_fenced_tokens():
+    # claude's bg lane takes the whole harness argv, so its row carries ["*"]:
+    # fenced tokens pass through untouched, on any substrate.
+    err = io.StringIO()
+    out = _norm(
+        ["spawn", "--name", "w", "--substrate", "bg", "hi", "--", "--verbose", "x"],
+        stderr=err,
+    )
+    assert out[out.index("--substrate") + 1] == "bg"
+    assert "--verbose" in out
+    assert "no carrier" not in err.getvalue()
+
+
+@pytest.mark.parametrize("substrate_args", [["--headless"], ["-p"]])
+def test_headless_keeps_fenced_tokens(substrate_args):
+    # The one-shot lanes carry fenced tokens (appended before the prompt).
+    err = io.StringIO()
+    out = _norm(
+        ["spawn", "--name", "w", *substrate_args, "hi", "--", "--verbose", "x"],
+        stderr=err,
+    )
+    assert "--verbose" in out
+    assert "no carrier" not in err.getvalue()
 
 
 def test_off_pane_single_fenced_seed_untouched():
@@ -357,18 +390,17 @@ def test_off_pane_single_fenced_seed_untouched():
     assert out == ["spawn", "--name", "w", "--substrate", "bg", "--", "--flag seed"]
 
 
-def test_single_fenced_token_beside_a_message_is_passthrough_on_bg():
-    # With a MESSAGE before the fence, even one fenced token can only be
-    # passthrough - on bg/headless that is the unguarded Rust lane, refused by
-    # name instead of silently folded into the seed text there.
+def test_single_fenced_token_beside_a_message_is_carried_on_claude_bg():
+    # With a MESSAGE before the fence, even one fenced token is passthrough -
+    # and claude's bg lane carries the whole harness argv, so it passes
+    # through instead of being refused or folded into the seed text.
     err = io.StringIO()
-    with pytest.raises(SystemExit) as exc:
-        _norm(
-            ["spawn", "--name", "w", "--substrate", "bg", "hi", "--", "--verbose"],
-            stderr=err,
-        )
-    assert exc.value.code == 2
-    assert "pane-only" in err.getvalue()
+    out = _norm(
+        ["spawn", "--name", "w", "--substrate", "bg", "hi", "--", "--verbose"],
+        stderr=err,
+    )
+    assert "--verbose" in out
+    assert "no carrier" not in err.getvalue()
 
 
 def test_fenced_provider_resume_is_not_fnos_resume():

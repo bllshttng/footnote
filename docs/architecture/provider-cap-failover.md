@@ -46,6 +46,13 @@ A mail-based fleet warning is therefore not a cap mitigation, and that is a reco
 | Stop out of band | a signal | `dispatch._stop_by_pid` via `stop_agent`'s escalation |
 | Re-dispatch across the harness axis | a fresh process | `config.agents.fallback`, `recovery._default_failover` |
 | Turn silence into a finding | a read and an event write | `agents/sweep.py`, `fno agents sweep` |
+| Cool the account at the refusal, before the next spawn | a file write | `recovery.recovery_sweep` via `quota_lock.record_quota_lock`, read by `spawn_gate.run_gate` |
+
+## Who writes the quota lock
+
+`update_provider_health` is the only function that writes one, and `quota_lock.record_quota_lock` is the only place that decides one is owed. A caller supplies its own account attribution, and the writer refuses to guess. None and "default" write nothing rather than falling back to the active account. One dead worker's refusal therefore cannot cool an account it never used.
+
+The ceiling is known and kept. `PROVIDER_HEALTH_TTL_SECONDS` is 1h. If the named reset is 5h out, `_drop_stale` still drops the whole record one hour after `last_error_at`. A 5-hour window therefore admits about one probe worker per hour instead of one per dispatch. The gate refusal naming the reset is what makes that survivable. Do not raise the TTL to fix it.
 
 ## Two rules that look like details and are not
 

@@ -28,18 +28,6 @@ impl Core {
             let node_id = agents_view::resolve_node_id(name, &self.backlog_pr)?;
             self.backlog_pr.get(&node_id).copied()
         };
-        // A paneless row whose name resolves to a node inside an active
-        // mission is grouped under that mission's synthetic squad, taking
-        // precedence over the owns_path fallback below. A pane-hosted row
-        // keeps its real session squad (it lives in an actual tab tree).
-        let mission_squad_for = |name: &str| -> Option<u64> {
-            let node_id = agents_view::resolve_node_id(name, &self.missions.node_to_epic)?;
-            self.missions
-                .node_to_epic
-                .get(&node_id)
-                .map(|epic| crate::mission_squad::mission_sid(epic))
-        };
-
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
         //    pane order). Iterating the tree (not `self.agents`) is what makes a
         //    bare shell pane a first-class row.
@@ -93,7 +81,7 @@ impl Core {
                                 exited,
                                 dnd: a.dnd,
                                 unmeasured,
-                                liveness_age_s: a.liveness_age_s,
+                                liveness_measured_at: a.liveness_measured_at,
                                 harness_title: a.harness_title.clone(),
                                 answerable: if exited { None } else { a.answerable.clone() },
                                 // A pane-hosted row focuses its pane; the attach
@@ -165,7 +153,7 @@ impl Core {
                                     || e.is_some_and(|entry| entry.refused_worker.is_some()),
                                 dnd: false,
                                 unmeasured: false,
-                                liveness_age_s: None,
+                                liveness_measured_at: None,
                                 harness_title: None,
                                 answerable: None,
                                 attach_id: None,
@@ -260,7 +248,7 @@ impl Core {
                         },
                         dnd: a.dnd,
                         unmeasured: false,
-                        liveness_age_s: None,
+                        liveness_measured_at: None,
                         harness_title: a.harness_title.clone(),
                         answerable: None,
                         attach_id: None,
@@ -294,9 +282,11 @@ impl Core {
                     // Truly paneless (bg/headless/daemon/roster). Its attach map
                     // pointed at no live pane (else a pane row claimed it), so it
                     // stays watch-only attachable - the AC1-FR revert.
+                    // Never a mission squad: that id names a render-time header
+                    // the client draws from names alone, so a row grouped under
+                    // one is drawn by no section at all and disappears.
                     let squad = self
                         .member_squad_for_agent(a)
-                        .or_else(|| mission_squad_for(&a.name))
                         .or_else(|| self.session.find_by_cwd(&a.cwd));
                     // (x-6851 US3) Every row carries its cwd basename: an orphan
                     // uses it for the `~ elsewhere` disambiguation suffix
@@ -318,7 +308,7 @@ impl Core {
                         exited: a.exited,
                         dnd: a.dnd,
                         unmeasured: a.liveness == agents_view::Liveness::Unmeasured,
-                        liveness_age_s: a.liveness_age_s,
+                        liveness_measured_at: a.liveness_measured_at,
                         harness_title: a.harness_title.clone(),
                         answerable: if a.exited { None } else { a.answerable.clone() },
                         attach_id: if a.exited { None } else { a.attach_id.clone() },
@@ -439,7 +429,7 @@ impl Core {
                 S::Stopping => (false, Some("stopping…".to_string())),
                 S::Removing => (false, Some("removing…".to_string())),
             };
-            let squad = mission_squad_for(&r.name).or_else(|| self.session.find_by_cwd(&r.cwd));
+            let squad = self.session.find_by_cwd(&r.cwd);
             // (x-6851 US3) Every row carries its cwd basename - including a
             // squad-matched external-lifecycle row, so its foreign-cwd subline
             // still renders (the "every row" wire contract; codex review).
@@ -461,7 +451,7 @@ impl Core {
                 exited,
                 dnd: false,
                 unmeasured: false,
-                liveness_age_s: None,
+                liveness_measured_at: None,
                 harness_title: None,
                 answerable: None,
                 // Carried on an exited row so the client can send RemoveExternal;

@@ -853,7 +853,7 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
                         "mux",
                         "pane",
                         "kill",
-                        "--session",
+                        "--server",
                         str(mux["session"]),
                         str(mux["pane_id"]),
                     ],

@@ -26,12 +26,13 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from fno.agents.harness_map import _BRIEF_MAX_BYTES
 from fno.provenance.resolver import ResolvedTranscript, resolve_transcript
 
-# The env budget a brief must fit (mirrors harness_map._BRIEF_MAX_BYTES). Auto
-# rungs clamp to it on a UTF-8 byte boundary; the explicit rung is left to the
-# downstream fail-closed gate so operator input is never silently truncated.
-_BRIEF_MAX_BYTES = 8192
+# The env budget is harness_map._BRIEF_MAX_BYTES, imported (one constant, three
+# readers: spawn gate, write-time warn, auto-rung clamp). Auto rungs clamp to it
+# on a UTF-8 byte boundary; the explicit rung is left to the downstream
+# fail-closed gate so operator input is never silently truncated.
 # Details get first claim on the budget; the transcript tail fills what remains.
 _DETAILS_MAX_BYTES = 6144
 # Rough envelope-header reservation when estimating tail headroom; the final

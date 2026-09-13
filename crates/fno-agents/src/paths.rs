@@ -197,6 +197,14 @@ impl AgentsHome {
         self.root.join("injection-gate.json")
     }
 
+    /// Machine-wide fleet incident breaker (`fleet-stop.json`, x-77db), next
+    /// to `registry.json`. Written by `fleet-incident stop|clear`, read by
+    /// every admission gate before its bypass branches; see
+    /// [`crate::fleet_incident`].
+    pub fn fleet_stop_json(&self) -> PathBuf {
+        self.root.join("fleet-stop.json")
+    }
+
     /// Durable roster-progress sidecar (x-cdc7 SECOND HALF): per-row git
     /// evidence (last commit sha/age, branch-ahead, PR number) keyed by row
     /// name, refreshed by the reconcile sweep alongside `registry.json`. A
@@ -450,6 +458,14 @@ pub fn worktree_repo_root(cwd: &Path) -> PathBuf {
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
+/// `$HOME`, or `/` when the environment lost it. Shared by the install and
+/// reclaim verbs, which both place state under the user's home.
+pub(crate) fn dirs_home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
 // ---------------------------------------------------------------------------
 // Project spaces: the per-repository state root OUTSIDE any checkout
 // ---------------------------------------------------------------------------
@@ -544,6 +560,41 @@ pub fn space_slug(canonical_root: &Path) -> String {
 pub fn space_dir(cwd: &Path) -> PathBuf {
     let root = canonical_repo_root(cwd).unwrap_or_else(|| worktree_repo_root(cwd));
     spaces_root_dir().join(space_slug(&root))
+}
+
+/// [`space_dir`] for best-effort callers, resolved from a ONE-READ snapshot
+/// of the pins: `None` when no state root is declared. A hermetic test
+/// process must not resolve an ambient `$HOME` (the guard refuses exactly
+/// that), and the snapshot keeps a parallel test's pin cleanup from flipping
+/// the resolution mid-read. The stop/rm claims release skips on `None`
+/// instead of failing the stop.
+pub fn space_dir_opt(cwd: &Path) -> Option<PathBuf> {
+    let spaces = std::env::var_os("FNO_SPACES_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let agents_home = std::env::var_os(HOME_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let root = match (spaces, agents_home) {
+        (Some(dir), _) => dir,
+        (None, Some(home)) => home
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| home.clone())
+            .join("spaces"),
+        // No pin at all: under test that is an undeclared process (skip);
+        // in production the durable default is the real answer.
+        (None, None) => {
+            if cfg!(test) && !test_root_declared() {
+                return None;
+            }
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".fno").join("spaces"))?
+        }
+    };
+    let repo_root = canonical_repo_root(cwd).unwrap_or_else(|| worktree_repo_root(cwd));
+    Some(root.join(space_slug(&repo_root)))
 }
 
 /// The per-worktree slice: `<space>/worktrees/<name>/` from a linked

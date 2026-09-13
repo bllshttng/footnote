@@ -96,9 +96,20 @@ def enumerated_scope(title: str, details: str) -> bool:
     would require parsing meaning, which is the trap this module exists to avoid.
     The structural ``denominator_absent`` predicate below is what protects that
     node, not this ratchet.
+
+    The weak detectors (cardinal-governs-plural, both-and) read the TITLE only:
+    in a details body they fire on measured incident narrative ("collided as
+    two PRs", "both rewrite X and Y"), which no human reads as a scope
+    enumeration, and each false positive withdraws the cheap exit from a
+    singular fix. Ordinals keep the full text - "(1) ... (2)" and a numbered
+    list stay unambiguous wherever they appear.
     """
     text = f"{title}\n{details or ''}"
-    return _ordinal_run(text) or _cardinal_governs_plural(text) or bool(_BOTH_AND.search(text))
+    return (
+        _ordinal_run(text)
+        or _cardinal_governs_plural(title)
+        or bool(_BOTH_AND.search(title))
+    )
 
 
 # ── denominator_absent: the structural gate predicate ─────────────────────────

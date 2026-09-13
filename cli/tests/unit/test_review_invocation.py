@@ -320,3 +320,44 @@ def test_parse_emits_a_react_to_em_dash_without_flag_name() -> None:
     parsed = parse_review_invocation("/fno:review high — quick pass")
     assert parsed is not None
     assert parsed["flags"] == []
+
+
+# --- the review's named target: what a hold keys on when the args name one ---
+
+
+def test_parse_names_a_pr_number_target() -> None:
+    from fno.review.invocation import parse_review_invocation
+
+    parsed = parse_review_invocation("/fno:review high --comment 1713")
+    assert parsed is not None
+    assert parsed["target"] == "1713"
+    assert parsed["pr_number"] == 1713
+    assert parsed["level"] == "high"
+    assert parsed["flags"] == ["--comment"]
+
+
+def test_parse_reads_a_pr_number_out_of_a_github_url() -> None:
+    from fno.review.invocation import parse_review_invocation
+
+    parsed = parse_review_invocation("/fno:review high --comment https://github.com/o/r/pull/7")
+    assert parsed is not None
+    assert parsed["target"] == "https://github.com/o/r/pull/7"
+    assert parsed["pr_number"] == 7
+
+
+def test_parse_names_a_branch_target_without_a_pr_number() -> None:
+    from fno.review.invocation import parse_review_invocation
+
+    parsed = parse_review_invocation("/fno:review medium feature/x-a089")
+    assert parsed is not None
+    assert parsed["target"] == "feature/x-a089"
+    assert parsed["pr_number"] is None
+
+
+def test_parse_records_no_target_when_the_args_carry_none() -> None:
+    from fno.review.invocation import parse_review_invocation
+
+    parsed = parse_review_invocation("/fno:review high --comment")
+    assert parsed is not None
+    assert parsed["target"] is None
+    assert parsed["pr_number"] is None

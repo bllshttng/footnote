@@ -458,7 +458,8 @@ def _patch_events_log(monkeypatch, tmp_path: Path) -> Path:
     return log
 
 
-def _stub_gh_merged(monkeypatch, module, branch: str = "feature/x-07dc"):
+def _stub_gh_merged(monkeypatch, module, branch: str = "feature/x-07dc",
+                    url: str = ""):
     class _R:
         ok = True
         stderr = ""
@@ -466,8 +467,10 @@ def _stub_gh_merged(monkeypatch, module, branch: str = "feature/x-07dc"):
 
     def _gh(args, cwd):
         r = _R()
-        if "--json" in args and "state,headRefName" in args:
-            r.stdout = json.dumps({"state": "MERGED", "headRefName": branch})
+        fields = next((a for a in args if a.startswith("state,headRefName")), "")
+        if "--json" in args and fields:
+            r.stdout = json.dumps(
+                {"state": "MERGED", "headRefName": branch, "url": url})
         return r
 
     monkeypatch.setattr(module, "_gh", _gh)
@@ -590,3 +593,143 @@ def test_ritual_mint_shares_request_id_with_merge_mint(tmp_path, monkeypatch):
     ids = [row["data"]["request_id"] for row in _requested_rows(log)]
     assert "cleanup-requested" in order
     assert ids == [twin, twin]
+
+
+def test_remove_rows_after_archive_empty_list_is_not_success(monkeypatch, tmp_path):
+    # An empty candidate list is not a successful removal. The leg used to
+    # initialise removed=True and loop over nothing, so the archive leg
+    # emitted the daemon's completion under the pending request id and
+    # tombstoned an order that removed nothing.
+    import fno.pr._ritual as R
+
+    monkeypatch.setattr(
+        R, "rows_for_cleanup", lambda worktree, node_ids, runner=None: []
+    )
+    ritual = R.Ritual.__new__(R.Ritual)
+    ritual.cwd = tmp_path
+    ritual.ctx = R._Ctx(
+        pr=9, autonomous=False, canon=tmp_path, settings=None, pm=None,
+        project="proj", lane_project="", parking_lot=None, holder="",
+        node_ids=["x-07dc"],
+    )
+    assert (
+        ritual._remove_rows_after_archive(str(tmp_path / "gone-wt"), "req-1", 0)
+        is False
+    )
+
+
+def test_remove_rows_after_archive_names_each_removal(monkeypatch, tmp_path):
+    # The non-empty arm: every candidate is rm'd under the request id, and a
+    # failed rm reads as not-removed (no completion tombstone).
+    import fno.pr._ritual as R
+    from types import SimpleNamespace
+
+    calls: list[list[str]] = []
+
+    def fake_runner(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(ok=True)
+
+    monkeypatch.setattr(
+        R, "rows_for_cleanup", lambda worktree, node_ids, runner=None: ["t-07dc-a1"]
+    )
+    ritual = R.Ritual.__new__(R.Ritual)
+    ritual.cwd = tmp_path
+    ritual.runner = fake_runner
+    ritual.ctx = R._Ctx(
+        pr=9, autonomous=False, canon=tmp_path, settings=None, pm=None,
+        project="proj", lane_project="", parking_lot=None, holder="",
+        node_ids=["x-07dc"],
+    )
+    assert (
+        ritual._remove_rows_after_archive(str(tmp_path / "gone-wt"), "req-1", 123)
+        is True
+    )
+    assert len(calls) == 1
+    assert "agents" in calls[0] and "t-07dc-a1" in calls[0]
+    assert "req-1" in calls[0]
+
+
+def _patch_sidecar(monkeypatch, rows):
+    from fno.tracker import sidecar as sidecar_store
+    from fno.tracker.sidecar import Sidecar
+
+    monkeypatch.setattr(
+        sidecar_store,
+        "load_all",
+        lambda: {
+            e["id"]: Sidecar(id=e["id"], pr_number=e.get("pr_number"),
+                             pr_url=e.get("pr_url"))
+            for e in rows
+        },
+    )
+
+
+def test_merge_mint_recovers_node_ids_from_sidecar(tmp_path, monkeypatch):
+    # AC1-HP: a merge whose reconcile bound nothing recovers the PR's node
+    # ids from the sidecar store (repo-scoped off the PR url), so the request
+    # names what it can reap instead of holding on no-node-ids for a day.
+    import fno.agents.events as E
+    import fno.pr._merge as M
+    import fno.worktree_reapable as WR
+
+    log = _patch_events_log(monkeypatch, tmp_path)
+    _stub_gh_merged(monkeypatch, M, url="https://github.com/owner/repo/pull/7")
+    _stub_git_root(monkeypatch, M, tmp_path)
+    M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
+    _write_manifest(tmp_path)
+    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
+    _patch_sidecar(monkeypatch, [
+        {"id": "fno-abc1", "pr_number": 7,
+         "pr_url": "https://github.com/owner/repo/pull/7"}])
+
+    M._run_post_merge_followups(7, "squash", str(tmp_path), bound_node_ids=[])
+
+    rows = _requested_rows(log)
+    assert len(rows) == 1
+    assert rows[0]["data"]["node_ids"] == ["fno-abc1"]
+
+
+def test_both_mints_carry_one_request_id(tmp_path, monkeypatch):
+    # AC1-FOLD: the merge mint (worktree /wt, node_ids []) and the ritual
+    # mint (worktree null, node_ids [x-1]) key on project, PR and branch,
+    # so one merge produces ONE request id either way.
+    import fno.agents.events as E
+
+    log = _patch_events_log(monkeypatch, tmp_path)
+    _patch_sidecar(monkeypatch, [])
+    E.emit_merge_cleanup_requested(
+        repo=str(tmp_path), project="proj", pr=7, branch="feature/x",
+        worktree="/wt", node_ids=[], session_id=None, harness=None,
+        candidate_row_names=[], repo_slug="owner/repo",
+    )
+    E.emit_merge_cleanup_requested(
+        repo=str(tmp_path), project="proj", pr=7, branch="feature/x",
+        worktree=None, node_ids=["x-1"], session_id=None, harness=None,
+        candidate_row_names=[],
+    )
+    ids = [row["data"]["request_id"] for row in _requested_rows(log)]
+    assert ids[0] == ids[1]
+
+
+def test_merge_mint_excludes_foreign_repo_sidecar_nodes(tmp_path, monkeypatch):
+    # AC1-EDGE: a sidecar node whose pr_url names another repo sharing the
+    # PR number stays out of the recovered ids (repo-scoped, never guessed).
+    import fno.pr._merge as M
+    import fno.worktree_reapable as WR
+
+    log = _patch_events_log(monkeypatch, tmp_path)
+    _stub_gh_merged(monkeypatch, M, url="https://github.com/owner/repo/pull/7")
+    _stub_git_root(monkeypatch, M, tmp_path)
+    M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
+    _write_manifest(tmp_path)
+    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
+    _patch_sidecar(monkeypatch, [
+        {"id": "fno-forei", "pr_number": 7,
+         "pr_url": "https://github.com/other/repo/pull/7"}])
+
+    M._run_post_merge_followups(7, "squash", str(tmp_path), bound_node_ids=[])
+
+    rows = _requested_rows(log)
+    assert len(rows) == 1
+    assert rows[0]["data"]["node_ids"] == []

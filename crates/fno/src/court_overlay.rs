@@ -2,10 +2,11 @@
 //! whether another lane fits.
 //!
 //! The operator asked for this and said the part that matters: "I just don't
-//! know what our cap even is." The cap is `max_load_per_cpu x ncpu`, and
-//! `fno doctor lanes` already knows it. This module is the SURFACE for a
-//! shipped advisor, never a second capacity model: it folds one payload and
-//! renders it, and no arithmetic here decides anything.
+//! know what our cap even is." The cap is the fleet's share of CPU capacity
+//! (`agents.max_fleet_cpu_share`, x-7783), and `fno doctor lanes` already
+//! knows it. This module is the SURFACE for a shipped advisor, never a second
+//! capacity model: it folds one payload and renders it, and no arithmetic
+//! here decides anything.
 //!
 //! The module owns the whole panel - the bounded fold, the cached state, and
 //! the render - so the client keeps only the wiring: one field, one channel,
@@ -337,23 +338,34 @@ impl Panel {
             return vec![first, String::new(), String::new()];
         };
         let load_line = match (
-            court.arm_num("spawn load", "load_1m"),
-            court.arm_num("spawn load", "ceiling"),
+            court.arm_num("cpu admission", "share_low"),
+            court.arm_num("cpu admission", "capacity_cores"),
+            court.arm_num("cpu admission", "ceiling"),
         ) {
-            (Some(load), Some(ceiling)) => {
-                let mut l = format!("  load      {load:.1} of {ceiling:.1} max");
-                if load > ceiling {
-                    // x-5283: the over verdict names the axis it read, so a
-                    // high load average is never mistaken for the cpu line's
-                    // sustained reading.
-                    l.push_str(&format!(" · {:.1}x over on load_1m", load / ceiling));
+            (Some(low), Some(cores), Some(ceiling)) => {
+                // x-7783: the fleet's attributed share is what decides, so
+                // that is what renders - never a load average.
+                let mut l = format!(
+                    "  fleet     {:.0}% of {cores:.0} cores against {:.0}%",
+                    low * 100.0,
+                    ceiling * 100.0
+                );
+                if let Some(high) = court.arm_num("cpu admission", "share_high") {
+                    if high > low {
+                        l.push_str(&format!(" up to {:.0}%", high * 100.0));
+                    }
+                }
+                if low > ceiling {
+                    // The over verdict names the axis it read, so a busy box
+                    // is never mistaken for the fleet being over.
+                    l.push_str(&format!(" · {:.1}x over on fleet_cpu_share", low / ceiling));
                 }
                 l
             }
             _ => format!(
-                "  load      unknown - {}",
+                "  fleet     unknown - {}",
                 court
-                    .arm("spawn load")
+                    .arm("cpu admission")
                     .map_or("arm absent", |a| a.reason.as_str())
             ),
         };
@@ -397,44 +409,53 @@ impl Panel {
         };
         let mut lines = Vec::new();
 
-        // load against the cap: the operator's own question, first. The
-        // 1m/5m/15m trio is what tells a climb from a spike; the factored
-        // ceiling is what turns 96.0 into 8.0 per cpu x 12 cores; and the
-        // comparand sentence is what turns 184.9 into 1.9x over.
+        // the fleet's CPU admission: the operator's own question, first.
+        // The share is what decides (x-7783); the 1m/5m/15m trio is trend
+        // only, and the 15-minute figure sits beside its backstop.
         match (
-            court.arm_num("spawn load", "load_1m"),
-            court.arm_num("spawn load", "ceiling"),
+            court.arm_num("cpu admission", "share_low"),
+            court.arm_num("cpu admission", "capacity_cores"),
+            court.arm_num("cpu admission", "ceiling"),
         ) {
-            (Some(load), Some(ceiling)) => {
-                let mut first = format!("  {label:<8} {load:.1} now", label = "load avg");
-                if let (Some(l5), Some(l15)) = (
-                    court.arm_num("spawn load", "load_5m"),
-                    court.arm_num("spawn load", "load_15m"),
-                ) {
-                    first.push_str(&format!(" · {l5:.1} 5m · {l15:.1} 15m"));
+            (Some(low), Some(cores), Some(ceiling)) => {
+                let mut first = format!(
+                    "  {label:<8} {:.0}% of {cores:.0} cores against {:.0}%",
+                    low * 100.0,
+                    ceiling * 100.0,
+                    label = "fleet"
+                );
+                if let Some(high) = court.arm_num("cpu admission", "share_high") {
+                    if high > low {
+                        first.push_str(&format!(" up to {:.0}% (gap)", high * 100.0));
+                    }
                 }
                 lines.push(first);
-                let mut second = format!("            ceiling {ceiling:.1}");
-                if let (Some(per_cpu), Some(ncpu)) = (
-                    court.arm_num("spawn load", "max_load_per_cpu"),
-                    court.arm_num("spawn load", "load_cpu_count"),
+                let mut second = String::from("            ");
+                if let (Some(l1), Some(l5), Some(l15)) = (
+                    court.arm_num("cpu admission", "load_1m"),
+                    court.arm_num("cpu admission", "load_5m"),
+                    court.arm_num("cpu admission", "load_15m"),
                 ) {
-                    second.push_str(&format!(" = {per_cpu:.1} per cpu x {ncpu:.0} cores"));
+                    second.push_str(&format!("· {l1:.1} 1m · {l5:.1} 5m · {l15:.1} 15m "));
                 }
-                if load > ceiling {
-                    second.push_str(&format!(" · {:.1}x over on load_1m", load / ceiling));
+                if let Some(backstop) = court.arm_num("cpu admission", "backstop") {
+                    second.push_str(&format!("· backstop {backstop:.1}"));
                 }
-                lines.push(second);
-                lines.push("            load counts QUEUED threads, not busy time".to_string());
+                if !second.trim().is_empty() {
+                    lines.push(second.trim_end().to_string());
+                }
+                if low > ceiling {
+                    lines.push(format!(
+                        "            · {:.1}x over on fleet_cpu_share",
+                        low / ceiling
+                    ));
+                }
             }
             _ => {
                 let reason = court
-                    .arm("spawn load")
+                    .arm("cpu admission")
                     .map_or("arm absent", |a| a.reason.as_str());
-                lines.push(format!(
-                    "  {label:<8} unknown - {reason}",
-                    label = "load avg"
-                ));
+                lines.push(format!("  {label:<8} unknown - {reason}", label = "fleet"));
             }
         }
 
@@ -670,10 +691,12 @@ mod tests {
                     "worktree": ".fno/worktrees/x-b1ee", "worktree_procs": 18}
                  ]},
       "arms": [
-        {"name": "spawn load", "state": "measured",
-         "value": {"load_1m": 107.3, "load_5m": 99.5, "load_15m": 88.2,
-                   "ceiling": 96.0, "max_load_per_cpu": 8.0, "load_cpu_count": 12,
-                   "status": "exceeded"}, "reason": ""},
+        {"name": "cpu admission", "state": "measured",
+         "value": {"fleet_cores": 7.0, "capacity_cores": 12.0,
+                   "share_low": 0.5833, "share_high": 0.5833, "bound": "exact",
+                   "ceiling": 0.5, "verdict": "hold",
+                   "load_15m": 88.2, "backstop": 480.0,
+                   "load_1m": 107.3, "load_5m": 99.5}, "reason": ""},
         {"name": "whole-machine cpu", "state": "measured",
          "value": {"busy_fraction": 0.797, "capacity_cores": 12}, "reason": ""},
         {"name": "memory", "state": "measured",
@@ -712,12 +735,15 @@ mod tests {
         assert_eq!(court.census.workers, Some(45));
         assert_eq!(court.census.tests, Some(2));
         assert_eq!(court.census.read_ms, Some(597));
-        assert_eq!(court.arm_num("spawn load", "load_1m"), Some(107.3));
-        assert_eq!(court.arm_num("spawn load", "load_5m"), Some(99.5));
-        assert_eq!(court.arm_num("spawn load", "load_15m"), Some(88.2));
-        assert_eq!(court.arm_num("spawn load", "max_load_per_cpu"), Some(8.0));
-        assert_eq!(court.arm_num("spawn load", "load_cpu_count"), Some(12.0));
-        assert_eq!(court.arm_str("spawn load", "status"), Some("exceeded"));
+        assert_eq!(court.arm_num("cpu admission", "fleet_cores"), Some(7.0));
+        assert_eq!(court.arm_num("cpu admission", "share_low"), Some(0.5833));
+        assert_eq!(court.arm_num("cpu admission", "ceiling"), Some(0.5));
+        assert_eq!(court.arm_num("cpu admission", "load_1m"), Some(107.3));
+        assert_eq!(court.arm_num("cpu admission", "load_5m"), Some(99.5));
+        assert_eq!(court.arm_num("cpu admission", "load_15m"), Some(88.2));
+        assert_eq!(court.arm_num("cpu admission", "backstop"), Some(480.0));
+        assert_eq!(court.arm_str("cpu admission", "verdict"), Some("hold"));
+        assert_eq!(court.arm_str("cpu admission", "bound"), Some("exact"));
         assert_eq!(
             court.arm_num("whole-machine cpu", "capacity_cores"),
             Some(12.0)
@@ -809,19 +835,18 @@ mod tests {
     fn ac4_hp_every_load_number_names_its_unit_and_comparand() {
         let text = opened(live()).expanded_lines(&AC6_AGES).join("\n");
 
+        // x-7783: the share renders as the deciding number, the trend trio is
+        // display-only, and the over-line names the fleet_cpu_share axis.
         assert!(
-            text.contains("load avg 107.3 now · 99.5 5m · 88.2 15m"),
+            text.contains("fleet    58% of 12 cores against 50%"),
             "{text}"
         );
         assert!(
-            text.contains("ceiling 96.0 = 8.0 per cpu x 12 cores"),
+            text.contains("· 107.3 1m · 99.5 5m · 88.2 15m · backstop 480.0"),
             "{text}"
         );
-        assert!(text.contains("1.1x over on load_1m"), "{text}");
-        assert!(
-            text.contains("load counts QUEUED threads, not busy time"),
-            "{text}"
-        );
+        assert!(text.contains("1.2x over on fleet_cpu_share"), "{text}");
+        assert!(!text.contains("load avg"), "{text}");
         assert!(text.contains("80% busy of 12 cores"), "{text}");
         assert!(text.contains("64.9 GB available"), "{text}");
         assert!(text.contains("0 more fit"), "{text}");
@@ -833,8 +858,11 @@ mod tests {
         let lines = opened(live()).minimized_lines(&AC6_AGES);
 
         assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(lines[0].contains("107.3 of 96.0 max"), "{lines:?}");
-        assert!(lines[0].contains("1.1x"), "{lines:?}");
+        assert!(
+            lines[0].contains("58% of 12 cores against 50%"),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("1.2x"), "{lines:?}");
         assert!(lines[1].contains("80% busy of 12 cores"), "{lines:?}");
         assert!(
             lines[2].contains("2 working · 2 idle · 1 stale · 1 dead · 1 unknown age"),
@@ -862,18 +890,18 @@ mod tests {
     fn ac5_edge_a_dark_load_arm_names_its_reason_rather_than_printing_a_number() {
         let court = parse(
             br#"{"lane_count": null, "refused_reason": "arms dark",
-                 "census": {}, "arms": [{"name": "spawn load", "state": "dark",
-                 "value": null, "reason": "load average unreadable"}]}"#,
+                 "census": {}, "arms": [{"name": "cpu admission", "state": "dark",
+                 "value": null, "reason": "the footprint reading is dark"}]}"#,
         )
         .expect("parses");
 
         let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
 
         assert!(
-            text.contains("load avg unknown - load average unreadable"),
+            text.contains("fleet    unknown - the footprint reading is dark"),
             "{text}"
         );
-        assert!(!text.contains("load avg 107.3"), "{text}");
+        assert!(!text.contains("fleet 58%"), "{text}");
     }
 
     #[test]
@@ -930,7 +958,10 @@ mod tests {
             text.contains("unavailable - the fleet footprint reading is dark"),
             "{text}"
         );
-        assert!(text.contains("load avg 107.3 now"), "{text}");
+        assert!(
+            text.contains("fleet    58% of 12 cores against 50%"),
+            "{text}"
+        );
         assert!(text.contains("80% busy of 12 cores"), "{text}");
         assert!(text.contains("2 working"), "{text}");
     }

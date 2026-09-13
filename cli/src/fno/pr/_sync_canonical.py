@@ -53,6 +53,10 @@ _SYNC_COMMAND_TIMEOUT_S = 600.0
 # gh page size. The window filter is what actually bounds the sweep; this only
 # caps the wire payload for a very busy week.
 _CATCHUP_GH_LIMIT = 50
+# How many dirty paths one report names before it collapses into "+N more".
+# The recovery line still carries every blocking path; only the display list
+# is capped, so a 40-path pileup stays paste-ready.
+_DIRTY_SHOW_CAP = 5
 
 _REMOTE_SLUG_RE = re.compile(
     r"(?:github\.com[:/])([^/]+)/(.+?)(?:\.git)?/?$"
@@ -77,6 +81,36 @@ def _origin_slug(canonical: Path, runner: Callable[..., Result]) -> Optional[str
 
 def _synced_marker(canonical: Path, sha: str) -> Path:
     return canonical / ".fno" / "post-merge-synced" / sha
+
+
+def _porcelain_path(raw: str) -> str:
+    """The path a ``git status --porcelain`` line carries (rename new side)."""
+    path = raw[3:]
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path
+
+
+def _dirty_paths(canonical: Path, runner: Callable[..., Result]) -> list[str]:
+    """Uncommitted paths in the canonical working tree, or [] when unanswerable.
+
+    Fail-open: a probe that cannot answer (git missing, non-zero, timeout) must
+    not refuse every future sync, so it reads as "no dirt found" and the old raw
+    sync_command failure is what a worker sees. A C-quoted special-char path
+    cannot string-match the merge's file list, so it reads as non-blocking and
+    the raw failure surfaces as before - the fail-safe direction.
+    """
+    try:
+        res = runner(
+            ["git", "status", "--porcelain"],
+            cwd=str(canonical),
+            timeout=_CATCHUP_PROBE_TIMEOUT_S,
+        )
+    except Exception:  # noqa: BLE001 - ToolMissing/OSError/timeout all read "unknown"
+        return []
+    if not res.ok:
+        return []
+    return [_porcelain_path(raw) for raw in res.stdout.splitlines() if len(raw) >= 4]
 
 
 def run_sync_canonical(
@@ -204,6 +238,36 @@ def run_sync_canonical(
                 f"({len(files)} files, none matched {globs}); marked {sha[:12]}"
             )
             return 0
+
+        # 6.5 Dirty-canonical gate: git refuses to merge over locally modified
+        #    or untracked paths the merge touches, so the pull inside
+        #    sync_command would die raw (ff-only / "would be overwritten") with
+        #    no owner named - the wedge this gate exists to pre-empt. Name the
+        #    checkout, the blocking paths, and the attributed-stash recovery
+        #    line; report, never an auto-stash (stashing someone's WIP silently
+        #    is the exact move the specimens were recovered from by hand).
+        #    Fail-open: a probe that cannot answer must not refuse every sync.
+        dirty = _dirty_paths(canonical, runner)
+        blocking = sorted(set(files) & set(dirty))
+        if blocking:
+            shown = ", ".join(blocking[:_DIRTY_SHOW_CAP])
+            if len(blocking) > _DIRTY_SHOW_CAP:
+                shown += f" (+{len(blocking) - _DIRTY_SHOW_CAP} more)"
+            date = datetime.now(timezone.utc).date().isoformat()
+            paths = " ".join(f"'{p}'" for p in blocking)
+            recovery = (
+                f"git -C {canonical} stash push -u -m \"fno post-merge sync {date} "
+                f"PR #{pr_number} {sha[:12]}\" -- {paths}"
+            )
+            typer.echo(
+                "post-merge sync: canonical checkout is dirty - the pull would refuse:\n"
+                f"  checkout: {canonical}\n"
+                f"  blocking (uncommitted + touched by this merge): {shown}\n"
+                f"  recovery: {recovery}\n"
+                "  marker withheld, will retry once the blocking paths are committed or stashed",
+                err=True,
+            )
+            return 1
 
         # 7. Run sync_command in the canonical via a login shell so uv/cargo/npm
         #    on the shell-rc PATH resolve (a bare `bash -c` would miss them).
@@ -441,6 +505,18 @@ def sync_staleness(
     if behind:
         stale = True
         detail = (detail + "; " if detail else "") + f"local default branch {behind} behind origin"
+
+    # Naming the dirt is doctor's job even when the sync currency reads fresh:
+    # the specimens sat for weeks before an overlapping merge tripped the gate.
+    # The note rides in detail and never sets stale by itself - uncommitted WIP
+    # that blocks no merge is not an outage, and a daemon alarm nobody can
+    # clear from the CLI is how an alarm gets ignored.
+    dirty = _dirty_paths(canonical, runner)
+    if dirty:
+        shown = ", ".join(dirty[:_DIRTY_SHOW_CAP])
+        if len(dirty) > _DIRTY_SHOW_CAP:
+            shown += f" (+{len(dirty) - _DIRTY_SHOW_CAP} more)"
+        detail = (detail + "; " if detail else "") + f"canonical dirty: {shown}"
 
     return SyncStaleness(
         "stale" if stale else "fresh", markerless, behind, detail

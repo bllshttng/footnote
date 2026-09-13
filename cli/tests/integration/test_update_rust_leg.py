@@ -208,11 +208,14 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
 
     # Installer handoff happened after the rust leg, and the chained
     # installed-rev write (post-execvp, gated on installer exit 0) recorded
-    # the source HEAD. --refresh must ride along: without it a uv wheel-cache
-    # hit reinstalls the same stale bytes and the update never converges.
+    # the source HEAD. --refresh-package fno must ride along: without it a
+    # uv wheel-cache hit reinstalls the same stale bytes and the update never
+    # converges. Narrow form, not --reinstall: the wide form strips every
+    # package out of the shared tool venv under running processes.
     uv_text = uv_log.read_text(encoding="utf-8")
-    assert "tool install --reinstall" in uv_text
-    assert "--refresh" in uv_text
+    assert "tool install --reinstall-package fno" in uv_text
+    assert "--refresh-package fno" in uv_text
+    assert "--reinstall " not in uv_text
     assert str(cli_src.resolve()) in uv_text
     installed_rev = home / ".fno" / "installed-rev"
     assert installed_rev.read_text(encoding="utf-8").strip() == head_rev

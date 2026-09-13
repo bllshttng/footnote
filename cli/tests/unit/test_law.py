@@ -20,6 +20,26 @@ LAW_RECORDED_EXIT = 0
 LAW_REFUSED_EXIT = 3
 
 
+@pytest.fixture(autouse=True)
+def quiet_sweep(request, monkeypatch):
+    """law set's rule-time sweep is best-effort stderr side work over the
+    machine-wide question store; the suite keeps it silent except in the
+    tests that pin its contract (x-cf6a)."""
+    from fno import law as law_mod
+
+    request.node._real_sweep = law_mod._sweep_open_questions
+    monkeypatch.setattr(law_mod, "_sweep_open_questions", lambda *a, **k: None)
+
+
+@pytest.fixture
+def real_sweep(request, monkeypatch):
+    """Re-arm the real sweep for the contract tests."""
+    from fno import law as law_mod
+
+    monkeypatch.setattr(law_mod, "_sweep_open_questions", request.node._real_sweep)
+
+
+
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
@@ -585,3 +605,316 @@ def test_a_lookalike_subject_is_ordinary_law(
     assert len(rows) == 1
     assert rows[0]["data"]["subject"] == "review-coverage-waiver-policy"
     assert rows[0]["data"]["authority_source"] == "chat_attested"
+
+
+# ── the evidence gate: a code fact carries the read that produced it ──────────
+
+
+def _with_advance(tmp_path: Path) -> None:
+    """`advance.py` in the pinned root, so the specimen citation resolves and
+    the refusal exercises the missing-read branch, not the untracked one."""
+    (tmp_path / "advance.py").write_text(
+        "\n".join(f"line {i}" for i in range(1, 201)) + "\n", encoding="utf-8"
+    )
+
+
+def _scripted_gate(monkeypatch: pytest.MonkeyPatch, answer):
+    """Swap the evidence-gate transport for `answer(payload)`; the payloads
+    the lanes send stay assertable on the returned call list."""
+    calls: list[dict] = []
+
+    def _gate(payload):
+        calls.append(payload)
+        return answer(payload)
+
+    monkeypatch.setattr("fno.decide._evidence_gate", _gate)
+    return calls
+
+
+def _run_reads_answer(payload):
+    """A responder that actually runs the requested reads in the payload's
+    root, so the row stored on the ruling carries real command output."""
+    import subprocess
+
+    rows = []
+    for cmd in payload["reads"] or []:
+        done = subprocess.run(
+            cmd, shell=True, cwd=payload["root"], capture_output=True, text=True
+        )
+        rows.append(
+            {
+                "cmd": cmd,
+                "exit": done.returncode,
+                "out_head": "\n".join(done.stdout.splitlines()[:5]),
+                "ts": "2026-09-10T00:00:00Z",
+                "head_sha": "",
+            }
+        )
+    return {"ok": True, "rows": rows}
+
+
+def test_code_fact_with_no_read_is_refused_with_exit_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC11-ERR: specimen 2, replayed. A ruling naming advance.py:167 as a
+    fact records nothing until the command that measured it rides along."""
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+    _with_advance(tmp_path)
+    calls = _scripted_gate(
+        monkeypatch,
+        lambda payload: {
+            "ok": False,
+            "kind": "unmeasured",
+            "message": (
+                "the ruling asserts a code fact ('advance.py:167') and carries "
+                "no read. Attach --read with the command that produced it."
+            ),
+        },
+    )
+
+    result = _run(
+        [
+            "set",
+            "territory-resolver",
+            "advance.py:167 is the territory resolver",
+            "--rationale",
+            "port it to Rust",
+        ]
+    )
+
+    assert result.exit_code == LAW_REFUSED_EXIT, result.output
+    assert "Nothing was recorded." in result.output
+    assert "advance.py:167" in result.output
+    assert index.read_text() == ""
+    assert calls[0]["reads"] is None
+    assert "advance.py:167" in calls[0]["text"]
+
+
+def test_code_fact_with_a_read_records_the_executed_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC12-HP: the same body with --read records, and the stored row carries
+    the command, its exit code and the head of its output."""
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+    _with_advance(tmp_path)
+    calls = _scripted_gate(monkeypatch, _run_reads_answer)
+
+    result = _run(
+        [
+            "set",
+            "territory-resolver",
+            "advance.py is 200 lines",
+            "--rationale",
+            "measured before ruling",
+            "--read",
+            "head -5 advance.py",
+        ]
+    )
+
+    assert result.exit_code == LAW_RECORDED_EXIT, result.output
+    assert calls[0]["reads"] == ["head -5 advance.py"]
+    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    reads = rows[0]["data"]["reads"]
+    assert reads[0]["cmd"] == "head -5 advance.py"
+    assert reads[0]["exit"] == 0
+    assert "line 1" in reads[0]["out_head"]
+
+
+def test_contradicted_citation_is_refused_even_with_a_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC13-ERR: a citation the repo contradicts is refused whatever is
+    attached to it."""
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+    _with_advance(tmp_path)
+    calls = _scripted_gate(
+        monkeypatch,
+        lambda payload: {
+            "ok": False,
+            "kind": "citation",
+            "message": "advance.py:99999: the file has 200 lines.",
+        },
+    )
+
+    result = _run(
+        [
+            "set",
+            "territory-resolver",
+            "advance.py:99999 is the territory resolver",
+            "--rationale",
+            "port it to Rust",
+            "--read",
+            "head -5 advance.py",
+        ]
+    )
+
+    assert result.exit_code == LAW_REFUSED_EXIT, result.output
+    assert "99999" in result.output
+    assert index.read_text() == ""
+    assert calls[0]["reads"] == ["head -5 advance.py"]
+
+
+def test_attended_operator_records_an_unmeasured_body_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC14-EDGE: the exemption keys on the RESOLVED authority, so a person
+    at a terminal is never blocked mid-waiver by a regex."""
+    from types import SimpleNamespace
+
+    from fno import decide
+    from fno.agents import self_stamp
+
+    index = _isolate(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        self_stamp,
+        "resolve_self_identity",
+        lambda *a, **k: SimpleNamespace(session_id=None, harness=None),
+    )
+    monkeypatch.setattr(decide, "_attended_terminal", lambda: True)
+    _with_advance(tmp_path)
+
+    result = _run(
+        [
+            "set",
+            "territory-resolver",
+            "advance.py:167 is the territory resolver",
+            "--rationale",
+            "the operator measured it by hand",
+        ]
+    )
+
+    assert result.exit_code == LAW_RECORDED_EXIT, result.output
+    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    assert rows[0]["data"]["authority_source"] == "operator"
+    assert "reads" not in rows[0]["data"]
+
+
+def test_body_with_no_code_fact_records_with_no_reads_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC15-EDGE: no claim, no change from today's behavior."""
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+    calls = _scripted_gate(monkeypatch, lambda payload: {"ok": True, "rows": None})
+
+    result = _run(
+        [
+            "set",
+            "x-12ba",
+            "Merges belong to the operator",
+            "--rationale",
+            "The operator owns durable policy.",
+        ]
+    )
+
+    assert result.exit_code == LAW_RECORDED_EXIT, result.output
+    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    assert "reads" not in rows[0]["data"]
+    assert calls[0]["text"] == (
+        "Merges belong to the operator\nThe operator owns durable policy."
+    )
+
+
+# ── the rule-time sweep: a new law names the open questions it may answer ─────
+
+
+class TestLawSetSweep:
+    """`law set` names open questions the new law may answer (x-cf6a). The
+    sweep is best-effort stderr side work: stdout stays exactly the `d-` id
+    and the exit stays 0, pass or fail - exit 1 is reserved for a failed
+    index write."""
+
+    def test_sweep_lines_hit_stderr_and_stdout_stays_the_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_sweep
+    ) -> None:
+        index = _isolate(tmp_path, monkeypatch)
+        _as_chat_session(monkeypatch)
+        questions = tmp_path / "questions.jsonl"
+        questions.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-09-12T17:16:00Z",
+                    "type": "operator_question",
+                    "data": {
+                        "question_id": "q-470f40d2",
+                        "question": "raise the allowance for pr-1847?",
+                        "subject": "pr-1847-budget-exception",
+                        "asker": "2cf809f6",
+                        "session_id": "sess-9f2c",
+                    },
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setattr("fno.paths.questions_jsonl", lambda: questions)
+
+        def fake_verb(verb, payload, *a, **k):
+            assert verb == "law-match"
+            assert payload["mode"] == "law"
+            assert payload["law"]["subject"] == "file-budget"
+            assert payload["questions"][0]["id"] == "q-470f40d2"
+            return {
+                "ok": True,
+                "candidates": [{"question_id": "q-470f40d2"}],
+                "total": 1,
+                "lines": [
+                    'law: d-1a2b3c4d may answer open q-470f40d2 (asker 2cf809f6): '
+                    '"raise the allowance for pr-1847?"'
+                ],
+            }
+
+        monkeypatch.setattr("fno.rust_binary.verb_call", fake_verb)
+
+        result = _run(
+            [
+                "set",
+                "file-budget",
+                "The allowance is never raised.",
+                "--rationale",
+                "The operator owns the budget.",
+            ]
+        )
+
+        assert result.exit_code == 0, result.output
+        decision_id = result.stdout.strip()
+        assert decision_id.startswith("d-")
+        assert "may answer open q-470f40d2" in result.stderr
+        rows = [
+            json.loads(line) for line in index.read_text().splitlines() if line.strip()
+        ]
+        assert rows[0]["data"]["decision_id"] == decision_id
+
+    def test_a_failed_sweep_keeps_exit_0_and_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_sweep
+    ) -> None:
+        index = _isolate(tmp_path, monkeypatch)
+        _as_chat_session(monkeypatch)
+        questions = tmp_path / "questions.jsonl"
+        questions.write_text("")
+        monkeypatch.setattr("fno.paths.questions_jsonl", lambda: questions)
+
+        def broken(*a, **k):
+            raise RuntimeError("matcher exploded")
+
+        monkeypatch.setattr("fno.rust_binary.verb_call", broken)
+
+        result = _run(
+            [
+                "set",
+                "file-budget",
+                "The allowance is never raised.",
+                "--rationale",
+                "The operator owns the budget.",
+            ]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert result.stdout.strip().startswith("d-")
+        assert "open-question sweep failed" in result.stderr
+        rows = [
+            json.loads(line) for line in index.read_text().splitlines() if line.strip()
+        ]
+        assert len(rows) == 1, "the law itself is recorded"

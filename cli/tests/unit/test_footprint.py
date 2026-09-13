@@ -361,3 +361,137 @@ def test_ac_edge_no_pool_rows_yields_zero_and_unchanged_fleet_numbers() -> None:
     assert reading.spare_pool_cpu_cores == 0.0
     assert reading.spare_pool_rss_gb == 0.0
     assert reading.fleet_cpu_cores == 0.2
+
+
+_GOOD_ROW = "100 1 01:00:00 20.0 1024 fno-agents-worker --run"
+
+
+def _parse_with_bad_row(bad_row: str):
+    return parse_footprint(
+        f"PID PPID ELAPSED %CPU RSS COMMAND\n{_GOOD_ROW}\n{bad_row}\n",
+    )
+
+
+def test_ac0_shapes_the_four_measured_failing_shapes_are_unparsed_beside_a_good_row() -> None:
+    # The four shapes proven to fail against the real parser (x-46cb): no
+    # command field, etime of dashes or question marks, a CPU or RSS field of
+    # dash, and a first token that is not an integer.
+    bad_rows = [
+        "200 1 01:00:00 20.0 1024",
+        "201 1 ??:??:?? 20.0 1024 fno-agents-worker --run",
+        "202 1 01:00:00 - 1024 fno-agents-worker --run",
+        "not-a-pid 1 01:00:00 20.0 1024 fno-agents-worker --run",
+        "203 1 01:00:00 20.0 - fno-agents-worker --run",
+        "204 1 --:-- 20.0 1024 fno-agents-worker --run",
+    ]
+    for bad_row in bad_rows:
+        reading = _parse_with_bad_row(bad_row)
+        assert reading.unparsed_lines == 1, bad_row
+        # The good row still parses: its pid holds a process in the reading.
+        assert reading.process_count == 1, bad_row
+        assert reading.fleet_cpu_cores == 0.2, bad_row
+
+
+def test_ac0_shapes_the_same_four_shapes_under_the_state_header() -> None:
+    # The shape production ps now writes (x-d6ad added STATE): the classifier
+    # must probe at the shifted indices, not read the state letter as etime.
+    header = "PID PPID STATE ELAPSED %CPU RSS COMMAND"
+    good = "100 1 S 01:00:00 20.0 1024 fno-agents-worker --run"
+    bad_rows = [
+        ("200 1 S 01:00:00 20.0 1024", "field-count"),
+        ("201 1 S ??:??:?? 20.0 1024 cmd", "etime"),
+        ("202 1 S 01:00:00 - 1024 cmd", "cpu"),
+        ("203 1 S 01:00:00 20.0 - cmd", "rss"),
+        ("not-a-pid 1 S 01:00:00 20.0 1024 cmd", "pid"),
+        ("204 1 R --:-- 20.0 1024 cmd", "etime"),
+    ]
+    for bad_row, reason in bad_rows:
+        reading = parse_footprint(f"{header}\n{good}\n{bad_row}\n")
+        assert reading.unparsed_lines == 1, bad_row
+        assert reading.process_count == 1, bad_row
+        assert reading.fleet_cpu_cores == 0.2, bad_row
+        assert reading.unparsed_samples[0].reason == reason, bad_row
+    # A good STATE row is a good row: the state letter never fails a cast.
+    ok = parse_footprint(f"{header}\n{good}\n")
+    assert ok.unparsed_lines == 0
+    assert ok.process_count == 1
+
+
+def test_samples_carry_the_fixed_reason_vocabulary() -> None:
+    cases = {
+        "200 1 01:00:00 20.0 1024": "field-count",
+        "not-a-pid 1 01:00:00 20.0 1024 cmd": "pid",
+        "201 1 ??:??:?? 20.0 1024 cmd": "etime",
+        "202 1 01:00:00 - 1024 cmd": "cpu",
+        "203 1 01:00:00 20.0 - cmd": "rss",
+    }
+    for bad_row, reason in cases.items():
+        reading = _parse_with_bad_row(bad_row)
+        assert reading.unparsed_samples[0].reason == reason, bad_row
+    reading = _parse_with_bad_row("200 1 01:00:00 20.0 1024")
+    assert reading.unparsed_samples[0].row == 2
+
+
+def test_mask_row_prints_numeric_tokens_and_masks_argv() -> None:
+    from fno.footprint import _mask_row
+
+    masked = _mask_row("12345 1 00:01 - 4096 /usr/bin/true")
+    assert masked == "12345 1 00:01 <tok:1> 4096 <tok:13>"
+
+
+def test_mask_row_never_prints_a_command_field_token() -> None:
+    from fno.footprint import _mask_row
+
+    masked = _mask_row(
+        "12345 1 00:01 - 4096 /usr/bin/curl -H Authorization:Bearer SUPERSECRET1234"
+    )
+    for secret in ("SUPERSECRET1234", "Authorization", "curl", "Bearer"):
+        assert secret not in masked
+
+
+def test_mask_row_caps_length_and_names_the_tail() -> None:
+    from fno.footprint import _MASKED_ROW_MAX_CHARS, _mask_row
+
+    masked = _mask_row("12345 1 00:01 5.0 4096 " + "arg " * 60)
+    assert len(masked) <= _MASKED_ROW_MAX_CHARS
+    assert "<+" in masked and "tokens>" in masked
+    assert masked.startswith("12345 1 00:01 5.0 4096")
+
+
+def test_mask_row_strips_control_bytes() -> None:
+    from fno.footprint import _mask_row
+
+    masked = _mask_row("12345 1 00:01\x1b[31m 5.0 4096 secret-value")
+    assert "\x1b" not in masked
+
+
+def test_samples_cap_at_three_while_the_count_names_all() -> None:
+    bad_rows = "\n".join(
+        f"{300 + n} 1 01:00:00 - 1024 fno-agents-worker --run" for n in range(5)
+    )
+    reading = parse_footprint(
+        f"PID PPID ELAPSED %CPU RSS COMMAND\n{_GOOD_ROW}\n{bad_rows}\n",
+    )
+
+    assert reading.unparsed_lines == 5
+    assert len(reading.unparsed_samples) == 3
+    # The uncapped pid salvage feeds the root-relevance arm even when a bad
+    # root row lands beyond the sample cap.
+    assert reading.unparsed_pids == {300, 301, 302, 303, 304}
+    assert [s.row for s in reading.unparsed_samples] == [2, 3, 4]
+
+
+def test_unparsed_pids_salvage_rejects_a_non_integer_first_token() -> None:
+    reading = _parse_with_bad_row("garbage-line-without-a-pid here")
+    assert reading.unparsed_lines == 1
+    assert reading.unparsed_pids == set()
+    assert reading.unparsed_samples[0].pid is None
+
+
+def test_negative_value_rows_report_their_field_reason() -> None:
+    reading = _parse_with_bad_row("200 -1 01:00:00 20.0 1024 fno-agents-worker --run")
+    assert reading.unparsed_samples[0].reason == "pid"
+    reading = _parse_with_bad_row("201 1 01:00:00 -20.0 1024 fno-agents-worker --run")
+    assert reading.unparsed_samples[0].reason == "cpu"
+    reading = _parse_with_bad_row("202 1 01:00:00 20.0 -4 fno-agents-worker --run")
+    assert reading.unparsed_samples[0].reason == "rss"

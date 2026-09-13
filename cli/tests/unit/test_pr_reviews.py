@@ -15,7 +15,7 @@ from pathlib import Path
 from fno.pr import _reviews
 
 
-def _row(*, tiled=None, chain=None, freshness="stale", reviewed_sha="c3"):
+def _row(*, tiled=None, chain=None, freshness="stale", reviewed_sha="c3", rounds_exhausted=None):
     """One review_coverage row: a local_attestation verdict plus tiling data."""
     data = {
         "pr": 42,
@@ -33,6 +33,8 @@ def _row(*, tiled=None, chain=None, freshness="stale", reviewed_sha="c3"):
             }
         ],
     }
+    if rounds_exhausted is not None:
+        data["rounds_exhausted"] = rounds_exhausted
     if tiled is not None or chain is not None:
         data["range_tiling"] = {
             "tiled": bool(tiled),
@@ -64,7 +66,7 @@ class TestTilingChainExemption:
             cwd=None,
         )
         assert shaped["coverage"] == "uncovered"
-        assert shaped["reviewed_count"] == 0
+        assert shaped["reviewed_count"] == 1
 
     def test_not_tiled_chain_does_not_rescue(self):
         shaped = _reviews._shape_review_coverage(
@@ -477,5 +479,44 @@ def test_review_state_matches_the_shared_table():
     )
     assert golden["rows"], "a golden nothing reads is a green control aimed at nothing"
     for row in golden["rows"]:
-        state = _reviews._derive_review_state("covered", row["verdicts"], set(), False)
+        state = _reviews._derive_review_state(
+            "covered",
+            row["verdicts"],
+            set(),
+            False,
+            rounds_exhausted=row.get("rounds_exhausted", False),
+        )
         assert state == row["expected_state"], f"row {row['name']} diverged: {state}"
+
+
+class TestSpentBudgetShaping:
+    def test_spent_row_with_a_stale_verdict_stays_covered_and_reviewed(self):
+        # d-0fa92eb9: at the cap the row IS reviewed. The shaper keeps the
+        # producer's covered word and the producer's count - it changes the
+        # state word only.
+        shaped = _reviews._shape_review_coverage(
+            _row(reviewed_sha="c3", freshness="stale", rounds_exhausted=True),
+            head="head",
+            cwd=None,
+        )
+        assert shaped["coverage"] == "covered"
+        assert shaped["review_state"] == "reviewed"
+        assert shaped["reviewed_count"] == 1
+
+    def test_the_same_row_unspent_still_reads_uncovered(self):
+        shaped = _reviews._shape_review_coverage(
+            _row(reviewed_sha="c3", freshness="stale", rounds_exhausted=False),
+            head="head",
+            cwd=None,
+        )
+        assert shaped["coverage"] == "uncovered"
+        assert shaped["review_state"] == "unreviewed"
+        assert shaped["reviewed_count"] == 1
+
+    def test_spent_row_with_a_malformed_verdict_names_no_state(self):
+        # A malformed list returns None before the spent arm, so a broken
+        # row fails closed even past the budget.
+        row = _row(rounds_exhausted=True)
+        row["verdicts"] = [{"producer": "local_attestation", "verdict": "junk"}]
+        shaped = _reviews._shape_review_coverage(row, head="head", cwd=None)
+        assert "review_state" not in shaped

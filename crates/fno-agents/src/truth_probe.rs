@@ -49,6 +49,14 @@ pub struct TruthProbe {
     /// from a fired falsifier.
     pub basis: Option<String>,
     pub last_activity_age_s: Option<f64>,
+    /// The instrument the activity age came from (`last-entry` | `mtime` |
+    /// `opencode-db`), or the resolver's reason word (`not-found` |
+    /// `no-records` | `resolver-error`) when it could not resolve the handle
+    /// at all. Those three are the difference between "this worker
+    /// has no transcript" and "the resolver crashed", and both rendered as
+    /// the same blank before. `None` on a truth build that predates the
+    /// field: absence renders as absence.
+    pub last_activity_basis: Option<String>,
     /// The absolute ISO8601 stamp of the newest transcript activity, and the
     /// flattened text of the LAST turn (compact `[tool_use: name]` markers
     /// included, capped at 200 chars Python-side). Derived by the same probe as
@@ -57,6 +65,17 @@ pub struct TruthProbe {
     pub last_event_at: Option<String>,
     pub last_message: Option<String>,
     pub observed_model: serde_json::Value,
+    /// The error taxonomy's class for a last assistant turn that is a provider
+    /// refusal (`provider_4xx_quota` and its siblings), classified Python-side
+    /// by the one classifier recovery already trusts. `None` on a healthy row
+    /// AND on a truth build that predates the field, so an older `fno` renders
+    /// exactly as it did before.
+    ///
+    /// Needed because the refusal record is the NEWEST transcript entry: a
+    /// worker killed by a usage-limit 429 dies writing that error, so
+    /// [`Self::last_activity_age_s`] reads freshest at the moment it died and
+    /// the row renders `writing` (measured 2026-09-11: 469 s, status writing).
+    pub provider_refusal: Option<String>,
     /// The title the HARNESS carries for this session (claude's Ctrl+R
     /// agent-name record; codex/opencode's index title), read Python-side by
     /// the same probe so the list emitter never grows a second title reader.
@@ -545,6 +564,28 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
             .and_then(|value| value.get("reachability")?.as_str().map(str::to_owned)),
         basis: parsed.and_then(|value| value.get("basis")?.as_str().map(str::to_owned)),
         last_activity_age_s: parsed.and_then(|value| value.get("last_activity_age_s")?.as_f64()),
+        // The age's instrument, straight off the payload. When the
+        // resolver answered `unknown`, that key is null and `reason` carries
+        // why; fall back to the reason, but ONLY the three unknown-path
+        // words - a `stalled` row's `api-error-tail` reason is about its
+        // tail, not about the age's instrument, and must not stand in for it.
+        last_activity_basis: parsed
+            .and_then(|value| {
+                value
+                    .get("last_activity_basis")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                parsed
+                    .and_then(|value| value.get("reason")?.as_str().map(str::to_owned))
+                    .filter(|reason| {
+                        matches!(
+                            reason.as_str(),
+                            "not-found" | "no-records" | "resolver-error"
+                        )
+                    })
+            }),
         last_event_at: parsed
             .and_then(|value| value.get("last_event_at")?.as_str().map(str::to_owned)),
         last_message: parsed
@@ -555,6 +596,9 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
         observed_model: parsed
             .and_then(|value| value.get("observed_model").cloned())
             .unwrap_or(serde_json::Value::Null),
+        // Absent on an older `fno`: None, so the row renders as it does today.
+        provider_refusal: parsed
+            .and_then(|value| value.get("provider_refusal")?.as_str().map(str::to_owned)),
         harness_title: parsed
             .and_then(|value| value.get("harness_title")?.as_str().map(str::to_owned)),
     }
@@ -631,6 +675,32 @@ fn family1_truth_batch_command(handles: &[String]) -> std::process::Command {
 pub fn family1_truth_probe_many(
     handles: &[String],
 ) -> std::collections::HashMap<String, TruthProbe> {
+    family1_truth_probe_many_checked(handles).unwrap_or_default()
+}
+
+/// Whether the batch instrument completed for the handles it was handed
+/// ([`BatchOutcome::Measured`], including "ran clean and resolved nothing"),
+/// or outlived its bound and answered for the page as a whole
+/// ([`BatchOutcome::NotMeasured`]). A reader may not collapse the two:
+/// `no-evidence` is a verdict the instrument earned, `unmeasured` says the
+/// instrument did not run - the two facts this seam exists to separate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchOutcome {
+    Measured,
+    NotMeasured,
+}
+
+/// The list seam's entry point: whatever the batch measured, PLUS
+/// whether it measured at all. [`family1_truth_probe_many_checked`] drops the
+/// map on a timeout, which is right for a caller that wants a verdict and
+/// wrong for the row projection, which must word a handle the instrument
+/// never reached differently from one it reached and found nothing for. The
+/// map is total for every handle it was handed either way: the
+/// unrepresentable handles ride their own probes even when the batch leg
+/// timed out, and those answers are real measurements.
+pub fn family1_truth_probe_many_measured(
+    handles: &[String],
+) -> (std::collections::HashMap<String, TruthProbe>, BatchOutcome) {
     // `--handles` is comma-separated, so a handle CARRYING a comma cannot be
     // put on the wire: the reader would split it into two handles that match
     // no row, and that row would go unanswered on every list, silently and
@@ -641,20 +711,66 @@ pub fn family1_truth_probe_many(
     // actually lives.
     let (batchable, unrepresentable): (Vec<String>, Vec<String>) =
         handles.iter().cloned().partition(|h| !h.contains(','));
-    let mut probes = family1_truth_probe_batchable(&batchable);
+    let (mut probes, timed_out) = family1_truth_probe_batchable(&batchable);
+    // A comma handle whose single probe did not answer is the same fact the
+    // batchable leg's `timed_out` carries: the instrument never produced a
+    // reading for that handle. Fold it into the page outcome, so the row words
+    // `unmeasured` instead of publishing the `no-evidence` verdict a clean
+    // page earns.
+    let mut fallback_unanswered = false;
     for handle in unrepresentable {
-        if let Some(probe) = family1_truth_probe(&handle) {
-            probes.insert(handle, probe);
+        match family1_truth_probe(&handle) {
+            Some(probe) => {
+                probes.insert(handle, probe);
+            }
+            None => fallback_unanswered = true,
         }
     }
-    probes
+    let outcome = page_outcome(timed_out, fallback_unanswered);
+    (probes, outcome)
 }
 
+/// The page outcome folds BOTH failure legs: the batchable probe's own
+/// timeout, and any comma handle the single-probe fallback could not answer.
+/// Either one means the instrument did not complete for the page, and a
+/// handle without a reading must never inherit the verdict a clean page
+/// earns.
+fn page_outcome(batchable_timed_out: bool, fallback_unanswered: bool) -> BatchOutcome {
+    if batchable_timed_out || fallback_unanswered {
+        BatchOutcome::NotMeasured
+    } else {
+        BatchOutcome::Measured
+    }
+}
+
+/// [`family1_truth_probe_many`] with the batch's failure made honest: a run
+/// that outlived its bound is `Err` naming the timeout, not an empty map a
+/// caller could misread as "every handle answered nothing". Every other
+/// outcome is `Ok` - a batch that answered (even empty), a Cache/Join flight
+/// that decoded shared bytes, and the one-probe-per-handle fallback after a
+/// double crash (that fallback measured each handle itself, so it is a real
+/// answer by construction).
+pub fn family1_truth_probe_many_checked(
+    handles: &[String],
+) -> Result<std::collections::HashMap<String, TruthProbe>, String> {
+    let (probes, outcome) = family1_truth_probe_many_measured(handles);
+    match outcome {
+        BatchOutcome::Measured => Ok(probes),
+        BatchOutcome::NotMeasured => Err(format!(
+            "truth probe: batch of {} handles timed out",
+            handles.len()
+        )),
+    }
+}
+
+/// The batchable leg's answer plus whether its run timed out (`false` when the
+/// batch answered, or when the double-crash fallback probed each handle
+/// itself - that fallback is a real measurement, never a timeout).
 fn family1_truth_probe_batchable(
     handles: &[String],
-) -> std::collections::HashMap<String, TruthProbe> {
+) -> (std::collections::HashMap<String, TruthProbe>, bool) {
     match family1_truth_batch_latched(handles) {
-        Some(probes) => probes,
+        Some((probes, timed_out)) => (probes, timed_out),
         None => {
             eprintln!(
                 "WARN: family-1 truth batch of {} handles failed twice; \
@@ -663,10 +779,11 @@ fn family1_truth_probe_batchable(
                  PATH right now (a `uv tool install --reinstall` window).",
                 handles.len()
             );
-            handles
+            let probes = handles
                 .iter()
                 .filter_map(|handle| Some((handle.clone(), family1_truth_probe(handle)?)))
-                .collect()
+                .collect();
+            (probes, false)
         }
     }
 }
@@ -680,9 +797,9 @@ fn family1_truth_probe_batchable(
 /// answer rather than starting a second batch.
 fn family1_truth_batch_latched(
     handles: &[String],
-) -> Option<std::collections::HashMap<String, TruthProbe>> {
+) -> Option<(std::collections::HashMap<String, TruthProbe>, bool)> {
     if handles.is_empty() {
-        return Some(std::collections::HashMap::new());
+        return Some((std::collections::HashMap::new(), false));
     }
     let timeout = family1_truth_batch_timeout(handles.len());
     let key = single_flight::flight_key(&["agents", "truth", "--handles", &handles.join(",")]);
@@ -698,8 +815,11 @@ fn family1_truth_batch_latched(
         shared
     });
     match flight.kind {
-        FlightKind::Spawn | FlightKind::Timeout => own.flatten().map(|a| a.probes),
-        FlightKind::Cache | FlightKind::Join => flight.stdout.as_deref().map(decode_truth_batch),
+        FlightKind::Spawn | FlightKind::Timeout => own.flatten().map(|a| (a.probes, a.timed_out)),
+        FlightKind::Cache | FlightKind::Join => flight
+            .stdout
+            .as_deref()
+            .map(|s| (decode_truth_batch(s), false)),
     }
 }
 
@@ -722,7 +842,13 @@ fn family1_truth_batch_latched(
 /// probes once did.
 fn family1_truth_batch_timeout(handles: usize) -> Duration {
     const BASE: Duration = Duration::from_secs(5);
-    const PER_HANDLE: Duration = Duration::from_millis(300);
+    // Measured on the 42-row live roster (x-e3cc): the batch cost 15.9 s, about
+    // 370 ms a row once transcript tails dominate, and the previous 300 ms a
+    // row put the bound at 17.9 s, which ordinary contention tipped. A tipped
+    // batch falls back to per-row probes that time out too, and the whole page
+    // renders unanswered rows as `unknown`. 750 ms a row keeps this fleet under
+    // the ceiling with headroom.
+    const PER_HANDLE: Duration = Duration::from_millis(750);
     const CEILING: Duration = Duration::from_secs(60);
     std::cmp::min(BASE + PER_HANDLE * handles as u32, CEILING)
 }
@@ -743,6 +869,7 @@ fn family1_truth_batch_answer(
             probes: std::collections::HashMap::new(),
             stdout: Vec::new(),
             crashed: false,
+            timed_out: false,
         });
     }
     // Warnings name the batch, not a row: no single handle owns the failure.
@@ -766,6 +893,9 @@ struct TruthBatchAttempt {
     /// The child's stdout, kept so a joiner is handed the SAME bytes.
     stdout: Vec<u8>,
     crashed: bool,
+    /// The run outlived its bound and was killed: an empty `probes` here is
+    /// "we never measured", not "they all answered nothing".
+    timed_out: bool,
 }
 
 /// Decode a `--handles` body into per-handle probes.
@@ -801,6 +931,7 @@ fn family1_truth_batch_attempt(
                 probes: empty(),
                 stdout: Vec::new(),
                 crashed: true,
+                timed_out: false,
             }
         }
         // A timeout is an ANSWER, not a crash, so it buys no retry - the same
@@ -823,6 +954,7 @@ fn family1_truth_batch_attempt(
                 probes: empty(),
                 stdout: Vec::new(),
                 crashed: false,
+                timed_out: true,
             }
         }
         BoundedRun::Output(output) => output,
@@ -836,6 +968,7 @@ fn family1_truth_batch_attempt(
             probes: decode_truth_batch(&output.stdout),
             stdout: output.stdout.clone(),
             crashed: false,
+            timed_out: false,
         },
         // No keyed object and a non-zero exit: the process died before writing
         // one, or this `fno` predates `--handles` and refused the usage. Both
@@ -855,6 +988,7 @@ fn family1_truth_batch_attempt(
                 probes: empty(),
                 stdout: Vec::new(),
                 crashed: true,
+                timed_out: false,
             }
         }
         // Exited clean and wrote something that is not a keyed object. A real
@@ -865,6 +999,7 @@ fn family1_truth_batch_attempt(
                 probes: empty(),
                 stdout: Vec::new(),
                 crashed: false,
+                timed_out: false,
             }
         }
     }
@@ -873,6 +1008,108 @@ fn family1_truth_batch_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC1/AC4 on the wire: the field arrives when Python sends it, and an older
+    /// `fno` that sends no such key parses `None` rather than a fabricated
+    /// value, so its rows render exactly as they did before.
+    #[test]
+    fn the_provider_refusal_parses_from_the_wire_and_absence_stays_none() {
+        let refused = serde_json::json!({
+            "state": "working",
+            "reachability": "reachable",
+            "last_activity_age_s": 469.0,
+            "provider_refusal": "provider_4xx_quota",
+        });
+        assert_eq!(
+            parse_truth_payload(&refused)
+                .unwrap()
+                .provider_refusal
+                .as_deref(),
+            Some("provider_4xx_quota")
+        );
+        let older = serde_json::json!({"state": "working", "reachability": "reachable"});
+        assert!(parse_truth_payload(&older)
+            .unwrap()
+            .provider_refusal
+            .is_none());
+        // A non-string value is not a class name: absence, never a coerced one.
+        let junk = serde_json::json!({"state": "working", "provider_refusal": 7});
+        assert!(parse_truth_payload(&junk)
+            .unwrap()
+            .provider_refusal
+            .is_none());
+    }
+
+    /// The age's instrument parses off the same wire, and on the
+    /// unknown paths the resolver's reason word stands in for it - but ONLY
+    /// the three unknown-path words. A `stalled` row's `api-error-tail`
+    /// reason describes its tail, not the age's instrument, and must never
+    /// masquerade as one. An older `fno` sending neither key parses None, so
+    /// absence renders as absence.
+    #[test]
+    fn the_activity_basis_parses_with_the_unknown_reason_as_fallback() {
+        let answered = serde_json::json!({
+            "state": "working",
+            "last_activity_age_s": 12.0,
+            "last_activity_basis": "last-entry",
+        });
+        assert_eq!(
+            parse_truth_payload(&answered)
+                .unwrap()
+                .last_activity_basis
+                .as_deref(),
+            Some("last-entry")
+        );
+        let unresolvable = serde_json::json!({
+            "state": "unknown",
+            "reason": "resolver-error",
+        });
+        assert_eq!(
+            parse_truth_payload(&unresolvable)
+                .unwrap()
+                .last_activity_basis
+                .as_deref(),
+            Some("resolver-error"),
+            "a crashed resolver must not render as a blank row"
+        );
+        let stalled_with_tail_reason = serde_json::json!({
+            "state": "stalled",
+            "reason": "api-error-tail",
+            "last_activity_basis": "mtime",
+        });
+        assert_eq!(
+            parse_truth_payload(&stalled_with_tail_reason)
+                .unwrap()
+                .last_activity_basis
+                .as_deref(),
+            Some("mtime"),
+            "a tail reason never stands in for the instrument word"
+        );
+        let older = serde_json::json!({"state": "working"});
+        assert!(parse_truth_payload(&older)
+            .unwrap()
+            .last_activity_basis
+            .is_none());
+    }
+
+    /// The page outcome folds both failure legs: a batchable timeout and a
+    /// comma handle the single-probe fallback could not answer each word the
+    /// page unmeasured; only a fully answered page stays Measured.
+    #[test]
+    fn page_outcome_folds_the_fallback_leg_into_the_batch_leg() {
+        use BatchOutcome::{Measured, NotMeasured};
+        assert_eq!(page_outcome(false, false), Measured);
+        assert_eq!(
+            page_outcome(true, false),
+            NotMeasured,
+            "a batchable timeout is unmeasured whatever the fallback did"
+        );
+        assert_eq!(
+            page_outcome(false, true),
+            NotMeasured,
+            "a comma handle the fallback never answered must not inherit the clean-page verdict"
+        );
+    }
 
     /// A shell command, built fresh per attempt so the retry path can spawn it
     /// twice. `-c` body only; the probe supplies nothing else.
@@ -1460,8 +1697,8 @@ mod tests {
             "12 handles took 1.6s measured"
         );
         assert!(
-            forty >= Duration::from_secs(15),
-            "31 handles took 3.9s measured"
+            forty >= Duration::from_secs(30),
+            "42 handles took 15.9s measured (x-e3cc)"
         );
 
         // Capped, so one pathological transcript cannot wedge a sweep for
@@ -1514,6 +1751,44 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn family1_truth_batch_timeout_reads_as_timed_out_not_empty() {
+        // A run that outlives its bound sets `timed_out`, so the checked
+        // caller can return Err instead of printing an empty map as a verdict.
+        // This is the x-db9c defect: the batch timed out, the map was empty,
+        // and every live holder rendered stalled.
+        let attempt = family1_truth_batch_answer(
+            &["h1".to_string()],
+            |_| sh("sleep 5"),
+            Duration::from_millis(100),
+        )
+        .expect("the timeout arm returns an attempt, not a crash");
+        assert!(attempt.timed_out, "a fired bound sets the timed_out flag");
+        assert!(
+            !attempt.crashed,
+            "a timeout is not a crash: it buys no retry"
+        );
+        assert!(attempt.probes.is_empty(), "no per-handle answer exists");
+    }
+
+    #[test]
+    fn family1_truth_batch_keyed_object_reads_as_answered_not_timed_out() {
+        // A batch that wrote a keyed object for every handle is a real
+        // answer: timed_out stays false and every handle gets a probe.
+        let attempt = family1_truth_batch_answer(
+            &["h1".to_string(), "h2".to_string()],
+            |_| {
+                sh(
+                    r#"printf '{"h1":{"state":"working","last_activity_age_s":30},"h2":{"state":"watching","last_activity_age_s":80}}'"#,
+                )
+            },
+            Duration::from_secs(5),
+        )
+        .expect("a keyed object is an attempt");
+        assert!(!attempt.timed_out, "an answered batch is not a timeout");
+        assert_eq!(attempt.probes.len(), 2, "one probe per handle");
     }
 
     #[test]

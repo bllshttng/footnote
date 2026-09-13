@@ -27,9 +27,7 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     # Clear settings cache so monkeypatched env takes effect
     monkeypatch.delenv("FNO_CONFIG", raising=False)
-    from fno import config as config_mod
     # Clear paths caches (resolve_repo_root now @cached)
-    import fno.paths as paths_mod
     yield
     # Clear again after test to avoid pollution
 def _write_settings(tmp_path: Path, content: str) -> Path:
@@ -188,6 +186,10 @@ def test_resolve_canonical_repo_root_falls_back_when_git_missing(
     """With no FNO_REPO_ROOT and git unavailable, fall back to resolve_repo_root()."""
     import fno.paths as paths_mod
 
+    # Leave any real repo so the filesystem short-circuit in
+    # resolve_canonical_worktree() stays out of the way and the stubbed
+    # subprocess path is what runs.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
     sentinel = tmp_path / "fallback"
     sentinel.mkdir()
@@ -214,6 +216,10 @@ def test_resolve_canonical_repo_root_uses_git_worktree_list(
     """
     import fno.paths as paths_mod
 
+    # Leave any real repo so the filesystem short-circuit in
+    # resolve_canonical_worktree() stays out of the way and the stubbed
+    # porcelain parse is what runs.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
     canonical = tmp_path / "canonical"
     linked = tmp_path / "linked"
@@ -655,7 +661,6 @@ def test_vault_in_state_dir_with_obsidian_disabled_rejected(
         tmp_path,
         "schema_version: 1\nconfig:\n  state_dir: '{vault}/fno'\n  obsidian:\n    enabled: false\n",
     )
-    from fno import config as config_mod
 
     from fno.config import load_settings
 
@@ -883,8 +888,6 @@ def test_config_file_inside_state_dir(
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
-    from fno import config as config_mod
-    import fno.paths as paths_mod
 
     from fno.paths import config_file
 
@@ -913,7 +916,6 @@ def test_config_file_loaded_from_is_preferred_over_state_dir_derivation(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    import fno.paths as paths_mod
 
     # Trigger load
     config_mod.load_settings()

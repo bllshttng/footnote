@@ -1,41 +1,18 @@
 """One-step law recording: `fno inbox law set`.
 
-The operator types one ruling and it records. There is no staged proposal, no
-content hash, no one-shot approval receipt, and no resume path (ruling
-d-e1eec854). The whole ceremony was deleted because it charged for a property it did not buy:
-it refused the honest headless path at the last step while an attended chat
-approved the same enactment without reading the hash.
-
-WHAT THAT TRADE COSTS, measured rather than assumed, and stated at its real
-WIDTH. `require_marked_caller` answers `chat_attested` off
-`resolve_self_identity`, which walks process ancestry. So the door is not
-"a mail-injected slash command". It is ANY process descended from a harness
-session, including an agent's own Bash call with no user-shaped text anywhere.
-The door is the law LANE and never the `operator` VALUE: `_resolve_decider`
-still refuses an `operator` claim from a resolved session.
-The narrower mail shape is merely the one that is impossible to detect: across
-every transcript in this machine's claude project directory, 2173 user turns
-carrying an `<fno_mail>` envelope were recorded with `promptSource: "typed"`
-and 2439 with `origin: {"kind": "human"}`, and `fno agents mail send --raw`
-strips the envelope that is the one remaining marker.
-
-What survives is the honest attribution: a chat recording lands as
-`chat_attested`, never as `operator`, so a reader can always tell it from a
-person at a terminal. Note the asymmetry that buys: a session can mint a law
-row and cannot retract one, because `retract_decision` requires `operator`.
-
-One family is closed to this door entirely: subjects under
-`review-coverage-waiver` (the merge gate's waiver evidence) refuse every
-non-operator authority at the write chokepoint, because a waiver asserts a
-person read the diff and no chat row can carry that fact. The attended
-`fno do pr coverage-waive` command is the only path.
+One ruling, recorded: no staged proposal, no resume path (ruling
+d-e1eec854). The caller-resolver and the measured narrative:
+docs/architecture/decision-record.md.
 """
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import typer
+
+from fno.decide import READ_HELP
 
 DECISION_ID_RE = re.compile(r"^d-[0-9a-f]{8}$")
 COORDINATION_MARKERS = (
@@ -80,6 +57,39 @@ def validate_durable_law(
 law_app = typer.Typer(help="Record operator law in one call.")
 
 
+def _sweep_open_questions(subject: str, decision: str, decision_id: str) -> None:
+    """Best-effort rule-time join (x-cf6a): name the open questions the new
+    law may answer. The matcher runs in the crate (`law-match`); the
+    open-question fold stays in `read_open_questions`. A candidate is only a
+    surface, never a verdict - three per-PR budget grants point the other way
+    from the general law - so each line carries the mail command for the
+    recording session to judge and send. It never raises and never touches
+    stdout or the exit code: the law is already recorded here, and exit 1 is
+    reserved for a failed index write.
+    """
+    try:
+        from fno.outstanding.core import read_open_questions
+        from fno.rust_binary import verb_call
+
+        questions = read_open_questions(Path.cwd(), liveness_budget_seconds=0)
+        answer = verb_call(
+            "law-match",
+            {
+                "mode": "law",
+                "law": {
+                    "decision_id": decision_id,
+                    "subject": subject,
+                    "decision": decision,
+                },
+                "questions": [q.as_dict() for q in questions],
+            },
+        )
+        for line in answer.get("lines") or []:
+            typer.echo(line, err=True)
+    except Exception as exc:  # noqa: BLE001 - the law is already recorded
+        typer.echo(f"law: open-question sweep failed ({exc}); the law is recorded", err=True)
+
+
 @law_app.callback()
 def _law_callback() -> None:
     """Hold `set` as a named subcommand on BOTH mounts.
@@ -101,12 +111,16 @@ def _law_callback() -> None:
 @law_app.command("set")
 def record_command(
     subject: str = typer.Argument(..., help="Subject governed by the law."),
-    decision: str = typer.Argument(..., help="Operator workaround or policy."),
+    decision: str | None = typer.Argument(None, help="Operator workaround or policy."),
+    decision_file: Path | None = typer.Option(
+        None, "--decision-file", help="Read the decision from a file ('-' = stdin)."
+    ),
     rationale: str | None = typer.Option(None, "--rationale"),
     option: list[str] = typer.Option([], "--option"),
     supersedes: str | None = typer.Option(None, "--supersedes"),
     graduation: str | None = typer.Option(None, "--graduation"),
     graduation_ref: str | None = typer.Option(None, "--graduation-ref"),
+    read: list[str] = typer.Option([], "--read", help=READ_HELP),
 ) -> None:
     """Record law in one call, from a chat or from a terminal."""
     from fno.decide import (
@@ -118,6 +132,10 @@ def record_command(
         require_marked_caller,
     )
     from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
+    from fno.rust_binary import VerbUnavailable
+    from fno.text_or_file import read_text_arg
+
+    decision = read_text_arg(decision, decision_file, what="the decision") or ""
 
     try:
         validate_durable_law(
@@ -141,12 +159,14 @@ def record_command(
             supersedes=supersedes,
             authority_source=authority,
             graduation=graduation_data,
+            reads=list(read) or None,
         )
-    except (InvalidGraduationError, ValueError) as exc:
+    except (InvalidGraduationError, ValueError, VerbUnavailable) as exc:
         # ValueError is `record_decision` refusing a --supersedes that names no
-        # recoverable decision. It must land on 3 with the rest: exit 1 is the
+        # recoverable decision; VerbUnavailable is the evidence gate refusing
+        # to run at all. Both must land on 3 with the rest: exit 1 is the
         # code reserved for "recorded, index write failed, do NOT re-run", so
-        # letting it escape told a caller the opposite of what happened.
+        # letting either escape told a caller the opposite of what happened.
         typer.echo(f"fno law: refused: {exc}. Nothing was recorded.", err=True)
         raise typer.Exit(3) from exc
     except WaiverAuthorityRefusedError as exc:
@@ -168,3 +188,4 @@ def record_command(
         )
         raise typer.Exit(1) from exc
     typer.echo(result["decision_id"])
+    _sweep_open_questions(subject, decision, result["decision_id"])

@@ -82,8 +82,23 @@ def test_violating_body_is_refused_before_delivery(tmp_path):
     assert "81 words" in proc.stderr and "80 words" in proc.stderr, proc.stderr
 
 
-def test_body_at_the_cap_with_semicolons_passes_the_gate(tmp_path):
+def test_body_at_the_cap_with_semicolons_is_refused(tmp_path):
+    # Mail runs the full rule set, so a semicolon refuses under the cap.
     proc = _run(["worker", UNDER_CAP_WITH_SEMICOLONS], {}, tmp_path)
+    assert proc.returncode == 1, proc.stderr
+    assert STYLE_REFUSED in proc.stderr, proc.stderr
+    assert "rule 2" in proc.stderr, proc.stderr
+
+
+def test_control_lane_bypasses_the_style_gate(tmp_path):
+    # AC7. A stop, a resume, or a scope change must land whatever the prose
+    # rules say; the control lane is what keeps the bus unwedgeable. The body
+    # carries a semicolon and "thanks" to prove the bypass is real, not an
+    # absence.
+    proc = _run(["worker", "control: stop work; report where you are. thanks."], {}, tmp_path)
+    # The handle 'worker' does not resolve in the sandbox and the send dies
+    # after the gate, so the marker is the refusal's absence on a body that
+    # carries both a semicolon and "thanks".
     assert STYLE_REFUSED not in proc.stderr, proc.stderr
 
 

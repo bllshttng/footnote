@@ -101,7 +101,7 @@ def test_marker_breached_ceiling_caps_threads_at_one(tmp_path, monkeypatch, caps
     # (x-5283), patched here like every sensor: gate_census and
     # load_settings both reach the repo-root resolution, and a cold cache
     # shells git into the capture as the first rust command.
-    monkeypatch.setattr(spawn_gate, "census", lambda: None)
+    monkeypatch.setattr(spawn_gate, "census", lambda socket_map=None: None)
     monkeypatch.setattr(spawn_gate, "share_reading", lambda *a, **k: None)
     monkeypatch.setattr(
         fno_config,

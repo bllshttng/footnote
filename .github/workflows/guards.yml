@@ -74,6 +74,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # The flag ratchet diffs against the merge base (or the previous
+          # tip on push); depth 1 holds neither.
+          fetch-depth: 0
 
       - name: Python + uv
         if: ${{ !cancelled() }}
@@ -81,14 +85,7 @@ jobs:
 
       - name: Ruff + MyPy (repo-wide)
         if: ${{ !cancelled() }}
-        working-directory: cli
-        run: |
-          set -euo pipefail
-          python_files="$(find src -type f -name '*.py' -print | wc -l | tr -d '[:space:]')"
-          test "$python_files" -gt 0
-          uv run ruff check --no-respect-gitignore src/
-          uv run mypy src/
-          echo "main-python-static: checked ${python_files} Python files with ruff + mypy"
+        run: bash scripts/ci/check-python-static.sh
 
       # The verb x harness doc is a projection of the capability table and
       # skills/*/SKILL.md frontmatter. It lives here, not in rust-ci, because
@@ -120,6 +117,24 @@ jobs:
           set -euo pipefail
           bash tests/ci/test_seam_crossings.sh
           (cd cli && uv run fno-py doctor lint seam-crossings)
+
+      # Flag + env-var registries (x-72fc): the flag check measures the
+      # change against its own base (merge base on a PR, the previous tip on
+      # push), so two PRs from one base cannot race on a stored count; every
+      # env var read carries a doc row. Selftest first, so the checks are
+      # positive-controlled before trusted.
+      - name: Flag and env registry ratchets (selftest, then check)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        env:
+          PR_BASE_REF: ${{ github.base_ref || 'main' }}
+          FLAG_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check_flag_registry.py --selftest
+          python3 scripts/ci/check_flag_registry.py
+          python3 scripts/ci/check_env_registry.py --selftest
+          python3 scripts/ci/check_env_registry.py
 
   # PR-only: every member here originally triggered on `pull_request` alone
   # (no `push`), several because they read PR-only context (PR_BODY,
@@ -253,6 +268,13 @@ jobs:
         timeout-minutes: 5
         run: bash tests/lib/test_cargo_rustc_wrapper.sh
 
+      # A zero is never a verdict: the helper refuses a probe zero whose
+      # control missed (broken instrument) or a caller that sent no control.
+      - name: assert-absent lib test (positive control on the zero-verdict helper)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/lib/test_assert_absent.sh
+
       # From disposable-rm.yml.
       - name: Bare rm in disposable-delete files + self-test
         if: ${{ !cancelled() }}
@@ -345,6 +367,9 @@ jobs:
         env:
           PR_BASE_REF: ${{ github.base_ref || 'main' }}
           FILE_BUDGET_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+          # Operator-applied only; an agent never sets it. It waives the
+          # Python tree allowance alone, never a per-file grow.
+          FILE_BUDGET_EXCEPTION_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'file-budget-exception') && 'file-budget-exception' || '' }}
         run: bash scripts/ci/check-file-budget.sh
 
       - name: File budget gate selftest
@@ -364,6 +389,17 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash scripts/ci/check-retired-command-strings.sh
+
+      # Every page the AGENTS.md deep-dive index links must open with a scope
+      # section (## Is this page for you? + a Not for: line), so a reader
+      # with a symptom can tell whether the mechanism on the page governs it
+      # without reading the source.
+      - name: Doc entry-page scope + self-test
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          bash tests/ci/test_check_doc_entry_scope.sh
+          bash scripts/ci/check-doc-entry-scope.sh
 
       # Graduated from the AGENTS.md reachable-paths pitfall entry.
       - name: Reachable-paths lint + self-test

@@ -47,7 +47,7 @@ fn portal_pick_view() -> View {
         exited: false,
         dnd: false,
         unmeasured: false,
-        liveness_age_s: None,
+        liveness_measured_at: None,
         harness_title: None,
         answerable: None,
         attach_id: None,

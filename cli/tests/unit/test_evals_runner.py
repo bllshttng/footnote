@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from fno.agents.registry import AgentEntry, RegistryVersionError, write_registry
 from fno.evals import history as _history
 from fno.evals.bank import GradeCheck, TaskSpec
 from fno.evals.grading import grade
@@ -287,15 +288,29 @@ def _never_called_spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResu
 _LANE = InventoryRow(name="astra-high", harness="codex", model="gpt-6-astra", effort="high")
 
 
-def test_observe_worker_reads_a_still_present_registry_row(monkeypatch) -> None:
-    import types
-
-    entry = types.SimpleNamespace(name="eval-worker-9", harness="codex", model="gpt-6-astra",
-                                   model_basis="verified", effort="high", harness_session_id="s1")
-    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [entry])
+def test_observe_worker_reads_a_real_registry_row(tmp_path, monkeypatch) -> None:
+    """The row round-trips through write_registry and load_registry, so a
+    renamed AgentEntry field fails here instead of degrading to unverified."""
+    reg = tmp_path / "registry.json"
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
+    write_registry([AgentEntry(
+        name="eval-worker-9", cwd="/tmp/proj", log_path="/tmp/proj.log", harness="codex",
+        model="gpt-6-astra", model_basis="verified", effort="high", harness_session_id="s1",
+    )], path=reg)
     observed = _runner._observe_worker("eval-worker-9")
-    assert observed is not None
-    assert observed["harness"] == "codex"
+    assert observed == {"harness": "codex", "model": "gpt-6-astra", "model_basis": "verified",
+                        "effort": "high", "harness_session_id": "s1"}
+    assert _runner._observe_worker("no-such-worker") is None
+
+
+def test_observe_worker_lets_a_malformed_registry_raise(tmp_path, monkeypatch) -> None:
+    """A damaged registry aborts the repeat with the real fault; only shape
+    drift on an existing row degrades to None."""
+    reg = tmp_path / "registry.json"
+    reg.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
+    with pytest.raises(RegistryVersionError):
+        _runner._observe_worker("eval-worker-9")
 
 
 def test_lane_hp_records_requested_and_observed_configuration(tmp_path: Path) -> None:

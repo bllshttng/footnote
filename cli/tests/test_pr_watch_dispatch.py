@@ -33,7 +33,7 @@ def _hermetic_post_merge(monkeypatch):
 
     monkeypatch.setattr(
         pmr, "_default_run_ritual_verb",
-        lambda pr, cwd: pmr.ColdRitualResult(ok=True, tail="ok"),
+        lambda pr, cwd, **_kw: pmr.ColdRitualResult(ok=True, tail="ok"),
     )
     monkeypatch.setattr(pmr, "emit_receipt", lambda *a, **k: True)
 
@@ -264,32 +264,17 @@ class TestTrackedStateBatch:
 
         def runner(cmd, **_kwargs):
             calls.append(list(cmd))
-            # owner/one: tracked #2 closed+merged (absent from the open list,
-            # resolved by its closed batch) plus untracked open #99; owner/two:
-            # tracked #3 closed.
+            # owner/one: tracked #1 open plus untracked open #99; tracked #2
+            # is absent from the open listing (NOT_OPEN). owner/two: tracked
+            # #3 absent too.
             open_rows = {
                 "owner/one": [{"number": 1, "state": "open", "merged": False},
                               {"number": 99, "state": "open", "merged": False}],
                 "owner/two": [],
             }
-            per_key = {
-                "owner/one#2": {"number": 2, "state": "closed", "merged": True},
-                "owner/two#3": {"number": 3, "state": "closed", "merged": False},
-            }
             path = cmd[2]
-            if path.startswith("repos/") and path.endswith("/pulls?state=open&per_page=100&page=1"):
-                repo = path[len("repos/"): path.index("/pulls?")]
-                return _rest_ok(json.dumps(open_rows[repo]))
-            if path.startswith("repos/") and path.endswith("/pulls?state=closed&per_page=100&page=1"):
-                repo = path[len("repos/"): path.index("/pulls?")]
-                return _rest_ok(
-                    json.dumps([
-                        row for key, row in per_key.items() if key.startswith(f"{repo}#")
-                    ])
-                )
-            number = path.rsplit("/", 1)[-1]
-            repo = path[len("repos/"): -len(f"/pulls/{number}")]
-            return _rest_ok(json.dumps(per_key[f"{repo}#{number}"]))
+            repo = path[len("repos/"): path.index("/pulls?")]
+            return _rest_ok(json.dumps(open_rows[repo]))
 
         states, sweep_failures = read_tracked_pr_states(
             {"owner/one#1", "owner/one#2", "owner/two#3"}, runner=runner
@@ -297,14 +282,13 @@ class TestTrackedStateBatch:
 
         assert states == {
             "owner/one#1": "OPEN",
-            "owner/one#2": "MERGED",
+            "owner/one#2": "NOT_OPEN",
             "owner/one#99": "OPEN",
-            "owner/two#3": "CLOSED",
+            "owner/two#3": "NOT_OPEN",
         }
         assert sweep_failures == 0
-        # One open-listing and one closed-listing per repository. No exact
-        # per-key fallback is needed when the terminal batch finds both keys.
-        assert len(calls) == 4
+        # One open listing per repository: no closed listing, no exact reads.
+        assert len(calls) == 2
 
     def test_repo_read_failure_returns_unknown_for_each_requested_key(self):
         from fno.pr_watch._discover import read_tracked_pr_states
@@ -318,6 +302,46 @@ class TestTrackedStateBatch:
 
         assert states == {"owner/repo#1": "UNKNOWN", "owner/repo#2": "UNKNOWN"}
         assert sweep_failures == 1
+
+    def test_not_open_batch_keys_drop_without_a_closed_read(self, tmp_path):
+        """x-c79d: absence from a successful open listing is the terminal
+        answer. Three orphaned keys drop as not_open in one tick."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        store = WatermarkStore(path=store_path)
+        for number in (1, 2, 3):
+            store.set(f"owner/repo#{number}", {
+                "last_review_ts": None,
+                "last_seen_state": "OPEN",
+                "merge_dispatched": False,
+                "retries": 0,
+                "parked": None,
+            })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "NOT_OPEN" for key in keys}, 0),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+
+        assert WatermarkStore(path=store_path).load() == {}
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["swept_count"] == 3
+        assert receipt["dropped_count"] == 3
+        assert receipt["dropped"] == {"not_open": {"owner/repo": [1, 2, 3]}}
+        assert receipt["failed_count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +359,7 @@ class TestFireSkill:
         def stub_runner(cmd, **kw):
             return _claude_ok_response()
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is True
         assert result.is_error is False
         assert result.rc == 0
@@ -347,7 +371,7 @@ class TestFireSkill:
         def stub_runner(cmd, **kw):
             return _claude_is_error_response()
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.is_error is True
         assert result.rc == 0
@@ -359,7 +383,7 @@ class TestFireSkill:
         def stub_runner(cmd, **kw):
             return _claude_nonzero_response(rc=2)
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.rc == 2
 
@@ -370,7 +394,7 @@ class TestFireSkill:
         def stub_runner(cmd, **kw):
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr="")
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
 
     def test_env_seam_overrides_command(self, tmp_path, monkeypatch):
@@ -384,7 +408,7 @@ class TestFireSkill:
             return _claude_ok_response()
 
         monkeypatch.setenv("PR_WATCH_FIRE_CMD", "true")
-        result = fire_skill("check", 5, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 5, tmp_path, runner=stub_runner, node_id="x-5")
         # When seam is set, the command prefix should change (stub runner sees it)
         assert result.ok is True
 
@@ -398,7 +422,7 @@ class TestFireSkill:
             captured["cmd"] = cmd
             return _claude_ok_response()
 
-        fire_skill("check", 7, tmp_path, runner=stub_runner)
+        fire_skill("check", 7, tmp_path, runner=stub_runner, node_id="x-7")
         cmd_str = " ".join(str(c) for c in captured["cmd"])
         assert captured["cmd"][:3] != ["claude", "--print", "--output-format"]
         assert "agents" in captured["cmd"] and "spawn" in captured["cmd"]
@@ -421,7 +445,7 @@ class TestFireSkill:
             captured.update(kw)
             return _claude_ok_response()
 
-        fire_skill("check", 7, tmp_path, runner=stub_runner)
+        fire_skill("check", 7, tmp_path, runner=stub_runner, node_id="x-7")
         assert captured.get("timeout") is not None
         assert captured["timeout"] > 0
 
@@ -436,7 +460,7 @@ class TestFireSkill:
             captured.update(kw)
             return _claude_ok_response()
 
-        fire_skill("check", 1, tmp_path, runner=stub_runner, timeout_s=12.0)
+        fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1", timeout_s=12.0)
         child_timeout = float(
             captured["cmd"][captured["cmd"].index("--timeout") + 1]
         )
@@ -451,7 +475,7 @@ class TestFireSkill:
         def stub_runner(cmd, **kw):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout", 0))
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.is_error is True
 
@@ -502,7 +526,7 @@ def _make_tick_deps(
             opened_at="2026-06-01T00:00:00Z",
         )
 
-    def fake_fire_skill(verb, pr_number, repo_dir, *, runner=None, model=None, env_seam=None):
+    def fake_fire_skill(verb, pr_number, repo_dir, *, node_id=None, runner=None, model=None, env_seam=None):
         from fno.pr_watch._dispatch import DispatchResult
 
         fired.append({"verb": verb, "pr": pr_number, "model": model})
@@ -1351,7 +1375,7 @@ class TestTickOrchestrator:
         # Override the autouse success verb so the dispatch returns 'failed'.
         monkeypatch.setattr(
             pmr, "_default_run_ritual_verb",
-            lambda pr, cwd: pmr.ColdRitualResult(ok=False, tail="fail"),
+            lambda pr, cwd, **_kw: pmr.ColdRitualResult(ok=False, tail="fail"),
         )
 
         store_path = tmp_path / "state.json"
@@ -1681,7 +1705,7 @@ class TestJsonLoadsGuards:
                 args=[], returncode=0, stdout="null", stderr=""
             )
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.is_error is True
 
@@ -1694,7 +1718,7 @@ class TestJsonLoadsGuards:
                 args=[], returncode=0, stdout="[1, 2, 3]", stderr=""
             )
 
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner)
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
         assert result.ok is False
         assert result.is_error is True
 
@@ -2434,6 +2458,341 @@ class TestTickRecordsAndDeadline:
         assert ends[0]["outcome"] == "timeout"
         assert ends[0]["phase"] == "sweep"
         assert ends[0]["duration_s"] >= 1.0
+        # x-d211: the env ceiling (1s) is below the sweep cap (150s), so the
+        # wall fired - the why says deadline, never "phase slice spent".
+        assert ends[0]["why"] == "deadline_exceeded"
+
+    def test_sigterm_during_a_tick_writes_its_death_record(self, monkeypatch):
+        """A bootout's SIGTERM cannot unwind the tick, so the handler writes
+        the end record itself: why=killed (an external kill), and the process
+        still dies BY the signal."""
+        import signal as signal_mod
+
+        from fno.pr_watch import cli as prcli
+
+        installed: dict[int, object] = {}
+
+        def _record_signal(sig, handler):
+            installed[sig] = handler
+            return None
+
+        monkeypatch.setattr(prcli.signal, "signal", _record_signal)
+        killed: list[int] = []
+        monkeypatch.setattr(prcli.os, "kill", lambda pid, sig: killed.append(sig))
+
+        res, events = self._invoke_tick(
+            monkeypatch, lambda **_kw: None
+        )
+        handler = installed.get(signal_mod.SIGTERM)
+        assert handler is not None, "tick installed no SIGTERM handler"
+
+        handler(signal_mod.SIGTERM, None)
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        death = ends[-1]
+        assert death["outcome"] == "error"
+        assert death["why"] == "killed"
+        assert death["phase"]
+        rows = [d for t, d in events if t == "control_plane_tick"
+                and d.get("arm") == "pr_watch_merge"]
+        assert rows and "killed by a signal mid-tick" in rows[-1]["detail"]
+        assert "started and did not complete" in rows[-1]["detail"]
+        assert rows[-1]["detail"].count("phase=") == 1
+        assert killed == [signal_mod.SIGTERM]
+        assert installed[signal_mod.SIGTERM] == signal_mod.SIG_DFL
+
+    def test_a_cut_phase_does_not_stop_the_phases_after_it(self, monkeypatch, tmp_path):
+        """AC3-HP (x-c79d): the sweep burning its slice cannot take the arms
+        behind it down. king_wake and notify_watch still write their rows in
+        the same tick, the merge row reads timeout, and the end record names
+        the cut."""
+        import time as _time
+
+        from fno.pr_watch import cli as prcli
+
+        def _stall(**_kw):
+            _time.sleep(2)
+            raise AssertionError("deadline did not interrupt the stalled sweep")
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "sweep", 1)
+        # Determinism, not contract: the arms behind the cut must be cheap, or
+        # a loaded runner cuts them too and this reads as a different failure.
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+        def _notify_row(_roots=None) -> None:
+            prcli._emit_tick_row("notify_watch", interval_s=300,
+                                 skip_reason="notify_off")
+
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase", _notify_row, raising=True)
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+        monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+        res, events = self._invoke_tick(monkeypatch, _stall)
+
+        assert res.exit_code == 75, f"expected 75, got {res.exit_code}: {res.output!r}"
+        rows = [d for t, d in events if t == "control_plane_tick"]
+        king_rows = [d for d in rows if d.get("arm") == "king_wake"]
+        notify_rows = [d for d in rows if d.get("arm") == "notify_watch"]
+        assert king_rows, "king_wake wrote no row after the sweep was cut"
+        assert notify_rows, "notify_watch wrote no row after the sweep was cut"
+        merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
+        assert merge_rows and merge_rows[-1].get("skip_reason") == "timeout"
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends and ends[-1].get("cut") == ["sweep"]
+        # x-d211: the 1s cap is below the 30s wall, so this cut is slice
+        # starvation - one arm lost its turn, the tick carried on.
+        assert ends[-1].get("why") == "slice_starved"
+        assert "sweep" in ends[-1].get("phase_s", {})
+        assert "king_wake" in ends[-1].get("phase_s", {})
+        # Saturated = the phase spent its whole slice: the cut sweep did,
+        # king_wake finished early and reads as quiet, not saturated.
+        assert ends[-1].get("saturated") == ["sweep"]
+
+    def test_a_cut_inside_a_step_names_the_step_in_the_row_detail(self, monkeypatch, tmp_path):
+        """AC2-ERR: the alarm catching the pass mid-truth-read names
+        the sub-step, and the end record still blames the phase."""
+        import time as _time
+
+        from fno.pr_watch import cli as prcli
+
+        def _stall_in_step(_settings, emit, **_kw):
+            from fno.pr_watch._dispatch import set_tick_phase
+
+            set_tick_phase("king_wake:truth:epic-x")
+            _time.sleep(2)
+            return {"woke": [], "crowns": 1}
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake", _stall_in_step, raising=True,
+        )
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda _roots=None: None, raising=True)
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+        monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+        def _stall(**_kw):
+            _time.sleep(2)
+
+        res, events = self._invoke_tick(monkeypatch, _stall)
+
+        assert res.exit_code == 75, f"expected 75, got {res.exit_code}: {res.output!r}"
+        rows = [d for t, d in events if t == "control_plane_tick"]
+        king_rows = [d for d in rows if d.get("arm") == "king_wake"]
+        assert king_rows and king_rows[-1].get("skip_reason") == "timeout"
+        assert "at king_wake:truth:epic-x" in king_rows[-1].get("detail", ""), (
+            f"the cut must name its sub-step: {king_rows[-1].get('detail')!r}"
+        )
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends[-1].get("phase") == "king_wake"
+        assert ends[-1].get("cut") == ["king_wake"]
+
+    def test_one_roots_scan_feeds_every_phase_that_sweeps(self, monkeypatch, tmp_path):
+        """AC3-HP: notify_watch, heal and stranded share the tick's one
+        sidecar scan - three consumers, one call, the same list. The catchup
+        leg is gone from the tick; its sync must never be called."""
+        from types import SimpleNamespace as _NS
+
+        from fno.pr_watch import cli as prcli
+
+        calls = []
+        roots = [tmp_path]
+
+        def _counting_roots():
+            calls.append(1)
+            return roots
+
+        healed, stranded_seen, catchup_seen = [], [], []
+        monkeypatch.setattr(prcli, "_catchup_roots", _counting_roots, raising=True)
+        monkeypatch.setattr(
+            "fno.rust_binary.resolve_binary", lambda: None, raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.pr_watch._heal_phase.run_heal_phase",
+            lambda _s, r: healed.append(r) or "healed", raising=True,
+        )
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 0.0, raising=True)
+        monkeypatch.setattr(
+            "fno.agents.watchdog.lane_armed", lambda _s: False, raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.worktree_stranded.sweep", lambda repo: stranded_seen.append(repo) or [],
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.worktree_stranded.apply_sweep", lambda rows, wake: [], raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.branch_provenance_cache.write_cache", lambda root, rows: False,
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.pr._sync_canonical.run_sync_catchup",
+            lambda settings, canonical_root: catchup_seen.append(canonical_root)
+            or _NS(outcome="disabled", stale=False, detail=""),
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+
+        res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+
+        assert calls == [1], f"the sidecar scan ran {len(calls)} times"
+        assert healed and healed[0] is roots, "heal got the memoized list"
+        assert stranded_seen == [tmp_path], "stranded swept the shared roots"
+        assert catchup_seen == [], "the tick no longer runs the catchup leg"
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert "catchup" not in ends[-1].get("phase_s", {})
+
+    def test_stranded_rotates_its_starting_root_each_interval(
+        self, monkeypatch, tmp_path
+    ):
+        """AC3-HP: the stranded sweep's starting root advances one bucket per
+        interval, so a cap cut moves to the next root next tick instead of
+        replaying the same prefix forever."""
+        from fno.pr_watch import cli as prcli
+
+        roots = []
+        for name in ("a", "b", "c"):
+            d = tmp_path / name
+            d.mkdir()
+            roots.append(d)
+        stranded_seen: list = []
+        clock = {"t": 0.0}
+
+        monkeypatch.setattr("time.time", lambda: clock["t"])
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: list(roots), raising=True)
+        monkeypatch.setattr(
+            "fno.rust_binary.resolve_binary", lambda: None, raising=True,
+        )
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 0.0, raising=True)
+        monkeypatch.setattr(
+            "fno.agents.watchdog.lane_armed", lambda _s: False, raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.worktree_stranded.sweep", lambda repo: stranded_seen.append(repo) or [],
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.worktree_stranded.apply_sweep", lambda rows, wake: [], raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.branch_provenance_cache.write_cache", lambda root, rows: False,
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+
+        firsts = []
+        for _ in range(3):
+            stranded_seen.clear()
+            res, _events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+            assert res.exit_code == 0, res.output
+            firsts.append(stranded_seen[0])
+            # The harness's MagicMock interval int()s to 1, so one clock
+            # tick per run is one interval bucket per run.
+            clock["t"] += 1.0
+        assert firsts == roots, f"each root led exactly once: {firsts}"
+
+    def test_stranded_with_no_roots_sweeps_nothing(self, monkeypatch):
+        """AC3-ERR: an empty root list sweeps nothing and raises nothing."""
+        from fno.pr_watch import cli as prcli
+
+        stranded_seen: list = []
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
+        monkeypatch.setattr(
+            "fno.rust_binary.resolve_binary", lambda: None, raising=True,
+        )
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 0.0, raising=True)
+        monkeypatch.setattr(
+            "fno.agents.watchdog.lane_armed", lambda _s: False, raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.worktree_stranded.sweep", lambda repo: stranded_seen.append(repo) or [],
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+
+        res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+
+        assert res.exit_code == 0, res.output
+        assert stranded_seen == []
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends[-1]["phase_s"]["stranded"] >= 0.0
+
+    def test_empty_roots_still_scan_once_and_spawn_with_no_root_flag(
+        self, monkeypatch, tmp_path
+    ):
+        """AC3-ERR: no roots is a memoized answer, not four scans,
+        and notify_watch spawns a bare argv without a --root flag."""
+        import json as _json
+        from types import SimpleNamespace as _NS
+
+        from fno.pr_watch import cli as prcli
+
+        calls = []
+        argvs = []
+
+        def _counting_roots():
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr(prcli, "_catchup_roots", _counting_roots, raising=True)
+        monkeypatch.setattr(
+            "fno.rust_binary.resolve_binary", lambda: "/fake/fno-agents", raising=True,
+        )
+
+        def _fake_run(argv, **_kw):
+            argvs.append(argv)
+            return _NS(stdout=_json.dumps({"acted": 0, "skip_reason": "notify_off"}))
+
+        monkeypatch.setattr("subprocess.run", _fake_run, raising=True)
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+
+        res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+
+        assert calls == [1], f"the sidecar scan ran {len(calls)} times"
+        assert argvs, "notify_watch spawned nothing"
+        assert argvs[0] == ["/fake/fno-agents", "notify-watch", "--json"]
+        assert "--root" not in argvs[0]
+        rows = [d for t, d in events if t == "control_plane_tick"]
+        notify_rows = [d for d in rows if d.get("arm") == "notify_watch"]
+        assert notify_rows and notify_rows[-1].get("skip_reason") == "notify_off"
+
+    def test_ritual_timeout_follows_the_phase_deadline(self):
+        """AC6-EDGE (x-c79d): the cold ritual's subprocess timeout is the
+        sweep slice minus its reserve, never the bare 300s default."""
+        import time as _time
+
+        from fno.pr_watch import _dispatch as d
+
+        d.set_phase_deadline(_time.monotonic() + 120)
+        try:
+            assert d._ritual_timeout() <= 110
+        finally:
+            d.set_phase_deadline(None)
+        assert d._ritual_timeout() == 300.0
 
     def test_healthy_tick_brackets_with_ok_end_record(self, monkeypatch):
         """AC9-EDGE backdrop: a normal tick emits attempt, tick, and end ok."""
@@ -2546,6 +2905,10 @@ class TestTickRecordsAndDeadline:
         tick_log = logging.getLogger("fno.pr_watch.cli")
         monkeypatch.setattr(tick_log, "handlers", [*tick_log.handlers, _Grab()])
         monkeypatch.setattr(tick_log, "level", logging.INFO)
+        # isEnabledFor caches per level, and setattr above bypasses setLevel's
+        # invalidation: an earlier test's INFO probe at the inherited WARNING
+        # level would otherwise keep suppressing INFO records here.
+        tick_log._cache.clear()
 
         settings = MagicMock()
         settings.pr_watch.enabled = True
@@ -2931,6 +3294,11 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr(
             watchdog, "run_sweep", lambda **kw: (sweep_payload, [])
         )
+        # fleet_rows probes the live roster by exec'ing the real `claude`
+        # binary; the provider-exec guard blocks that, and everything after
+        # it in the leg would be skipped. The leg's subject here is the
+        # refusal-event lane, not the roster.
+        monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: ([], []))
         monkeypatch.setattr(watchdog, "_last_recovery_events_signature", lambda: "")
         sweep_writes = []
         monkeypatch.setattr(
@@ -3035,15 +3403,15 @@ class TestTickRecordsAndDeadline:
 # ---------------------------------------------------------------------------
 
 
-class TestFleetLegRunsBeforeThePRLegs:
-    """AC7: the failover trigger must be inside the tick deadline, not behind it.
+class TestFleetLegRunsAfterACutPRLeg:
+    """x-c79d: per-phase slices moved the fleet leg behind the PR legs.
 
-    The tick arms a SIGALRM and re-raises TickDeadlineExceeded, which propagates
-    before the old recovery phase was ever reached. A slow PR leg therefore
-    aborted the tick before the one leg that detects a capped worker.
+    The old ordering test proved recovery ran BEFORE a stalling PR leg; its
+    successor proves recovery still runs, on its own slice, AFTER the sweep
+    is cut mid-stall - and still writes its heartbeat.
     """
 
-    def _invoke(self, monkeypatch, tmp_path, dispatch_tick, sweep_fn):
+    def _invoke(self, monkeypatch, tmp_path, dispatch_tick, sweep_fn, king_wake_fn=None):
         import typer
         from typer.testing import CliRunner
         from unittest.mock import MagicMock
@@ -3060,6 +3428,18 @@ class TestFleetLegRunsBeforeThePRLegs:
         monkeypatch.setattr(
             agents_sweep, "run_sweep", lambda **_kw: ([], 0), raising=True,
         )
+        # Determinism, not contract: the arms between the cut sweep and the
+        # recovery phase must be cheap, or a loaded runner cuts recovery too.
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            king_wake_fn or (lambda _settings, emit, **_kw: {"woke": [], "crowns": 0}),
+            raising=True,
+        )
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda _roots=None: None, raising=True)
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+        monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
 
         if not os.environ.get("FNO_PR_WATCH_TICK_TIMEOUT"):
             monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
@@ -3086,16 +3466,19 @@ class TestFleetLegRunsBeforeThePRLegs:
         res = CliRunner().invoke(app, [])
         return res, events, hb
 
-    def test_ac7_hp_fleet_leg_ran_and_heartbeat_written_despite_a_pr_timeout(
+    def test_ac3_hp_recovery_runs_and_writes_heartbeat_after_a_cut_sweep(
         self, monkeypatch, tmp_path
     ):
+        import json as _json
         import time as _time
+
+        from fno.pr_watch import cli as prcli
 
         ran: list[str] = []
 
         def _stall(**_kw):
-            _time.sleep(1.5)
-            raise AssertionError("deadline did not interrupt the stalled tick")
+            _time.sleep(2)
+            raise AssertionError("deadline did not interrupt the stalled sweep")
 
         def _sweep(_cfg, emit=None, **_kw):
             ran.append("fleet")
@@ -3103,19 +3486,56 @@ class TestFleetLegRunsBeforeThePRLegs:
                 emit("worker_refused", {"short_id": "aaaa1111"})
             return 3
 
-        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "1")
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "sweep", 1)
         res, events, hb = self._invoke(monkeypatch, tmp_path, _stall, _sweep)
 
-        # The tick still dies at its deadline - this change does not bound the
-        # gh leg, it only moves the trigger in front of it.
+        # The sweep was cut at its own slice; the tick still exits 75.
         assert res.exit_code == 75, res.output
-        assert ran == ["fleet"]
-        assert hb.exists(), "the fleet watermark must be written before the PR legs"
-        import json as _json
+        assert ran == ["fleet"], "recovery must run on its own slice after a cut sweep"
+        assert hb.exists(), "the fleet heartbeat must survive a cut sweep"
         payload = _json.loads(hb.read_text(encoding="utf-8"))
         assert payload["candidates"] == 3
         assert payload["refused"] == 1
         assert ("worker_refused", {"short_id": "aaaa1111"}) in events
+
+    def test_recovery_runs_and_records_after_king_wake_itself_is_cut(
+        self, monkeypatch, tmp_path
+    ):
+        """The phase that failed tonight is king_wake, not the sweep: cut IT
+        at its own slice and the fleet legs after it still run and still
+        record an outcome."""
+        import json as _json
+        import time as _time
+
+        from fno.pr_watch import cli as prcli
+
+        def _stall_in_king_wake(_settings, emit, **_kw):
+            _time.sleep(2)
+            return {"woke": [], "crowns": 0}
+
+        swept: list[int] = []
+
+        def _sweep(_cfg, emit=None, **_kw):
+            swept.append(1)
+            return 0
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+        res, events, hb = self._invoke(
+            monkeypatch, tmp_path, lambda **_kw: None, _sweep,
+            king_wake_fn=_stall_in_king_wake,
+        )
+
+        assert res.exit_code == 75, res.output
+        assert swept == [1], "recovery must run on its own slice after a cut king_wake"
+        assert hb.exists(), "the fleet heartbeat must survive a cut king_wake"
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends and ends[-1].get("phase") == "king_wake", ends
+        assert "king_wake" in ends[-1].get("cut", []), ends
+        assert "recovery" in ends[-1].get("phase_s", {}), (
+            "the phases after the cut must still record an outcome"
+        )
 
     def test_ac7_edge_a_raising_fleet_leg_still_lets_the_pr_legs_run(
         self, monkeypatch, tmp_path
@@ -3343,14 +3763,10 @@ class TestQuotaPreflight:
         assert {event["data"].get("reason") for event in deps["events"]} >= {"tick-budget"}
         receipt = next(event["data"] for event in deps["events"] if event["type"] == "pr_watch_tick")
         assert receipt["swept_count"] == 1
-
-    def test_dispatch_reserve_scales_with_tick_budget(self):
-        """Short valid tick deadlines must not disable dispatch outright."""
-        from fno.pr_watch._dispatch import _dispatch_reserve_seconds
-
-        assert _dispatch_reserve_seconds(480) == 360
-        assert _dispatch_reserve_seconds(360) == 270
-        assert _dispatch_reserve_seconds(60) == 45
+        # AC3-EDGE: the break fired before any rich read, so scanned stays 0
+        # while completed stays true - "reached nothing", not "found nothing".
+        assert receipt["merge_scan"]["completed"] is True
+        assert receipt["merge_scan"]["scanned"] == 0
 
     def test_degraded_sweep_still_completes_and_receipts(self, tmp_path):
         """AC4-EDGE at the tick boundary: a sweep WITH failures completed -
@@ -3540,7 +3956,9 @@ class TestDurableGrantExecution:
         assert entry["merge_dispatched"] is True
         assert entry["retries"] == 0
         receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
-        assert receipt["merge_scan"] == {"completed": True, "eligible": 1, "attempted": 1}
+        assert receipt["merge_scan"] == {
+            "completed": True, "scanned": 1, "eligible": 1, "attempted": 1,
+        }
 
     def test_held_consumes_no_failure_budget(self, tmp_path, monkeypatch):
         deps = _make_tick_deps(
@@ -3613,6 +4031,36 @@ class TestDurableGrantExecution:
             e["type"] != "merge_grant_execution" for e in deps["events"]
         )
 
+    def test_execute_arm_ignores_fire_budget(self, tmp_path, monkeypatch):
+        """The fire floor gates the spawn arm only. A durable-grant execution
+        is the canonical merge core bounded by its own guards, so it still
+        runs - and the scan receipt still counts it - on a tick with no room
+        to fire a spawn."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
+            obs_map={1: _make_obs(pr_number=1, state="OPEN")},
+        )
+        _arm_durable_grant(monkeypatch, tmp_path, approved=True)
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+        # 35s of phase left -> _ritual_timeout() = 25 < _FIRE_FLOOR_S.
+        monkeypatch.setattr(d, "_phase_deadline", clock["t"] + 35.0)
+        self._tick(tmp_path, deps, monkeypatch, 0)
+
+        executed = [
+            e for e in deps["events"]
+            if e["type"] == "merge_grant_execution" and e["data"].get("phase") == "executed"
+        ]
+        assert [e["data"]["pr"] for e in executed] == [1]
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["merge_scan"]["eligible"] == 1
+        assert receipt["merge_scan"]["attempted"] == 1
+
     def test_quiet_tick_still_proves_the_scan_ran(self, tmp_path, monkeypatch):
         """AC12-HP: a completed tick with zero eligible PRs carries the scan
         receipt with integer zeros - a scan that saw nothing is still a scan
@@ -3638,5 +4086,562 @@ class TestDurableGrantExecution:
         )
         receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
         assert receipt["merge_scan"]["completed"] is True
+        assert receipt["merge_scan"]["scanned"] == 0
         assert receipt["merge_scan"]["eligible"] == 0
         assert receipt["merge_scan"]["attempted"] == 0
+
+
+class TestScanResumesLeastRecentlyPolled:
+    """x-b083 absorbed into x-d211: the rich scan resumes where the last
+    budget break left off instead of restarting at graph order, and cheap
+    disposals (parked, terminal, baselined, unresolvable) cost no rich read."""
+
+    @staticmethod
+    def _seed(tmp_path: Path, prs, *, parked_prs=()):
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        store = WatermarkStore(path=store_path)
+        for pr in prs:
+            store.set(f"owner/repo#{pr}", {
+                "last_review_ts": None,
+                "last_seen_state": "OPEN",
+                "merge_dispatched": False,
+                "retries": 0,
+                "parked": "retries-exhausted" if pr in parked_prs else None,
+            })
+        return store_path
+
+    @staticmethod
+    def _counting_reads(deps, clock):
+        base_read = deps["read_pr_state"]
+        reads: list[int] = []
+
+        def counting_read(candidate, **kw):
+            reads.append(candidate.pr_number)
+            clock["t"] += 1.0
+            return base_read(candidate, **kw)
+
+        deps["read_pr_state"] = counting_read
+        return reads
+
+    def _tick(self, tmp_path, deps, monkeypatch, store_path, *, deadline=None):
+        from fno.pr_watch._dispatch import tick
+
+        return tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({k: "OPEN" for k in keys}, 0),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            max_retries=2,
+            graphql_remaining_fn=lambda: (4800, None),
+            dispatch_deadline=deadline,
+        )
+
+    def test_five_ticks_reach_pr_45_and_stamp_each_window(self, tmp_path, monkeypatch):
+        """AC3-HP: 50 graph-ordered candidates, 10 rich reads per tick, one
+        store. LRU order carries every window forward; the granted PR at
+        position 45 executes by tick five."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+
+        prs = list(range(1, 51))
+        candidates = [
+            _make_candidate(pr_number=n, node_id=f"x-{n:08d}", repo_dir=tmp_path)
+            for n in prs
+        ]
+        deps = _make_tick_deps(tmp_path, candidates=candidates)
+        store_path = self._seed(tmp_path, prs)
+
+        import fno.config as config_mod
+        from fno.config import AutoMergeBlock
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+        reads = self._counting_reads(deps, clock)
+
+        g = tmp_path / "grant-graph.json"
+        receipt = {
+            "approved": True, "source": "config",
+            "recorded_by": "spawner-session", "recorded_at": "2026-08-24T12:00:00Z",
+        }
+        g.write_text(json.dumps({"entries": [{
+            "id": "x-45abc001", "title": "t", "pr_number": 45,
+            "sessions": [{"phase": "do", "harness": "claude", "session_id": "w1",
+                          "merge_grant": receipt}],
+        }]}))
+        monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+        monkeypatch.setattr("fno.pr._coverage_gate._repo_slug", lambda repo: None)
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, **kw: {"key": key, "state": "stale", "holder": "w1"},
+        )
+        monkeypatch.setattr(
+            "fno.config.load_settings_for_repo",
+            lambda path: config_mod.load_settings().model_copy(
+                update={"auto_merge": AutoMergeBlock(enabled=True, grant="dispatch")}
+            ),
+        )
+        monkeypatch.setattr("fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd: 0)
+
+        for _ in range(5):
+            # 10 reads per tick: the read floor is 15s, so the window is
+            # deadline - 15; each read costs 1s of the faked clock.
+            deadline = clock["t"] + 24.0
+            res = self._tick(tmp_path, deps, monkeypatch, store_path, deadline=deadline)
+            assert not res.quota_skip
+
+        # Every PR observed exactly once, in ten-PR windows, no repeats.
+        assert reads == prs
+        executed = [
+            e for e in deps["events"]
+            if e["type"] == "merge_grant_execution" and e["data"].get("phase") == "executed"
+        ]
+        assert [e["data"]["pr"] for e in executed] == [45]
+
+        from fno.pr_watch._state import WatermarkStore
+
+        state = WatermarkStore(path=store_path).load()
+        assert state["owner/repo#45"].get("merge_dispatched") is True
+        stamped = [k for k, v in state.items() if isinstance(v, dict) and v.get("last_polled_at")]
+        assert len(stamped) == 50, "every rich read stamped its cursor"
+
+    def test_production_slice_still_reaches_every_candidate(self, tmp_path, monkeypatch):
+        """AC1-HP + AC3-HP at the production numbers that broke on 2026-09-12:
+        a 150s sweep slice with 40s spent leaves 110s before the deadline. The
+        old fire-sized reserve (min(360, 150*0.75) = 112.5s) exceeded that and
+        broke the loop on its first state-backed candidate: 0 reads, 0 stamps,
+        eligible=0, acted=0. Every candidate must be rich-read and scanned."""
+        from types import SimpleNamespace
+
+        import fno.config as config_mod
+        import fno.pr_watch._dispatch as d
+        from fno.config import AutoMergeBlock
+        from fno.pr_watch._state import WatermarkStore
+
+        prs = list(range(1, 12))
+        candidates = [
+            _make_candidate(pr_number=n, node_id=f"x-{n:08d}", repo_dir=tmp_path)
+            for n in prs
+        ]
+        deps = _make_tick_deps(tmp_path, candidates=candidates)
+        store_path = self._seed(tmp_path, prs)
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+        reads = self._counting_reads(deps, clock)
+
+        # PR 11 carries a positive durable grant: the scan counts it eligible
+        # and the execute arm acts on it (rc=0 stub).
+        g = tmp_path / "grant-graph.json"
+        receipt = {
+            "approved": True, "source": "config",
+            "recorded_by": "spawner-session", "recorded_at": "2026-08-24T12:00:00Z",
+        }
+        g.write_text(json.dumps({"entries": [{
+            "id": "x-00000011", "title": "t", "pr_number": 11,
+            "sessions": [{"phase": "do", "harness": "claude", "session_id": "w1",
+                          "merge_grant": receipt}],
+        }]}))
+        monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+        monkeypatch.setattr("fno.pr._coverage_gate._repo_slug", lambda repo: None)
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda key, **kw: {"key": key, "state": "stale", "holder": "w1"},
+        )
+        monkeypatch.setattr(
+            "fno.config.load_settings_for_repo",
+            lambda path: config_mod.load_settings().model_copy(
+                update={"auto_merge": AutoMergeBlock(enabled=True, grant="dispatch")}
+            ),
+        )
+        monkeypatch.setattr("fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd: 0)
+
+        res = self._tick(tmp_path, deps, monkeypatch, store_path,
+                         deadline=clock["t"] + 110.0)
+
+        assert reads == prs, f"every state-backed candidate is rich-read: {reads}"
+        assert res.acted == 1
+        state = WatermarkStore(path=store_path).load()
+        stamped = [k for k, v in state.items() if isinstance(v, dict) and v.get("last_polled_at")]
+        assert len(stamped) == 11, "every rich read stamped its cursor"
+        tick_receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert tick_receipt["merge_scan"] == {
+            "completed": True, "scanned": 11, "eligible": 1, "attempted": 1,
+        }
+        budget_events = [
+            e for e in deps["events"]
+            if e["type"] == "pr_watch_skipped" and e["data"].get("reason") == "tick-budget"
+        ]
+        assert budget_events == []
+
+    def test_fire_budget_skips_the_spawn_not_the_scan(self, tmp_path, monkeypatch):
+        """AC2-EDGE: a merge/review decision on a tick with less than
+        _FIRE_FLOOR_S of phase left emits fire-budget, fires nothing, and the
+        iteration still lands last_seen_state and the scan still counts the
+        candidate as scanned."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+        from fno.pr_watch._state import WatermarkStore
+
+        candidates = [_make_candidate(pr_number=7, repo_dir=tmp_path)]
+        deps = _make_tick_deps(
+            tmp_path, candidates=candidates,
+            obs_map={7: _make_obs(pr_number=7, state="OPEN",
+                                  latest_review_ts="2026-06-14T11:00:00Z")},
+        )
+        store_path = self._seed(tmp_path, [7])
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+        # 35s of phase left -> _ritual_timeout() = 25 < _FIRE_FLOOR_S.
+        monkeypatch.setattr(d, "_phase_deadline", clock["t"] + 35.0)
+        reads = self._counting_reads(deps, clock)
+
+        res = self._tick(tmp_path, deps, monkeypatch, store_path,
+                         deadline=clock["t"] + 600.0)
+
+        assert reads == [7], "the scan still reaches the candidate"
+        assert res.acted == 0
+        assert deps["fired"] == [], "no spawn may fire without fire budget"
+        skipped = [
+            e["data"].get("reason") for e in deps["events"]
+            if e["type"] == "pr_watch_skipped"
+        ]
+        assert skipped == ["fire-budget"]
+        state = WatermarkStore(path=store_path).load()
+        entry = state["owner/repo#7"]
+        assert entry.get("last_seen_state") == "OPEN"
+        assert entry.get("last_polled_at"), "the cursor stamps even on a skipped fire"
+        tick_receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert tick_receipt["merge_scan"] == {
+            "completed": True, "scanned": 1, "eligible": 0, "attempted": 0,
+        }
+
+    def test_parked_prefix_costs_no_rich_read(self, tmp_path, monkeypatch):
+        """AC3-EDGE: parked PRs 1300 and 1597 precede an actionable candidate
+        at the budget boundary. Neither invokes read_pr_state_fn; the later
+        actionable PR is observed; no tick-budget fires on a cheap row."""
+        prs = [1300, 1597, 42]
+        candidates = [_make_candidate(pr_number=n, repo_dir=tmp_path) for n in prs]
+        deps = _make_tick_deps(tmp_path, candidates=candidates)
+        store_path = self._seed(tmp_path, prs, parked_prs={1300, 1597})
+
+        reads = self._counting_reads(deps, {"t": 0.0})
+        self._tick(tmp_path, deps, monkeypatch, store_path)
+
+        assert reads == [42], f"parked rows must not cost a rich read: {reads}"
+        budget_events = [
+            e for e in deps["events"]
+            if e["type"] == "pr_watch_skipped" and e["data"].get("reason") == "tick-budget"
+        ]
+        assert budget_events == [], "no tick-budget may fire on cheap disposals"
+
+
+# ---------------------------------------------------------------------------
+# Candidate read discipline: the candidate path stops re-reading merged PRs
+# every tick, and the open count reads the listing's answer, not stale rows.
+# ---------------------------------------------------------------------------
+
+
+class TestCandidateReadDiscipline:
+    """The listing's terminal answer lands on cached candidate rows, OPEN
+    candidates read first, and a recorded terminal outcome skips the read."""
+
+    @staticmethod
+    def _listing(not_open: set, open_keys: set = frozenset()):
+        def read(keys):
+            states = {}
+            for key in keys:
+                if key in not_open:
+                    states[key] = "NOT_OPEN"
+                elif key in open_keys:
+                    states[key] = "OPEN"
+                else:
+                    states[key] = "MERGED"
+            return states, 0
+
+        return read
+
+    def _tick(
+        self, tmp_path, deps, store_path, *, listing, deadline=None, ritual_fn=None,
+    ):
+        from fno.pr_watch._dispatch import tick
+
+        return tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=listing,
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            dispatch_deadline=deadline,
+            dispatch_ritual_fn=ritual_fn,
+        )
+
+    @staticmethod
+    def _counting_reads(deps, clock):
+        base_read = deps["read_pr_state"]
+        reads: list[int] = []
+
+        def counting_read(candidate, **kw):
+            reads.append(candidate.pr_number)
+            clock["t"] += 1.0
+            return base_read(candidate, **kw)
+
+        deps["read_pr_state"] = counting_read
+        return reads
+
+    def test_listing_answer_lands_on_cached_candidate_row(self, tmp_path):
+        """A candidate row frozen OPEN adopts the listing's NOT_OPEN, so the
+        receipt's open_prs stops counting a PR that merged weeks ago."""
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(tmp_path, candidates=[candidate])
+
+        result = self._tick(
+            tmp_path, deps, store_path,
+            listing=self._listing({"owner/repo#1"}),
+            deadline=time.monotonic() - 1,
+        )
+
+        row = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert row["last_seen_state"] == "NOT_OPEN"
+        assert result.open_prs == 0
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["open_prs"] == 0
+
+    def test_failed_listing_preserves_cached_candidate_rows(self, tmp_path):
+        """sweep_failures 1: UNKNOWN writes nothing; rows keep the old answer
+        until a healthy sweep corrects them."""
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(tmp_path, candidates=[candidate])
+
+        result = self._tick(
+            tmp_path, deps, store_path,
+            listing=lambda keys: ({key: "UNKNOWN" for key in keys}, 1),
+            deadline=time.monotonic() - 1,
+        )
+
+        row = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert row["last_seen_state"] == "OPEN"
+        assert result.open_prs == 1
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["sweep_failures"] == 1
+
+    def test_open_candidate_jumps_the_merged_queue_under_budget(self, tmp_path, monkeypatch):
+        """20 merged candidates ahead of 1 OPEN in discovery order, budget one
+        read: the OPEN candidate is the one that gets it."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+
+        merged = [
+            _make_candidate(pr_number=n, node_id=f"x-{n:08d}", repo_dir=tmp_path)
+            for n in range(1, 21)
+        ]
+        open_cand = _make_candidate(pr_number=99, node_id="x-00000063", repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[*merged, open_cand],
+            obs_map={
+                **{n: _make_obs(n, "MERGED") for n in range(1, 21)},
+                99: _make_obs(99, "OPEN"),
+            },
+            merge_ready=False,
+        )
+        reads = self._counting_reads(deps, clock)
+
+        # The OPEN PR is already tracked; a first-seen OPEN row would be
+        # baselined in the batch loop and never rich-read this tick.
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#99", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+
+        self._tick(
+            tmp_path, deps, store_path,
+            listing=self._listing({f"owner/repo#{n}" for n in range(1, 21)},
+                                  open_keys={"owner/repo#99"}),
+            # read floor is 15s, each read costs 1s: exactly one read fits.
+            deadline=clock["t"] + 15.5,
+        )
+
+        assert reads == [99]
+
+    def test_budget_break_advances_cursor_across_ticks(self, tmp_path, monkeypatch):
+        """4 unhandled NOT_OPEN candidates, 2 reads per tick: the second tick
+        reads the two candidates the first could not reach."""
+        from types import SimpleNamespace
+
+        import fno.pr_watch._dispatch as d
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+
+        candidates = [
+            _make_candidate(pr_number=n, node_id=f"x-{n:08d}", repo_dir=tmp_path)
+            for n in range(1, 5)
+        ]
+        deps = _make_tick_deps(
+            tmp_path, candidates=candidates,
+            obs_map={n: _make_obs(n, "MERGED") for n in range(1, 5)},
+            merge_ready=False,
+        )
+        reads = self._counting_reads(deps, clock)
+        listing = self._listing({f"owner/repo#{n}" for n in range(1, 5)})
+        store_path = tmp_path / "state.json"
+
+        # Two reads per tick: read floor 15s, each read 1s on the fake clock.
+        self._tick(tmp_path, deps, store_path, listing=listing,
+                   deadline=clock["t"] + 16.5)
+        self._tick(tmp_path, deps, store_path, listing=listing,
+                   deadline=clock["t"] + 16.5)
+
+        assert reads == [1, 2, 3, 4]
+
+    def test_handled_candidate_skips_the_rich_read(self, tmp_path):
+        """A merged candidate whose ritual already ran is read once; the memo
+        then silences it while the listing keeps saying NOT_OPEN."""
+        from fno.post_merge_route import PostMergeDispatchResult
+        from fno.pr_watch._dispatch import _delivery_state_path
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[candidate], obs_map={1: _make_obs(1, "MERGED")},
+        )
+        reads = self._counting_reads(deps, {"t": 0.0})
+
+        def fake_ritual(cand, obs, fire):
+            return PostMergeDispatchResult(
+                "already-dispatched", cand.pr_number,
+                short_id="abcd1234", detail="marker-exists",
+            )
+
+        listing = self._listing({"owner/repo#1"})
+        self._tick(tmp_path, deps, store_path, listing=listing, ritual_fn=fake_ritual)
+        self._tick(tmp_path, deps, store_path, listing=listing, ritual_fn=fake_ritual)
+
+        assert reads == [1]
+        rec = json.loads(_delivery_state_path(store_path).read_text())["owner/repo#1"]
+        assert rec["handled"] == "MERGED"
+        second_tick_skips = [
+            e["data"]["reason"] for e in deps["events"]
+            if e["type"] == "pr_watch_skipped"
+        ]
+        assert second_tick_skips.count("already-dispatched") == 1, (
+            "the memo skip must be silent; the one receipt came from tick one"
+        )
+
+    def test_merge_not_ready_is_not_terminal_and_is_read_again(self, tmp_path):
+        """A merged candidate whose readiness said not-ready keeps the retry
+        path: no memo, and the next tick reads it again."""
+        from fno.pr_watch._dispatch import _delivery_state_path
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[candidate], obs_map={1: _make_obs(1, "MERGED")},
+            merge_ready=False,
+        )
+        reads = self._counting_reads(deps, {"t": 0.0})
+
+        listing = self._listing({"owner/repo#1"})
+        self._tick(tmp_path, deps, store_path, listing=listing)
+        self._tick(tmp_path, deps, store_path, listing=listing)
+
+        assert reads == [1, 1]
+        rec = json.loads(_delivery_state_path(store_path).read_text())["owner/repo#1"]
+        assert "handled" not in rec
+
+    def test_reopened_candidate_gets_a_fresh_read(self, tmp_path):
+        """A handled candidate the listing now calls OPEN falls through the
+        memo skip and gets the rich read."""
+        from fno.pr_watch._dispatch import _delivery_state_path
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        _delivery_state_path(store_path).write_text(json.dumps(
+            {"owner/repo#1": {"handled": "MERGED", "retries": 0, "parked": None}}
+        ))
+        # A row already tracks the PR; a first-seen OPEN row would be
+        # baselined in the batch loop and never rich-read this tick.
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path, candidates=[candidate], obs_map={1: _make_obs(1, "OPEN")},
+        )
+        reads = self._counting_reads(deps, {"t": 0.0})
+
+        self._tick(tmp_path, deps, store_path,
+                   listing=self._listing(set(), open_keys={"owner/repo#1"}))
+
+        assert reads == [1]
+        row = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert row["last_seen_state"] == "OPEN"

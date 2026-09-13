@@ -11,6 +11,7 @@ fn deadbeef_member() -> crate::squad_store::StoredMember {
         worker: None,
         harness: None,
         harness_session_id: None,
+        pane_id: None,
     }
 }
 
@@ -298,6 +299,7 @@ fn conflicting_squad_does_not_discard_a_fresh_disjoint_snapshot() {
         worker: None,
         harness: None,
         harness_session_id: None,
+        pane_id: None,
     };
     crate::squad_store::upsert("sq", "", &["/a".into()], &[newer_member]).unwrap();
     older.session.squad_mut(2).unwrap().tabs[0].name = Some("fresh-local".into());

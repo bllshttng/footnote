@@ -31,7 +31,6 @@ from pathlib import Path
 import pytest
 
 from fno.agents import rm_notice
-from fno.agents.dispatch import rm_agent
 from fno.agents.registry import AgentEntry, load_registry, update_registry
 
 # A full claude session uuid and the 8-hex short id an operator actually peeks
@@ -90,43 +89,6 @@ def _names() -> list[str]:
 # --------------------------------------------------------------------------
 # AC1-HP / AC2-ERR: the warning precedes the teardown
 # --------------------------------------------------------------------------
-
-
-def test_rm_warns_before_the_teardown_and_names_adopt(
-    isolated_state, monkeypatch, capsys
-):
-    """AC1-HP: the notice is written BEFORE `claude rm` is invoked, not after.
-
-    Ordering is the whole point: a warning printed after the shellout tells an
-    operator about a loss they can no longer decline. The recorder below
-    captures the stderr length at shellout time, so the assertion is on
-    sequence, not merely on both things happening.
-    """
-    _seed_row()
-    seen_before_shellout: dict[str, str] = {}
-
-    import sys
-
-    from fno.agents.harnesses import claude as claude_mod
-
-    def fake_rm(short_id, *, timeout=30.0):
-        seen_before_shellout["stderr"] = sys.stderr.getvalue()  # type: ignore[attr-defined]
-        seen_before_shellout["short_id"] = short_id
-        return (0, "")
-
-    monkeypatch.setattr(claude_mod, "claude_rm", fake_rm)
-    monkeypatch.setattr("fno.agents.dispatch.is_provider_available", lambda _p: True)
-
-    rm_agent("reaped-worker", force=True)
-
-    # Positive markers, not an absence: assert the exact strings the recovery
-    # needs, so a crashed writer that prints nothing cannot pass as a warning.
-    warned = seen_before_shellout["stderr"]
-    assert SESSION_ID in warned, warned
-    assert "fno agents adopt" in warned, warned
-    assert "resume handle" in warned, warned
-    assert seen_before_shellout["short_id"] == SHORT_ID
-    assert "reaped-worker" not in _names()
 
 
 def test_rm_notice_omits_a_row_with_no_handle(isolated_state):
@@ -292,13 +254,12 @@ def test_the_gate_resolves_a_short_id_not_just_an_exact_name(isolated_state):
         assert row.name == "reaped-worker", token
 
 
-def test_the_notice_is_written_once_across_the_seam_and_dispatch(
-    isolated_state, monkeypatch
-):
-    """The seam warns, then the Python route falls through to rm_agent.
+def test_the_seam_marks_its_notice_shown(isolated_state, monkeypatch):
+    """The seam writes the notice once and stamps NOTICE_SHOWN_ENV.
 
-    Both would write the same block, which is the double-print hazard the seam
-    already documents for the env-scrub spawn warning.
+    The env marker's only reader was the deleted Python rm twin; the stamp
+    stays so a future second writer below the seam can key on it without a
+    new contract.
     """
     _seed_row()
     seam_err = _FakeTTY()
@@ -309,17 +270,6 @@ def test_the_notice_is_written_once_across_the_seam_and_dispatch(
     assert env.get(rm_notice.NOTICE_SHOWN_ENV) == "1"
 
     monkeypatch.setenv(rm_notice.NOTICE_SHOWN_ENV, "1")
-    from fno.agents.harnesses import claude as claude_mod
-
-    dispatch_err: list[str] = []
-    monkeypatch.setattr(claude_mod, "claude_rm", lambda sid, *, timeout=30.0: (0, ""))
-    monkeypatch.setattr("fno.agents.dispatch.is_provider_available", lambda _p: True)
-    monkeypatch.setattr(
-        "fno.agents.dispatch.sys.stderr",
-        type("W", (), {"write": lambda _s, t: dispatch_err.append(t)})(),
-    )
-    rm_agent("reaped-worker", force=True)
-    assert not any("resume handle" in t for t in dispatch_err), dispatch_err
 
 
 def test_assume_yes_env_silences_the_prompt_without_forcing(isolated_state):
@@ -363,35 +313,23 @@ def test_a_prompt_nobody_can_read_is_never_asked(isolated_state):
 # --------------------------------------------------------------------------
 
 
-def test_transcript_survives_rm_and_the_short_id_still_resolves(
-    isolated_state, tmp_path, monkeypatch
-):
-    """AC2-HP: rm takes the row, not the conversation, and adopt can find it.
+def test_the_store_probe_resolves_a_reaped_short_id(isolated_state, tmp_path, monkeypatch):
+    """Adopt's recovery is real: the harness store probe still answers for the
+    short id once the row is gone.
 
-    This is the claim every notice in this change makes. `adopt`'s third
-    resolution step is the harness store probe, so if the probe still answers
-    for the short id after a reap, the advertised recovery is real. Asserting
-    it here rather than trusting the string.
+    `adopt`'s third resolution step is the harness store probe, so if the
+    probe answers for the short id of a row that no longer exists, every
+    `fno agents adopt` hint the notices print is a promise the tool keeps.
+    (The rm half of the old round trip is Rust-owned now; the crate's index
+    tests pin that rm drops the index record, never the transcript.)
     """
     from fno.agents.store_fallback import probe_stores
 
-    transcript = _seed_transcript(tmp_path, monkeypatch)
-    _seed_row()
+    _seed_transcript(tmp_path, monkeypatch)
 
-    from fno.agents.harnesses import claude as claude_mod
-
-    monkeypatch.setattr(claude_mod, "claude_rm", lambda sid, *, timeout=30.0: (0, ""))
-    monkeypatch.setattr("fno.agents.dispatch.is_provider_available", lambda _p: True)
-
-    assert probe_stores(SHORT_ID), "precondition: the store resolves the short id"
-
-    rm_agent("reaped-worker", force=True)
-
-    assert "reaped-worker" not in _names(), "the registry row is gone"
-    assert transcript.exists(), "the transcript is NOT what rm removes"
     hits = probe_stores(SHORT_ID)
     assert [h.session_id for h in hits] == [SESSION_ID], (
-        "adopt's store probe must still answer for the short id after a reap; "
+        "adopt's store probe must answer for the short id of a reaped row; "
         "otherwise every `fno agents adopt` hint this change prints is a lie"
     )
 

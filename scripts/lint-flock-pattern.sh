@@ -7,7 +7,7 @@
 # the helper `with_agent_lock_and_entry` itself which is the sanctioned
 # place to call both.
 #
-# Why this exists: the original stop_agent / rm_agent implementations
+# Why this exists: the original stop_agent implementation
 # pre-loaded the registry entry, acquired the per-agent flock, then
 # re-loaded the entry post-lock. The pre-flock snapshot was a TOCTOU
 # race seed — a future contributor that forgot the post-lock re-read

@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from fno.claims.self_identity import resolve_self_identity as _resolve_self_identity
-from fno.harness_identity import canonical_handle
 
 _TAIL_BYTES = 256 * 1024
 _EXPANDED_TAIL_BYTES = 2 * 1024 * 1024
@@ -122,6 +121,13 @@ def resolve_self_handle(
     env: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
     """Return this process's proven harness handle, or omit it when ambiguous."""
+    # Imported per call, never at module scope: a module-level from-import
+    # binds whatever canonical_handle pointed to at first import, so a test
+    # monkeypatching harness_identity.canonical_handle around this module's
+    # first import poisons every later caller in the worker process (the same
+    # regression reply_resolve.py fixed).
+    from fno.harness_identity import canonical_handle
+
     ident = resolve_self_identity(env)
     if ident.session_id and ident.harness:
         return canonical_handle(ident.session_id)

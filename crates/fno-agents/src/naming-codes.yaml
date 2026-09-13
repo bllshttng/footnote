@@ -1,0 +1,63 @@
+# The x-84b2 dispatch-provenance vocabulary: data behind
+# cli/src/fno/agents/naming.py, the single owner of worker-name generation.
+# A code here is contract, not decoration: autonomy status, the CI provenance
+# audit, and `fno agents name --source/--verb` all read this table.
+schema_version: 1
+sources:
+  # ab covers BOTH active-backlog rows (parallel fill + mission converge):
+  # same owner, same gate; the name names the source, not the internal branch.
+  - ab   # active-backlog daemon
+  - ac   # merge-triggered auto-continue
+  - sob  # spawn on blueprint
+  - rd   # reconcile de-stub
+  - th   # spawn_think
+  - pm   # post-merge judgment
+  - pw   # pr-watch
+  - rec  # recovery sweep
+  - kg   # keep-going
+  - gr   # groom
+  - ro   # restart orphan revive
+  - ev   # evals runner
+  - kl   # king loop
+  - oh   # provider outage handoff
+  - sh   # target self-handoff
+  - ex   # execute foreign wave
+  - jn   # backlog join (operator verb)
+verbs:
+  - t   # target
+  - bp  # blueprint
+  - r   # research/review
+  - th  # think
+  - f   # fix
+# Harness-map work-verb words -> codes; `builtin` is the no-declared-verb
+# target path. One table so no producer keeps a second mapping that drifts.
+word_codes:
+  target: t
+  blueprint: bp
+  review: r
+  research: r
+  think: th
+  fix: f
+  builtin: t
+# Every dispatch path with its codes. verb "resolved" = decided at dispatch
+# time from the harness-map receipt. The CI audit refuses when a path loses
+# its row or the sob/ac split and the two ab rows stop holding.
+provenance:
+  - { site: "dispatch_lanes (parallel fill)",      source: ab,  verb: resolved }
+  - { site: "epic converge (mission drain)",       source: ab,  verb: resolved }
+  - { site: "advance (node-walk)",                 source: ac,  verb: resolved }
+  - { site: "spawn on blueprint",                  source: sob, verb: resolved }
+  - { site: "reconcile_dispatch (G4 de-stub)",     source: rd,  verb: t }
+  - { site: "spawn_think (context /think)",        source: th,  verb: th }
+  - { site: "post-merge ritual",                   source: pm,  verb: r }
+  - { site: "pr_watch (headless PR poll)",         source: pw,  verb: r }
+  - { site: "recovery sweep (crash respawn)",      source: rec, verb: resolved }
+  - { site: "keep_going (autonomous follow-up)",   source: kg,  verb: t }
+  - { site: "groom (_spawn_groom_worker)",         source: gr,  verb: th }
+  - { site: "restart (_revive_orphans)",           source: ro,  verb: resolved }
+  - { site: "evals runner",                        source: ev,  verb: th }
+  - { site: "king loop",                           source: kl,  verb: th }
+  - { site: "outage handoff",                      source: oh,  verb: t }
+  - { site: "target self-handoff",                 source: sh,  verb: t }
+  - { site: "execute foreign wave",                source: ex,  verb: t }
+  - { site: "backlog join",                        source: jn,  verb: t }

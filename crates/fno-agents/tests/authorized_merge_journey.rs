@@ -72,6 +72,9 @@ impl Probes for FakeGitHub {
     fn base_lineage(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
         ProbeOutcome::Clear
     }
+    fn merge_result(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+        ProbeOutcome::Clear
+    }
     fn checks_verdict(&self, _cwd: &Path, _pr: u64) -> String {
         "green".to_string()
     }

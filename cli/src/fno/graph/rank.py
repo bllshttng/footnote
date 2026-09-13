@@ -7,19 +7,23 @@ from typing import Optional
 import typer
 
 
-def _drain_receipt() -> list[dict]:
+def _drain_receipt() -> dict:
     """The Rust drain receipt (active-backlog-receipt), parsed.
 
-    Raises on an unreadable source so the caller can answer `unknown` instead
-    of pretending no dispatcher is live. Test seam: monkeypatch this, not a
-    subprocess.
+    Returns the x-338c reading shape (``targets``/``missions``/``skip_reason``);
+    a bare target list (a pre-338c binary) still parses, with the count for
+    ``missions`` and no zero-path. Raises on an unreadable source so the caller
+    can answer `unknown` instead of pretending no dispatcher is live. Test
+    seam: monkeypatch this, not a subprocess.
     """
     from fno.rust_binary import call_binary_json
 
     error, receipt = call_binary_json("active-backlog-receipt")
-    if error is not None or not isinstance(receipt, list):
-        raise RuntimeError(error or "non-list drain receipt")
-    return receipt
+    if error is None and isinstance(receipt, dict) and isinstance(receipt.get("targets"), list):
+        return receipt
+    if error is None and isinstance(receipt, list):
+        return {"targets": receipt, "missions": len(receipt), "skip_reason": None}
+    raise RuntimeError(error or "unreadable drain receipt")
 
 
 def _dispatch_note(task_id: str, graph_path) -> str | None:
@@ -31,8 +35,9 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
         entries = read_graph(graph_path)
         if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
             raise ValueError("graph read returned an unreadable shape")
+        reading = _drain_receipt()
         missions: list[str] = []
-        for target in _drain_receipt():
+        for target in reading["targets"]:
             mission = target.get("mission") if isinstance(target, dict) else None
             if mission is None:
                 continue
@@ -42,6 +47,20 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
         missions = sorted(set(missions))
         if any(task_id in descendants_of(entries, m) for m in missions):
             return None
+        # A switched-off drain is a config fact, not a mission fact: prescribe
+        # the config fix, never the epic lever that cannot work (x-338c).
+        if reading["skip_reason"] == "drain_disabled":
+            return (
+                f"no live dispatcher will take it (the drain is disabled in config; "
+                f"{reading['missions']} active missions); "
+                "Enable it: fno config set active_backlog.enabled true"
+            )
+        if reading["skip_reason"] == "bad_interval":
+            return (
+                f"no live dispatcher will take it (the drain interval is invalid; "
+                f"{reading['missions']} active missions); "
+                "Fix it: fno config set active_backlog.interval 5m"
+            )
         # The remedy, not just the diagnosis: name the one command that makes a
         # dispatcher take the node. With no epic parent it says so, so the note
         # never prints a command that cannot work.

@@ -228,7 +228,8 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     """A fresh send resolves the sender row through its mailbox address.
 
     The CLI passes the sender's canonical handle, not its registry label. The
-    envelope must still carry the spawn-recorded harness and full session id.
+    envelope must still carry the full session id (the harness rides the bus
+    record now, not the tag, x-d7cf).
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -284,7 +285,6 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     assert result.delivery == "hosted"
     assert len(captured) == 1
     envelope = captured[0]
-    assert f'harness="{wire_harness}"' in envelope
     assert f'from_session="{sender_session}"' in envelope
 
 
@@ -586,14 +586,14 @@ def test_dispatch_send_durable_fallback_preserves_sender_provenance(
 
     assert result.delivery == "durable"
     record = next(message for message in iter_messages() if message.id == result.msg_id)
-    assert f'harness="{wire_harness}"' in record.body
     assert f'from_session="{sender_session}"' in record.body
 
 
 def test_dispatch_send_keeps_unknown_for_unprovable_sender(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A fresh send without a registry proof keeps the explicit unknown floor."""
+    """A fresh send without a registry proof keeps the honest floors: the bare
+    name as `from`, and no reply address."""
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents import dispatch as dispatch_mod
@@ -624,7 +624,9 @@ def test_dispatch_send_keeps_unknown_for_unprovable_sender(
     assert result.delivery == "hosted"
     assert len(captured) == 1
     envelope = captured[0]
-    assert 'harness="unknown"' in envelope
+    # x-d7cf: the harness floor retired with the attribute; an unprovable
+    # sender shows the bare name and no reply address.
+    assert envelope.startswith('<fno_mail from="unregistered-sender" ')
     assert "from_session=" not in envelope
 
 
@@ -2458,13 +2460,14 @@ def test_dispatch_send_agent_lock_timeout_queues_durable(
     assert "hello" in threads[0].messages[0].body
 
 
-def test_dispatch_send_agent_lock_timeout_reserves_the_pair_budget(
+def test_dispatch_send_agent_lock_timeout_leaves_no_ledger(
     tmp_path: Path, monkeypatch
 ) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno import paths
+    from fno.agents.dispatch import dispatch_send
 
     body = " ".join("word" for _ in range(79))
     _fail_first_lock_acquire(monkeypatch)
@@ -2478,52 +2481,21 @@ def test_dispatch_send_agent_lock_timeout_reserves_the_pair_budget(
     )
     assert first.delivery == "durable"
     assert first.reason == "agent-lock-timeout"
-
-    with pytest.raises(DispatchAskError) as raised:
-        dispatch_send(
-            name="red",
-            message=body,
-            provider=None,
-            cwd=tmp_path,
-            lock_timeout=0.2,
-            from_name="sender",
-        )
-
-    assert raised.value.exit_code == 1
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in str(
-        raised.value
+    assert not (paths.bus_dir() / "word-budget").exists(), (
+        "an ordinary send reserves nothing, even on the timeout path"
     )
 
 
-def test_dispatch_send_lock_timeout_budget_refusal_clears_dispatch_context(
+def test_dispatch_send_control_refusal_clears_dispatch_context(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from contextlib import contextmanager
-
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
     from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import DispatchAskError, dispatch_send
-    from fno.agents.lock import AgentLockTimeout
 
-    real_hold = dispatch_mod.hold_agent_lock
-    calls = 0
-
-    @contextmanager
-    def _timeout_then_grace(lock_name, registry_path, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls % 2 == 1:
-            raise AgentLockTimeout(
-                name=lock_name,
-                timeout=kwargs.get("timeout", 0.1),
-            )
-        with real_hold(lock_name, registry_path, **kwargs) as handle:
-            yield handle
-
-    monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _timeout_then_grace)
-    body = " ".join("word" for _ in range(79))
+    body = "control: " + " ".join("word" for _ in range(50))
 
     first = dispatch_send(
         name="red",
@@ -2547,17 +2519,18 @@ def test_dispatch_send_lock_timeout_budget_refusal_clears_dispatch_context(
         )
 
     assert raised.value.exit_code == 1
+    assert "refused: control word budget" in str(raised.value)
     assert dispatch_mod._DISPATCH_CTX.get() is None
 
 
-def test_registered_sender_normal_and_timeout_paths_share_canonical_budget(
+def test_registered_sender_normal_and_timeout_paths_write_no_ledger(
     tmp_path: Path, monkeypatch
 ) -> None:
     use_tmpdir(monkeypatch, tmp_path)
 
-    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno import paths
+    from fno.agents.dispatch import dispatch_send
     from fno.agents.registry import AgentEntry, write_registry
-    from fno.bus.log import iter_messages
 
     write_registry(
         [
@@ -2597,23 +2570,19 @@ def test_registered_sender_normal_and_timeout_paths_share_canonical_budget(
     assert first.delivery == "durable"
 
     _fail_first_lock_acquire(monkeypatch)
-    with pytest.raises(DispatchAskError) as raised:
-        dispatch_send(
-            name="red",
-            message=body,
-            provider=None,
-            cwd=tmp_path,
-            lock_timeout=0.2,
-            from_name="sender-worker",
-        )
-
-    assert raised.value.exit_code == 1
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in str(
-        raised.value
+    second = dispatch_send(
+        name="red",
+        message=body,
+        provider=None,
+        cwd=tmp_path,
+        lock_timeout=0.2,
+        from_name="sender-worker",
     )
-    rows = [row for row in iter_messages(warn=False) if row.kind == "send"]
-    assert len(rows) == 1
-    assert rows[0].from_ == "cccccccc"
+    assert second.delivery == "durable"
+    assert second.reason == "agent-lock-timeout"
+    assert not (paths.bus_dir() / "word-budget").exists(), (
+        "neither the normal path nor the timeout path resurrects a ledger"
+    )
 
 
 def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(
@@ -3198,3 +3167,199 @@ def test_lock_timeout_queue_keeps_a_bus_only_row_on_its_designed_lane(
     assert result.reason == BUS_ONLY_POLICY, (
         f"a designed-queue row must keep its own reason, got {result.reason!r}"
     )
+
+
+
+# ---------------------------------------------------------------------------
+# AC2: `mail team` is the one writer's shim
+# ---------------------------------------------------------------------------
+
+def _team_invoke(monkeypatch, args: list[str]):
+    from fno.mail.cli import mail_app
+
+    return CliRunner().invoke(mail_app, args)
+
+
+def _team_fake_writer(monkeypatch, returncode: int = 0, stdout: str = "", stderr: str = ""):
+    """Capture the announce send subprocess; returns the list of invocations."""
+    import shutil
+    import subprocess
+
+    # CI has no fno-agents binary installed; the shim's on-PATH check must
+    # see one or every team test dies before the writer is invoked.
+    monkeypatch.setattr(
+        shutil, "which", lambda name: f"/tmp/{name}" if name == "fno-agents" else None
+    )
+
+    calls: list[dict[str, object]] = []
+
+    class _Proc:
+        pass
+
+    def fake_run(args, **kwargs):
+        calls.append({
+            "args": args,
+            "input": kwargs.get("input"),
+            "stdout": stdout,
+            "stderr": stderr,
+            "returncode": returncode,
+        })
+        proc = _Proc()
+        proc.returncode = returncode
+        proc.stdout = stdout
+        proc.stderr = stderr
+        return proc
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def test_team_shim_invokes_the_one_writer_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-HP: dispatch_send is never called; one announce send runs with the
+    body on stdin and its stdout/exit relayed."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import dispatch as dispatch_mod
+
+    def explode(**_kwargs):
+        raise AssertionError("dispatch_send must never run on the announce path")
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_send", explode)
+    calls = _team_fake_writer(
+        monkeypatch,
+        stdout='{"id":"msg-test","scope":"all","audience":3}\n',
+    )
+
+    result = _team_invoke(
+        monkeypatch, ["team", "--scope", "all", "one bus line", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1, calls
+    argv = calls[0]["args"]
+    assert argv[1:3] == ["announce", "send"]
+    assert "--scope" in argv and "all" in argv
+    assert "--sender-kind" in argv
+    assert calls[0]["input"] == "one bus line"
+    assert "msg-test" in result.output
+
+
+def test_team_sender_kind_is_agent_only_for_an_owned_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-HP: a resolvable owned harness identity stamps agent; a bare shell
+    (no markers) stamps operator."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.harness_identity as hi_mod
+
+    from fno.harness_identity import OwnedHarnessIdentity
+
+    calls = _team_fake_writer(monkeypatch)
+
+    def owned(env=None, **_kw):
+        return OwnedHarnessIdentity(
+            session_id="abcd1234-1111-2222-3333-444455556666", harness="claude"
+        )
+
+    monkeypatch.setattr(hi_mod, "resolve_owned_identity", owned)
+    _team_invoke(monkeypatch, ["team", "--scope", "all", "from a session"])
+    owned_argv = calls[-1]["args"]
+    assert owned_argv[owned_argv.index("--sender-kind") + 1] == "agent"
+
+    def empty(env=None, **_kw):
+        return OwnedHarnessIdentity(session_id=None, harness=None)
+
+    monkeypatch.setattr(hi_mod, "resolve_owned_identity", empty)
+    _team_invoke(monkeypatch, ["team", "--scope", "all", "from a shell"])
+    shell_argv = calls[-1]["args"]
+    assert shell_argv[shell_argv.index("--sender-kind") + 1] == "operator"
+
+
+def test_team_passthrough_flags_reach_the_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-HP: --subject / --expires / --urgent are forwarded verbatim."""
+    use_tmpdir(monkeypatch, tmp_path)
+    calls = _team_fake_writer(monkeypatch)
+
+    result = _team_invoke(
+        monkeypatch,
+        [
+            "team", "--scope", "kings", "shift change",
+            "--subject", "maintenance", "--expires", "45m", "--urgent",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    argv = calls[-1]["args"]
+    assert argv[argv.index("--subject") + 1] == "maintenance"
+    assert argv[argv.index("--expires") + 1] == "45m"
+    assert "--urgent" in argv
+
+
+def test_team_style_refusal_fires_before_the_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-ERR: a body failing the style lint exits non-zero and the Rust
+    writer is never invoked."""
+    use_tmpdir(monkeypatch, tmp_path)
+    calls = _team_fake_writer(monkeypatch)
+    bad_body = "Stop work; report where you are."
+
+    result = _team_invoke(
+        monkeypatch, ["team", "--scope", "all", bad_body]
+    )
+
+    assert result.exit_code != 0, result.output
+    assert calls == [], "the writer must not run past a refused body"
+
+
+def test_team_body_cap_refused_before_the_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-ERR: an over-cap body exits non-zero before any subprocess."""
+    use_tmpdir(monkeypatch, tmp_path)
+    calls = _team_fake_writer(monkeypatch)
+
+    result = _team_invoke(
+        monkeypatch, ["team", "--scope", "all", "x" * (1024 * 1024 + 1)]
+    )
+
+    assert result.exit_code != 0, result.output
+    assert calls == []
+
+
+def test_team_writer_failure_relays_the_exit_and_stderr(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-ERR: a refused announce (authority/rate limit) surfaces as a
+    non-zero exit with the writer's own words."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _team_fake_writer(
+        monkeypatch,
+        returncode=2,
+        stderr="announce: refused: rate limit is 6 announcements per rolling hour\n",
+    )
+
+    result = _team_invoke(monkeypatch, ["team", "--scope", "all", "spam"])
+
+    assert result.exit_code == 2, result.output
+    assert "rate limit" in result.output
+
+
+def test_team_empty_scope_relays_the_writer_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-EDGE: an empty scope never reports fleet-wide success."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _team_fake_writer(
+        monkeypatch,
+        returncode=1,
+        stderr="announce send: no live recipients in scope 'all'\n",
+    )
+
+    result = _team_invoke(monkeypatch, ["team", "--scope", "all", "nobody home"])
+
+    assert result.exit_code == 1, result.output
+    assert "no live recipients" in result.output

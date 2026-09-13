@@ -203,7 +203,7 @@ pub(crate) fn apply_opencode_variant_at(
 /// is built by `opencode_run_tail`: a footnote slash command rides `--command`
 /// (opencode expands the plugin command), a prose prompt stays the message
 /// positional (x-de43 / codex P1).
-fn build_opencode_argv(prompt: &str, model: Option<&str>) -> Vec<String> {
+fn build_opencode_argv(prompt: &str, model: Option<&str>, harness_args: &[String]) -> Vec<String> {
     let mut argv = vec![
         "opencode".to_string(),
         "run".to_string(),
@@ -213,6 +213,9 @@ fn build_opencode_argv(prompt: &str, model: Option<&str>) -> Vec<String> {
         argv.push("--model".to_string());
         argv.push(m.to_string());
     }
+    // Fenced tokens ride before the prompt tail so opencode's own parser
+    // reads them as flags.
+    argv.extend(harness_args.iter().cloned());
     argv.extend(crate::provider::opencode_run_tail(prompt));
     argv
 }
@@ -358,6 +361,7 @@ pub fn dispatch_opencode_once(
     timeout: Option<Duration>,
     model: Option<&str>,
     effort: Option<&str>,
+    harness_args: &[String],
 ) -> AskOutcome {
     use crate::claude_ask::{emit_event, py_repr, validate_spawn_inputs};
 
@@ -415,7 +419,7 @@ pub fn dispatch_opencode_once(
             return AskOutcome::err(error, 2);
         }
     }
-    let argv = build_opencode_argv(&full_prompt, model);
+    let argv = build_opencode_argv(&full_prompt, model, harness_args);
     let log_path = derive_log_path(home, name);
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -526,7 +530,7 @@ mod tests {
     fn argv_is_headless_run_bypass_with_prompt_last() {
         // Matches OpencodeProvider::create_argv (confirmed vs opencode v1.14.50).
         assert_eq!(
-            build_opencode_argv("do X", None),
+            build_opencode_argv("do X", None, &[]),
             vec![
                 "opencode",
                 "run",
@@ -546,7 +550,7 @@ mod tests {
         // flag to the CLI's argv parser, x-9d11 round 7); any other args keep
         // the one-positional shape (round 11).
         assert_eq!(
-            build_opencode_argv("/fno:target --no-merge x-abcd", None),
+            build_opencode_argv("/fno:target --no-merge x-abcd", None, &[]),
             vec![
                 "opencode",
                 "run",
@@ -561,7 +565,7 @@ mod tests {
         // No leading dash: no separator, one positional - multiword free-text
         // args reach the command exactly as before the separator existed.
         assert_eq!(
-            build_opencode_argv("/fno:blueprint my multi word idea", None),
+            build_opencode_argv("/fno:blueprint my multi word idea", None, &[]),
             vec![
                 "opencode",
                 "run",
@@ -576,7 +580,7 @@ mod tests {
     #[test]
     fn argv_threads_model_before_prompt() {
         assert_eq!(
-            build_opencode_argv("m", Some("anthropic/claude-x")),
+            build_opencode_argv("m", Some("anthropic/claude-x"), &[]),
             vec![
                 "opencode",
                 "run",

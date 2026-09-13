@@ -157,7 +157,7 @@ class TestListWithRecords:
 
 
 # ---------------------------------------------------------------------------
-# The usage=<age> column (distinct from snapshot=<age>, the
+# The usage=<age> column (distinct from cred-snapshot=<age>, the
 # credential blob age) and the DISARMED footer.
 # ---------------------------------------------------------------------------
 
@@ -255,6 +255,45 @@ class TestListUsageColumn:
         assert row["usage_age_s"] is None
         assert row["usage_stale"] is False
         assert row["usage_ttl_seconds"] == 300
+
+    def test_lock_line_names_the_lock_and_the_credential_snapshot(self, tmp_path: Path):
+        """The misread that filed the node: `headroom=exhausted` and
+        `snapshot=15d` rendered as one sentence, so the credential blob age
+        read as the verdict's provenance. The headroom now names its own
+        source, and the credential column can no longer be read as it."""
+        import json as _json
+        import time
+
+        settings_path = tmp_path / ".fno" / "config.toml"
+        config = _two_record_config()
+        # only a managed record prints the credential-snapshot column
+        config["config"]["providers"]["records"] = [
+            {"id": "makers", "name": "Makers", "harness": "claude",
+             "auth": "managed", "priority": 100},
+        ]
+        config["config"]["providers"]["active"] = "makers"
+        _write_settings(settings_path, config)
+        state_path = tmp_path / "provider-runtime-state.json"
+        now = time.time()
+        state_path.write_text(_json.dumps({
+            "schema_version": 2,
+            "provider_health": {"makers": {
+                "provider_id": "makers", "backoff_level": 1,
+                "rate_limited_until": now + 3600, "last_error_at": now - 47 * 60,
+                "model_locks": {}}},
+        }), encoding="utf-8")
+
+        result = runner.invoke(
+            providers_app, ["list"],
+            env={"HOME": str(tmp_path), "PWD": str(tmp_path),
+                 "FNO_RUNTIME_STATE_PATH": str(state_path)},
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        line = next(ln for ln in result.output.splitlines() if "makers" in ln)
+        assert "headroom=exhausted(lock" in line
+        assert "cred-snapshot=" in line
+        assert "headroom=exhausted  snapshot=" not in line
 
 
 class TestListDisarmedFooter:
@@ -1111,7 +1150,7 @@ class TestListJson:
         assert cp["priority"] == 10
         assert cp["active"] is True
         assert "headroom" in cp        # 'unknown' allowed; the key must exist
-        assert "snapshot" in cp        # None for non-managed; key present
+        assert "cred-snapshot" in cp   # None for non-managed; key present
         assert by_id["gemini-backup"]["active"] is False
 
 
@@ -2375,3 +2414,199 @@ class TestUsageNamesTheServingAccount:
 
         assert "account_identity_mismatch" in result.output
         assert "identity: readyrule" not in result.output
+
+
+class TestListIdentityColumn:
+    """AC1/AC2 (x-3fc6): the accounts list answers who each row is really
+    signed in as, from the same binding owner usage and doctor read. The
+    stimulus was a live drift: list said `* makers headroom=ok` in the same
+    minute doctor reported the slot serving jason@readyrule.com."""
+
+    @staticmethod
+    def _pair_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        _write_settings(
+            tmp_path / ".fno" / "config.toml", _managed_pair_config("makers")
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        return tmp_path
+
+    @staticmethod
+    def _bind(record_id: str, tmp_path: Path) -> None:
+        from fno.adapters.providers import managed
+
+        managed.write_record_principal(
+            record_id,
+            {"account_uuid": f"acct-{record_id}", "organization_uuid": "org-1"},
+            tmp_path / ".fno" / "providers",
+        )
+
+    def test_mismatch_row_names_who_the_slot_really_serves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1-HP: stamp says makers, slot credential serves readyrule."""
+        from fno.adapters.providers import managed
+
+        self._pair_env(tmp_path, monkeypatch)
+        root = tmp_path / ".fno" / "providers"
+        managed.stamp_active_slot("claude", "makers", root)
+        self._bind("readyrule", tmp_path)
+        self._bind("makers", tmp_path)
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["{}"])
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": "acct-readyrule", "organization_uuid": "org-1",
+                 "email": "other@example.com"},
+                None,
+            ),
+        )
+
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+
+        assert result.exit_code == 0, result.output
+        makers_row = next(ln for ln in result.output.splitlines() if " makers " in ln)
+        readyrule_row = next(
+            ln for ln in result.output.splitlines() if " readyrule " in ln
+        )
+        assert "!serves readyrule" in makers_row
+        # identity is the last column, so the modal can take the row's tail verbatim.
+        assert makers_row.endswith("identity=!serves readyrule")
+        assert "!serves" not in readyrule_row
+        assert "identity=readyrule" in readyrule_row
+        # AC1-HP names doctor as the agreeing witness in the same store.
+        doctor = _invoke(["doctor", "-J"], cwd=tmp_path, home=tmp_path)
+        assert "slot-identity-drift" in doctor.output
+
+    def test_unprovable_identity_is_named_and_still_exits_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1-ERR: an unproven row renders ?<reason>, never an account name."""
+        from fno.adapters.providers import managed
+
+        self._pair_env(tmp_path, monkeypatch)
+        self._bind("readyrule", tmp_path)
+        self._bind("makers", tmp_path)
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: [])
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert "?no-slot-credential" in result.output
+        assert "!serves" not in result.output
+
+    def test_a_raised_identity_read_renders_no_observation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A read that raises is a failed observation, not a proven account."""
+        import fno.adapters.providers.binding as binding
+
+        self._pair_env(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            binding, "resolve_account_binding",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("keychain down")),
+        )
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert "?no-observation" in result.output
+        assert "!serves" not in result.output
+
+    def test_two_scoped_roots_on_one_principal_flag_shared_identity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1-EDGE: different credential roots observing one principal."""
+        from fno.adapters.providers import managed
+
+        dir_a = tmp_path / "cfg-a"
+        dir_b = tmp_path / "cfg-b"
+        _write_settings(
+            tmp_path / ".fno" / "config.toml",
+            {"config": {"providers": {"active": "scoped-a", "records": [
+                {"id": "scoped-a", "name": "scoped-a", "harness": "claude",
+                 "auth": "oauth_dir", "credentials_source": str(dir_a),
+                 "priority": 10},
+                {"id": "scoped-b", "name": "scoped-b", "harness": "claude",
+                 "auth": "oauth_dir", "credentials_source": str(dir_b),
+                 "priority": 20},
+            ]}}},
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        for rid in ("scoped-a", "scoped-b"):
+            self._bind(rid, tmp_path)
+        monkeypatch.setattr(managed, "slot_blobs", lambda harness, root: ["{}"])
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": "acct-shared", "organization_uuid": "org-1"},
+                None,
+            ),
+        )
+
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+
+        assert result.exit_code == 0, result.output
+        assert result.output.count("!shared-identity") == 2
+
+    def test_a_managed_pair_on_one_slot_never_flags_shared_identity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1-EDGE negative: one slot is one root, so no flag either row."""
+        from fno.adapters.providers import managed
+
+        self._pair_env(tmp_path, monkeypatch)
+        self._bind("readyrule", tmp_path)
+        self._bind("makers", tmp_path)
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["{}"])
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": "acct-shared", "organization_uuid": "org-1"},
+                None,
+            ),
+        )
+
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+
+        assert result.exit_code == 0, result.output
+        assert "shared-identity" not in result.output
+
+    def test_expired_snapshot_is_appended_to_the_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-record doctor findings ride the row as ` !<problem>`."""
+        import json as _json
+
+        self._pair_env(tmp_path, monkeypatch)
+        blob = _json.dumps({
+            "claudeAiOauth": {"accessToken": "t", "expiresAt": 1783352000000}
+        })
+        root = tmp_path / ".fno" / "providers"
+        for rid in ("readyrule", "makers"):
+            (root / rid).mkdir(parents=True)
+            (root / rid / "blob").write_text(blob)
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert result.output.count("!expired-credential") == 2
+
+    def test_json_without_the_flag_stays_byte_compatible_and_offline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2-HP: no flag, same keys, and no binding work at all."""
+        import json as _json
+
+        import fno.adapters.providers.binding as binding
+
+        self._pair_env(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            binding, "resolve_account_binding",
+            lambda *a, **k: pytest.fail("bare list -J must not resolve identity"),
+        )
+        result = _invoke(["list", "-J"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        rows = _json.loads(result.output)
+        assert {r["id"] for r in rows} == {"readyrule", "makers"}
+        assert all(set(r) == {
+            "id", "name", "harness", "auth", "priority", "active", "headroom",
+            "cred-snapshot", "usage_age_s", "usage_ttl_seconds", "usage_stale",
+        } for r in rows)

@@ -38,7 +38,8 @@ def gate_calls(monkeypatch):
             FakeGuard.released += 1
 
     def fake_run_gate(
-        name, substrate, *, force=False, no_wait=False, route_provider=None, node=None
+        name, substrate, *, force=False, no_wait=False, route_provider=None,
+        account=None,
     ):
         calls.append(
             {
@@ -47,7 +48,7 @@ def gate_calls(monkeypatch):
                 "force": force,
                 "no_wait": no_wait,
                 "route_provider": route_provider,
-                "node": node,
+                "account": account,
             }
         )
         return FakeGuard()
@@ -91,7 +92,7 @@ def test_bg_spawn_gates_as_bg_and_receipt_is_byte_identical(
             "force": False,
             "no_wait": False,
             "route_provider": None,
-            "node": None,
+            "account": None,
         }
     ]
     # Hand-rolled f-string receipt, byte-parity with the Rust path (LD10).

@@ -8,6 +8,8 @@
 /// row id (or the `(no harness row id)` placeholder); `row_present` only
 /// means something when `roster_known` holds; `warnings` is the snapshot's
 /// own warning text (partial-list marker, or the read's failure reason).
+/// `pane` is the row's mux ref as `(session, pane_id)` when it could name a
+/// pane; a ref with no session is not a pane address and reads as `None`.
 pub(crate) fn live_row_refusal(
     name: &str,
     row: &str,
@@ -16,15 +18,28 @@ pub(crate) fn live_row_refusal(
     roster_known: bool,
     row_present: bool,
     warnings: &str,
+    pane: Option<(&str, u64)>,
 ) -> String {
+    let pane = pane.filter(|(session, _)| !session.trim().is_empty());
     if harness_name != "claude" {
+        if let Some((session, pane_id)) = pane {
+            // stop cannot serve a pane worker (ruling d-658e6834), so name
+            // the pane-kill path rm itself re-checks: once the pane is gone
+            // the probe proves absence and rm proceeds with no --force.
+            return format!(
+                "agent {name} is still live. It is a pane worker; stop cannot serve it. \
+                 Kill the pane: `fno mux pane kill {session}:{pane_id}`. The registry \
+                 row survives that; re-run `fno agents rm {name}` and it proceeds on \
+                 its own once the pane is provably gone."
+            );
+        }
         format!(
             "agent {name} is still live. Stop it with `fno agents stop {name}`; rm \
              proceeds on its own once the row is gone. Forcing it through orphans a \
              live process and spends the row's resume handle. If stop answers no_op \
              (no addressable session behind the row), the row cannot prove liveness \
-             either way; the override for that case is documented in `fno agents rm \
-             --help`, not here."
+             either way; the override for that case is documented in \
+             `fno agents rm --help`, not here."
         )
     } else if harness_row_id_none {
         // claude_row_provably_absent short-circuits to `false` (not

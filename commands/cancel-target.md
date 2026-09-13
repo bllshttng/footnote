@@ -19,6 +19,8 @@ Cancels a target pipeline. Behavior depends on whether a state file exists:
   (postmortem + ledger + the backlog node returning to `ready`); the next
   `fno do target init` archives that terminal state cleanly.
 
+  The `ready` return is the claim's doing. The cancel terminal releases the run's `node:<id>` claim. That release closes the `do` row that was pinning the status.
+
 - **Orphan (no state file):** the session was driven off-ceremony (init
   skipped) or a prior cancel removed the file. Clearing the orphan block
   requires a genuine human-typed `/fno:target cancel` (the anti-forgery
@@ -51,8 +53,10 @@ if [[ -f "$STATE_FILE" ]]; then
     # Assert the sanctioned cancel signal. has_external_cancel_signal() honors a
     # .target-cancelled whose mtime is at or after the state file's created_at.
     # The hook then writes status: BLOCKED itself and exits cleanly on the next
-    # stop. We deliberately keep the state file.
-    touch "$SENTINEL"
+    # stop. We deliberately keep the state file. The payload names the author
+    # and reason so the resulting Interrupted line explains the cancel; a bare
+    # `touch` stays valid and reads as unattributed.
+    printf 'author: operator\nreason: cancelled via /fno:cancel-target\n' > "$SENTINEL"
     _EVENT_DATA="$(python3 -c 'import json,sys; print(json.dumps({"lane":"target","path":sys.argv[1],"reason":"operator"}))' "$SENTINEL" 2>/dev/null || true)"
     if [[ -n "$_EVENT_DATA" ]]; then
       fno doctor event emit -t cancel_signal_set -s target -d "$_EVENT_DATA" >/dev/null 2>&1 || \
@@ -94,9 +98,10 @@ else
 fi
 ```
 
-On the next stop, for a live session the hook reads `.target-cancelled` via
-`has_external_cancel_signal`, writes `status: BLOCKED`, generates a postmortem,
-returns the backlog node to `ready`, and allows a clean exit. For an orphan, a
-human-typed `/fno:target cancel` is honored via the tombstone;
-`init-target-state.sh` clears both `.target-cancelled` and the tombstone the
-next time a target session starts in this worktree.
+On the next stop, for a live session the hook reads `.target-cancelled` via `has_external_cancel_signal`, writes `status: BLOCKED`, generates a postmortem, returns the backlog node to `ready`, and allows a clean exit.
+
+The `Interrupted` finalize releases the run's `node:<id>` claim with `--stamp-do`. The release closes the `do` row that was pinning the status.
+
+The sentinel can carry a payload of `author:` / `reason:` lines. Loop-check echoes them in the Interrupted line and then deletes the sentinel, so one cancel terminates one run. A bare `touch` stays valid and reads as unattributed.
+
+For an orphan, a human-typed `/fno:target cancel` is honored via the tombstone. `init-target-state.sh` clears both `.target-cancelled` and the tombstone the next time a target session starts in this worktree.

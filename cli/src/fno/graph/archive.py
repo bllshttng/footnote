@@ -23,6 +23,7 @@ release rule fixes. Read-through fallback keeps the archived id resolvable.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from fno.graph.statuses import is_terminal_entry
@@ -260,3 +261,111 @@ def merge_into_archive(existing: list[Entry], new: list[Entry]) -> list[Entry]:
         else:
             order.append(e)
     return [by_id[x] if isinstance(x, str) else x for x in order]
+
+
+# -- retirement: postmortem receipts -----------------------------------------
+
+#: The retro-triage trailer a landed postmortem carries (source_pr=None is the
+#: postmortem shape). A literal match keeps graph/archive free of a retro
+#: import; the trailer has one writer (retro.land) and one reader (retro.dedup).
+_POSTMORTEM_TRAILER = "retro-triage source_pr=None"
+
+
+def retire_stale_postmortems(
+    entries: list[Entry], now: datetime, max_age_days: int = 30
+) -> "tuple[list[Entry], list[Entry]]":
+    """Close postmortem receipts that aged out untriaged: ``(entries, retired)``.
+
+    finalize mints one completion-eval node per session and nothing consumed
+    them (61 open receipts, 750 near-duplicate pairs). A receipt no human
+    touched within ``max_age_days`` closes by rule (status done, a ``retired``
+    marker); the next sweep removes it like any terminal row. Queued, claimed,
+    deferred, and non-idea rows are never touched. Pure: new dicts.
+    """
+    cutoff = now.timestamp() - max_age_days * 86400
+    patched: list[Entry] = []
+    retired: list[Entry] = []
+    for e in entries:
+        if not isinstance(e, dict) or e.get("status") != "idea":
+            patched.append(e)
+            continue
+        if e.get("queued_at") or e.get("locked_by") or e.get("completed_at"):
+            patched.append(e)
+            continue
+        if _POSTMORTEM_TRAILER not in str(e.get("details") or ""):
+            patched.append(e)
+            continue
+        created = _parse_ts(e.get("created_at"))
+        if created is None or created.timestamp() >= cutoff:
+            patched.append(e)
+            continue
+        retired.append({
+            **e,
+            "status": "done",
+            "completed_at": now.isoformat(),
+            "retired": "stale-postmortem-receipt",
+        })
+        patched.append(retired[-1])
+    return patched, retired
+
+
+# -- receipt helpers ----------------------------------------------------------
+
+_ARCHIVE_SKIP_REASONS = (
+    "referenced-by-open-node",
+    "related-peer-not-archived",
+    "too-recent",
+    "no-parseable-timestamp",
+)
+
+
+def _archive_bucket_counts(skipped: list) -> dict[str, int]:
+    """Tally ``skipped`` by ``_skip`` reason, zero-filled for every known one.
+
+    Zero-fill so a 0 reads as "checked, none held", not as an unmeasured line.
+    A reason outside ``_ARCHIVE_SKIP_REASONS`` still lands in the dict, so a
+    new ``_skip`` reason shows in the receipt instead of vanishing.
+    """
+    held = {reason: 0 for reason in _ARCHIVE_SKIP_REASONS}
+    for s in skipped:
+        held[s["_skip"]] = held.get(s["_skip"], 0) + 1
+    return held
+
+
+def _receipt_reason_order(held: dict[str, int]) -> list[str]:
+    extras = set(held) - set(_ARCHIVE_SKIP_REASONS)
+    return list(_ARCHIVE_SKIP_REASONS) + sorted(extras)
+
+
+def _last_sweep_line(archive_path: Path, now: datetime) -> str:
+    """Sweep freshness from the archive's newest ``archived_at`` stamp.
+
+    The newest completed_at trails today by the age gate, so it reads as a
+    stall; ``archived_at`` is the honest marker. A read failure answers
+    unknown, never a clean "none": an instrument that could not read says so.
+    """
+    from datetime import timedelta
+
+    from fno.graph.store import _read_json
+
+    if not archive_path.exists():
+        return "none on record"
+    try:
+        entries = _read_json(archive_path)
+        stamps = [e.get("archived_at") for e in entries if isinstance(e, dict)]
+        newest = max(
+            (parsed for parsed in (_parse_ts(s) for s in stamps if isinstance(s, str))
+             if parsed is not None),
+            default=None,
+        )
+    except Exception:  # noqa: BLE001 - the receipt must not crash on a bad archive
+        return "unknown (archive unreadable)"
+    if newest is None:
+        return "none stamped"
+    age = now - newest
+    text = (
+        "<1h ago" if age < timedelta(hours=1)
+        else f"{int(age.total_seconds() // 3600)}h ago" if age < timedelta(hours=48)
+        else f"{age.days}d ago"
+    )
+    return f"{newest.strftime('%Y-%m-%dT%H:%M:%SZ')} ({text})"

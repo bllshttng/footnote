@@ -8,6 +8,12 @@ See [What this substrate does NOT do](#what-this-substrate-does-not-do).
 
 ---
 
+## Is this page for you?
+
+You manage provider records, credential staging, or the dispatch env, or you are untangling the word `provider` across five axes. This page owns `fno config accounts` and the substrate's boundary: records, staging, and env construction, never automated rotation or failover. Misreading it makes you wait for a swap this substrate will never do.
+
+Not for: the full axis vocabulary, effort included. That is [architecture/axis-vocabulary.md](architecture/axis-vocabulary.md).
+
 ## The axes
 
 Several different things used to share the word `provider`. This document covers harness, provider, model, and account: see [docs/architecture/axis-vocabulary.md](architecture/axis-vocabulary.md) for the full set, including effort.
@@ -376,6 +382,10 @@ One question had four readers: which account will this claude launch bill? `reso
 The verdict is `matched`, `mismatch`, `ambiguous` or `unknown`. Only one of them refuses. A `mismatch` is a positive observation, so both launch env paths refuse with `account_identity_mismatch` before they spawn anything. An `unknown` never refuses. An unreachable profile endpoint must not ground the fleet, and an unpinned manual login keeps its permissive posture. What `unknown` forbids is a receipt naming an account as served. `doctor` and `fno config accounts usage` print `account_identity_unknown` with its cause instead.
 
 A reading is bound to the credential generation that produced it. Identity is proven before the usage request, which stops another account's numbers being fetched at all. A sign-in that lands after the request is a separate window, and a reading from it is discarded with `identity_changed`. The marker matters as much as the discard: a missing snapshot alone reads exactly like a probe that never ran.
+
+The accounts list and the Connections modal carry an identity column. The modal renders the cell that `fno config accounts list` prints, so one renderer states every token, and a row states who its credential is proved to serve. A matched row names its own record. A mismatch renders `!serves <record>`. The active stamp names the account that put a credential in the slot. The slot credential presents as the named record. The row shows both instead of papering over the gap. `?<reason>` marks anything unproved, and two credential roots observing one principal flag `!shared-identity`. A row never names an account it did not prove. The fix for a drift is the manual one: sign out and back in with a foreground `/logout` and `/login`, or re-register.
+
+One lane fact, observed on Claude Code 2.1.266. The Keychain item is chosen by whether `CLAUDE_CONFIG_DIR` is set at all, not by which account will read it. A daemon-spawned background session receives its token at spawn and never reads the Keychain. A login change therefore reaches new spawns only.
 
 ### Switching claude accounts is manual, by design
 

@@ -65,15 +65,34 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
                 .await
                 .expect("yolo thread starts")
         });
-    let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None, None);
+    let yolo = build_codex_thread_entry(
+        "t",
+        worktree.path(),
+        &start,
+        None,
+        None,
+        true,
+        None,
+        None,
+        &[],
+    );
     assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
     assert!(
         entry_posture_is_full_access(&yolo)
             && yolo.fno_id.as_deref() == Some("thread-p")
             && yolo.mux.is_none()
     );
-    let bounded =
-        build_codex_thread_entry("t", worktree.path(), &start, None, None, false, None, None);
+    let bounded = build_codex_thread_entry(
+        "t",
+        worktree.path(),
+        &start,
+        None,
+        None,
+        false,
+        None,
+        None,
+        &[],
+    );
     assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
     assert!(!entry_posture_is_full_access(&bounded));
     // A requested model stamps its basis on the row; an absent one
@@ -87,6 +106,7 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         false,
         None,
         None,
+        &[],
     );
     assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
     assert_eq!(modeled.model_basis.as_deref(), Some("requested"));
@@ -135,13 +155,23 @@ fn build_codex_thread_entry_records_the_resolved_posture_and_its_roots() {
                     false,
                     None,
                     &[granted_s],
+                    None,
                 )
                 .await
                 .expect("bounded thread starts")
             }
         });
-    let entry =
-        build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None, None);
+    let entry = build_codex_thread_entry(
+        "t",
+        worktree.path(),
+        &start,
+        None,
+        None,
+        true,
+        None,
+        None,
+        &[],
+    );
     // The request says full access...
     assert_eq!(entry.sandbox_posture.as_deref(), Some("danger-full-access"));
     // ...and the record says what actually came back, explicitly.
@@ -182,6 +212,7 @@ fn build_codex_thread_entry_stamps_the_request_node() {
         true,
         Some("x-535c"),
         None,
+        &[],
     );
     assert_eq!(entry.node.as_deref(), Some("x-535c"));
 }
@@ -213,10 +244,20 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         true,
         None,
         Some("codex-main"),
+        &[],
     );
     assert_eq!(pinned.account_record_id.as_deref(), Some("codex-main"));
-    let unpinned =
-        build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None, None);
+    let unpinned = build_codex_thread_entry(
+        "t",
+        worktree.path(),
+        &start,
+        None,
+        None,
+        true,
+        None,
+        None,
+        &[],
+    );
     assert_eq!(unpinned.account_record_id.as_deref(), Some("default"));
     let blank = build_codex_thread_entry(
         "t",
@@ -227,6 +268,7 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         true,
         None,
         Some("   "),
+        &[],
     );
     assert_eq!(blank.account_record_id.as_deref(), Some("default"));
 }
@@ -1277,4 +1319,203 @@ async fn poll_thread_row(
     pred: impl Fn(&state::InsideLegReport) -> bool,
 ) -> state::InsideLegReport {
     poll_thread_row_named(registry_path, "t", pred).await
+}
+
+/// The fenced-token path, end to end on the fake shared daemon: `-c` pairs
+/// land in the `thread/start` config map with TOML-typed values, `--add-dir`
+/// rides the state-root grant onto every turn, the spawn-request effort rides
+/// `turn/start`, and the row stores the raw tokens for startup recovery
+/// (AC2-HP, AC3-HP).
+#[tokio::test(flavor = "current_thread")]
+async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-harness-args");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let worktree = home.root().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": worktree.to_string_lossy(),
+                "message": "seed turn",
+                "effort": "high",
+                "harness_args": [
+                    "-c", "sandbox_workspace_write.network_access=true",
+                    "--add-dir", "/tmp/x",
+                ],
+            }),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        assert!(resp.result().is_some(), "spawn failed: {resp:?}");
+
+        let frames = |received: &std::sync::Arc<std::sync::Mutex<Vec<Value>>>| {
+            received
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        };
+        let start = frames(&received)
+            .into_iter()
+            .find(|f| f["method"] == "thread/start")
+            .expect("a thread/start frame");
+        assert_eq!(
+            start["params"]["config"]["sandbox_workspace_write.network_access"],
+            json!(true),
+            "the -c pair rides thread/start as a TOML boolean: {start}"
+        );
+        // The seed submit is async in the actor; poll for the frame rather
+        // than racing it.
+        let turn = (async {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let turn = frames(&received)
+                    .into_iter()
+                    .find(|f| f["method"] == "turn/start");
+                if turn.is_some() || std::time::Instant::now() >= deadline {
+                    break turn;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the seed turn frame");
+        assert_eq!(
+            turn["params"]["effort"], "high",
+            "effort rides turn/start: {turn}"
+        );
+        assert!(
+            turn["params"]["sandboxPolicy"]["writableRoots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|root| root == "/tmp/x"),
+            "the add-dir rides the state-root grant: {turn}"
+        );
+
+        // The row keeps the raw tokens so startup recovery re-parses them.
+        let registry = load_registry_offloaded(home.registry_json())
+            .await
+            .expect("registry");
+        assert_eq!(
+            registry
+                .find("t")
+                .map(|entry| entry.harness_args.as_slice()),
+            Some(
+                &[
+                    "-c".to_string(),
+                    "sandbox_workspace_write.network_access=true".to_string(),
+                    "--add-dir".to_string(),
+                    "/tmp/x".to_string(),
+                ][..]
+            ),
+            "the row stores the fenced tokens verbatim"
+        );
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC2-EDGE: with no fenced tokens, the frames are today's frames - no
+/// `config` key anywhere, and the row stays slim.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_thread_spawn_without_harness_args_keeps_todays_frames() {
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-no-harness-args");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+
+        let start = received
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|f| f["method"] == "thread/start")
+            .and_then(|f| f.get("params").cloned())
+            .expect("a thread/start frame");
+        assert!(
+            start.get("config").is_none(),
+            "no fenced tokens, no config key - today's frame: {start}"
+        );
+
+        let registry = load_registry_offloaded(home.registry_json())
+            .await
+            .expect("registry");
+        assert!(
+            registry
+                .find("t")
+                .map(|entry| entry.harness_args.is_empty())
+                .unwrap_or(false),
+            "an unfenced spawn stores no tokens"
+        );
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC2-EDGE, recovery leg: a row with stored fenced tokens re-parses them on
+/// startup recovery, so the `thread/resume` frame carries the same config the
+/// start built. Evicting the live handle forces the next ask through
+/// [`ensure_codex_thread_handle`].
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_resume_carries_the_stored_config() {
+    // The fake answers every thread/start and thread/resume with THIS id, so
+    // it must be full-length: the resume-identity gate refuses a short id,
+    // and a resume that confirms a different id than the row stores fails.
+    let behavior =
+        crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-recovery-config-full");
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-resume-config");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let worktree = home.root().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": worktree.to_string_lossy(),
+                "message": "seed turn",
+                "harness_args": ["-c", "model_reasoning_effort=high"],
+            }),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        assert!(resp.result().is_some(), "spawn failed: {resp:?}");
+        // Evict the live handle so the ask goes through startup recovery.
+        ctx.codex_threads.lock().await.remove("t");
+
+        let ask = handle_ask(
+            &ctx,
+            &Request::new(2, "agent.ask", json!({"name": "t", "message": "follow-up"})),
+        )
+        .await;
+        assert!(ask.result().is_some(), "ask after eviction failed: {ask:?}");
+        let resume = received
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|f| f["method"] == "thread/resume")
+            .and_then(|f| f.get("params").cloned())
+            .expect("the recovery resume frame");
+        assert_eq!(
+            resume["config"]["model_reasoning_effort"],
+            json!("high"),
+            "startup recovery re-parses the stored tokens onto thread/resume: {resume}"
+        );
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
 }

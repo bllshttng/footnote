@@ -14,6 +14,15 @@
 # points at it anymore.
 set -uo pipefail
 
+# The build hash dir outlives git's removal; reclaim it while the manifest
+# can still answer. A partial deploy without the lib leaves the dir to the
+# sweep.
+_CBD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib" && pwd)"
+if [[ -f "$_CBD_LIB_DIR/cargo-build-dir.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$_CBD_LIB_DIR/cargo-build-dir.sh"
+fi
+
 INPUT=$(cat)
 WORKTREE_PATH=$(printf '%s' "$INPUT" | python3 -c "
 import sys, json
@@ -78,16 +87,20 @@ if [[ -f "$ST" ]]; then
     fi
 fi
 
-if [[ -n "$MAIN_REPO" ]] && git -C "$MAIN_REPO" worktree remove "$WORKTREE_PATH" 2>/dev/null; then
-    git -C "$MAIN_REPO" worktree prune 2>/dev/null
-    log_event "removed"
-    exit 0
+if [[ -n "$MAIN_REPO" ]]; then
+    declare -F cargo_build_dir_remove_for_wt >/dev/null 2>&1 && cargo_build_dir_remove_for_wt "$WORKTREE_PATH" || true
+    if git -C "$MAIN_REPO" worktree remove "$WORKTREE_PATH" 2>/dev/null; then
+        git -C "$MAIN_REPO" worktree prune 2>/dev/null
+        log_event "removed"
+        exit 0
+    fi
 fi
 
 # Not a registered worktree (or removal refused, e.g. dirty). If it is a bare
 # leftover dir with no git metadata of its own, clear it; otherwise refuse so
 # dirty work is never silently destroyed.
 if [[ ! -e "$WORKTREE_PATH/.git" ]]; then
+    declare -F cargo_build_dir_remove_for_wt >/dev/null 2>&1 && cargo_build_dir_remove_for_wt "$WORKTREE_PATH" || true
     # A worktree is the largest thing fno deletes. Trash-moving it reclaims
     # nothing. command -p rm + /bin/rm, never bare rm. See
     # docs/architecture/disposable-deletes.md.

@@ -439,6 +439,14 @@ h1 { font-size:29px; line-height:1.15; margin:0; font-weight:600; letter-spacing
 .stat.is-prog { border-color:var(--prog); background:var(--prog-bg) }
 .stat.is-prog .n, .stat.is-prog .k { color:var(--prog) }
 .stat.is-blocked .n { color:var(--blocked) }
+.flow { display:flex; flex-wrap:wrap; gap:10px 26px; align-items:baseline;
+  background:var(--surface); border:1px solid var(--line); border-radius:9px;
+  padding:11px 15px; margin-top:10px; box-shadow:var(--shadow) }
+.flow .fhead { flex-basis:100%; font-size:11px; letter-spacing:.06em; color:var(--muted) }
+.flow .fgroup { min-width:230px }
+.flow .fk { font-size:11px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); font-weight:500 }
+.flow .fv { font-size:13px; margin-top:3px; font-variant-numeric:tabular-nums }
+.flow .fsub { font-size:11px; color:var(--muted); margin-top:3px }
 .controls { display:flex; flex-wrap:wrap; gap:9px; align-items:center;
   background:var(--surface); border:1px solid var(--line); border-radius:9px;
   padding:11px 13px; box-shadow:var(--shadow); position:sticky; top:0; z-index:20 }
@@ -574,6 +582,7 @@ body[data-local="false"] .detail { padding-left:15px }
   display:inline-flex; align-items:center; gap:5px; text-decoration:none }
 .pbtn:hover { border-color:var(--accent); color:var(--accent) }
 .pbtn.primary { border-color:var(--accent); color:var(--accent); background:var(--accent-soft) }
+.pill.origin { border-style:dashed }
 .pbtn:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 .none, .empty { padding:26px 15px; color:var(--muted); text-align:center; font-size:14px }
 footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); padding-top:14px;
@@ -607,7 +616,11 @@ _DASHBOARD_JS = """\
   var label = function (s) { return String(s).replace(/_/g, ' ').replace(/\\b\\w/g, function (c) { return c.toUpperCase(); }); };
   var counts = function (nodes) { var result = {}; ORDER.forEach(function (s) { result[s] = 0; });
     nodes.forEach(function (n) { result[n.s] = (result[n.s] || 0) + 1; }); return result; };
-  var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', ty:'', planOnly:false, prOnly:false, demand:false };
+  var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', ty:'', planOnly:false, prOnly:false, demand:false, origin:'' };
+  // Request-origin bucket names. Unknown rows carry no pill; the
+  // detail panel still names the origin so absence reads as unknown, never
+  // as missing data.
+  var ORIGIN_LABELS = { operator_request:'your request', agent_discovery:'agent discovery', automated_followup:'automated', unknown:'unknown' };
   var PROJECT_KEY = 'fno-kanban-project-state';
   function loadProjects() {
     try {
@@ -629,7 +642,7 @@ _DASHBOARD_JS = """\
   var statRows = [['Total', 'total', ''], ['In progress', 'in_progress', 'is-prog'],
     ['In review', 'in_review', ''], ['Ready', 'ready', 'is-ready'], ['Blocked', 'blocked', 'is-blocked'],
     ['Design', 'design', ''], ['Idea', 'idea', ''], ['Deferred', 'deferred', ''],
-    ['Done', 'done', 'is-done'], ['Shipped', 'shipped', 'is-done']];
+    ['Done', 'done', 'is-done'], ['Done % of shown', 'shipped', 'is-done']];
   var statNums = [];
   statRows.forEach(function (s) { var d = document.createElement('div'); d.className = 'stat' + (s[2] ? ' ' + s[2] : '');
     d.innerHTML = '<div class=\"n\"></div><div class=\"k\">' + s[0] + '</div>'; statsEl.appendChild(d); statNums.push(d.querySelector('.n')); });
@@ -688,6 +701,9 @@ _DASHBOARD_JS = """\
   fill(document.getElementById('prioSel'), 'p', 'Priority'); fill(document.getElementById('sizeSel'), 'sz', 'Size');
   document.getElementById('prioSel').addEventListener('change', function (e) { state.prio = e.target.value; render(); });
   document.getElementById('sizeSel').addEventListener('change', function (e) { state.size = e.target.value; render(); });
+  var originSel = document.getElementById('originSel');
+  if (originSel) originSel.addEventListener('change', function (e) { state.origin = e.target.value; render(); });
+  function originBadge(n) { return LOCAL && n.ro && n.ro !== 'unknown' ? '<span class="pill origin">' + esc(ORIGIN_LABELS[n.ro] || n.ro) + '</span>' : ''; }
   var fromEl = document.getElementById('fromDate'); var stamps = NODES.map(function (n) { return n.u || n.c || ''; }).filter(Boolean).sort();
   if (stamps.length) { fromEl.min = stamps[0]; fromEl.max = stamps[stamps.length - 1]; }
   fromEl.addEventListener('change', function () { state.from = fromEl.value || '';
@@ -704,6 +720,7 @@ _DASHBOARD_JS = """\
     if (!projectMatch(n) || (state.status.size && !state.status.has(n.s))) return false;
     if (state.group && state.group !== n.g) return false; if (state.prio && state.prio !== n.p) return false;
     if (state.size && state.size !== n.sz) return false;
+    if (state.origin && (n.ro || 'unknown') !== state.origin) return false;
     if (state.ty && state.ty !== n.ty) return false; if (state.from && (n.s === 'done' || n.s === 'superseded') && (n.u || n.c || '') < state.from) return false;
     if (state.planOnly && !(n.pl && n.s !== 'done' && n.s !== 'superseded')) return false; if (state.prOnly && !n.pr) return false;
     if (state.q && (String(n.id || '') + ' ' + n.t + ' ' + String(n.d || '') + ' ' + String(n.pl || '')).toLowerCase().indexOf(state.q) < 0) return false;
@@ -739,6 +756,51 @@ _DASHBOARD_JS = """\
     state.status = saved;
     ORDER.forEach(function (s) { var el = statusBadges[s]; if (el) el.textContent = facet[s] || 0; });
   }
+  // The flow panel: one keeper-computed payload for this board's scope,
+  // rendered once here, never from the filtered row set, so no row filter
+  // can move a throughput denominator.
+  function renderFlow(flow) {
+    var el = document.getElementById('flow');
+    if (!el) return;
+    if (!flow) { el.style.display = 'none'; return; }
+    if (!flow.available) {
+      el.innerHTML = '<div class="fgroup"><div class="fk">Delivery flow</div>' +
+        '<div class="fv">unavailable: ' + esc(flow.reason || 'unknown reason') + '</div></div>';
+      return;
+    }
+    function grp(title, body, sub) {
+      return '<div class="fgroup"><div class="fk">' + title + '</div><div class="fv">' + body +
+        (sub ? '</div><div class="fsub">' + sub : '') + '</div></div>';
+    }
+    function waitingLine(key, label) {
+      var v = (flow.waiting || {})[key] || {};
+      return label + ' ' + (v.count || 0) + (v.oldest_age_days == null ? '' : ' (oldest ' + v.oldest_age_days + 'd)');
+    }
+    var w = flow.window || {}, d = flow.deliveries || {}, cov = flow.coverage || {};
+    var c = flow.cycle || {}, op = flow.open_prs || {};
+    var weeks = (d.weeks || []).map(function (wk) {
+      return esc(String(wk.week_start || '')) + ': ' + ((wk.code || 0) + (wk.doc || 0)) + (wk.partial ? '*' : '');
+    }).join(' · ');
+    var covNote = [];
+    if (cov.unlinked) covNote.push('plus ' + cov.unlinked + ' unlinked delivery(s) not on this board');
+    if (cov.rows != null) covNote.push(cov.rows + ' ledger rows in scope');
+    if (weeks) covNote.unshift(weeks + ' (* partial week)');
+    el.innerHTML =
+      '<div class="fhead">last ' + esc(String(w.since_days == null ? '' : w.since_days)) + ' days to ' +
+      esc(String(w.end || '')) + ' · local weeks' + (w.tz_offset ? ' (' + esc(String(w.tz_offset)) + ')' : '') +
+      ', start Monday · scope does not follow filters</div>' +
+      grp('Delivered', (d.total || 0) + ' · ' + esc(String(d.code || 0)) + ' code, ' + esc(String(d.doc || 0)) + ' doc',
+        esc(covNote.join(' · '))) +
+      grp('Elapsed',
+        c.n ? 'open-to-merge median ' + esc(String(c.median_days)) + 'd · p85 ' + esc(String(c.p85_days)) +
+          'd (n=' + esc(String(c.n)) + ')' : 'open-to-merge: ' + esc(c.reason || 'no samples'),
+        'open PRs ' + (op.count || 0) + ', oldest ' + (op.oldest_age_days == null ? 'unknown' : op.oldest_age_days + 'd')) +
+      grp('Waiting',
+        waitingLine('in_progress', 'WIP') + ' · ' + waitingLine('in_review', 'review') + ' · ' +
+        waitingLine('blocked', 'blocked'),
+        'ages from node created_at · accumulated blocked time unmeasured');
+  }
+  renderFlow(DATA.flow);
   // Copy, with the execCommand fallback the canonical template carried. This
   // board is opened from disk as often as over http, and file:// is not a
   // secure context, so navigator.clipboard is frequently absent exactly where
@@ -821,6 +883,8 @@ _DASHBOARD_JS = """\
     // the same copy is this button, reached by expanding the row.
     if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + ' <button class=\"pbtn\" type=\"button\" data-copy=\"id\">Copy</button></span>';
     h += '<span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
+    if (LOCAL) { var ro = n.ro || 'unknown';
+      h += '<div class="kv"><span><b>origin</b> ' + esc(ORIGIN_LABELS[ro] || ro) + '</span>' + (n.oe ? '<span><b>evidence</b> ' + esc(n.oe) + '</span>' : '') + '</div>'; }
     if (LOCAL) h += '<div class="kv"><span><b>encounters</b> ' + n.en + ' (' + (n.en - n.eo) + ' agent, ' + n.eo + ' operator)</span><button class="pbtn" type="button" data-copy="vote">Copy upvote</button></div>';
     if (n.pa) h += '<div class=\"blk kin\"><div class=\"h\">Parent</div><div class=\"item\">'
       // No not-found marker here: pt_ is empty BOTH when the parent is absent
@@ -867,7 +931,7 @@ _DASHBOARD_JS = """\
         // Click order matters: the pill's handler stops propagation, which also
         // keeps the .rid copy-id handler beneath it from firing, so one click
         // copies the command and nothing else.
-        main.innerHTML = (LOCAL ? '<span class=\"rid\"><span class=\"ridtxt\">' + esc(n.id) + '</span><br>' + votePill + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
+        main.innerHTML = (LOCAL ? '<span class=\"rid\"><span class=\"ridtxt\">' + esc(n.id) + '</span><br>' + votePill + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + originBadge(n) + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
         main.setAttribute('aria-expanded', 'false');
         // The id is the thing most often copied out of this board, so it is
         // one click ON the id rather than a trip through the detail. A span,
@@ -1109,6 +1173,7 @@ def _dashboard_rows(
                         for bid in entry.get("blocked_by") or []
                         if isinstance(bid, str)
                     ],
+                    "ro": str(entry.get("request_origin") or "unknown"), "oe": str(entry.get("origin_evidence") or ""),
                 }
             )
             # Emitted on EVERY local row, zero included. A vote surface
@@ -1249,6 +1314,8 @@ def _dashboard_html(
     vault: str | None = None,
     context_entries: list[dict] | None = None,
     projection: str = "backlog",
+    flow: dict | None = None,
+    label: str = "fno",
 ) -> str:
     rows = _dashboard_rows(
         entries, local=local, vault=vault, context_entries=context_entries
@@ -1266,6 +1333,10 @@ def _dashboard_html(
             # A roadmap's whole point is the shipped column, so it opens with
             # done pressed. Every other surface opens on open work.
             "initial_done": projection == "roadmap",
+            # The flow panel's whole payload, keeper-computed for this
+            # board's scope. The JS presents these numbers and never
+            # re-derives them from the rows.
+            "flow": flow,
         },
         separators=(",", ":"),
     ).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
@@ -1281,7 +1352,9 @@ def _dashboard_html(
     # way. A local board is written by the auto-render hook on every mutation;
     # a published one is a snapshot taken when it was published.
     if local:
-        scope_note = "live \u00b7 re-rendered on every graph mutation"
+        # Every local render path overlays the shipped archive, so naming only
+        # "live" under-claims the corpus a reader is looking at.
+        scope_note = "live + shipped archive \u00b7 re-rendered on every graph mutation"
         opens_note = "Opens on the live board. "
         # Description, blockers and the plan link are added under `if local:`
         # in _dashboard_rows. Promising them on a public board sends a reader
@@ -1333,7 +1406,7 @@ def _dashboard_html(
         f"<title>{html.escape(title)}</title>{fonts}"
         f"<style>{_DASHBOARD_CSS}</style></head>"
         f'<body data-local="{str(local).lower()}"><div class="wrap">'
-        f'<header><div class="eyebrow">fno \u00b7 generated <span>{generated}</span>'
+        f'<header><div class="eyebrow">{html.escape(label)} \u00b7 generated <span>{generated}</span>'
         f' \u00b7 <span>{html.escape(scope_note)}</span></div>'
         f"<h1>{html.escape(title)}</h1>"
         '<p class="lede">Every open node, plus recently closed work for context. '
@@ -1349,19 +1422,40 @@ def _dashboard_html(
         '<label class="datef" id="datef">from <input type="date" id="fromDate" aria-label="Show work touched on or after this date"></label>'
         '<select id="prioSel" aria-label="Filter by priority"><option value="">Any priority</option></select>'
         '<select id="sizeSel" aria-label="Filter by size"><option value="">Any size</option></select>'
-        '<button class="chip" id="planOnly" type="button" aria-pressed="false">Plan, unfinished <span class="c" id="planCount"></span></button>'
+        + (
+            '<select id="originSel" aria-label="Filter by request origin"><option value="">All origins</option>'
+            '<option value="operator_request">Your requests</option><option value="agent_discovery">Agent discoveries</option>'
+            '<option value="automated_followup">Automated follow-ups</option><option value="unknown">Unknown</option></select>'
+            if local else ""
+        )
+        + '<button class="chip" id="planOnly" type="button" aria-pressed="false">Plan, unfinished <span class="c" id="planCount"></span></button>'
         '<button class="chip" id="prOnly" type="button" aria-pressed="false">has a PR <span class="c" id="prCount"></span></button>'
         + (
             '<button class="chip" id="demandOnly" type="button" aria-pressed="false">Demand</button>'
             if local
             else ""
         )
-        + f'</div><main id="board">{static_board}</main>'
+        + f'</div><div class="flow" id="flow"></div><main id="board">{static_board}</main>'
         f'<footer><span id="shown"></span><span>rendered {generated}</span>'
         f"<span>statuses: {status_legend}</span></footer>"
         f'</div><script id="data" type="application/json">{payload}</script>'
         f"<script>{dashboard_js}</script></body></html>\n"
     )
+
+
+def _board_flow(entries: list[dict], project: str | None = None, *, since_days: int = 28) -> dict:
+    """Flow payload for one board scope. Never raises (AC2-EDGE): the board
+    renders on every graph mutation, keeper or no keeper."""
+    try:
+        from fno import paths as _paths
+        from fno.scoreboard.fold import classify_deliveries, load_ledger_rows
+
+        flow = classify_deliveries(
+            entries, load_ledger_rows(_paths.ledger_json()), project, since_days=since_days
+        ).get("flow")
+        return flow if isinstance(flow, dict) else {"available": False, "reason": "classifier gave no flow"}
+    except Exception as exc:  # noqa: BLE001 - degrade, never wedge the render
+        return {"available": False, "reason": f"flow source unavailable ({type(exc).__name__})"}
 
 
 def render_graph_html(
@@ -1372,6 +1466,15 @@ def render_graph_html(
     all_projects: bool = False,
 ) -> None:
     """Render the canonical full-detail dashboard for the local surface."""
+    # The title names the scope so two boards reading different corpora never
+    # share one: the whole-graph board is not "fno Backlog", it is every
+    # project. An unscoped caller (the plain `view` default) keeps fno.
+    if all_projects:
+        title, label = "All Projects Backlog", "all projects"
+    elif project:
+        title, label = f"{project} Backlog", project
+    else:
+        title, label = "fno Backlog", "fno"
     all_entries = [entry for entry in entries if isinstance(entry, dict)]
     scoped = (
         all_entries
@@ -1385,10 +1488,14 @@ def render_graph_html(
     vault = _load_obsidian_vault()
     content = _dashboard_html(
         scoped,
-        title="fno Backlog",
+        title=title,
+        label=label,
         local=True,
         vault=vault,
         context_entries=all_entries,
+        flow=_board_flow(
+            scoped, None if all_projects or not project else project
+        ),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
@@ -1405,8 +1512,15 @@ def render_graph_html(
 
 
 def render_public_sections_html(
-    sections: list[tuple[str, list[dict]]], *, title: str, projection: str
+    sections: list[tuple[str, list[dict]]],
+    *,
+    title: str,
+    projection: str,
+    flow: dict | None = None,
 ) -> str:
-    """Render any public projection with the same canonical dashboard shape."""
+    """Render any public projection with the same canonical dashboard shape.
+    ``flow`` is aggregate numbers only (no ids, titles or paths)."""
     entries = [entry for _label, section in sections for entry in section]
-    return _dashboard_html(entries, title=title, local=False, projection=projection)
+    return _dashboard_html(
+        entries, title=title, local=False, projection=projection, flow=flow
+    )

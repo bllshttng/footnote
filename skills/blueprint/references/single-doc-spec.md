@@ -22,7 +22,7 @@ difficulty: <low | medium | high>   # Required for plans created after 2026-08-2
 sources: [<artifacts actually read>]
 consolidation:
   outcome: <absorb | append | proceed_alone>
-  proceed_alone_against: []   # or absorbed: / appended_to:, each entry an id with its reason
+  proceed_alone_against: []   # or absorbed: / appended_to: / rejected:, each entry an id with its reason
 ---
 
 # <Title>

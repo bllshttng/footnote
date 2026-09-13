@@ -233,6 +233,8 @@ pub trait Probes {
     fn dispatch_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
     fn review_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
     fn base_lineage(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
+    /// Compile the merge result (merge-tree + the repo-wide static step).
+    fn merge_result(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
     /// `green` | `red` | `pending` | `unknown`.
     fn checks_verdict(&self, cwd: &Path, pr: u64) -> String;
     fn covered_head(&self, cwd: &Path) -> Option<String>;
@@ -316,6 +318,15 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
     if let Some(reason) = probes.base_lineage(cwd, facts.number).fail_open() {
         return Err(Outcome::Refused {
             reason: format!("stale base: {reason}"),
+        });
+    }
+
+    // Two green parents can merge red: git joins hunks that never met on one
+    // machine (3334b826a133 broke main with F821 out of a clean textual
+    // merge). Held, not refused: the remedy is rebase, fix, push, retry.
+    if let Some(reason) = probes.merge_result(cwd, facts.number).fail_open() {
+        return Err(Outcome::Held {
+            reason: format!("red merge result: {reason}"),
         });
     }
 
@@ -630,6 +641,22 @@ impl Probes for RealProbes {
         }
     }
 
+    fn merge_result(&self, cwd: &Path, pr: u64) -> ProbeOutcome {
+        match Self::fno(cwd, &["do", "pr", "merge-result-check", &pr.to_string()]) {
+            Ok((code, _stdout, stderr)) => match code {
+                Some(0) => ProbeOutcome::Clear,
+                Some(3) => {
+                    ProbeOutcome::Refused(String::from_utf8_lossy(&stderr).trim().to_string())
+                }
+                other => ProbeOutcome::Inconclusive(format!(
+                    "exit {other:?}: {}",
+                    String::from_utf8_lossy(&stderr).trim()
+                )),
+            },
+            Err(error) => ProbeOutcome::Inconclusive(format!("spawn error: {error}")),
+        }
+    }
+
     fn checks_verdict(&self, cwd: &Path, pr: u64) -> String {
         match Self::fno(cwd, &["do", "pr", "status", &pr.to_string()]) {
             Ok((_code, stdout, _stderr)) => serde_json::from_slice::<Value>(&stdout)
@@ -890,6 +917,7 @@ mod tests {
         dispatch_hold: Option<ProbeOutcome>,
         review_hold: Option<ProbeOutcome>,
         lineage: Option<ProbeOutcome>,
+        merge_result: Option<ProbeOutcome>,
         checks: Option<String>,
         covered_head: Option<String>,
         enabled: bool,
@@ -938,6 +966,9 @@ mod tests {
         }
         fn base_lineage(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
             self.lineage.clone().unwrap_or(ProbeOutcome::Clear)
+        }
+        fn merge_result(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+            self.merge_result.clone().unwrap_or(ProbeOutcome::Clear)
         }
         fn checks_verdict(&self, _cwd: &Path, _pr: u64) -> String {
             self.checks.clone().unwrap_or_else(|| "green".to_string())
@@ -994,6 +1025,39 @@ mod tests {
             assert!(outcome.detail().contains("review_in_flight"));
             assert!(fake.gh_calls.borrow().is_empty(), "{effect:?} ran gh");
         }
+    }
+
+    #[test]
+    fn a_red_merge_result_holds_both_effects_and_calls_no_gh() {
+        // 3334b826a133: two green parents merged into a red main. Held, not
+        // refused - the remedy is rebase, fix, push, retry.
+        for effect in [Effect::Merge, Effect::Arm] {
+            let fake = Fake {
+                merge_result: Some(ProbeOutcome::Refused(
+                    "merge-result: REFUSED - cli/src/fno/graph/store.py:525:21: F821 Undefined name `_TAG_SHUTDOWN`"
+                        .to_string(),
+                )),
+                ..clean()
+            };
+            let outcome = run(&fake, &request(effect));
+            assert_eq!(outcome.word(), "held", "{effect:?}");
+            assert!(outcome.detail().contains("red merge result"), "{effect:?}");
+            assert!(outcome.detail().contains("F821"), "{effect:?}");
+            assert!(fake.gh_calls.borrow().is_empty(), "{effect:?} ran gh");
+        }
+    }
+
+    #[test]
+    fn an_inconclusive_merge_result_proceeds_with_a_breadcrumb() {
+        // Fail-open, like the lineage probe: a deployed fno lacking the verb
+        // or a gh hiccup must not make auto-merge silently never work.
+        let fake = Fake {
+            merge_result: Some(ProbeOutcome::Inconclusive(
+                "exit 4: probe failed".to_string(),
+            )),
+            ..clean()
+        };
+        assert_eq!(run(&fake, &request(Effect::Merge)).word(), "merged");
     }
 
     #[test]

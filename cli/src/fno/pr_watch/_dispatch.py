@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from fno import _subprocess_util
+from fno.agents.naming import dispatch_agent_name
 from fno.events import MAX_DATA_BYTES as _EVENT_MAX_DATA_BYTES
 
 log = logging.getLogger(__name__)
@@ -126,6 +127,19 @@ def _drop_cached_terminal(
     """Receipt a terminal removal only when this tick actually removed a row."""
     if state.pop(key, None) is not None:
         dropped.append({"key": key, "reason": current.lower(), "state": current})
+
+
+def _mark_handled(delivery_state: dict[str, dict], key: str, obs_state: str) -> None:
+    """Record a terminal outcome on the delivery record.
+
+    Candidate rows never persist as cache entries once terminal, so without
+    this memo every tick re-rich-reads the same merged candidates. Keeps any
+    retries/parked the record already holds.
+    """
+    rec = delivery_state.get(key)
+    rec = rec if isinstance(rec, dict) else {}
+    rec["handled"] = obs_state
+    delivery_state[key] = rec
 
 
 def _finish_queue_merge(repo_dir: Path, pr: int, emit: Callable) -> None:
@@ -268,22 +282,14 @@ _DEFAULT_MODEL = "claude-haiku-4-5"
 _TIMEOUT_FOR_VERB: dict[str, float] = {"check": 180.0}
 _DEFAULT_FIRE_TIMEOUT = 300.0
 _SPAWN_TIMEOUT_GRACE = 30.0
-# Leave enough cadence budget for one bounded ritual and the post-dispatch legs.
-# A later action can retry on the next tick; starting it with less time would
-# turn a completed sweep into the same global deadline timeout this daemon is
-# meant to avoid.
-_DISPATCH_RESERVE_S = 360.0
-_DISPATCH_RESERVE_FRACTION = 0.75
-
-
-def _dispatch_reserve_seconds(tick_budget_seconds: Optional[float]) -> float:
-    """Reserve a scaled fraction of short ticks, capped at the normal budget."""
-    if tick_budget_seconds is None:
-        return _DISPATCH_RESERVE_S
-    return min(
-        _DISPATCH_RESERVE_S,
-        max(1.0, float(tick_budget_seconds) * _DISPATCH_RESERVE_FRACTION),
-    )
+# The dispatch loop's two costs are different orders: a rich read (gh pr view,
+# seconds) and a fire (a bounded spawn). The read floor leaves room for one
+# more read plus the final store.persist(), so the loop stops on its own terms
+# rather than under the phase alarm mid-persist. The fire floor gates the
+# spawn arm against the live phase clock via _ritual_timeout(): below it, skip
+# the dispatch (never the scan) and let the next tick re-decide.
+_READ_FLOOR_S = 15.0
+_FIRE_FLOOR_S = 30.0
 
 
 def fire_skill(
@@ -291,6 +297,7 @@ def fire_skill(
     pr_number: int,
     repo_dir: Path,
     *,
+    node_id: Optional[str] = None,
     model: str = _DEFAULT_MODEL,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     env_seam: str = _ENV_SEAM,
@@ -303,6 +310,11 @@ def fire_skill(
     (``PR_WATCH_FIRE_CMD`` env, or *env_seam*) replaces the complete spawn command
     with an arbitrary command string for unit tests; when set, the command is
     built as ``["<seam>"]`` and the runner receives it like any other call.
+
+    ``node_id`` (x-84b2) names the worker ``pw-r-<node>-pr-<n>``; a PR whose
+    candidate binds no graph node REFUSES the autonomous spawn rather than
+    substituting the PR number as a fake node (the tick's retry/park machinery
+    owns the refusal).
 
     This is the review (``check``) fire only. The post-merge ritual no longer
     fires here: pr-watch runs ``fno do pr ritual <n> --autonomous`` directly, and
@@ -319,6 +331,12 @@ def fire_skill(
     SUCCESS = rc == 0 AND parsed ``is_error`` is ``False``. Every other outcome
     is a failure.
     """
+    if not node_id:
+        log.warning(
+            "pr-watch: PR #%d binds no graph node; refusing the %s fire (x-84b2)",
+            pr_number, verb,
+        )
+        return DispatchResult(ok=False, rc=-1, is_error=False, raw="")
     worker_timeout = (
         timeout_s if timeout_s is not None else _TIMEOUT_FOR_VERB.get(verb, _DEFAULT_FIRE_TIMEOUT)
     )
@@ -341,7 +359,7 @@ def fire_skill(
             "--cwd",
             str(repo_dir),
             "--name",
-            f"pr-check-{pr_number}",
+            dispatch_agent_name("pw", "r", node_id, qualifier=f"pr-{pr_number}"),
             "--output-format",
             "json",
         ]
@@ -435,7 +453,7 @@ _MAX_RETRIES = 3
 _TICK_CLAIM_KEY = "pr-watch:tick"
 
 # The stage a live tick is in ("entry" -> "settings" -> "lock" -> "discover"
-# -> "sweep" -> "dispatch" -> "recovery" -> "catchup"). The CLI's deadline
+# -> "sweep" -> "dispatch" -> "recovery"). The CLI's deadline
 # record reads this so a hang names WHERE it hung - the difference between
 # "the tick hung" and "the tick hung waiting on the graph flock" - without
 # threading a callback through every injectable seam.
@@ -449,6 +467,36 @@ def set_tick_phase(phase: str) -> None:
 
 def current_tick_phase() -> str:
     return _tick_phase
+
+
+# The wall-clock deadline of the phase alarm the CLI's runner armed, as a
+# time.monotonic() stamp. Same shape as _tick_phase above: a module global a
+# record sets and deep legs read, so budget checks inside a phase (the
+# watchdog floors, the ritual verb timeout) see THEIR phase's remaining time
+# instead of re-deriving the tick ceiling. None when no phase alarm is armed.
+_phase_deadline: Optional[float] = None
+
+
+def set_phase_deadline(monotonic: Optional[float]) -> None:
+    global _phase_deadline
+    _phase_deadline = monotonic
+
+
+def phase_seconds_left() -> Optional[float]:
+    if _phase_deadline is None:
+        return None
+    return _phase_deadline - time.monotonic()
+
+
+def _ritual_timeout() -> float:
+    """Cold-ritual subprocess timeout: the sweep slice minus a 10s reserve so
+    the verb times out as an ordinary recorded failure BEFORE the phase alarm
+    fires - an alarm cut mid-subprocess would skip the caller's persist and
+    replay the same ritual every tick (x-c79d AC6)."""
+    left = phase_seconds_left()
+    if left is None:
+        return 300.0
+    return min(300.0, left - 10)
 
 
 def tick(
@@ -479,7 +527,6 @@ def tick(
     graphql_remaining_fn: Optional[Callable] = None,
     graphql_min_remaining: int = 200,
     dispatch_deadline: Optional[float] = None,
-    dispatch_budget_seconds: Optional[float] = None,
     # x-aaaf wave 2: config.pr_watch.enabled was declared but never actually
     # consulted here - the launchd activation coupling (x-e106: "enabled means
     # running") stops a NEWLY-toggled watcher at install time, but a config
@@ -590,7 +637,6 @@ def tick(
             graphql_remaining_fn=_graphql_remaining,
             graphql_min_remaining=graphql_min_remaining,
             dispatch_deadline=dispatch_deadline,
-            dispatch_budget_seconds=dispatch_budget_seconds,
             holder=holder,
         )
     finally:
@@ -620,7 +666,6 @@ def _run_tick(
     graphql_remaining_fn,
     graphql_min_remaining,
     dispatch_deadline,
-    dispatch_budget_seconds,
     holder,
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
@@ -689,6 +734,7 @@ def _run_tick(
     batch_baselined: set[str] = set()
     query_keys = batch_keys | candidate_keys
     sweep_failures = 0
+    batch_states: dict[str, str] = {}
     set_tick_phase("sweep")
     if query_keys:
         try:
@@ -706,14 +752,14 @@ def _run_tick(
             if key not in batch_states:
                 failed.add(key)
         for key, current in batch_states.items():
-            if current in ("OPEN", "CLOSED", "MERGED"):
+            if current in ("OPEN", "CLOSED", "MERGED", "NOT_OPEN"):
                 swept.add(key)
             elif key in query_keys:
                 failed.add(key)
         for key in sorted(batch_keys):
             current = batch_states.get(key, "UNKNOWN")
             entry = state[key]
-            if current in ("MERGED", "CLOSED"):
+            if current in ("MERGED", "CLOSED", "NOT_OPEN"):
                 _drop_cached_terminal(state, dropped, key, current)
                 batch_terminal.add(key)
             else:
@@ -736,6 +782,41 @@ def _run_tick(
                 }
                 swept.add(key)
                 batch_baselined.add(key)
+        # Write the listing's answer onto candidate rows that still carry one.
+        # Both open-count readers (status line, tick receipt) count
+        # last_seen_state, so a row frozen at a weeks-old OPEN read inflates
+        # the count forever. decide() never reads this field, so no dispatch
+        # verdict changes. A failed or UNKNOWN listing writes nothing.
+        for key in sorted(candidate_keys & batch_states.keys()):
+            current = batch_states[key]
+            if current not in ("OPEN", "NOT_OPEN"):
+                continue
+            row = state.get(key)
+            if isinstance(row, dict):
+                row["last_seen_state"] = current
+
+    # Order after the sweep so the listing's answer can lead the queue: OPEN
+    # candidates first (a merge among them is what the ritual is for), then
+    # least-recently-read (cache cursor, else the delivery record's; missing
+    # stamp first), discovery order breaking ties. The dispatch loop stamps
+    # each read, so a budget break resumes where the last tick stopped.
+    def _poll_order(indexed):
+        idx, cand = indexed
+        try:
+            key = make_watermark_key(repo_slug=cand.repo_slug, pr_number=cand.pr_number)
+        except ValueError:
+            return (2, "", idx)
+        head = 0 if batch_states.get(key) == "OPEN" else 1
+        row = state.get(key)
+        stamp = row.get("last_polled_at") if isinstance(row, dict) else None
+        if not (isinstance(stamp, str) and stamp):
+            drec = delivery_state.get(key)
+            stamp = drec.get("last_polled_at") if isinstance(drec, dict) else None
+            if not (isinstance(stamp, str) and stamp):
+                stamp = ""
+        return (head, stamp, idx)
+
+    candidates = [cand for _, cand in sorted(enumerate(candidates), key=_poll_order)]
 
     acted = 0
     skipped = 0
@@ -746,6 +827,9 @@ def _run_tick(
     # needs and a bare absence cannot prove.
     merge_scan_eligible = 0
     merge_scan_attempted = 0
+    # Rich reads completed: separates "the scan reached nothing" from "the
+    # scan found nothing granted" (eligible=0 alone cannot).
+    merge_scan_scanned = 0
 
     # GraphQL budget preflight. The dispatch pass below spends gh pr view,
     # which bills the shared per-user GraphQL pool by point cost; with the
@@ -774,14 +858,6 @@ def _run_tick(
     for cand in candidates:
         pr = cand.pr_number
         slug = cand.repo_slug
-        if (
-            dispatch_deadline is not None
-            and dispatch_deadline - time.monotonic()
-            < _dispatch_reserve_seconds(dispatch_budget_seconds)
-        ):
-            emit("pr_watch_skipped", {"pr": pr, "reason": "tick-budget"})
-            skipped += 1
-            break
         try:
             key = make_watermark_key(repo_slug=slug, pr_number=pr)
         except ValueError:
@@ -802,6 +878,29 @@ def _run_tick(
         if key in batch_keys and isinstance(batched_entry, dict) and batched_entry.get("parked"):
             continue
 
+        # Terminal memo: the listing called this candidate NOT_OPEN and a past
+        # tick already recorded the outcome (handled) or parked it. The rich
+        # read would return the same terminal state again, so skip it. A
+        # candidate the listing now calls OPEN (reopened) falls through and
+        # gets the read.
+        drec = delivery_state.get(key)
+        if (
+            batch_states.get(key) == "NOT_OPEN"
+            and isinstance(drec, dict)
+            and (drec.get("handled") or drec.get("parked"))
+        ):
+            skipped += 1
+            continue
+
+        # x-d211: only a candidate owing the rich read may break the tick.
+        if (
+            dispatch_deadline is not None
+            and dispatch_deadline - time.monotonic() < _READ_FLOOR_S
+        ):
+            emit("pr_watch_skipped", {"pr": pr, "reason": "tick-budget"})
+            skipped += 1
+            break
+
         # Per-PR concurrency guard
         pr_lock_key = f"pr-watch:{slug or 'unknown'}:{pr}"
         try:
@@ -812,11 +911,22 @@ def _run_tick(
             continue
 
         try:
+            # Stamp the poll cursor on the delivery record before the read:
+            # a merged candidate has no cache row to stamp, so this is what
+            # moves it to the back of the order. persist() in finally carries
+            # the stamp across a budget break.
+            if batch_states.get(key) == "NOT_OPEN":
+                drec = delivery_state.get(key)
+                drec = drec if isinstance(drec, dict) else {}
+                drec["last_polled_at"] = now_iso
+                delivery_state[key] = drec
+
             # Fetch current state
             try:
                 reviewers = reviewers_for(cand.repo_dir) if cand.repo_dir else []
                 obs = read_pr_state_fn(cand, reviewers=reviewers)
                 swept.add(key)
+                merge_scan_scanned += 1
                 failed.discard(key)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)
@@ -834,6 +944,10 @@ def _run_tick(
                     "pr-watch: corrupt watermark entry for %s (not a dict); re-baselining", key
                 )
                 entry = None
+
+            # x-d211: stamp the cursor; the final persist carries it forward.
+            if isinstance(entry, dict):
+                entry["last_polled_at"] = now_iso
 
             skip_reason = None
             if cand.repo_dir is None:
@@ -858,6 +972,7 @@ def _run_tick(
                     "merge_dispatched": obs.state == "MERGED",
                     "retries": 0,
                     "parked": None,
+                    "last_polled_at": now_iso,
                 }
                 store.set(key, baseline)
                 log.debug("pr-watch: first-seen PR #%d baselined as %s", pr, obs.state)
@@ -874,6 +989,7 @@ def _run_tick(
                     "merge_dispatched": False,
                     "retries": pending.get("retries", 0),
                     "parked": pending.get("parked"),
+                    "last_polled_at": now_iso,
                 }
             if entry is None:
                 continue
@@ -918,15 +1034,24 @@ def _run_tick(
             )
 
             if decision.kind == "noop":
-                pass  # nothing to do; no event
+                # A merged candidate whose ritual already ran is terminal; the
+                # memo is what stops the next tick re-reading it. Not
+                # merge-not-ready: that one retries by design.
+                if decision.reason == "merge-already-dispatched" and obs.state in (
+                    "MERGED",
+                    "CLOSED",
+                ):
+                    _mark_handled(delivery_state, key, obs.state)
 
             elif decision.kind == "park":
                 entry["parked"] = decision.reason
                 if obs.state not in ("MERGED", "CLOSED"):
                     store.set(key, entry)
+                elif decision.reason == "closed":
+                    _mark_handled(delivery_state, key, obs.state)
                 emit("pr_watch_parked", {"pr": pr, "reason": decision.reason})
 
-            elif decision.kind in ("merge", "review"):
+            elif decision.kind in ("merge", "review") and _ritual_timeout() >= _FIRE_FLOOR_S:
                 dispatch_ok = False
                 dispatch_extra: dict[str, Any] = {}
                 if decision.kind == "merge":
@@ -953,7 +1078,7 @@ def _run_tick(
                             emit("pr_watch_skipped", {"pr": pr, "reason": "dispatch-in-flight"})
                         else:
                             entry["merge_dispatched"] = True
-                            delivery_state.pop(key, None)
+                            _mark_handled(delivery_state, key, obs.state)
                             emit("pr_watch_skipped", {"pr": pr, "reason": "already-dispatched"})
                         skipped += 1
                         _drop_cached_terminal(state, dropped, key, "MERGED")
@@ -968,6 +1093,7 @@ def _run_tick(
                         delivery_state[key] = {
                             "retries": entry.get("retries", 0),
                             "parked": "auto-run-disabled",
+                            "handled": obs.state,
                         }
                         emit("pr_watch_skipped", {"pr": pr, "reason": "auto-run-disabled"})
                         skipped += 1
@@ -988,7 +1114,7 @@ def _run_tick(
                             pm.detail or pm.short_id or "",
                         )
                 else:
-                    result = fire_skill_fn("check", pr, cand.repo_dir)
+                    result = fire_skill_fn("check", pr, cand.repo_dir, node_id=cand.node_id)
                     dispatch_ok = result.ok
 
                 if dispatch_ok:
@@ -999,7 +1125,7 @@ def _run_tick(
                         entry["last_review_ts"] = obs.latest_review_ts
                     entry["retries"] = 0
                     if obs.state in ("MERGED", "CLOSED"):
-                        delivery_state.pop(key, None)
+                        _mark_handled(delivery_state, key, obs.state)
                     else:
                         store.set(key, entry)
                     emit("pr_watch_dispatched", {"kind": decision.kind, "pr": pr, **dispatch_extra})
@@ -1033,6 +1159,14 @@ def _run_tick(
                             )
                         except Exception as exc:
                             log.warning("pr-watch: notify failed: %s", exc)
+
+            elif decision.kind in ("merge", "review"):
+                # No room for one bounded fire in the phase slice: skip the
+                # dispatch only. No break, no continue: the scan continues to
+                # the next candidate and last_seen_state still lands below,
+                # so the next tick re-decides with a fresh cursor.
+                emit("pr_watch_skipped", {"pr": pr, "reason": "fire-budget"})
+                skipped += 1
 
             elif decision.kind == "execute":
                 # The parked worker hands execution to the watcher: one
@@ -1148,6 +1282,7 @@ def _run_tick(
         # integer, and include zero).
         "merge_scan": {
             "completed": True,
+            "scanned": merge_scan_scanned,
             "eligible": merge_scan_eligible,
             "attempted": merge_scan_attempted,
         },
@@ -1238,7 +1373,7 @@ def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> An
     tick branch - but it stays on the signature so the tick's
     ``dispatch_ritual_fn`` protocol is uniform.
     """
-    from fno.post_merge_route import dispatch_post_merge_ritual
+    from fno.post_merge_route import _default_run_ritual_verb, dispatch_post_merge_ritual
 
     # Honor the post_merge.auto_run opt-in: a `ready` verdict means "configured +
     # active", NOT "operator armed automatic dispatch". Without this gate, enabling
@@ -1258,6 +1393,7 @@ def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> An
         dedup_key=getattr(obs, "merge_sha", None),
         auto_run=auto_run,
         node_cwd=str(cand.repo_dir) if cand.repo_dir else None,
+        run_verb=lambda pr, cwd: _default_run_ritual_verb(pr, cwd, timeout=_ritual_timeout()),
         ship_session_id=getattr(cand, "ship_session_id", None),
         ship_harness=getattr(cand, "ship_harness", None),
         source_session_id=getattr(cand, "source_session_id", None),

@@ -36,6 +36,19 @@ def _isolated_world(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-root"))
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    # x-7783: the gate takes a footprint reading on EVERY spawn, so the
+    # fixture pins an idle one; the getloadavg pin below now feeds only the
+    # 15-minute backstop input (the third element). The scenario roster stays
+    # the variable under test.
+    from fno import doctor_footprint
+    from fno.footprint import Footprint
+
+    idle = Footprint(0.0, 0.0, 0.1, 0, 0, 0, 0, 0.0, 0.2, [], 0, None)
+    monkeypatch.setattr(
+        spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
+    )
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
     # The gate reads the HOST load average live, so an "under cap" scenario
     # fails on any machine whose real load crosses the ceiling (a busy fleet
     # trips it daily). Pin it: the scenario roster is the variable under test.

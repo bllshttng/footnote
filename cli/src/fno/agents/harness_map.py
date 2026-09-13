@@ -34,6 +34,7 @@ Verified facts, each dated where it differs from the 2026-07-13 spike:
 """
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from copy import deepcopy
@@ -654,6 +655,11 @@ def normalize_command(command: str, harness: str) -> str:
         if verb not in footnote_verbs():
             return cmd
         return "$fno:" + verb + cmd[len(first_word):]
+    if surface == _SLASH and cmd.startswith("$fno:"):
+        # Reverse rewrite (x-413d): the sigil says who WROTE the seed, never
+        # which harness runs it. Swap the sigil, keep the namespace, and let
+        # the /fno: handling below render it per surface.
+        cmd = "/fno:" + cmd[len("$fno:"):]
     if surface == _SLASH and cmd.startswith("/"):
         # Plugin-namespace prefix swap only (never re-tokenize): claude/agy inject
         # the skill natively (""), opencode's fno plugin exposes it as `/fno:verb`.
@@ -679,6 +685,114 @@ def normalize_command(command: str, harness: str) -> str:
             return cmd
         return "/" + prefix + verb
     return cmd
+
+
+# zsh reads the `:t` in "$fno:target" as a modifier on the empty `$fno`, so the
+# verb loses its first letter too. Measured: these letters vanish without an
+# error, `s` fails loudly, and every other letter survives as `:verb`.
+_ZSH_EATEN_LETTERS = frozenset("acelqrtu")
+
+
+def lost_verb_refusal(message: str) -> Optional[str]:
+    """The refusal for a payload whose ``$fno:`` prefix the calling shell ate,
+    or None when the payload is intact.
+
+    Inside double quotes a shell expands ``$fno`` to nothing before fno runs.
+    bash leaves ``:target``; zsh leaves ``arget``. The worker reads either as
+    prose, and the spawn still returns a live receipt, so the loss shows up
+    an hour later as a worker that did not run the verb.
+
+    The zsh shape is matched only for verbs longer than four letters: the
+    short remainders (``dd``, ``aw``) are ordinary words."""
+    verbs = set(footnote_verbs()) | {v[1:] for v in _TARGET_FAMILY_VERBS}
+    lost = {":" + v: v for v in verbs}
+    lost.update({v[1:]: v for v in verbs if len(v) > 4 and v[0] in _ZSH_EATEN_LETTERS})
+    for token in message.split():
+        verb = lost.get(token)
+        if verb is not None:
+            return (
+                f"the payload has {token!r} where '$fno:{verb}' belongs. The shell "
+                "expanded $fno to nothing inside double quotes, and zsh also drops "
+                "the first letter of the verb. Single-quote the payload: "
+                f"'$fno:{verb} ...'"
+            )
+    return None
+
+
+def cannot_fire_refusal(message: str, harness: str) -> Optional[str]:
+    """The refusal for a verb-shaped seed whose verb cannot expand, or None.
+
+    An intact ``$fno:verb`` seed still lands as prose when the footnote plugin
+    is not enabled in the codex home this machine resolves. ``missing`` and
+    ``wrong-channel`` are the measured-absent states and refuse; an unreadable
+    state (no codex CLI on PATH) fails open, because the spawn fails on its
+    own there.
+    """
+    if harness != "codex" or not message.strip().startswith(("/", "$fno:")):
+        return None
+    from fno.setup.codex_plugin import CodexPluginError, inspect_freshness
+
+    try:
+        status = inspect_freshness().get("status")
+    except (CodexPluginError, OSError, ValueError):
+        return None
+    if status in ("missing", "wrong-channel"):
+        return (
+            f"the seed invokes {message.strip().split()[0]!r} but the footnote "
+            "plugin is not enabled for codex on this machine, so the verb would "
+            "not fire and the worker would read the seed as prose. Install it "
+            "with 'fno config plugin install codex' and spawn again."
+        )
+    return None
+
+
+def verb_fired_marker(message: str) -> Optional[str]:
+    """The command that proves a ``/fno:target <node>`` seed actually fired.
+
+    The marker is the claim naming the spawned session as holder; a busy worker fired nothing.
+    """
+    first = message.strip().splitlines()[0].split()
+    if len(first) < 2 or first[1].startswith(("-", "/", "$")):
+        return None
+    if first[0].lstrip("/$") != "fno:target":
+        return None
+    return f"fno agents claim status node:{first[1]}"
+
+
+def render_seed(message: str, harness: str) -> str:
+    """Prose verbatim; a verb-shaped seed gate-checked then normalized by the
+    one shared fire-test predicate (``is_verb_seed``, x-413d)."""
+    from fno.agents.spawn_defaults import is_verb_seed
+
+    if not is_verb_seed(message):
+        return message
+    refusal = cannot_fire_refusal(message, harness)
+    if refusal:
+        raise DispatchResolveError(refusal)
+    return normalize_command(message, harness)
+
+
+def spawn_seed_receipt_fields(effective_message: str) -> dict[str, str]:
+    """The receipt fields a delivered seed contributes; prose seeds get none.
+
+    ``verb_fired`` is ``pending`` because a busy worker fired nothing; the
+    marker names the command whose pass settles it.
+    """
+    fields = {"effective_message": effective_message, "verb_fired": "pending"}
+    marker = verb_fired_marker(effective_message)
+    if marker:
+        fields["verb_marker"] = marker
+    return fields
+
+
+def spawn_seed_receipt_fragment(effective_message: Optional[str]) -> str:
+    """The JSON fragment form of :func:`spawn_seed_receipt_fields`; "" for prose."""
+    if effective_message is None:
+        return ""
+    return "".join(
+        f", {json.dumps(key)}: {json.dumps(value)}"
+        for key, value in spawn_seed_receipt_fields(effective_message).items()
+    )
 
 
 def _loop_extension_installed(harness: str) -> bool:
@@ -1061,6 +1175,47 @@ def thread_seatable(harness: str) -> bool:
     return spawn_state(harness) == "native"
 
 
+def thread_uncarried(
+    harness: str,
+    axes: dict[str, object],
+    passthrough: list[str] | None,
+) -> str | None:
+    """The first launch flag this harness's thread lane cannot carry, or None.
+
+    Reads the ``[harness.<name>.thread]`` carrier row, else the ``keeper``
+    row. ``axes`` maps ``keeper_thread.LAUNCH_AXES`` axis names to set values;
+    ``passthrough`` is the fenced ``--`` token list. A non-None answer
+    demotes the spawn to the pane; it never refuses on the substrate.
+    """
+    caps = _BUNDLED_CAPS.get(harness) or {}
+    arm = caps.get("thread") or caps.get("keeper")
+    if not arm:
+        return None
+    carries = set(arm.get("carries") or [])
+    from fno.agents.keeper_thread import LAUNCH_AXES
+
+    for flag, axis in LAUNCH_AXES:
+        if axis not in carries and axes.get(axis):
+            return flag
+    covered = set(arm.get("passthrough") or [])
+    if "*" in covered:
+        return None
+    skip_value = False
+    for token in passthrough or []:
+        if skip_value:
+            skip_value = False
+            continue
+        if token in covered:
+            # A carried spelling consumes its value token too: `-c` and
+            # `model_reasoning_effort=high` arrive as two fenced tokens.
+            skip_value = True
+        elif token.split("=", 1)[0] in covered:
+            continue
+        else:
+            return token
+    return None
+
+
 def substrate_default(harness: str) -> str:
     """Per-harness default substrate: ``thread`` where the spawn claim reads
     ``native`` (a journey-proven launch seam), else ``headless``. Pane
@@ -1149,12 +1304,67 @@ PERMISSION_MODE_HELP = (
 _VALID_SUBSTRATES = ("thread", "headless", "pane")
 _LEGACY_SUBSTRATE_ALIASES = {"bg": "thread"}
 # US3: the built-in verb allowlist (config.dispatch.allowed_verbs overrides).
-_DEFAULT_ALLOWED_VERBS = ("/target", "/think")
+_DEFAULT_ALLOWED_VERBS = ("/target", "/think", "/blueprint")
 # The env budget a brief must fit; 8 KB, measured in UTF-8 bytes (Locked
 # Decision 9 / epic Boundaries). Oversized -> explicit error, never truncation.
 _BRIEF_MAX_BYTES = 8192
 # The default command is per-harness now (each harness's `dispatch_command` in
 # _HARNESS_CAPS), not a single template - see the resolve builtin branch.
+
+
+#: The verbs the x-ebd2 lifecycle table owns; anything else abstains.
+_TARGET_FAMILY_VERBS = ("/target", "/blueprint")
+#: Intake keys on difficulty (law d-834b6ff1); re-dispatch on the plan's rung.
+_DIFFICULTY_ANSWERS = {"low": "/target", "medium": "/blueprint", "high": "/blueprint"}
+_RUNG_ANSWERS = {
+    "idea": "/blueprint",
+    "design": "/blueprint",
+    "ready": "/target",
+    "in_progress": "/target",
+    "in_review": "/target",
+}
+
+
+def resolve_effective_verb(
+    *,
+    verb: Optional[str] = None,
+    difficulty: Optional[str] = None,
+    plan_rung: Optional[str] = None,
+    node_id: Optional[str] = None,
+) -> tuple[Optional[str], str]:
+    """The target/blueprint lifecycle conditional; full table:
+    docs/architecture/backlog-graph-verb-contracts.md. Intake (rung "none"):
+    difficulty decides. Re-dispatch: the plan rung decides. The stored
+    ``verb`` reconciles through the table; out-of-family abstains to declared
+    precedence. Returns ``(canonical_verb, decision)``; ``None`` = abstain.
+    Raises :class:`DispatchResolveError` on a refusal rung, or planless
+    without low/medium/high difficulty. ``plan_rung`` is a Rung value. The
+    refusal leads with ``node_id`` when the caller holds one, so the subject
+    of the failure is never read off a citation."""
+    raw_verb = (verb or "").strip()
+    if raw_verb.startswith("/fno:"):
+        raw_verb = "/" + raw_verb[len("/fno:"):]
+    if raw_verb and raw_verb not in _TARGET_FAMILY_VERBS:
+        return None, f"verb=lifecycle(out-of-family {raw_verb}; declared precedence holds)"
+    if plan_rung is None:
+        return None, "verb=lifecycle(no-node-context)"
+    rung = plan_rung.strip().lower()
+    d = (difficulty or "").strip().lower()
+    if rung == "none" and d in _DIFFICULTY_ANSWERS:
+        answer = _DIFFICULTY_ANSWERS[d]
+        note = f"verb=lifecycle(intake difficulty={d} -> {answer}"
+    elif rung in _RUNG_ANSWERS:
+        answer = _RUNG_ANSWERS[rung]
+        note = f"verb=lifecycle(plan {rung} -> {answer}"
+    else:
+        who = f" for node {node_id}" if node_id else ""
+        raise DispatchResolveError(
+            f"dispatch verb cannot be derived{who}: plan rung {rung!r} with "
+            f"difficulty {d!r} answers no lifecycle rung"
+        )
+    if raw_verb and raw_verb != answer:
+        note += f"; stored dispatch_verb {raw_verb} reconciled"
+    return answer, note + ")"
 
 
 def resolve_dispatch(
@@ -1164,6 +1374,8 @@ def resolve_dispatch(
     node_id: Optional[str] = None,
     command: Optional[str] = None,
     verb: Optional[str] = None,
+    difficulty: Optional[str] = None,
+    plan_rung: Optional[str] = None,
     brief: Optional[str] = None,
     merge_posture: Optional[str] = None,
     trigger: str = "autonomous",
@@ -1172,44 +1384,48 @@ def resolve_dispatch(
 ) -> dict:
     """Map (config + context) -> the dispatch tuple. Pure; never spawns/claims.
 
-    Precedence (each field independent):
-      harness    : explicit > config.dispatch.harness > ``claude``
-      substrate  : explicit > config.dispatch.substrate > per-harness default
-      command    : explicit > node ``verb`` > config.dispatch.command > builtin
-      merge      : builtin rung only; ``config.auto_merge.grant`` picks
-                   ``/target {id}`` over the default ``/target --no-merge {id}``
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md. Field
+    precedence (each independent): harness explicit > stage table >
+    ``claude``; substrate explicit > config > per-harness default; command
+    explicit > x-ebd2 lifecycle derivation > node ``verb`` (allowlist-checked;
+    a graph field is a trust boundary) > ``config.dispatch.command`` >
+    per-harness builtin. ``difficulty``/``plan_rung`` feed the lifecycle
+    derivation (see :func:`resolve_effective_verb`), which runs BEFORE the
+    stage-table read so ``agents.profiles.<derived-verb>`` drives the harness;
+    an explicit command bypasses it (reconcile and the other explicit doors
+    spell their own verb). ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
+    at 8 KB, never truncated. ``route`` is the stage table's vendor lane beside
+    the harness ("" when unset), returned so a caller forwarding the harness
+    can forward the vendor too. ``trigger`` is autonomous or attended (pane
+    needs the capability). ``node_id`` substitutes the command's ``{id}``.
+    ``merge_posture`` (x-8151): no-merge injects, allow overrides the config
+    read (an explicit template is never edited), from-config reads the grant.
 
-    ``verb`` is a node's ``dispatch_verb`` (US3): validated against the allowlist
-    (``config.dispatch.allowed_verbs`` > built-in ``/target``, ``/think``) and
-    assembled as ``<verb> {id}`` - a graph field is a trust boundary, so an
-    out-of-allowlist verb is refused. ``brief`` is a node's ``dispatch_brief``:
-    it rides ``env['TARGET_BRIEF']`` only (never the command line) and is capped
-    at 8 KB with an explicit error, never truncated.
-
-    ``trigger`` is ``autonomous`` (fire-and-forget) or ``attended``. An
-    autonomous pane requires evidence-backed per-harness capability.
-
-    ``node_id`` when given is substituted into the command's ``{id}`` (exactly
-    once, else an error); when absent the template is returned literally (a bare
-    ``--harness`` resolution just wants the harness/substrate decision).
-
-    ``merge_posture`` (x-8151): ``no-merge`` injects the flag into a
-    /target-family command missing it; ``allow`` overrides the builtin rung's
-    config read (an explicit template is never edited - a refusal it carries
-    wins); ``from-config`` resolves ``config.auto_merge.grant``, errors
-    degrading to no-merge.
-
-    Raises :class:`DispatchResolveError` on: an unknown harness (naming the map),
-    an explicit ``thread`` on a harness without that lane (pointing at ``headless``), an
-    unsupported autonomous ``pane``, an unknown trigger or substrate, or an
-    empty / unsubstituted command. ``dispatch_cfg`` overrides the config read
-    (for tests)."""
+    Raises :class:`DispatchResolveError` on an unknown/refused harness, a
+    missing substrate lane, an unsupported autonomous pane, an unknown trigger
+    or substrate, an out-of-allowlist verb, an oversized brief, an empty or
+    unsubstituted command, or an unanswerable node lifecycle.
+    ``dispatch_cfg`` overrides the config read (for tests)."""
+    decision: list[str] = []
+    # The lifecycle rung derives the effective verb BEFORE the config read so
+    # the stage table resolves the DERIVED verb's profile row.
+    lifecycle_verb: Optional[str] = None
+    if command is None or not command.strip():
+        lifecycle_verb, lifecycle_note = resolve_effective_verb(
+            verb=verb, difficulty=difficulty, plan_rung=plan_rung, node_id=node_id
+        )
+        decision.append(lifecycle_note)
     cfg = (
         dict(dispatch_cfg)
         if dispatch_cfg is not None
-        else _load_dispatch_cfg(settings, verb=verb)
+        else _load_dispatch_cfg(settings, verb=lifecycle_verb or verb)
     )
-    decision: list[str] = []
+    # The verb lane vendor rides the same stage-table row the harness does:
+    # an autonomous dispatch that names the harness but not the route sends a
+    # routed model to the default endpoint (x-14d4: HTTP 404 model_not_found).
+    route_value = str(cfg.get("route", "") or "")
+    if route_value:
+        decision.append(f"route=config({route_value})")
     chosen_trigger = (trigger or "autonomous").strip().lower() or "autonomous"
     if chosen_trigger not in ("autonomous", "attended"):
         raise DispatchResolveError(
@@ -1297,14 +1513,24 @@ def resolve_dispatch(
             f"{', '.join(h for h in known_harnesses() if thread_seatable(h))})"
         )
 
-    # 3. command template. Precedence: explicit --command > node verb > config
-    # template > per-harness builtin (dispatch_command). A node verb is validated
-    # against the allowlist (a graph field is a trust boundary) and assembled as
-    # `<verb> {id}`; the merge posture (no-merge) is NOT part of the verb string -
-    # it stays a launcher flag.
+    # 3. command template. Precedence: explicit --command > lifecycle > node
+    # verb (allowlist-checked; a graph field is a trust boundary) > config
+    # template > per-harness builtin. A derived /target renders through the
+    # SAME builtin rungs (suppress the raw verb and fall through); a derived
+    # /blueprint renders its own verb: the target template is target-phase.
+    # A registry verb sets skip_normalize and, with takes_node_id=false,
+    # verb_declares_no_id (both consumed below).
+    skip_normalize = False
+    verb_declares_no_id = False
+    derived_blueprint = lifecycle_verb == "/blueprint"
+    if lifecycle_verb == "/target":
+        verb = None
     if command is not None and command.strip():
         template = command.strip()
         decision.append("command=explicit")
+    elif derived_blueprint:
+        template = f"{lifecycle_verb} {{id}}"
+        decision.append(f"command=derived({lifecycle_verb})")
     elif verb is not None:
         chosen_verb = verb.strip()
         if not chosen_verb:
@@ -1320,14 +1546,51 @@ def resolve_dispatch(
             chosen_verb = "/" + chosen_verb[len("/fno:"):]
         _av = cfg.get("allowed_verbs")
         allowed = list(_av) if isinstance(_av, list) else list(_DEFAULT_ALLOWED_VERBS)
-        if chosen_verb not in allowed:
+        from fno.config import resolvable_verbs
+        from fno.review_capability import resolve_skill_presence
+
+        _vr = cfg.get("verb_registry")
+        registry = resolvable_verbs(_vr if isinstance(_vr, Mapping) else None, allowed)
+        descriptor = registry.get(chosen_verb)
+        if chosen_verb not in allowed and descriptor is None:
             raise DispatchResolveError(
-                f"dispatch verb {chosen_verb!r} is not in the allowlist "
-                f"({', '.join(allowed)}); set config.dispatch.allowed_verbs to extend it"
+                f"dispatch verb {chosen_verb!r} is in neither the allowlist "
+                f"({', '.join(allowed)}) nor config.dispatch.verb_registry "
+                f"({', '.join(sorted(registry)) or 'empty'}); extend one of them"
             )
-        # Slash-leading; the post-ladder seam normalizes it per-harness.
-        template = f"{chosen_verb} {{id}}"
-        decision.append(f"command=verb({chosen_verb})")
+        if descriptor is not None:
+            # Registry verb: descriptor carries spelling, capability, claim.
+            if descriptor.requires == "skill":
+                # First token only (the verb may carry args; same contract as
+                # the reviewer probe); malformed falls back to the key.
+                head = descriptor.invocation.split()
+                skill_name = (head[0] if head else chosen_verb).lstrip("/").split(":")[-1]
+                status, reason = resolve_skill_presence(
+                    skill_name, chosen_harness, context="config.dispatch.verb_registry"
+                )
+                if status == "unavailable":
+                    raise DispatchResolveError(reason)
+            if descriptor.invocations and chosen_harness not in descriptor.invocations:
+                raise DispatchResolveError(
+                    f"dispatch verb {chosen_verb!r} is not declared on harness "
+                    f"{chosen_harness!r}; config.dispatch.verb_registry declares "
+                    f"it on: {', '.join(sorted(descriptor.invocations))}"
+                )
+            template = (descriptor.invocations or {}).get(chosen_harness, descriptor.invocation)
+            if descriptor.takes_node_id:
+                template = f"{template} {{id}}"
+            else:
+                verb_declares_no_id = True
+            # The descriptor already spells the verb natively; normalizing
+            # would mint a phantom `$fno:` skill from it.
+            skip_normalize = True
+            decision.append(
+                f"command=registry-verb({chosen_verb}, asserts={descriptor.asserts})"
+            )
+        else:
+            # Slash-leading; the post-ladder seam normalizes it per-harness.
+            template = f"{chosen_verb} {{id}}"
+            decision.append(f"command=verb({chosen_verb})")
     else:
         # Per-harness builtin (x-a5e4): the normalize of `/target --no-merge {id}` -
         # codex `$fno:target`, claude/agy `/target`, opencode `/fno:target`, gemini
@@ -1361,7 +1624,7 @@ def resolve_dispatch(
     # call is unguarded by design and every caller shares one implementation.
     # Non-slash templates (`$fno:...`) pass through unchanged, and the call is
     # idempotent over the builtin/verb rungs' output.
-    normalized_cmd = normalize_command(template, chosen_harness)
+    normalized_cmd = template if skip_normalize else normalize_command(template, chosen_harness)
     if normalized_cmd != template:
         template = normalized_cmd
         decision.append(f"command=normalized({chosen_harness})")
@@ -1373,16 +1636,17 @@ def resolve_dispatch(
     # where the load gate is a shape check and the dispatch gate is where a
     # capability is required.
     check_loop_participation(chosen_harness, template)
-    if node_id:
-        # `{id}` must appear at least once; a template may reference it more than
-        # once (str.replace substitutes every occurrence).
-        if "{id}" not in template:
-            raise DispatchResolveError(
-                f"command template {template!r} must contain '{{id}}' at least "
-                f"once for substitution"
-            )
+    # `{id}` must appear at least once; a template may reference it more than
+    # once. A registry verb declaring takes_node_id=false is exempt: ignoring
+    # the id is declared, not a dropped substitution.
+    if node_id and "{id}" in template:
         resolved_command = template.replace("{id}", node_id.strip())
         decision.append(f"command=substituted({resolved_command})")
+    elif node_id and "{id}" not in template and not verb_declares_no_id:
+        raise DispatchResolveError(
+            f"command template {template!r} must contain '{{id}}' at least "
+            f"once for substitution"
+        )
     else:
         resolved_command = template
         decision.append(f"command=template({resolved_command})")
@@ -1426,7 +1690,12 @@ def resolve_dispatch(
         "map_version": MAP_VERSION,
         "harness": chosen_harness,
         "substrate": chosen_substrate,
+        "route": route_value,
         "command": resolved_command,
+        # x-ebd2: the lifecycle-derived canonical verb, or None when the table
+        # abstained (bare resolve, explicit command, out-of-family declared
+        # verb) - the raw source state stays in the caller's verb_source.
+        "verb": lifecycle_verb,
         "command_surface": caps["command_surface"],
         "permission_bypass": list(caps["permission_bypass"]),
         "resume": caps["resume"],
@@ -1470,9 +1739,10 @@ def _load_dispatch_cfg(settings: object, verb: Optional[str] = None) -> dict:
     # One home for the harness axis (the stage table) with the deprecated
     # dispatch.harness folded beneath it; the note names the losing spelling
     # when both were set and disagreed.
-    from fno.dispatch_flags import configured_dispatch_harness
+    from fno.dispatch_flags import configured_dispatch_harness, configured_dispatch_route
 
     harness_value, harness_note = configured_dispatch_harness(settings, verb=verb or "target")
+    route_value = configured_dispatch_route(settings, verb=verb or "target")
     d = getattr(settings, "dispatch", None)
     # The grant lives in config.auto_merge, NOT under dispatch (x-4be1), so it
     # is read before the dispatch-block gate: a settings object carrying an
@@ -1485,6 +1755,7 @@ def _load_dispatch_cfg(settings: object, verb: Optional[str] = None) -> dict:
         return {
             "harness": harness_value or "",
             "harness_note": harness_note or "",
+            "route": route_value,
             "auto_merge": grant,
         }
 
@@ -1495,9 +1766,11 @@ def _load_dispatch_cfg(settings: object, verb: Optional[str] = None) -> dict:
         return {
             "harness": harness_value or "",
             "harness_note": harness_note or "",
+            "route": route_value,
             "substrate": _text("substrate"),
             "command": _text("command"),
             "allowed_verbs": list(getattr(d, "allowed_verbs", None) or []),
+            "verb_registry": dict(getattr(d, "verb_registry", None) or {}),
             # Strict literal compare, not truthiness: only the "dispatch"
             # grant grants (a stray truthy value or a stub block never does).
             "auto_merge": grant,

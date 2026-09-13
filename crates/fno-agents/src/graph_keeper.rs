@@ -32,6 +32,7 @@ use crate::graph_store::{self, FieldUpdate, MutateInput, StoreError};
 use crate::identity::{harness_of_session_id, shape_known_harness};
 use serde_json::{json, Map, Value};
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,30 +42,7 @@ use std::time::Duration;
 /// The store keeper frame protocol version. Bump on any frame-shape change.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReadSource {
-    Json,
-    Sqlite,
-}
-
-impl ReadSource {
-    fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "json" => Ok(Self::Json),
-            "sqlite" => Ok(Self::Sqlite),
-            _ => Err(format!(
-                "--read-source must be json or sqlite, got {value:?}"
-            )),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Json => "json",
-            Self::Sqlite => "sqlite",
-        }
-    }
-}
+use crate::backlog::Backend;
 
 // Frame tags. Client -> keeper then keeper -> client.
 pub(crate) const TAG_REQUEST: u8 = 1;
@@ -80,7 +58,8 @@ const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Parsed `--store-keeper` lane argv:
 /// `--store-keeper --sock <path> --graph <path> [--session <id>]
-/// [--canonical] [--lock-timeout-secs N] [--read-source json|sqlite]`.
+/// [--canonical] [--lock-timeout-secs N]`. The backend is not argv state:
+/// the store names it in graph_meta and every request re-reads it.
 pub struct KeeperConfig {
     pub sock: PathBuf,
     pub graph: PathBuf,
@@ -91,7 +70,6 @@ pub struct KeeperConfig {
     pub lock_timeout: Duration,
     /// Project journal receiving bounded write-gate aggregates.
     pub events: Option<PathBuf>,
-    pub read_source: ReadSource,
     /// Idle self-exit bound. A keeper is long-lived by design in production,
     /// but its spawner can vanish without a Shutdown frame - a crashed CLI,
     /// a killed pytest worker above all - and one orphan per fixture graph
@@ -114,7 +92,6 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
     let mut canonical = false;
     let mut lock_timeout = graph_store::DEFAULT_LOCK_TIMEOUT;
     let mut events = None;
-    let mut read_source = ReadSource::Json;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -132,9 +109,6 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
                 lock_timeout = Duration::from_secs(v);
             }
             "--events" => events = Some(PathBuf::from(it.next().ok_or("--events needs a value")?)),
-            "--read-source" => {
-                read_source = ReadSource::parse(it.next().ok_or("--read-source needs a value")?)?
-            }
             other => return Err(format!("unknown arg: {other}")),
         }
     }
@@ -158,7 +132,6 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
         canonical,
         lock_timeout,
         events,
-        read_source,
         idle_limit,
     })
 }
@@ -291,7 +264,24 @@ struct StoreState {
     snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
     gate_metrics: Mutex<GateMetrics>,
     events: Option<PathBuf>,
-    read_source: ReadSource,
+    /// The (dev, ino) of the socket path at bind time: the seat's proof.
+    /// Unlinks are guarded by it, and an idle keeper whose path was rebound
+    /// stands down (AC2-ERR).
+    sock_ino: Option<(u64, u64)>,
+    /// The build this keeper process launched from: drift is computed fresh
+    /// at every Identify, and the WouldBlock arm self-retires when the
+    /// binary under the keeper is rewritten while it idles.
+    startup_fp: Option<crate::drift::ExeFingerprint>,
+}
+
+impl StoreState {
+    /// The backend the store names RIGHT NOW, re-read from graph_meta on
+    /// every request: another process flipping `graph_meta.backend` lands on
+    /// the next request, no restart (AC5-EDGE). Unset or absent db reads as
+    /// json.
+    fn backend(&self) -> Backend {
+        crate::backlog::backend(&self.graph)
+    }
 }
 
 const GATE_WINDOW: Duration = Duration::from_secs(300);
@@ -389,6 +379,130 @@ fn flush_gate_metrics(state: &StoreState) {
     );
 }
 
+/// The soak sampler: each 5-minute window, when the backend is json
+/// (JSON authoritative) and the db version moved since the last
+/// sample, run one parity compare and journal it. A failed compare
+/// does not advance the sampler, so the window retries (AC13-HP).
+fn sample_parity(state: &StoreState, last_sampled: &mut Option<String>) {
+    if state.backend() != crate::backlog::Backend::Json {
+        return;
+    }
+    let Ok(version) = crate::backlog::version(&state.graph) else {
+        return;
+    };
+    if last_sampled.as_deref() == Some(version.as_str()) {
+        return;
+    }
+    // Same gate discipline as the parity op: the compare holds the shared
+    // read guard so a publish cannot interleave with the sample.
+    let gate = state.gate.read().unwrap_or_else(|error| error.into_inner());
+    let report = crate::backlog::parity(&state.graph);
+    drop(gate);
+    let Ok(report) = report else {
+        return;
+    };
+    *last_sampled = Some(version);
+    if let Some(events) = &state.events {
+        let emitter = crate::events::EventEmitter::new(events, "daemon");
+        let _ = emitter.emit(
+            "graph_parity_sample",
+            &json!({
+                "rows": report.rows,
+                "divergent": report.divergent,
+                "divergent_ids": report.divergent_ids,
+                "backend": "json",
+            }),
+        );
+    }
+}
+
+/// Exit code for a keeper that found its seat owned: the Python spawner
+/// (`store.py:_client_for`) reads this number and keeps polling the
+/// incumbent instead of failing the spawn.
+pub const EXIT_SEAT_OWNED: i32 = 3;
+
+/// Seat-ladder pacing, mirroring daemon.rs's LOCK_ACQUIRE_* shape: a probe
+/// holds the seat lock for microseconds, an incumbent for life, and only
+/// duration separates them.
+const SEAT_LOCK_ATTEMPTS: usize = 6;
+const SEAT_LOCK_RETRY: Duration = Duration::from_millis(25);
+
+/// How often an idle keeper re-checks that the socket path still names the
+/// inode it bound.
+const SEAT_CHECK_EVERY: Duration = Duration::from_secs(1);
+
+fn seat_lock_path(sock: &Path) -> PathBuf {
+    let mut s = sock.as_os_str().to_os_string();
+    s.push(".lock");
+    PathBuf::from(s)
+}
+
+/// Take the exclusive seat flock on `<sock>.lock`, held for the process
+/// life (the returned File keeps it). `None` = the seat is owned: the
+/// daemon's bind_supervisor_socket rule, applied to the store.
+fn take_seat(sock: &Path) -> Option<std::fs::File> {
+    let lock_path = seat_lock_path(sock);
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+    for attempt in 0..SEAT_LOCK_ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() != std::io::ErrorKind::WouldBlock {
+                    return None;
+                }
+                if attempt + 1 < SEAT_LOCK_ATTEMPTS {
+                    std::thread::sleep(SEAT_LOCK_RETRY * (attempt as u32 + 1));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// One Identify with a short reply bound: true only when something behind
+/// the path answers. An answering incumbent predates the seat lock (it was
+/// built before this change); a refusal or silence is a dead leftover the
+/// caller may clear.
+fn a_live_keeper_answers(sock: &Path, bound: Duration) -> bool {
+    let Ok(mut stream) = UnixStream::connect(sock) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(bound));
+    let _ = stream.set_write_timeout(Some(bound));
+    if stream.write_all(&encode(TAG_IDENTIFY, b"")).is_err() {
+        return false;
+    }
+    let mut header = [0u8; 5];
+    if stream.read_exact(&mut header).is_err() {
+        return false;
+    }
+    let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+    let mut payload = vec![0u8; len.min(1 << 20)];
+    stream.read_exact(&mut payload).is_ok()
+}
+
+/// True while the socket path still names the inode THIS keeper bound. A
+/// keeper never unlinks a socket it does not own, and an idle keeper whose
+/// path was rebound stands down instead of serving a phantom.
+fn seat_still_ours(sock: &Path, sock_ino: Option<(u64, u64)>) -> bool {
+    match sock_ino {
+        None => true,
+        Some(mine) => match std::fs::metadata(sock) {
+            Ok(md) => (md.dev(), md.ino()) == mine,
+            Err(_) => false,
+        },
+    }
+}
+
 /// Run the store keeper to completion. Returns only on a startup failure;
 /// a Shutdown frame ends the process from inside.
 pub fn run(cfg: KeeperConfig) -> Result<(), String> {
@@ -397,20 +511,61 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     unsafe {
         libc::setsid();
     }
-    // Connect-before-bind: a double keeper is a loud refusal.
-    if UnixStream::connect(&cfg.sock).is_ok() {
-        return Err(format!(
-            "store socket {} already has a live listener behind it",
+    // Seat flock BEFORE touching the socket: the loser exits 3 and the
+    // Python spawner keeps polling the incumbent rather than respawning.
+    // `_seat` is a named binding, the daemon's bind_supervisor_socket
+    // shape: the File holds the flock, so an `if take_seat(..).is_none()`
+    // temporary drops at the end of the condition and the lock guards
+    // nothing (x-252e).
+    let Some(_seat) = take_seat(&cfg.sock) else {
+        eprintln!(
+            "store keeper: {} is owned by a live keeper (lock held); exiting",
             cfg.sock.display()
-        ));
+        );
+        std::process::exit(EXIT_SEAT_OWNED);
+    };
+    // A keeper built before the seat lock can still own the path. With the
+    // flock held, one short-bound Identify decides: an answerer is a live
+    // incumbent, a refusal or silence is a dead leftover.
+    if cfg.sock.exists() && a_live_keeper_answers(&cfg.sock, Duration::from_millis(750)) {
+        eprintln!(
+            "store keeper: {} is owned by a live keeper (Identify answered); exiting",
+            cfg.sock.display()
+        );
+        std::process::exit(EXIT_SEAT_OWNED);
+    }
+    // Connect-before-bind: a live listener IS the seat, whatever its build
+    // (a loaded incumbent can answer Identify too slowly for the probe above
+    // and still own the path), so the loser exits EXIT_SEAT_OWNED and the
+    // Python spawner keeps polling the incumbent instead of failing.
+    if UnixStream::connect(&cfg.sock).is_ok() {
+        eprintln!(
+            "store keeper: {} is owned by a live keeper (connect before bind); exiting",
+            cfg.sock.display()
+        );
+        std::process::exit(EXIT_SEAT_OWNED);
     }
     let _ = std::fs::remove_file(&cfg.sock);
     if let Some(parent) = cfg.sock.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
-    let listener = UnixListener::bind(&cfg.sock)
-        .map_err(|e| format!("cannot bind {}: {e}", cfg.sock.display()))?;
+    let listener = match UnixListener::bind(&cfg.sock) {
+        Ok(l) => l,
+        // A listener appeared between the probe and the bind: the seat filled.
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!(
+                "store keeper: {} is owned by a live keeper (bind in use); exiting",
+                cfg.sock.display()
+            );
+            std::process::exit(EXIT_SEAT_OWNED);
+        }
+        Err(e) => return Err(format!("cannot bind {}: {e}", cfg.sock.display())),
+    };
+    let sock_ino = std::fs::metadata(&cfg.sock)
+        .ok()
+        .map(|md| (md.dev(), md.ino()));
+    let startup_fp = crate::drift::ExeFingerprint::current();
 
     let state = Arc::new(StoreState {
         graph: cfg.graph.clone(),
@@ -422,7 +577,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         snapshots: Mutex::new(std::collections::VecDeque::new()),
         gate_metrics: Mutex::new(GateMetrics::new()),
         events: cfg.events.clone(),
-        read_source: cfg.read_source,
+        sock_ino,
+        startup_fp,
     });
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -434,7 +590,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         "graph": cfg.graph.display().to_string(),
         "session": cfg.session,
         "started_at": started_at,
-        "store_backend": cfg.read_source.name(),
+        // The live backend is stamped onto every Identify reply in
+        // serve_client, not frozen here.
     })
     .to_string()
     .into_bytes();
@@ -445,15 +602,21 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         let metrics_shutdown = Arc::clone(&shutdown);
         let _ = std::thread::Builder::new()
             .name("fno-store-metrics".into())
-            .spawn(move || loop {
-                std::thread::sleep(GATE_WINDOW);
-                if metrics_shutdown.load(Ordering::SeqCst) == 1 {
-                    break;
+            .spawn(move || {
+                // The parity sampler state: the last db version a
+                // sample covered, so an unmoved window samples nothing.
+                let mut last_sampled: Option<String> = None;
+                loop {
+                    std::thread::sleep(GATE_WINDOW);
+                    if metrics_shutdown.load(Ordering::SeqCst) == 1 {
+                        break;
+                    }
+                    flush_gate_metrics(&metrics_state);
+                    sample_parity(&metrics_state, &mut last_sampled);
                 }
-                flush_gate_metrics(&metrics_state);
             });
     }
-    if state.read_source == ReadSource::Sqlite {
+    if state.backend() == Backend::Sqlite {
         let export_state = Arc::clone(&state);
         let export_shutdown = Arc::clone(&shutdown);
         let _ = std::thread::Builder::new()
@@ -467,10 +630,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                     .gate
                     .write()
                     .unwrap_or_else(|error| error.into_inner());
-                let result = crate::graph_sqlite::export_if_due(
-                    &export_state.graph,
-                    Duration::from_secs(60),
-                );
+                let result =
+                    crate::backlog::export_if_due(&export_state.graph, Duration::from_secs(60));
                 drop(gate);
                 if let (Err(error), Some(path)) = (result, &export_state.events) {
                     let emitter = crate::events::EventEmitter::new(path, "daemon");
@@ -486,6 +647,15 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     }
     let active_clients = Arc::new(AtomicU64::new(0));
     let mut last_activity = std::time::Instant::now();
+    let mut last_seat_check = std::time::Instant::now();
+    let mut last_drift_check = std::time::Instant::now();
+    // x-f188 change 3: the drift tick period. 30s default, env-overridable
+    // for tests, next to its idle-exit sibling's override.
+    let drift_check_every = std::env::var("FNO_STORE_KEEPER_DRIFT_CHECK_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30));
     // A test-owned fixture store (argv carries FNO_TEST_OWNER_PID/BIRTH) is
     // bound to that test run's lifetime, not the longer-lived idle bound
     // above: a wedged test that never sends Shutdown must not leak this
@@ -545,6 +715,46 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Seat check while idle: once a second, an idle keeper
+                // confirms the path still names the inode it bound. Lost
+                // seat -> stand down WITHOUT unlinking (the post-loop unlink
+                // is inode-guarded, so the rebinding keeper's socket stays).
+                if active_clients.load(Ordering::SeqCst) == 0
+                    && last_seat_check.elapsed() >= SEAT_CHECK_EVERY
+                {
+                    last_seat_check = std::time::Instant::now();
+                    if !seat_still_ours(&cfg.sock, sock_ino) {
+                        // The same verdict the pre-bind ladder spells 3, so
+                        // spell 3 here too: falling through reports a robbed
+                        // seat as success (the racer-0 exit-0 in the CI race).
+                        // The path is not ours; skip the inode-guarded
+                        // unlink below the loop as well.
+                        eprintln!(
+                            "store keeper: {} is owned by a live keeper (inode moved); exiting",
+                            cfg.sock.display()
+                        );
+                        std::process::exit(EXIT_SEAT_OWNED);
+                    }
+                }
+                // Drift self-retire (x-f188 change 3): a keeper idling on a
+                // binary that a rebuild replaced is a stale server no
+                // restart reaches. Every drift tick with no client,
+                // re-stat the own executable; Drifted -> break so the
+                // inode-guarded unlink runs and the next caller respawns
+                // on the installed binary.
+                if active_clients.load(Ordering::SeqCst) == 0
+                    && last_drift_check.elapsed() >= drift_check_every
+                {
+                    last_drift_check = std::time::Instant::now();
+                    if let Some(fp) = &state.startup_fp {
+                        if matches!(
+                            crate::drift::self_drift(fp),
+                            crate::drift::DriftState::Drifted { .. }
+                        ) {
+                            break;
+                        }
+                    }
+                }
                 if let Some(limit) = cfg.idle_limit {
                     if active_clients.load(Ordering::SeqCst) == 0
                         && last_activity.elapsed() >= limit
@@ -554,10 +764,23 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            Err(_) => break,
+            // A peer resetting between connect and accept surfaces here
+            // (Linux ECONNABORTED); one dropped probe must not retire a
+            // keeper that owns the seat. Interrupted accept retries too.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ConnectionAborted
+                    || e.kind() == std::io::ErrorKind::Interrupted => {}
+            // Anything past WouldBlock/Aborted/Interrupted is a listener
+            // that can no longer accept: a broken keeper must not report
+            // success (worker.rs prints the Err and exits 2).
+            Err(e) => return Err(format!("accept failed on {}: {e}", cfg.sock.display())),
         }
     }
-    let _ = std::fs::remove_file(&cfg.sock);
+    // Unlink only what we still own: after a seat loss the path names the
+    // rebinding keeper's socket, and removing it would kill THEIR listener.
+    if seat_still_ours(&cfg.sock, sock_ino) {
+        let _ = std::fs::remove_file(&cfg.sock);
+    }
     Ok(())
 }
 
@@ -694,7 +917,32 @@ fn serve_client(
                 return;
             }
             Incoming::Identify => {
-                let _ = stream.write_all(&encode(TAG_IDENTIFY_REPLY, &identify));
+                // Build + drift computed LIVE at each Identify: a binary
+                // rewritten after this keeper started reads drifted in the
+                // next census, not one restart behind. New JSON keys are
+                // not a frame-shape change (PROTOCOL_VERSION stays 1).
+                let mut id: Value = serde_json::from_slice(&identify).unwrap_or(json!({}));
+                if let Some(obj) = id.as_object_mut() {
+                    // The backend the store names at answer time: a keeper
+                    // reports a flip another process made, even one made
+                    // after this keeper started (AC4-HP, AC5-EDGE).
+                    obj.insert("store_backend".to_string(), json!(state.backend().name()));
+                }
+                if let (Some(obj), Some(fp)) = (id.as_object_mut(), &state.startup_fp) {
+                    obj.insert(
+                        "build".to_string(),
+                        json!({
+                            "path": fp.path.display().to_string(),
+                            "mtime_nanos": fp.mtime_nanos,
+                            "size": fp.size,
+                        }),
+                    );
+                    obj.insert(
+                        "drift".to_string(),
+                        json!(crate::drift::drift_label(&crate::drift::self_drift(fp))),
+                    );
+                }
+                let _ = stream.write_all(&encode(TAG_IDENTIFY_REPLY, id.to_string().as_bytes()));
                 let _ = stream.flush();
             }
             Incoming::Shutdown => {
@@ -703,6 +951,31 @@ fn serve_client(
                 // survived-hangup vs survived-close line; an explicit
                 // shutdown ends the process here, so in-flight writers on
                 // other threads are bounded by the atomic-replace publish.
+                // Wait out an in-flight mutation first (x-f188 change 3):
+                // a bounded try_write ladder; when it cannot land within
+                // lock_timeout, answer busy and KEEP SERVING instead of
+                // exiting mid-write.
+                let deadline = std::time::Instant::now() + state.lock_timeout;
+                let mut gate_guard: Option<std::sync::RwLockWriteGuard<'_, ()>> = None;
+                while std::time::Instant::now() < deadline {
+                    if let Ok(g) = state.gate.try_write() {
+                        gate_guard = Some(g);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let Some(gate_guard) = gate_guard else {
+                    let _ = stream.write_all(&encode(
+                        TAG_RESPONSE,
+                        json!({"id": 0, "ok": false, "error": {"kind": "busy",
+                              "message": "a mutation is in flight"}})
+                        .to_string()
+                        .as_bytes(),
+                    ));
+                    let _ = stream.flush();
+                    return;
+                };
+                drop(gate_guard);
                 let _ = stream.write_all(&encode(
                     TAG_RESPONSE,
                     json!({"id": 0, "ok": true, "result": "shutdown"})
@@ -711,7 +984,10 @@ fn serve_client(
                 ));
                 let _ = stream.flush();
                 shutdown.store(1, Ordering::SeqCst);
-                let _ = std::fs::remove_file(store_socket_for(&state.graph));
+                let sock = store_socket_for(&state.graph);
+                if seat_still_ours(&sock, state.sock_ino) {
+                    let _ = std::fs::remove_file(&sock);
+                }
                 std::process::exit(0);
             }
             Incoming::Request(payload) => {
@@ -766,11 +1042,14 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "read" => handle_read(state, &params),
         "read_strict" => handle_read(state, &params),
         "read_ids" => handle_read_ids(state, &params),
+        "plan_refs" => handle_plan_refs(state),
         "begin" => handle_begin(state),
         "commit" => handle_commit(state, &params),
         "export_now" => handle_export_now(state),
         "export_status" => handle_export_status(state),
+        "parity" => handle_parity(state),
         "op" => handle_op(state, &params),
+        "api" => handle_api(state, &params),
         "read_archive" => handle_read_archive(state, &params),
         "read_file" => handle_read_file(state),
         "defaults" => handle_pure(&params, |mut entries, p| {
@@ -810,10 +1089,14 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
             let normalized = graph_store::normalize_plan_path(opt_str(&params, "path"));
             Ok(json!({ "path": normalized }))
         }
-        // The canonical key order, for the ordering tests and any caller
-        // that documents the on-disk shape: one source of truth (the
-        // ported store's constant), never a re-typed copy.
+        // The canonical key order, for the ordering tests and one caller that
+        // documents the on-disk shape: one source of truth (the ported
+        // store's constant), never a re-typed copy.
         "canonical_field_order" => Ok(json!({ "fields": graph_store::CANONICAL_FIELD_ORDER })),
+        // The one delivery classifier (scoreboard.rs): graph nodes + ledger
+        // rows in, a per-node delivery classification out. Pure; the
+        // scoreboard views are the callers, so seven views read one decision.
+        "scoreboard_classify" => crate::scoreboard::classify(&params).map_err(StoreError::Invalid),
         // One named op applied over client-shipped rows, no file I/O and no
         // publish: `set_related`, `plan_path_owner_conflict`, and friends
         // run INSIDE a client mutator on an in-hand snapshot, where a full
@@ -870,7 +1153,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             // Unknown claim state must refuse, not read as "nothing is
             // claimed": the Python leg this verb replaced failed closed
             // (`live_claimed_node_ids(strict=True)`).
-            _ => crate::claims::list_strict(Some("node:"), None, false)
+            _ => crate::claims::list(Some("node:"), None, false)
                 .map_err(|e| {
                     StoreError::ClaimsUnavailable(format!(
                         "live claim state is unavailable; ready selection refused: {e}"
@@ -901,12 +1184,12 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
     let sqlite;
     let entries: &[Value] = match params.get("entries").and_then(Value::as_array) {
         Some(a) => a,
-        None => match state.read_source {
-            ReadSource::Json => {
+        None => match state.backend() {
+            Backend::Json => {
                 cached = cached_entries(state, false, false)?;
                 &cached
             }
-            ReadSource::Sqlite => {
+            Backend::Sqlite => {
                 sqlite = read_state(state, false, true)?;
                 &sqlite
             }
@@ -942,12 +1225,12 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     // Entries only: the parity-era byte-serialization echoes rode every
     // reply and tripled its size on a large graph; the differential stage
     // that needed them is over (graph_store_parity.rs is characterization).
-    match state.read_source {
-        ReadSource::Json => {
+    match state.backend() {
+        Backend::Json => {
             let entries = cached_entries(state, keep_malformed, strict)?;
             Ok(json!({ "entries": entries }))
         }
-        ReadSource::Sqlite => {
+        Backend::Sqlite => {
             let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
             let entries = read_state(state, keep_malformed, !strict)?;
             Ok(json!({ "entries": entries }))
@@ -974,9 +1257,9 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
             "read_ids needs a non-empty ids list".into(),
         ));
     }
-    let mut overlaid = match state.read_source {
-        ReadSource::Json => (*cached_entries(state, false, false)?).clone(),
-        ReadSource::Sqlite => read_state(state, false, true)?,
+    let mut overlaid = match state.backend() {
+        Backend::Json => (*cached_entries(state, false, false)?).clone(),
+        Backend::Sqlite => read_state(state, false, true)?,
     };
     graph_store::apply_readiness_overlay(&mut overlaid);
     let mut out = Vec::with_capacity(tokens.len());
@@ -990,18 +1273,41 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
     Ok(json!({"entries": out, "missing": missing}))
 }
 
+/// The plan-rung inputs: id plus the two fields the Python rung table
+/// (`ladder.plan_rung`) reads on its side of the seam. The typed-op client
+/// derives the rung map from this light read instead of a full begin, which
+/// ships the whole graph for one derived value.
+fn handle_plan_refs(state: &StoreState) -> Result<Value, StoreError> {
+    let entries = match state.backend() {
+        Backend::Json => cached_entries(state, false, false)?,
+        Backend::Sqlite => std::sync::Arc::new(read_state(state, false, true)?),
+    };
+    let refs: Vec<Value> = entries
+        .iter()
+        .filter(|e| graph_store::is_dict(e))
+        .map(|e| {
+            json!({
+                "id": e.get("id"),
+                "plan_path": e.get("plan_path"),
+                "cwd": e.get("cwd"),
+            })
+        })
+        .collect();
+    Ok(json!({ "entries": refs }))
+}
+
 fn read_state(
     state: &StoreState,
     keep_malformed: bool,
     backup_on_corrupt: bool,
 ) -> Result<Vec<Value>, StoreError> {
-    match state.read_source {
-        ReadSource::Json => {
+    match state.backend() {
+        Backend::Json => {
             graph_store::read_defaulted_opts(&state.graph, keep_malformed, backup_on_corrupt)
         }
-        ReadSource::Sqlite => crate::graph_sqlite::read_entries(&state.graph).map_err(|error| {
+        Backend::Sqlite => crate::backlog::read_entries(&state.graph).map_err(|error| {
             StoreError::Unreadable(
-                crate::graph_sqlite::database_path(&state.graph)
+                crate::backlog::database_path(&state.graph)
                     .display()
                     .to_string(),
                 error,
@@ -1011,11 +1317,11 @@ fn read_state(
 }
 
 fn state_version(state: &StoreState) -> Result<String, StoreError> {
-    match state.read_source {
-        ReadSource::Json => Ok(graph_store::file_content_version(&state.graph)),
-        ReadSource::Sqlite => crate::graph_sqlite::version(&state.graph).map_err(|error| {
+    match state.backend() {
+        Backend::Json => Ok(graph_store::file_content_version(&state.graph)),
+        Backend::Sqlite => crate::backlog::version(&state.graph).map_err(|error| {
             StoreError::Unreadable(
-                crate::graph_sqlite::database_path(&state.graph)
+                crate::backlog::database_path(&state.graph)
                     .display()
                     .to_string(),
                 error,
@@ -1062,11 +1368,11 @@ fn handle_settle_edges(params: &Value) -> Result<Value, StoreError> {
 /// observe a half-written file.
 fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
     let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-    let bytes = match state.read_source {
-        ReadSource::Json => std::fs::read(&state.graph).map_err(|error| {
+    let bytes = match state.backend() {
+        Backend::Json => std::fs::read(&state.graph).map_err(|error| {
             StoreError::Unreadable(state.graph.display().to_string(), error.to_string())
         })?,
-        ReadSource::Sqlite => {
+        Backend::Sqlite => {
             graph_store::serialize_graph_file(&read_state(state, true, false)?).into_bytes()
         }
     };
@@ -1080,9 +1386,9 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     // One gate-held window for entries and digest both (cached_snapshot): a
     // commit publishing mid-begin waits, so a retrying writer's version never
     // names a file its entries did not come from.
-    let (version, entries) = match state.read_source {
-        ReadSource::Json => cached_snapshot(state)?,
-        ReadSource::Sqlite => {
+    let (version, entries) = match state.backend() {
+        Backend::Json => cached_snapshot(state)?,
+        Backend::Sqlite => {
             let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
             (
                 state_version(state)?,
@@ -1123,16 +1429,16 @@ fn stored_snapshot(state: &StoreState, version: &str) -> Option<Vec<Value>> {
 }
 
 fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
-    if state.read_source != ReadSource::Sqlite {
+    if state.backend() != Backend::Sqlite {
         return Err(StoreError::Invalid(
-            "graph export requires graph.read_source=sqlite".into(),
+            "graph export requires graph_meta.backend=sqlite".into(),
         ));
     }
     let _gate = state
         .gate
         .write()
         .unwrap_or_else(|error| error.into_inner());
-    let version = crate::graph_sqlite::export_now(&state.graph).map_err(StoreError::Sqlite)?;
+    let version = crate::backlog::export_now(&state.graph).map_err(StoreError::Sqlite)?;
     Ok(json!({
         "version": version,
         "path": state.graph.display().to_string(),
@@ -1140,16 +1446,31 @@ fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
 }
 
 fn handle_export_status(state: &StoreState) -> Result<Value, StoreError> {
-    if state.read_source != ReadSource::Sqlite {
+    if state.backend() != Backend::Sqlite {
         return Ok(json!({"backend": "json", "stale": false}));
     }
     let (current, exported) =
-        crate::graph_sqlite::export_status(&state.graph).map_err(StoreError::Sqlite)?;
+        crate::backlog::export_status(&state.graph).map_err(StoreError::Sqlite)?;
     Ok(json!({
         "backend": "sqlite",
         "stale": exported.as_deref() != Some(current.as_str()),
         "version": current,
         "exported_version": exported,
+    }))
+}
+
+/// The parity op: the thin wire face over the only compare
+/// implementation (backlog::parity); no second compare here.
+fn handle_parity(state: &StoreState) -> Result<Value, StoreError> {
+    // The compare reads graph.json AND the db: under the shared gate so a
+    // concurrent publish can never present it a torn pair.
+    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+    let report = crate::backlog::parity(&state.graph).map_err(StoreError::Sqlite)?;
+    Ok(json!({
+        "rows": report.rows,
+        "divergent": report.divergent,
+        "divergent_ids": report.divergent_ids,
+        "backend": state.backend().name(),
     }))
 }
 
@@ -1173,12 +1494,11 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(version.to_string()),
             plan_rungs: plan_rung_map(params),
-            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
     );
     let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
-    if state.read_source == ReadSource::Json {
+    if state.backend() == Backend::Json {
         if let Ok(value) = &outcome {
             seed_cache(state, value.entries.clone(), &value.version);
         }
@@ -1366,12 +1686,11 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(current_version),
             plan_rungs: plan_rung_map(params),
-            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
     );
     let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
-    if state.read_source == ReadSource::Json {
+    if state.backend() == Backend::Json {
         if let Ok(value) = &outcome {
             seed_cache(state, value.entries.clone(), &value.version);
         }
@@ -1643,7 +1962,7 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
             Ok(json!({"found": found, "removed": removed}))
         }
         "session_reap_open" => {
-            let node_id = param_str(p, "node_id")?;
+            let node_id = opt_str(p, "node_id");
             let phase = param_str(p, "phase")?;
             let harness = param_str(p, "harness")?;
             let session_id = param_str(p, "session_id")?;
@@ -2153,12 +2472,19 @@ fn stamp_utc(v: &str) -> Result<String, StoreError> {
     Ok(parsed.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
-/// store.reap_open_session_record: close one exact open row with positive
-/// death evidence. `do` REMOVES; every other phase FILLS ended_at; `all`
-/// applies both to every open row carrying the identity.
+/// store.reap_open_session_record: close open rows with positive death
+/// evidence. `do` REMOVES; every other phase FILLS ended_at; `all` applies
+/// both to every open row carrying the identity.
+///
+/// With a node id the op answers about that one entry exactly as before.
+/// Without one (the death-cascade form), it walks every entry and applies
+/// the same semantics to each open row carrying the identity, so one call
+/// settles a session that worked several nodes. `found` means "the named
+/// node exists" on the exact form and "at least one node matched" on the
+/// identity form; `node_ids` names every node the write touched.
 fn session_reap_open(
     entries: &mut Vec<Value>,
-    node_id: &str,
+    node_id: Option<&str>,
     phase: &str,
     harness: &str,
     session_id: &str,
@@ -2191,65 +2517,114 @@ fn session_reap_open(
         Some(v) => stamp_utc(v)?,
         None => chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
     };
-    let Some(idx) = find_exact(entries, node_id) else {
-        return Ok(json!({
-            "found": false, "settled": false, "row_removed": false, "row_closed": false,
-            "status_before": null, "status_after": null, "remaining_open_do": 0,
-        }));
-    };
-    let status_before = entries[idx]
-        .get("status")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let obj = entries[idx].as_object_mut().unwrap();
-    let rows = obj
-        .get("sessions")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     // The crate's one openness predicate (graph_store::is_open_phase_row,
-    // mirroring the Python authority); the closure keeps the call-site shape.
-    let is_open = |r: &Value, phase: &str| graph_store::is_open_phase_row(r, phase);
-    let mut row_removed = false;
-    let mut kept: Vec<Value> = rows.clone();
-    if remove_do {
-        kept.retain(|r| {
-            let matches = is_open(r, "do")
-                && r.get("harness").and_then(Value::as_str) == Some(harness)
-                && r.get("session_id").and_then(Value::as_str) == Some(session_id);
-            if matches {
-                row_removed = true;
-            }
-            !matches
-        });
-    }
-    let mut row_closed = false;
-    for cp in &close_phases {
-        for r in kept.iter_mut() {
-            if is_open(r, cp)
-                && r.get("harness").and_then(Value::as_str) == Some(harness)
-                && r.get("session_id").and_then(Value::as_str) == Some(session_id)
-            {
-                r.as_object_mut()
-                    .unwrap()
-                    .entry("ended_at".to_string())
-                    .or_insert_with(|| Value::String(ended.clone()));
-                row_closed = true;
+    // mirroring the Python authority) applied to one entry's rows; both
+    // forms share it so they cannot drift.
+    let reap_rows = |rows: &mut Vec<Value>| -> (bool, bool) {
+        let mut row_removed = false;
+        if remove_do {
+            rows.retain(|r| {
+                let matches = graph_store::is_open_phase_row(r, "do")
+                    && r.get("harness").and_then(Value::as_str) == Some(harness)
+                    && r.get("session_id").and_then(Value::as_str) == Some(session_id);
+                if matches {
+                    row_removed = true;
+                }
+                !matches
+            });
+        }
+        let mut row_closed = false;
+        for cp in &close_phases {
+            for r in rows.iter_mut() {
+                if graph_store::is_open_phase_row(r, cp)
+                    && r.get("harness").and_then(Value::as_str) == Some(harness)
+                    && r.get("session_id").and_then(Value::as_str) == Some(session_id)
+                {
+                    r.as_object_mut()
+                        .unwrap()
+                        .entry("ended_at".to_string())
+                        .or_insert_with(|| Value::String(ended.clone()));
+                    row_closed = true;
+                }
             }
         }
+        (row_removed, row_closed)
+    };
+    match node_id {
+        Some(node_id) => {
+            let Some(idx) = find_exact(entries, node_id) else {
+                return Ok(json!({
+                    "found": false, "settled": false, "row_removed": false, "row_closed": false,
+                    "status_before": null, "status_after": null, "remaining_open_do": 0,
+                    "node_ids": [],
+                }));
+            };
+            let status_before = entries[idx]
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let obj = entries[idx].as_object_mut().unwrap();
+            let mut rows = obj
+                .get("sessions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let (row_removed, row_closed) = reap_rows(&mut rows);
+            if row_removed || row_closed {
+                obj.insert("sessions".to_string(), Value::Array(rows));
+            }
+            Ok(json!({
+                "found": true,
+                "settled": true,
+                "row_removed": row_removed,
+                "row_closed": row_closed,
+                "status_before": status_before,
+                "status_after": Value::Null,
+                "remaining_open_do": Value::Null,
+                "node_ids": [node_id],
+            }))
+        }
+        None => {
+            let mut node_ids: Vec<String> = Vec::new();
+            let mut row_removed = false;
+            let mut row_closed = false;
+            for idx in 0..entries.len() {
+                if !entries[idx]
+                    .get("sessions")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| !a.is_empty())
+                {
+                    continue;
+                }
+                let node = graph_store::entry_id(&entries[idx]).map(str::to_string);
+                let obj = entries[idx].as_object_mut().unwrap();
+                let mut rows = obj
+                    .get("sessions")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let (removed, closed) = reap_rows(&mut rows);
+                if removed || closed {
+                    if let Some(node) = node {
+                        node_ids.push(node);
+                    }
+                    obj.insert("sessions".to_string(), Value::Array(rows));
+                }
+                row_removed |= removed;
+                row_closed |= closed;
+            }
+            Ok(json!({
+                "found": !node_ids.is_empty(),
+                "settled": true,
+                "row_removed": row_removed,
+                "row_closed": row_closed,
+                "status_before": Value::Null,
+                "status_after": Value::Null,
+                "remaining_open_do": Value::Null,
+                "node_ids": node_ids,
+            }))
+        }
     }
-    if row_removed || row_closed {
-        obj.insert("sessions".to_string(), Value::Array(kept));
-    }
-    Ok(json!({
-        "found": true,
-        "settled": true,
-        "row_removed": row_removed,
-        "row_closed": row_closed,
-        "status_before": status_before,
-        "status_after": Value::Null,
-        "remaining_open_do": Value::Null,
-    }))
 }
 
 /// store.set_related + _mirror_related: symmetric edges stored on both
@@ -2365,11 +2740,10 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
             // in_progress like any full write); a caller that sends none
             // keeps stored statuses.
             plan_rungs: plan_rung_map(&p),
-            sqlite_authoritative: state.read_source == ReadSource::Sqlite,
         },
         state.lock_timeout,
     )?;
-    if state.read_source == ReadSource::Json {
+    if state.backend() == Backend::Json {
         seed_cache(state, outcome.entries.clone(), &outcome.version);
     }
     Ok(json!({
@@ -2378,8 +2752,249 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     }))
 }
 
+/// The typed backlog API over the wire: one keeper op per
+/// `backlog::api` function, same name, same JSON fields. Queries hold the
+/// read gate; mutations hold the write gate (the gate serializes api
+/// traffic against the legacy ops on this keeper; the store's own file
+/// lock serializes across processes).
+fn handle_api(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
+    let op = params
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| StoreError::Invalid("api needs an op".into()))?;
+    let store = crate::backlog::api::Store::new(&state.graph);
+    const READ_OPS: &[&str] = &["node", "nodes", "comments", "version"];
+    if READ_OPS.contains(&op) {
+        let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+        return api_op(&store, op, params);
+    }
+    let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
+    api_op(&store, op, params)
+}
+
+fn api_op(
+    store: &crate::backlog::api::Store,
+    op: &str,
+    params: &Value,
+) -> Result<Value, StoreError> {
+    use crate::backlog::api;
+    let node_row = |node: &api::Node| node.to_json();
+    match op {
+        "node" => {
+            let id = param_str(params, "id")?;
+            let found = api::node(store, id)?;
+            Ok(json!({
+                "node": found.map(|n| n.to_json()),
+                "version": api::version(store)?,
+            }))
+        }
+        "nodes" => {
+            let filter: api::NodeFilter = params
+                .get("filter")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| StoreError::Invalid(format!("bad filter: {e}").into()))?
+                .unwrap_or_default();
+            let page: api::Page = serde_json::from_value(params.clone())
+                .map_err(|e| StoreError::Invalid(format!("bad page: {e}").into()))?;
+            let connection = api::nodes(store, &filter, &page)?;
+            Ok(json!({
+                "nodes": connection.nodes.iter().map(node_row).collect::<Vec<_>>(),
+                "page_info": serde_json::to_value(&connection.page_info).unwrap_or(Value::Null),
+                "version": api::version(store)?,
+            }))
+        }
+        "comments" => {
+            let id = param_str(params, "id")?;
+            let page: api::Page = serde_json::from_value(params.clone())
+                .map_err(|e| StoreError::Invalid(format!("bad page: {e}").into()))?;
+            let connection = api::comments(store, id, &page)?;
+            Ok(json!({
+                "nodes": connection
+                    .nodes
+                    .iter()
+                    .map(crate::backlog::model::comment_to_json)
+                    .collect::<Vec<_>>(),
+                "page_info": serde_json::to_value(&connection.page_info).unwrap_or(Value::Null),
+                "version": api::version(store)?,
+            }))
+        }
+        "version" => Ok(json!({ "version": api::version(store)? })),
+        _ => api_mutation(store, op, params),
+    }
+}
+
+fn api_mutation(
+    store: &crate::backlog::api::Store,
+    op: &str,
+    params: &Value,
+) -> Result<Value, StoreError> {
+    use crate::backlog::api;
+    let id = params.get("id").and_then(Value::as_str);
+    match op {
+        "node_create" => {
+            let input: api::NodeCreateInput = input_of(params, "input")?;
+            let payload = api::node_create(store, input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "node_update" => {
+            let input: api::NodeUpdateInput = input_of(params, "input")?;
+            let payload = api::node_update(store, id.unwrap_or_default(), input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "node_batch_update" => {
+            let ids: Vec<String> = input_of(params, "ids")?;
+            let input: api::NodeUpdateInput = input_of(params, "input")?;
+            let payload = api::node_batch_update(store, &ids, input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload
+                    .node
+                    .map(|list| list.iter().map(|n| n.to_json()).collect::<Vec<_>>()),
+                "version": payload.version,
+            }))
+        }
+        "node_archive" => {
+            let payload = api::node_archive(store, id.unwrap_or_default())?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "node_unarchive" => {
+            let payload = api::node_unarchive(store, id.unwrap_or_default())?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "node_delete" => {
+            let payload = api::node_delete(store, id.unwrap_or_default())?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "relation_create" | "relation_delete" => {
+            let related = param_str(params, "related")?;
+            let t: api::RelationType = match params.get("type") {
+                Some(v) => serde_json::from_value(v.clone())
+                    .map_err(|e| StoreError::Invalid(format!("bad type: {e}").into()))?,
+                None => api::RelationType::Related,
+            };
+            let payload = if op == "relation_create" {
+                api::relation_create(store, id.unwrap_or_default(), related, t)?
+            } else {
+                api::relation_delete(store, id.unwrap_or_default(), related, t)?
+            };
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "label_add" | "label_remove" => {
+            let name = param_str(params, "name")?;
+            let payload = if op == "label_add" {
+                api::label_add(store, id.unwrap_or_default(), name)?
+            } else {
+                api::label_remove(store, id.unwrap_or_default(), name)?
+            };
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "comment_create" => {
+            let input: api::CommentCreateInput = input_of(params, "input")?;
+            let payload = api::comment_create(store, id.unwrap_or_default(), input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "pull_request_attach" => {
+            let input: api::PullRequestInput = input_of(params, "input")?;
+            let payload = api::pull_request_attach(store, id.unwrap_or_default(), input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "session_append" => {
+            let row: api::SessionRecord = input_of(params, "row")?;
+            let payload = api::session_append(store, id.unwrap_or_default(), row)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "session_end" => {
+            let session_id = param_str(params, "session_id")?;
+            let ended_by = param_str(params, "ended_by")?;
+            let payload = api::session_end(store, id.unwrap_or_default(), session_id, ended_by)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "encounter_create" => {
+            let input: api::EncounterInput = input_of(params, "input")?;
+            let payload = api::encounter_create(store, id.unwrap_or_default(), input)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        "dispatch_set" => {
+            let d: Option<api::Dispatch> = match params.get("dispatch") {
+                Some(v) if !v.is_null() => Some(
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| StoreError::Invalid(format!("bad dispatch: {e}").into()))?,
+                ),
+                _ => None,
+            };
+            let payload = api::dispatch_set(store, id.unwrap_or_default(), d)?;
+            Ok(json!({
+                "success": payload.success,
+                "node": payload.node.map(|n| n.to_json()),
+                "version": payload.version,
+            }))
+        }
+        other => Err(StoreError::Invalid(
+            format!("unknown api op {other:?}").into(),
+        )),
+    }
+}
+
+fn input_of<T: serde::de::DeserializeOwned>(params: &Value, key: &str) -> Result<T, StoreError> {
+    serde_json::from_value(
+        params
+            .get(key)
+            .cloned()
+            .ok_or_else(|| StoreError::Invalid(format!("api op needs {key}").into()))?,
+    )
+    .map_err(|e| StoreError::Invalid(format!("bad {key}: {e}").into()))
+}
 /// The socket path for a graph file: a sibling `<graph>.store.sock`, so the
-/// keeper's discovery needs no config and a tmp test graph never touches the
 /// operator's state root. When the sibling would overrun the unix-socket
 /// address limit (macOS binds 104 sun_path bytes, directory included), the
 /// socket moves to a uid-keyed root under the platform temp dir, named by
@@ -2448,7 +3063,8 @@ mod tests {
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             events: None,
-            read_source: ReadSource::Json,
+            sock_ino: None,
+            startup_fp: None,
         }
     }
 
@@ -2517,7 +3133,8 @@ mod tests {
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             events: None,
-            read_source: ReadSource::Json,
+            sock_ino: None,
+            startup_fp: None,
         }
     }
 
@@ -2774,6 +3391,53 @@ mod tests {
     }
 
     #[test]
+    fn plan_refs_ships_only_the_rung_inputs() {
+        // The typed-op client derives the plan-rung map from this read, so
+        // each row carries id + plan_path + cwd and nothing else: one
+        // derived value must not cost a full begin. Absent fields ride as
+        // null, which ladder.plan_rung reads as no plan, same as before.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let body = serde_json::to_string(&json!({
+            "entries": [
+                {"id": "x-planned", "title": "planned", "status": "ready",
+                 "plan_path": "docs/plans/p.md", "cwd": "/tmp/proj",
+                 "progress_notes": [{"ts": "t", "text": "x"}]},
+                {"id": "x-bare", "title": "bare", "status": "idea"},
+                {"id": "x-anchored", "slug": "third-node", "title": "third",
+                 "plan_path": "p.md#anchor", "cwd": "~/proj"},
+            ]
+        }))
+        .unwrap();
+        std::fs::write(&graph, body).unwrap();
+        let state = read_state(&graph);
+        let reply = handle_plan_refs(&state).unwrap();
+        let entries = reply["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        for e in entries {
+            let keys: Vec<&str> = e.as_object().unwrap().keys().map(String::as_str).collect();
+            assert!(
+                keys.iter()
+                    .all(|k| matches!(*k, "id" | "plan_path" | "cwd")),
+                "only the rung inputs ship, got {keys:?}"
+            );
+        }
+        assert_eq!(entries[0]["plan_path"], json!("docs/plans/p.md"));
+        assert_eq!(entries[0]["cwd"], json!("/tmp/proj"));
+        assert!(
+            entries[1]["plan_path"].is_null(),
+            "a plan-less node ships a null plan_path, not guessed fields"
+        );
+        // The cache leg: a second call parses nothing new.
+        let _ = handle_plan_refs(&state).unwrap();
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            1,
+            "plan_refs must ride the cache"
+        );
+    }
+
+    #[test]
     fn read_ids_returns_overlaid_rows_in_order_and_reports_missing() {
         // AC9-HP / AC10-EDGE / AC11-EDGE: one row for one id (the reply body
         // is a row, not the graph), the readiness overlay applied server-side,
@@ -2823,6 +3487,63 @@ mod tests {
         );
     }
 
+    /// Reads the Identify reply's `store_backend` over the wire.
+    fn identify_backend(stream: &mut UnixStream) -> String {
+        stream
+            .write_all(&encode(TAG_IDENTIFY, b""))
+            .expect("identify write");
+        let mut header = [0u8; 5];
+        stream.read_exact(&mut header).expect("identify header");
+        assert_eq!(header[0], TAG_IDENTIFY_REPLY, "unexpected reply tag");
+        let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).expect("identify body");
+        let id: Value = serde_json::from_slice(&body).unwrap();
+        id["store_backend"].as_str().unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn keeper_identify_reports_the_named_backend_live() {
+        // AC4-HP + AC5-EDGE over the wire: the reply carries the backend
+        // graph_meta names at answer time, and a flip by another process
+        // lands on the next Identify without a restart.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("backend.store.sock");
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        let cfg = KeeperConfig {
+            sock: sock.clone(),
+            graph: graph.clone(),
+            session: "test-backend".into(),
+            canonical: false,
+            lock_timeout: Duration::from_secs(2),
+            events: None,
+            // The Shutdown frame ends the keeper process from inside, which
+            // under test kills the whole binary; the idle bound is the way a
+            // test keeper exits.
+            idle_limit: Some(Duration::from_millis(700)),
+        };
+        let handle = std::thread::spawn(move || run(cfg));
+        let mut stream = loop {
+            match UnixStream::connect(&sock) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        };
+        assert_eq!(identify_backend(&mut stream), "json", "unset reads json");
+        crate::backlog::set_backend(&graph, Backend::Sqlite).unwrap();
+        assert_eq!(
+            identify_backend(&mut stream),
+            "sqlite",
+            "a flip lands on the next Identify"
+        );
+        // Drop the client and let the idle bound retire the keeper.
+        drop(stream);
+        let result = handle.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!sock.exists(), "idle exit must unlink the socket");
+    }
+
     #[test]
     fn a_keeper_with_an_idle_deadline_exits_and_unlinks_its_socket() {
         let dir = tempfile::tempdir().unwrap();
@@ -2834,7 +3555,6 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             events: None,
-            read_source: ReadSource::Json,
             idle_limit: Some(Duration::from_millis(700)),
         };
         let handle = std::thread::spawn(move || run(cfg));
@@ -2875,7 +3595,8 @@ mod tests {
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             events: None,
-            read_source: ReadSource::Json,
+            sock_ino: None,
+            startup_fp: None,
         };
         let stale = json!({
             "name": "update_fields",

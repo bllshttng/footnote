@@ -74,7 +74,9 @@ DoctorStatus = Literal["fresh", "stale", "unknown"]
 
 _DAEMON_DRIFT_WARNING = re.compile(
     r"^fno agents: .* is an older build than the installed binary; "
-    r"run `fno agents restart` to pick up the new build\.$"
+    r"`fno agents restart` fixes it but restarts every worker on the shared "
+    r"daemon, so it is an operator action - surface it to the operator "
+    r"instead of running it from an agent session\.$"
 )
 
 REVIEW_INVOCATION_LOST_WINDOW_SECONDS = 15 * 60
@@ -536,13 +538,25 @@ def _binary_crates_rev(binary: Optional[str]) -> Optional[str]:
     return _clean_rev(_binary_version_json(binary).get("crates_rev"))
 
 
+def _human_age(seconds: int) -> str:
+    """Compact process-age label. Reuses the fleet's formatter (the same
+    cross-module import `mail/receipts.py` makes) rather than a 4th copy."""
+    from fno.agents.top import _fmt_age
+
+    return _fmt_age(seconds)
+
+
 def _daemon_drift_warning() -> Optional[str]:
     """Return Rust's measured daemon-drift warning, or None on unknown state.
 
-    ``fno-agents status`` owns the executable fingerprint comparison. This
-    adapter only validates its JSON response and relays the canonical stderr
-    warning; it never infers freshness from process presence or Python-side
-    version data.
+    ``fno-agents status`` owns the executable fingerprint comparison. The
+    verdict is read from the structured ``drift`` field of ``status --json``,
+    never regex-parsed from prose. Bare ``status`` prints the human arms
+    table, so the old JSON gate over its stdout could never pass and the
+    relay stayed dead: doctor printed an unqualified fresh verdict while the
+    daemon ran pre-fix code. The canonical stderr sentence is still the
+    relayed text; the daemon's measured process age is appended beside it so
+    a fresh artifact verdict carries the lag in view.
     """
     try:
         from fno import rust_binary
@@ -557,7 +571,7 @@ def _daemon_drift_warning() -> Optional[str]:
         return None
     try:
         result = subprocess.run(
-            [str(binary), "status"],
+            [str(binary), "status", "--json"],
             capture_output=True,
             text=True,
             check=False,
@@ -571,13 +585,26 @@ def _daemon_drift_warning() -> Optional[str]:
         payload = json.loads(result.stdout or "")
     except (TypeError, ValueError):
         return None
-    if not isinstance(payload, dict) or not isinstance(payload.get("daemon"), dict):
+    if not isinstance(payload, dict) or payload.get("drift") != "drifted":
         return None
-    for line in (result.stderr or "").splitlines():
-        line = line.strip()
-        if _DAEMON_DRIFT_WARNING.fullmatch(line):
-            return line
-    return None
+    warning = next(
+        (
+            line.strip()
+            for line in (result.stderr or "").splitlines()
+            if _DAEMON_DRIFT_WARNING.fullmatch(line.strip())
+        ),
+        None,
+    )
+    if warning is None:
+        return None
+    daemon = payload.get("daemon")
+    uptime = daemon.get("uptime_secs") if isinstance(daemon, dict) else None
+    if isinstance(uptime, int) and 0 <= uptime < 10 * 365 * 24 * 3600:
+        # Process age stated as what drift proves: the daemon still runs the
+        # build it started with. "Predates the binary" is only provable for
+        # same-path content drift, not for a path-drifted daemon.
+        return f"{warning} (daemon up {_human_age(uptime)}; running its startup build, not this one)"
+    return warning
 
 
 def _rust_report() -> dict[str, Optional[str]]:
@@ -1778,14 +1805,16 @@ def _session_start_bytes_line(preamble_line: Optional[str]) -> Optional[str]:
 
 
 def _control_plane_arms_report() -> dict[str, Any]:
-    """Stale control-plane arms via the one Rust reader (shells
-    ``fno-agents status --json``): unknown on a failed read, never green.
+    """Red control-plane arms (stale or failing) via the one Rust reader
+    (shells ``fno-agents status --json``): unknown on a failed read, never
+    green. Rows carry the reader's rendered ``line``; rows from an older
+    binary without one fall back to the sentence render.
     """
     try:
         from fno import rust_binary
         binary = rust_binary.resolve_binary()
         if binary is None:
-            return {"stale": [], "unknown_reason": "fno-agents binary not found"}
+            return {"red": [], "unknown_reason": "fno-agents binary not found"}
         result = subprocess.run(
             [str(binary), "status", "--json"],
             capture_output=True, text=True, timeout=10, check=False,
@@ -1793,11 +1822,12 @@ def _control_plane_arms_report() -> dict[str, Any]:
         payload = json.loads(result.stdout) if result.stdout.strip() else {}
         arms = payload.get("arms")
         if not isinstance(arms, list):
-            return {"stale": [], "unknown_reason": "status payload carries no arms"}
-        return {"stale": [a for a in arms if isinstance(a, dict) and a.get("stale")],
+            return {"red": [], "unknown_reason": "status payload carries no arms"}
+        return {"red": [a for a in arms if isinstance(a, dict)
+                        and (a.get("stale") or a.get("failing"))],
                 "unknown_reason": None}
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        return {"stale": [], "unknown_reason": f"read failed: {exc}"}
+        return {"red": [], "unknown_reason": f"read failed: {exc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -2298,7 +2328,17 @@ def _emit_human(
     non_fresh = [c for c in components if c.get("status") not in ("fresh", "updated")]
     if components and not non_fresh:
         names = ", ".join(str(c.get("component")) for c in components)
-        out(f"fno doctor: components: {len(components)}/{len(components)} fresh ({names}).")
+        if result.get("daemon_drift"):
+            # An all-fresh on-disk sweep is not a fleet verdict while the
+            # daemon keeps executing pre-fix code. Never print the bare
+            # "N/N fresh" form beside a measured drift; the note below carries
+            # the canonical warning and the restart remedy.
+            out(
+                f"fno doctor: components: {len(components)}/{len(components)} fresh "
+                "on disk; a daemon drift note follows."
+            )
+        else:
+            out(f"fno doctor: components: {len(components)}/{len(components)} fresh ({names}).")
     else:
         from fno import update as _update
 
@@ -2326,15 +2366,21 @@ def _emit_human(
             "precedes any Python `fno` on PATH."
         )
 
-    # Running-process freshness (x-e6dd): a mux server that predates the installed
-    # binary is still speaking the old proto - it survives an upgrade by design and
-    # silently blocks agent dispatch until restarted. Advisory only.
+    # Wire-floor freshness (x-e6dd): the WIRE verdict, not the build one
+    # (x-f188); build staleness is the census below. Advisory only.
     for sess in result.get("mux_server_stale") or []:
         out(
-            f"fno doctor: mux server '{sess}' is running an older build than the installed "
-            "`fno`; run `fno agents restart` to cut it over (auto-heals pane-less servers; "
+            f"fno doctor: mux server '{sess}' is below the wire compatibility floor; "
+            "run `fno agents restart` to cut it over (auto-heals pane-less servers; "
             "add `--mux` to also end servers with live panes)."
         )
+
+    # Running-process census (x-f188): one line per stale row.
+    for row in result.get("running_components") or []:
+        if isinstance(row, dict) and row.get("verdict") == "stale":
+            pid = f" pid {row['pid']}" if row.get("pid") else ""
+            out(f"fno doctor: {row.get('component')} '{row.get('name') or 'unnamed'}'{pid} is an older "
+                f"build ({row.get('evidence')}); on restart: {row.get('on_restart')}; keeps {row.get('survives')}.")
 
     # Orphan files from deleted capture/migration paths (Group 3 GC). Advisory.
     orphans = result.get("orphan_files") or []
@@ -2354,19 +2400,30 @@ def _emit_human(
             f"fno doctor: pr-watch enabled but not running ({pw.get('detail')}); "
             f"run `{fix}`, then verify with `fno do pr watch status`."
         )
+    elif pw_verdict == "wedged":
+        fix = pw.get("fix") or "fno do pr watch refresh"
+        out(
+            f"fno doctor: pr-watch wedged ({pw.get('detail')}); "
+            f"run `{fix}`, then verify with `fno do pr watch status`."
+        )
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
 
-    # Control-plane arms (x-1b88), advisory: name every stale arm; an
-    # unreadable readout never reads as green.
+    # Control-plane arms (x-1b88), advisory: name every red (stale or
+    # failing) arm with the reader's own line; an unreadable readout never
+    # reads as green.
     cpa = result.get("control_plane_arms") or {}
     if cpa.get("unknown_reason"):
         out(f"fno doctor: control-plane arms readout unknown ({cpa['unknown_reason']}); "
             "staleness is unmeasured.")
-    for arm in cpa.get("stale") or []:
-        out(f"fno doctor: control-plane arm {arm.get('arm')} is STALE "
-            f"(last tick {arm.get('age_s')}s ago, interval {arm.get('interval_s')}s, "
-            f"skip: {arm.get('skip_reason') or 'none'})")
+    for arm in cpa.get("red") or []:
+        line = arm.get("line")
+        if line:
+            out(f"fno doctor: control-plane arm {line}")
+        else:
+            out(f"fno doctor: control-plane arm {arm.get('arm')} is STALE "
+                f"(last tick {arm.get('age_s')}s ago, interval {arm.get('interval_s')}s, "
+                f"skip: {arm.get('skip_reason') or 'none'})")
 
     # The durable-grant observer coupling: a standing dispatch grant
     # (auto_merge.enabled true, grant=dispatch) implies a live watcher -
@@ -2570,10 +2627,13 @@ def _emit_human(
         # silent scan read as a clean bill of health.
         out("fno doctor: LaunchAgent health: not applicable (no launchctl on this host).")
     for entry in agents.get("dead") or []:
+        if entry["label"] == "sh.fno.pr-watcher":
+            remedy = "run `fno do pr watch refresh`"
+        else:
+            remedy = "re-run `fno doctor update` if the entry point moved"
         out(
             f"fno doctor: LaunchAgent {entry['label']} last exited {entry['exit']} "
-            "(it is installed but failing); check its log under ~/.fno/ and re-run "
-            "`fno doctor update` if the entry point moved."
+            f"(it is installed but failing); check its log under ~/.fno/ and {remedy}."
         )
 
     # Silent-switch legibility (x-8cd5 Wave 6): the applied posture, then both
@@ -3130,7 +3190,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
         baseline_ids = set()
     spawn_started_ms = int(time.time() * 1000)
     proc = _run_mux(
-        ["mux", "pane", "run", "--session", session, "--cwd", str(cwd), "--", *argv],
+        ["mux", "pane", "run", "--server", session, "--cwd", str(cwd), "--", *argv],
         subprocess.run,
     )
     if proc.returncode != 0:
@@ -3608,7 +3668,7 @@ def _harness_surface_report() -> dict[str, Any]:
                 "status": "unknown",
                 "issue": "inspection-failed",
                 "detail": str(exc)[-500:],
-                "remedy": "fno config setup codex-plugin --channel release --refresh",
+                "remedy": "fno config plugin install codex --force",
             }
 
     # Surface codex hooks dual-representation in the MAIN run too, not only the
@@ -4082,6 +4142,9 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # PROCESS. Never changes status/exit.
     result["mux_server_stale"] = _update.stale_mux_servers()
 
+    # Advisory running-process census (x-f188); never changes status/exit.
+    result["running_components"] = _update.running_components() or []
+
     # Advisory orphan-file check (Group 3 GC); never changes status/exit.
     result["orphan_files"] = _orphan_report()
 
@@ -4400,16 +4463,31 @@ def doctor_command(
 
     # Report BEFORE delegating: `fno doctor update` execs/replaces this process.
     if fix:
-        # Heal a dead pr-watch first: the verdict's own fix is the bounce, and a
-        # python_stale --fix execs `fno doctor update` below and never returns, so act
-        # on it here. Advisory - never changes doctor's exit code (a dead
-        # watcher and a stale binary are distinct concerns).
+        # Heal a dead or wedged pr-watch first: the verdict's own fix is the
+        # bounce, and a python_stale --fix execs `fno doctor update` below and
+        # never returns, so act on it here. Advisory - never changes doctor's
+        # exit code (a dead watcher and a stale binary are distinct concerns).
+        # `wedged` takes the refresh cure, not the bounce: its watermark is
+        # fresh, so the tick already runs and re-bouncing the same plist
+        # re-runs the same failure; the plist must be re-rendered onto the
+        # current binary first.
         pw = result.get("pr_watch") or {}
-        if pw.get("verdict") == "dead" and not json_out:
-            from fno.pr_watch._install import _LAUNCH_AGENTS_DIR, heal_watcher
+        if pw.get("verdict") in ("dead", "wedged") and not json_out:
+            from fno.pr_watch._install import _LAUNCH_AGENTS_DIR, heal_watcher, refresh_watcher
 
-            hmsg, _ = heal_watcher(launch_agents_dir=_LAUNCH_AGENTS_DIR)
-            typer.echo(f"fno doctor: --fix pr-watch heal: {hmsg}", err=True)
+            if pw.get("verdict") == "wedged":
+                from fno.pr_watch.cli import _resolve_fno_binary
+
+                rmsg, _ = refresh_watcher(
+                    launch_agents_dir=_LAUNCH_AGENTS_DIR,
+                    fno_binary=_resolve_fno_binary(),
+                    install_path=os.environ.get("PATH", "/usr/bin:/bin"),
+                    interval=int(pw.get("interval_seconds") or 600),
+                )
+                typer.echo(f"fno doctor: --fix pr-watch refresh: {rmsg}", err=True)
+            else:
+                hmsg, _ = heal_watcher(launch_agents_dir=_LAUNCH_AGENTS_DIR)
+                typer.echo(f"fno doctor: --fix pr-watch heal: {hmsg}", err=True)
 
         # A stale plugin cache is counted in `blockers`, and nothing on this path
         # clears it: the exec below is `fno update`, which does not own claude's

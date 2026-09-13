@@ -77,11 +77,12 @@ def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
     return reason
 
 
-# The prompt lane opens a row only for a message that leads with a review
-# verb: the x-4342 complaint shape is a review worker spawned with the node id
-# in its prompt. A do worker whose prompt mentions a SIBLING id must not get a
-# reviewer row stamped on that sibling, so prose and other verbs arm nothing.
-from fno.agents.spawn_phase import REVIEW_VERB_PREFIXES as _REVIEW_VERB_PREFIXES  # noqa: E402
+# The prompt lane opens a row only for a message whose verb labels review
+# (infer_phase, the spawn_phase.toml table): the x-4342 complaint shape is a
+# review worker spawned with the node id in its prompt. A do worker whose
+# prompt mentions a SIBLING id must not get a reviewer row stamped on that
+# sibling, so prose and other verbs arm nothing.
+from fno.agents.spawn_phase import infer_phase as _infer_phase  # noqa: E402
 
 
 def _resolve_spawn_merge_grant(message: str) -> dict:
@@ -168,7 +169,7 @@ def _stamp_spawned_session_row(
     if node_id is None:
         msg = (message or "").lstrip()
         ids = extract_node_ids(message or "")
-        if not msg.startswith(_REVIEW_VERB_PREFIXES) or len(ids) != 1:
+        if _infer_phase(msg) != "review" or len(ids) != 1:
             return  # not a single-node review prompt: no row, nothing to say
         who = ids[0]
         try:
@@ -180,16 +181,6 @@ def _stamp_spawned_session_row(
         print(
             f"spawn: session row open skipped for {who} "
             f"(node not in graph); the row was not written. Skipped.",
-            file=sys.stderr,
-        )
-        return
-    if not phase:
-        # A verb cmd_spawn could not label (a /think worker is neither do nor
-        # review). A guessed label would lie on an append-only record.
-        print(
-            f"spawn: session row open skipped for {node_id} "
-            f"(phase unknown for the message verb; pass --session-phase); "
-            f"the row was not written. Skipped.",
             file=sys.stderr,
         )
         return

@@ -1437,3 +1437,150 @@ def test_status_events_with_nothing_to_scope_on_returns_nothing():
     from fno.agents.peek import _status_events
 
     assert _status_events(Path("/nonexistent"), "", "") == []
+
+
+# --------------------------------------------------------------------------
+# peek_grep — rank 9: transcript search with a reported count
+# --------------------------------------------------------------------------
+
+
+def _grep_transcript(tmp_path, sess, needle):
+    _claude_transcript(
+        tmp_path,
+        sess.cwd,
+        sess.session_id,
+        [
+            _user(f"working {needle} today"),
+            _assistant("unrelated reply"),
+            _user(f"again {needle} and again"),
+        ],
+    )
+
+
+def test_grep_returns_only_matching_records(tmp_path):
+    sess = _Session()
+    _grep_transcript(tmp_path, sess, "x-450f")
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "worker-x",
+        lines=10,
+        grep="x-450f",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (sess, []),
+        projects_root=tmp_path,
+    )
+    assert rc == 0
+    body = out.getvalue()
+    assert "x-450f" in body
+    assert "unrelated reply" not in body
+    # The positive control: the count names what was searched, on stderr,
+    # keeping stdout parseable.
+    assert "2 matching record(s)" in err.getvalue()
+
+
+def test_grep_zero_hits_prints_count_and_exits_zero(tmp_path):
+    sess = _Session()
+    _grep_transcript(tmp_path, sess, "x-450f")
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "worker-x",
+        lines=10,
+        grep="absent-token",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (sess, []),
+        projects_root=tmp_path,
+    )
+    assert rc == 0, "a measured zero is success, not failure"
+    assert "0 matching record(s)" in err.getvalue()
+    assert "no activity yet" in out.getvalue()
+
+
+def test_grep_json_stays_jsonl(tmp_path):
+    sess = _Session()
+    _grep_transcript(tmp_path, sess, "x-450f")
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "worker-x",
+        lines=10,
+        grep="x-450f",
+        json_out=True,
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (sess, []),
+        projects_root=tmp_path,
+    )
+    assert rc == 0
+    rows = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert len(rows) == 2
+    assert all(set(r) == {"role", "text"} for r in rows)
+
+
+def test_peek_all_spans_sessions_and_reports_both(tmp_path, monkeypatch):
+    """--all reads every registry session with a transcript; the summary names
+    sessions READ, so a zero-hit corpus never reads as an unsearched one."""
+    from types import SimpleNamespace
+
+    from fno.agents import registry as registry_mod
+
+    rows = [
+        SimpleNamespace(
+            harness="claude",
+            harness_session_id="sid-aaa",
+            cwd="/tmp/proj-a",
+        ),
+        SimpleNamespace(
+            harness="codex",
+            harness_session_id="sid-bbb",
+            cwd="/tmp/proj-b",
+        ),
+        SimpleNamespace(harness="claude", harness_session_id=None, cwd="/tmp"),
+    ]
+    monkeypatch.setattr(registry_mod, "load_registry", lambda p=None: rows)
+    # claude store for sid-aaa; codex needs a rollout path, so give the second
+    # row a claude transcript too by reusing the claude harness shape.
+    _claude_transcript(tmp_path, "/tmp/proj-a", "sid-aaa", [_user("hit x-450f here")])
+    rows[1].harness = "claude"
+    rows[1].cwd = "/tmp/proj-b"
+    _claude_transcript(tmp_path, "/tmp/proj-b", "sid-bbb", [_assistant("nothing here")])
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "",
+        lines=10,
+        all_sessions=True,
+        grep="x-450f",
+        stdout=out,
+        stderr=err,
+        projects_root=tmp_path,
+    )
+    assert rc == 0
+    assert "sid-aaa" in out.getvalue()
+    assert "sid-bbb" not in out.getvalue(), "a session with no hits emits no block"
+    assert "1 matching record(s) across 2 session(s)" in err.getvalue()
+
+
+def test_peek_all_without_grep_reads_every_session(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from fno.agents import registry as registry_mod
+
+    rows = [
+        SimpleNamespace(harness="claude", harness_session_id="sid-aaa", cwd="/tmp/proj-a"),
+        SimpleNamespace(harness="claude", harness_session_id="sid-bbb", cwd="/tmp/proj-b"),
+    ]
+    monkeypatch.setattr(registry_mod, "load_registry", lambda p=None: rows)
+    _claude_transcript(tmp_path, "/tmp/proj-a", "sid-aaa", [_user("alpha")])
+    _claude_transcript(tmp_path, "/tmp/proj-b", "sid-bbb", [_assistant("beta")])
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "",
+        lines=10,
+        all_sessions=True,
+        stdout=out,
+        stderr=err,
+        projects_root=tmp_path,
+    )
+    assert rc == 0
+    assert "alpha" in out.getvalue() and "beta" in out.getvalue()
+    assert "2 session(s) read" in err.getvalue()

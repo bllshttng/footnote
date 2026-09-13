@@ -156,6 +156,12 @@ pub struct StoredMember {
     /// Full harness session identity captured alongside `harness`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_id: Option<String>,
+    /// The birth pane id, captured at each persist while a pane resolves and
+    /// never cleared: after a restart it is the first join tried in
+    /// `member_pane`, so the member lands back on the same pane number.
+    /// `#[serde(default)]`, same no-quarantine rule as `tab_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<u64>,
 }
 
 ///  The one declared member-to-row join, stated here because the
@@ -2176,18 +2182,19 @@ fn mutate_lifecycle(f: impl FnOnce(&mut Vec<ExternalLifecycle>)) -> io::Result<(
     mutate_file(|sf| f(&mut sf.external_lifecycle))
 }
 
-/// Walk `exe`'s ancestors for a directory named `target` carrying a cargo
-/// build-tree marker (`.rustc_info.json` or `CACHEDIR.TAG`). Every exec'd test
-/// binary lives under `target/{debug,release,...}`; no installed binary
-/// (`~/.cargo/bin`, homebrew, a deployed `fno`) does. Pure over the path so the
-/// marker logic is unit-testable; [`assert_writable`] feeds it `current_exe()`.
-/// A bare directory named `target` without a marker is NOT a build tree (the
-/// marker is what proves cargo owns it), so a coincidentally-named dir never
-/// trips the guard.
+/// Walk `exe`'s ancestors for the nearest directory carrying a cargo build-tree
+/// marker (`.rustc_info.json` or `CACHEDIR.TAG`). Every exec'd test binary lives
+/// under a build tree - `target/{debug,release,...}` with the classic layout, or
+/// `<build-dir>/<hash>/debug/deps` under build.build-dir, where the markers sit
+/// on the hash dir and no ancestor is named `target`. No installed binary
+/// (`~/.cargo/bin`, homebrew, a deployed `fno`) carries a marker. Pure over the
+/// path so the marker logic is unit-testable; [`assert_writable`] feeds it
+/// `current_exe()`. A bare directory named `target` without a marker is NOT a
+/// build tree (the marker is what proves cargo owns it), so a coincidentally
+/// named dir never trips the guard.
 fn build_tree_target_dir(exe: &std::path::Path) -> Option<PathBuf> {
     exe.ancestors()
-        .find(|d| d.file_name().is_some_and(|n| n == "target"))
-        .filter(|d| d.join(".rustc_info.json").exists() || d.join("CACHEDIR.TAG").exists())
+        .find(|d| d.join(".rustc_info.json").exists() || d.join("CACHEDIR.TAG").exists())
         .map(|d| d.to_path_buf())
 }
 
@@ -2416,6 +2423,12 @@ fn now_iso() -> String {
     epoch_to_iso(now_secs())
 }
 
+/// Public twin for cross-module callers that need the same UTC stamp shape
+/// (the mux stats answer carries the counter's measurement window).
+pub fn epoch_to_iso_public(secs: u64) -> String {
+    epoch_to_iso(secs)
+}
+
 fn epoch_to_iso(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
@@ -2435,64 +2448,11 @@ fn epoch_to_iso(secs: u64) -> String {
 }
 
 #[cfg(test)]
+mod member_join_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-
-    #[test]
-    fn member_joins_row_prefers_the_full_session_id_then_the_short_id() {
-        //  The declared join, both keys: a member carrying a full
-        // harness session id joins on it and ignores the short ids; a member
-        // without one joins by attach id against the row's short id; an
-        // id-less member joins nothing.
-        let m_session = StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: None,
-            harness: Some("claude".into()),
-            harness_session_id: Some("sess-full".into()),
-        };
-        assert!(member_joins_row(
-            &m_session,
-            Some("other-short"),
-            Some("sess-full")
-        ));
-        assert!(!member_joins_row(
-            &m_session,
-            Some("sess-full"),
-            Some("other-session")
-        ));
-        let m_short = StoredMember {
-            attach_id: "abc12345".into(),
-            tombstone: false,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: None,
-            harness: None,
-            harness_session_id: None,
-        };
-        assert!(member_joins_row(&m_short, Some("abc12345"), None));
-        assert!(!member_joins_row(&m_short, None, Some("abc12345")));
-        assert!(!member_joins_row(&m_short, Some("zzzzzzzz"), None));
-        let m_bare = StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            tombstone_reason: None,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: None,
-            harness: None,
-            harness_session_id: None,
-        };
-        assert!(!member_joins_row(&m_bare, Some("abc12345"), Some("sess")));
-    }
 
     /// A scratch store dir installed via the per-thread path override, so the
     /// store never touches a real file AND never mutates the process
@@ -2529,6 +2489,7 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }
     }
 
@@ -2889,6 +2850,7 @@ mod tests {
             worker: Some("probe-x5f7f".into()),
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         };
         upsert("work", "", &["/repo".into()], &[worker, m("c19cd2c3")]).unwrap();
         let loaded = load();
@@ -2943,6 +2905,7 @@ mod tests {
             worker: Some("t-abcd-worker".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("01a03a85-1111-7222-8333-444455556666".into()),
+            pane_id: None,
         };
         let sibling = StoredMember {
             attach_id: String::new(),
@@ -2954,6 +2917,7 @@ mod tests {
             worker: Some("t-abcd-sibling".into()),
             harness: Some("codex".into()),
             harness_session_id: Some("22222222-1111-7222-8333-444455556666".into()),
+            pane_id: None,
         };
         let already_gone = StoredMember {
             tombstone: true,
@@ -3012,6 +2976,7 @@ mod tests {
             worker: Some("a;rm -rf".into()),
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         };
         upsert("work", "", &["/repo".into()], &[hostile, m("c19cd2c3")]).unwrap();
         let loaded = load();
@@ -3383,6 +3348,7 @@ mod tests {
             worker: Some("residue".into()),
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         };
         let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
         assert_eq!(
@@ -3437,6 +3403,7 @@ mod tests {
             worker: Some("w1".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
         evidence.fold_registry_rows(
@@ -3479,6 +3446,7 @@ mod tests {
             worker: Some("w1".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
         evidence.fold_registry_rows(
@@ -3543,6 +3511,7 @@ mod tests {
             worker: Some("target-x-aaaa-worker".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
         evidence.add_retire_eligible_name("target-x-aaaa-worker");
@@ -3578,6 +3547,7 @@ mod tests {
             worker: Some("w9".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         let stale = crate::agents_view::RegistryAgent {
             name: "w9".into(),
@@ -3635,6 +3605,7 @@ mod tests {
             worker: Some("w9".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         let stale = crate::agents_view::RegistryAgent {
             name: "w9".into(),
@@ -3686,6 +3657,7 @@ mod tests {
             worker: Some("w4".into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         assert_eq!(
             evidence.verdict(&member),
@@ -3739,6 +3711,7 @@ mod tests {
             worker: Some(worker.into()),
             harness: Some("claude".into()),
             harness_session_id: None,
+            pane_id: None,
         };
         assert_eq!(
             evidence.verdict(&member("w2")),
@@ -4073,6 +4046,28 @@ mod tests {
         // An installed binary (no `target` ancestor) is never a build tree.
         std::fs::create_dir_all(tmp.join("bin")).unwrap();
         assert_eq!(build_tree_target_dir(&tmp.join("bin").join("fno")), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn build_tree_marker_detection_covers_the_build_dir_layout() {
+        // Under build.build-dir (measured 2026-09-10) a test binary lives at
+        // <build-base>/<h2>/<hash>/debug/deps/<name>; the markers sit on
+        // the hash dir and no ancestor is named `target`. The nearest tagged
+        // ancestor is the build tree, whatever its name.
+        let tmp = std::env::temp_dir().join(format!("fno-guard-bd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let hash = tmp.join("bd/bac4721f2d16ec");
+        let exe = hash.join("debug/deps/probe-0123456789abcdef");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+
+        // Untagged -> not a build tree, even with the deps-shaped path.
+        assert_eq!(build_tree_target_dir(&exe), None);
+
+        // Tag on the hash dir -> the hash dir IS the build tree.
+        std::fs::write(hash.join("CACHEDIR.TAG"), "x").unwrap();
+        assert_eq!(build_tree_target_dir(&exe), Some(hash));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -4456,6 +4451,7 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
+                pane_id: None,
             }];
             assert_eq!(
                 prune_decision(&s, false, live_some, &no_cwds, &gone),
@@ -4654,6 +4650,7 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }];
         assert_eq!(
             prune_decision_at(
@@ -4813,6 +4810,7 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }
     }
 
@@ -4827,6 +4825,7 @@ mod tests {
             worker: Some(name.into()),
             harness: None,
             harness_session_id: None,
+            pane_id: None,
         }
     }
 

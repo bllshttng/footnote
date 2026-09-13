@@ -207,6 +207,14 @@ resolve-plan-executor.sh
 # hooks/megawalk-stop-hook.sh; tests source the lib directly. Pure sourcing
 # library; no standalone CLI of its own.
 
+# The zero-verdict helper (runs a control and a probe through ONE argv so a
+# zero needs a live control in the same tool and scope). Invoked via
+# `bash <path>` by the scripts/ci gates (check-no-internal-refs.sh,
+# check-no-stale-spec-refs.sh) and by tests/lib/test_assert_absent.sh; the
+# calling gates ARE the entry points, so an fno verb would be a third path
+# to the same scan. Standalone tool; no CLI of its own.
+assert-absent.sh
+
 # The shared "is removing this worktree safe?" answer. Sourced by
 # scripts/lib/worktree-lifecycle.sh and scripts/setup/archive-worktree.sh;
 # exposes wt_reapable. It is the bash ADAPTER for the wrapped entry point
@@ -230,6 +238,22 @@ worktree-unpushed.sh
 # Pure sourcing library; no CLI of its own.
 worktree-removal-event.sh
 
+# The shared "which of these rooted processes actually holds the tree?" answer.
+# Sourced by scripts/lib/worktree-lifecycle.sh and scripts/setup/archive-worktree.sh;
+# exposes wt_classify_pids. The bridge is the bash ADAPTER for the classifier
+# beside it (worktree_occupancy.py), which composes the fno Python modules
+# (keeper_lane, session_procs, footprint) from cli/src on PYTHONPATH; the
+# wrapped entry points users drive are `fno workspace worktree cleanup/archive`.
+# Pure sourcing library; no CLI of its own.
+worktree-occupancy.sh
+
+# The per-hit worktree occupancy classifier (holder vs inert) run AS A SCRIPT
+# by the bridge above: `python scripts/lib/worktree_occupancy.py <wt> <pid>...`.
+# It lives here, not in cli/src/fno, because cli/src is shrink-only net
+# (check-file-budget) and this is sweep-side tooling like worktree-status.py.
+# Its caller is the bridge; no fno verb wraps it directly.
+worktree_occupancy.py
+
 # Bounded append-log rotation (.fno/ dir-hygiene, ab-d5a984f6). A thin
 # `bash <path> <file> <max_bytes>` helper invoked by hooks/convo-signal-capture.sh
 # to cap convo-signals.jsonl; tests run it directly. Pure utility, not a
@@ -250,6 +274,13 @@ worktree-status.py
 # points and need no fno verb between them and the lib. Pure sourcing
 # library; no standalone CLI of its own.
 postcompact-carrier.sh
+
+# Canon-doc marker-block reader for the fno:user fence: extraction, the seed
+# placeholder, and the placeholder classifier. Sourced by
+# hooks/precompact-canon-doc.sh, hooks/king-postcompact-reinject.sh, and the
+# reign check-in body. Sourced, never executed; the hooks are the entry
+# points. Pure sourcing library; no standalone CLI of its own.
+canon-doc-marker.sh
 cargo-rustc-wrapper.sh
 
 # The foreign-rooted-writers predicate for the flush nudge (x-299b). Sourced by

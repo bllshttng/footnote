@@ -379,6 +379,22 @@ def test_spawn_claude_command_receipt_names_effective_message(workdir_claude) ->
     assert receipt["effective_message"] == "/fno:pr check 7"
 
 
+def test_spawn_refuses_a_payload_whose_verb_the_shell_ate(workdir) -> None:
+    """zsh turns a double-quoted `$fno:target x-1` into `arget x-1`. The spawn
+    refuses it before launching anything, instead of seeding a worker with prose."""
+    from fno.agents.cli import agents_app
+
+    result = _make_runner().invoke(
+        agents_app,
+        ["spawn", "--name", "eaten-c", "-H", "codex", "arget x-1", "--substrate", "thread"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "Single-quote the payload: '$fno:target ...'" in result.output
+    assert not any(e.name == "eaten-c" for e in load_registry())
+
+
 def test_spawn_claude_receipt_surfaces_moved_cwd(workdir_claude, monkeypatch) -> None:
     """x-85fe: when the default moves the worker off the caller (canonical !=
     caller), the bg receipt appends the effective cwd LAST, and the stderr
@@ -636,7 +652,7 @@ def test_spawn_pi_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> 
     calls: list[dict] = []
     seeds: list[dict] = []
 
-    def _fake_lane_b(*, name, harness, cwd, lock_timeout):
+    def _fake_lane_b(*, name, harness, cwd, lock_timeout, **_extra):
         calls.append({"name": name, "harness": harness, "cwd": cwd})
         return {
             "name": name,
@@ -722,30 +738,47 @@ def test_spawn_agy_headless_refuses_by_name(workdir, monkeypatch) -> None:
     )
 
 
-def test_a_keeper_lane_refuses_the_permission_axis_it_does_not_carry() -> None:
-    """The permission axis is an axis like any other. pi's lane driver takes no
-    permission mode, so passing one used to be dropped in silence - a security-
-    adjacent surprise, and a flat contradiction of the row's own claim that
-    every axis it does not carry is refused BY NAME."""
-    from fno.agents import dispatch
+def test_a_keeper_lane_demotes_the_permission_axis_it_does_not_carry(
+    tmp_path, monkeypatch
+) -> None:
+    """The permission axis is an axis like any other. pi's keeper lane takes
+    no permission mode, so the resolver demotes the spawn to the pane loudly
+    instead of dropping the axis in silence."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.agents import cli as agents_cli
     from fno.agents.keeper_thread import LAUNCH_AXES, keeper_arm
+    from fno.agents.mux_spawn import dispatch_spawn_bounded_pane as _pane_dispatch
+    from fno.paths_testing import use_tmpdir
 
     assert ("--permission-mode", "permission_mode") in LAUNCH_AXES
     assert "permission_mode" not in keeper_arm("pi")["carries"]
     for harness in ("cursor-agent", "grok", "agy"):
         assert "permission_mode" in keeper_arm(harness)["carries"], harness
 
-    with pytest.raises(dispatch.DispatchAskError) as caught:
-        dispatch.dispatch_spawn(
-            name="wkpiperm",
-            message="hello",
-            harness="pi",
-            cwd=Path("/tmp"),
-            permission_mode="yolo",
-        )
-    assert "--permission-mode is not supported on the pi thread lane" in str(
-        caught.value
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    sent: dict = {}
+
+    def recorder(**kwargs):
+        sent.update(kwargs)
+        raise typer.Exit(code=0)
+
+    monkeypatch.setattr("fno.agents.mux_spawn.dispatch_spawn_bounded_pane", recorder)
+    del _pane_dispatch
+
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        [
+            "spawn", "hello", "--name", "wkpiperm", "-H", "pi",
+            "--permission-mode", "yolo",
+        ],
     )
+    assert sent.get("provider") == "pi", (
+        f"expected a pane dispatch, got exit {result.exit_code}\noutput: {result.output}"
+    )
+    assert "no carrier for --permission-mode" in result.output, result.output
 
 
 def test_spawn_agy_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> None:
@@ -953,6 +986,8 @@ def test_spawn_opencode_bg_delegates_to_serve_lane(workdir, monkeypatch) -> None
             "x-abcd",
             "--cwd",
             str(workdir),
+            "--session-phase",
+            "do",
             "run the node",
         ],
     )
@@ -998,10 +1033,22 @@ def test_spawn_opencode_bg_once_refused(workdir) -> None:
     assert "headless" in result.output
 
 
-def test_spawn_opencode_bg_role_refused(workdir) -> None:
-    """--role has no carrier on the serve row, so it is refused loudly rather
-    than silently dropped."""
+def test_spawn_opencode_bg_role_demotes_to_pane(workdir, monkeypatch) -> None:
+    """--role has no carrier on the serve row, so the resolver demotes the
+    spawn to the pane loudly instead of refusing on the substrate."""
+    import typer
+
     from fno.agents.cli import agents_app
+    from fno.agents.mux_spawn import dispatch_spawn_bounded_pane as _pane_dispatch
+
+    sent: dict = {}
+
+    def recorder(**kwargs):
+        sent.update(kwargs)
+        raise typer.Exit(code=0)
+
+    monkeypatch.setattr("fno.agents.mux_spawn.dispatch_spawn_bounded_pane", recorder)
+    del _pane_dispatch
 
     runner = _make_runner()
     result = runner.invoke(
@@ -1022,9 +1069,10 @@ def test_spawn_opencode_bg_role_refused(workdir) -> None:
         ],
     )
 
-    assert result.exit_code == 2, (
-        f"expected exit 2, got {result.exit_code}\noutput: {result.output}"
+    assert sent.get("provider") == "opencode", (
+        f"expected a pane dispatch, got exit {result.exit_code}\noutput: {result.output}"
     )
+    assert "no carrier for --role" in result.output, result.output
     assert "--role" in result.output
 
 

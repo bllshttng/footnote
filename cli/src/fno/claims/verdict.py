@@ -40,13 +40,43 @@ def process_create_time_ms(pid: int | None) -> int | None:
         return None
 
 
+def run_op(
+    op_args: Sequence[str], claims_dirs: Sequence[Path]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Run one ``fno-agents claim <op>`` that takes repeatable
+    ``--claims-dir``; answers ``(payload, None)`` or ``(None, error)`` — a
+    reporting caller never dies on an op failure."""
+    binary = resolve_binary()
+    if binary is None:
+        return None, "fno-agents binary not found"
+    command = [str(binary), "claim", *op_args]
+    for cdir in claims_dirs:
+        command.extend(("--claims-dir", str(cdir)))
+    try:
+        result = run_subprocess(command, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        return None, f"OSError: {exc}"
+    if result.returncode != 0:
+        return None, result.stderr.strip() or f"exit {result.returncode}"
+    try:
+        return json.loads(result.stdout), None
+    except json.JSONDecodeError as exc:
+        return None, f"JSONDecodeError: {exc}"
+
+
 def claim_verdicts(
     keys: Sequence[str] | None = None,
     *,
     prefix: str | None = None,
     root: Path | None = None,
+    claims_dir_path: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Return native verdict rows for many keys in one subprocess."""
+    """Return native verdict rows for many keys in one subprocess.
+
+    ``claims_dir_path`` is passed verbatim as ``--claims-dir``; ``root``
+    would be re-resolved one level down, so a caller holding a resolved
+    claims directory must use it.
+    """
     binary = resolve_binary()
     if binary is None:
         raise ClaimVerdictUnavailable(
@@ -67,7 +97,7 @@ def claim_verdicts(
     # else the claims_dir(None) contract (env override, else the repo's space).
     # Verbatim --claims-dir, because --root spells a repo checkout (it appends
     # .fno/claims) and no root reaches the space layout.
-    command.extend(("--claims-dir", str(claims_dir(root))))
+    command.extend(("--claims-dir", str(claims_dir_path or claims_dir(root))))
 
     try:
         result = run_subprocess(command, capture_output=True, text=True, check=False)

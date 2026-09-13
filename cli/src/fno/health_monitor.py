@@ -847,6 +847,12 @@ def summarize_trend(entries: list[dict[str, Any]]) -> dict[str, Any]:
     ``delta``, and ``percent_change`` fields. Empty input yields an empty
     summary dict.
     """
+    # A partial pass carries fewer findings because some legs never ran, never
+    # because the board got cleaner; pre-``complete`` entries still count.
+    # Test the value, never its absence.
+    entries = [
+        e for e in entries if e.get("report", {}).get("complete") is not False
+    ]
     if not entries:
         return {}
 

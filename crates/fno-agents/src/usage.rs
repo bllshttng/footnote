@@ -38,6 +38,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     "reconcile",
     "drive-authority [--json]",
     "trace [options]",
+    "registry-json",
     "ping",
     "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>]",
     "adopt <session-id> [--cross-project]",
@@ -54,6 +55,12 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     // intercept would print a one-line usage and shadow the verb's own
     // --help, which states the load-bearing contract (no way to assert
     // coverage without the reads, and the strict manifest-less defaults).
+    //
+    // `distress-scan` deliberately has NO entry here either, same reason:
+    // it intercepts its own --help (DISTRESS_SCAN_USAGE in distress.rs)
+    // with the fuller best-effort-always-exits-0 contract a one-liner would
+    // shadow, and it is a hidden verb with no external callers to discover
+    // it from a top-level list.
 ];
 
 /// Return the usage line for `verb` (matched on the leading token), or `None`
@@ -63,4 +70,106 @@ pub fn verb_usage(verb: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|usage| usage.split_whitespace().next() == Some(verb))
+}
+
+/// Full per-verb help for a verb whose contract does not fit the one-line
+/// table above; checked before `verb_usage` by the per-verb `--help`
+/// intercept in the bin. Same reason `review-coverage` owns its `--help`
+/// inline (x-b863): the load-bearing contract has to live in a string the
+/// binary prints, next to the table entry that stays one line for the
+/// top-level list.
+pub const LOOP_CHECK_USAGE: &str = "\
+usage: fno-agents loop-check --state <manifest> --transcript <transcript.jsonl> --cwd <project-root>
+       [--driver target|king] [--events <p>] [--global-events <p>] [--settings <p>]
+       [--global-settings <p>] [--ledger <p>] [--now <rfc3339>] [--author-harness <h>]
+       [--hook-input-stdin] [--gh-bin <p>] [--git-bin <p>] [--fno-bin <p>] [--read-timeout-ms <n>]
+
+The stop-hook decision verb: it decides whether a driven session may stop,
+and every verdict comes from external truth read fresh on each fire - PR
+existence, CI, required-bot review, plan done_probes, budget. The
+session's own claim of done is not an input.
+
+--driver selects the arm and the manifest kind --state points at. target
+(the default) reads a target manifest (target-state.md) and asks whether
+its one deliverable shipped. king reads a king manifest (frontmatter
+scope) and asks whether the crown scope drained. The arm is chosen by the
+flag, never by sniffing the file, and any other value is refused.
+
+Required: --state, --transcript, --cwd. Unknown flags are tolerated for
+shim forward-compat. stdout is one JSON decision; exit 0 = a decision
+(verdict allow or block), 2 = bad arguments.
+";
+
+/// The fuller help body for `verb`, when one exists above. `None` falls
+/// through to the one-line `verb_usage` entry.
+pub fn verb_help(verb: &str) -> Option<&'static str> {
+    match verb {
+        "loop-check" => Some(LOOP_CHECK_USAGE),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use regex::Regex;
+
+    /// x-b863: every flag loop-check's parser accepts appears in its help
+    /// body. This is the gate that retires the class: --driver was
+    /// load-bearing, accepted, and absent from the one place a user can
+    /// look, and nothing caught that. The gate reads parse_args's own
+    /// source, so a new flag cannot land undocumented.
+    #[test]
+    fn loop_check_help_covers_every_accepted_flag() {
+        let source = include_str!("loopcheck.rs");
+        let start = source
+            .find("fn parse_args(")
+            .expect("parse_args not found in loopcheck.rs");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("parse_args has no closing brace")];
+
+        let flag = Regex::new(r#"try_flag_value\(arg, "(--[\w-]+)"|arg == "(--[\w-]+)""#).unwrap();
+        let mut flags: Vec<&str> = Vec::new();
+        for caps in flag.captures_iter(body) {
+            let f = caps
+                .get(1)
+                .or_else(|| caps.get(2))
+                .expect("one alternation matched")
+                .as_str();
+            if !flags.contains(&f) {
+                flags.push(f);
+            }
+        }
+        // Positive control: the extraction must find the known flags, so a
+        // broken scan fails loudly instead of passing on an empty set.
+        assert!(
+            flags.contains(&"--state"),
+            "scan missed --state; extraction is broken: {flags:?}"
+        );
+        assert!(
+            flags.contains(&"--driver"),
+            "scan missed --driver; extraction is broken: {flags:?}"
+        );
+        assert!(
+            flags.len() >= 16,
+            "unexpectedly few flags scanned: {flags:?}"
+        );
+
+        for f in &flags {
+            assert!(
+                LOOP_CHECK_USAGE.contains(f),
+                "loop-check accepts {f} but LOOP_CHECK_USAGE never names it"
+            );
+        }
+        // The contract words the node asked for, beyond the flag spellings.
+        // Whitespace-normalized: the const line-wraps its prose.
+        let one_line: String = LOOP_CHECK_USAGE
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(verb_help("loop-check").is_some());
+        assert!(one_line.contains("target (the default)"));
+        assert!(one_line.contains("target manifest"));
+        assert!(one_line.contains("king manifest"));
+    }
 }

@@ -1,6 +1,6 @@
 """Style checker for agent-authored text.
 
-Seven rules, checked at the tool boundary. ``docs/style-rules.md`` is the
+Eight rules, checked at the tool boundary. ``docs/style-rules.md`` is the
 normative statement; this module is the mechanism. Pure: no filesystem, no
 state, no network. ``fno agents mail send`` and the hand-run ``fno doctor lint style``
 surfaces route through :func:`check`.
@@ -25,6 +25,7 @@ RULE_NAMES = {
     5: "condition",
     6: "wrap",
     7: "wordcap",
+    8: "filler",
 }
 
 LIST_ITEM_CAP = 20
@@ -44,6 +45,18 @@ CAPPED_SURFACES = frozenset({"mail", "encounter"})
 # "May" never fires; the other four carry no capitalized homonym in prose.
 BANNED_MODALS = frozenset({"should", "would", "might", "could"})
 BANNED_MODAL_MAY = "may"
+
+# Rule 8. Filler and pleasantry words that carry no task content. The list is
+# SHORT on purpose. It was cut against every occurrence in a 6,964-message mail
+# corpus, and a word stays out unless the corpus shows it is filler THERE.
+# "just", "actually", "simply" and "really" were rejected as restrictive or
+# contrastive, "sure" because every use was "make sure", "certainly" because
+# every use was "almost certainly", and "I think" because it separates
+# inference from measurement, which this repo requires. Caveman's article-drop
+# and abbreviation rules are NOT ported: ASD-STE100 requires the article
+# (operator ruling 2026-08-13) and an abbreviation gives one word two spellings.
+BANNED_FILLERS = frozenset({"please", "thanks", "basically"})
+BANNED_FILLER_PHRASES = ("thank you", "of course", "happy to", "feel free")
 
 # Rule 4. A closed list, matched case-insensitively after normalising the curly
 # apostrophe U+2019 to U+0027. A regex pattern was rejected because it flags
@@ -182,13 +195,12 @@ def has_exception(text: str) -> str | None:
 def check(text: str, *, surface: str = "mail", word_cap: int | None = None) -> list[Violation]:
     """Return every violation found in ``text``.
 
-    ``mail`` enforces the relay compression contract only: the 80-word cap.
-    Rules 1 to 6 are prose shape for text a human reads, and an agent mail is
-    not that. The surfaces in :data:`CAPPED_SURFACES` carry the prose word cap
-    alongside rules 1 to 6; PR bodies, comments, and changed markdown do not,
-    because they are not read mid-turn. The text is masked whole, then each
-    line is split into its sentences: a paragraph is one physical line and
-    carries as many sentences as it needs, and rule 6 is what holds that shape.
+    Every surface runs rules 1 to 8. The surfaces in :data:`CAPPED_SURFACES`
+    (``mail`` and ``encounter``) also carry the prose word cap; PR bodies,
+    comments, and changed markdown do not, because they are not read mid-turn.
+    The text is masked whole, then each line is split into its sentences: a
+    paragraph is one physical line and carries as many sentences as it needs,
+    and rule 6 is what holds that shape.
 
     ``word_cap`` overrides :data:`MESSAGE_WORD_CAP` for this one call. The
     caller resolves it, because this module promises no filesystem and no state
@@ -200,9 +212,12 @@ def check(text: str, *, surface: str = "mail", word_cap: int | None = None) -> l
     ``_run`` for added-lines markdown checks, where a whole-body count would
     charge a file's total against one added line. Masking also means a pasted log
     can count near zero words; the cap covers prose, not a log dump.
+
+    :func:`fix` defaults to ``surface="mail"`` and loops on this function, so
+    a mail body gets its mechanical repairs too: semicolons split and wrapped
+    paragraphs rejoin. Before the mail gate ran the full rule set the mail
+    default could only ever find the cap, which no fix can clear.
     """
-    if surface == "mail":
-        return _check_message_length(text, word_cap or MESSAGE_WORD_CAP)
     violations = _run(text, None)
     if surface in CAPPED_SURFACES:
         violations.extend(_check_message_length(text, word_cap or MESSAGE_WORD_CAP))
@@ -305,10 +320,14 @@ def _run(text: str, only: set[int] | None) -> list[Violation]:
 _EXCERPT_CAP = 12
 
 
-def format_violations(violations: list[Violation]) -> str:
+def format_violations(violations: list[Violation], surface: str | None = None) -> str:
     """Render violations as a self-teaching, rule-compliant refusal message.
 
-    The message itself passes rules 1 to 6: every banned word it names is
+    ``surface`` names the gate that produced the violations, so a rule 7
+    refusal can point the rewrite check at a surface that sees the same cap.
+    Unknown falls back to ``mail``, the dominant capped surface.
+
+    The message itself passes rules 1 to 8: every banned word it names is
     double-quoted, and the masking pass replaces quoted spans with one token
     before any rule runs, so a gate that violates its own rule never ships.
     Rule 6 is why the lines are joined by a BLANK line rather than a newline.
@@ -370,11 +389,80 @@ def format_violations(violations: list[Violation]) -> str:
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
     # Name the surface explicitly: --stdin defaults to mail, which checks the
     # word cap only, so the bare command would pass a prose rewrite vacuously.
-    lines.append(
-        'run "fno doctor lint style --stdin --surface pr-body" to check a '
-        "rewrite before you send it."
-    )
+    # The check must also see the gate that fired: pr-body never counts words,
+    # so for rule 7 it clears a rewrite the capped gate refuses again.
+    if 7 in by_rule:
+        named = surface or "mail"
+        lines.append(
+            f'run "fno doctor lint style --stdin --surface {named}" to check a '
+            "rewrite first. Fewer words."
+        )
+    else:
+        lines.append(
+            'run "fno doctor lint style --stdin --surface pr-body" to check a '
+            "rewrite first."
+        )
     return "\n\n".join(lines)
+
+
+# Rules a rewrite can clear without an author: a semicolon splits into two
+# sentences, a wrapped paragraph rejoins into one physical line. The rest
+# change meaning when applied blind, so they stay in the residue.
+FIXABLE_RULES = frozenset({2, 6})
+
+_SEMICOLON_SPACE_RE = re.compile(r";[ \t]+")
+
+
+def fix(text: str, *, surface: str = "mail") -> tuple[str, list[Violation]]:
+    """Rewrite the mechanically fixable violations. Return (text, residue).
+
+    Pure. Re-checks after every pass because a fix can expose another; a pass
+    that changes nothing ends the loop. A non-empty residue is the caller's
+    signal to exit non-zero: a partial fix never reads as a pass.
+    """
+    for _ in range(10):
+        violations = check(text, surface=surface)
+        mechanical = [v for v in violations if v.rule in FIXABLE_RULES]
+        if not mechanical:
+            return text, violations
+        fixed = _apply_fixes(text, mechanical)
+        if fixed == text:
+            return text, violations
+        text = fixed
+    return text, check(text, surface=surface)
+
+
+def _apply_fixes(text: str, violations: list[Violation]) -> str:
+    lines = text.split("\n")
+    # Joins run bottom-up so deleting a line cannot shift a pending index.
+    for i in sorted(
+        (v.sentence_index for v in violations if v.rule == 6), reverse=True
+    ):
+        if 0 < i < len(lines):
+            lines[i - 1] = lines[i - 1].rstrip() + " " + lines[i].lstrip()
+            del lines[i]
+    text = "\n".join(lines)
+    # A line whose masked form differs carries a construct (code span, fence,
+    # path) with no offset map back to raw text, so its semicolons stay in the
+    # residue rather than risk a split inside the span. The mask runs on the
+    # whole text: fence state spans lines.
+    masked_lines = _mask(text).split("\n")
+    return "\n".join(
+        line if line != masked else _split_semicolons(line)
+        for line, masked in zip(text.split("\n"), masked_lines)
+    )
+
+
+def _split_semicolons(line: str) -> str:
+    """Turn ``a; b`` into ``a. B`` and a trailing ``;`` into a period."""
+    parts = _SEMICOLON_SPACE_RE.split(line)
+    if len(parts) == 1:
+        return re.sub(r";[ \t]*$", ".", line)
+    out = parts[0]
+    for part in parts[1:]:
+        cap = part[:1].upper() + part[1:] if part[:1].islower() else part
+        out += ". " + cap
+    return out
 
 
 def _quote_safe(text: str) -> str:
@@ -434,6 +522,24 @@ def _check_sentence(sentence: str, index: int, is_list: bool) -> list[Violation]
                     3, index, sentence,
                     f'sentence {shown} uses "{_quote_safe(word)}". '
                     'Write "can", "will", or "must" instead.',
+                )
+            )
+        if lowered in BANNED_FILLERS:
+            out.append(
+                Violation(
+                    8, index, sentence,
+                    f'sentence {shown} uses the filler "{_quote_safe(word)}". '
+                    "Delete it. The imperative alone reads stronger.",
+                )
+            )
+    lowered_sentence = sentence.lower()
+    for phrase in BANNED_FILLER_PHRASES:
+        if phrase in lowered_sentence:
+            out.append(
+                Violation(
+                    8, index, sentence,
+                    f'sentence {shown} uses the filler phrase "{phrase}". '
+                    "Delete it.",
                 )
             )
     for word in words:

@@ -67,8 +67,15 @@ STATUS=$(fno backlog get "$WAVE_NODE" --field status)
 case "$STATUS" in
   ready)
     # SPAWN into the foreign project via the CLI --cwd flag (-C/--project is a normalize.sh input that resolves to --cwd, not a CLI flag; -P is --provider). Subscription lane (never -p/--bare).
-    fno agents spawn --harness claude --cwd "$ROOT" --name "target-$WAVE_NODE" "/target $WAVE_NODE"
-    echo "do: spawned target-$WAVE_NODE --cwd $ROOT"   # receipt (AC3-UI)
+    # x-84b2: the worker name is minted through the bridge - ex-t-<node> (the
+    # foreign-wave source), never a bare target- shape.
+    WORKER_NAME="$(FNO_AGENTS_RUNTIME=python fno agents name --source ex --verb t "$WAVE_NODE" 2>/dev/null)"
+    if [[ -z "$WORKER_NAME" ]]; then
+      echo "do: REFUSE foreign wave for '$WAVE_NODE' - the canonical name mint refused (x-84b2)" >&2
+    else
+      fno agents spawn --harness claude --cwd "$ROOT" --name "$WORKER_NAME" "/target $WAVE_NODE"
+      echo "do: spawned $WORKER_NAME --cwd $ROOT"   # receipt (AC3-UI)
+    fi
     # mark the wave DELEGATED in STATE.md; continue the session's own waves
     ;;
   idea)

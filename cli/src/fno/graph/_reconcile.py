@@ -922,6 +922,15 @@ def _close_probe_runner_shellout(
     return (False, reason)
 
 
+def _verdict_reader_shellout(plan_path: str) -> "dict[str, Any]":
+    """Default ``verdict_reader``: one round-trip with ``fno-agents
+    prove-it-verdicts``; a ``VerbUnavailable`` degrades to a warning, the
+    same posture a plan read failure takes."""
+    from fno.rust_binary import verb_call
+
+    return verb_call("prove-it-verdicts", {})
+
+
 def resolve_promise_evidence(
     node: dict,
     *,
@@ -930,6 +939,7 @@ def resolve_promise_evidence(
     probe_runner: Optional[Callable[[str, Optional[str]], tuple[bool, str]]] = None,
     extra_refs: Optional[list[tuple[int, Optional[str]]]] = None,
     carveout_reader: Optional[Callable[[Optional[str]], "list[dict]"]] = None,
+    verdict_reader: Optional[Callable[[str], "dict[str, Any]"]] = None,
 ) -> PromiseVerdict:
     """Decide whether a node's plan promised work that has not all shipped.
 
@@ -1002,6 +1012,32 @@ def resolve_promise_evidence(
     node_id = node.get("id", "(unknown)")
     plan_display = node.get("plan_path", plan_path_clean)
 
+    # Condition E (x-6d64): an open prove-it FAIL on this node's own plan
+    # artifacts is claimed work whose outcome did not hold; it needs no
+    # declaration. A done node is never reopened; a failed reader is a warning.
+    if node_id:
+        try:
+            payload = (verdict_reader or _verdict_reader_shellout)(plan_path_clean)
+        except Exception as exc:  # noqa: BLE001 - a failed read must not block a close
+            return PromiseVerdict(
+                outcome="ok",
+                warning=f"prove-it verdict read failed ({exc}); gate skipped for this close",
+            )
+        fail_rows = [
+            r for r in (payload.get("rows") or [])
+            if isinstance(r, dict) and r.get("node") == node_id and r.get("open")
+        ]
+        if fail_rows:
+            row = fail_rows[0]
+            return PromiseVerdict(
+                outcome="promise_unmet",
+                reason=(
+                    f"{node_id}: prove-it FAIL on its own plan artifacts "
+                    f"({row.get('report')}): {row.get('claim')}. Fix and re-run prove-it, "
+                    f"rule with fno inbox decide, or close with --force --reason."
+                ),
+            )
+
     # The gate fires ONLY on an explicit declaration. A plan that declares
     # neither close_probes nor expected_url_count closes exactly as it does
     # today - inferring "multi-wave" from `## Wave N` headings was rejected
@@ -1010,7 +1046,6 @@ def resolve_promise_evidence(
     # parking every such node on autonomous /target. Coverage grows as
     # /blueprint stamps expected_url_count going forward; nothing retroactively
     # parks. A gate that only fires on an explicit promise cannot false-positive.
-    #
     # Condition B: run the declared outcome probes. Opt-in by construction (only
     # fires when the plan declared the field).
     if close_probes:
@@ -1049,7 +1084,6 @@ def resolve_promise_evidence(
                 # unconfirmed in BOTH directions. Closing here stamped a
                 # declared multi-ship node done on the strength of an outage.
                 # The node stays open and the sweep retries when gh answers.
-                #
                 # The remedy names the verb that can actually recover, which is
                 # NOT always reconcile. When `extra_refs` carried an explicit
                 # ship the close verb had not yet persisted, the refusal exits
@@ -1518,9 +1552,10 @@ def clear_reopen_warning_if_child_matches(parent: dict, child: object) -> None:
 def _reopen_outranks_child_closes(parent: dict, kids: list[dict]) -> bool:
     """True when a deliberate reopen postdates every child's close.
 
-    Both close paths ask only whether every child carries ``completed_at``, and
-    that predicate stays true forever once the last child merges. So a node
-    reopened after its children finished was re-closed by the very next sweep:
+    Both close paths ask :func:`children_all_closed` - every child closed, at
+    least one really shipped - and that predicate stays true forever once the
+    last child merges. So a node reopened after its children finished was
+    re-closed by the very next sweep:
     measured 2026-09-05, a reopen carrying a written reason was overridden by
     ``reconcile`` seven minutes later, and no retry could hold it. ``reopen``
     requires ``--reason`` precisely because a close is evidenced by a merged PR
@@ -1605,6 +1640,28 @@ def _merge_postdates_reopen(
     return False
 
 
+def children_all_closed(parent: dict, kids: list[dict]) -> bool:
+    """Every child is closed, and at least one really shipped.
+
+    The one closure question both epic close paths ask
+    (:func:`cascade_close_should_stop` and ``_strandable_epic_ids``). A child
+    counts closed when :func:`fno.graph.statuses.is_terminal_entry` says so -
+    done, superseded, or freshly stamped ``completed_at`` with its status
+    still catching up - EXCEPT a child superseded BY THIS PARENT: the parent
+    absorbed that child's work, so the parent's own liveness keeps it open.
+    The shipped term keeps a parent whose every child was replaced elsewhere
+    from closing as done with nothing built.
+    """
+    from fno.graph.statuses import is_terminal_entry
+
+    pid = parent.get("id")
+    if not kids:
+        return False
+    if any(not is_terminal_entry(k) or k.get("superseded_by") == pid for k in kids):
+        return False
+    return any(k.get("status") != "superseded" and not k.get("superseded_by") for k in kids)
+
+
 def cascade_close_should_stop(parent: dict, kids: list[dict], child: object) -> bool:
     """One climb step of ``_cascade_close_parents``: clear a stale marker on
     ``parent`` first, then report whether the walk stops here (``parent``
@@ -1616,7 +1673,7 @@ def cascade_close_should_stop(parent: dict, kids: list[dict], child: object) -> 
         return True
     if _reopen_outranks_child_closes(parent, kids):
         return True  # reopened after its children finished -> the human call holds
-    return not kids or any(not k.get("completed_at") for k in kids)
+    return not children_all_closed(parent, kids)
 
 
 @dataclass
@@ -1642,21 +1699,24 @@ def classify_open_pr_bindings(
 ) -> list[OpenPrBinding]:
     """Classify every open-PR row against graph entries: ``bound`` (the node
     points back at this PR), ``missing`` (a unique real node resolves but does
-    not point back), ``untracked`` (neither key names a real node), or
+    not point back), ``untracked`` (no key names a real node), or
     ``ambiguous`` (several real nodes, or one node named by several open PRs).
 
-    Two resolution keys, in order: delimiter-bounded branch matching is
+    Three resolution keys, in order: delimiter-bounded branch matching is
     ``branch_node_ids`` - the same producer/gate authority the merged reverse
-    map's ``_branch_matches_node`` agrees with - and when it yields nothing,
-    the graph's own ``(pr_number, pr_url)`` back-pointer read through
-    ``node_pr_refs``. The branch key wins whenever it hits, so existing
-    verdicts are unchanged. The reverse key is scoped by URL because a
-    ``pr_number`` is only unique within one repository.
+    map's ``_branch_matches_node`` agrees with; when it yields nothing, the
+    graph's own ``(pr_number, pr_url)`` back-pointer read through
+    ``node_pr_refs``, scoped by URL because a ``pr_number`` is only unique
+    within one repository; when both miss, the row body's exact
+    ``Backlog-Closure:`` trailer (x-9588). The branch key wins whenever it
+    hits, so existing verdicts are unchanged. A row produced without a
+    ``body`` field never reads the trailer; the ``untracked`` detail names
+    that absence instead of reading it as an empty body.
 
     Pure (no I/O), so the reconcile heal, ``fno do pr list``, and the king
     board all read the same verdicts.
     """
-    from fno.pr.closure import branch_node_ids
+    from fno.pr.closure import branch_node_ids, parse_closure_trailer
 
     real_ids = {
         e.get("id")
@@ -1677,7 +1737,7 @@ def classify_open_pr_bindings(
             key_url = _normalized_pr_url(url)
             if key_url is not None:
                 by_pr_ref.setdefault((num, key_url), []).append(nid)
-    parsed: list[tuple[int, Optional[str], str, list[str]]] = []
+    parsed: list[tuple[int, Optional[str], str, list[str], list[str], bool]] = []
     open_prs_by_node: dict[str, list[int]] = {}
     for row in open_rows:
         if not isinstance(row, dict):
@@ -1687,12 +1747,27 @@ def classify_open_pr_bindings(
         if not isinstance(number, int) or not head:
             continue
         matched = [nid for nid in branch_node_ids(head) if nid in real_ids]
-        parsed.append((number, row.get("url"), head, matched))
+        body_supplied = "body" in row
+        trailer: list[str] = (
+            [nid for nid in parse_closure_trailer(row["body"]) if nid in real_ids]
+            if body_supplied
+            else []
+        )
+        parsed.append((number, row.get("url"), head, matched, trailer, body_supplied))
         if len(matched) == 1:
             open_prs_by_node.setdefault(matched[0], []).append(number)
+        elif not matched:
+            # Sibling guard: a trailer-resolved row competes for its node like
+            # a branch-resolved one, so one node named by a branch PR and a
+            # trailer PR reads ambiguous on both rows.
+            key_url = _normalized_pr_url(row.get("url"))
+            hits = by_pr_ref.get((number, key_url), []) if key_url else []
+            if not hits and len(trailer) == 1:
+                open_prs_by_node.setdefault(trailer[0], []).append(number)
 
     verdicts: list[OpenPrBinding] = []
-    for number, url, head, matched in parsed:
+    for number, url, head, matched, trailer, body_supplied in parsed:
+        via = "branch"
         if not matched:
             # Fallback: the node's own back-pointer. A reverse candidate
             # already points at this PR, so this can only ever produce
@@ -1700,18 +1775,49 @@ def classify_open_pr_bindings(
             key_url = _normalized_pr_url(url)
             hits = by_pr_ref.get((number, key_url), []) if key_url else []
             if not hits:
-                verdicts.append(OpenPrBinding(number, url, head, "untracked"))
-                continue
-            if len(hits) > 1:
-                verdicts.append(
-                    OpenPrBinding(
-                        number, url, head, "ambiguous",
-                        detail=f"{len(hits)} nodes carry this PR: "
-                        f"{' '.join(sorted(hits))}",
+                if not trailer:
+                    verdicts.append(
+                        OpenPrBinding(
+                            number, url, head, "untracked",
+                            detail=(
+                                f"branch '{head}' names no real node; "
+                                + (
+                                    f"no node carries #{number} at {url}"
+                                    if url
+                                    else "no url, back-pointer not read"
+                                )
+                                + (
+                                    "; body carries no Backlog-Closure trailer"
+                                    if body_supplied
+                                    else "; body not supplied, trailer not read"
+                                )
+                            ),
+                        )
                     )
-                )
-                continue
-            matched = hits
+                    continue
+                if len(trailer) > 1:
+                    verdicts.append(
+                        OpenPrBinding(
+                            number, url, head, "ambiguous",
+                            detail=f"trailer names {len(trailer)} real nodes: "
+                            f"{' '.join(trailer)}",
+                        )
+                    )
+                    continue
+                matched = trailer
+                via = "trailer"
+            else:
+                if len(hits) > 1:
+                    verdicts.append(
+                        OpenPrBinding(
+                            number, url, head, "ambiguous",
+                            detail=f"{len(hits)} nodes carry this PR: "
+                            f"{' '.join(sorted(hits))}",
+                        )
+                    )
+                    continue
+                matched = hits
+                via = "branch"
         if len(matched) > 1:
             verdicts.append(
                 OpenPrBinding(
@@ -1738,6 +1844,11 @@ def classify_open_pr_bindings(
         verdicts.append(
             OpenPrBinding(
                 number, url, head, "bound" if refs_this_pr else "missing", node_id=nid,
+                detail=(
+                    None
+                    if refs_this_pr
+                    else f"{nid} resolved via {via} but does not point back at #{number}"
+                ),
             )
         )
     return verdicts
@@ -1761,7 +1872,7 @@ def list_open_pr_branches(
         return []
     cmd = [
         "gh", "pr", "list", "--state", "open", "--limit", str(limit + 1),
-        "--json", "number,url,headRefName",
+        "--json", "number,url,headRefName,body",
     ]
     try:
         result = runner(
@@ -1787,29 +1898,72 @@ def list_open_pr_branches(
     return rows
 
 
-def collect_open_binding_heals(
+def _repo_group_key(cwd: str, memo: dict[str, str]) -> str:
+    """The git common dir of ``cwd``, or ``cwd`` when git can't say (x-6283)."""
+    hit = memo.get(cwd)
+    if hit is None:
+        try:
+            probe = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"], capture_output=True,
+                text=True, check=False, timeout=3, cwd=cwd,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            probe = None
+        # ``.git`` comes back relative on a main checkout; anchor it so keys agree.
+        hit = (
+            str((Path(cwd) / probe.stdout.strip()).resolve())
+            if probe is not None and probe.returncode == 0 and probe.stdout.strip()
+            else cwd
+        )
+        memo[cwd] = hit
+    return hit
+
+
+class _ListingCache:
+    """One gh listing per repo per run, shared by the scans (x-6283).
+
+    A failed fetch caches the error so later asks re-raise, not re-hit gh.
+    """
+
+    def __init__(self) -> None:
+        self._repo_keys: dict[str, str] = {}
+        self._store: dict[tuple[str, str], list[dict]] = {}
+        self._errors: dict[tuple[str, str], ReconcileError] = {}
+
+    def rows_for(
+        self, kind: str, cwd: str, fetch: Optional[Callable[..., list[dict]]] = None
+    ) -> list[dict]:
+        """Cached rows for ``kind`` ("open" | "merged") of ``cwd``'s repo."""
+        if fetch is None:
+            fetch = list_open_pr_branches if kind == "open" else list_merged_pr_branches
+        key = (kind, _repo_group_key(cwd, self._repo_keys))
+        if key in self._errors:
+            raise self._errors[key]
+        if key not in self._store:
+            try:
+                self._store[key] = fetch(cwd=cwd)
+            except ReconcileError as exc:
+                self._errors[key] = exc
+                raise
+        return self._store[key]
+
+
+def _group_refless_by_repo(
     entries: list[dict],
     *,
     node_id: Optional[Union[str, Iterable[str]]] = None,
-    list_open: Optional[Callable[..., list[dict]]] = None,
-) -> "tuple[list[OpenPrBinding], list[str]]":
-    """Discover open PRs that uniquely name an open, ref-less node (x-d3c6).
+    memo: dict[str, str],
+) -> "tuple[dict[str, list[dict]], dict[str, str], list[str]]":
+    """Group open ref-less candidates by repo: (by_repo, cwd_by_nid, skipped).
 
-    One ``gh pr list --state open`` per distinct candidate cwd, under the same
-    ``REVERSE_MAP_BUDGET_S`` wall clock as the merged reverse map. Returns
-    ``(heals, advisories)``: heals are ``missing`` verdicts whose node is open
-    with no PR refs - the exact repair a human did by hand with
-    ``fno backlog update <id> --pr-number``; advisories name ambiguity and gh
-    read failures without mutating anything. Persisting the fills is the
-    CALLER's job; this function only reads.
+    Shared eligibility of both listing scans; the first member's cwd runs the
+    gh call so gh still resolves the repo from that dir's origin remote. Pass
+    the cache's ``_repo_keys`` so both scans probe each cwd once per run.
     """
-    if list_open is None:
-        list_open = list_open_pr_branches
     _scope = _node_id_scope(node_id)
-
-    # Same eligibility as reverse_map_unstamped: open, ref-less, live cwd -
-    # one gh call per cwd group, not per node.
-    by_cwd: dict[str, set[str]] = {}
+    by_repo: dict[str, list[dict]] = {}
+    cwd_by_nid: dict[str, str] = {}
+    skipped: list[str] = []
     for node in entries:
         nid = node.get("id")
         if not isinstance(nid, str):
@@ -1819,30 +1973,63 @@ def collect_open_binding_heals(
         if not node_is_open(node) or node_pr_refs(node):
             continue
         cwd = node.get("cwd")
+        # str-only: a corrupt non-string cwd would be a bad dict key and a
+        # TypeError at the subprocess cwd= below.
         if not isinstance(cwd, str) or not cwd:
             continue
         cwd = _effective_reconcile_cwd(cwd, node.get("project"))
         if not os.path.isdir(cwd):
+            skipped.append(nid)
             continue
-        by_cwd.setdefault(cwd, set()).add(nid)
+        cwd_by_nid[nid] = cwd
+        by_repo.setdefault(_repo_group_key(cwd, memo), []).append(node)
+    return by_repo, cwd_by_nid, skipped
+
+
+def collect_open_binding_heals(
+    entries: list[dict],
+    *,
+    node_id: Optional[Union[str, Iterable[str]]] = None,
+    list_open: Optional[Callable[..., list[dict]]] = None,
+    listings: Optional[_ListingCache] = None,
+) -> "tuple[list[OpenPrBinding], list[str]]":
+    """Discover open PRs that uniquely name an open, ref-less node (x-d3c6).
+
+    One ``gh pr list --state open`` per repo (same-repo worktrees share the
+    call), under the same ``REVERSE_MAP_BUDGET_S`` wall clock as the merged
+    reverse map. Returns ``(heals, advisories)``: heals are ``missing``
+    verdicts whose node is open with no PR refs - the exact repair a human did
+    by hand with ``fno backlog update <id> --pr-number``; advisories name
+    ambiguity and gh read failures without mutating anything. Persisting the
+    fills is the CALLER's job; this function only reads.
+    """
+    if list_open is None:
+        list_open = list_open_pr_branches
+    cache = listings if listings is not None else _ListingCache()
+
+    by_repo, cwd_by_nid, _skipped = _group_refless_by_repo(
+        entries, node_id=node_id, memo=cache._repo_keys
+    )
 
     heals: list[OpenPrBinding] = []
     advisories: list[str] = []
     _deadline = time.monotonic() + REVERSE_MAP_BUDGET_S
-    _groups = list(by_cwd.items())
-    for _i, (cwd, nids) in enumerate(_groups):
+    _groups = list(by_repo.items())
+    for _i, (_key, nodes) in enumerate(_groups):
         if time.monotonic() >= _deadline:
-            _deferred = sorted(n for _c, ns in _groups[_i:] for n in ns)
+            _deferred = sorted(n["id"] for _c, ns in _groups[_i:] for n in ns)
             advisories.append(
                 f"open-binding scan stopped at its {REVERSE_MAP_BUDGET_S:.0f}s budget "
                 f"(gh is slow or degraded); deferred {len(_deferred)} node(s) to a "
                 f"later sweep: {' '.join(_deferred)}"
             )
             break
+        nids = {n["id"] for n in nodes}
+        gh_cwd = cwd_by_nid[nodes[0]["id"]]
         try:
-            rows = list_open(cwd=cwd)
+            rows = cache.rows_for("open", gh_cwd, list_open)
         except ReconcileError as exc:
-            advisories.append(f"open-binding gh query failed ({cwd}): {exc}")
+            advisories.append(f"open-binding gh query failed ({gh_cwd}): {exc}")
             continue
         for binding in classify_open_pr_bindings(rows, entries):
             if binding.verdict == "ambiguous":
@@ -1893,6 +2080,7 @@ def reverse_map_unstamped(
     *,
     node_id: Optional[Union[str, Iterable[str]]] = None,
     list_merged: Optional[Callable[..., list[dict]]] = None,
+    listings: Optional[_ListingCache] = None,
 ) -> list[MergeDriftRecord]:
     """Close open nodes with NO PR refs by matching the id in a merged branch.
 
@@ -1900,42 +2088,13 @@ def reverse_map_unstamped(
     """
     if list_merged is None:
         list_merged = list_merged_pr_branches
-    _scope = _node_id_scope(node_id)
+    cache = listings if listings is not None else _ListingCache()
 
-    # Open, ref-less, cwd-resolvable candidates grouped by repo dir so we make
-    # ONE gh call per repo, not per node.
-    # ponytail: group by cwd string; two worktrees of one repo -> two identical
-    # gh calls. Collapse to git-common-dir only if that ever shows on a profile.
-    by_cwd: dict[str, list[dict]] = {}
-    skipped_dead_cwd: list[str] = []
-    for node in entries:
-        nid = node.get("id")
-        if not isinstance(nid, str):
-            continue
-        if _scope is not None and nid not in _scope:
-            continue
-        if not node_is_open(node):
-            continue
-        if node_pr_refs(node):
-            continue
-        cwd = node.get("cwd")
-        # str-only: a non-string cwd (corrupt graph) would become a bad dict key
-        # here and a TypeError at the subprocess cwd= below.
-        if not isinstance(cwd, str) or not cwd:
-            continue
-        # An archived-worktree cwd would make gh raise Errno 2; substitute the
-        # node's project root when it's gone (also collapses same-project gone
-        # worktrees to one gh call).
-        cwd = _effective_reconcile_cwd(cwd, node.get("project"))
-        # Original dead AND project-root fallback unresolvable: this ref-less node
-        # cannot be reverse-mapped at all - handing the missing dir to
-        # subprocess(cwd=) raises Errno 2, one hard failure per node on EVERY
-        # reconcile (SessionStart + every merge). Skip it and surface ONE
-        # aggregated advisory below instead of that permanent per-node spam.
-        if not os.path.isdir(cwd):
-            skipped_dead_cwd.append(nid)
-            continue
-        by_cwd.setdefault(cwd, []).append(node)
+    # Open, ref-less, cwd-resolvable candidates grouped by repo so we make
+    # ONE gh call per repo, not per node or per worktree cwd (x-6283).
+    by_repo, cwd_by_nid, skipped_dead_cwd = _group_refless_by_repo(
+        entries, node_id=node_id, memo=cache._repo_keys
+    )
 
     if skipped_dead_cwd:
         # Name EVERY skipped id (not a capped subset): the id is the only handle
@@ -1952,10 +2111,10 @@ def reverse_map_unstamped(
 
     records: list[MergeDriftRecord] = []
     _deadline = time.monotonic() + REVERSE_MAP_BUDGET_S
-    _cwds = list(by_cwd.items())
-    for _i, (cwd, nodes) in enumerate(_cwds):
+    _groups = list(by_repo.items())
+    for _i, (_key, nodes) in enumerate(_groups):
         if time.monotonic() >= _deadline:
-            _deferred = [n["id"] for _c, ns in _cwds[_i:] for n in ns]
+            _deferred = [n["id"] for _c, ns in _groups[_i:] for n in ns]
             print(
                 f"reverse-map: stopped at its {REVERSE_MAP_BUDGET_S:.0f}s budget "
                 f"(gh is slow or degraded); deferred {len(_deferred)} node(s) to a "
@@ -1963,8 +2122,9 @@ def reverse_map_unstamped(
                 file=sys.stderr,
             )
             break
+        gh_cwd = cwd_by_nid[nodes[0]["id"]]
         try:
-            merged = list_merged(cwd=cwd)
+            merged = cache.rows_for("merged", gh_cwd, list_merged)
         except ReconcileError as exc:
             for node in nodes:
                 records.append(
@@ -1972,7 +2132,8 @@ def reverse_map_unstamped(
                         node_id=node["id"], plan_path=node.get("plan_path"),
                         pr_number=0, pr_url=None, pr_state="UNKNOWN", merged_at=None,
                         error=f"reverse-map gh query failed: {exc}",
-                        session_id=node.get("session_id"), cwd=cwd,
+                        session_id=node.get("session_id"),
+                        cwd=cwd_by_nid[node["id"]],
                     )
                 )
             continue
@@ -1993,7 +2154,8 @@ def reverse_map_unstamped(
                         node_id=nid, plan_path=node.get("plan_path"),
                         pr_number=0, pr_url=None, pr_state="UNKNOWN", merged_at=None,
                         error=f"reverse-map ambiguous: {nums} both match branch id {nid}",
-                        session_id=node.get("session_id"), cwd=cwd,
+                        session_id=node.get("session_id"),
+                        cwd=cwd_by_nid[nid],
                     )
                 )
                 continue
@@ -2003,7 +2165,8 @@ def reverse_map_unstamped(
                     node_id=nid, plan_path=node.get("plan_path"),
                     pr_number=int(row.get("number") or 0), pr_url=row.get("url"),
                     pr_state="MERGED", merged_at=row.get("mergedAt"),
-                    session_id=node.get("session_id"), cwd=cwd,
+                    session_id=node.get("session_id"),
+                    cwd=cwd_by_nid[nid],
                 )
             )
     return records
@@ -2057,20 +2220,45 @@ def detect_reverted_nodes(
     return out
 
 
+def _listing_answer(
+    rows: list[dict], number: int, ref_repo: Optional[str]
+) -> Optional[dict]:
+    """First row carrying this number whose repo may answer for the ref."""
+    for row in rows:
+        if not isinstance(row, dict) or row.get("number") != number:
+            continue
+        slug = repo_slug_from_url(row.get("url"))
+        if ref_repo is None or slug is None or slug.lower() == ref_repo.lower():
+            return row
+    return None
+
+
 def scan_merge_drift(
     entries: list[dict],
     *,
     query: Optional[Callable[..., PrMergeState]] = None,
     node_id: Optional[Union[str, Iterable[str]]] = None,
     list_merged: Optional[Callable[..., list[dict]]] = None,
+    listings: Optional[_ListingCache] = None,
 ) -> list[MergeDriftRecord]:
     """Find open nodes whose PR has merged outside the ship gate.
+
+    With ``listings``, a ref resolves against the repo's listings first; the
+    per-node ``query`` fires only for a number in neither listing.
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     if query is None:
         query = query_pr_merge_state
     _scope = _node_id_scope(node_id)
+
+    # Successors of a pending supersession need changed-file evidence, which
+    # only the per-node query fetches: route them around the listings.
+    pending_supersede = {
+        e.get("superseded_by")
+        for e in entries
+        if isinstance(e.get("supersession"), dict) and not e["supersession"].get("verified_at")
+    }
 
     records: list[MergeDriftRecord] = []
 
@@ -2099,6 +2287,17 @@ def scan_merge_drift(
                 cwd = None
         else:
             cwd = None
+
+        # No cache, no live dir, or supersession evidence owed: query.
+        merged_rows: list[dict] = []
+        open_rows: list[dict] = []
+        if listings is not None and cwd is not None and nid not in pending_supersede:
+            try:
+                merged_rows = listings.rows_for("merged", cwd, list_merged)
+                open_rows = listings.rows_for("open", cwd)
+            except ReconcileError:
+                merged_rows = open_rows = []
+
         merged: Optional[PrMergeState] = None
         first_error: Optional[str] = None
         first_error_kind: Optional[str] = None
@@ -2111,6 +2310,18 @@ def scan_merge_drift(
             # cannot safely identify the repo: record a failure rather than
             # risk closing a node off a same-numbered PR elsewhere.
             repo = repo_slug_from_url(url)
+            # A merged listing row closes this ref; only a number in NEITHER
+            # listing owes the query below (x-6283).
+            hit = _listing_answer(merged_rows, number, repo)
+            if hit is not None:
+                # No mergeCommit oid/files on a listing row - like a reverse-mapped record.
+                merged = PrMergeState(
+                    number=number, state="MERGED",
+                    url=hit.get("url"), merged_at=hit.get("mergedAt"),
+                )
+                break
+            if _listing_answer(open_rows, number, repo) is not None:
+                continue  # still open on GitHub: no drift, and no query owed
             if repo is None and not cwd:
                 if first_error is None:
                     first_error = (
@@ -2183,7 +2394,9 @@ def scan_merge_drift(
             )
 
     records.extend(
-        reverse_map_unstamped(entries, node_id=node_id, list_merged=list_merged)
+        reverse_map_unstamped(
+            entries, node_id=node_id, list_merged=list_merged, listings=listings
+        )
     )
 
     return records

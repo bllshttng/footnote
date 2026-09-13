@@ -73,7 +73,7 @@ fn absolute_lexical(graph: &Path) -> PathBuf {
     abs
 }
 
-fn worker_binary() -> Option<PathBuf> {
+pub(crate) fn worker_binary() -> Option<PathBuf> {
     if let Ok(v) = std::env::var("FNO_AGENTS_WORKER") {
         let p = PathBuf::from(v);
         if p.is_file() {
@@ -95,16 +95,11 @@ fn worker_binary() -> Option<PathBuf> {
 }
 
 fn which_worker() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("fno-agents-worker"))
-        .find(|p| p.is_file())
+    crate::product_boundary::find_on_path("fno-agents-worker")
 }
 
 fn spawn_keeper(graph: &Path) -> Result<(), String> {
-    let binary = worker_binary().ok_or_else(|| {
-        "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)".to_string()
-    })?;
+    let binary = worker_binary().ok_or_else(crate::product_boundary::graph_worker_missing_error)?;
     let sock = store_socket_for(graph);
     let session = format!("mux-{}", std::process::id());
     std::process::Command::new(&binary)
@@ -121,7 +116,7 @@ fn spawn_keeper(graph: &Path) -> Result<(), String> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| format!("cannot spawn store keeper: {e}"))?;
+        .map_err(|e| crate::product_boundary::graph_worker_spawn_error(&binary, e))?;
     Ok(())
 }
 
@@ -346,4 +341,78 @@ pub fn end_mission(graph: &Path, node_id: &str) -> Result<String, String> {
         }),
     )?;
     Ok(format!("end mission: {node_id}"))
+}
+
+// -- typed backlog API calls ------------------------------------------------
+//
+// Thin clients over the keeper's `api` command (one op per
+// fno-agents `backlog::api` function, same name and fields). Node bodies
+// stay JSON values: this crate reads them through `backlog_view`, and the
+// typed model lives in fno-agents, which this crate deliberately does not
+// depend on (they ship as separate binaries).
+
+/// Pagination info for a typed page of rows.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Page {
+    pub has_next_page: bool,
+    pub has_previous_page: bool,
+    pub end_cursor: Option<String>,
+}
+
+/// One page of node rows in store order, plus the cursor to resume at.
+#[derive(Debug, Clone)]
+pub struct NodeConnection {
+    pub nodes: Vec<Value>,
+    pub page_info: Page,
+}
+
+/// One node by id, or None when the store holds no such row.
+pub fn node(graph: &Path, id: &str) -> Result<Option<Value>, String> {
+    let reply = call(graph, "api", json!({ "op": "node", "id": id }))?;
+    Ok(reply.get("node").cloned().filter(|v| !v.is_null()))
+}
+
+/// A filtered, ordered, cursor-paged page of node rows.
+#[allow(clippy::too_many_arguments)]
+pub fn nodes(
+    graph: &Path,
+    filter: Value,
+    first: Option<usize>,
+    after: Option<&str>,
+    include_archived: bool,
+    order_by: Option<&str>,
+) -> Result<NodeConnection, String> {
+    let mut params = json!({ "op": "nodes", "filter": filter });
+    if let Some(first) = first {
+        params["first"] = json!(first);
+    }
+    if let Some(after) = after {
+        params["after"] = json!(after);
+    }
+    if include_archived {
+        params["include_archived"] = json!(true);
+    }
+    if let Some(order_by) = order_by {
+        params["order_by"] = json!(order_by);
+    }
+    let reply = call(graph, "api", params)?;
+    let nodes = reply
+        .get("nodes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let page_info: Page =
+        serde_json::from_value(reply.get("page_info").cloned().unwrap_or_else(|| json!({})))
+            .map_err(|e| format!("bad page_info: {e}"))?;
+    Ok(NodeConnection { nodes, page_info })
+}
+
+/// The store's mutation counter: one bump per write, legacy writers
+/// included.
+pub fn version(graph: &Path) -> Result<i64, String> {
+    let reply = call(graph, "api", json!({ "op": "version" }))?;
+    reply
+        .get("version")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "the store returned no version".to_string())
 }

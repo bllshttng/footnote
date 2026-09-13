@@ -37,7 +37,33 @@ BIN_DIR="${TMP_DIR}/bin"; mkdir -p "$BIN_DIR"
 NODE_ID="ab-deadbeef"
 SID="hsess-001"
 CHILD_SID="00000000-0000-0000-0000-000000abc123"
-CHILD_NAME="target-${NODE_ID}-work-g2"
+# The successor name contract IS the x-84b2 vocabulary: compute the expectation
+# through the same bridge handoff.sh mints with, else this harness certifies a
+# second copy of the shape.
+FNO_SRC="${REPO_ROOT}/cli/src"
+FNO_PYTHON=""
+for _cand in \
+  "${REPO_ROOT}/cli/.venv/bin/python" \
+  "$(command -v python3 || true)"
+do
+  [ -n "$_cand" ] && [ -x "$_cand" ] || continue
+  if PYTHONPATH="$FNO_SRC" "$_cand" -c 'import fno.cli' >/dev/null 2>&1; then
+    FNO_PYTHON="$_cand"
+    break
+  fi
+done
+[ -n "$FNO_PYTHON" ] || { fail "no interpreter can import fno.cli (cd cli && uv sync)"; exit 1; }
+# The vocabulary lives in the fno-agents binary; the sandbox stub below pins
+# FNO_AGENTS_BIN, so capture the REAL binary now for the stub to delegate the
+# naming verbs to (naming is the contract under test, not a scenario input).
+# PATH is stripped for the resolution so a stale PATH-installed binary cannot
+# shadow the repo's own cargo build.
+REAL_AGENTS_BIN="$(env PATH='/usr/bin:/bin' PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c 'from fno import rust_binary; b = rust_binary.resolve_binary(); print(b or "")')"
+[ -n "$REAL_AGENTS_BIN" ] || { fail "no fno-agents binary resolves (cargo build --release -p fno-agents)"; exit 1; }
+CHILD_NAME="$(FNO_AGENTS_BIN="$REAL_AGENTS_BIN" PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c "
+from fno.agents.naming import dispatch_agent_name
+print(dispatch_agent_name('sh', 't', '$NODE_ID', slug='work', discriminator='g2'))
+")"
 CAP_NONCE="ledger-capability-nonce"
 CAP_DIGEST="$(printf '%s\n%s\n%s' "$CAP_NONCE" "$PROJ" "$PROJ" | shasum -a 256 | awk '{print $1}')"
 
@@ -102,6 +128,10 @@ case "\$1 \$2" in
     printf '{"name":"${CHILD_NAME}","short_id":"abc123","session_id":"${CHILD_SID}","harness":"claude","status":"live","bound":true,"readiness":"ready","model":"opus"}\n' ;;
   "agents truth")
     printf '{"state":"your-move","last_message":"FNO_CAPABILITY_READY:${CAP_DIGEST}","observed_model":{"kind":"observed","model":"opus","samples":1}}\n' ;;
+  "agents name")
+    # Naming is the contract under test, not a scenario input: delegate to the
+    # real bridge exactly like the capability probe delegates truth.
+    exec env PYTHONPATH="${FNO_SRC}" "${FNO_PYTHON}" -m fno.cli agents name "\${@:3}" ;;
   "agents mail")
     touch "${TMP_DIR}/child-active"
     cat > .fno/target-state.md <<'CHILD'
@@ -124,6 +154,10 @@ chmod +x "${BIN_DIR}/fno"
 FIN_MARKER="${TMP_DIR}/finalize_called"
 cat > "${BIN_DIR}/fno-agents" <<AGEOF
 #!/usr/bin/env bash
+case "\$1" in
+  name-mint|name-codes|name-parse)
+    exec "${REAL_AGENTS_BIN}" "\$@" ;;
+esac
 if [[ "\$1" == "finalize" ]]; then
   shift
   printf 'finalize %s\n' "\$*" >> "${FIN_MARKER}"

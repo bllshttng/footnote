@@ -49,6 +49,11 @@
             "type": "command",
             "command": "python3 ${PLUGIN_ROOT}/hooks/truncation-guard.py",
             "statusMessage": "checking for a truncated count-or-existence read"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/recursive-grep-guard.py",
+            "statusMessage": "checking recursive grep cache traversal"
           }
         ]
       }
@@ -68,6 +73,10 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/inject-mail-notify.sh"
+          },
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/inject-announce.sh prompt"
           }
         ]
       }
@@ -171,6 +180,10 @@
           {
             "type": "command",
             "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id king-postcompact-reinject --expected target-postcompact-reinject,king-postcompact-reinject --entry post_compact -- ${PLUGIN_ROOT}/hooks/king-postcompact-reinject.sh"
+          },
+          {
+            "type": "command",
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/inject-announce.sh compact"
           }
         ]
       }

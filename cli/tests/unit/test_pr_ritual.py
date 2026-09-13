@@ -416,7 +416,8 @@ def test_judgment_autonomous_empty_skips(tmp_path, capsys):
 def test_judgment_autonomous_nonempty_spawns_headless(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
     runner = FakeRunner(diff_files=14, additions=300, deletions=20)
-    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md")
+    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md",
+              node_ids=["x-7test"])
     r.leg_judgment()
     out = capsys.readouterr().out
     assert "step=judgment status=ok" in out
@@ -434,7 +435,8 @@ def test_judgment_autonomous_nonempty_spawns_headless(tmp_path, capsys, monkeypa
     # grammar this leg depends on.
     assert argv[-1].startswith("Post-merge judgment")   # the prompt = message
     i = argv.index("--name")
-    assert argv[i + 1] == "judgment-pr-7" and len(argv[i + 1]) <= 64
+    # x-84b2: pm-r-<node>-pr-<n> - the post-merge source and the bound node.
+    assert argv[i + 1] == "pm-r-x-7test-pr-7" and len(argv[i + 1]) <= 64
     # codex P2: the worker gets its own --timeout, not a 60s outer kill.
     assert "--timeout" in argv
     # Guard against silent grammar drift: the constructed argv must SURVIVE the
@@ -444,7 +446,22 @@ def test_judgment_autonomous_nonempty_spawns_headless(tmp_path, capsys, monkeypa
 
     spawn_argv = argv[argv.index("spawn"):]  # ["spawn", ...]
     normalized = normalize_spawn_args(spawn_argv)  # raises SystemExit(2) if invalid
-    assert normalized[normalized.index("--name") + 1] == "judgment-pr-7"
+    assert normalized[normalized.index("--name") + 1] == "pm-r-x-7test-pr-7"
+
+
+def test_judgment_pr_without_node_binding_refuses(tmp_path, capsys, monkeypatch):
+    """x-84b2: a merged PR that binds no graph node spawns no pm-r worker -
+    substituting the PR number as a fake node would orphan the provenance."""
+    monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
+    runner = FakeRunner(diff_files=14, additions=300, deletions=20)
+    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md")
+    r.leg_judgment()
+    captured = capsys.readouterr()
+    assert "step=judgment status=failed" in captured.out
+    assert "binds no node" in captured.err
+    assert not any(
+        len(c) > 1 and c[1] == "agents" and "spawn" in c for c in runner.calls
+    )
 
 
 def test_judgment_spawn_forwards_configured_model(tmp_path, capsys, monkeypatch):
@@ -456,7 +473,8 @@ def test_judgment_spawn_forwards_configured_model(tmp_path, capsys, monkeypatch)
     """
     monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
     runner = FakeRunner(diff_files=14, additions=300, deletions=20)
-    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md")
+    r = _bare(tmp_path, runner, autonomous=True, parking_lot="internal/x/parking-lot.md",
+              node_ids=["x-7test"])
     r.leg_judgment()
     argv = [c for c in runner.calls if len(c) > 1 and c[1] == "agents" and "spawn" in c][0]
     assert argv[argv.index("--model") + 1] == PostMergeBlock().model
@@ -479,7 +497,7 @@ def test_judgment_spawn_omits_model_when_unset(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
     runner = FakeRunner(diff_files=14, additions=300, deletions=20)
     r = _bare(tmp_path, runner, autonomous=True,
-              parking_lot="internal/x/parking-lot.md", model="")
+              parking_lot="internal/x/parking-lot.md", model="", node_ids=["x-7test"])
     r.leg_judgment()
     argv = [c for c in runner.calls if len(c) > 1 and c[1] == "agents" and "spawn" in c][0]
     assert "--model" not in argv
@@ -536,7 +554,7 @@ def test_judgment_autonomous_spawns_without_parking_lot_above_bar(
     # availability).
     monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
     runner = FakeRunner(diff_files=14, additions=300, deletions=20)
-    r = _bare(tmp_path, runner, autonomous=True, pr=7)  # NO parking_lot
+    r = _bare(tmp_path, runner, autonomous=True, pr=7, node_ids=["x-7test"])  # NO parking_lot
     r.leg_judgment()
     out = capsys.readouterr().out
     assert "step=judgment status=ok" in out
@@ -622,28 +640,30 @@ def test_origin_slug_rejects_lookalike_hosts():
 
 def test_scan_nodes_acs():
     # AC1: pr_number match -> unioned. AC2c: two same-repo matches -> both.
+    # The scan lives in fno.agents.events so both mint sites recover ids
+    # through the one helper.
     entries = [
         {"id": "x-1234", "pr_number": 292, "pr_url": "https://github.com/o/r/pull/292"},
         {"id": "x-5678", "pr_number": 292, "pr_url": "https://github.com/o/r/pull/292"}]
-    assert set(_ritual._scan_nodes(entries, 292, "o/r")) == {"x-1234", "x-5678"}
+    assert set(_events.scan_pr_nodes(entries, 292, "o/r")) == {"x-1234", "x-5678"}
     # AC4: a same-numbered PR in a FOREIGN repo is excluded.
     entries = [{"id": "x-mine", "pr_number": 292, "pr_url": "https://github.com/o/r/pull/292"},
                {"id": "x-theirs", "pr_number": 292, "pr_url": "https://github.com/other/repo/pull/292"}]
-    assert _ritual._scan_nodes(entries, 292, "o/r") == ["x-mine"]
+    assert _events.scan_pr_nodes(entries, 292, "o/r") == ["x-mine"]
     # AC5: a superstring slug is excluded; a case-differing slug still matches.
     entries = [{"id": "x-super", "pr_number": 292, "pr_url": "https://github.com/o/r-extra/pull/292"},
                {"id": "x-upper", "pr_number": 292, "pr_url": "https://github.com/O/R/pull/292"}]
-    assert _ritual._scan_nodes(entries, 292, "o/r") == ["x-upper"]
+    assert _events.scan_pr_nodes(entries, 292, "o/r") == ["x-upper"]
     # AC6: a url-less node is never matched. AC7: a corrupt non-string pr_url is
     # skipped, not fatal to the scan.
     entries = [{"id": "x-here", "pr_number": 292},
                {"id": "x-corrupt", "pr_number": 292, "pr_url": {"not": "a string"}},
                {"id": "x-good", "pr_number": 292, "pr_url": "https://github.com/o/r/pull/292"}]
-    assert _ritual._scan_nodes(entries, 292, "o/r") == ["x-good"]
+    assert _events.scan_pr_nodes(entries, 292, "o/r") == ["x-good"]
     # AC3: no matching pr_number -> empty.
-    assert _ritual._scan_nodes(entries, 999, "o/r") == []
+    assert _events.scan_pr_nodes(entries, 999, "o/r") == []
     # No slug -> empty (AC8: the union is skipped wholesale).
-    assert _ritual._scan_nodes(entries, 292, None) == []
+    assert _events.scan_pr_nodes(entries, 292, None) == []
 
 
 def test_recover_skips_when_no_origin_slug(tmp_path, monkeypatch):
@@ -804,11 +824,11 @@ def test_mint_binds_node_ids_when_reconcile_closed_nothing(tmp_path, monkeypatch
     assert len(requests) == 1
     assert requests[0]["node_ids"] == ["fno-abc1"]
     assert requests[0]["merged_at"] == "2026-09-07T15:00:00Z"
-    # The request id keys on the bound set: a site minting the same merge with
-    # the ids bound folds to this id; the empty-keyed id never matches it.
-    bound = _events.merge_cleanup_request_id("", 7, "feature/x", str(r.cwd), ["fno-abc1"])
+    # The request id keys on project, PR and branch only: the merge mint
+    # (which bound [] and recovered) and this ritual mint fold to ONE id.
+    bound = _events.merge_cleanup_request_id("", 7, "feature/x")
     assert requests[0]["request_id"] == bound
-    assert _events.merge_cleanup_request_id("", 7, "feature/x", str(r.cwd), []) != bound
+    assert _events.merge_cleanup_request_id("", 7, "feature/x") == bound
 
     # The ids stay bound, so the reap leg completes instead of skipping.
     r.leg_reap_rows()

@@ -44,11 +44,12 @@ agents loop-check
 agents needs
 agents resume
 agents rm !--audit-actor !--audit-reason !--audit-reclaimed-bytes !--audit-request-id !--audit-worktree-touched
-agents spawn !--bounded-placement !--output-format !--recorded-provider !--squad
+agents spawn !--bounded-placement !--mux-session !--output-format !--recorded-provider !--squad
 annotate
 annotate list
 approvals
-autonomy
+autonomy provenance
+autonomy status
 backlog
 backlog advance !--continuation
 backlog done
@@ -96,6 +97,9 @@ inbox outstanding ask
 inbox outstanding clear !--origin
 inbox outstanding mine do
 inbox outstanding reindex
+inbox user ack
+inbox user list
+inbox user status
 king board
 king cancel
 king done
@@ -155,8 +159,7 @@ worker
 workspace reap
 workspace register-worker
 workspace worktree archive
-workspace worktree cargo-offload
-workspace worktree cleanup
+workspace worktree cleanup !--kill-orphans
 workspace worktree ensure
 workspace worktree overlap-record
 workspace worktree overlaps

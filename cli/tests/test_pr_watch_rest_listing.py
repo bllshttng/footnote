@@ -114,25 +114,6 @@ class TestListPrsRest:
         assert len(calls) == 3
         assert len(rows) == 300
 
-    def test_requested_numbers_stop_closed_listing_after_all_are_found(self):
-        """AC3-HP: terminal batches stop once every requested number is present."""
-        from fno.pr._rest import list_prs_rest
-
-        calls: list[list] = []
-
-        def runner(cmd, **_kw):
-            calls.append(list(cmd))
-            return _page([_pr_row(9, "closed", merged=True)])
-
-        rows, reason = list_prs_rest(
-            "owner/repo", state="closed", requested_numbers={9}, runner=runner
-        )
-
-        assert reason == ""
-        assert rows == [{"number": 9, "state": "MERGED"}]
-        assert len(calls) == 1
-        assert "state=closed" in calls[0][2]
-
     def test_closed_listing_uses_merged_at_to_map_merged(self):
         """Closed list rows expose merge truth through ``merged_at``."""
         from fno.pr._rest import list_prs_rest
@@ -217,9 +198,8 @@ class TestGraphqlRemaining:
 # ---------------------------------------------------------------------------
 
 
-def _sweep_runner(calls, *, open_pages, per_key):
-    """Answer the sweep's two read shapes: the paginated open list and the
-    per-key pulls/<n> reads for tracked keys the open list did not resolve."""
+def _sweep_runner(calls, *, open_pages):
+    """Answer the sweep's one read shape: the paginated open list."""
 
     def runner(cmd, **_kw):
         calls.append(list(cmd))
@@ -233,12 +213,7 @@ def _sweep_runner(calls, *, open_pages, per_key):
             if page_no > len(pages):
                 return _page([])
             return _page(pages[page_no - 1])
-        number = int(path.rsplit("/", 1)[-1])
-        repo = path[len("repos/"): -len(f"/pulls/{number}")]
-        row = per_key.get(f"{repo}#{number}")
-        if row is None:
-            return Result(returncode=1, stdout="", stderr="not found")
-        return _ok(json.dumps(row))
+        raise AssertionError(f"no per-key reads remain in the tick: {cmd}")
 
     return runner
 
@@ -253,7 +228,6 @@ class TestTrackedStateSweepOnRest:
         runner = _sweep_runner(
             calls,
             open_pages={"owner/repo": [[_pr_row(1), _pr_row(2)]]},
-            per_key={},
         )
 
         states, failures = read_tracked_pr_states({"owner/repo#1"}, runner=runner)
@@ -277,7 +251,6 @@ class TestTrackedStateSweepOnRest:
                 [_pr_row(n) for n in range(1, 101)],
                 [_pr_row(100), _pr_row(101)],
             ]},
-            per_key={},
         )
 
         states, failures = read_tracked_pr_states({"owner/repo#101"}, runner=runner)
@@ -288,73 +261,35 @@ class TestTrackedStateSweepOnRest:
         pages = [c[2] for c in calls if "/pulls?state=" in c[2]]
         assert any("&page=2" in p for p in pages)
 
-    def test_missing_tracked_key_resolved_by_one_per_key_read(self):
-        """AC3-HP: absent from the open list -> exactly one pulls/<n> read,
-        mapped through _map_pr_state to MERGED, never UNKNOWN."""
+    def test_absent_from_open_listing_reads_not_open_with_no_closed_read(self):
+        """x-c79d: a key absent from a successful open listing is not open.
+        No state=closed request backs the answer up."""
         from fno.pr_watch._discover import read_tracked_pr_states
 
         calls: list[list] = []
-        runner = _sweep_runner(
-            calls,
-            open_pages={"owner/repo": [[_pr_row(7)]]},
-            per_key={"owner/repo#9": {"number": 9, "state": "closed", "merged": True}},
+
+        def runner(cmd, **_kw):
+            calls.append(list(cmd))
+            return _page([_pr_row(5)])
+
+        states, failures = read_tracked_pr_states(
+            {"owner/repo#5", "owner/repo#9"}, runner=runner
         )
 
-        states, failures = read_tracked_pr_states({"owner/repo#9"}, runner=runner)
-
-        assert states == {"owner/repo#7": "OPEN", "owner/repo#9": "MERGED"}
+        assert states == {"owner/repo#5": "OPEN", "owner/repo#9": "NOT_OPEN"}
         assert failures == 0
-        per_key_calls = [c for c in calls if c[2].endswith("/pulls/9")]
-        assert len(per_key_calls) == 1
-
-    def test_missing_tracked_key_resolved_by_closed_batch_before_exact(self):
-        """AC3-HP: a terminal key comes from the closed repository batch."""
-        from fno.pr_watch._discover import read_tracked_pr_states
-
-        calls: list[list] = []
-
-        def runner(cmd, **_kw):
-            calls.append(list(cmd))
-            path = cmd[2]
-            if "state=open" in path:
-                return _page([])
-            if "state=closed" in path:
-                return _page([_pr_row(9, "closed", merged=True)])
-            raise AssertionError(f"exact fallback should not run: {cmd}")
-
-        states, failures = read_tracked_pr_states({"owner/repo#9"}, runner=runner)
-
-        assert states == {"owner/repo#9": "MERGED"}
-        assert failures == 0
-        assert [call[2] for call in calls] == [
-            "repos/owner/repo/pulls?state=open&per_page=100&page=1",
-            "repos/owner/repo/pulls?state=closed&per_page=100&page=1",
-        ]
-
-    def test_failed_closed_batch_keeps_terminal_keys_unknown(self):
-        """AC3-ERR: a failed terminal batch does not fabricate a state."""
-        from fno.pr_watch._discover import read_tracked_pr_states
-
-        calls: list[list] = []
-
-        def runner(cmd, **_kw):
-            calls.append(list(cmd))
-            if "state=open" in cmd[2]:
-                return _page([])
-            return Result(returncode=1, stdout="", stderr="network down")
-
-        states, failures = read_tracked_pr_states({"owner/repo#9"}, runner=runner)
-
-        assert states == {"owner/repo#9": "UNKNOWN"}
-        assert failures == 1
-        assert len(calls) == 2
+        open_calls = [c for c in calls if "state=open" in c[2]]
+        closed_calls = [c for c in calls if "state=closed" in c[2]]
+        # The positive read is the control for the absence below.
+        assert len(open_calls) == 1
+        assert closed_calls == []
 
     def test_failed_repo_listing_degrades_with_failure_count(self):
         """AC4-EDGE: keys UNKNOWN (not deleted), sweep_failures counts the repo."""
         from fno.pr_watch._discover import read_tracked_pr_states
 
         calls: list[list] = []
-        runner = _sweep_runner(calls, open_pages={}, per_key={})
+        runner = _sweep_runner(calls, open_pages={})
 
         states, failures = read_tracked_pr_states(
             {"owner/repo#1", "owner/repo#2"}, runner=runner
@@ -406,47 +341,6 @@ class TestRestReaderHardening:
         assert states == {"owner/repo#1": "UNKNOWN"}
         assert failures == 1
 
-    def test_failed_per_key_reads_count_toward_the_failure_total(self):
-        """A listing that succeeds while every per-key read fails must not
-        read as a clean sweep: outcome ok with unresolved keys is the
-        swallowed-failure shape AC4 exists to end."""
-        from fno.pr_watch._discover import read_tracked_pr_states
-
-        calls: list[list] = []
-        runner = _sweep_runner(calls, open_pages={"owner/repo": []}, per_key={})
-
-        states, failures = read_tracked_pr_states({"owner/repo#1"}, runner=runner)
-
-        assert states == {"owner/repo#1": "UNKNOWN"}
-        assert failures == 1
-
-    def test_exact_terminal_fallback_is_capped_and_timeout_bounded(self):
-        """AC4-HP/ERR: exact reads stop at the cap and never exceed five seconds."""
-        from fno.pr_watch._discover import (
-            EXACT_TERMINAL_READ_TIMEOUT_S,
-            MAX_EXACT_TERMINAL_READS,
-            read_tracked_pr_states,
-        )
-
-        keys = {f"owner/repo#{number}" for number in range(1, MAX_EXACT_TERMINAL_READS + 3)}
-        exact_calls: list[list] = []
-        exact_timeouts: list[float] = []
-
-        def runner(cmd, timeout=None, **_kw):
-            path = cmd[2]
-            if "state=open" in path or "state=closed" in path:
-                return _page([])
-            exact_calls.append(list(cmd))
-            exact_timeouts.append(timeout)
-            raise subprocess.TimeoutExpired(cmd, timeout)
-
-        states, failures = read_tracked_pr_states(keys, runner=runner)
-
-        assert states == {key: "UNKNOWN" for key in keys}
-        assert len(exact_calls) == MAX_EXACT_TERMINAL_READS
-        assert exact_timeouts == [EXACT_TERMINAL_READ_TIMEOUT_S] * MAX_EXACT_TERMINAL_READS
-        assert failures >= len(keys)
-
     def test_graphql_remaining_bounds_the_subprocess_wait(self):
         """The preflight read must not hand a black-holed gh an unbounded
         wait: this PR exists to end tick hangs, not to add one."""
@@ -463,20 +357,6 @@ class TestRestReaderHardening:
         remaining, _reset = graphql_remaining(runner=runner)
         assert remaining == 5
         assert seen["timeout"] is not None and seen["timeout"] > 0
-
-    def test_per_key_payload_that_is_not_an_object_degrades_one_key(self):
-        """gh output drift can return rc 0 with a JSON array; _map_pr_state
-        would raise AttributeError out of the whole sweep instead of one
-        key failing."""
-        from fno.pr_watch._discover import read_tracked_pr_states
-
-        calls: list[list] = []
-        runner = _sweep_runner(calls, open_pages={"owner/repo": []}, per_key={"owner/repo#1": [1]})
-
-        states, failures = read_tracked_pr_states({"owner/repo#1"}, runner=runner)
-
-        assert states == {"owner/repo#1": "UNKNOWN"}
-        assert failures == 1
 
     def test_sweep_passes_the_caller_timeout_to_the_listing(self):
         """timeout_s is the caller's bound on the sweep's gh calls; the REST

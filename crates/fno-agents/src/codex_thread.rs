@@ -630,7 +630,7 @@ impl CodexThread {
         yolo: bool,
         effort: Option<&str>,
     ) -> Result<Self, ThreadDriverError> {
-        Self::start_with_state_dirs(cwd, model, yolo, effort, &[]).await
+        Self::start_with_state_dirs(cwd, model, yolo, effort, &[], None).await
     }
 
     /// [`CodexThread::start`] plus the roots this thread carries on every turn
@@ -642,6 +642,7 @@ impl CodexThread {
         yolo: bool,
         effort: Option<&str>,
         state_dirs: &[String],
+        config: Option<&serde_json::Map<String, Value>>,
     ) -> Result<Self, ThreadDriverError> {
         let cwd = cwd.into();
         // `launch` completes the app-server handshake as part of connecting,
@@ -652,8 +653,15 @@ impl CodexThread {
         // fail-open and bounded; a None below drops the key and the request
         // stays byte-identical to the unassigned form.
         let project_id = crate::codex_inject::ensure_project_for_cwd(&cwd).await;
-        let request =
-            thread_start_request_with_options(1, &cwd, model, yolo, "never", project_id.as_deref());
+        let request = thread_start_request_with_options(
+            1,
+            &cwd,
+            model,
+            yolo,
+            "never",
+            project_id.as_deref(),
+            config,
+        );
         let response = driver.request(1, request).await?;
         let (thread_id, rollout_path) = parse_thread_start_response(&response)
             .map_err(|error| ThreadDriverError::Protocol(error.to_string()))?;
@@ -668,14 +676,41 @@ impl CodexThread {
         Ok(driver)
     }
 
+    /// Resume an existing thread by its app-server id.
+    ///
+    /// The state-root grant (x-f22f) cannot be reconstructed on this path, and
+    /// the loss is announced rather than taken quietly. The roots reach a
+    /// spawn from the Python seam's `FNO_WORKER_ADD_DIRS`, which the long-lived
+    /// shared daemon does not have, and Rust deliberately runs no second copy
+    /// of the resolver (`writable_dirs.published_worker_writable_dirs`: one
+    /// published value, two readers). Reading the daemon's own env instead
+    /// would grant whatever shell started it, which is wrong in a more
+    /// dangerous direction.
+    ///
+    /// In practice the grant usually survives: a turn-level `sandboxPolicy`
+    /// becomes the thread's default server-side, so a thread still loaded by
+    /// the codex app-server keeps it across an `fno-agents-daemon` restart. It
+    /// is lost only when the app-server itself restarted and reloaded the
+    /// thread from its rollout. That worker is then mute again, so the caller
+    /// gets an event instead of silence. The durable fix is a granted-roots
+    /// receipt on the registry row, which belongs to the sibling node that
+    /// owns that schema.
+    ///
+    /// Emitted only for a thread that COULD have lost something. A yolo thread
+    /// is `danger-full-access` and needs no grant, and a resume that succeeds
+    /// says nothing on its own, so the event fires after the resume and only
+    /// for a bounded thread. An unconditional emit on every cache miss reports
+    /// a loss that never happened, which is the kind of telemetry an operator
+    /// learns to ignore.
     pub async fn resume(
         cwd: impl Into<PathBuf>,
         thread_id: &str,
         model: Option<&str>,
         yolo: bool,
         effort: Option<&str>,
+        config: Option<&serde_json::Map<String, Value>>,
     ) -> Result<Self, ThreadDriverError> {
-        Self::resume_with_state_dirs(cwd, thread_id, model, yolo, effort, &[]).await
+        Self::resume_with_state_dirs(cwd, thread_id, model, yolo, effort, &[], config).await
     }
 
     /// [`CodexThread::resume`] plus the state-root grant. A resumed thread
@@ -688,6 +723,7 @@ impl CodexThread {
         yolo: bool,
         effort: Option<&str>,
         state_dirs: &[String],
+        config: Option<&serde_json::Map<String, Value>>,
     ) -> Result<Self, ThreadDriverError> {
         if thread_id.trim().is_empty() {
             return Err(ThreadDriverError::Protocol(
@@ -698,7 +734,8 @@ impl CodexThread {
         // `launch` completes the app-server handshake as part of connecting,
         // so the driver is protocol-ready the moment it exists.
         let mut driver = Self::launch(cwd.clone()).await?;
-        let request = thread_resume_request_with_options(1, thread_id, &cwd, model, yolo, "never");
+        let request =
+            thread_resume_request_with_options(1, thread_id, &cwd, model, yolo, "never", config);
         let response = driver.request(1, request).await?;
         let (confirmed_id, rollout_path) = parse_thread_start_response(&response)
             .map_err(|error| ThreadDriverError::Protocol(error.to_string()))?;
@@ -1795,6 +1832,76 @@ impl ActorCtx {
     }
 }
 
+/// What a fenced-token list carries onto the codex thread lane.
+pub struct HarnessCarry {
+    /// `-c`/`--config key=value` pairs. Keys stay dotted strings (the
+    /// app-server owns their meaning); values parse as TOML like the codex
+    /// CLI, and a non-TOML value stays a string.
+    pub config: serde_json::Map<String, Value>,
+    /// `--add-dir` roots, appended to the state-root grant.
+    pub add_dirs: Vec<String>,
+}
+
+/// Parse the fenced `--` tokens a spawn routed to this lane. Only the
+/// spellings the codex CLI itself takes are accepted: `-c`/`--config
+/// key=value` and `--add-dir <dir>`, two-token or `=`-joined on the long
+/// forms. Anything else is a front-door contract break - the spawn front
+/// door demotes a flag this lane cannot carry to the pane, so a stray token
+/// here is a router bug - and is refused by name rather than dropped
+/// silently.
+pub fn parse_harness_args(tokens: &[String]) -> Result<HarnessCarry, String> {
+    fn toml_value(raw: &str) -> Value {
+        // `toml::from_str` reads a DOCUMENT, so a bare value like `true`
+        // needs a key to hang off; the wrap is local to this parse.
+        toml::from_str::<toml::Table>(&format!("v = {raw}"))
+            .ok()
+            .and_then(|table| table.get("v").cloned())
+            .and_then(|parsed| serde_json::to_value(parsed).ok())
+            .unwrap_or_else(|| json!(raw))
+    }
+    let mut carry = HarnessCarry {
+        config: serde_json::Map::new(),
+        add_dirs: Vec::new(),
+    };
+    let mut values = tokens.iter();
+    while let Some(token) = values.next() {
+        let (flag, inline): (&str, Option<&str>) = match token.split_once('=') {
+            Some((flag, rest)) if flag == "--config" || flag == "--add-dir" => (flag, Some(rest)),
+            _ => (token.as_str(), None),
+        };
+        match (flag, inline) {
+            ("--add-dir", Some(dir)) => carry.add_dirs.push(dir.to_string()),
+            ("--add-dir", None) => match values.next() {
+                Some(dir) => carry.add_dirs.push(dir.clone()),
+                None => return Err("--add-dir arrives with no directory".into()),
+            },
+            ("-c", None) | ("--config", None) => {
+                let Some(pair) = values.next() else {
+                    return Err(format!("config flag {flag} arrives with no key=value pair"));
+                };
+                let Some((key, raw)) = pair.split_once('=') else {
+                    return Err(format!("config value {pair:?} is not key=value"));
+                };
+                carry.config.insert(key.to_string(), toml_value(raw));
+            }
+            ("--config", Some(rest)) => {
+                let Some((key, raw)) = rest.split_once('=') else {
+                    return Err(format!("config value {rest:?} is not key=value"));
+                };
+                carry.config.insert(key.to_string(), toml_value(raw));
+            }
+            _ => {
+                return Err(format!(
+                    "harness token {token:?} is not one the codex thread lane carries \
+                     (-c/--config key=value, --add-dir dir); the spawn front door owns \
+                     the -- fence and should have routed it to the pane"
+                ));
+            }
+        }
+    }
+    Ok(carry)
+}
+
 fn thread_start_request_with_options(
     id: u64,
     cwd: &Path,
@@ -1802,6 +1909,7 @@ fn thread_start_request_with_options(
     yolo: bool,
     approval_policy: &str,
     project_id: Option<&str>,
+    config: Option<&serde_json::Map<String, Value>>,
 ) -> String {
     let mut params = json!({
         "cwd": cwd,
@@ -1814,6 +1922,10 @@ fn thread_start_request_with_options(
     if let Some(project_id) = project_id.filter(|id| !id.is_empty()) {
         params["projectId"] = json!(project_id);
     }
+    // Absent or empty keeps the frame byte-identical to the pre-config form.
+    if let Some(config) = config.filter(|config| !config.is_empty()) {
+        params["config"] = Value::Object(config.clone());
+    }
     json!({"id": id, "method": "thread/start", "params": params}).to_string()
 }
 
@@ -1824,6 +1936,7 @@ fn thread_resume_request_with_options(
     model: Option<&str>,
     yolo: bool,
     approval_policy: &str,
+    config: Option<&serde_json::Map<String, Value>>,
 ) -> String {
     let mut params = json!({
         "threadId": thread_id,
@@ -1833,6 +1946,9 @@ fn thread_resume_request_with_options(
     });
     if let Some(model) = model.filter(|model| !model.is_empty()) {
         params["model"] = json!(model);
+    }
+    if let Some(config) = config.filter(|config| !config.is_empty()) {
+        params["config"] = Value::Object(config.clone());
     }
     json!({"id": id, "method": "thread/resume", "params": params}).to_string()
 }
@@ -1886,6 +2002,7 @@ mod tests {
             yolo,
             "never",
             None,
+            None,
         ))
         .unwrap();
         assert_eq!(frame["params"]["sandbox"], "danger-full-access");
@@ -1899,6 +2016,7 @@ mod tests {
             None,
             paired,
             "never",
+            None,
             None,
         ))
         .unwrap();
@@ -1967,6 +2085,7 @@ mod tests {
             None,
             true,
             "never",
+            None,
         ))
         .unwrap();
         assert_eq!(full["params"]["sandbox"], "danger-full-access");
@@ -1977,9 +2096,105 @@ mod tests {
             None,
             false,
             "never",
+            None,
         ))
         .unwrap();
         assert_eq!(bounded["params"]["sandbox"], "workspace-write");
+    }
+
+    /// An empty config map is the absent form: the key is omitted so the
+    /// frame stays byte-identical to the pre-config shape (AC2-EDGE).
+    #[test]
+    fn thread_requests_omit_an_empty_config_map() {
+        let empty = serde_json::Map::new();
+        let start: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            false,
+            "never",
+            None,
+            Some(&empty),
+        ))
+        .unwrap();
+        let resume: Value = serde_json::from_str(&thread_resume_request_with_options(
+            1,
+            "thread-p",
+            std::path::Path::new("/tmp/w"),
+            None,
+            false,
+            "never",
+            Some(&empty),
+        ))
+        .unwrap();
+        assert!(start["params"].get("config").is_none());
+        assert!(resume["params"].get("config").is_none());
+
+        let mut config = serde_json::Map::new();
+        config.insert(
+            "sandbox_workspace_write.network_access".to_string(),
+            json!(true),
+        );
+        let start: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            false,
+            "never",
+            None,
+            Some(&config),
+        ))
+        .unwrap();
+        assert_eq!(
+            start["params"]["config"]["sandbox_workspace_write.network_access"],
+            json!(true),
+            "a populated map rides thread/start verbatim"
+        );
+    }
+
+    /// The fenced-token parser: TOML-typed values, string fallback, and the
+    /// by-name refusal that names the front door.
+    #[test]
+    fn harness_args_parse_into_config_and_add_dirs() {
+        let tokens: Vec<String> = [
+            "-c",
+            "sandbox_workspace_write.network_access=true",
+            "--add-dir",
+            "/tmp/x",
+            "--config=model_reasoning_effort=high",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let carry = parse_harness_args(&tokens).unwrap();
+        assert_eq!(
+            carry.config["sandbox_workspace_write.network_access"],
+            json!(true),
+            "a TOML boolean parses as a boolean"
+        );
+        assert_eq!(
+            carry.config["model_reasoning_effort"],
+            json!("high"),
+            "a non-TOML scalar stays a string, as the codex CLI reads it"
+        );
+        assert_eq!(carry.add_dirs, vec!["/tmp/x".to_string()]);
+
+        let error = parse_harness_args(&["-p".to_string(), "profile".to_string()])
+            .err()
+            .expect("an unrouted token refuses");
+        assert!(error.contains("-p"), "the refusal names the token: {error}");
+        assert!(
+            error.contains("front door"),
+            "the refusal names the router, not a silent drop: {error}"
+        );
+
+        let error = parse_harness_args(&["--add-dir".to_string()])
+            .err()
+            .expect("a dangling flag refuses");
+        assert!(
+            error.contains("--add-dir"),
+            "the refusal names the flag: {error}"
+        );
     }
 
     #[test]
@@ -2196,6 +2411,7 @@ mod tests {
             false,
             "never",
             None,
+            None,
         ))
         .unwrap();
         assert_eq!(value["params"]["sandbox"], "workspace-write");
@@ -2214,6 +2430,7 @@ mod tests {
             false,
             "never",
             Some("proj-1"),
+            None,
         ))
         .unwrap();
         assert_eq!(value["params"]["projectId"], "proj-1");
@@ -2230,6 +2447,7 @@ mod tests {
             None,
             false,
             "never",
+            None,
             None,
         ))
         .unwrap();

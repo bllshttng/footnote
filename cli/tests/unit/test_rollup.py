@@ -277,3 +277,52 @@ def test_closed_work_is_never_an_orphan(status):
 def test_open_statuses_still_count():
     for status in ("ready", "idea", "blocked", "claimed", None):
         assert orphan_ids([node("x-1", status=status)]) == {"x-1"}, status
+
+
+# -- crown scope -> parentable epic (birth path) --
+
+
+def test_crown_scope_of_one_live_epic_names_it():
+    from fno.graph.rollup import crown_epic_from_scope
+
+    entries = [epic("x-e", "mux polish")]
+    assert crown_epic_from_scope("x-e", entries) == "x-e"
+
+
+def test_crown_project_scope_names_no_parent():
+    from fno.graph.rollup import crown_epic_from_scope
+
+    entries = [epic("x-e", "mux polish")]
+    assert crown_epic_from_scope("fno", entries) is None
+
+
+def test_crown_set_scope_names_no_single_parent():
+    from fno.graph.rollup import crown_epic_from_scope
+
+    entries = [epic("x-e1", "one"), epic("x-e2", "two")]
+    assert crown_epic_from_scope("x-e1,x-e2", entries) is None
+
+
+@pytest.mark.parametrize("status", ["done", "superseded", "deferred"])
+def test_crown_over_retired_epic_parents_nothing(status):
+    from fno.graph.rollup import crown_epic_from_scope
+
+    entries = [epic("x-e", "finished territory", status=status)]
+    assert crown_epic_from_scope("x-e", entries) is None
+
+
+def test_crown_scope_of_unknown_id_names_no_parent():
+    from fno.graph.rollup import crown_epic_from_scope
+
+    assert crown_epic_from_scope("x-gone", []) is None
+
+
+def test_crown_receipt_line_carries_undo():
+    from fno.graph.rollup import Resolution, receipt_lines
+
+    index = {"x-e": {"id": "x-e", "title": "mux polish"}}
+    lines = receipt_lines(Resolution("crown", epic_id="x-e"), "x-1", index)
+    assert len(lines) == 1
+    assert "crown-linked x-1 -> x-e" in lines[0]
+    assert "(filing session crown scope)" in lines[0]
+    assert "--parent null" in lines[0]

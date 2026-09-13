@@ -5,38 +5,10 @@ backlog verb behind the shared external-backend refusal, so its direct graph
 reads are census-classified as guarded machinery
 (scripts/diagnostics/tracker-consumers.py --reads).
 
-Node ab-3cd195b6. When a backlog node's PR merges, a merge-detector
-(``fno backlog reconcile`` or the /pr merged skill) calls this verb after the
-node-close write commits. If auto-continue is armed for the project and no live
-walk owns it, advance dispatches a fresh background ``/target`` worker (with the
-merge posture from ``config.auto_merge.grant``, default ``none``) for the
-next now-unblocked node, so a merge-gated epic walks itself group-by-
-group across merges with no manual re-invocation.
-
-Locked Decisions this module embodies:
-  1. Decoupled from the loop driver - driven by the merge event, so megawalk /
-     /target / /megatron all inherit auto-continue (no driver-specific code).
-  4. Fire-and-forget dispatch: ``fno agents spawn`` -> ``/target [--no-merge] <id>``
-     (the ``--no-merge`` flag is gated on ``config.auto_merge.grant``; x-4391/x-4be1).
-  5. Concurrency via ``fno agents claim``: honor ``walker:<root>`` (no double-dispatch
-     during a live walk); reserve ``dispatch:<id>`` (O_EXCL dedup + bridge token
-     that outlives this short-lived process until the worker owns ``node:<id>``,
-     LD#11 / AC1-CLAIM - mirrors handoff.sh + dispatch-node.sh).
-  6. advance never merges the PR itself - it dispatches a worker whose merge
-     posture comes from ``config.auto_merge.grant`` (default ``none``);
-     an actual merge, when enabled, is still gated by the worker's own
-     ``config.auto_merge.*`` review layer (x-4391, revisits epic LD#4).
-  7. Non-fatal: a failed spawn never wedges the host op (reconcile/post-merge).
- 12. Every code path emits EXACTLY ONE decision event before returning
-     (advance_dispatched | advance_skipped{reason} | advance_failed), so a
-     silent stall is impossible.
-
-The ``dispatch:<id>`` reservation uses a TTL claim (not PID-liveness) precisely
-so it survives advance's exit (AC1-CLAIM): the just-dispatched node stays
-"claimed" for the boot window, so a concurrent reconcile/post-merge sees it as
-already-being-worked. The spawned worker acquires ``node:<id>`` cleanly on its
-own ``fno do target init`` (free at that point); the reservation then expires by
-TTL once the worker owns the node.
+Merge-triggered auto-continue: after a node's PR merges, this verb dispatches
+a background ``/target`` worker on the next unblocked node. The flow, the
+locked decisions, and the ``dispatch:<id>`` reservation contract live in
+docs/architecture/advance-auto-continue.md.
 """
 
 from __future__ import annotations
@@ -47,15 +19,17 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, Optional
+from typing import Any, Callable, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
-from fno.agents.naming import agent_name, slug_component
+from fno.agents.naming import AgentNameError, dispatch_agent_name
+from fno.agents.node_dispatch import node_spawn_argv, resolve_node_spawn
 from fno.agents import spawn_gate as _spawn_gate
+from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.provenance import autobrief as _autobrief
 
@@ -176,6 +150,34 @@ class AdvanceResult:
     # dispatched results only. "headless" is synchronous: the worker already
     # ran and released its claim before this result exists.
     substrate: Optional[str] = None
+    # x-4138: spawn-seam receipt lines (`fno agents spawn: ...`) the launch
+    # printed on stderr - every axis the seam did NOT apply. Empty on a quiet
+    # spawn. Set on dispatched results only.
+    notes: tuple = ()
+
+    def render(self) -> list[str]:
+        """The board verb's human stdout: the verdict line, then one
+        `advance: ` line per spawn-seam note (x-4138), so a dropped pin is
+        named where the dispatch was reported."""
+        parts = [self.decision]
+        if self.node_id:
+            parts.append(self.node_id)
+        if self.reason:
+            parts.append(f"reason={self.reason}")
+        if self.short_id:
+            parts.append(f"short_id={self.short_id}")
+        return [" ".join(parts)] + [f"advance: {note}" for note in self.notes]
+
+    def json_receipt(self) -> dict:
+        """The board verb's --json payload; notes ride beside the verdict."""
+        return {
+            "decision": self.decision,
+            "event": self.event,
+            "reason": self.reason,
+            "node_id": self.node_id,
+            "short_id": self.short_id,
+            "notes": list(self.notes),
+        }
 
     def __post_init__(self) -> None:
         # Make an invalid (decision, event) combination a loud construction
@@ -221,14 +223,20 @@ class DispatchClaimObservation:
 # as a named constant so a future spawn-verb message change has one grep hit.
 _SPAWN_ALREADY_EXISTS = "already exists"
 
+# x-4138: the seam's stderr receipt prefix, shared vocabulary with
+# spawn_axes.rs - one spelling read by tests and operators alike. The cap
+# keeps a pathological spawn from turning one advance line into a screenful.
+_SPAWN_NOTE_PREFIX = "fno agents spawn: "
+_SPAWN_NOTE_CAP = 20
+
 
 class SpawnAlreadyRunning(RuntimeError):
     """A peer dispatcher / live worker already owns this node's launch."""
 
 
 class SpawnError(RuntimeError):
-    """``fno agents spawn`` failed re-dispatchably. A gate refusal (75-81) also
-    carries ``exit_code`` plus the gate's own refusal sentence in ``detail``."""
+    """``fno agents spawn`` failed re-dispatchably. A gate (75-81) or sandbox-probe (82) refusal
+    also carries ``exit_code`` plus its own refusal sentence in ``detail``."""
 
     def __init__(self, message: str, exit_code: Optional[int] = None, detail: str = ""):
         super().__init__(message)
@@ -246,14 +254,17 @@ class SpawnQueueRefused(SpawnError):
         self.retry_at = retry_at
 
 
-#: spawn-gate exit -> machine verdict. 75-80 are capacity conditions true for
-#: every caller equally; 81 is a registry no spawn can pass. Constants are read
-#: off the module so a rename breaks loudly.
+#: spawn exit -> machine verdict. 75-80 are capacity conditions true for every caller equally;
+#: 81 is a registry no spawn can pass; 82 is a codex sandbox blocking a tool its lane needs.
+#: 84 is the Rust gate's state-root refusal: permanent, a human grants, never capacity.
+#: Constants are read off the module so a rename breaks loudly.
 _GATE_REFUSAL_REASONS = {
     _spawn_gate.EXIT_QUEUE_TIMEOUT: "capacity-refused", _spawn_gate.EXIT_NO_WAIT: "capacity-refused",
     _spawn_gate.EXIT_RAM_REFUSED: "capacity-refused", _spawn_gate.EXIT_PROVIDER_CAP: "capacity-refused",
     _spawn_gate.EXIT_LOAD_REFUSED: "capacity-refused", _spawn_gate.EXIT_KING_SHARE: "capacity-refused",
     _spawn_gate.EXIT_REGISTRY_SCHEMA: "gate-unavailable",
+    _spawn_gate.EXIT_STATE_ROOT_UNGRANTED: "state-root-ungranted",
+    EXIT_SANDBOX_UNREACHABLE: "sandbox-unreachable",
 }
 
 
@@ -268,24 +279,26 @@ class GateRefusal:
 
 
 def _gate_refusal_detail(stderr: str) -> str:
-    """The gate's refusal sentence: the LAST ``spawn-gate:`` line (the gate warns
-    before its verdict); stderr head as fallback."""
+    """The refusal sentence: the LAST ``spawn-gate:`` or ``sandbox-probe:`` line
+    (the gate warns before its verdict); the whole stderr as fallback. No head
+    window: a capped head cut a refusal mid-flag and the cause was lost."""
     lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
-    gate_lines = [ln for ln in lines if ln.startswith("spawn-gate:")]
-    return gate_lines[-1] if gate_lines else (stderr or "").strip()[:200]
+    gate_lines = [ln for ln in lines if ln.startswith(("spawn-gate:", "sandbox-probe:"))]
+    return gate_lines[-1] if gate_lines else (stderr or "").strip()
 
 
 def gate_refusal(exc: BaseException) -> Optional[GateRefusal]:
     """A :class:`GateRefusal` for a machine-scoped gate refusal, else None. The
-    ``spawn-gate:`` marker is REQUIRED provenance: ``_codex_create_path``
-    propagates a provider crash's raw exit, so the number alone cannot prove
-    the machine refused."""
+    ``spawn-gate:`` marker (``sandbox-probe:`` for the sandbox probe's exit) is
+    REQUIRED provenance: ``_codex_create_path`` propagates a provider crash's
+    raw exit, so the number alone cannot prove the machine refused."""
     code = getattr(exc, "exit_code", None)
     if not isinstance(code, int):
         return None
     reason = _GATE_REFUSAL_REASONS.get(code)
     detail = (getattr(exc, "detail", "") or "").strip()
-    if reason is None or not detail.startswith("spawn-gate:"):
+    marker = "sandbox-probe:" if code == EXIT_SANDBOX_UNREACHABLE else "spawn-gate:"
+    if reason is None or not detail.startswith(marker):
         return None
     return GateRefusal(reason, code, detail, getattr(exc, "retry_at", None))
 
@@ -318,6 +331,34 @@ def _slot_queue_retry_at(stdout: str) -> Optional[float]:
 _MAX_ANCESTOR_WALK = 64
 
 
+def first_dead_ancestor(
+    entry: dict,
+    entries_by_id: dict,
+    *,
+    is_dead: Callable[[dict], bool],
+) -> Optional[str]:
+    """First ancestor satisfying ``is_dead`` walking the parent edge, else None.
+
+    One walk, one dead predicate: selection excludes on superseded/deferred,
+    the strand receipts on any terminal ancestor. Cycle- and depth-capped.
+    """
+    seen: set[str] = set()
+    cur = entry.get("parent")
+    steps = 0
+    while cur and steps < _MAX_ANCESTOR_WALK:
+        if cur in seen:
+            break  # cycle - stop, no verdict
+        seen.add(cur)
+        anc = entries_by_id.get(cur)
+        if anc is None:
+            break  # missing parent - no verdict
+        if is_dead(anc):
+            return cur
+        cur = anc.get("parent")
+        steps += 1
+    return None
+
+
 def selection_guards(
     entry: dict,
     entries_by_id: dict,
@@ -347,29 +388,20 @@ def selection_guards(
         if isinstance(owner, str) and owner:
             return f"contained:{owner}"
 
-        seen: set[str] = set()
-        cur = entry.get("parent")
-        steps = 0
-        while cur and steps < _MAX_ANCESTOR_WALK:
-            if cur in seen:
-                break  # cycle - stop, no verdict
-            seen.add(cur)
-            anc = entries_by_id.get(cur)
-            if anc is None:
-                break  # missing parent - no verdict, select normally
-            # Field-based, not just derived `status`: read_graph returns the
-            # persisted status and does NOT recompute, so a superseded/deferred
-            # ancestor whose `status` was not re-persisted still reads its own
-            # bucket here via the underlying fields. Checking both is robust to
-            # either read path.
-            if (
-                anc.get("status") in ("superseded", "deferred")
-                or anc.get("superseded_by")
-                or anc.get("deferred_at")
-            ):
-                return f"dead-ancestor:{cur}"
-            cur = anc.get("parent")
-            steps += 1
+        # Field-based, not just derived `status`: read_graph does NOT recompute,
+        # so a superseded/deferred ancestor whose `status` was not re-persisted
+        # still reads its own bucket here via the underlying fields.
+        dead = first_dead_ancestor(
+            entry,
+            entries_by_id,
+            is_dead=lambda a: bool(
+                a.get("status") in ("superseded", "deferred")
+                or a.get("superseded_by")
+                or a.get("deferred_at")
+            ),
+        )
+        if dead:
+            return f"dead-ancestor:{dead}"
 
         from fno.graph import maintain as _maintain
         from fno.graph.ladder import UNSELECTABLE_RUNGS, Rung, plan_rung
@@ -382,7 +414,6 @@ def selection_guards(
         # that dispatch used to supply, and would age into `stale-quarantine` -
         # reporting the wrong reason and letting `maintain --apply` auto-defer
         # a perfectly healthy design doc off the board.
-        #
         # Keys on the RUNG, not on `is_design_stage`, because the persisted
         # `ready` above it can be stale: a plan doc is external mutable state
         # that `/blueprint` (or a hand edit) rewrites without touching the graph,
@@ -391,7 +422,6 @@ def selection_guards(
         # `ready` row, and a DESIGN-only probe waves it straight through to
         # dispatch. Re-probing live is the whole reason this guard exists; it has
         # to ask about every undesigned rung, not just one of them.
-        #
         # One `plan_rung` call, shared with the policy set, so the reason stays
         # rung-specific without a second filesystem read per candidate.
         if entry.get("status") == "ready":
@@ -778,7 +808,6 @@ def select_lane_fill(
                     # Unevaluated (no comparable file surface): dispatch anyway
                     # (fail-open) but say so LOUDLY - a silent pass would read
                     # as "gate clean" when it never ran.
-                    #
                     # Normally only when something is actually in flight: with
                     # nothing to collide against, an unknown surface risks
                     # nothing, and every plan-less node (which is every
@@ -876,30 +905,6 @@ _SAME_DOMAIN_ANNOTATION = "+same-domain:"
 # Same reasoning for the file-overlap token: the producer builds it and
 # select_lane_fill matches it to decide how loudly to log the skip.
 _HIGH_COLLISION_PREFIX = "high-collision:"
-
-
-def lane_fill_filter_name(reason: Optional[str]) -> str:
-    """Map one classifier reason token to its canonical lane-fill filter name.
-
-    The canonical names the ``--explain --epic`` SELECTION section reports.
-    Living HERE, beside the tokens, keeps the explainer's vocabulary from
-    drifting from the selector's: both derive from the classifier's stable
-    tokens, never from a second hand-written list. An unmapped token maps to
-    itself (its head up to the first colon), so a future token shows up in
-    the report under its own name instead of vanishing into a bucket that
-    no longer matches.
-    """
-    if not reason:
-        return ""
-    if reason == "peer-lane":
-        return "live-lane"
-    if reason.startswith(_HIGH_COLLISION_PREFIX):
-        return "in-flight-collision"
-    if _SAME_DOMAIN_ANNOTATION in reason:
-        return "live-lane-domain"
-    if reason.startswith(_UNEVALUATED_PREFIX):
-        return "unevaluated"
-    return reason.split(":", 1)[0]
 
 
 def _classify_lane_candidate(
@@ -1052,7 +1057,6 @@ def schedule_shadow(
     # Slots already held by live lanes count AGAINST the cap, so a cap-two report
     # with one lane already live can start only ONE more node. Counting from zero
     # would overstate the frontier during fill-vacant-lanes runs.
-    #
     # Count EVERY live lane, not just the ones at an index below the cap. It is
     # tempting to count only what acquire_lane_slot(cap) would contend for, since
     # that predicts the acquire call exactly - but effective_cap is a ceiling on
@@ -1147,45 +1151,44 @@ def schedule_shadow(
     }
 
 
-def _verb_qualifier(verb: Optional[str]) -> Optional[str]:
-    """Lifecycle-reason qualifier for the worker name: the bare declared verb.
+def _node_effective_verb(node: dict) -> Optional[str]:
+    """The effective workflow verb for a node dict, or None when the
+    lifecycle table abstains. One wrapper so every advance door derives ONE
+    answer per node. Raises DispatchResolveError on an unanswerable node; the
+    caller's spawn-failure path owns it."""
+    from fno.agents import harness_map
+    from fno.graph.ladder import plan_rung as _node_plan_rung
 
-    ``/fno:blueprint`` becomes ``blueprint`` (the codex ``$fno:`` spelling
-    slugifies to ``fno-blueprint``), so the row name states which verb ran
-    while every ``target-<node>-`` consumer match keeps holding. A node
-    declaring no verb yields ``None``: the builtin target path keeps its
-    exact current name.
-    """
-    v = (verb or "").strip()
-    if not v:
-        return None
-    if v.startswith("/fno:"):
-        v = v[len("/fno:"):]
-    return slug_component(v.lstrip("/")) or None
+    verb, _note = harness_map.resolve_effective_verb(
+        verb=(node.get("dispatch_verb") or "").strip() or None,
+        difficulty=node.get("difficulty"),
+        plan_rung=_node_plan_rung(node).value,
+        node_id=node.get("id"),
+    )
+    return verb
+
+
+def refuse_unknown_source(verb_name: str, source):
+    """An unknown --source refuses at the door (exit 2), never defaults."""
+    import typer
+    from fno.agents.naming import dispatch_sources
+
+    if source is not None and source not in dispatch_sources():
+        known = ", ".join(sorted(dispatch_sources()))
+        typer.echo(f"{verb_name}: unknown --source {source!r}; known: {known}", err=True)
+        raise typer.Exit(code=2)
 
 
 def _worker_agent_name(
     node_id: str,
     node_slug: Optional[str],
-    prefix: str = "target",
-    qualifier: Optional[str] = None,
+    *,
+    source: Optional[str] = None,
+    verb_code: str = "t",
 ) -> str:
-    """Provenance-carrying bg worker name: ``<prefix>-<full-node-id>-<slug>``.
-
-    Thin adapter over the canonical owner (``fno.agents.naming``), which also
-    enforces the runtime's 64-char limit this call site used to skip - a long
-    configured node id assembled a name ``fno agents spawn`` rejected, losing
-    the dispatch with no session and no event (x-3218). ``prefix`` is
-    ``reconcile`` for the G4 de-stub pass so its worker name never collides
-    with the (ended) first pass's ``target-<id>-<slug>``. ``qualifier`` names
-    the declared dispatch verb when the node declares one (see
-    :func:`_verb_qualifier`).
-
-    Raises :class:`~fno.agents.naming.AgentNameError` when the required
-    identity cannot be represented; the dispatch path projects that as a
-    node-identifying failure event rather than a launched lane.
-    """
-    return agent_name(prefix, node_id, slug=node_slug, qualifier=qualifier)
+    """Provenance-carrying bg worker name ``[<source>-]<verb>-<node>-<slug>``;
+    raises AgentNameError when the identity cannot be represented."""
+    return dispatch_agent_name(source, verb_code, node_id, slug=node_slug)
 
 
 def _refuse_repeated_dead_dispatch(
@@ -1325,241 +1328,49 @@ def _spawn_worker(
     node: Optional[dict] = None,
     dispatch_reservation: Optional[tuple] = None,
     caller: str = "unknown",
+    source: Optional[str] = None,
     events_path: Optional[Path] = None,
     grid_reason: Optional[str] = None,
     receipt: Optional[dict] = None,
 ) -> str:
-    """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
+    """Dispatch a fire-and-forget autonomous worker.
 
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
+    The workflow verb is DERIVED from the node's plan rung and difficulty
+    (x-ebd2, law d-834b6ff1). ``source`` (x-84b2) stamps the worker name;
+    the reconcile pass is always ``rd`` (an impossible pair refuses).
     """
-    is_reconcile = bool(reconcile_manifest)
-    node_verb = (verb or "").strip() or None
-    agent_name = _worker_agent_name(
+    # x-e53e change 2: the preference half is ONE resolver; this function
+    # keeps the launch: argv, reservation handover, subprocess, receipts.
+    args = resolve_node_spawn(
         node_id,
+        node_cwd,
         node_slug,
-        prefix="reconcile" if is_reconcile else "target",
-        qualifier=_verb_qualifier(node_verb),
+        node=node,
+        reconcile_manifest=reconcile_manifest,
+        model=model,
+        provider=provider,
+        vendor=vendor,
+        grid_route=grid_route,
+        grid_account=grid_account,
+        harness=harness,
+        verb=verb,
+        brief=brief,
+        extra_env=extra_env,
+        dispatch_account=dispatch_account,
+        permission_mode=permission_mode,
+        grid_reason=grid_reason,
+        source=source,
+        caller=caller,
     )
-    # --provider selects the account/record (or a bare kind like "claude"); a
-    # per-node or dispatch-time pin overrides the claude default. Layer-separate
-    # from `harness` (the record's cli, which drives the resolver's substrate).
-    # NOT the launch harness: defaulting it here, a rung before the resolver,
-    # launched claude carrying codex syntax.
-    launch = (provider or "").strip()
-
-    # Capacity-grid deferral receiving end: the automatic dispatch callers pass
-    # resolve_difficulty=False to node_model precisely so difficulty picks the
-    # lane HERE, at the seam that can read live capacity - the spawned argv
-    # always carries an explicit --harness, so the spawn-CLI grid can never fire
-    # on this path. See _grid_lane_for; harness-keyed placement sites resolve
-    # there instead and arrive already pinned - on a grid decline the pin is the
-    # placement harness. An explicit harness therefore skips this consult: under
-    # it the grid could pick a harness the caller's placement did not key for.
-    # A caller that resolved the grid hands its reason in; the consult below
-    # is skipped under an explicit harness. grid_reason=None on a grid PICK.
-    grid_why: Optional[str] = grid_reason
-    # Caller-supplied grid answers first: dispatch_lanes resolves the grid
-    # before placement and pins the harness, so the consult below never runs.
-    grid_lane_route: Optional[str] = grid_route
-    grid_lane_account: Optional[str] = grid_account
-    if harness is None:
-        grid_harness, grid_model, grid_route_resolved, grid_account_resolved, grid_why = _grid_lane_for(
-            node, model=model, provider=provider
-        )
-        if grid_harness is not None:
-            model = grid_model
-            # The resolver must see the grid's harness or it resolves a
-            # claude substrate/command for a codex spawn (bg is claude-only).
-            harness = grid_harness
-            grid_lane_route = grid_route_resolved
-            grid_lane_account = grid_account_resolved
-
-    # x-4391/x-4be1: merge posture from config.auto_merge.grant, read with the
-    # node_cwd precedence so a cross-project dispatch reads the DEPENDENT node's
-    # config (AC2-EDGE), never the merged repo's. advance takes no per-run flag,
-    # so config is the sole non-builtin rung; any read failure -> no-merge
-    # (Locked Decision 6). The same settings object feeds the resolver
-    # (config.dispatch.*) and the permission-mode read below, so all three
-    # config reads are node-consistent.
-    settings_obj = None
-    try:
-        from fno.config import load_settings, load_settings_for_repo
-        from fno.config.grant import auto_merge_grant
-
-        settings_obj = (
-            load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
-        )
-    except Exception:  # noqa: BLE001 - unreadable config -> defaults below
-        settings_obj = None
-    # Read the grant in its OWN guard so a missing/odd block never disables the
-    # independent permission-mode read that also consumes settings_obj. Only the
-    # literal "dispatch" grants (a typo or a stub settings object never does).
-    allow_merge = auto_merge_grant(settings_obj)
-
-    # x-0676: resolve substrate + normalized command. A node dispatch_verb takes the
-    # verb path (never a merge); reconcile stays explicit and spells its own posture.
-    # With neither, the builtin rung reads config.auto_merge.grant itself (x-8e59),
-    # so this caller no longer routes a merge grant through the verb path to work
-    # around a builtin that ignored the key. A DispatchResolveError propagates to the
-    # caller's non-fatal spawn-failure path.
-    from fno.agents import harness_map
     from fno.harness_identity import (
         CODEX_SHORT_ADDRESS_RULE,
         is_unsafe_short_address,
     )
 
-    # One axis: `provider` is the harness under an older spelling, so it must
-    # reach the resolver too, or the command follows the stage table instead.
-    launch_axis = _launch_harness_axis(launch, node_cwd)
-    # x-0961: "declared nothing" and "declaration eaten by a lossy feed" used
-    # to produce a byte-identical dispatch. The `verb` param collapses both to
-    # None; only the node dict carries the difference, so the receipt names it
-    # - and reads the DICT alone, never the verb param, so a caller whose verb
-    # diverges from the dict surfaces as verb=builtin beside verb_source=
-    # declared (the mismatch this field exists to expose) instead of a receipt
-    # that launders the divergence. A dict without the key at all can only
-    # come from a projection that dropped it - the exact silent loss this
-    # names out loud. Canonicalized the same way the resolver's allowlist rung
-    # does, so receipt and command agree on the spelling.
-    if isinstance(node, dict) and "dispatch_verb" in node:
-        verb_source = (
-            "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
-        )
-    else:
-        verb_source = "field-absent"
-        print(
-            f"advance: WARNING: dispatching {node_id} without knowing whether it "
-            f"declared a verb: the node dict {caller} passed carries no "
-            "dispatch_verb key. The selection projection feeding this dispatcher "
-            "is lossy (x-0961); fix the projection, not the node.",
-            file=sys.stderr,
-        )
-    receipt_verb = node_verb or "builtin"
-    if receipt_verb.startswith("/fno:"):
-        receipt_verb = "/" + receipt_verb[len("/fno:"):]
-    resolve_kwargs: dict = {
-        "harness": ((harness or "").strip() or launch_axis or None),
-        "node_id": node_id,
-        "brief": (brief or None),
-        "trigger": "autonomous",
-        "settings": settings_obj,
-    }
-    if is_reconcile:
-        # x-8151: the refusal spelling is inserted by the shared vocabulary
-        # helper, never a second hardcoded "--no-merge " string.
-        resolve_kwargs["command"] = f"/target --reconcile {reconcile_manifest} {{id}}"
-        if not allow_merge:
-            resolve_kwargs["command"] = harness_map.inject_no_merge_into_command(
-                resolve_kwargs["command"]
-            )
-    elif node_verb:
-        resolve_kwargs["verb"] = node_verb
-    resolved = harness_map.resolve_dispatch(**resolve_kwargs)
-    substrate = resolved["substrate"]
-    target_cmd = resolved["command"]
-    spawn_env = resolved.get("env") or {}
-
-    prov = launch or resolved["harness"]  # alias kept; resolver owns the default
-    if launch_axis and launch_axis != resolved["harness"]:
-        raise SpawnError(
-            f"refusing to spawn {node_id}: --harness {prov!r} runs "
-            f"{launch_axis!r} but the command is spelled for "
-            f"{resolved['harness']!r} ({target_cmd!r}). Pass one axis."
-        )
-
     cmd = [
         *_subprocess_util.fno_py_cmd(),
-        "agents", "spawn", "--harness", prov, "--substrate", substrate,
+        "agents", "spawn", *node_spawn_argv(args, cwd=node_cwd),
     ]
-    if vendor:
-        cmd += ["--provider", vendor]
-    elif grid_lane_route:
-        # The row's route owns vendor AND model as one fact; an explicit
-        # dispatch-time vendor pin outranks it and is never replaced.
-        cmd += ["--route", grid_lane_route]
-    if grid_lane_account and resolved.get("harness") == "claude":
-        # The capacity pick read THIS account's quota; claude-only at the CLI.
-        cmd += ["--account", grid_lane_account]
-    elif grid_lane_account:
-        print(
-            f"advance: grid account {grid_lane_account!r} skipped "
-            f"(claude-only, harness {resolved.get('harness')!r})",
-            file=sys.stderr,
-        )
-    if node_cwd:
-        cmd += ["--cwd", node_cwd]
-    else:
-        cmd += ["--fresh"]
-    # x-571f: a per-node model pin rides as a spawn flag. Empty/None = provider
-    # default, byte-identical to today.
-    if model:
-        cmd += ["--model", model]
-    # x-dfa4: an explicit permission_mode wins; else the operator's spawn
-    # default (config.agents.defaults.permission_mode); else the built-in
-    # unattended answer (x-7198). Never unset for a claude dispatch below.
-    mode = (permission_mode or "").strip()
-    if not mode and settings_obj is not None:
-        try:
-            from fno.agents.spawn_defaults import SPAWN_PERMISSION_BUILTIN
-
-            mode = (
-                settings_obj.agents.defaults.permission_mode or ""
-            ).strip() or SPAWN_PERMISSION_BUILTIN
-        except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
-            mode = ""
-    # CLAUDE-ONLY, mirroring dispatch-node.sh: the spawn seam exit-2 rejects a
-    # mapped --permission-mode for a non-claude harness on a non-pane substrate.
-    # Gate on the RESOLVED harness, not the raw `prov` string: `provider` may carry
-    # a claude ACCOUNT record (e.g. ccm/ccr) that resolves to harness=claude and
-    # MUST still get the flag, else the account-pinned worker keeps hanging - the
-    # exact bug this change fixes. A failover leg landing on codex/gemini gets its
-    # bypass from its own resolved caps, not this claude-native value. Silent skip
-    # (parity); the receipt omits permission_mode, so the posture stays inspectable.
-    if mode and resolved.get("harness") == "claude":
-        cmd += ["--permission-mode", mode]
-    # A quota cutover's destination account rides argv as a RECORD ID, never as
-    # env: the spawn front door resolves it inside cmd_spawn and applies the
-    # overlay where the harness is exec'd. A codex record's overlay is
-    # {HOME: <account_dir>/home}, and footnote resolves its own state root off
-    # HOME too, so putting it on this wrapper would move the registry, the claim
-    # and the events into the account's home where nothing looks (x-c33e).
-    if dispatch_account:
-        cmd += ["--dispatch-account", dispatch_account]
-    # x-0961: the worker-to-node join. Without --node the registry row carries
-    # node: null, so no instrument can answer which worker is on which node;
-    # every manual spawn passes it, which is why manual dispatches joined and
-    # advance dispatches did not.
-    cmd += ["--node", node_id]
-    if node_slug:
-        cmd += ["--slug", node_slug]
-    cmd += ["--name", agent_name, target_cmd]
-
-    # The brief (US3) rides the spawn subprocess env as TARGET_BRIEF (never the
-    # command line), mirroring dispatch-node.sh's `export TARGET_BRIEF`. A failover
-    # account does NOT ride here: `--provider <harness>` selects the CLI and
-    # `--dispatch-account <record>` selects the account (x-0676, x-c33e;
-    # --provider never carries a record id).
-    from fno.agents.account_env import STATE_ROOT_ENV_KEYS
-
-    for key in sorted(STATE_ROOT_ENV_KEYS & set(extra_env or {})):
-        raise SpawnError(
-            f"refusing to put {key} on the `fno agents spawn` wrapper: footnote "
-            f"resolves its own state root off {key}, so the worker's registry "
-            "row, claim and events would land in the account's home where "
-            "nothing looks. Pass the destination account as "
-            "--dispatch-account <record> instead; the spawn front door applies "
-            "the overlay where the harness is exec'd."
-        )
-    merged_env = {**spawn_env, **(extra_env or {})}
-    # x-9d11: the resolver's env is AUTHORITATIVE for the merge posture, so the
-    # inherited TARGET_NO_MERGE never survives into a successor the resolver just
-    # granted allow-merge (this verb runs as a subprocess of the prior no-merge
-    # worker, whose exported carrier would otherwise silently kill the config's
-    # auto-merge posture - review round 5). Dropped from the base BEFORE the
-    # merge so the resolver's own value (either way) is the only one that lands.
-    base_env = {k: v for k, v in os.environ.items() if k != "TARGET_NO_MERGE"}
-    run_env = {**base_env, **merged_env} if merged_env else (base_env or None)
     # x-0961: the caller's dispatch:<id> reservation and the --node spawn
     # door's own family-2 guard collide - the door acquires the SAME key,
     # sees a foreign `advance:<pid>` holder it must never clear, and refuses
@@ -1572,12 +1383,12 @@ def _spawn_worker(
         _res_key, _res_holder, _res_root = dispatch_reservation
         _safe_release(_res_key, _res_holder, _res_root)
     proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=600, env=run_env
+        cmd, capture_output=True, text=True, timeout=600, env=args.env or None
     )
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
-            raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
+            raise SpawnAlreadyRunning(f"agent {args.agent_name} already exists")
         if proc.returncode == _spawn_gate.EXIT_PROVIDER_CAP:
             gate_detail = _gate_refusal_detail(stderr or proc.stdout or "")
             exc = SpawnQueueRefused(
@@ -1619,7 +1430,7 @@ def _spawn_worker(
     # requirement (else the parse below would raise SpawnError, release the
     # reservation, and redispatch a node whose headless worker already ran).
     launch_identity = "headless"
-    if substrate == "thread":
+    if args.substrate == "thread":
         # Keep scanning past a line that merely MENTIONS an id field but is
         # not the JSON receipt - stop once an id actually parses.
         launch_identity = _spawn_receipt_identity(proc.stdout)
@@ -1632,12 +1443,23 @@ def _spawn_worker(
         # not an address: refuse by shape rather than bind a worker to the
         # wrong session (ruling d-513d9d22, is_unsafe_short_address).
         if is_unsafe_short_address(
-            launch_identity, (resolved.get("harness") or "").strip() or None
+            launch_identity, (args.resolved_harness or "").strip() or None
         ):
             raise SpawnError(
                 f"fno agents spawn receipt carries a codex head-8 launch "
                 f"identity ({launch_identity}): {CODEX_SHORT_ADDRESS_RULE}"
             )
+    # x-4138: the spawn seam prints its own receipt on stderr (route/effort/
+    # substrate suppressions - spawn_axes.rs owns the `fno agents spawn: `
+    # prefix as its one spelling). capture_output would discard it on a
+    # successful launch, silently dropping every axis the seam did NOT apply.
+    # Match the prefix, never an allowlist of message shapes: the seam adds
+    # axes, and the next one must ride too.
+    notes = tuple(
+        line.strip()
+        for line in (proc.stderr or "").splitlines()
+        if line.startswith(_SPAWN_NOTE_PREFIX)
+    )[:_SPAWN_NOTE_CAP]
     # One row per launch: only the spawner knows the resolved argv, and it
     # sits after the guards, so the row is proof of a launch that happened.
     _emit(
@@ -1645,33 +1467,37 @@ def _spawn_worker(
         {
             "node_id": node_id,
             "short_id": launch_identity,
-            "agent_name": agent_name,
-            "harness": prov,
-            "vendor": vendor or "",
-            "model": model or "",
-            "account": dispatch_account or "",
-            "substrate": substrate,
-            "command": target_cmd,
-            "verb": receipt_verb,
-            "verb_source": verb_source,
-            "cwd": node_cwd or "",
+            "agent_name": args.agent_name,
+            "harness": args.harness,
+            "vendor": args.vendor or "",
+            "model": args.model or "",
+            "account": args.dispatch_account or "",
+            "substrate": args.substrate,
+            "command": args.command,
+            "verb": args.verb,
+            "verb_source": args.verb_source,
+            "cwd": args.node_cwd or "",
             "caller": caller,
-            "grid": grid_why or "",
-            "decision": "; ".join(resolved.get("decision") or []),
+            "grid": args.grid_reason or "",
+            "decision": "; ".join(args.decision),
         },
         events_path,
     )
     if receipt is not None:
         # Filled from the same values the EVENT_SPAWNED row carries, so the
         # row and the receipt cannot disagree (the row has no harness-
-        # independent form; prov is what it records).
+        # independent form; prov is what it records). agent_name (x-84b2) is
+        # the exact registered name: callers copy it into their dispatched
+        # events instead of re-minting a lookalike.
         receipt.update(
             {
                 "short_id": launch_identity,
-                "substrate": substrate,
-                "harness": prov,
-                "verb": receipt_verb,
-                "verb_source": verb_source,
+                "substrate": args.substrate,
+                "harness": args.harness,
+                "verb": args.verb,
+                "verb_source": args.verb_source,
+                "agent_name": args.agent_name,
+                "notes": notes,
             }
         )
     return launch_identity
@@ -1680,13 +1506,11 @@ def _spawn_worker(
 # ---------------------------------------------------------------------------
 # Lane dispatch (parallel mode, epic x-42d5 group 3): spawn + per-lane isolation
 # ---------------------------------------------------------------------------
-#
 # G1 shipped the atomic lane-slot cap (claims/lanes.py); G2 the lane-fill
 # selector (select_lane_fill above) + the `fno backlog lane-fill` preview CLI.
 # G3 is the SPAWN layer: it takes G2's selection (which already holds a
 # dispatch-time lane slot per node, LD#8) and launches each pick as an ISOLATED
 # background lane - one worktree off origin/main, one branch, one PR stream.
-#
 # The isolation is the whole point (why x-cbce is a hard dep). Every worktree
 # shares the canonical config.toml (symlinked by setup-worktree.sh). G3 seeds
 # each lane a `.fno/config.local.toml` (x-cbce's per-worktree override, allowlist
@@ -1695,7 +1519,6 @@ def _spawn_worker(
 # `advance(project=<lane-id>)` finds no same-project `next`, so the top-level
 # parallel dispatcher stays the single lane authority instead of each lane
 # fanning out past `max_lanes`.
-#
 # The parking lot is NOT lane-isolated (x-071c): the post-merge ritual resolves
 # `parking_lot_path` against the canonical root unconditionally and writes there.
 # It is a serial one-shot durable step whose write vehicles are already safe on
@@ -1703,7 +1526,6 @@ def _spawn_worker(
 # per-PR single-flight under the reconcile mutex with O_APPEND), so a per-lane
 # redirect bought nothing and orphaned the prose into an untracked file that
 # archive-worktree.sh deletes.
-#
 # NOT here (deferred to G4): merge serialization (LD#9 - lanes must rebase +
 # merge one at a time), full failure isolation via _redispatch (x-370f), and the
 # grid status rollup. G3 releases a lane slot on spawn failure so the node stays
@@ -1759,14 +1581,20 @@ def _base_project_id(canonical_root: Path) -> str:
 
 
 def _grid_lane_for(
-    node: Optional[dict], *, model: Optional[str], provider: Optional[str]
+    node: Optional[dict],
+    *,
+    model: Optional[str],
+    provider: Optional[str],
+    verb: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
     """``(harness, model, route, account, decline_reason)`` for an UNPINNED spawn.
 
     One seam: tests monkeypatch this name, and a caller reaching past it
     bypasses every patch. A decline surfaces the chain's terminal verbatim,
     never refusing (Locked 10). Route and account ride beside harness/model
-    as one row fact. Contract: docs/architecture/backlog-graph-verb-contracts.md"""
+    as one row fact. ``verb`` is the effective workflow verb: its profile row
+    prices the slot; None keeps the target profile. Contract:
+    docs/architecture/backlog-graph-verb-contracts.md"""
     if model is not None or (provider or "").strip() or node is None:
         return None, None, None, None, None
     try:
@@ -1776,17 +1604,11 @@ def _grid_lane_for(
         capacity: dict[str, object] = dict(
             route_resolve.runtime_capacity(inventory=inventory)
         )
-        # The same planning/execution role floor the spawn seam applies: an
-        # unplanned node auto-dispatched here bills planning too, or the two
-        # dispatch doors would price one node differently.
-        role: Optional[str] = None
-        if not (node.get("plan_path") or "").strip():
-            role = "planning"
+        profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
         candidate, chain, _verdict = route_resolve.resolve_slot(
-            "target",
+            profile_verb,
             node,
             capacity,
-            role=role,
             inventory=inventory,
         )
     except Exception as exc:  # noqa: BLE001 - unknown capacity spawns on defaults
@@ -1960,11 +1782,14 @@ def dispatch_lanes(
     harness: Optional[str] = None,
     vendor: Optional[str] = None,
     report: Optional[dict] = None,
+    source: Optional[str] = None,
 ) -> list[dict]:
     """Select and spawn up to ``max_lanes`` isolated background lanes.
 
     Dispatch-time ``model``/``harness``/``vendor`` values apply to every lane
     spawned this run and outrank each node's own annotation (Locked Decision 1).
+    ``source`` (x-84b2) stamps the workers' names: the active-backlog daemon
+    passes ``ab``; an attended manual run passes nothing.
 
     The parallel-mode dispatcher (epic x-42d5, group 3). Selects collision-clean
     ready nodes via :func:`select_lane_fill` (which atomically holds a lane slot
@@ -2085,7 +1910,6 @@ def dispatch_lanes(
         # re-anchored to the worker's lifecycle in target_cli._maybe_reconcile_lane_slot
         # (LD#8) once its target-init claims the node. Both are released on the
         # failure path below.
-        #
         # Reserve-to-outcome span (x-41f7), mirroring _converge_one: every exit
         # that is not a dispatch returns the boot-window reservation, so a raise
         # between acquire and the dispatched receipt cannot strand the bridge.
@@ -2104,7 +1928,10 @@ def dispatch_lanes(
                 # spawn seam, and a capacity change in between could land the worker
                 # on a harness the worktree was not keyed for.
                 lane_grid_harness, lane_grid_model, lane_grid_route, lane_grid_account, lane_grid_why = _grid_lane_for(
-                    node, model=resolved_model, provider=eff_harness
+                    node,
+                    model=resolved_model,
+                    provider=eff_harness,
+                    verb=_node_effective_verb(node),
                 )
                 lane_placement_harness = _lane_harness(
                     lane_grid_harness or eff_harness, str(root)
@@ -2140,6 +1967,7 @@ def dispatch_lanes(
                     node=node,
                     dispatch_reservation=(dispatch_key, dispatch_holder, dispatch_root),
                     caller="dispatch_lanes",
+                    source=source,
                     events_path=ev_path,
                     receipt=lane_receipt,
                     # The door resolved the grid, so the seam's own consult never
@@ -2160,7 +1988,9 @@ def dispatch_lanes(
                 {
                     "node_id": node_id,
                     "short_id": short_id,
-                    "agent_name": _worker_agent_name(node_id, slug),
+                    # The exact registered name from the spawn receipt (x-84b2);
+                    # never a re-mint that can disagree with the registry.
+                    "agent_name": lane_receipt.get("agent_name", ""),
                     "lane": True,
                     "worktree": str(worktree),
                     "verb": lane_receipt.get("verb", "builtin"),
@@ -2195,7 +2025,6 @@ def dispatch_lanes(
 # ---------------------------------------------------------------------------
 # Join (epic x-956c, x-8d1d): spawn execute-waves joiners into a HELD worktree
 # ---------------------------------------------------------------------------
-#
 # dispatch_lanes is one worker per node and a second `/target <id>` refuses
 # (target init takes the node claim). Join is the complement: N
 # `/fno:execute waves <plan>` workers run INSIDE the holder's worktree as
@@ -2210,7 +2039,7 @@ class JoinRefuse(Exception):
 
     2 = no live node claim (nothing to join), 3 = width 1 (a second worker
     has nothing to pull), 4 = no usable bound plan, 5 = already joined
-    (live ``j-<node>-*`` workers exist).
+    (live ``j-<node>-*`` workers exist), 6 = joiner name unmintable.
     """
 
     def __init__(self, code: int, message: str) -> None:
@@ -2317,7 +2146,6 @@ def _width_from_graph(graph: _PlanTaskGraph) -> int:
 
     # Derived within-wave edges (the orchestrator's partition_edges): group
     # order serializes, unevaluated tasks wait out the evaluated ones.
-    #
     # Runs for EVERY wave, mirroring `apply_partition_edges`. Both used to skip
     # non-parallel waves, so two tasks in one `sequential` wave editing the
     # same file read as simultaneously ready and the label named `sequential`
@@ -2528,18 +2356,27 @@ def _transcript_recently_active(session_id: str) -> bool:
     """Whether this claude session's transcript moved inside the idle window.
 
     The transcript is the last truth that outlives a dead daemon (liveness
-    probes and stored status fields have both lied). No transcript at all is
-    activity-nothing; an unreadable glob is activity-UNKNOWN and reads False
-    here, so the caller treats it as dead only when the harness store also
-    went quiet - the transcript is the second probe, never the only one.
+    probes and stored status fields have both lied). "Moved" is the newest
+    TIMESTAMPED entry, not the mtime that untimestamped trailing records keep
+    young (x-54cf). No timestamped entry is NO evidence, so that transcript
+    answers nothing and is skipped - the mtime fallback read a file touched
+    2h33m after its newest record as live (x-dead, measured 2026-09-11). No
+    transcript at all is activity-nothing; an unreadable glob is
+    activity-UNKNOWN and reads False, so the caller treats it as dead only
+    when the harness store also went quiet - the transcript is the second
+    probe, never the only one.
     """
     if not session_id:
         return False
+    from fno.agents.session_truth import newest_entry_epoch
+
     projects = Path.home() / ".claude" / "projects"
     try:
         for transcript in projects.glob(f"*/{session_id}.jsonl"):
-            age = time.time() - transcript.stat().st_mtime
-            if age <= _JOINER_IDLE_WINDOW:
+            epoch = newest_entry_epoch(transcript)
+            if epoch is None:
+                continue  # an undatable transcript is not a fresh one
+            if time.time() - epoch <= _JOINER_IDLE_WINDOW:
                 return True
     except OSError:
         return False
@@ -2547,7 +2384,7 @@ def _transcript_recently_active(session_id: str) -> bool:
 
 
 def _live_joiner_names(node_id: str) -> list[str]:
-    """Live roster names ``j-<node>-*``, probed - not the stored field.
+    """Live roster joiner names (``jn-t-<node>-*``, legacy ``j-<node>-*``), probed - not the stored field.
 
     A second join into the same node rewrites the join brief (dropping the
     first join's band table) and then dies on the already-taken lead name -
@@ -2566,11 +2403,13 @@ def _live_joiner_names(node_id: str) -> list[str]:
         reg = json.loads(Path(agents_registry_path()).read_text())
     except Exception:  # noqa: BLE001 - an unreadable registry must not block a join
         return []
-    prefix = f"j-{node_id}-"
+    legacy_prefix = f"j-{node_id}-"
+    canonical_prefix = f"jn-t-{node_id}-"
     candidates = [
         (str(row.get("name")), str(row.get("harness_session_id") or ""))
         for row in reg.get("agents", [])
-        if str(row.get("name", "")).startswith(prefix) and row.get("status") == "live"
+        if str(row.get("name", "")).startswith((legacy_prefix, canonical_prefix))
+        and row.get("status") == "live"
     ]
     if not candidates:
         return []
@@ -2608,13 +2447,13 @@ def _sandbox_brief_section(
         if pol is not None and pol.verdict == "enforced":
             any_policy = True
             lines.append(
-                f"- j-{node_id}-{k} (band {band}) may write: "
+                f"- jn-t-{node_id}-{k} (band {band}) may write: "
                 f"{', '.join(pol.allow_write or ())}. A write outside it is "
                 f"refused at the Edit/Write layer and by the OS sandbox."
             )
         else:
             lines.append(
-                f"- j-{node_id}-{k} (band {band or 'unbanded'}) is NOT "
+                f"- jn-t-{node_id}-{k} (band {band or 'unbanded'}) is NOT "
                 f"narrowed ({verdict}); the sandbox layer is off for it."
             )
     return "\n".join(lines) if any_policy else ""
@@ -2754,7 +2593,6 @@ def _join_node(
     # their cardinality was never a capacity. Measured over the 45 joinable
     # banded plans since bands existed, 14 were capped below width - 1, losing
     # 34 of 197 joiner slots in a fortnight.
-    #
     # The width rule still caps, and it is the real one: the node holder is one
     # of the width workers, so joiners stay under it.
     # One switch covers BOTH enforcement layers (the OS allowlist and the
@@ -2775,7 +2613,6 @@ def _join_node(
         # byte-identical, mutually unrestricted policies - the isolation the
         # partition exists to provide, silently gone. So the band cardinality
         # legitimately caps the lane count HERE, and only here.
-        #
         # With enforcement off (the default) it does not, and that is the
         # whole point of the fix: `len(bands)` used to sit in this min
         # unconditionally, so a single-band plan of width 6 got one joiner and
@@ -2794,7 +2631,7 @@ def _join_node(
         worker_bands = [""] * count
     policies = render_join_write_policy(graph, worker_bands) if sandbox_on else {}
 
-    lead = f"j-{node_id}-1"
+    lead = f"jn-t-{node_id}-1"
     # The joiner brief rides a FILE, not only TARGET_BRIEF: a daemon-forked
     # worker inherits the claude daemon's env (x-6de8), so the env export in
     # the spawn below reaches panes but not this lane's serving sessions.
@@ -2802,11 +2639,21 @@ def _join_node(
     # table is the band's durable channel for the same reason.
     brief_dir = Path(worktree) / ".fno" / "join-briefs"
     try:
+        # x-84b2: joiner names are minted once through the canonical bridge -
+        # jn-t-<node>-<ordinal>, the operator-verb source stamped so a joiner
+        # is distinguishable from an autonomous dispatch.
+        try:
+            joiner_names = {
+                k: dispatch_agent_name("jn", "t", node_id, slug=str(k))
+                for k in range(1, len(worker_bands) + 1)
+            }
+        except AgentNameError as exc:
+            raise JoinRefuse(6, f"joiner name unmintable: {exc}") from exc
         brief_dir.mkdir(parents=True, exist_ok=True)
         band_table = ""
         if bands:
             rows = "\n".join(
-                f"| j-{node_id}-{k} | {band} |"
+                f"| {joiner_names[k]} | {band} |"
                 for k, band in enumerate(worker_bands, start=1)
             )
             band_table = (
@@ -2869,7 +2716,7 @@ def _join_node(
             pol = policies.get(band)
             if pol is None or pol.verdict != "enforced":
                 continue
-            name = f"j-{node_id}-{k}"
+            name = joiner_names[k]
             policy_dir.mkdir(parents=True, exist_ok=True)
             (policy_dir / f"{name}.json").write_text(
                 json.dumps(
@@ -2888,9 +2735,10 @@ def _join_node(
     spawned: list[str] = []
     lanes: dict[str, dict] = {}
     for k, band in enumerate(worker_bands, start=1):
-        name = f"j-{node_id}-{k}"
+        name = joiner_names[k]
         brief = (
-            f"lead joiner of {node_id}: you are the mail hub for j-{node_id}-*"
+            f"lead joiner of {node_id}: you are the mail hub for the {node_id} "
+            f"joiners (jn-t-{node_id}-*)"
             if k == 1
             else f"joiner of {node_id}: mail hub is {lead}"
         ) + (
@@ -2948,7 +2796,6 @@ def _join_node(
             # was ended mid-flight, and that reversal is gated on pane-keeper
             # durability being confirmed end to end: a keeper must survive
             # `fno mux kill-server` and re-adopt the SAME pid.
-            #
             # Not confirmed as of 2026-09-02. `fno mux pane keeper list` shows
             # only the operator's own main pane, no joiner survivor to read
             # durability off, and the one machine that could run the kill-server
@@ -3102,6 +2949,16 @@ def _observe_node_claim(
         occupied = True
         worker = ", ".join(workers)
     block_reason = "worked-authority-unavailable" if worked_error else None
+    if occupied and block_reason is None:
+        # x-dead task 2.2: `blocked`/`already-claimed` starved auto_continue
+        # for 97 minutes; name what was consulted and what it found.
+        parts = [
+            p for p in (
+                f"claim {claim_state} held by {holder}" if claim_state in ("live", "suspect") else "",
+                f"worked overlay: {worker}" if worker else "",
+            ) if p
+        ]
+        block_reason = "held: " + "; ".join(parts) if parts else None
     dead_action = (
         None
         if occupied or not enforce_failure_limit
@@ -3138,8 +2995,12 @@ def _observe_node_claim(
             event_data["block_reason"] = block_reason
         agent_events.emit(EVENT_CLAIM_OBSERVED, **event_data)
     if emit and claim_state in ("stale", "suspect"):
+        # Lead with the worker when one is on the node: this line pointed at a
+        # stale claim while the row was the occupant, and an operator followed
+        # it to a claim that read UNCLAIMED.
+        lead = f"worker row {worker} is on the node; " if worker else ""
         message = (
-            f"dispatch {action} for {node_id}: node claim is {claim_state}, "
+            f"dispatch {action} for {node_id}: {lead}node claim is {claim_state}, "
             f"prior holder={holder}, truth_status={truth}"
         )
         print(f"advance: WARNING: {message}", file=sys.stderr)
@@ -3281,12 +3142,17 @@ def advance(
     verbose: bool = False,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> AdvanceResult:
     """Dispatch the next now-unblocked node, if armed and unclaimed.
 
     A dispatch-time ``model``/``provider`` (from ``fno backlog advance -m/-p``)
     is the operator's in-the-moment word and outranks the node's own annotation
     (Locked Decision 1); absent, the node's ``model``/``provider`` keys are used.
+
+    ``source`` (x-84b2) stamps the worker's name: the merge-triggered
+    continuation passes ``ac``, the blueprint terminal ``sob``; a bare
+    attended call passes nothing and the name carries no source segment.
 
     Invoked ONLY after the node-close write commits (keyed by ``closed_node_id``,
     AC1-RACE), so within one reconcile/post-merge run the closed node is already
@@ -3303,10 +3169,12 @@ def advance(
     armed, rank = _auto_continue_resolve(project_root)
 
     def _tick(acted: int, skip_reason: Optional[str], detail: str = "") -> None:
-        """One auto-continue arm row: what this advance did, or why not."""
+        """One auto-continue arm row: what this advance did, or why not. The
+        detail passes through uncapped: the emitter bounds one row, and a
+        failure row must carry the whole refusal."""
         emit_tick("auto_continue", scheduler=scheduler_from_env(), interval_s=1800,
                   acted=acted, skip_reason=skip_reason,
-                  detail=(f"closed={closed_node_id or '-'} {detail}")[:200] or None)
+                  detail=(f"closed={closed_node_id or '-'} {detail}") or None)
 
     def skip(
         reason: str,
@@ -3333,7 +3201,7 @@ def advance(
         _emit(EVENT_SKIPPED, data, ev_path)
         tick_detail = f"node={node_id or '-'} reason={reason}"
         if detail:
-            tick_detail += f" detail={detail[:120]}"
+            tick_detail += f" detail={detail}"
         _tick(0, reason, tick_detail)
         return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason,
                              node_id=node_id, detail=detail, exit_code=exit_code)
@@ -3343,8 +3211,7 @@ def advance(
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         _emit(EVENT_FAILED, data, ev_path)
-        # Tail this too: the error ends at the refusal, so must the window.
-        _tick(0, "spawn-failed", f"node={node_id} error={error[-140:]}")
+        _tick(0, "spawn-failed", f"node={node_id} error={error}")
         return AdvanceResult(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )
@@ -3494,6 +3361,7 @@ def advance(
             brief=_brief,
             dispatch_reservation=(dispatch_key, holder, dispatch_root),
             caller="advance",
+            source=source,
             events_path=ev_path,
             receipt=next_receipt,
         )
@@ -3537,11 +3405,13 @@ def advance(
         {
             "node_id": node_id,
             "short_id": short_id,
-            "agent_name": _worker_agent_name(node_id, node.get("slug") or node.get("title")),
+            # The exact registered name from the spawn receipt (x-84b2).
+            "agent_name": next_receipt.get("agent_name", ""),
             "verb": next_receipt.get("verb", "builtin"),
             "verb_source": next_receipt.get("verb_source", "field-absent"),
             "brief": _brief_tag,
             "rank": rank,
+            "notes": list(next_receipt.get("notes") or ()),
             **({"closed_node_id": closed_node_id} if closed_node_id else {}),
         },
         ev_path,
@@ -3563,18 +3433,22 @@ def advance(
         touch_nudge()
     except Exception:
         pass
-    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+    return AdvanceResult(
+        "dispatched",
+        EVENT_DISPATCHED,
+        node_id=node_id,
+        short_id=short_id,
+        notes=tuple(next_receipt.get("notes") or ()),
+    )
 
 
 # ---------------------------------------------------------------------------
 # advance_dependents() - cross-project successor dispatch (G1 / AC5-FR)
 # ---------------------------------------------------------------------------
-#
 # advance() above dispatches the project-scoped `next` ready node (same-project
 # auto-continue). It deliberately CANNOT reach a dependent in another project:
 # `fno backlog next --project <closed.project>` filters foreign nodes out. So a
 # merge of A (project etl) never dispatches B (project web, blocked_by A).
-#
 # advance_dependents() closes that gap by following `blocked_by` EDGES instead of
 # a project-scoped selection: for each now-unblocked DIRECT dependent in a
 # DIFFERENT project, it spawns `/target --no-merge <dep> --cwd <dep project root>`.
@@ -3740,6 +3614,7 @@ def _converge_one(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     rank: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> AdvanceResult:
     """The one shared converge-dispatch core: dedup, reserve, spawn, one receipt.
 
@@ -3847,6 +3722,7 @@ def _converge_one(
                 node=node_meta,
                 dispatch_reservation=(dispatch_key, holder, dispatch_root),
                 caller="_converge_one",
+                source=source,
                 events_path=ev_path,
                 receipt=spawn_receipt,
             )
@@ -3868,11 +3744,13 @@ def _converge_one(
                 {
                     "node_id": node_id,
                     "short_id": short_id,
-                    "agent_name": _worker_agent_name(node_id, slug),
+                    # The exact registered name from the spawn receipt (x-84b2).
+                    "agent_name": spawn_receipt.get("agent_name", ""),
                     "cross_project": cross_project,
                     "verb": spawn_receipt.get("verb", "builtin"),
                     "verb_source": spawn_receipt.get("verb_source", "field-absent"),
                     "brief": _brief_tag,
+                    "notes": list(spawn_receipt.get("notes") or ()),
                 }
             ),
             ev_path,
@@ -3896,6 +3774,7 @@ def _converge_one(
             node_id=node_id,
             short_id=short_id,
             substrate=spawn_receipt.get("substrate"),
+            notes=tuple(spawn_receipt.get("notes") or ()),
         )
     finally:
         if not dispatched:
@@ -3905,7 +3784,7 @@ def _converge_one(
 def _dispatch_one_dependent(
     dep: dict, closed_node_id: str, ev_path: Path, verbose: bool,
     *, model: Optional[str] = None, provider: Optional[str] = None,
-    rank: Optional[str] = None,
+    rank: Optional[str] = None, source: Optional[str] = None,
 ) -> AdvanceResult:
     """Resolve one dependent's own project root, then converge-dispatch it.
 
@@ -3957,7 +3836,7 @@ def _dispatch_one_dependent(
     return _converge_one(
         dep, root, ev_path, verbose,
         cross_project=cross_project, closed_node_id=closed_node_id,
-        model=model, provider=provider, rank=rank,
+        model=model, provider=provider, rank=rank, source=source,
     )
 
 
@@ -3970,6 +3849,7 @@ def advance_dependents(
     verbose: bool = False,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> list[AdvanceResult]:
     """Dispatch the closed node's now-unblocked direct dependents (G1 + RC1).
 
@@ -4030,7 +3910,8 @@ def advance_dependents(
 
     return [
         _dispatch_one_dependent(
-            dep, closed_node_id, ev_path, verbose, model=model, provider=provider, rank=rank
+            dep, closed_node_id, ev_path, verbose, model=model, provider=provider,
+            rank=rank, source=source,
         )
         for dep in deps
     ]
@@ -4039,7 +3920,6 @@ def advance_dependents(
 # ---------------------------------------------------------------------------
 # Epic advance / converge (x-9608 K1): fan out an epic's ready leaf children
 # ---------------------------------------------------------------------------
-#
 # The mission's manual entry point (and, later, K2's per-tick drain reuse the
 # same _converge_one core). A "mission" is an epic node plus its transitive
 # children (the parent EDGE is the mission key; mission_id is untouched -
@@ -4088,7 +3968,8 @@ class AdvanceEpicResult:
             "children": [
                 {"node_id": r.node_id, "decision": r.decision,
                  "reason": r.reason, "detail": r.detail,
-                 "short_id": r.short_id, "substrate": r.substrate}
+                 "short_id": r.short_id, "substrate": r.substrate,
+                 "notes": list(r.notes)}
                 for r in self.child_results
             ],
         }
@@ -4115,10 +3996,8 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
 def _binding_provider() -> Optional[str]:
     """The configured provider with the least lane headroom, or None.
 
-    The unpinned epic advance could route anywhere, so the most constrained
-    CONFIGURED provider is the one whose cap binds the next spawn. One walk,
-    shared by :func:`_spawn_headroom` (the width) and the explain surfaces
-    (the row that explains the width).
+    x-fa3a prices each child by its own lane, so this cap binds only an
+    unresolvable child (plus the scalar width and the explain's no-subject row).
     """
     from fno.agents import spawn_gate
     from fno.config import load_settings
@@ -4135,65 +4014,156 @@ def _binding_provider() -> Optional[str]:
     return binding
 
 
-def _spawn_headroom(provider: Optional[str] = None) -> int:
-    """Dispatch width from the spawn gate's own counters.
+@dataclass
+class _LaneBudget:
+    """One pass's spawn-gate counters, shared by the drain and the explain preview.
 
-    ``config.parallel.max_lanes`` once gated the epic advance here, but it was
-    a second concurrency authority beside the real one: a spawn is refused by
-    the spawn gate's ``max_live`` and per-provider ``lanes``, and those are the
-    caps that actually bind. The knob is retired (the deletion ruling stands;
-    the key stays parseable for one release with a deprecation line), and the
-    width now derives from the gate's own counters through the SAME functions
-    ``fno agents top`` and ``advance --explain`` read, so no surface can
-    disagree with the refusal that follows it:
-
-    - fleet: ``agents.max_live`` minus the live census slot count
-    - provider: ``lanes`` minus the live count for ``provider``; with no pin,
-      the most-constrained CONFIGURED provider bounds the next spawn, because
-      the grid may route it anywhere
-
-    The number is advisory width, not the refusal - the gate still refuses at
-    spawn time. Fleet or provider headroom at or below zero returns 0: the
-    fleet is full, and dispatching would only manufacture refusals. A failed
-    reading degrades to 1 (the conservative single lane the retired config
-    default carried) with a warning naming what could not be read.
+    x-fa3a: a child is bounded by the lane its own dispatch settles. Absent
+    from ``vendor_remaining`` = uncapped; ``binding`` keeps the old
+    most-constrained cap for a child whose lane cannot be resolved.
     """
+
+    fleet: int = 0
+    vendor_remaining: dict[str, int] = field(default_factory=dict)
+    binding: Optional[str] = None
+    binding_remaining: Optional[int] = None
+    dispatched_by_vendor: dict[str, int] = field(default_factory=dict)
+
+
+def _spawn_budget(provider: Optional[str] = None) -> _LaneBudget:
+    """One pass's width state from the gate's own counters, shared by the drain
+    and the ``--explain`` preview so both price children identically."""
+    from fno.agents import spawn_gate
+    from fno.config import load_settings
+
+    agents_cfg = load_settings().agents
+    fleet = int(agents_cfg.max_live) - spawn_gate.census().slot_count
+    limits = dict(agents_cfg.provider_limits)
+    pin_vendor: Optional[str] = None
+    if provider is not None:
+        from fno.agents.spawn_defaults import resolve_lane_vendor
+
+        vendor = resolve_lane_vendor([], harness=provider)
+        # Resolver silent: only a raw vendor pin scopes; else the configured caps bind.
+        pin_vendor = vendor or (provider if provider in limits else None)
+        scoped: dict = {pin_vendor: limits.get(pin_vendor)} if pin_vendor else limits
+    else:
+        scoped = limits
+    vendor_remaining: dict[str, int] = {}
+    for name, budget in scoped.items():
+        cap = spawn_gate.provider_lanes_cap(budget)
+        if cap is None:
+            continue  # an uncapped provider cannot bound the width
+        vendor_remaining[name] = cap - spawn_gate.provider_live_count(name)
+    # x-7783 AC10: a hold or undecidable CPU verdict queues/refuses every spawn.
+    from fno.agents.spawn_gate import _cpu_axis
+
+    admission = _cpu_axis()
+    if admission.verdict != "admit":
+        _LOG.warning("cpu axis %s, dispatch width 0: %s", admission.verdict, admission.reason)
+        fleet = 0
+    binding: Optional[str]
+    binding_remaining: Optional[int]
+    if pin_vendor is not None:
+        binding = pin_vendor
+        binding_remaining = vendor_remaining.get(pin_vendor)
+    else:
+        binding = _binding_provider()
+        binding_remaining = vendor_remaining.get(binding) if binding else None
+    return _LaneBudget(
+        fleet=fleet,
+        vendor_remaining=vendor_remaining,
+        binding=binding,
+        binding_remaining=binding_remaining,
+    )
+
+
+def _spawn_budget_or_degraded(provider: Optional[str] = None) -> _LaneBudget:
     try:
-        from fno.agents import spawn_gate
-        from fno.config import load_settings
-
-        agents_cfg = load_settings().agents
-        fleet_remaining = int(agents_cfg.max_live) - spawn_gate.census().slot_count
-        limits = dict(agents_cfg.provider_limits)
-        if provider is not None:
-            from fno.agents.spawn_defaults import resolve_lane_vendor
-
-            # The pin is a HARNESS (`--provider` resolves on the harness axis);
-            # provider_limits is keyed by VENDOR. Map through the shipped
-            # resolver and fall back to the raw pin, which may already be a
-            # vendor. A harness pin read against this vendor-keyed table
-            # directly would miss (`codex` is not a key) and silently drop the
-            # one cap that binds.
-            pin_vendor = resolve_lane_vendor([], harness=provider) or provider
-            budgets = {pin_vendor: limits.get(pin_vendor)}
-        else:
-            binding = _binding_provider()
-            budgets = {} if binding is None else {binding: limits.get(binding)}
-        provider_remaining: Optional[int] = None
-        for name, budget in budgets.items():
-            cap = spawn_gate.provider_lanes_cap(budget)
-            if cap is None:
-                continue  # an uncapped provider cannot bound the width
-            remaining = cap - spawn_gate.provider_live_count(name)
-            if provider_remaining is None or remaining < provider_remaining:
-                provider_remaining = remaining
-        bound = [fleet_remaining]
-        if provider_remaining is not None:
-            bound.append(provider_remaining)
-        return max(0, min(bound))
+        return _spawn_budget(provider)
     except Exception as exc:  # noqa: BLE001 - degrade to the conservative lane, loudly
         _LOG.warning("spawn headroom unreadable, degrading to 1 lane: %s", exc)
-        return 1
+        return _LaneBudget(fleet=1)
+
+
+def _child_lane_vendor(
+    child: dict, *, model: Optional[str], provider: Optional[str]
+) -> Optional[str]:
+    """The VENDOR whose lane cap prices this child, or None when unresolvable.
+
+    x-fa3a: the child's own dispatch settles its lane. Order mirrors the spawn
+    seam - harness pin (pass flag, else the node's provider field) > grid pick
+    > the verb's profile fallback; None keeps the binding-provider cap.
+    """
+    try:
+        from fno.agents.spawn_defaults import resolve_lane_vendor
+        from fno.config import load_settings
+
+        pin = (provider or "").strip() or (child.get("provider") or "").strip() or None
+        if pin:
+            vendor = resolve_lane_vendor([], harness=pin)
+            if vendor is not None or pin in dict(load_settings().agents.provider_limits):
+                return vendor or pin
+            return None  # no vendor opinion: the binding cap prices this child
+        verb = _node_effective_verb(child)
+        harness, _m, route, _a, _why = _grid_lane_for(
+            child, model=model, provider=None, verb=verb
+        )
+        if harness:
+            argv = ["fno"] + (["--route", route] if route else [])
+            return resolve_lane_vendor(argv, harness=harness)
+        # The grid declined; the spawn falls back to agents.profiles.<verb>.
+        agents_cfg = load_settings().agents
+        profile = (getattr(agents_cfg, "profiles", {}) or {}).get(
+            (verb or "target").strip().lstrip("/")
+        ) or getattr(agents_cfg, "defaults", None)
+        route = (getattr(profile, "route", "") or "").strip() or None
+        prof_model = model or (getattr(profile, "model", "") or "").strip() or None
+        prof_harness = (getattr(profile, "provider", "") or "").strip() or None
+        if route is None and prof_model is None and prof_harness is None:
+            return None  # nothing the spawn would inherit names a lane
+        argv = ["fno"] + (["--route", route] if route else [])
+        argv += ["--model", prof_model] if prof_model else []
+        return resolve_lane_vendor(argv, harness=prof_harness)
+    except Exception:  # noqa: BLE001 - an unresolvable lane falls back to the binding cap
+        return None
+
+
+def _lane_cap_verdict(
+    child: dict,
+    budget: _LaneBudget,
+    *,
+    total: int,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> tuple[bool, Optional[str], Optional[int]]:
+    """``(refused, lane, headroom)`` for one child: the ONE classifier the drain
+    and the ``--explain`` preview share, so they cannot disagree. ``headroom``
+    is set only when ``refused``; ``lane`` None = unpriced (fleet or binding cap).
+    """
+    if total >= budget.fleet:
+        return True, None, budget.fleet - total  # fleet-full: the lane is moot
+    lane = _child_lane_vendor(child, model=model, provider=provider)
+    if lane is not None:
+        remaining = budget.vendor_remaining.get(lane)
+        if remaining is None:
+            return False, lane, None  # an uncapped lane cannot refuse
+        used = budget.dispatched_by_vendor.get(lane, 0)
+        return used >= remaining, lane, remaining - used
+    if budget.binding_remaining is not None and total >= budget.binding_remaining:
+        return True, None, budget.binding_remaining - total
+    return False, None, None
+
+
+def _spawn_headroom(provider: Optional[str] = None) -> int:
+    """The scalar width the pre-x-fa3a surfaces read: min(fleet, the one binding
+    cap). The drain prices children per lane instead; a failed read degrades to 1.
+    """
+    budget = _spawn_budget_or_degraded(provider)
+    bound = [budget.fleet]
+    if budget.binding_remaining is not None:
+        bound.append(budget.binding_remaining)
+    return max(0, min(bound))
 
 
 def _set_mission_active(epic_id: str, active: bool) -> bool:
@@ -4237,6 +4207,7 @@ def advance_epic(
     provider: Optional[str] = None,
     stop: bool = False,
     continuation: bool = False,
+    source: Optional[str] = None,
 ) -> AdvanceEpicResult:
     """Advance (or stop) an epic mission: mark active + converge pass 1.
 
@@ -4303,11 +4274,20 @@ def advance_epic(
 
     # All descendants already done -> mission complete: verify the cascade closed
     # the epic, deactivate, emit a no-op receipt. (_container_ids guaranteed at
-    # least one child above.)
+    # least one child above.) Descendants read the shared closure rule the close
+    # paths apply (children_all_closed): supersede stamps no completed_at, so a
+    # raw completed_at read re-arms a mission whose every child was replaced
+    # elsewhere. A closed epic itself never re-arms either.
+    from fno.graph._reconcile import children_all_closed
+
     descendants = descendants_of(entries, canon)
     by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
-    all_done = bool(descendants) and all(
-        (by_id.get(d) or {}).get("completed_at") for d in descendants
+    epic = by_id.get(canon) or {}
+    all_done = bool(epic.get("completed_at")) or (
+        bool(descendants)
+        and children_all_closed(
+            epic, [d for d in (by_id.get(x) for x in descendants) if isinstance(d, dict)]
+        )
     )
     if all_done:
         _set_mission_active(canon, False)
@@ -4345,13 +4325,10 @@ def advance_epic(
             child_results=(AdvanceResult("skipped", EVENT_SKIPPED, reason="children-error"),),
         )
 
-    # Width: spawn-gate headroom (fleet + provider). Live workers already
-    # consumed their capacity inside the read (the census and provider counts
-    # subtract them), so the bound here is how many MORE spawns this pass may
-    # make - not a per-project threshold. A --provider pin reads that
-    # provider's lanes; unpinned, the most constrained configured provider
-    # bounds it. An overall --max caps total dispatches this run.
-    max_lanes = _spawn_headroom(provider)
+    # Width: per-child lanes from the spawn gate's own counters (x-fa3a). The
+    # bound is how many MORE spawns this pass may make; each child is priced
+    # by the lane its own dispatch settles, unresolvable lanes by the binding cap.
+    budget = _spawn_budget_or_degraded(provider)
 
     results: list[AdvanceResult] = []
     dispatched: list[str] = []
@@ -4383,15 +4360,19 @@ def advance_epic(
         if not root:
             results.append(_converge_skip_unmapped(child, proj, canon, ev_path, rank=rank))
             continue
-        # Spawn-gate headroom exhausted this pass (0 = the fleet or the
-        # binding provider is already full). The remaining ready children wait
-        # for a drain / re-run; the gate itself still refuses at spawn time if
-        # the world changed since the read.
-        if total >= max_lanes:
+        # Spawn-gate capacity exhausted for THIS child's lane. The remaining
+        # ready children wait for a drain / re-run; the gate itself still
+        # refuses at spawn time if the world changed since the read.
+        refused, lane, headroom = _lane_cap_verdict(
+            child, budget, total=total, model=model, provider=provider
+        )
+        if refused:
+            lane_label = lane or ("fleet" if total >= budget.fleet else f"binding:{budget.binding}")
             _emit(
                 EVENT_SKIPPED,
                 {"reason": "lane-cap", "node_id": child["id"], "mission": canon,
-                 "detail": f"{proj}: headroom={max_lanes} (spawn gate)", "rank": rank},
+                 "detail": f"{proj}: lane={lane_label} headroom={headroom} (spawn gate)",
+                 "rank": rank},
                 ev_path,
             )
             results.append(
@@ -4400,12 +4381,15 @@ def advance_epic(
             continue
         res = _converge_one(
             child, root, ev_path, verbose,
-            cross_project=True, mission=canon, model=model, provider=provider, rank=rank,
+            cross_project=True, mission=canon, model=model, provider=provider,
+            rank=rank, source=source,
         )
         results.append(res)
         if res.decision == "dispatched":
             dispatched.append(res.node_id or child["id"])
             total += 1
+            if lane is not None:
+                budget.dispatched_by_vendor[lane] = budget.dispatched_by_vendor.get(lane, 0) + 1
         if res.decision == "skipped" and res.exit_code not in (None, _spawn_gate.EXIT_PROVIDER_CAP):
             # A global refusal (load, RAM, queue, registry) ends the pass: the
             # condition is identical for every remaining child. A 78 skip is
@@ -4556,7 +4540,11 @@ def echo_advance_receipt(result: AdvanceEpicResult, *, kind: str, json_out: bool
         typer.echo(json.dumps(result.receipt(), indent=2))
         return
     if result.error:
-        typer.echo(f"{kind} {result.epic_id}: {result.error}", err=True)
+        # x-4138: a refusal (no-such-node / not-a-container, the exit-1 set
+        # below) stays on stderr; every other error is a VERDICT and goes to
+        # stdout. Nothing exits 0 into an empty stdout.
+        is_refusal = result.error in ("no-such-node", "not-a-container")
+        typer.echo(f"{kind} {result.epic_id}: {result.error}", err=is_refusal)
     elif kind == "epic" and result.deactivated:
         reason = "complete" if result.all_done else "stopped"
         typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
@@ -4569,3 +4557,80 @@ def echo_advance_receipt(result: AdvanceEpicResult, *, kind: str, json_out: bool
             + (f", skipped {len(skips)}" if skips else "")
             + (f", failed {len(fails)}" if fails else "")
         )
+        # x-4138: each dispatched child's spawn-seam receipt prints under
+        # its own node id, so a fan-out stays attributable.
+        for r in result.child_results:
+            for note in r.notes:
+                typer.echo(f"{kind} {result.epic_id}: {r.node_id}: {note}")
+def run_advance_epic(
+    epic: str,
+    *,
+    stop: bool,
+    max_dispatch: Optional[int],
+    json_out: bool,
+    verbose: bool,
+    model: Optional[str],
+    provider: Optional[str],
+    continuation: bool = False,
+    source: Optional[str] = None,
+) -> None:
+    """Run the epic advance and render its receipt.
+
+    Refusals (no-such-node / not-a-container) exit non-zero: unlike the
+    merge-advance path (a dispatch decision is never an error), an operator naming
+    a bad node to --epic wants a clear failure. Everything else exits 0.
+
+    ``continuation`` is the K2 daemon-drain mode (never reactivate; retire an
+    inactive mission).
+    """
+    import typer
+
+    try:
+        result = advance_epic(
+            epic,
+            stop=stop,
+            max_dispatch=max_dispatch,
+            verbose=verbose,
+            model=model,
+            provider=provider,
+            continuation=continuation,
+            source=source,
+        )
+    except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
+        typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
+        # x-4138: the detail alone used to leave stdout empty and exit 0 -
+        # byte-identical to a swallowed crash for any caller reading stdout.
+        typer.echo(f"epic {epic}: failed reason=unexpected-error")
+        raise typer.Exit(code=0)
+
+    if json_out:
+        typer.echo(json.dumps(result.receipt(), indent=2))
+    else:
+        if result.error:
+            # x-4138: a refusal (no-such-node / not-a-container, the exit-1
+            # set below) stays on stderr; every other error is a VERDICT and
+            # goes to stdout. Nothing exits 0 into an empty stdout.
+            is_refusal = result.error in ("no-such-node", "not-a-container")
+            typer.echo(f"epic {result.epic_id}: {result.error}", err=is_refusal)
+        elif result.deactivated:
+            reason = "complete" if result.all_done else "stopped"
+            typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
+        else:
+            n = len(result.dispatched)
+            skips = [r for r in result.child_results if r.decision == "skipped"]
+            fails = [r for r in result.child_results if r.decision == "failed"]
+            typer.echo(
+                f"epic {result.epic_id}: dispatched {n}"
+                + (f", skipped {len(skips)}" if skips else "")
+                + (f", failed {len(fails)}" if fails else "")
+            )
+            # x-4138: each dispatched child's spawn-seam receipt prints under
+            # its own node id, so a fan-out stays attributable.
+            for r in result.child_results:
+                for note in r.notes:
+                    typer.echo(f"epic {result.epic_id}: {r.node_id}: {note}")
+
+    # A refusal (bad node) is the only non-zero exit; a per-child failure is a
+    # loud receipt, not a verb error.
+    if result.error in ("no-such-node", "not-a-container"):
+        raise typer.Exit(code=1)

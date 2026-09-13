@@ -301,6 +301,10 @@ That identity is the diff from `merge-base(base, sha)` to `sha`, documentation p
 Equal identities mean the code under review is byte-identical, whatever happened to the sha.
 That is what makes a rebase carry and a one-line code fix die.
 
+A carry answers freshness, never the round ledger.
+
+The `--verify-fixes` carveout is the count-side complement. Its hold half lives in `review_invocation_refusal`. When the invocation flags carry `--verify-fixes`, its count half is the `review_round` the emitter stamps: the counter reads the round the pass verified. An undeclared pass counts a fresh round, as it always has.
+
 `reviewed_sha` comes from a different place per producer, and both were already available.
 
 | Producer | `reviewed_sha` source | Cost |
@@ -448,21 +452,33 @@ Two consequences are recorded rather than gated.
 
 It is recorded rather than gated because the native final-head review is the DEFAULT path, and refusing its attestation wedges every single-session PR.
 
-The `model` field records what the environment CLAIMED.
+The `model` field records the model that ANSWERED, stamped by the emit chokepoint from the attesting session's own transcript via `observed_model_for_session` (the platform provenance leaf).
 
-The producer refuses to record a claim it can prove false.
+The emitter passes no model of its own.
 
-A non-`claude*` model name with no non-Anthropic base URL cannot be the model that answered.
+The routed-model environment names the model the session ASKED for.
 
-A refused claim stores the literal `unobserved`, never an empty string.
+A non-Anthropic name over an unset base URL silently falls back to the primary model.
 
-So a claim that was made and declined never reads the same as a field nobody set.
+An env read recorded asks as answers.
 
-A claim that is merely unverified still records as given, because nothing in a shell can check it.
+Four sessions in one day produced that wrong record.
 
-That refusal landed separately.
+The caller gets no vote: a `--data` model that disagrees with the transcript refuses the emit, the same rule `attester_session_id` follows.
 
-`tests/hooks/test_attest_model.sh` drives the hook and the emitter over one env matrix, so the two predicates cannot drift.
+An unresolvable transcript means not observable, so the field is absent, never a guess.
+
+Events emitted before this change can carry an env claim or the literal `unobserved`.
+
+Both are legacy values a reader must not treat as an observation.
+
+Even with no attestation ever emitted, `hooks/attest-model.sh` still warns at SessionStart that the ROUTE is misconfigured, a real config bug worth surfacing.
+
+`tests/hooks/test_attest_model.sh` drives that hook's env rule.
+
+The emitter's copy of the rule is gone.
+
+The harness pins one body where it once held two in parity.
 
 ## Attestation origin: whose process rendered the verdict
 
@@ -569,11 +585,11 @@ Neither layer covers the specimens alone. The probe cannot see the window betwee
 
 | Site | Registers | Why it is the one that matters |
 |---|---|---|
-| `PreToolUse` on the Skill tool (`hooks/review-hold.sh`) | takes it | all three specimens were reviews the worker self-invoked through this tool, which is not footnote code and cannot register on its own |
-| `fno do target request-self-review` | takes it | the requester side, in footnote's own code, so every pipeline review is held on any harness without a reviewer doing anything. It takes nothing on a refused or unconfirmed send: no review is running |
+| `PreToolUse` on the Skill tool (`hooks/review-hold.sh`) | takes it | all three specimens were reviews the worker self-invoked through this tool, which is not footnote code and cannot register on its own. The hold keys the named PR's head ref, resolved from GitHub, or a named branch; only an invocation with no target reads the cwd |
+| `fno do target request-self-review` | takes it | the requester side, in footnote's own code, so every pipeline review is held on any harness without a reviewer doing anything. It takes nothing on a refused or unconfirmed send: no review is running. It passes the branch it resolved and takes no hold when the PR read has no head ref |
 | `skills/review/scripts/emit-attestation.sh` | releases it | the positive completion marker: a verdict now exists for this head, so the release and the proof are one event |
 | `fno do review classify --attest` | releases it | the Python producer of the same row. It emitted the verdict and left the hold standing for the full TTL |
-| the TTL | ages it out | the reviewer died. See the receipt rule below |
+| the TTL | ages it out | the review did not attest inside its lease, whether or not its session still runs. See the receipt rule below |
 | a human or an unhooked harness | takes nothing | the named residual gap, covered only by the worktree probe |
 
 The requester site is the answer to PR 1575, merged 2026-09-07 while the only non-author review was still running. Eight findings, one HIGH, were discarded, and a review that finishes after a merge cannot post them. The hold existed and `fno do pr merge` was already fail-closed against it. Nothing took it. A hold nobody takes is identical to a hold that does not exist.
@@ -599,13 +615,15 @@ The release never names a holder, and `--holder` is optional on the verb for tha
 
 The hook reads files rather than shelling a third `fno` probe. The two vetoes above it already spend 25s each. The harness hook budget is 60s, and the margin is under 6s. A killed hook emits no verdict at all.
 
-That coarseness is deliberate, in the safe direction. Any review hold in the repo denies. The hook never maps the PR to its branch, because that needs the network call this path exists to avoid. It never judges expiry either. Hybrid liveness can keep a TTL-lapsed hold LIVE, so a TTL-only read here can ALLOW what the guard refuses. A wrong deny costs one command.
+That coarseness is deliberate, in the safe direction. Any review hold in the repo denies. The hook never maps the PR to its branch, because that needs the network call this path exists to avoid. It never judges expiry either. It reads file presence only. The first Python read deletes a lapsed hold, so nothing expired lingers for the hook to misread. A wrong deny costs one command.
 
 ### Failing safe in both directions
 
 A missing hold is never by itself the clear answer. It clears only after the worktree enumeration RAN and answered. Four readings block instead: a corrupted lockfile, an unreadable claims root, a failed `git worktree list`, and a PR whose head branch will not resolve. An unprobed PR is not a clear one.
 
 A hold that outlives a crashed reviewer wedges the merge lane permanently. That is worse than the defect it prevents. So it ages out on `config.review.hold_ttl_minutes`, which defaults to 90. It never ages out silently. The surface that clears past a lapsed hold prints the holder and the expiry, and emits `review_hold_expired`. A lane that clears with no receipt reads exactly like a lane nobody ever held.
+
+A live holder session does not extend the hold: the lease is on the review, not on the session that ran it. A same-holder re-acquire renews it, which is how a genuinely long review keeps its lane.
 
 That same arm DELETES the lockfile, in one breath with the receipt. A lapsed file stops blocking the Python readers, which judge expiry, and keeps blocking the stdlib hook, which cannot. One crashed reviewer otherwise denies every bare `gh pr merge` in the repo, for every PR, until someone notices. The claims reaper does collect it eventually, but it is config-gated, so this path cannot lean on it.
 
@@ -643,3 +661,28 @@ The local `review_coverage` event is the computed verdict. The `fno/review-cover
 ### Zero rows vs a frozen streak: the discriminator
 
 Two symptoms read alike and are different defects. Count `loop_check` rows in the worktree's own `.fno/events.jsonl`. Zero rows means the producer never ran there. A manual `fno-agents review-coverage --cwd <worktree>` settles it. Rows present with `consecutive_unchanged` frozen below `MUTE_PROBE_N` is the streak-gated shape the merge recompute makes moot.
+
+## The bot identity: posting a verdict GitHub can count
+
+Every local review verdict lands in one place: `fno event emit -t review_attestation`. The script `skills/review/scripts/emit-attestation.sh` ends in that call. The same emit now also mirrors the verdict to GitHub under a second identity: `config.review.bot_identity`. A clean pass can then carry `APPROVED`.
+
+GitHub refuses an approving review from the PR author. With one account authoring and reviewing, `reviewDecision` reads empty. No number of review objects changes that.
+
+The mirror is fail-closed inside the producer (`crates/fno-agents/src/publish_review.rs`), which the emit chokepoint and the hidden verb drive through one JSON contract. An unconfigured lane or token skips. A bot that is the PR author refuses. A stale head pin refuses. An unmappable verdict refuses. The result carries the `reviewDecision` GitHub reports back, never the POST receipt. One stderr receipt line prints on every branch: `bot-review: posted ...`, `bot-review: skipped (...)`, `bot-review: refused (...)`. The backfill door is the hidden verb `fno pr publish-review --pr-number N`. Its verdict defaults to the newest head-pinned attestation for HEAD.
+
+One ordering fact: the first review of a branch runs BEFORE its PR exists, so the emit-time mirror skips with no open PR. The `/pr create` flow closes that gap. Its step 2d runs `fno pr publish-review --pr-number <n>` the moment the PR opens. The verb mirrors only a verdict the local gate already accepted. If a flow bypasses `/pr` and skips the mirror, branch protection makes the miss visible: the PR cannot merge until the approve exists.
+
+### Operator setup, in order
+
+The identity cannot be created by code. Four steps:
+
+1. Create a second GitHub account for the reviewer lane. A public repository costs it no seat.
+2. Add it to the repository as a collaborator with **write** access. Skipping write access is expensive. If the account is read-only, GitHub records and displays its review. That review never counts toward a required-approving-review rule. The setup looks green. When branch protection goes on, it fails.
+3. Mint a fine-grained PAT on that account. Scope it to this repository. Give it pull request read/write permission.
+4. Export it in the environment under the name `config.review.bot_token_env` gives (here: `GH_REVIEW_BOT_TOKEN`). Set `config.review.bot_identity` to the account's login.
+
+Verify live before you rely on it. Run `fno pr publish-review --pr-number <n>`. Then `gh pr view <n> --json reviewDecision --jq .reviewDecision` must print `APPROVED`. The empty string means the identity is not working.
+
+### Sequencing: after, never with
+
+Branch protection with required approving reviews goes on AFTER this feature lands and is verified live on a real PR. Never turn both on in the same change. If the identity is misconfigured, turning both on at once wedges the repository. No merge path is left to fix it. Required status checks are independent of this and must not wait for it.

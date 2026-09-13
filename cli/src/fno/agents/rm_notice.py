@@ -1,18 +1,15 @@
 """The one place that says what ``fno agents rm`` is about to destroy.
 
-On the harnesses that have one, ``rm`` tears down the harness's own session
-record before it touches the fno registry, and that record IS the resume
-handle. The transcript survives on disk, so the loss is reversible with ``fno
-agents adopt`` -- but nothing in the verb, its help, or its receipt used to say
-either half.
+``rm`` tears down the harness's own session record before it touches the fno
+registry, and that record IS the resume handle. The transcript survives on
+disk, so the loss is reversible with ``fno agents adopt`` -- but nothing in
+the verb, its help, or its receipt used to say either half.
 
-This module is shared rather than inlined because ``rm`` reaches the teardown
-through two runtimes: the Rust binary serves ``fno agents rm`` by default (an
-installed binary wins at the ``rust_runtime`` seam), and the Python
-``dispatch.rm_agent`` serves a forced ``FNO_AGENTS_RUNTIME=python``, a
-development checkout with no installed binary, and the documented
-wedged-daemon escape hatch that imports ``rm_agent`` directly. A notice on one
-of those paths is decorative; the seam gate below is what covers both.
+This module lives at the routing seam because that is the one path every
+``rm`` takes: the Rust binary serves ``fno agents rm`` (an installed binary
+wins at the ``rust_runtime`` seam, and there is no Python rm to fall back
+to). A notice inside the verb's implementation would be decorative; the seam
+gate below is what covers the verb however it is reached.
 """
 from __future__ import annotations
 
@@ -24,11 +21,9 @@ from typing import IO, Optional
 #: greps a receipt for the recovery verb finds this exact string.
 ADOPT_VERB = "fno agents adopt"
 
-#: Set by the seam once it has written the notice, read by :func:`rm_agent` so
-#: the Python route does not print the same block twice. The env is the carrier
-#: because the seam either execs the Rust binary (which never reads it) or
-#: falls through to the Python dispatch in this same process. Same hazard the
-#: seam's own comments record for the env-scrub spawn warning.
+#: Stamped by the seam once it has written the notice. Its reader was the
+#: deleted Python rm twin; the stamp stays so a future second writer below the
+#: seam can key on it without a new contract.
 NOTICE_SHOWN_ENV = "FNO_RM_NOTICE_SHOWN"
 
 #: Opt out of the confirmation prompt WITHOUT opting into ``--force``. Those are

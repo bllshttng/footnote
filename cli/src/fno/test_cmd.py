@@ -11,11 +11,10 @@ Footguns this verb encodes (tribal knowledge made runtime behavior):
    `RTK_DISABLED=1` in the child env so nothing re-wraps it.
 3. `... | tail && echo OK` masks the real exit code (false green). We propagate
    the child's *actual* return code.
-4. Full test output in an agent transcript is re-read by every later request in
-   the session. Default mode therefore captures ALL output to
-   `<repo>/.fno/last-test.log` and prints only a summary: on failure, the TAIL
-   of the log (errors live at the end - read from the end, expand upward via
-   the log path). `--stream` restores inherited stdio for interactive runs.
+4. Full test output in an agent transcript is re-read by every later request in the session.
+   Default mode therefore captures ALL output to `<repo>/.fno/last-test.log` and prints only a
+   summary: on failure, the TAIL of the log (errors live at the end - read from the end,
+   expand upward via the log path). `--stream` restores inherited stdio for interactive runs.
 
 The interpreter is resolved worktree-venv -> canonical-venv -> the running
 interpreter, so a fresh worktree with no local `.venv` still runs.
@@ -332,15 +331,33 @@ def _child_env(root: Path) -> dict:
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src + (os.pathsep + existing if existing else "")
     env["RTK_DISABLED"] = "1"  # never let rtk re-wrap the child run
+    # Cargo intermediates go under the SANDBOX's state root, never the
+    # operator's real one and never the checkout's target/. Computed from the
+    # sandbox, not cargo_build_dir_value(): that reads the PARENT's state
+    # root, and a value pointing at ~/.fno/cargo-build makes every cargo
+    # invocation inside a test write into operator state - the exact write
+    # the state canary refuses. Matches what the child itself would resolve
+    # (its HOME is the sandbox home). Set AFTER neutralise, which scrubs a
+    # developer's own value as ambient state.
+    env["CARGO_BUILD_BUILD_DIR"] = (
+        f"{_sandbox() / 'home' / '.fno' / 'cargo-build'}/{{workspace-path-hash}}"
+    )
+    # TMPDIR is deliberately left ambient. The fence allows journal roots
+    # under TMPDIR (fno.events._hermetic_allowed_roots), and the sandbox is
+    # created by mkdtemp under that same TMPDIR, so every sandbox path is
+    # already inside the allowed root without rewriting it. Rewriting it also
+    # pushes pytest's basetemp under the sandbox, and the lane-B keeper socket
+    # then crosses the 108-byte AF_UNIX limit on the runner (the reason
+    # neutralise's own ambient list refuses to touch TMPDIR).
     return env
 
 
 def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
     """Run each command with output captured to `log`; print the terse verdict.
 
-    The header (command + log path) prints BEFORE the run so a long suite never
-    looks stalled - a watcher can `tail -f` the log. Returns the first non-zero
-    child exit code, else 0.
+    The header prints BEFORE the run so a watcher can `tail -f` the log. The
+    log's last line is always ``EXIT=<rc>``: a reader recovers the real code
+    even where an outer tee or harness flattens this process's exit.
     """
     timeout = test_timeout_seconds()
     rc = 0
@@ -358,12 +375,18 @@ def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
                 )
             except OSError as exc:
                 sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
+                fh.write("EXIT=127\n")
                 return 127
             if rc_cmd != 0:
                 rc = rc_cmd
                 break  # first failure wins; its output is the log tail
+        fh.write(f"EXIT={rc}\n")
     if rc == 0:
-        lines = [ln.rstrip() for ln in _tail(log, 5) if ln.strip()]
+        # The EXIT marker is bookkeeping, not a verdict summary; the terse
+        # PASS line shows the suite's own last output.
+        lines = [
+            ln.rstrip() for ln in _tail(log, 5) if ln.strip() and not ln.startswith("EXIT=")
+        ]
         summary = lines[-1] if lines else "(no output)"
         print(f"PASS | {summary}")
     else:
@@ -375,7 +398,7 @@ def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
     return rc
 
 
-def _run(args: Sequence[str], stream: bool = False) -> int:
+def _run(args: Sequence[str], stream: bool = False, log_override: Optional[Path] = None) -> int:
     """Resolve interpreter + env, run pytest, return its real exit code."""
     root = _repo_root(Path.cwd()) or Path.cwd()
     interp = _resolve_interpreter(root)
@@ -410,7 +433,7 @@ def _run(args: Sequence[str], stream: bool = False) -> int:
             # executable) are both OSError; either means we could not run it.
             sys.stderr.write(f"fno doctor test: failed to run interpreter {interp}: {exc}\n")
             return 127
-    return _run_captured([cmd], env, _log_path(root))
+    return _run_captured([cmd], env, log_override or _log_path(root))
 
 
 # The per-process lanes reading behind _lanes_threads(). One reading per
@@ -504,7 +527,7 @@ def _clamp_flag(
     return value, effective
 
 
-def _run_rust(args: Sequence[str], stream: bool = False) -> int:
+def _run_rust(args: Sequence[str], stream: bool = False, log_override: Optional[Path] = None) -> int:
     """Run the Rust suites: nextest when installed, else `cargo test -q`.
 
     No workspace root exists, so without an explicit `--manifest-path` we sweep
@@ -597,7 +620,7 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
             if rc != 0:
                 return rc
         return 0
-    return _run_captured(cmds, env, _log_path(root))
+    return _run_captured(cmds, env, log_override or _log_path(root))
 
 
 # ---------------------------------------------------------------------------
@@ -741,9 +764,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("events-discipline lint", ".", "bash scripts/lint/events-discipline.sh"),
     ("events-discipline lint self-test", ".", "bash tests/lint/test-events-discipline.sh"),
     ("No quarantined events.invalid.jsonl rows", ".", "bash scripts/lint/no-invalid-events.sh"),
-    ("ruff + mypy (both repo-wide)", "cli",
-     "uv run ruff check --no-respect-gitignore src/\n"
-     "uv run mypy src/"),
     ("Smoke tests", ".", "bash cli/tests/smoke/run-all.sh"),
     ("no hardcoded paths", ".", "bash scripts/ci/check-no-hardcoded-paths.sh"),
     ("placement rule", ".", "bash scripts/ci/check-placement-rule.sh"),
@@ -755,14 +775,15 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Company module boundary check", ".", "bash scripts/ci/check-company-boundaries.sh --baseline"),
     ("Skill snippet hazard lint", ".", "bash scripts/ci/check-skill-snippets.sh"),
     ("Skill snippet lint self-test", ".", "bash tests/ci/test_check_skill_snippets.sh"),
-    # Both gates measure the always-loaded SessionStart preamble. Neither could
-    # FAIL anywhere but CI before this entry: `fno doctor` prints the number,
-    # but advisorily, and never changes its own exit code. So the only local
-    # signal was a line nobody had to act on, and an AGENTS.md edit went green
-    # locally and red on push - which is how the preamble reached 55 bytes of
-    # headroom with nobody watching the slope.
-    ("SessionStart preamble byte budget", ".", "bash scripts/ci/check-preamble-budget.sh"),
-    ("Oversized files are shrink-only", ".", "bash scripts/ci/check-file-budget.sh"),
+    # CI gates under scripts/ci/ that guards.yml already runs on every push and
+    # pull_request are NOT registered here. A second registration makes one
+    # failure red two check runs (guards plus smoke/changed-smoke), which is how
+    # one prose breach in AGENTS.md went three-checks-red in one night. The
+    # preamble byte budget keeps its local signal through
+    # `fno doctor lint preamble-budget`, which exits with the gate's own code;
+    # `fno doctor` also prints the number advisorily at session start. The
+    # ruff+mypy and file-budget gates are reachable by running their scripts.
+    # test_smoke_registry_shares_no_ci_scripts_with_guards holds this open.
     ("Pitfalls corpus cap", ".", "bash scripts/ci/check-pitfalls.sh"),
     ("No stale /spec refs (blueprint rename audit)", ".", "bash scripts/ci/check-no-stale-spec-refs.sh"),
     ("Config schema docs freshness", ".", "bash scripts/ci/check-config-schema-drift.sh"),
@@ -2321,29 +2342,39 @@ def _run_census_deferred(args: Sequence[str]) -> int:
     name="test",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
-        "Run the Python suite (default), or a sub-suite: `fno doctor test "
-        "rust ...` (crates) or `fno doctor test smoke [flags]` (the full CI "
-        "smoke: structural steps plus auto-discovered shell harnesses). "
-        "`fno doctor test --census-deferred` runs every _DISCOVERY_DEFERRED "
-        "entry bounded and "
-        "exits non-zero if any passes inside the 60s tranche, so the quarantine "
-        "cannot silently hold working tests. The real exit code is "
-        "propagated, rtk is bypassed (RTK_DISABLED=1), and PYTHONPATH is "
-        "pinned to the worktree's cli/src. Use this, never a bare `pytest` in "
-        "a worktree: that imports the canonical fno, lets rtk re-wrap the run, "
-        "and masks the exit code. Bare `fno doctor test` runs the Python suite in parallel "
-        "and captures to .fno/last-test.log (the transcript gets PASS or the failing tail); "
-        "--stream restores full inherited-stdio output."
+        "Run the Python suite (default), or a sub-suite: `rust` (crates) or "
+        "`smoke [flags]` (the full CI smoke). The real exit code is propagated, "
+        "rtk is bypassed, and PYTHONPATH is pinned to the worktree's cli/src. "
+        "Bare `fno doctor test` runs the Python suite in parallel and captures "
+        "to .fno/last-test.log; `--stream` restores inherited stdio. "
+        "--census-deferred refuses a quarantined test that now passes."
     ),
 )
 @click.option("--stream", is_flag=True, help="Stream full output (no capture/log).")
+@click.option(
+    "--log",
+    "log_override",
+    type=click.Path(path_type=Path),
+    default=None,
+    help=(
+        "Capture here instead of .fno/last-test.log; the file's last line is "
+        "always EXIT=<rc>. (Claims the token: pytest's passthrough has no bare --log.)"
+    ),
+)
 @click.argument("runner_args", nargs=-1, type=click.UNPROCESSED)
-def test_command(stream: bool, runner_args: tuple[str, ...]) -> None:
+def test_command(stream: bool, log_override: Optional[Path], runner_args: tuple[str, ...]) -> None:
     args = list(runner_args)
+    if log_override is not None and (
+        stream or (args and args[0] in ("smoke", "--census-deferred"))
+    ):
+        sys.stderr.write(
+            "--log supports the python and rust suites; drop --log or the conflicting flag\n"
+        )
+        raise SystemExit(2)
     if args and args[0] == "rust":
-        raise SystemExit(_run_rust(args[1:], stream=stream))
+        raise SystemExit(_run_rust(args[1:], stream=stream, log_override=log_override))
     if args and args[0] == "smoke":
         raise SystemExit(_run_smoke(args[1:], stream=stream))
     if args and args[0] == "--census-deferred":
         raise SystemExit(_run_census_deferred(args[1:]))
-    raise SystemExit(_run(args, stream=stream))
+    raise SystemExit(_run(args, stream=stream, log_override=log_override))

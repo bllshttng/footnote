@@ -31,6 +31,13 @@ REGISTERED_GRADUATION_PROBES: tuple[dict[str, Any], ...] = (
 )
 
 
+REFERENCE_HELP = (
+    "Enforced: test:<nodeid>; file|doc:<path>[:<line>]=>marker:<text>; "
+    "gate:<cmd>=>marker:<text>; default:<key>=<value>. "
+    "Follow-up: node:<id>."
+)
+
+
 class InvalidGraduationError(ValueError):
     """A decision graduation declaration is missing or malformed."""
 

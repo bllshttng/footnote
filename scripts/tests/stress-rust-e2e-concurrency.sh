@@ -120,8 +120,16 @@ build_test_binary workspace_persistence_e2e crates/fno/Cargo.toml workspace_pers
 # resolved and its existence is REQUIRED: a missing binary refuses the run
 # rather than reporting a clean zero.
 # daemon_bin is the compiled TEST binary, which cargo puts in deps/; the
-# daemon it spawns sits one level up beside it.
+# daemon it spawns sits one level up beside it. Under build.build-dir the
+# compiled test binary is an INTERMEDIATE in the shared build base, while
+# fno-agents-daemon is a FINAL binary that still lands in the checkout's
+# crates/fno-agents/target/<profile> - the path the e2e itself resolves and
+# spawns under that layout.
 daemon_bin_path="$(dirname "$(dirname "$daemon_bin")")/fno-agents-daemon"
+if [[ ! -x "$daemon_bin_path" ]]; then
+    profile="$(basename "$(dirname "$(dirname "$daemon_bin")")")"
+    daemon_bin_path="$repo_root/crates/fno-agents/target/${profile}/fno-agents-daemon"
+fi
 if [[ ! -x "$daemon_bin_path" ]]; then
     echo "stress_setup=unavailable reason=daemon-binary-not-found path=$daemon_bin_path" >&2
     echo "stress_setup_note=the leak counter cannot report a trustworthy zero without it" >&2

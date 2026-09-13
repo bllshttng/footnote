@@ -1,13 +1,14 @@
 //! The operator lane parser and the thirteen-queue board build (pure; no I/O).
-use super::classify::{claim_is_dead, node_driver, node_has_pr};
+use super::classify::{claim_is_dead, holder_token, node_driver, node_has_pr};
 use super::prs::derived_status;
 use super::scope::operator_lane_path;
 use super::{
     as_int, s_str, truthy, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX,
-    SRC_CLAIMS, SRC_DISTRESS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS, SRC_READY,
-    SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
+    SRC_CLAIMS, SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS,
+    SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -250,6 +251,29 @@ pub(crate) fn filter_unanswered_by_mail(
         .collect()
 }
 
+/// One row per node whose plan artifacts hold an open prove-it FAIL
+/// (x-6d64): the verdict that used to route nowhere.
+fn verdict_rows_from(outstanding: &Value) -> Vec<Value> {
+    outstanding
+        .get("verdicts")
+        .and_then(|v| v.get("items"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|r| {
+                    json!({
+                        "node": r.get("node"),
+                        "verdict": r.get("verdict"),
+                        "report": r.get("report"),
+                        "claim": r.get("claim"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Board construction: the thirteen queues
 // ---------------------------------------------------------------------------
@@ -334,7 +358,16 @@ pub(crate) struct BoardInputs {
     pub(crate) claims: SourceRead,
     pub(crate) worked: SourceRead,
     pub(crate) claimed_nodes: SourceRead,
+    /// The driver feed: registry rows that target a node, the
+    /// roster-side answer to "who drives" that the claim snapshot cannot
+    /// give. Every node_driver-consuming queue reads unreadable when this
+    /// fails, the same fold holder_activity_error gets.
+    pub(crate) drivers: SourceRead,
     pub(crate) holder_activity: HashMap<String, crate::truth_probe::TruthProbe>,
+    /// The truth batch's failure receipt: `Some` when the batch timed out or
+    /// its reader panicked. The claim-dependent queues read unreadable
+    /// rather than rendering an absent measurement as a verdict (x-db9c).
+    pub(crate) holder_activity_error: Option<String>,
     pub(crate) prs: SourceRead,
     pub(crate) pr_nodes: SourceRead,
     pub(crate) outstanding: SourceRead,
@@ -358,19 +391,126 @@ pub(crate) struct BoardInputs {
     pub(crate) crown_scope: Option<String>,
 }
 
+/// True when any non-done descendant under `parent_id` is being driven: a
+/// live claim (even one whose holder probe did not answer - the lock is
+/// real), a crown, or a worked-feed listing. Container children recurse: a
+/// sub-epic carries no claim of its own, but its leaf's driver holds the
+/// whole chain. A claim-free child under an unreadable worked feed names no
+/// driver, so measurement blindness can never read as held. `seen` breaks
+/// parent cycles; ids are matched lowercased.
+fn subtree_held(
+    parent_id: &str,
+    children_by_parent: &HashMap<String, Vec<&Value>>,
+    claim_by_node: &HashMap<String, Value>,
+    activity: &HashMap<String, crate::truth_probe::TruthProbe>,
+    crown_ids: Option<&HashSet<String>>,
+    worked: Option<&SourceRead>,
+    drivers: Option<&SourceRead>,
+    seen: &mut HashSet<String>,
+) -> bool {
+    if parent_id.is_empty() || !seen.insert(parent_id.to_string()) {
+        return false;
+    }
+    children_by_parent.get(parent_id).is_some_and(|children| {
+        children.iter().any(|child| {
+            let done = derived_status(child) == "done"
+                || s_str(child, "status")
+                    .map(|s| TERMINAL_RUNGS.contains(&s))
+                    .unwrap_or(false)
+                || child.get("superseded_by").is_some_and(|v| !v.is_null());
+            if done {
+                return false;
+            }
+            let (state, claim) =
+                node_driver(child, claim_by_node, activity, crown_ids, worked, drivers);
+            let live_claim = claim.is_some_and(|c| !claim_is_dead(c, activity));
+            if live_claim || state == "crowned" {
+                return true;
+            }
+            let worked_driven = state == "active"
+                && claim.is_none()
+                && s_str(child, "contained_in").is_none_or(|c| c.is_empty());
+            if worked_driven {
+                return true;
+            }
+            match s_str(child, "id") {
+                Some(child_id) => subtree_held(
+                    &child_id.to_ascii_lowercase(),
+                    children_by_parent,
+                    claim_by_node,
+                    activity,
+                    crown_ids,
+                    worked,
+                    drivers,
+                    seen,
+                ),
+                None => false,
+            }
+        })
+    })
+}
+
+/// The aggregate the termination readers key on: a FLOOR, the rows the board
+/// can actually name. Blind actionable queues contribute nothing and are
+/// named in a warning instead (x-c911: +1 per blind queue read as one row
+/// and a king went hunting rows that never existed). A blind REPORT-ONLY
+/// queue stays loud through unreadable and uncounted.
+pub(crate) fn actionable_tally(queues: &[Queue], warnings: &mut Vec<String>) -> i64 {
+    let mut readable: i64 = 0;
+    let mut blind: Vec<&'static str> = Vec::new();
+    for q in queues {
+        if not_read_status(q.status) {
+            if q.actionable {
+                blind.push(q.name);
+            }
+        } else if q.actionable {
+            readable += q.count;
+        }
+    }
+    if !blind.is_empty() {
+        blind.sort();
+        warnings.push(format!(
+            "actionable is a floor: {} actionable queue(s) unreadable and uncounted ({})",
+            blind.len(),
+            blind.join(", ")
+        ));
+    }
+    readable
+}
+
 /// Build the board payload. Pure; does no I/O. Queue names, order, and row
 /// shapes match board.py's `build_board` exactly.
 pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
-    let warnings = inputs.warnings.clone();
+    let mut warnings = inputs.warnings.clone();
     let mut out_of_scope: Vec<Value> = Vec::new();
+    // On a scoped board a row whose node id cannot be resolved is
+    // unknown, not mine. Work rows fail CLOSED - they land in no queue and
+    // are named in one warning line below - because "in scope" would hand
+    // every crown every unattributable PR, while out_of_scope would mislabel
+    // the row as another crown's work. A REPORT-ONLY queue (unreachable_worker)
+    // bypasses instead: its signals carry no node by design (needs.rs mints
+    // node: None for mail_escalation, carveout_stale, stale_claims,
+    // worker_refused) and the evidence must reach every board. The unscoped
+    // arm returns true before any of this: the operator board keeps showing
+    // every row.
+    let unattributed: RefCell<Vec<String>> = RefCell::new(Vec::new());
     let scope_ids = inputs.scope_ids.as_ref();
 
-    let in_scope = |queue: &str, node_id: &Value, row: &Value, out: &mut Vec<Value>| -> bool {
+    let in_scope = |queue: &str,
+                    report_only: bool,
+                    node_id: &Value,
+                    row: &Value,
+                    out: &mut Vec<Value>|
+     -> bool {
         let Some(ids) = scope_ids else {
             return true;
         };
         let Some(id) = node_id.as_str() else {
-            return true;
+            if report_only {
+                return true;
+            }
+            unattributed.borrow_mut().push(queue.to_string());
+            return false;
         };
         if ids.contains(id) {
             return true;
@@ -395,6 +535,53 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         }
     }
 
+    // x-db9c: a holder the probe batch never answered for is a hole in the
+    // board's evidence, not a worker verdict. Name every hole in one warning
+    // line so a partially-answered batch is visible in the payload, not only
+    // through the rows its absence silently removed. The expected set is the
+    // CLAIM-derived subset of the probe feed (king-priority claimed nodes +
+    // dead-state claims; roster driver tokens are also fed to the probe but
+    // never warned about): a live claim on a lower-priority node is never fed
+    // to the probe, so counting it here would warn forever about a holder
+    // nobody promised to measure.
+    let mut unmeasured_holders: Vec<String> = Vec::new();
+    if inputs.holder_activity_error.is_none() {
+        let probed_ids: HashSet<String> = inputs
+            .claimed_nodes
+            .rows()
+            .iter()
+            .filter(|n| KING_PRIORITIES.contains(&s_str(n, "priority").unwrap_or("")))
+            .filter_map(|n| s_str(n, "id").map(str::to_string))
+            .collect();
+        let mut expected: HashSet<String> = HashSet::new();
+        for row in &claim_rows {
+            let token = holder_token(row);
+            if token.is_empty() {
+                continue;
+            }
+            let dead_state = DEAD_CLAIM_STATES.contains(&s_str(row, "state").unwrap_or(""));
+            let node_id = s_str(row, "key")
+                .and_then(|k| k.strip_prefix("node:"))
+                .unwrap_or("");
+            if dead_state || probed_ids.contains(node_id) {
+                expected.insert(token);
+            }
+        }
+        for token in &expected {
+            if !inputs.holder_activity.contains_key(token) {
+                unmeasured_holders.push(token.clone());
+            }
+        }
+        unmeasured_holders.sort();
+    }
+    if !unmeasured_holders.is_empty() {
+        warnings.push(format!(
+            "holder_activity: {} holder(s) unmeasured: {}",
+            unmeasured_holders.len(),
+            unmeasured_holders.join(", ")
+        ));
+    }
+
     // Undispatched: planned work with no claim, king priorities only.
     let undispatched_rows = if inputs.undispatched.is_ok() {
         inputs
@@ -405,6 +592,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             .filter(|node| {
                 in_scope(
                     "undispatched",
+                    false,
                     node.get("id").unwrap_or(&Value::Null),
                     node,
                     &mut out_of_scope,
@@ -434,15 +622,25 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 .unwrap_or(true)
         })
         .filter(|node| {
-            let dead = claim_by_node
-                .get(s_str(node, "id").unwrap_or(""))
-                .map(|c| claim_is_dead(c, &inputs.holder_activity))
-                .unwrap_or(false);
-            !dead
+            // x-db9c: the ready feed drops claimed nodes it cannot see
+            // (non-stale claims are excluded there, worked ids too), so the
+            // driver join is the only read left. A node under ANY driver -
+            // active, stalled, unmeasured, or a dead claim that belongs to
+            // stale_claim - is not unplanned.
+            let (state, claim) = node_driver(
+                node,
+                &claim_by_node,
+                &inputs.holder_activity,
+                inputs.scope_ids.as_ref(),
+                Some(&inputs.worked),
+                Some(&inputs.drivers),
+            );
+            state == "none" && claim.is_none()
         })
         .filter(|node| {
             in_scope(
                 "unplanned",
+                false,
                 node.get("id").unwrap_or(&Value::Null),
                 node,
                 &mut out_of_scope,
@@ -475,6 +673,8 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             &claim_by_node,
             &inputs.holder_activity,
             inputs.scope_ids.as_ref(),
+            Some(&inputs.worked),
+            Some(&inputs.drivers),
         );
         if state != "stalled" {
             continue;
@@ -482,6 +682,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         let claim = claim.expect("stalled always carries its claim");
         if !in_scope(
             "stalled_holder",
+            false,
             node.get("id").unwrap_or(&Value::Null),
             &node,
             &mut out_of_scope,
@@ -493,6 +694,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             "priority": node.get("priority"),
             "title": node.get("title"),
             "holder": claim.get("holder"),
+            "worker": holder_token(claim),
             "claim_state": claim.get("state"),
         }));
     }
@@ -503,10 +705,14 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .iter()
         .filter(|row| claim_is_dead(row, &inputs.holder_activity))
         .filter(|row| {
+            // A key that is not `node:`-prefixed is unattributable, not
+            // another crown's: feed Null so it fails closed with the other
+            // unknown-attribution rows instead of matching `""` out of scope.
             let node_id = s_str(row, "key")
                 .and_then(|k| k.strip_prefix("node:"))
-                .unwrap_or("");
-            in_scope("stale_claim", &json!(node_id), row, &mut out_of_scope)
+                .map(|id| json!(id))
+                .unwrap_or(Value::Null);
+            in_scope("stale_claim", false, &node_id, row, &mut out_of_scope)
         })
         .map(|row| {
             json!({
@@ -524,6 +730,22 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     // list: with no claims read every node would look unheld at once.
     let mut unheld_rows: Vec<Value> = Vec::new();
     if inputs.claims.is_ok() {
+        // A container is judged by its children, never by the leaf test:
+        // an epic goes in_progress because its children are worked, and
+        // the epic itself never takes a claim or opens a PR, so the leaf
+        // test flagged every healthy epic forever. Held when any non-done
+        // descendant is driven (subtree_held); still reported when none
+        // is - an epic whose children all died is exactly what a king
+        // must see.
+        let mut children_by_parent: HashMap<String, Vec<&Value>> = HashMap::new();
+        for entry in inputs.entries.as_deref().unwrap_or(&[]) {
+            if let Some(parent) = s_str(entry, "parent") {
+                children_by_parent
+                    .entry(parent.to_ascii_lowercase())
+                    .or_default()
+                    .push(entry);
+            }
+        }
         for node in inputs.entries.as_deref().unwrap_or(&[]) {
             if !KING_PRIORITIES.contains(&s_str(node, "priority").unwrap_or("")) {
                 continue;
@@ -549,12 +771,28 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 &claim_by_node,
                 &inputs.holder_activity,
                 inputs.scope_ids.as_ref(),
+                Some(&inputs.worked),
+                Some(&inputs.drivers),
             );
             if state != "none" {
                 continue;
             }
+            let mut seen: HashSet<String> = HashSet::new();
+            if subtree_held(
+                s_str(node, "id").unwrap_or(""),
+                &children_by_parent,
+                &claim_by_node,
+                &inputs.holder_activity,
+                inputs.scope_ids.as_ref(),
+                Some(&inputs.worked),
+                Some(&inputs.drivers),
+                &mut seen,
+            ) {
+                continue;
+            }
             if !in_scope(
                 "unheld_progress",
+                false,
                 node.get("id").unwrap_or(&Value::Null),
                 node,
                 &mut out_of_scope,
@@ -588,6 +826,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .filter(|row| {
             in_scope(
                 "blocked_child",
+                false,
                 row.get("id").unwrap_or(&Value::Null),
                 row,
                 &mut out_of_scope,
@@ -637,7 +876,8 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
 
     // mergeable_pr is scoped by the node that binds each PR (pr_number plus
     // additional_prs), the same join undriven_pr makes. A PR no node claims
-    // stays visible: an unattributable row is shown, never hidden.
+    // stays visible on the unscoped board; on a scoped board it fails closed
+    // and is named in `warnings` rather than read as every crown's work.
     let mut node_by_pr: HashMap<i64, String> = HashMap::new();
     for node in &inputs.pr_nodes.rows() {
         let Some(node_id) = s_str(node, "id").map(str::to_string) else {
@@ -663,7 +903,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 .get(&r.get("number").and_then(Value::as_i64).unwrap_or(-1))
                 .map(|id| json!(id))
                 .unwrap_or(Value::Null);
-            in_scope("mergeable_pr", &node_id, r, &mut out_of_scope)
+            in_scope("mergeable_pr", false, &node_id, r, &mut out_of_scope)
         })
         .map(|r| json!({"number": r.get("number"), "title": r.get("title")}))
         .collect();
@@ -680,9 +920,23 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         HashSet::new()
     };
     let mut undriven_rows: Vec<Value> = Vec::new();
+    // x-dead task 1.4b: the pr_nodes rows carry no `contained_in` (the field
+    // lives on the graph entry), so node_driver's contained arm cannot fire
+    // here on its own. Resolve it from the entries the board already holds.
+    let contained_ids: HashSet<String> = inputs
+        .entries
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|e| s_str(e, "contained_in").is_some_and(|c| !c.is_empty()))
+        .filter_map(|e| s_str(e, "id").map(str::to_string))
+        .collect();
     if inputs.pr_nodes.is_ok() && inputs.claims.is_ok() {
         for node in &inputs.pr_nodes.rows() {
             if !KING_PRIORITIES.contains(&s_str(node, "priority").unwrap_or("")) {
+                continue;
+            }
+            if s_str(node, "id").is_some_and(|id| contained_ids.contains(id)) {
                 continue;
             }
             let terminal = s_str(node, "status")
@@ -706,6 +960,8 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 &claim_by_node,
                 &inputs.holder_activity,
                 inputs.scope_ids.as_ref(),
+                Some(&inputs.worked),
+                Some(&inputs.drivers),
             );
             if state != "none" {
                 continue;
@@ -718,6 +974,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             }
             if !in_scope(
                 "undriven_pr",
+                false,
                 node.get("id").unwrap_or(&Value::Null),
                 &node,
                 &mut out_of_scope,
@@ -799,6 +1056,20 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         capture_rows.push(json!({"elided_projects": elided}));
     }
 
+    // One row per node whose plan artifacts hold an open prove-it FAIL
+    // (x-6d64): the verdict that used to route nowhere. An ok read with no
+    // verdicts key at all is a STALE Python leg, not a clean one -- the key is
+    // unconditionally emitted since the leg shipped, so its absence must not
+    // read as "zero FAILs".
+    let verdict_rows = verdict_rows_from(&Value::Object(outstanding.clone()));
+    if inputs.outstanding.is_ok() && outstanding.get("verdicts").is_none() {
+        warnings.push(
+            "the outstanding read carries no verdicts leg; the installed fno Python is \
+             older than this binary (fno doctor update)"
+                .to_string(),
+        );
+    }
+
     // `fno agents needs` emits operator questions in the same list; the queue
     // above already carries them, so this one drops the kind.
     let needs_rows: Vec<Value> = inputs
@@ -809,6 +1080,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .filter(|row| {
             in_scope(
                 "unreachable_worker",
+                true,
                 row.get("node").unwrap_or(&Value::Null),
                 row,
                 &mut out_of_scope,
@@ -861,8 +1133,13 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "unplanned",
-            format!("{SRC_READY} + {SRC_CLAIMS} + {SRC_WORKED}"),
-            &if inputs.ready.is_ok() && inputs.claims.is_ok() && inputs.worked.is_ok() {
+            format!("{SRC_READY} + {SRC_CLAIMS} + {SRC_WORKED} + {SRC_DRIVERS} + holder_activity"),
+            &if inputs.ready.is_ok()
+                && inputs.claims.is_ok()
+                && inputs.worked.is_ok()
+                && inputs.drivers.is_ok()
+                && inputs.holder_activity_error.is_none()
+            {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(
@@ -872,6 +1149,8 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .clone()
                         .or_else(|| inputs.claims.error.clone())
                         .or_else(|| inputs.worked.error.clone())
+                        .or_else(|| inputs.drivers.error.clone())
+                        .or_else(|| inputs.holder_activity_error.clone())
                         .unwrap_or_default(),
                 )
             },
@@ -883,8 +1162,12 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "stalled_holder",
-            format!("{SRC_CLAIMS} + fno backlog get <id> + fno agents peek <holder>"),
-            &if inputs.claims.is_ok() && inputs.claimed_nodes.is_ok() {
+            format!("{SRC_CLAIMS} + {SRC_DRIVERS} + fno backlog get <id> + fno agents peek <worker>"),
+            &if inputs.claims.is_ok()
+                && inputs.claimed_nodes.is_ok()
+                && inputs.drivers.is_ok()
+                && inputs.holder_activity_error.is_none()
+            {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(
@@ -893,6 +1176,8 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .error
                         .clone()
                         .or_else(|| inputs.claimed_nodes.error.clone())
+                        .or_else(|| inputs.drivers.error.clone())
+                        .or_else(|| inputs.holder_activity_error.clone())
                         .unwrap_or_default(),
                 )
             },
@@ -904,14 +1189,24 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "unheld_progress",
-            format!("graph entries + {SRC_CLAIMS}"),
-            &if inputs.entries.is_some() && inputs.claims.is_ok() {
+            format!("graph entries + {SRC_CLAIMS} + {SRC_DRIVERS} + holder_activity"),
+            &if inputs.entries.is_some()
+                && inputs.claims.is_ok()
+                && inputs.drivers.is_ok()
+                && inputs.holder_activity_error.is_none()
+            {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(if inputs.entries.is_none() {
                     "graph unreadable".to_string()
                 } else {
-                    inputs.claims.error.clone().unwrap_or_default()
+                    inputs
+                        .claims
+                        .error
+                        .clone()
+                        .or_else(|| inputs.drivers.error.clone())
+                        .or_else(|| inputs.holder_activity_error.clone())
+                        .unwrap_or_default()
                 })
             },
             unheld_rows,
@@ -932,8 +1227,12 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "undriven_pr",
-            SRC_PR_NODES.to_string(),
-            &if inputs.pr_nodes.is_ok() && inputs.claims.is_ok() {
+            format!("{SRC_PR_NODES} + {SRC_CLAIMS} + {SRC_DRIVERS} + holder_activity"),
+            &if inputs.pr_nodes.is_ok()
+                && inputs.claims.is_ok()
+                && inputs.drivers.is_ok()
+                && inputs.holder_activity_error.is_none()
+            {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(
@@ -942,6 +1241,8 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                         .error
                         .clone()
                         .or_else(|| inputs.claims.error.clone())
+                        .or_else(|| inputs.drivers.error.clone())
+                        .or_else(|| inputs.holder_activity_error.clone())
                         .unwrap_or_default(),
                 )
             },
@@ -967,8 +1268,19 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "stale_claim",
-            SRC_CLAIMS.to_string(),
-            &inputs.claims,
+            format!("{SRC_CLAIMS} + holder_activity"),
+            &if inputs.claims.is_ok() && inputs.holder_activity_error.is_none() {
+                SourceRead::ok(Value::Null)
+            } else {
+                SourceRead::err(
+                    inputs
+                        .claims
+                        .error
+                        .clone()
+                        .or_else(|| inputs.holder_activity_error.clone())
+                        .unwrap_or_default(),
+                )
+            },
             stale_claim_rows,
             true,
             String::new(),
@@ -1010,6 +1322,16 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             Some(as_int(capture_stream.get("total").unwrap_or(&Value::Null))),
         ),
         queue(
+            "failed_verdict",
+            SRC_QUESTIONS.to_string(),
+            &inputs.outstanding,
+            verdict_rows,
+            true,
+            "a merged or open node's plan artifacts hold a prove-it FAIL with no ruling; rule with fno inbox decide <node> naming the report, or re-run /fno:review prove-it".to_string(),
+            "fno inbox outstanding",
+            None,
+        ),
+        queue(
             "unreachable_worker",
             SRC_NEEDS.to_string(),
             &inputs.needs,
@@ -1036,7 +1358,21 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         }
     }
 
-    let mut actionable: i64 = 0;
+    // The scoped board just dropped every row it could not attribute.
+    // Name the hole in one warning line, the same shape the holder-activity
+    // warning uses, so a quietly shorter queue reads as a measured drop.
+    let unattributed = unattributed.into_inner();
+    if !unattributed.is_empty() {
+        let mut names = unattributed.clone();
+        names.sort();
+        names.dedup();
+        warnings.push(format!(
+            "unattributed: {} row(s) with no node binding dropped from this scoped board ({})",
+            unattributed.len(),
+            names.join(", ")
+        ));
+    }
+
     let mut unreadable: i64 = 0;
     let mut over_budget: i64 = 0;
     for q in &queues {
@@ -1046,16 +1382,9 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             } else {
                 unreadable += 1;
             }
-            // A blind ACTIONABLE queue is work: the king may not exit while it
-            // cannot see a queue it could have shrunk. A blind report-only
-            // queue is loud (the exit code) and still uncounted.
-            if q.actionable {
-                actionable += 1;
-            }
-        } else if q.actionable {
-            actionable += q.count;
         }
     }
+    let actionable = actionable_tally(&queues, &mut warnings);
 
     let queues_json: Vec<Value> = queues.iter().map(queue_json).collect();
     json!({
@@ -1177,6 +1506,38 @@ mod tests {
         let body = queue_json(&q);
         assert_eq!(body["count"], Value::Null);
         assert!(body["error"].as_str().unwrap().contains("exit 1"));
+    }
+
+    #[test]
+    fn an_open_prove_it_fail_becomes_a_failed_verdict_queue_row() {
+        let outstanding = json!({
+            "verdicts": {"total": 1, "error": null, "items": [{
+                "node": "x-70e1",
+                "report": "/plans/a.md.artifacts/coverage/REPORT.md",
+                "verdict": "FAIL",
+                "claim": "the probe rejects incomplete evidence",
+                "status": "done",
+                "mtime": "2026-09-08T20:56:56Z",
+            }]}
+        });
+        let rows = verdict_rows_from(&outstanding);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["node"], "x-70e1");
+        let q = queue(
+            "failed_verdict",
+            "src".to_string(),
+            &SourceRead::ok(outstanding),
+            rows,
+            true,
+            String::new(),
+            "fno inbox outstanding",
+            None,
+        );
+        assert_eq!(q.count, 1);
+        assert_eq!(queue_json(&q)["count"], 1);
+        // No open rows, no queue row: silence is the steady state.
+        assert!(verdict_rows_from(&json!({})).is_empty());
+        assert!(verdict_rows_from(&json!({"verdicts": {"items": []}})).is_empty());
     }
 
     #[test]

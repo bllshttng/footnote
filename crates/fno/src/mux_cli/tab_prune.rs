@@ -28,6 +28,10 @@ pub(super) struct LiveTab {
     /// default fold closes such a tab: a reaped worker leaves scrollback, so
     /// `pristine` alone never fires for it.
     pub(super) orphaned: bool,
+    /// (x-1b90) The first release evidence carried by any pane in the tab,
+    /// printed on the tab's `closed_named` line so the reason names the
+    /// harness, the session id, the reap time and the basis.
+    pub(super) release: Option<String>,
 }
 
 /// Read every live tab once, keeping WHICH sessions answered. The same
@@ -56,10 +60,12 @@ pub(super) fn live_tabs() -> (Vec<LiveTab>, Vec<String>, Vec<String>, Vec<String
     let mut groups: std::collections::BTreeMap<(String, u64, u64), LiveTab> =
         std::collections::BTreeMap::new();
     // (v71) Per-tab fold state for the orphan verdict: (any pane orphaned,
-    // every pane disposable). Side map because a tab's panes interleave with
-    // other tabs' in the pane list.
-    let mut orphan_fold: std::collections::BTreeMap<(String, u64, u64), (bool, bool)> =
-        std::collections::BTreeMap::new();
+    // every pane disposable, first release). Side map because a tab's panes
+    // interleave with other tabs' in the pane list.
+    let mut orphan_fold: std::collections::BTreeMap<
+        (String, u64, u64),
+        (bool, bool, Option<String>),
+    > = std::collections::BTreeMap::new();
     let mut cwds = Vec::new();
     let mut answered: Vec<String> = Vec::new();
     let mut unreachable = Vec::new();
@@ -74,7 +80,9 @@ pub(super) fn live_tabs() -> (Vec<LiveTab>, Vec<String>, Vec<String>, Vec<String
                 for pane in panes {
                     cwds.push(pane.cwd.clone());
                     let key = (name.clone(), pane.squad_id, pane.tab_id);
-                    let fold = orphan_fold.entry(key.clone()).or_insert((false, true));
+                    let fold = orphan_fold
+                        .entry(key.clone())
+                        .or_insert((false, true, None));
                     // (v71) The orphan verdict is per-pane from the server:
                     // `any.0` some pane orphaned, `any.1` every pane
                     // disposable (orphaned, pristine, or a spent shell - a
@@ -83,6 +91,9 @@ pub(super) fn live_tabs() -> (Vec<LiveTab>, Vec<String>, Vec<String>, Vec<String
                     fold.1 &= pane.orphaned_worker
                         || pane.pristine_idle_shell
                         || (pane.fno_id.is_none() && pane.shell_idle);
+                    if fold.2.is_none() {
+                        fold.2 = pane.release.clone();
+                    }
                     let tab = groups.entry(key).or_insert_with(|| LiveTab {
                         session: name.clone(),
                         squad_id: pane.squad_id,
@@ -93,6 +104,7 @@ pub(super) fn live_tabs() -> (Vec<LiveTab>, Vec<String>, Vec<String>, Vec<String
                         pristine: true,
                         used_shell_only: true,
                         orphaned: false,
+                        release: None,
                     });
                     tab.pane_count += 1;
                     tab.pristine &= pane.pristine_idle_shell;
@@ -105,10 +117,11 @@ pub(super) fn live_tabs() -> (Vec<LiveTab>, Vec<String>, Vec<String>, Vec<String
             _ => unreachable.push(name),
         }
     }
-    for (key, (any_orphan, disposable)) in orphan_fold {
+    for (key, (any_orphan, disposable, release)) in orphan_fold {
         if any_orphan && disposable {
             if let Some(tab) = groups.get_mut(&key) {
                 tab.orphaned = true;
+                tab.release = release;
             }
         }
     }
@@ -143,6 +156,10 @@ pub(super) struct TabPruneOutcome {
     /// The orphaned-worker subset of `closed`/`would_close` (v71).
     pub(super) closed_orphaned: usize,
     pub(super) would_close_orphaned: usize,
+    /// Of `skipped_named`, the tabs a `--include-named` pass would close.
+    /// Measured on a dry-run only, so the sweep modal's named row can show
+    /// exactly what its tap closes.
+    pub(super) named_would_close: usize,
     /// One label per tab this pass would close (or closed) - nineteen is past
     /// the point where a bare count is a decision an operator can make.
     pub(super) closed_named: Vec<String>,
@@ -218,7 +235,11 @@ pub(super) fn prune_live_tabs(
         // of the pristine test: the worker is positively Dead and nothing live
         // sits in the tab, so its scrollback is not a reason to keep it.
         if tab.orphaned {
-            out.closed_named.push(live_tab_label(tab));
+            let mut label = live_tab_label(tab);
+            if let Some(release) = &tab.release {
+                label.push_str(&format!(" (released: {release})"));
+            }
+            out.closed_named.push(label);
             if dry_run {
                 out.would_close += 1;
                 out.would_close_orphaned += 1;
@@ -288,6 +309,25 @@ pub(super) fn prune_live_tabs(
     out
 }
 
+/// The fold, plus `named_would_close` on a dry-run that left named tabs out:
+/// a second dry fold over the same snapshot with named tabs in. The open-tab
+/// counter is per squad and a name is per squad, so the unnamed tabs fold the
+/// same both times and the difference is the named tabs alone.
+pub(super) fn prune_live_tabs_measuring_named(
+    tabs: &[LiveTab],
+    include_named: bool,
+    dry_run: bool,
+    include_used_shells: bool,
+) -> TabPruneOutcome {
+    let mut out = prune_live_tabs(tabs, include_named, dry_run, include_used_shells);
+    if dry_run && !include_named {
+        out.named_would_close = prune_live_tabs(tabs, true, true, include_used_shells)
+            .would_close
+            .saturating_sub(out.would_close);
+    }
+    out
+}
+
 /// One close roundtrip for a tab the fold has decided to close. `true` only
 /// on the positive `TabClosed` receipt - a refused close keeps the tab and is
 /// counted as kept, never as a silent success.
@@ -325,6 +365,7 @@ mod tests {
                 pristine: true,
                 used_shell_only: false,
                 orphaned: false,
+                release: None,
             },
             LiveTab {
                 session: "main".into(),
@@ -336,6 +377,7 @@ mod tests {
                 pristine: false,
                 used_shell_only: false,
                 orphaned: false,
+                release: None,
             },
             LiveTab {
                 session: "main".into(),
@@ -347,6 +389,7 @@ mod tests {
                 pristine: true,
                 used_shell_only: false,
                 orphaned: false,
+                release: None,
             },
         ];
 
@@ -363,6 +406,36 @@ mod tests {
         assert_eq!(outcome.kept_zero_panes, 0);
         assert_eq!(outcome.kept_unreachable, 0);
         assert_eq!(outcome.kept_not_probed, 0);
+    }
+
+    #[test]
+    fn named_would_close_is_what_an_include_named_pass_folds() {
+        let tab = |squad_id: u64, squad_name: Option<&str>, tab_id: u64| LiveTab {
+            session: "main".into(),
+            squad_id,
+            squad_name: squad_name.map(Into::into),
+            tab_id,
+            tab_name: None,
+            pane_count: 1,
+            pristine: true,
+            used_shell_only: false,
+            orphaned: false,
+            release: None,
+        };
+        // Two pristine tabs per workspace: each folds one, its last tab stays.
+        let tabs = vec![
+            tab(1, None, 11),
+            tab(1, None, 12),
+            tab(2, Some("named"), 21),
+            tab(2, Some("named"), 22),
+        ];
+        let dry = prune_live_tabs_measuring_named(&tabs, false, true, false);
+        assert_eq!(
+            (dry.would_close, dry.skipped_named, dry.named_would_close),
+            (1, 2, 1)
+        );
+        let widened = prune_live_tabs(&tabs, true, true, false);
+        assert_eq!(widened.would_close, dry.would_close + dry.named_would_close);
     }
 
     #[test]
@@ -384,6 +457,7 @@ mod tests {
             pristine: true,
             used_shell_only: false,
             orphaned: false,
+            release: None,
         }];
         let outcome = prune_live_tabs(&only, false, false, false);
         assert_eq!(outcome.closed, 0, "a workspace's only tab is never closed");
@@ -401,6 +475,7 @@ mod tests {
             pristine: true,
             used_shell_only: false,
             orphaned: false,
+            release: None,
         };
         let pair = vec![pristine_tab(11), pristine_tab(12)];
         let outcome = prune_live_tabs(&pair, false, true, false);
@@ -435,6 +510,7 @@ mod tests {
             pristine: true,
             used_shell_only: false,
             orphaned: false,
+            release: None,
         };
         // Five tabs in one squad: four pristine, one running. The fold
         // empties the squad to its LAST tab - the running one is it - so all
@@ -451,6 +527,7 @@ mod tests {
             pristine: false,
             used_shell_only: false,
             orphaned: false,
+            release: None,
         });
         let outcome = prune_live_tabs(&tabs, false, true, false);
         assert_eq!(
@@ -495,6 +572,7 @@ mod tests {
             pristine: false,
             used_shell_only: true,
             orphaned: false,
+            release: None,
         }
     }
 
@@ -520,6 +598,7 @@ mod tests {
                 pristine: false,
                 used_shell_only: false,
                 orphaned: false,
+                release: None,
             },
         ];
 
@@ -590,6 +669,7 @@ mod tests {
             pristine: false,
             used_shell_only: true,
             orphaned: false,
+            release: None,
         };
         let label = live_tab_label(&tab);
         assert!(label.contains("main"), "{label}");
@@ -650,6 +730,7 @@ mod tests {
             pristine: false,
             used_shell_only: false,
             orphaned: true,
+            release: None,
         };
         // The companion tab shares the unreachable session, so the squad has
         // two tabs and the last-in-squad guard lets the fold decide. A live
@@ -664,6 +745,7 @@ mod tests {
             pristine: false,
             used_shell_only: true,
             orphaned: false,
+            release: None,
         };
         let out = prune_live_tabs(&[tab, companion], false, false, false);
         assert_eq!(out.closed_orphaned, 0, "no server answers in a unit test");
@@ -698,6 +780,7 @@ mod tests {
             pristine: false,
             used_shell_only: false,
             orphaned: false,
+            release: None,
         };
         let spent_shell = used_shell_tab(31);
         let tabs = vec![

@@ -1,5 +1,5 @@
 {
-  "note": "AC9-HP (x-e221): the Rust gate (crates/fno-agents/src/spawn_gate.rs::check_territory_cap) and the Python gate (cli/src/fno/agents/spawn_gate.py::_check_territory_cap) must return the same territory verdict for each scenario. Both test suites read THIS file. Live registry rows carry 'node' (the backlog node the row works) and crown rows carry 'crown_scope'. 'graph' is the backlog graph; 'node' names the SPAWNING node; expect.verdict is 'territory_cap' (refuse), 'territory_unknown' (refuse), or 'ok' (admit).",
+  "note": "AC9-HP (x-e221): the per-territory team cap verdicts, pinned as scenarios. The Rust gate (crates/fno-agents/src/spawn_gate.rs::check_territory_cap) is the sole enforcement home since the Python conjunct was ported there (2026-09-13 crown ruling: cli/src/fno budget); the Rust suite reads this file. Live registry rows carry 'node' (the backlog node the row works) and crown rows carry 'crown_scope'. 'graph' is the backlog graph; 'node' names the SPAWNING node; expect.verdict is 'territory_cap' (refuse), 'territory_unknown' (refuse), or 'ok' (admit).",
   "scenarios": [
     {
       "name": "cap_refuses_fifth_in_scope_worker",

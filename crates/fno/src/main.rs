@@ -2,17 +2,20 @@
 //!
 //! - bare `fno` on a TTY -> mux client (spawn a server if absent, attach)
 //! - bare `fno` off a TTY -> a one-line notice, exit 0 (never a TUI into a pipe)
-//! - `fno --session <name>` on a TTY -> mux client for a named session
+//! - `fno --server <name>` on a TTY -> mux client for a named server
+//! - `fno --session <name>` -> deprecated spelling of `--server` (still works, warns)
 //! - `fno --server <socket>` -> mux server (internal; what the client spawns)
-//! - `fno mux server [--session <name>]` -> mux server (public, scriptable)
-//! - `fno mux ls | attach <name> | kill-server [<name>]` -> session management
+//! - `fno mux server [--server <name>]` -> mux server (public, scriptable)
+//! - `fno mux ls | attach <name> | kill-server [<name>]` -> server management
 //! - anything else -> forward to the provisioned Python CLI (`bootstrap`)
 //!
-//! `--session` is intercepted ONLY as the exact leading pair
-//! `["--session", <name>]` (Locked 7): every other leading `--session` shape
-//! is MuxUsage, never a silent forward to Python - the Python namespace only
-//! carries a deprecated per-subcommand alias, never a leading flag, so the
-//! interception is collision-free.
+//! The leading `--server`/`--session` pair is intercepted ONLY as the exact
+//! pair `[flag, <name>]` (Locked 7): every other shape is MuxUsage, never a
+//! silent forward to Python - the Python namespace only carries a deprecated
+//! per-subcommand alias, never a leading flag, so the interception is
+//! collision-free. A `--server` value containing `/` keeps the internal
+//! ServerSocket role (what `client.rs` spawns with an absolute path); any
+//! other value is the attach.
 
 use std::env;
 use std::ffi::OsString;
@@ -42,8 +45,9 @@ fn mux_tombstone(verb: &str) -> Option<&'static str> {
 }
 
 /// What this invocation is, decided purely from args + TTY-ness. Session
-/// resolution (flag > env > default) happens in `main`, not here, so the
-/// decision table stays pure.
+/// resolution (flag > env > default) happens in `main`, not here; the one
+/// side effect is the `--session` deprecation note, which names a flag and
+/// stays silent on every `--server` shape.
 #[derive(Debug, PartialEq, Eq)]
 enum Role {
     /// Attach (spawning the server if absent). `Some(name)` when an explicit
@@ -62,6 +66,9 @@ enum Role {
     /// `mux doctor [--json]`: read-only environment diagnostics (US6). The bool
     /// is `--json`.
     MuxDoctor(bool),
+    /// (v78) `mux stats [--json]`: server-instance telemetry (the human_touch
+    /// emission-failure counter with its measurement window). Hidden, read-only.
+    MuxStats(bool),
     /// `mux pane <verb> ...`: the v4 script API. Carries the tokens after
     /// `mux pane` verbatim; `mux_cli::pane` parses the verb + flags. No TTY
     /// needed (control verbs are scriptable one-shots).
@@ -112,7 +119,14 @@ enum Role {
     /// `mux serve --web [--session <name>] [--bind <addr>] [--port <n>]`: the
     /// read-only web bridge (x-6a14). Attaches to a session as an observer and
     /// serves its frame stream to browsers over HTTP+WebSocket. No TTY needed.
+    /// `mux serve --stop [--session <name>]` kills the running bridge: it reads
+    /// the bridge's own state file, identity-checks the pid against its
+    /// recorded start token, then SIGINTs (the bridge's graceful exit) with a
+    /// SIGKILL escalation for a wedged one.
     MuxWeb(fno::web::WebArgs),
+    /// `mux web reap [--json]`: the corpse sweep for the `--web` bridge
+    /// marker. Same carry-verbatim shape; `mux_cli::web` parses.
+    MuxWebCtl(Vec<OsString>),
     /// A verb named in [`MUX_TOMBSTONES`]: refuse, naming what replaced it.
     MuxRemoved(String),
     /// `version [--json]`: report the mux binary's own baked-in build rev so
@@ -165,9 +179,10 @@ fn split_json(rest: &[OsString]) -> Option<(Vec<&str>, bool)> {
     Some((positionals, json))
 }
 
-/// Parse `serve` flags into [`fno::web::WebArgs`]. `--web` is required; a missing
-/// flag value, an unknown flag, a non-UTF-8 arg, or a bad `--port` is `None`
-/// (the caller maps that to `MuxUsage`, exit 2).
+/// Parse `serve` flags into [`fno::web::WebArgs`]. One of `--web`, `--stop`,
+/// `--status` is required; a missing flag value, an unknown flag, a non-UTF-8
+/// arg, or a bad `--port` is `None` (the caller maps that to `MuxUsage`, exit
+/// 2).
 fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
     let mut web = false;
     let mut args = fno::web::WebArgs::default();
@@ -175,13 +190,18 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
     while let Some(a) = it.next() {
         match a.to_str()? {
             "--web" => web = true,
-            "--session" => args.session = it.next()?.to_str()?.to_string(),
+            "--stop" => args.stop = true,
+            "--status" => args.status = true,
+            tok @ ("--server" | "--session") => {
+                mux_cli::note_server_flag(tok);
+                args.session = it.next()?.to_str()?.to_string()
+            }
             "--bind" => args.bind = it.next()?.to_str()?.to_string(),
             "--port" => args.port = it.next()?.to_str()?.parse().ok()?,
             _ => return None,
         }
     }
-    web.then_some(args)
+    (web || args.stop || args.status).then_some(args)
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
@@ -194,43 +214,58 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 Role::NotTty
             }
         }
-        Some(Some("--session")) => match args.get(1).and_then(|a| a.to_str()) {
-            // Exactly ["--session", <name>]: an attach. Anything else
-            // (bare flag, trailing args) is usage - never forwarded (AC3-ERR).
-            Some(name) if args.len() == 2 => {
-                if is_tty {
-                    Role::Client(Some(name.to_string()))
-                } else {
-                    Role::NotTty
+        Some(Some(flag @ ("--session" | "--server"))) => {
+            // Exactly [flag, <name>]: an attach. Anything else (bare flag,
+            // trailing args) is usage - never forwarded (AC3-ERR).
+            match args.get(1).and_then(|a| a.to_str()) {
+                Some(name) if args.len() == 2 => {
+                    // A `--server` value containing `/` keeps the internal
+                    // ServerSocket role (client.rs spawns it with an absolute
+                    // path); any other value is the attach that
+                    // `fno --session <name>` performs today (x-f209).
+                    if flag == "--server" && name.contains('/') {
+                        return Role::ServerSocket(OsString::from(name));
+                    }
+                    if flag == "--session" {
+                        mux_cli::note_server_flag(flag);
+                    }
+                    if is_tty {
+                        Role::Client(Some(name.to_string()))
+                    } else {
+                        Role::NotTty
+                    }
                 }
+                _ => Role::MuxUsage,
             }
-            _ => Role::MuxUsage,
-        },
-        Some(Some("--server")) => match args.get(1) {
-            Some(p) if args.len() == 2 => Role::ServerSocket(p.clone()),
-            _ => Role::MuxUsage,
-        },
+        }
         Some(Some("mux")) => match args.get(1).and_then(|a| a.to_str()) {
             Some("server") => {
                 let mut session = proto::DEFAULT_SESSION.to_string();
                 let mut rest = args[2..].iter();
                 while let Some(a) = rest.next() {
                     match a.to_str() {
-                        Some("--session") => match rest.next().and_then(|s| s.to_str()) {
-                            Some(s) => session = s.to_string(),
-                            None => return Role::MuxUsage,
-                        },
+                        Some(flag @ ("--server" | "--session")) => {
+                            mux_cli::note_server_flag(flag);
+                            match rest.next().and_then(|s| s.to_str()) {
+                                Some(s) => session = s.to_string(),
+                                None => return Role::MuxUsage,
+                            }
+                        }
                         _ => return Role::MuxUsage,
                     }
                 }
                 Role::ServerSession(session)
             }
             // `mux serve --web ...`: the read-only web bridge (x-6a14). `--web`
-            // is required (the `serve` verb reserves room for future modes).
+            // or `--stop` is required (the `serve` verb reserves room for
+            // future modes; `--stop` is the bridge's kill switch).
             Some("serve") => match parse_web_args(&args[2..]) {
                 Some(w) => Role::MuxWeb(w),
                 None => Role::MuxUsage,
             },
+            // `mux web reap ...`: the bridge marker's corpse sweep. A bare
+            // `mux web` falls through to MuxUsage.
+            Some("web") if args.len() > 2 => Role::MuxWebCtl(args[2..].to_vec()),
             // `mux pane <verb> ...`: hand the rest to the pane verb family;
             // a bare `mux pane` (no verb) falls through to MuxUsage. Nothing
             // under `mux pane` ever forwards to Python (AC).
@@ -273,6 +308,12 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             },
             Some("doctor") => match split_json(&args[2..]) {
                 Some((pos, json)) if pos.is_empty() => Role::MuxDoctor(json),
+                _ => Role::MuxUsage,
+            },
+            // (v78) `mux stats [--json]`: server-instance telemetry the
+            // scoreboard reads. Hidden, read-only, no positional.
+            Some("stats") => match split_json(&args[2..]) {
+                Some((pos, json)) if pos.is_empty() => Role::MuxStats(json),
                 _ => Role::MuxUsage,
             },
             Some("attach") => match args.get(2).and_then(|a| a.to_str()) {
@@ -324,7 +365,7 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
 fn main() {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let env_session = env::var("FNO_SESSION").ok();
+    let env_session = mux_cli::env_server();
     match decide_role(&args, is_tty) {
         Role::Forward => bootstrap::forward(&args),
         Role::NotTty => {
@@ -337,12 +378,15 @@ fn main() {
         }
         Role::MuxUsage => {
             eprintln!(
-                "usage: fno [--session <name>] | fno version [--json] \
-                 | fno mux server [--session <name>] \
+                "usage: fno [--server <name>] | fno version [--json] \
+                 | fno mux server [--server <name>] \
                  | fno mux ls [--json] | fno mux attach <name> \
                  | fno mux kill-server [<name>] [--json] \
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
-                 | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
+                 | fno mux serve --web [--server <name>] [--bind <addr>] [--port <n>] \
+                 | fno mux serve --stop [--server <name>] \
+                 | fno mux web reap [--json] \
+                 | fno mux serve --status [--server <name>] \
                  | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
                  | fno mux block pipe|annotate ... \
                  | fno mux tab ls|create|rename|join|move|close ... (--tab takes the visible \
@@ -375,6 +419,7 @@ fn main() {
             std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
         }
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
+        Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
         Role::MuxWeb(web_args) => {
             // The bridge serves for hours, so the warning its startup
             // resolution recorded must surface NOW: exit_mux would print it
@@ -386,6 +431,7 @@ fn main() {
             }
             exit_mux(fno::web::serve(web_args))
         }
+        Role::MuxWebCtl(rest) => exit_mux(mux_cli::web_ctl::web(&rest, env_session.as_deref())),
         Role::MuxPane(rest) => exit_mux(mux_cli::pane(&rest, env_session.as_deref())),
         Role::MuxBlock(rest) => exit_mux(mux_cli::block(&rest, env_session.as_deref())),
         Role::MuxTab(rest) => exit_mux(mux_cli::tab(&rest, env_session.as_deref())),
@@ -480,6 +526,40 @@ mod tests {
         assert_eq!(
             decide_role(&os(&["--session", "work", "backlog", "list"]), false),
             Role::MuxUsage
+        );
+    }
+
+    #[test]
+    fn server_axis_top_level_server_flag_attaches_or_spawns_internal() {
+        // x-f209 AC4-HP/EDGE: `--server <name>` is the attach that
+        // `--session <name>` performs today; a value containing `/` keeps the
+        // internal ServerSocket role the client spawns.
+        assert_eq!(
+            decide_role(&os(&["--server", "work"]), true),
+            Role::Client(Some("work".into()))
+        );
+        assert_eq!(decide_role(&os(&["--server", "work"]), false), Role::NotTty);
+        assert_eq!(
+            decide_role(&os(&["--server", "/tmp/x.sock"]), true),
+            Role::ServerSocket("/tmp/x.sock".into())
+        );
+        assert_eq!(
+            decide_role(&os(&["--server"]), true),
+            Role::MuxUsage,
+            "a bare flag is usage, never a forward"
+        );
+    }
+
+    #[test]
+    fn server_axis_mux_server_takes_server_flag() {
+        // x-f209: `mux server --server <name>`; --session keeps working.
+        assert_eq!(
+            decide_role(&os(&["mux", "server", "--server", "work"]), false),
+            Role::ServerSession("work".into())
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "server", "--session", "work"]), false),
+            Role::ServerSession("work".into())
         );
     }
 
@@ -682,5 +762,20 @@ mod tests {
             Role::MuxUsage
         );
         assert_eq!(decide_role(&os(&["mux", "bogus"]), false), Role::MuxUsage);
+    }
+
+    #[test]
+    fn serve_parses_the_status_flag_like_stop() {
+        // `--status` is the read door beside `--stop`: it parses alone and
+        // alongside --web/--port, and the mode-required check admits all
+        // three modes.
+        let parsed = parse_web_args(&os(&["--status"])).expect("--status parses");
+        assert!(parsed.status);
+        assert!(!parsed.stop);
+        let parsed = parse_web_args(&os(&["--web", "--port", "9001", "--status"]))
+            .expect("--web --status parses");
+        assert!(parsed.status);
+        assert_eq!(parsed.port, 9001);
+        assert!(parse_web_args(&os(&["--server", "main"])).is_none());
     }
 }

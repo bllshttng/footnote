@@ -295,6 +295,7 @@ fn rust_codex_create(
         None,
         None,
         None,
+        &[],
     );
 
     match old_path {

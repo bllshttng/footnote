@@ -989,8 +989,9 @@ def test_an_unmapped_row_state_does_not_degrade_the_reading(cwd_tmp, fake_roster
     row that IS in the listing. Blocking on it printed "roster not consulted"
     forever and answered None for every SUSPECT claim, so nothing was reaped.
 
-    Carrying it is safe because an unknown state matches no finished state, so
-    the alarm reads the worker as engaged - the conservative direction."""
+    An unmapped word is no liveness evidence either: the row reads unmeasured,
+    never engaged-by-default - the old conservative alarm fired on a label
+    nobody had mapped, which is a verdict from a word, not a measurement."""
     from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
 
     fake_roster(
@@ -998,8 +999,10 @@ def test_an_unmapped_row_state_does_not_degrade_the_reading(cwd_tmp, fake_roster
         warnings=[f"{ADVISORY_WARNING_PREFIX}unmapped row state 'frobnicating'"],
     )
     r = runner.invoke(cli, ["status", "node:x-76d1"])
-    assert "UNCLAIMED but a live worker is on this node" in r.output
+    assert "unmeasured, never live" in r.output
+    assert "t-x76d1-rmtruth" in r.output
     assert "roster not consulted" not in r.output
+    assert "UNCLAIMED but a live worker" not in r.output
 
 
 def test_an_unanticipated_warning_degrades_by_default(cwd_tmp, fake_roster):
@@ -1017,8 +1020,17 @@ def test_a_lying_done_row_still_raises_the_alarm(cwd_tmp, fake_roster, monkeypat
     incident `_TERMINAL_STATES` carries a warning about. A transcript that is
     positively still moving overrules the row, so an operator deciding whether
     to staff this node is told a worker is on it."""
+    import time as _t
+
+    from fno.agents.watchdog import TailFacts
+
     monkeypatch.setattr(
-        "fno.claims.roster._transcript_activity", lambda *_a, **_kw: False
+        "fno.agents.watchdog.tail_facts",
+        lambda *_a, **_kw: TailFacts(
+            records=None, last_event_epoch=_t.time() - 60,
+            tail_text="", last_role="assistant", last_text="working the task",
+            pr_polls=None,
+        ),
     )
     fake_roster(rows=[_row("t-x76d1-rmtruth", "done", "x-76d1")])
     r = runner.invoke(cli, ["status", "node:x-76d1"])
@@ -1030,8 +1042,16 @@ def test_an_aged_out_transcript_leaves_the_row_standing(cwd_tmp, fake_roster, mo
     A wrong reap archives a live worker's claim; a wrong line here is an alarm
     on an empty node, and one that fires on every finished session whose
     transcript has aged out teaches operators to ignore the alarm."""
+    import time as _t
+
+    from fno.agents.watchdog import TailFacts
+
     monkeypatch.setattr(
-        "fno.claims.roster._transcript_activity", lambda *_a, **_kw: None
+        "fno.agents.watchdog.tail_facts",
+        lambda *_a, **_kw: TailFacts(
+            records=None, last_event_epoch=_t.time() - 11 * 3600,
+            tail_text="", last_role="assistant", last_text="...", pr_polls=None,
+        ),
     )
     fake_roster(rows=[_row("t-x76d1-rmtruth", "done", "x-76d1")])
     r = runner.invoke(cli, ["status", "node:x-76d1"])
@@ -1157,3 +1177,75 @@ def test_a_stub_captured_at_import_never_answers_for_the_cli(cwd_tmp):
         # Drop whatever this reload captured so later tests get the real
         # function even when the assertion above fails.
         importlib.reload(claims_cli_module)
+
+
+def _write_claim_file(key, *, expires_at):
+    """A claim whose TTL lapsed under a provably live pid (this process).
+
+    pid_provenance="session-prover" plus a pid-dies-with-session harness is
+    the arm the native verdict keeps Live past the TTL; a legacy-shaped
+    record reads Stale on the clock alone.
+    """
+    import os
+    import socket
+
+    import psutil
+
+    from fno.claims.hostid import machine_id
+    from fno.claims.io import claim_path, serialize_claim
+    from fno.claims.types import Claim, now_ms
+
+    # The verdict reads PID reuse when the pid's create time EXCEEDS
+    # acquired_at, so pin acquired_at a beat after THIS process's birth: the
+    # freshest provably-live pid a test can own.
+    pid = os.getpid()
+    acquired_at = int(psutil.Process(pid).create_time() * 1000) + 2_000
+    claim = Claim(
+        key=key,
+        holder="target-session:sid-e",
+        acquired_at=acquired_at,
+        pid=pid,
+        host=socket.gethostname(),
+        machine_id=machine_id(),
+        harness="claude",
+        pid_provenance="session-prover",
+        expires_at=expires_at,
+    )
+    p = claim_path(key)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(serialize_claim(claim))
+    return p
+
+
+def test_status_live_expired_ttl_names_the_expiry(cwd_tmp):
+    """AC3-HP (x-74aa): a live claim past its TTL renders the expiry clause
+    with the age and the evidence keeping the holder live, not a bare live."""
+    from fno.claims.types import now_ms
+
+    _write_claim_file("k", expires_at=now_ms() - 60_000)
+    r = runner.invoke(cli, ["status", "k"])
+    assert r.exit_code == 0, r.output
+    assert "ttl expired" in r.output
+    assert "holder live by" in r.output
+    assert json.loads(r.stdout)["state"] == "live"
+
+
+def test_status_live_fresh_lease_has_no_expiry_clause(cwd_tmp):
+    """AC3-EDGE: a lease inside its TTL renders no expiry clause."""
+    runner.invoke(cli, ["acquire", "k", "--holder", "h"])
+    r = runner.invoke(cli, ["status", "k"])
+    assert r.exit_code == 0, r.output
+    assert "ttl expired" not in r.output
+
+
+def test_unresolved_roster_row_naming_another_node_stays_free(cwd_tmp, fake_roster):
+    """AC4-HP (x-74aa): an unresolved row whose worktree names some OTHER node
+    is not evidence about this key; the state stays the claim's own free and
+    only coverage reads degraded."""
+    fake_roster(rows=[_row("t-unrelated", "working", None, "/tmp/x-other-node")])
+    r = runner.invoke(cli, ["status", "node:x-76d1", "--json"])
+    assert r.exit_code == 0
+    info = json.loads(r.output)
+    assert info["state"] == "free"
+    assert info.get("basis") != "unresolved-roster-row"
+    assert info["roster_coverage"] == "degraded"

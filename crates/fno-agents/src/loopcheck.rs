@@ -21,6 +21,7 @@ use crate::{
 use crate::acceptance_evidence::{evaluate_done_probes, ProbeGate, PROBE_TIMEOUT};
 use crate::bounded_spawn::{kill_process_group, killpg};
 pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
+use crate::king_termination::{bound_breached, king_quiet_body};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -3059,7 +3060,7 @@ fn read_pr_info(
         // Locked Decision 1, same conjunct as the solo lane arm: the pass
         // condition is disposition-complete, withheld below the cap only.
         let blockers = disposition_blockers(&events_text, &head_branch, head_sha);
-        let reviewed = (info.all_required_passed() || local_recovery)
+        let reviewed = (info.all_required_passed() || local_recovery || tiling.rounds_exhausted)
             && unaddressed.is_empty()
             && reviewers_ok
             && !blockers_withhold(&blockers, tiling.rounds_exhausted);
@@ -3253,10 +3254,10 @@ fn local_recovery_from_refusal(
 }
 
 /// True when explicit reviewer refusal is the only remaining review obstacle.
-/// Missing and stale reviewers still deserve a wait or re-read, while findings
-/// and unattested required local reviewers remain work for the agent.
 fn awaiting_review_only(pr: &PrInfo) -> bool {
-    pr.coverage.review_state() == Some(ReviewState::ReviewerRefused)
+    pr.coverage
+        .review_state_at(pr.range_tiling.rounds_exhausted)
+        == Some(ReviewState::ReviewerRefused)
         && pr.missing_bots.is_empty()
         && pr.stale_bots.is_empty()
         && pr.unaddressed_findings.is_empty()
@@ -3491,8 +3492,18 @@ fn already_emitted_awaiting_merge(events_path: &Path, session_id: &str) -> bool 
 /// env seam the hint and fidelity probes use (`FNO_LOOPCHECK_FNO_BIN`,
 /// default `fno`). One resolver so a stubbed test and a live gate cannot
 /// disagree about which binary answered.
-fn loopcheck_fno_bin() -> String {
+pub(crate) fn loopcheck_fno_bin() -> String {
     std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string())
+}
+
+/// `$HOME/.fno/events.jsonl`, the global-log fallback every direct-dispatch
+/// verb reaches for when no `--global-events` override is given. Hand-built
+/// (no Rust resolver for events.jsonl exists yet, x-1571 debt this file
+/// already carries) rather than a new duplicate of the same literal in
+/// every caller.
+pub(crate) fn default_global_events_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(&home).join(".fno/events.jsonl")
 }
 
 /// Best-effort `fno inbox notify TITLE BODY`. Spawned detached and never waited on;
@@ -7123,7 +7134,7 @@ fn coverage_event_data_full(
         "verdicts": &rep.verdicts,
         "head_sha": head_sha,
     });
-    if let Some(review_state) = rep.review_state() {
+    if let Some(review_state) = rep.review_state_at(tiling.is_some_and(|t| t.rounds_exhausted)) {
         data["review_state"] = serde_json::json!(review_state);
     }
     if let Coverage::Covered(n) = &rep.coverage {
@@ -7978,7 +7989,12 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     })
 }
 
-fn try_flag_value(arg: &str, flag: &str, args: &[String], i: &mut usize) -> Option<String> {
+pub(crate) fn try_flag_value(
+    arg: &str,
+    flag: &str,
+    args: &[String],
+    i: &mut usize,
+) -> Option<String> {
     if arg == flag {
         *i += 1;
         args.get(*i).cloned()
@@ -8037,7 +8053,7 @@ pub(crate) fn resolve_review_inputs(
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let global_events = global_events_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(&home).join(".fno/events.jsonl"));
+        .unwrap_or_else(default_global_events_path);
 
     // Scopes the review_coverage event written into the cross-project global
     // log. The git remote is the one identifier canonical and every one of its
@@ -8228,17 +8244,19 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             return (2, out.to_string());
         }
     };
-    // Publish the per-thread read bound and the fire's budget deadline before
-    // any read can fire. Zero (and absent) both mean "the production
-    // default". Thread-local, not process-global: the test harness fires
-    // `decide` in-process on parallel threads, and one fire must never reset
-    // or inherit a neighboring fire's injected bound mid-read.
-    STOPGATE_READS.with(|cell| {
-        *cell.borrow_mut() = (
-            parsed.read_timeout_ms.unwrap_or(0),
-            Some(std::time::Instant::now() + STOPGATE_FIRE_BUDGET),
-        );
-    });
+    // Publish the per-thread read bound, the fire's budget deadline, and the
+    // king drain's reserved slice before any read can fire. Zero (and absent)
+    // both mean "the production default".
+    let reserve_ms = if parsed.driver == "king" {
+        stopgate_drain_reserve_ms()
+    } else {
+        0
+    };
+    stopgate_stamp_fire(
+        parsed.read_timeout_ms.unwrap_or(0),
+        std::time::Instant::now() + STOPGATE_FIRE_BUDGET,
+        reserve_ms,
+    );
 
     // The king asks a different question of a different manifest, so it routes
     // BEFORE the target-shaped manifest read below. Branching inside that read
@@ -8377,54 +8395,37 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // no-gh mode), because it is a side channel that must fire once per stop
     // regardless of how the stop itself is decided. The node id is resolved
     // here once; the review-findings scan below reuses the same binding.
-    // NEWEST entry only on the transcript fallback (mirroring the intent
-    // read's newest-entry rule for watching): a distress in an older entry
-    // was handled at that entry's own stop, and re-reading it here would
-    // re-fire it. The fallback matters because the agy, opencode, and codex
-    // stop hooks are transcript-only invocations - `last_assistant_message`
-    // is always absent there (codex round on PR 1282) - and the emitter must
-    // not silently not exist on those harnesses.
     let node_id = scan_manifest_field(&manifest_content, "graph_node_id").or_else(|| {
         scan_manifest_field(&manifest_content, "target_claim_key")
             .and_then(|k| k.strip_prefix("node:").map(|s| s.to_string()))
     });
-    let distress_text: Option<String> = last_assistant_message.clone().or_else(|| {
-        crate::distress::newest_assistant_text_via_reader(
-            &loopcheck_fno_bin(),
-            &transcript_path,
-            &cwd,
-        )
-    });
-    if let Some(distress) = distress_text
-        .as_deref()
-        .and_then(crate::distress::extract_help_distress)
-    {
-        crate::distress::emit_help_distress_blocked(
-            &project_events,
-            &global_events,
-            &cwd,
-            &session_id,
-            node_id.as_deref(),
-            &distress,
-        );
-    }
+    let harness = scan_manifest_field(&manifest_content, "harness");
+    crate::distress::scan_and_emit(
+        &project_events,
+        &global_events,
+        &cwd,
+        &session_id,
+        node_id.as_deref(),
+        harness.as_deref(),
+        &transcript_path,
+        last_assistant_message.as_deref(),
+    );
 
     // ── Step 1: cancel sentinel ───────────────────────────────────────────────
-    if check_cancel_sentinel(&cwd, &state_path, &manifest.created_at, "target") {
-        emit(
-            "termination",
-            serde_json::json!({
-                "session_id": session_id,
-                "reason": "Interrupted",
-                "message": "cancel sentinel present"
-            }),
-        );
+    if let Some(hit) = check_cancel_sentinel(&cwd, &state_path, &manifest.created_at, "target") {
+        emit("termination", hit.termination_data(&session_id));
+        // One-shot: once a sentinel has terminated this run it has done its
+        // job. Consuming it is what stops a cancel from re-terminating every
+        // later stop of a session that recovers and keeps working.
+        if hit.kind == crate::cancel_sentinel::CancelKind::TargetSentinel {
+            let _ = std::fs::remove_file(&hit.path);
+        }
         return (
             0,
             allow_output(
                 "allow",
                 Some(TerminationReason::Interrupted),
-                "cancel sentinel present; exiting",
+                &hit.termination_message(),
                 0,
                 None,
             ),
@@ -10643,77 +10644,13 @@ fn run_bounded(
     }
 }
 
-/// Wall-clock ceiling for ONE synchronous stop-gate read: PR metadata,
-/// checks, reviews, inline comments, commits, quota, coverage reads,
-/// fingerprint reads, nudges/coverage writes, the king board, and every
-/// local `git` read the gate makes. One named bound so a single wedged child
-/// can never outlive the stop fire; the fidelity ceiling (60s) and the
-/// advisory-hint ceiling (10s) stay separate because they gate different
-/// things and drift independently.
-const STOPGATE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+mod read_bounds;
 
-/// Aggregate wall-clock budget for ONE fire's external reads. The harness
-/// kills the stop hook at 60s (hooks/git-protection.py records the budget and
-/// the Stop hook carries no override), so N sequential reads each legal at
-/// 30s could burn multiples of that and die mid-fire with no decision -
-/// recreating the exact no-decision path this transport exists to close.
-/// Reads that start after the budget is spent still run, but at the floor
-/// bound, so the fire ends fast with a decision naming what it could not
-/// wait for.
-const STOPGATE_FIRE_BUDGET: std::time::Duration = std::time::Duration::from_secs(50);
-
-/// A spent budget must still bound every remaining read, so the effective
-/// ceiling never reaches zero: this floor keeps a late read killable in
-/// bounded time instead of degenerating into an unbounded wait.
-const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration::from_millis(250);
-
-thread_local! {
-    /// The fire's read-bound override (from `--read-timeout-ms`, 0 meaning
-    /// the production default) and its budget deadline, stamped when `decide`
-    /// begins. Thread-local, not process-global: the test harness fires
-    /// `decide` in-process on parallel threads, and one fire must never reset
-    /// or inherit a neighboring fire's injected bound mid-read.
-    static STOPGATE_READS: std::cell::RefCell<(u64, Option<std::time::Instant>)> =
-        const { std::cell::RefCell::new((0, None)) };
-}
-
-/// Effective bound for one stop-gate read: the configured ceiling (flag or
-/// production default) clamped to whatever remains of this fire's aggregate
-/// budget, floored so the answer is always a positive killable bound.
-pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
-    STOPGATE_READS.with(|cell| {
-        let (override_ms, _) = *cell.borrow();
-        let configured = if override_ms > 0 {
-            std::time::Duration::from_millis(override_ms)
-        } else {
-            STOPGATE_READ_TIMEOUT
-        };
-        clamp_to_fire_deadline(configured)
-    })
-}
-
-/// Clamp a configured read ceiling to this fire's budget deadline, so no
-/// single long read can spend more than the fire still has. Used both for
-/// stop-gate reads (via `stopgate_read_timeout`) and for the fidelity
-/// probe's separate 60s ceiling - the budget is the fire's, not the read's.
-fn clamp_to_fire_deadline(configured: std::time::Duration) -> std::time::Duration {
-    STOPGATE_READS.with(|cell| match cell.borrow().1 {
-        Some(d) => {
-            let remaining = d.saturating_duration_since(std::time::Instant::now());
-            clamp_to_fire_budget(configured, remaining)
-        }
-        None => configured,
-    })
-}
-
-/// Pure clamp so the deadline math is testable without a clock: never above
-/// what remains of the budget, never below the floor.
-fn clamp_to_fire_budget(
-    configured: std::time::Duration,
-    remaining: std::time::Duration,
-) -> std::time::Duration {
-    configured.min(remaining).max(STOPGATE_BOUND_FLOOR)
-}
+pub(crate) use read_bounds::{
+    clamp_to_fire_budget, clamp_to_fire_deadline, stopgate_drain_reserve_ms,
+    stopgate_drain_timeout, stopgate_read_timeout, stopgate_stamp_fire, STOPGATE_BOUND_FLOOR,
+    STOPGATE_FIRE_BUDGET,
+};
 
 /// How an external stop-gate read failed. `TimedOut` is its own kind so a
 /// killed child can never render through the ordinary failed-read wording -
@@ -10788,6 +10725,15 @@ impl GhReadError {
             stderr_tail: detail.to_string(),
             elapsed: None,
             spawn_kind: Some(spawn_kind),
+        }
+    }
+
+    /// The kill bound when this error is a timeout, so a render site can
+    /// classify without parsing the rendered prose.
+    pub(crate) fn timeout_bound(&self) -> Option<std::time::Duration> {
+        match self.kind {
+            ReadErrorKind::TimedOut => self.elapsed,
+            _ => None,
         }
     }
 
@@ -11641,119 +11587,6 @@ fn king_output(
     .to_string()
 }
 
-/// What the dry-fire scan found: how many fires have landed with no new work
-/// done, and what was actionable on the most recent one.
-pub(crate) struct KingFireHistory {
-    /// Every fire this session has made. The manifest's `budget_max_iterations`
-    /// is a ceiling on THIS, not on the dry streak: a king clearing a row every
-    /// fire makes progress forever and must still stop somewhere.
-    pub(crate) total: u64,
-    pub(crate) dry: u64,
-    /// Actionable row identities recorded on the previous fire, or empty when
-    /// this is the first.
-    pub(crate) last_ids: Vec<String>,
-}
-
-/// Count how many king loop-check fires have landed with no NEW work done.
-///
-/// Progress is a positive marker, never board size: the board refills while
-/// the king works, so the actionable count can rise on the very fire that
-/// clears a row. Two things count, and the first is the one that fires.
-///
-/// 1. A row identity present on the previous fire and absent now: external
-///    truth off the board, needing no producer. The first cut had only rule
-///    2, nothing emitted the event it keyed on, and every king terminated
-///    NoProgress on its third fire no matter how much it dispatched.
-/// 2. A `king_action` naming a target id this run has not acted on before.
-///    Re-acting on the same id is NOT progress: `stalled_holder` rows can
-///    outlive the only action a king has for them, and a reset-on-repeat
-///    counter would never converge.
-pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFireHistory {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        return KingFireHistory {
-            total: 0,
-            dry: 0,
-            last_ids: Vec::new(),
-        };
-    };
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut total: u64 = 0;
-    let mut dry: u64 = 0;
-    let mut last_ids: Vec<String> = Vec::new();
-    for line in content.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let data = value.get("data");
-        let sid = data
-            .and_then(|d| d.get("session_id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if sid != session_id {
-            continue;
-        }
-        match value.get("type").and_then(|v| v.as_str()) {
-            Some("king_action") => {
-                let target = data
-                    .and_then(|d| d.get("target_id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if !target.is_empty() && seen.insert(target.to_string()) {
-                    dry = 0;
-                }
-            }
-            Some("king_loop_check") => {
-                total += 1;
-                dry += 1;
-                // The clear is recorded ON the fire that saw it, so the reset
-                // survives into every later read. Resetting only the local
-                // `dry` inside `king_decide` left the journal unchanged, so
-                // the next fire recounted this row and the tolerance shrank by
-                // one per fire until a working king died on its third.
-                if data
-                    .and_then(|d| d.get("cleared"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    dry = 0;
-                }
-                last_ids = data
-                    .and_then(|d| d.get("actionable_ids"))
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-            }
-            _ => {}
-        }
-    }
-    KingFireHistory {
-        total,
-        dry,
-        last_ids,
-    }
-}
-
-/// True when any row the previous fire called actionable is gone now.
-///
-/// Deliberately one-directional. Rows ARRIVING is the board refilling, which
-/// is not progress and not failure; only a row leaving is something the king
-/// cleared.
-pub(crate) fn king_cleared_a_row(last_ids: &[String], now_ids: &[String]) -> bool {
-    if last_ids.is_empty() {
-        return false;
-    }
-    let now: std::collections::HashSet<&str> = now_ids.iter().map(String::as_str).collect();
-    last_ids.iter().any(|id| !now.contains(id.as_str()))
-}
-
-/// Consecutive dry fires before the loop gives up on a board that will not
-/// shrink. Named rather than inlined so it is tunable in one place.
-pub(crate) const KING_DRY_FIRE_CEILING: u64 = 3;
-
 fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     // A missing manifest is the only safe silent allow, exactly as on the
     // target path: a session nobody crowned is not a king, and blocking one
@@ -11825,7 +11658,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         )
     };
 
-    if check_cancel_sentinel(
+    if let Some(hit) = check_cancel_sentinel(
         &parsed.cwd,
         &parsed.state_path,
         &manifest.created_at,
@@ -11833,35 +11666,38 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     ) {
         return terminate(
             TerminationReason::Interrupted,
-            "cancel sentinel present; exiting",
+            &format!("cancel sentinel present{}", hit.attribution()),
             0,
             0,
             &[],
         );
     }
 
-    let history = king_fire_history(&project_events, &session_id);
+    let history = crate::loop_king::king_fire_history(&project_events, &session_id);
     let dry = history.dry;
+    // The bounds every block below owes, in one place so a branch can no
+    // longer grow its own copy of either and sit above them.
+    let bounded = |dry: u64, waiting: &str| {
+        bound_breached(history.total, dry, manifest.max_iterations, waiting)
+    };
+    // Shared spine of both blind-board blocks: bounded, quiet emit, block.
+    let blind_block = |message: &str, actionable: i64, dry: u64| -> (i32, String) {
+        if let Some(b) = bounded(dry, message) {
+            return terminate(b.reason, &b.message, 0, b.fires, &[]);
+        }
+        emit("king_loop_check", king_quiet_body(&session_id, actionable));
+        (0, king_output("block", None, message, actionable, dry + 1))
+    };
 
     let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
         Ok(b) => b,
         Err(e) => {
-            // Blind is not clean. Block, but let the dry-fire counter below
-            // bound it: a board that never answers reaches the ceiling and
-            // terminates NoProgress rather than holding the king forever.
-            // Unlike the clean block at the bottom, exit 2 here marks the
-            // degraded path for log readers; no consumer acts on it (the shim
-            // keys on the decision field, never the code). The real bound is
-            // the dry-fire ceiling above, which terminates NoProgress when
-            // the board never answers.
-            if dry + 1 >= KING_DRY_FIRE_CEILING {
-                return terminate(
-                    TerminationReason::NoProgress,
-                    &format!("king board unreadable {} fires running: {e}", dry + 1),
-                    0,
-                    dry + 1,
-                    &[],
-                );
+            // Blind is not clean. Block on exit 2, but bounded: a board that
+            // never answers still reaches a ceiling and terminates. The exit
+            // code marks the degraded path; the shim keys on the decision
+            // field, never the code.
+            if let Some(b) = bounded(dry, &format!("king board unreadable: {e}")) {
+                return terminate(b.reason, &b.message, 0, b.fires, &[]);
             }
             emit(
                 "king_loop_check",
@@ -11885,15 +11721,12 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
 
     if board.actionable == 0 {
         if board.operator_questions_unreadable {
-            return (
+            // Bounded, and each blocking fire emits its row so the counters
+            // advance; the old return left both frozen and blocked forever.
+            return blind_block(
+                "board clean but outstanding operator questions are unreadable; blocking completion",
                 0,
-                king_output(
-                    "block",
-                    None,
-                    "board clean but outstanding operator questions are unreadable; blocking completion",
-                    0,
-                    dry,
-                ),
+                dry,
             );
         }
         let open_question = board
@@ -11916,26 +11749,50 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         // (2026-09-06 ruling): a board reading clean while nodes sit driven
         // but unshipped is a quiet beat, never a finish line. An unreadable
         // drain read must not certify the scope drained, so it skips this
-        // exit and the dry-fire ceiling below bounds the wait.
-        let undelivered = if manifest.scope.is_empty() {
-            0
+        // exit and the dry-fire ceiling below bounds the wait. The error
+        // rides with the sentinel: a timeout and a failed command demand
+        // opposite operator responses, and flattening both to "unreadable"
+        // is how a hang reads as a blip forever.
+        let (undelivered, drain_error) = if manifest.scope.is_empty() {
+            (0, None)
         } else {
-            crate::loop_king::scope_undelivered_count(&parsed.fno_bin, &parsed.cwd, &manifest.scope)
-                .unwrap_or(i64::MAX)
+            match crate::loop_king::scope_undelivered_count(
+                &parsed.fno_bin,
+                &parsed.cwd,
+                &manifest.scope,
+            ) {
+                Ok(n) => (n, None),
+                Err(e) => (i64::MAX, Some(e)),
+            }
         };
         if undelivered == 0 {
-            let message = if board.unreadable + board.over_budget > 0 {
-                "board clean on every readable queue; exiting NoWork"
-            } else {
-                "board clean; exiting NoWork"
-            };
-            return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
+            // x-c911: a floor count cannot see blind queues; refuse to certify.
+            if board.unreadable_sources {
+                return blind_block(
+                    "board quiet but some sources are unreadable; blocking completion",
+                    0,
+                    dry,
+                );
+            }
+            return terminate(
+                TerminationReason::NoWork,
+                "board clean; exiting NoWork",
+                0,
+                dry,
+                &[],
+            );
         }
-        let message = if undelivered == i64::MAX {
-            "board quiet but scope delivery is unreadable; blocking completion".to_string()
-        } else {
-            format!("board quiet; {undelivered} scope nodes still undelivered")
+        let message = match &drain_error {
+            Some(e) => {
+                format!("board quiet but scope delivery is unreadable: {e}; blocking completion")
+            }
+            None => format!("board quiet; {undelivered} scope nodes still undelivered (drive each scope node to done or superseded to drain)"),
         };
+        let shrank = undelivered != i64::MAX
+            && history
+                .last_undelivered
+                .is_some_and(|prev| undelivered < prev);
+        let dry = if shrank { 0 } else { dry };
         emit(
             "king_loop_check",
             serde_json::json!({
@@ -11943,50 +11800,62 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                 "actionable": 0,
                 "undelivered": undelivered,
                 "actionable_ids": [],
-                "cleared": false,
+                "cleared": shrank,
             }),
         );
+        if let Some(b) = bounded(dry, &message) {
+            return terminate(b.reason, &b.message, 0, b.fires, &[]);
+        }
         return (0, king_output("block", None, &message, 0, dry + 1));
-    }
-
-    // The ceiling `fno agents king init --max-iterations` advertises. Before this it
-    // was parsed into the manifest and read by nothing, so the help string
-    // promised a bound that did not exist, which is worse than no flag. Checked
-    // AFTER NoWork so a clean board still exits clean, and before NoProgress so
-    // an exhausted king reports the reason that actually stopped it.
-    if history.total + 1 >= manifest.max_iterations {
-        return terminate(
-            TerminationReason::Budget,
-            &format!(
-                "{} fires reached the manifest ceiling of {}; {} rows still actionable",
-                history.total + 1,
-                manifest.max_iterations,
-                board.actionable
-            ),
-            board.actionable,
-            dry,
-            &board.actionable_ids,
-        );
     }
 
     // A row the previous fire called actionable and this one does not is work
     // the king cleared. That is the progress signal, read back off the board
-    // rather than self-reported, so it needs no producer to exist.
-    let cleared = king_cleared_a_row(&history.last_ids, &board.actionable_ids);
+    // rather than self-reported, so it needs no producer to exist. Applied
+    // BEFORE the bound: a clearing fire must be judged on its post-reset
+    // streak, never killed by the stale one.
+    let cleared = crate::loop_king::king_cleared_a_row(&history.last_ids, &board.actionable_ids);
     let dry = if cleared { 0 } else { dry };
 
-    if dry + 1 >= KING_DRY_FIRE_CEILING {
+    // The bounds `--max-iterations` advertises, checked after NoWork so a
+    // clean board still exits clean. Budget is reported before NoProgress, so
+    // an exhausted king names the reason that actually stopped it.
+    let waiting = format!("{} rows still actionable", board.actionable);
+    if let Some(b) = bounded(dry, &waiting) {
         return terminate(
-            TerminationReason::NoProgress,
-            &format!(
-                "{} actionable rows unshrunk after {} fires with nothing cleared",
-                board.actionable,
-                dry + 1
-            ),
+            b.reason,
+            &b.message,
             board.actionable,
-            dry + 1,
+            b.fires,
             &board.actionable_ids,
         );
+    }
+
+    match crate::king_termination::capacity_gate(
+        &board,
+        &parsed.fno_bin,
+        &parsed.cwd,
+        &session_id,
+        dry,
+        &emit,
+    ) {
+        Some(crate::king_termination::CapacityGate::Saturated {
+            message,
+            blocked,
+            fires,
+        }) => {
+            return terminate(TerminationReason::NoWork, &message, blocked, fires, &[]);
+        }
+        Some(crate::king_termination::CapacityGate::Split {
+            message,
+            actionable,
+            fires,
+            journal,
+        }) => {
+            emit("king_loop_check", journal);
+            return (0, king_output("block", None, &message, actionable, fires));
+        }
+        None => {}
     }
 
     emit(
@@ -17042,6 +16911,7 @@ git_bounded();";
         // `<level>` placeholder, and a missing binary keeps the placeholder.
         // Without the pin the expectation would depend on whatever fno the
         // host has installed.
+        let _env_guard = crate::distress::fno_bin_env_test_lock().lock().unwrap(); // shared: distress.rs races this var too
         let var = "FNO_LOOPCHECK_FNO_BIN";
         let prior = std::env::var(var).ok();
         let mut pr = reviewers_gate_pr();

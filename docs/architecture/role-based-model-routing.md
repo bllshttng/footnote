@@ -69,9 +69,22 @@ The guard covers two role *names*. It does not cover the two things a reader rea
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `enabled` | `true` | Master on/off. |
-| `providers` | _(built-in `zai`)_ | Name → `{protocol, base_url, api_key_env, api_key_file}`. Add `deepseek` etc.; override `zai` per field. |
+| `providers` | _(built-in `zai`)_ | Name → `{protocol, base_url, api_key_env, api_key_file, tier_models}`. Add `deepseek` etc.; override `zai` per field. |
 | `roles` | _(built-in → `zai/glm-5.3`)_ | Role → `"provider/model"` (e.g. `tidy: "zai/glm-4.7"`; legacy comma `zai,glm-4.7` also accepted). |
-| `extra_env` | `{}` | Extra env merged into routed spawns (e.g. `API_TIMEOUT_MS`, a cheaper per-tier model). |
+| `extra_env` | `{}` | Extra env merged into routed spawns (e.g. `API_TIMEOUT_MS`). Prefer `tier_models` for per-tier models; `extra_env` still wins as a hand pin. |
+
+`tier_models` maps a Claude tier to a model. It makes `/model` in the running worker offer a real choice instead of the spawn model written into every tier:
+
+```yaml
+config:
+  model_routing:
+    providers:
+      zai:
+        tier_models:
+          opus: "glm-5.3[1m]"   # keys: opus | sonnet | haiku | fable
+```
+
+Undeclared tiers keep the spawn model. `tier_models.haiku` beats the provider's `haiku_model`. An `extra_env` pin beats both. The pin does not survive a resume, where declared tiers re-resolve against today's registry. A composed route whose five model keys hold one distinct value says so at spawn and names this key. There is no check that the provider serves the named model. A wrong id fails at the endpoint. A bare tier alias (`sonnet`) routed to a non-Anthropic endpoint is refused at compose time.
 
 A worked example:
 
@@ -210,7 +223,7 @@ The fallback keeps a tier request answerable where nothing is declared. Review l
 
 ## The strict inventory policy
 
-`routing.enforce_inventory` (default off) turns the declared inventory from a preference into a boundary. Under it, every spawn qualifies against the declared slots only. An explicit `--model`, `-P` or `--route` no slot declares is refused by name, and so is an unqualified lane. The harness default and the built-in fallback sit out of the decision path entirely. `routing.operator_access` (default `unknown`) says where the operator watches from: `local`, `remote`, or `unknown`, and unknown filters like remote.
+`routing.enforce_inventory` (default off) turns the declared inventory from a preference into a boundary for autonomous tiering. Under it, a spawn with no typed axis flag qualifies against the declared slots only, and an unqualified lane is refused by name. A typed `--model`, `-P` or `--route` is an operator pin. It outranks the declared lanes and the slot's lane walk entirely. The flag is the operator's own statement of intent, not a machine choice strict routing exists to bound. Every axis the operator did not name still qualifies against the declared slots. The harness default and the built-in fallback sit out of the decision path entirely. `routing.operator_access` (default `unknown`) says where the operator watches from: `local`, `remote`, or `unknown`. Unknown filters like remote. A pinned spawn skips this filter too, for the same reason.
 
 A row can carry `operator_view`: `claude-native` or `codex-native`, matching its harness. A row with a vendor `route` cannot: that coordinate is not native, and labeling it so is a named refusal. Under `remote` or `unknown`, only labeled rows qualify. The point is observability: a launch must land in a view the operator can actually see. Under `local` every declared lane qualifies.
 
@@ -300,7 +313,7 @@ The code side of the same defense: `incoherent_model_env` (`cli/src/fno/agents/m
 
 ## Scope and deferrals
 
-Wires native per-spawn routing for the claude lane (Anthropic-protocol providers) with the fail-safe fallback and the hard guard. `extra_env` is the escape hatch for differentiated tiers (e.g. a cheaper `ANTHROPIC_DEFAULT_HAIKU_MODEL`). Deferred: a codex/openai lane that consumes the same provider registry over the OpenAI-protocol endpoints. Also deferred: an external router for in-session subagent routing to a non-Anthropic provider. Also deferred: a config UI for editing roles (hand-edit is acceptable first). `consolidate` is already served out-of-repo by modelkit/memdream, which calls z.ai directly.
+Wires native per-spawn routing for the claude lane (Anthropic-protocol providers) with the fail-safe fallback and the hard guard. `tier_models` is the declared per-tier model map, shown in the table above. `extra_env` remains the escape hatch for anything that is not a tier model (e.g. `API_TIMEOUT_MS`). Deferred: a codex/openai lane that consumes the same provider registry over the OpenAI-protocol endpoints. Also deferred: an external router for in-session subagent routing to a non-Anthropic provider. Also deferred: a config UI for editing roles (hand-edit is acceptable first). `consolidate` is already served out-of-repo by modelkit/memdream, which calls z.ai directly.
 
 ## Sigma panel routes
 

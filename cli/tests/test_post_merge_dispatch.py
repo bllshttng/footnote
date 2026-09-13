@@ -622,7 +622,7 @@ def _patch_default_verb(monkeypatch, captured):
     """Redirect the cold verb runner to a recorder (no real subprocess)."""
     import fno.post_merge_route as pmr
 
-    def _verb(pr, cwd):
+    def _verb(pr, cwd, **_kw):
         captured.append((pr, cwd))
         return pmr.ColdRitualResult(ok=True, tail="ok")
 
@@ -650,7 +650,7 @@ def test_default_dispatch_ritual_cold_verb_notok_no_marker(tmp_path, monkeypatch
     _arm_auto_run(tmp_path)
     monkeypatch.setattr(
         pmr, "_default_run_ritual_verb",
-        lambda pr, cwd: pmr.ColdRitualResult(ok=False, tail="fail"),
+        lambda pr, cwd, **_kw: pmr.ColdRitualResult(ok=False, tail="fail"),
     )
     res = _default_dispatch_ritual(_Cand(7, tmp_path), _Obs(merge_sha="shaD2"), None)
     assert res.outcome == "failed"
@@ -726,3 +726,27 @@ def test_sole_production_dispatch_entrypoint():
     # Reconcile keeps its node-closure job but must not reach the dispatch seam.
     assert "dispatch_post_merge_ritual" not in inspect.getsource(rec)
     assert "dispatch_post_merge_ritual" not in inspect.getsource(gcli)
+
+
+def test_ritual_verb_passes_its_timeout(monkeypatch):
+    """AC6-EDGE (x-c79d): the cold verb's subprocess timeout comes from the
+    caller's slice, not a hard 300s the phase alarm cannot reach."""
+    from fno.post_merge_route import _default_run_ritual_verb
+
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "ritual ok"
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr("fno.post_merge_route.subprocess.run", _fake_run)
+
+    res = _default_run_ritual_verb(7, "/tmp", timeout=110)
+
+    assert res.ok is True
+    assert captured["timeout"] == 110

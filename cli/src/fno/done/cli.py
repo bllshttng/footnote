@@ -61,6 +61,7 @@ from fno.graph._reconcile import (
 )
 from fno.graph.fuzzy import resolve_id
 from fno.graph.store import locked_mutate_graph, normalize_plan_path, read_graph
+from fno.graph.strand import _reparent_live_children, _reparent_receipt
 
 
 def _path_graph():
@@ -772,6 +773,9 @@ def done_command(
     # session_id/points _apply_rollup fills inside the lock; `node` is the
     # pre-lock snapshot and never sees them.
     node_after: list = [None]
+    # No --force here (a refused mainstream close wedges autonomous loops), so
+    # live children are re-parented in the same mutation and echoed after.
+    reparented_box: list = []
 
     def _mutator(entries_inner):
         for e in entries_inner:
@@ -821,6 +825,7 @@ def done_command(
                 # imports this module, so a top-level import would cycle.
                 from fno.graph.cli import _cascade_close_parents
 
+                reparented_box.extend(_reparent_live_children(entries_inner, node_id))
                 cascade_closed.extend(_cascade_close_parents(entries_inner, node_id))
             break
         return entries_inner
@@ -860,6 +865,9 @@ def done_command(
         )
         typer.echo(f"fno backlog done: {node_id} -> already done (metadata updated)")
         return
+
+    if reparented_box:
+        typer.echo("fno backlog done: " + _reparent_receipt(reparented_box))
 
     # The canonical post-close steps (stamp+graduate, projection, retro),
     # shared with graph.cli's cmd_done so close depth never forks on flags.

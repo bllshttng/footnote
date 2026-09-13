@@ -433,3 +433,46 @@ def test_routing_init_appends_the_sample_commented(tmp_path, monkeypatch) -> Non
     assert "already present" in res.output
 
 
+# ---------------------------------------------------------------------------
+# settings ls renders the declared tier map (x-f173 AC9-HP)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_ls_renders_the_declared_tier_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC9-HP: a provider with a tier map renders each declared tier and its
+    model beside the haiku column, and a recorded file holding an older tier
+    value reads STALE naming the tier that moved."""
+    recorded = {
+        "env": {
+            "ANTHROPIC_BASE_URL": mr.DEFAULT_ZAI_BASE_URL,
+            "ANTHROPIC_AUTH_TOKEN": "zk",
+            "ANTHROPIC_MODEL": "glm-5.3-flash[1m]",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
+        }
+    }
+    (tmp_path / "route-settings").mkdir()
+    (tmp_path / "route-settings" / "tiered.json").write_text(
+        json.dumps(recorded), encoding="utf-8"
+    )
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: _settings(providers={"zai": {"tier_models": {"opus": "glm-5.3[1m]"}}}),
+    )
+    res = runner.invoke(route_app, ["settings", "ls", "--json"])
+    assert res.exit_code == 0, res.output
+    row = json.loads(res.output)["rows"][0]
+    assert row["provider"] == "zai"
+    # The effective map renders: the declared opus tier plus the builtin
+    # zai haiku_model fold (the same map the STALE check loops).
+    assert row["tiers"] == "haiku=glm-4.7,opus=glm-5.3[1m]"
+    assert row["stale"] == "opus glm-5.2 -> glm-5.3[1m]"
+    assert row["haiku"] == "glm-4.7"
+    text = runner.invoke(route_app, ["settings", "ls"])
+    assert text.exit_code == 0
+    assert "TIERS" in text.output
+
+

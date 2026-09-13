@@ -7,7 +7,7 @@ from pathlib import Path
 from fno import test_cmd
 
 
-def test_bare_run_uses_capped_loadgroup_parallelism(tmp_path, monkeypatch):
+def test_bare_run_uses_capped_loadgroup_parallelism(tmp_path, monkeypatch, no_native_owner):
     captured: dict[str, list[str]] = {}
 
     class _Proc:
@@ -40,7 +40,7 @@ def test_bare_run_uses_capped_loadgroup_parallelism(tmp_path, monkeypatch):
     ]
 
 
-def test_bare_run_keeps_explicit_xdist_settings(tmp_path, monkeypatch):
+def test_bare_run_keeps_explicit_xdist_settings(tmp_path, monkeypatch, no_native_owner):
     captured: dict[str, list[str]] = {}
 
     class _Proc:

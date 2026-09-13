@@ -387,7 +387,19 @@ _NODE_SLUG="$(fno backlog get "$NODE_ID" 2>/dev/null | jq -r '.slug // empty' 2>
 _NODE_SLUG="$(printf '%s' "$_NODE_SLUG" | tr '[:upper:]_' '[:lower:]-' \
   | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//' | cut -c1-48)"
 [ -n "$_NODE_SLUG" ] || _NODE_SLUG="work"
-CHILD_NAME="target-${NODE_ID}-${_NODE_SLUG}-g${CHILD_GEN}"
+# x-84b2: the child name is minted through the canonical bridge -
+# sh-t-<node>-<slug>-g<n>, the self-handoff source stamped so the successor
+# is distinguishable from a manual t- worker. The generation rides as the
+# never-shaved discriminator. A mint refusal parks the handoff loudly.
+_CHILD_NAME_OUT="$(FNO_AGENTS_RUNTIME=python fno agents name --source sh --verb t \
+  "$NODE_ID" --slug "$_NODE_SLUG" --discriminator "g${CHILD_GEN}" 2>&1)"
+_CHILD_NAME_RC=$?
+if [ "$_CHILD_NAME_RC" -ne 0 ]; then
+  _NAME_WHY="$(printf '%s' "${_CHILD_NAME_OUT:-agent name cannot be represented}" | tr '\n"' '  ' | cut -c1-200)"
+  echo "parked $NODE_ID reason=\"canonical naming failed (rc=$_CHILD_NAME_RC): $_NAME_WHY\""
+  exit "$_EXIT_PARKED"
+fi
+CHILD_NAME="${_CHILD_NAME_OUT##*$'\n'}"
 _CAPABILITY_NONCE="${HANDOFF_CAPABILITY_NONCE:-$(date +%s)-$$-${RANDOM:-0}}"
 _CAPABILITY_CWD="${HANDOFF_CAPABILITY_EXPECTED_CWD:-$PWD}"
 _CAPABILITY_ROOT="${HANDOFF_CAPABILITY_EXPECTED_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"

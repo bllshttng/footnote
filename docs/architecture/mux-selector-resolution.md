@@ -2,6 +2,12 @@
 
 The contract between the Python name minter and the Rust pane resolver. Two languages, no shared type: this file is the type. The registry row carries no node field. The agent NAME is the only carrier of which node a worker serves. That makes the name format load-bearing in both directions.
 
+## Is this page for you?
+
+You mint or resolve a worker pane name, or you chase a pane that cannot be found. This page owns that name format and its resolution rules. Misreading it mints a name that resolves to no pane, or to the wrong one.
+
+Not for: restore, held panes, or what survives a restart. Those are [workspace-restore.md](workspace-restore.md) and [pane-worker-relaunch.md](pane-worker-relaunch.md).
+
 ## The name format
 
 A node-driven spawn mints `t-<node-id>-<slug>-<model>`. The prefix `t` marks target workers.
@@ -38,7 +44,7 @@ One resolver, three callers. A resolver wired into only one door leaves the othe
 
 A row that resolves but hosts no pane (`mux == None`) never attaches. Attaching creates a pane, and the server's inherited fd limit makes that a wave-wedging side effect. The doors print the follow command (`fno agents peek <name> --follow`) and exit `17` (`EXIT_NOT_PANE_HOSTED`).
 
-Selector focus ignores `FNO_SESSION`. That variable names the session you sit in, not the one the target pane lives in. An explicit `--session` still overrides, as it does for `where`.
+Selector focus ignores `FNO_SERVER` (and the deprecated `FNO_SESSION`). That variable names the server you sit in, not the one the target pane lives in. An explicit `--server` still overrides, as it does for `where`.
 
 ## The web-bridge state file
 

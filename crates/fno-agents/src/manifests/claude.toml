@@ -1,7 +1,7 @@
 # Claude readiness manifest (E6.3) - new, mirroring the reference claude detection
 # rules. Claude's TUI is richer than codex/gemini's single composer line, so its
 # rules use more of the engine: the OSC title (authoritative, survives
-# scrollback/wrap/resize), the box-drawn composer body, and skip_state_update
+# scrollback/wrap/resize), the composer body (box or rule-bordered), and skip_state_update
 # for the ctrl+o transcript pager.
 #
 # State vocabulary (consumed by the daemon badge when E2 wires evaluate() in):
@@ -13,7 +13,8 @@
 #
 # Priority order (highest wins; the OSC title is primary because it is the one
 # signal grid-scraping cannot fake):
-#   1100 osc_title_working   - braille spinner in the title => working
+#   1100 osc_title_working   - braille/quarter-circle spinner in the title => working
+#   1050 composer_working    - the pinned interrupt/queued line above the composer => working
 #   1000 transcript_viewer   - ctrl+o pager open => hold state (skip update)
 #    980 live_blocked_form    - a selection menu is up => blocked
 #    960 permission_prompt    - "do you want to proceed?" box => blocked
@@ -29,27 +30,48 @@
 # is the safe failure direction.
 #
 # AC-E6-5 in practice: a working claude whose grid shows an idle-looking
-# composer box still badges `working`, because osc_title_working (1100) beats
-# live_prompt_box (950). The title is the authority, not the scraped grid.
+# composer still badges `working`, because osc_title_working (1100) and
+# composer_working (1050) beat live_prompt_box (950). The title is the
+# authority when present; the pinned grid markers carry the busy signal when
+# it is not (a portal view's title reads None).
 #
-# ponytail: the braille spinner (U+2800-28FF) and "✳ " idle title are grounded
-# in osc.rs; the transcript-pager / permission / select-menu MARKER STRINGS and
-# the bottom_non_empty_lines(N) window sizes are from the reference design and are NOT
-# yet pinned against a live claude TUI (no live pane until E2 lands - same
-# constraint readiness.rs documents in its SMOKE-PINNING NOTE). Pin them via
-# cli/scripts/smoke/capture-readiness-grid.sh when E2 lands. Conservative bias
-# holds: a wrong marker is a brief false/late badge, never input sent into the
-# wrong state. the reference engine splits bash-vs-generic permission prompts; folded into one
-# `permission_prompt` here until the bash-specific marker is pinned (carveout).
+# ponytail: the braille spinner (U+2800-28FF), the "✳ " idle title, the
+# rule-bordered composer, and the `esc to interrupt` / `Press up to edit queued
+# messages` / title-spinner ◐ ◑ markers are PINNED 2026-09-11 against claude
+# 2.1.268 (plain-pty capture, x-3ea6). The transcript-pager / permission /
+# select-menu MARKER STRINGS and the bottom_non_empty_lines(N) window sizes are
+# from the reference design and are NOT yet pinned against a live claude TUI.
+# Pin them via cli/scripts/smoke/capture-readiness-grid.sh when E2 lands.
+# Conservative bias holds: a wrong marker is a brief false/late badge, never
+# input sent into the wrong state. the reference engine splits bash-vs-generic
+# permission prompts; folded into one `permission_prompt` here until the
+# bash-specific marker is pinned (carveout).
 
-# OSC title carries a braille spinner (U+2800-28FF) while claude is working.
+# OSC title carries a braille (U+2800-28FF) or quarter-circle (U+25D0-25D3)
+# spinner while claude is working. ◐ and ◑ were measured 2026-09-11; the rest
+# of that range is inferred, and a false `working` is the safe direction.
 # Literal (single-quoted) TOML string so the backslash reaches the regex engine.
 [[rule]]
 id = "osc_title_working"
 state = "working"
 priority = 1100
 region = "osc_title"
-gate = { regex = '^[\x{2800}-\x{28FF}]' }
+gate = { regex = '^[\x{2800}-\x{28FF}\x{25D0}-\x{25D3}]' }
+
+# The pinned mid-turn / queued markers sit just above the composer (claude
+# 2.1.268, pinned 2026-09-11). The title is None on a portal view, so this grid
+# rule carries the busy signal the title used to carry. A false `working` is
+# the safe direction; a missed one lets the idle composer rule send into a
+# busy claude - the one direction x-3ea6 exists to close.
+[[rule]]
+id = "composer_working"
+state = "working"
+priority = 1050
+region = "bottom_non_empty_lines(12)"
+gate = { any = [
+  { contains = "esc to interrupt" },
+  { contains = "Press up to edit queued messages" },
+] }
 
 # ctrl+o transcript pager open: hold whatever state we were in (a working claude
 # scrolling its transcript must not read as idle). Marker tunable (see header).

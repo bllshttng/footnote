@@ -21,10 +21,9 @@ const STORE_VERSION: u32 = 1;
 
 /// Which sideline section a view state belongs to.
 ///
-/// Keyed by what is STABLE, which is deliberately not the rendered name: a
-/// mission header's name embeds its live `done/total` counters, and an
+/// Keyed by what is STABLE, which is deliberately not the rendered name: an
 /// attach-born squad's derived label is rewritten (`foo` -> `parent/foo`) as
-/// soon as a sibling collides. Either would orphan the operator's choice on an
+/// soon as a sibling collides. That would orphan the operator's choice on an
 /// unrelated event, and the derived label is not even unique - the
 /// disambiguation is one level deep, and the server's uniqueness gate compares
 /// explicit names only.
@@ -36,10 +35,6 @@ pub enum SectionKey {
     /// strictly better than sharing it with whatever squad happens to render
     /// under the same name today.
     Squad(String),
-    /// A synthetic mission header, keyed by its per-epic id. That id is a pure
-    /// hash of the epic id, so unlike the mission's name it survives a progress
-    /// tick and a restart alike.
-    Mission(u64),
     /// The `~ elsewhere` catch-all for agents matched to no squad.
     Elsewhere,
     /// The `~ backlog` lane.
@@ -61,7 +56,6 @@ impl SectionKey {
     fn to_wire(&self) -> String {
         match self {
             SectionKey::Squad(cwd) => format!("squad:{cwd}"),
-            SectionKey::Mission(id) => format!("mission:{id:x}"),
             SectionKey::Elsewhere => "elsewhere".into(),
             SectionKey::WorkQueue => "work-queue".into(),
             SectionKey::Missions => "missions".into(),
@@ -73,13 +67,11 @@ impl SectionKey {
             "elsewhere" => Some(SectionKey::Elsewhere),
             "work-queue" => Some(SectionKey::WorkQueue),
             "missions" => Some(SectionKey::Missions),
-            _ => {
-                if let Some(cwd) = s.strip_prefix("squad:") {
-                    return Some(SectionKey::Squad(cwd.into()));
-                }
-                let id = s.strip_prefix("mission:")?;
-                u64::from_str_radix(id, 16).ok().map(SectionKey::Mission)
-            }
+            // Anything else, including a `mission:` key saved before missions
+            // moved off `squads`, reads as None and `load` drops that key alone.
+            _ => s
+                .strip_prefix("squad:")
+                .map(|cwd| SectionKey::Squad(cwd.into())),
         }
     }
 
@@ -737,9 +729,6 @@ mod tests {
         assert_eq!(next_view(Expanded, true, &sq), LiveOnly);
         assert_eq!(next_view(LiveOnly, true, &sq), Collapsed);
         assert_eq!(next_view(Collapsed, true, &sq), Expanded);
-        // A mission header is a normal tri-state section, not a binary one.
-        let m = SectionKey::Mission(0x8000_0000_0000_0001);
-        assert_eq!(next_view(Expanded, true, &m), LiveOnly);
     }
 
     // AC12-FR: a section left in LiveOnly whose last dead row was reaped
@@ -754,20 +743,6 @@ mod tests {
             ),
             SectionView::Collapsed
         );
-    }
-
-    // A mission key round-trips through the wire form, so a mission section's
-    // state survives a restart (its NAME would not - it carries done/total).
-    #[test]
-    fn mission_key_round_trips() {
-        let _s = Scratch::new("mission");
-        let mut m = HashMap::new();
-        m.insert(
-            SectionKey::Mission(0x8000_0000_dead_beef),
-            SectionView::Collapsed,
-        );
-        save(&m);
-        assert_eq!(load(), m);
     }
 
     // `strip_prefix` removes only the leading marker, so an identity that

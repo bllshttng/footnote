@@ -877,3 +877,35 @@ def test_band_is_scoped_to_the_gates_own_repo(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "more than the" not in result.stderr
 
+
+
+def test_preamble_budget_is_registered_in_exactly_one_ci_path() -> None:
+    """AC1-HP: one prose breach reds exactly one check run.
+
+    The positive marker first: the guards job carries the step name. The smoke
+    lint registry must not carry the script - the gate already runs
+    unconditionally in guards, and the registry copy made one AGENTS.md breach
+    red three runs (guards, smoke, changed-smoke) at once.
+    """
+    from fno.test_cmd import _STRUCTURAL_STEPS
+
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    step_names = [s.get("name", "") for s in workflow["jobs"]["guards"]["steps"]]
+    assert "SessionStart preamble byte budget" in step_names
+    registry_cmds = [cmd for _, _, cmd in _STRUCTURAL_STEPS]
+    assert not any("check-preamble-budget.sh" in cmd for cmd in registry_cmds)
+
+
+def test_smoke_registry_shares_no_ci_script_with_guards() -> None:
+    """The whole class, not one entry: every scripts/ci/*.sh gate runs in
+    exactly one CI execution path. guards.yml is that path for CI gates; the
+    smoke registry owns harnesses, self-tests, and verb wrappers. If the
+    positive-marker test above still passes, a deleted registry cannot make
+    this one read as coverage.
+    """
+    from fno.test_cmd import _STRUCTURAL_STEPS
+
+    gate_re = re.compile(r"scripts/ci/[\w.-]+\.sh")
+    registry = {m for _, _, cmd in _STRUCTURAL_STEPS for m in gate_re.findall(cmd)}
+    guards = set(gate_re.findall(WORKFLOW.read_text(encoding="utf-8")))
+    assert not (registry & guards), sorted(registry & guards)

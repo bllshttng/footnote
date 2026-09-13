@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shlex
 from pathlib import Path
@@ -240,12 +241,32 @@ def parse_review_invocation(raw: str) -> dict[str, Any] | None:
             flags.append(canonical)
         elif arg.startswith("--"):
             flags.append(arg)
+    # The router's own target rule (skills/review/SKILL.md): strip the flags,
+    # then the first token that is not the leading level token is the review's
+    # subject. An all-digit subject, or a GitHub PR URL, is a PR number. The
+    # hold side keys on this instead of whatever branch the session stands on,
+    # so a review that names its PR holds that PR from any checkout (x-b5f6).
+    rest = args[1:] if args and (args[0] == "ultra" or args[0] in REVIEW_LEVELS) else args
+    target = next(
+        (arg for arg in rest if not (canonical_flag(arg) or arg.startswith("--"))),
+        None,
+    )
+    pr_number: "int | None" = None
+    if target is not None:
+        if target.isdigit() and int(target) > 0:
+            pr_number = int(target)
+        else:
+            url = re.fullmatch(r"https://github\.com/[^/]+/[^/]+/pull/([1-9][0-9]*)/?", target)
+            if url:
+                pr_number = int(url.group(1))
     return {
         "verb": f"/{name}",
         "args_raw": args_raw,
         "level": level,
         "level_source": level_source,
         "flags": flags,
+        "target": target,
+        "pr_number": pr_number,
     }
 
 

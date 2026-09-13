@@ -773,23 +773,39 @@ pub(crate) fn paired_bin(env_var: &str, name: &str) -> PathBuf {
         if sibling.exists() {
             return sibling;
         }
-        // …/crates/fno/target/debug (or …/debug/deps for a test binary)
-        // → …/crates/fno/target → …/crates/fno → …/crates
         if let Some(profile) = dev_profile_dir(dir) {
-            let dev = profile
-                .parent()
-                .and_then(|t| t.parent())
-                .and_then(|crate_dir| crate_dir.parent())
-                .map(|crates| {
-                    crates
-                        .join("fno-agents")
-                        .join("target")
-                        .join(profile.file_name().unwrap())
-                        .join(name)
-                })
-                .filter(|p| p.exists());
-            if let Some(dev) = dev {
-                return dev;
+            if dir.file_name().is_some_and(|n| n == "deps") {
+                // A test binary: resolve the sibling crate from THIS crate's
+                // manifest dir. Under build.build-dir the exe sits under the
+                // build base, so the old climb through crates/ leaves the
+                // checkout; final binaries still land in the checkout's
+                // crates/fno-agents/target/<profile>. Falls back to the bare
+                // name on PATH, as before.
+                let dev = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../fno-agents/target")
+                    .join(profile.file_name().unwrap())
+                    .join(name);
+                if dev.exists() {
+                    return dev;
+                }
+            } else {
+                // A plain final binary at …/crates/fno/target/<profile>: keep
+                // the climb (final binaries stay in the checkout's target/).
+                let dev = profile
+                    .parent()
+                    .and_then(|t| t.parent())
+                    .and_then(|crate_dir| crate_dir.parent())
+                    .map(|crates| {
+                        crates
+                            .join("fno-agents")
+                            .join("target")
+                            .join(profile.file_name().unwrap())
+                            .join(name)
+                    })
+                    .filter(|p| p.exists());
+                if let Some(dev) = dev {
+                    return dev;
+                }
             }
         }
     }

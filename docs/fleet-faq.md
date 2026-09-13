@@ -1,8 +1,14 @@
 # Fleet FAQ
 
-Questions a king or an orchestrating agent hits while running workers, and the answer that survived contact. Every entry here cost a real session something. For run-level failures (a run that will not converge, a run that will not stop) see [troubleshooting.md](troubleshooting.md). For the coordination model see [architecture/coordination.md](architecture/coordination.md).
+Questions a king or an orchestrating agent hits while running workers, and the answer that survived contact. Every entry here cost a real session something. For run-level failures (a run that will not converge, a run that will not stop) see [troubleshooting.md](troubleshooting.md). For the coordination model see [architecture/coordination.md](architecture/coordination.md). For why a reaping sweep kept a session row, see [reaping-faq.md](reaping-faq.md).
 
 This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/king-for-a-day/references/cli-commands.md](../skills/king-for-a-day/references/cli-commands.md).
+
+## Is this page for you?
+
+You run workers and hit a receipt, a lane, or a liveness answer that says one thing and means another. This list owns the questions real sessions paid for, each with a specimen and a retirement contract. Misreading it costs the same session twice: yours, then the next reader's.
+
+Not for: verb syntax and run-level failure triage. Those are `fno agents --help` and [troubleshooting.md](troubleshooting.md).
 
 ## What this list is for
 
@@ -40,7 +46,7 @@ Probably not, and four readers will disagree with each other. Know what each one
 |---|---|---|
 | roster `status` in `fno agents list` | what the last reconcile saw | flaps between `unknown`, `quiet`, `orphaned` on a live session |
 | `pgrep -f <session-id>` | a process exists right now | a thread-substrate worker is idle between turns and holds no process |
-| transcript mtime | the session wrote recently | **you read the wrong path** (see below) |
+| transcript mtime | the session wrote recently | **you read the wrong path** (see below), or the right path read by its stat: untimestamped trailing records keep the file young while the conversation is silent (measured median +20 min, max +240 hours) - age the newest timestamped entry, not the file |
 | `fno agents resume <name> --print-command` | nothing about liveness: it renders the route and returns | it prints a command for a session the provider cannot reach, and for one whose cwd is gone |
 
 **Read the right transcript.** Claude Code keys its project directory by the session's **cwd**. A worker running in a worktree writes to a directory named for that worktree, not for the canonical checkout:
@@ -70,9 +76,7 @@ Three verbs, and they are not interchangeable.
 
 When the old worker holds context you must otherwise pay to rebuild, prefer resume over spawn. A worker five hours into a port is worth more than a fresh one, even a stronger fresh one.
 
-**A caution on `resume -m`.** Resume takes `-m/--message` to hand the revived session an instruction. Once observed, `resume -m` against a session already in a terminal state printed `Done -> Done` and the message never reached the transcript. If you need an instruction to land, send it with `fno agents mail send` and verify it arrived rather than assuming the resume carried it.
-
-*Graduates to:* `resume -m` either delivering to a terminal session or refusing loudly, instead of reporting `Done -> Done` and dropping the payload.
+**Resume delivers the message, and the exit code says so.** Resume takes `-m/--message` to hand the session an instruction. On a claude session it wakes the worker headlessly, and exit 0 means the message is in the transcript. On a codex thread it hands the text to the codex daemon, and exit 0 means the daemon accepted it. Exit 16 means the message did not land, and the refusal names what is missing. A session already in a terminal state is never injected into. An explicit message on one refuses instead of reporting `Done -> Done` with the payload dropped.
 
 ## My worker did real work and never reported it
 
@@ -92,7 +96,7 @@ A subagent fails the same way and gives you less to read. One finished at 23:13 
 
 Two channels, and they answer different questions.
 
-`fno agents mail send <name> "<text>"` can reach a **live** worker now. Read the receipt line it prints. `delivered (hosted)` and `delivered (woken)` prove the instruction arrived. If the receipt says anything else, the worker still holds its old orders. A failed injection demotes the message to a durable queue, and the worker can stay there unread.
+`fno agents mail send <name> "<text>"` can reach a **live** worker now. Read the receipt line it prints. `delivered (hosted)` and `delivered (woken)` prove the text reached the pane, not that the agent read it. A `queued` result also prints hosted (`cli/src/fno/mail/cli.py:3139`). The message can sit until the agent looks up, or until a human presses ESC. If the receipt says anything else, the worker still holds its old orders. A failed injection demotes the message to a durable queue, and the worker can stay there unread.
 
 `fno backlog update <id> --dispatch-brief "..."` changes what the **next** worker reads. This is a standing order, not a note. Update it before you spawn, never after.
 
@@ -126,9 +130,9 @@ A refusal message can name the wrong cause while still being right to refuse. Fi
 
 **A capacity refusal is a hold.** One sample is not the band. Four readings of the gating load average landed inside forty minutes, with no change in real work. They read 182.7 over, 99.7 under, 153.2 over and 186.0 over, against a ceiling of 120. Sustained CPU over the same window read 2.458, 3.304, 4.252 and 2.838 cores of twelve. The last pair moved in opposite directions. Retrying because one sample came back under is edge-triggering on a signal that flaps.
 
-Read the refusal's own words before you name the cause. One refusal blamed load. A later one from the same caller said `30/30 live worker slots` and queued 271 seconds, which is a different gate entirely. The slot cap counts registry rows, so quiet and parked workers hold slots while consuming nothing.
+This graduated on 2026-09-10: the gate no longer decides on the one-minute load at all. Admission reads the fleet's attributed share of CPU capacity, an over sample holds and re-samples, and the load average survives only as the fifteen-minute backstop.
 
-*Graduates to:* every refusal naming a cause it actually verified, and an admission decision that reads work rather than a one-minute load average.
+Read the refusal's own words before you name the cause. One refusal blamed load. A later one from the same caller said `30/30 live worker slots` and queued 271 seconds, which is a different gate entirely. The slot cap counts registry rows, so quiet and parked workers hold slots while consuming nothing.
 
 ## An absence, a zero, or an unconfirmed result is not a verdict
 
@@ -299,16 +303,6 @@ Until the fix merges, confirm ownership against the worker roster. Do not trust 
 
 *Graduates to:* one ownership answer per payload, with the resolver reporting an unresolved roster as unresolved rather than free.
 
-## An arm reports one label for two causes
-
-**Answer.** A skip reason can name a cause that is false. Read the code path before you act on the label.
-
-**Specimen, one.** `fno agents status` showed `active_backlog ok skip=no_missions targets=0` while six epics carried `mission_active=true`. `resolve_drain_targets` in `cli/src/fno/active_backlog.py` returns `[]` at its first gate, `if not cfg.any_enabled()`, before any mission is read. A disabled drain and a drain with no missions print the same word. One king read a healthy but disabled arm as an arm with no lever, and filed an operator question on that basis.
-
-**Specimen, two.** `auto_continue` read `stale: true` at `age_s` 6041 against `interval_s` 1800, with `skip_reason: disabled`. Staleness is computed at `crates/fno-agents/src/tick_ledger.rs` from age alone. `skip_reason` is populated five lines above, from the same tick, and never consulted. An arm that is off by configuration reads exactly like an arm whose scheduler died. The reign skill's one sanctioned dispatch exception keys on that field.
-
-*Graduates to:* a third skip reason for a disabled drain, and staleness that excludes a configured-off arm. The Rust side already separates `env_broken` from `no_missions` in `active_backlog.rs`.
-
 ## A hook fails Permission denied and the fix is already merged
 
 **Answer.** The checkout is stale. The script is correct upstream. Look at the checkout before you file the bug.
@@ -324,6 +318,10 @@ Everything in that checkout was 342 commits old: hooks, guards and CI scripts. A
 **Answer.** Share counts live harness rows, and a session never ends. A finished worker holds its lane forever.
 
 **Specimen.** `spawn-gate: king <id> holds 6 of max_live 30 across 5 kings (share 6); refusing to spawn`. Two of those six rows had been silent for 3h40m and 4h24m. `stop` failed on a deleted cwd. `rm` refused because the row is present. `rm --force` can leave an orphan process. Each night every king's share fills with dead rows, dispatch stops, and no reader reports it.
+
+**Specimen, the clean case.** A worker shipped its pull request and the pull request merged. The node closed with its claim released. The loop reported the terminal reason `DonePRGreen`. Its row then read `parked` rather than disappearing, and the share stayed full. Four terminal events, and none released the lane. Nothing further is available to that worker to give the slot back.
+
+**Specimen, the stop verb.** `fno agents stop` is the lever that works, and its receipt is incomplete. It printed `stopped: <name> (<session>)` for two finished workers, and `ps` confirmed both processes dead. The share freed, and a dispatch that had refused for hours went through at once. Both registry rows still read `parked` afterwards, and the row count did not change. So the row outlives the worker while the slot returns. A king reading the roster still sees a full crown. Two readers disagree here. Trust the lane. A peer confirmed the lane read 9 of 10, with both rows absent from its holders. The roster still listed them as `parked`.
 
 *Graduates to:* a lane released on delivery, rather than on an exit event that never arrives.
 
@@ -460,6 +458,16 @@ An earlier version of this entry cited a task reader here, and that citation was
 The source field cannot be fixed by hand either. `fno doctor event emit -s king-<id>` is refused, because the enum is closed and carries no king value. Its one extensible pattern is `worker:` or `stream-worker:`. So a king defaults to `test`, borrows a mechanism name like `loop`, or dresses as a worker. None of those is the truth.
 
 *Graduates to:* a check-in verb that stamps source, crown scope and session. Add a reader that lists this session's live monitors. Add a pre-compact hook that re-arms the beat, or names every arm it lost.
+
+## A stacked pull request does not stand out in `fno do pr list`
+
+**Answer.** A `fno do pr list` row names number, state, title, head ref, and URL, but not the base. The list shows every open pull request whatever its base. A stacked pull request targets its parent branch, so nothing in the row says where it targets. Read the pull request by number, or from its own branch, before you decide where a branch's pull request targets.
+
+**Specimen.** An L1 king asked the crown to open pull requests for two branches. All three were already open. PR 1651 targeted `main` from `feature/<node>`. PR 1660 targeted `feature/<node>` from `feature/<node>-wave2`. PR 1663 targeted `feature/<node>-wave2` from `feature/<node>-wave3`. Only the first targets `main`, and nothing in the list's output marked the two children as members of a stack. A caller who acts on that read opens a duplicate pull request on a branch that already carries one.
+
+The same read reported both branches as 32 commits behind `main`. That is the normal state of a stack, because each branch tracks its parent and not `main`. A behind-count is not evidence of neglect on a stacked branch.
+
+*Graduates to:* a list whose rows name their base, or a list that follows a stack to its root.
 
 ## Retired
 

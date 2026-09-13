@@ -21,14 +21,20 @@ from pathlib import Path
 import pytest
 
 from fno.paths import project_log
+from fno.rust_binary import VerbUnavailable, find_dev_binary
 from typer.testing import CliRunner
 
 from fno.harness_identity import OwnedHarnessIdentity
 from fno.king.lane import LaneItem
 from fno.outstanding.cli import outstanding_app
-from fno.outstanding.core import RENDER_CAP, Outstanding, Question, render
+from fno.outstanding.core import RENDER_CAP, Outstanding, Question, VerdictRow, render
 
 runner = CliRunner()
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
 
 
 def _write_carveouts(root: Path, rows: list[dict]) -> Path:
@@ -101,6 +107,13 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         lambda: tmp_path / "my-priorities.md",
         raising=False,
     )
+    # The verdict leg shells the fno-agents binary; pin it to a clean read so
+    # these tests never touch the machine's real FAIL rows (tests that assert
+    # the leg patch this seam themselves).
+    monkeypatch.setattr(
+        "fno.outstanding.core._read_open_verdicts",
+        lambda: ([], None),
+    )
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
 
@@ -159,6 +172,70 @@ def test_carveout_leg_reports_the_age_of_the_oldest_row(root: Path):
     assert "oldest 2026-01-01" in result.output
     # The newer row's date must NOT be the one reported as oldest.
     assert "oldest 2026-08-01" not in result.output
+
+
+# --- prove-it verdict leg (x-6d64) -------------------------------------------
+
+
+def _open_fail_row() -> VerdictRow:
+    return VerdictRow(
+        node="x-70e1",
+        report="/plans/a.md.artifacts/coverage-audit-20260908/REPORT.md",
+        verdict="FAIL",
+        claim="The retirement done probe rejects incomplete evidence and requires the outcome",
+        status="done",
+        mtime="2026-09-08T20:56:56Z",
+    )
+
+
+def test_an_open_fail_verdict_renders_with_node_claim_and_ruling_verb(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "fno.outstanding.core._read_open_verdicts", lambda: ([_open_fail_row()], None)
+    )
+    result = runner.invoke(outstanding_app, [])
+    assert result.exit_code == 0, result.output
+    assert "1 prove-it FAIL verdict with no ruling." in result.output
+    assert "x-70e1 (done):" in result.output
+    assert "The retirement done probe rejects incomplete evidence" in result.output
+    assert "/plans/a.md.artifacts/coverage-audit-20260908/REPORT.md" in result.output
+    assert "fno inbox decide" in result.output
+
+
+def test_no_open_verdicts_renders_nothing_for_the_leg(root: Path):
+    # Zero rows stays silent; the one-row render above is its positive control.
+    result = runner.invoke(outstanding_app, [])
+    assert result.exit_code == 0
+    assert "prove-it FAIL" not in result.output
+
+
+def test_a_failed_verdict_read_names_itself_and_keeps_the_questions_leg(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC2-ERR: the verdict reader failing must not blank the other legs."""
+    monkeypatch.setattr(
+        "fno.outstanding.core._read_open_verdicts", lambda: ([], "the binary refused")
+    )
+    assert runner.invoke(outstanding_app, ["ask", "should the gate refuse?"]).exit_code == 0
+    result = runner.invoke(outstanding_app, [])
+    assert result.exit_code == 0, result.output
+    assert "prove-it verdicts could not be read (the binary refused)." in result.output
+    assert "1 open question" in result.output
+
+
+def test_collect_carries_the_verdicts_leg_in_as_dict(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno.outstanding.core import collect
+
+    monkeypatch.setattr(
+        "fno.outstanding.core._read_open_verdicts", lambda: ([_open_fail_row()], None)
+    )
+    payload = collect(root).as_dict()
+    assert payload["verdicts"]["total"] == 1
+    assert payload["verdicts"]["items"][0]["node"] == "x-70e1"
+    assert payload["verdicts"]["error"] is None
 
 
 # --- 2.2 an unreadable ledger is a stated failure ----------------------------
@@ -283,9 +360,292 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
         "ask": "pick one",
         "options": ["index", "journal"],
         "blocks": ["x-one", "x-two"],
+        "subject": None,
         "live": True,
         "rank": 1,
     }
+
+
+# --- the ask gate: live law on the subject refuses the question ---------------
+
+
+def _fake_law_rows(*a, **k):
+    return (
+        "(all)",
+        [
+            {
+                "decision_id": "d-0fa92eb9",
+                "subject": "review-coverage",
+                "lane": "law",
+                "lifecycle": "live",
+            }
+        ],
+        0,
+    )
+
+
+_PR1717_QUESTION = (
+    "PR 1717 is stuck at the review cap: coverage reads uncovered and the "
+    "attestation is stale. Approve, or set the override label?"
+)
+
+
+def _question_rows(root: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in project_log("events.jsonl", project_root=root)
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+        and json.loads(line)["type"] == "operator_question"
+    ]
+
+
+class TestAskReceiptNamesVisibility:
+    """The receipt must say whether the ask renders (x-0dc5): a bare
+    `recorded q-...` shipped two fleet blockers into the invisible 98 percent.
+    CliRunner merges streams here, so the stream guarantee is asserted as
+    ORDER: the stdout qid is the final line of the invocation."""
+
+    def _seed(self, root: Path, count: int, *, ts: str = "2026-08-19T00:00:00Z") -> None:
+        _write_indexed_questions(
+            root,
+            [
+                _indexed_question(
+                    f"q-{i:02d}", ts, asker="gone", blocks=[]
+                )
+                for i in range(count)
+            ],
+        )
+
+    def test_the_tenth_ask_renders_at_position_one_of_ten(self, root: Path):
+        """AC8-HP (x-0dc5): 9 open + this one = 10; the fresh ask ranks first."""
+        self._seed(root, 9)
+        result = runner.invoke(outstanding_app, ["ask", "verify the render window"])
+
+        assert result.exit_code == 0, result.output
+        (qid,) = [row["data"]["question_id"] for row in _question_rows(root)
+                  if row["data"]["question_id"].startswith("q-")
+                  and row["data"]["question_id"] not in {f"q-{i:02d}" for i in range(9)}]
+        assert "renders at position 1 of 10" in result.output
+        assert result.output.rstrip().endswith(qid)
+
+    def test_an_ask_below_the_window_says_so_and_names_its_position(self, root: Path):
+        """AC9-ERR (x-0dc5): the honest branch - queued behind a full window,
+        nothing will show it, and the receipt says exactly that."""
+        # ts far in the future: every seeded row outranks the fresh ask, so it
+        # sorts last regardless of the id the receipt mints.
+        self._seed(root, 10, ts="2099-01-01T00:00:00Z")
+        result = runner.invoke(outstanding_app, ["ask", "buried on arrival"])
+
+        assert result.exit_code == 0, result.output
+        rows = [row["data"]["question_id"] for row in _question_rows(root)]
+        qid = next(q for q in rows if q not in {f"q-{i:02d}" for i in range(10)})
+        assert f"{qid} does NOT render: position 11 of 11" in result.output
+        assert "Nothing will show it to the operator" in result.output
+
+    def test_a_failed_position_read_still_records_and_says_so(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """AC10-EDGE (x-0dc5): the receipt is best-effort side work; a broken
+        read never fails the durable write."""
+
+        def broken(*_a, **_k):
+            raise RuntimeError("index unreadable")
+
+        monkeypatch.setattr("fno.outstanding.core.read_open_questions", broken)
+        result = runner.invoke(outstanding_app, ["ask", "record me anyway"])
+
+        assert result.exit_code == 0, result.output
+        assert len(_question_rows(root)) == 1
+        assert "render position could not be read" in result.output
+
+
+class TestAskRefusedWhenLiveLawRules:
+    # These four route the exact tier through the real binary (`law-match`),
+    # so they need the compiled dev build, not just the patched lifecycle read.
+    @requires_rust
+    def test_the_pr1717_question_exits_2_and_records_nothing(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        # Positive control: a plain ask on a different subject records a row,
+        # so the absence below is the gate's doing and not a broken journal.
+        plain = runner.invoke(outstanding_app, ["ask", "which base do we rebase on?"])
+        assert plain.exit_code == 0, plain.output
+        assert len(_question_rows(root)) == 1
+
+        refused = runner.invoke(outstanding_app, ["ask", _PR1717_QUESTION])
+        assert refused.exit_code == 2, refused.output
+        assert "d-0fa92eb9" in refused.output
+        assert "review-coverage" in refused.output
+        assert len(_question_rows(root)) == 1, "the refused ask recorded nothing new"
+
+    @requires_rust
+    def test_a_named_subject_hits_even_on_unrelated_text(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        refused = runner.invoke(
+            outstanding_app,
+            ["ask", "what colour should the button be?", "--subject", "review-coverage"],
+        )
+        assert refused.exit_code == 2, refused.output
+        assert "d-0fa92eb9" in refused.output
+        # The named match folds case: the law is recorded under one spelling
+        # and an agent types another, and both name the same subject.
+        drifted = runner.invoke(
+            outstanding_app,
+            ["ask", "what colour should the button be?", "--subject", "Review-Coverage"],
+        )
+        assert drifted.exit_code == 2, drifted.output
+        assert "review-coverage" in drifted.output
+
+    @requires_rust
+    def test_a_named_other_subject_asks_and_records_the_subject(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        allowed = runner.invoke(
+            outstanding_app,
+            ["ask", _PR1717_QUESTION, "--subject", "pr-heal"],
+        )
+        assert allowed.exit_code == 0, allowed.output
+        rows = _question_rows(root)
+        assert len(rows) == 1
+        assert rows[0]["data"]["subject"] == "pr-heal"
+
+    @requires_rust
+    def test_a_question_with_no_matching_words_asks(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("fno.decide.list_decisions", _fake_law_rows)
+        allowed = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?"])
+        assert allowed.exit_code == 0, allowed.output
+
+    def test_a_failing_law_lookup_fails_open_and_records(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        def broken(*a, **k):
+            raise RuntimeError("index unreadable")
+
+        monkeypatch.setattr("fno.decide.list_decisions", broken)
+        allowed = runner.invoke(outstanding_app, ["ask", _PR1717_QUESTION])
+        assert allowed.exit_code == 0, allowed.output
+        assert "live-law lookup failed" in allowed.output
+        rows = _question_rows(root)
+        assert len(rows) == 1, "a broken index must not eat the question"
+
+
+_NEARBY_ANSWER = {
+    "ok": True,
+    "exact": [],
+    "nearby": [
+        {
+            "decision_id": "d-4b39ad4c",
+            "subject": "file-budget",
+            "decision": "A size-budget refusal is never answered by raising the allowance.",
+            "shared": ["budget"],
+        }
+    ],
+    "uncited": ["d-4b39ad4c"],
+    "nearby_refusal": (
+        "outstanding: refused: live law on a nearby subject may already answer this. "
+        "d-4b39ad4c (file-budget): A size-budget refusal is never answered by raising "
+        "the allowance. Read each with fno inbox decisions <id>. If your question still "
+        "stands, name every id above in the question and ask again."
+    ),
+}
+
+
+class TestAskNearbyLawRefusal:
+    """The nearby tier (x-cf6a): a per-PR subject can never exact-match a
+    general law, so naming --subject used to switch the whole check off.
+    Fake-matcher tests: the matcher runs in the crate; these pin the ask
+    verb's contract around it."""
+
+    def test_a_nearby_refusal_exits_2_and_records_nothing(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        clean = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
+        answers = iter([clean, _NEARBY_ANSWER])
+        monkeypatch.setattr(
+            "fno.outstanding.cli._law_match", lambda *a, **k: next(answers)
+        )
+        # Positive control: an allowed ask records a row, so the absence below
+        # is the gate's doing and not an empty journal.
+        control = runner.invoke(outstanding_app, ["ask", "which base do we rebase on?"])
+        assert control.exit_code == 0, control.output
+        assert len(_question_rows(root)) == 1
+
+        refused = runner.invoke(
+            outstanding_app,
+            [
+                "ask",
+                "PR 1847 shrank +207 to +142. Requesting a budget-exception label.",
+                "--subject",
+                "pr-1847-budget-exception",
+            ],
+        )
+        assert refused.exit_code == 2, refused.output
+        assert "d-4b39ad4c" in refused.output
+        assert len(_question_rows(root)) == 1, "the refused ask recorded nothing"
+
+    def test_citing_the_listed_ids_records_the_question(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        answer = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
+        monkeypatch.setattr(
+            "fno.outstanding.cli._law_match", lambda *a, **k: answer
+        )
+        allowed = runner.invoke(
+            outstanding_app,
+            [
+                "ask",
+                "PR 1847 shrank +207 to +142. d-4b39ad4c is in view; asking anyway.",
+                "--subject",
+                "pr-1847-budget-exception",
+            ],
+        )
+        assert allowed.exit_code == 0, allowed.output
+        rows = _question_rows(root)
+        assert len(rows) == 1
+        assert rows[0]["data"]["subject"] == "pr-1847-budget-exception"
+
+    def test_a_failed_matcher_fails_open_and_records(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        def broken(*a, **k):
+            raise VerbUnavailable("binary missing")
+
+        monkeypatch.setattr("fno.outstanding.cli._law_match", broken)
+        allowed = runner.invoke(outstanding_app, ["ask", "still worth recording"])
+        assert allowed.exit_code == 0, allowed.output
+        assert "live-law lookup failed" in allowed.output
+        assert len(_question_rows(root)) == 1
+
+    def test_json_rows_carry_the_subject(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        answer = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
+        monkeypatch.setattr(
+            "fno.outstanding.cli._law_match", lambda *a, **k: answer
+        )
+        assert (
+            runner.invoke(
+                outstanding_app,
+                ["ask", "one", "--subject", "file-budget-exception"],
+            ).exit_code
+            == 0
+        )
+        assert runner.invoke(outstanding_app, ["ask", "two"]).exit_code == 0
+
+        from fno.outstanding.core import read_open_questions
+
+        by_id = {q.id: q.as_dict() for q in read_open_questions(root, liveness_budget_seconds=0)}
+        subjects = {row["subject"] for row in by_id.values()}
+        assert "file-budget-exception" in subjects
+        assert None in subjects
 
 
 def test_live_is_computed_for_json_and_missing_asker_is_stale(
@@ -443,9 +803,13 @@ def _indexed_question(
     }
 
 
-def test_question_rank_orders_live_then_blocks_then_oldest_and_id(
+def test_question_rank_orders_newest_first_within_a_liveness_lane(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """Rewrites the old blocks-then-oldest rank (x-0dc5): the 19 rows carrying
+    blocks were all filed before 09-08 and held the whole 10-row window against
+    every ask filed since, so recency outranks blocks. Liveness still lanes
+    first; blocks breaks same-second ties."""
     monkeypatch.setattr(
         "fno.agents.discover.resolve_reachable",
         lambda asker: (object(), []) if asker == "live" else (None, []),
@@ -470,13 +834,62 @@ def test_question_rank_orders_live_then_blocks_then_oldest_and_id(
 
     payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
 
-    assert [row["id"] for row in payload] == ["q-two", "q-one", "q-zero", "q-stale"]
+    assert [row["id"] for row in payload] == ["q-zero", "q-two", "q-one", "q-stale"]
     assert [row["rank"] for row in payload] == [1, 2, 3, 4]
 
 
-def test_question_rank_uses_oldest_then_id_within_a_block_count(
+def test_a_fresh_ask_outranks_an_older_blocking_one(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """AC4-HP (x-0dc5): within one lane, recency beats blocks outright."""
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable", lambda _asker: (None, [])
+    )
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-blocked", "2026-08-12T03:00:00Z", asker="stale", blocks=["x-a", "x-b"]
+            ),
+            _indexed_question(
+                "q-fresh", "2026-08-19T03:00:00Z", asker="stale", blocks=[]
+            ),
+        ],
+    )
+
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+
+    assert [row["id"] for row in payload] == ["q-fresh", "q-blocked"]
+
+
+def test_an_empty_ts_lands_last_not_first(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC5-EDGE (x-0dc5): under the newest-first reverse sort, an empty ts is
+    the smallest key and sorts last inside its lane, never first."""
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable", lambda _asker: (None, [])
+    )
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question("q-none", "", asker="stale", blocks=[]),
+            _indexed_question(
+                "q-real", "2026-08-19T03:00:00Z", asker="stale", blocks=[]
+            ),
+        ],
+    )
+
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+
+    assert [row["id"] for row in payload] == ["q-real", "q-none"]
+
+
+def test_question_rank_uses_id_desc_within_a_same_timestamp_tie(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The rank stays total: same ts and same block count falls to the id, and
+    `needs --json` diff-stability survives the reorder."""
     monkeypatch.setattr(
         "fno.agents.discover.resolve_reachable", lambda _asker: (object(), [])
     )
@@ -497,7 +910,7 @@ def test_question_rank_uses_oldest_then_id_within_a_block_count(
 
     payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
 
-    assert [row["id"] for row in payload] == ["q-a", "q-z", "q-new"]
+    assert [row["id"] for row in payload] == ["q-new", "q-z", "q-a"]
     assert [row["rank"] for row in payload] == [1, 2, 3]
 
 
@@ -517,6 +930,69 @@ def test_question_render_cap_shows_ten_and_names_true_total(
 
     assert sum(row["data"]["question_id"] in out for row in rows) == 10
     assert "Showing 10 of 11 open questions" in out
+
+
+def test_a_long_body_renders_bounded_with_the_trim_footer():
+    """AC6-HP (x-0dc5): a 2000-character body prints as one bounded line that
+    ends in the ellipsis, and the footer names the way to the full text."""
+    from fno.outstanding.core import QUESTION_BODY_CAP
+
+    body = "x" * 2000
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[Question("q-long", "2026-08-19T00:00:00Z", body, live=False)],
+        captures=[],
+    )
+
+    output = render(report)
+
+    body_line = next(line for line in output.splitlines() if "q-long" in line)
+    printed_body = body_line.split("  ", 2)[2].split("  (")[0]
+    assert len(printed_body) == QUESTION_BODY_CAP
+    assert printed_body.endswith("…")
+    assert "Rows are trimmed to one line" in output
+    assert "fno inbox outstanding -J" in output
+
+
+def test_a_multiline_body_renders_first_line_with_the_trim_footer():
+    """The trim says itself: a multi-line body collapses to its first line and
+    the footer appears even though nothing was character-truncated."""
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[
+            Question("q-multi", "2026-08-19T00:00:00Z", "first line\nsecond line", live=False)
+        ],
+        captures=[],
+    )
+
+    output = render(report)
+
+    assert "first line" in output
+    assert "second line" not in output
+    assert "Rows are trimmed to one line" in output
+
+
+def test_short_single_line_bodies_render_no_trim_footer():
+    """AC7-EDGE (x-0dc5): every body one line and short - the footer would be
+    a lie, so it must not appear."""
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[
+            Question("q-short", "2026-08-19T00:00:00Z", "short ask?", live=False),
+            Question("q-short2", "2026-08-19T01:00:00Z", "another short ask?", live=False),
+        ],
+        captures=[],
+    )
+
+    output = render(report)
+
+    assert "Rows are trimmed" not in output
 
 
 def test_stale_questions_render_under_visible_heading_with_age(
@@ -1514,7 +1990,12 @@ def test_json_mode_emits_one_object_carrying_both_legs(root: Path):
 # --- 5.2 the asking session's own questions lead -----------------------------
 
 
-def test_own_first(root: Path, monkeypatch: pytest.MonkeyPatch):
+def test_own_rows_are_labelled_and_rank_is_newest_first(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Rewrites the old own-first order assert (x-0dc5): rank is newest-first
+    inside a lane, so the newer row outranks this session's. Ownership shows
+    as the [this session] label, never as rank."""
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-mine")
     runner.invoke(outstanding_app, ["ask", "MINE: do we ship the fold arm?"])
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-other")
@@ -1524,7 +2005,7 @@ def test_own_first(root: Path, monkeypatch: pytest.MonkeyPatch):
     out = runner.invoke(outstanding_app, []).stdout
     assert "MINE:" in out
     assert "THEIRS:" in out
-    assert out.index("MINE:") < out.index("THEIRS:")
+    assert out.index("THEIRS:") < out.index("MINE:")
     # Labelled as this session's, so the agent that asked is the one prompted.
     assert "this session" in out.lower()
 
@@ -1841,12 +2322,12 @@ def test_render_names_the_carveout_root_it_read(root: Path):
 # --- BREAK 4 read-side pin: render paths never slice --------------------------
 
 
-def test_a_long_question_renders_whole_never_sliced(root: Path):
-    """The write side caps at QUESTION_CAP; the read side must not cut too.
-
-    A king escalation cut mid-node-id read as 'nothing is clearing: stalled',
-    which is a different sentence about a different board. The full id list
-    must survive the render.
+def test_a_long_question_renders_bounded_and_names_the_full_read(root: Path):
+    """Rewrites the old read-side never-slice rule (x-0dc5): each rendered row
+    is now bounded at QUESTION_BODY_CAP, because ten 2000-character rows were
+    exactly how the short asks got buried. The bound says itself - the row
+    ends in the ellipsis and the footer names -J - so a cut can never
+    masquerade as the whole text the way the old mid-id slice did.
     """
     ids = "stalled_holder:x-5c59, " * 30
     long_q = f"nothing is clearing: {ids}decide"
@@ -1854,7 +2335,10 @@ def test_a_long_question_renders_whole_never_sliced(root: Path):
 
     out = runner.invoke(outstanding_app, []).stdout
 
-    assert ids.strip() in out, "the whole id list must be on screen; wrap, never truncate"
+    row = next(line for line in out.splitlines() if "nothing is clearing" in line)
+    assert "…" in row, "the bounded body must say it truncated"
+    assert len(row) <= 300, "the rendered row must be bounded, not the old full body"
+    assert "fno inbox outstanding -J" in out
 
 
 def test_ask_and_clear_state_when_the_cap_truncated_the_text(root: Path):

@@ -7,10 +7,15 @@ Discovers the source via (in priority order):
 3. ``~/.fno/source-path`` cache (written on prior successful install)
 4. Well-known candidate paths (plugin install, common dev locations)
 
-Then execs ``uv tool install --reinstall --refresh <source>`` (or ``pip install --user
---force-reinstall <source>`` if uv is unavailable). Uses ``os.execvp`` so the
-installer replaces this Python process cleanly, avoiding the "binary being
-replaced while it runs" race.
+Then execs ``uv tool install --reinstall-package fno --refresh-package fno
+<source>`` (or ``pip install --user --force-reinstall <source>`` if uv is
+unavailable). Only the ``fno`` package is reinstalled: the wide ``--reinstall``
+form strips all packages out of the shared tool venv, and every fno process on
+the machine importing mid-rewrite raises ModuleNotFoundError. When the whole
+environment needs rebuilding (broken venv, new interpreter), use
+``.claude-plugin/postinstall.sh`` or a hand-run ``uv tool install --force``.
+Uses ``os.execvp`` so the installer replaces this Python process cleanly,
+avoiding the "binary being replaced while it runs" race.
 """
 from __future__ import annotations
 
@@ -426,6 +431,28 @@ def _live_mux_sessions(
     ]
 
 
+def running_components(
+    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
+) -> "list[dict] | None":
+    """One row per long-lived process from ``fno-agents census --json``
+    (x-f188; the walker lives in crates/fno-agents/src/census.rs). ``None``
+    when the census itself could not run: a dark census is not an empty machine."""
+    try:
+        from fno import rust_binary
+
+        binary = rust_binary.resolve_installed_binary()
+    except Exception:  # noqa: BLE001
+        binary = None
+    if binary is None:
+        return None
+    try:
+        proc = runner([str(binary), "census", "--json"], capture_output=True, text=True, check=False, timeout=30)
+        rows = json.loads(proc.stdout or "[]") if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+
+
 def stale_mux_servers(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> list[str]:
@@ -568,6 +595,11 @@ def _wire_label(wires: list[int]) -> str:
     return "/".join(f"v{w}" for w in wires) if wires else "unknown"
 
 
+def _current_but_stale(rev_label: str, stale: int, restartable: int, pane_kept: int) -> str:
+    return (f"installed {rev_label} is current; {stale} running process(es) are older builds - restart "
+            f"cycles {restartable}, keeps {pane_kept} pane keeper(s) on the old build until their panes end")
+
+
 def _build_update_guidance(
     *,
     update_ready: bool,
@@ -583,6 +615,7 @@ def _build_update_guidance(
     revivable: int,
     revivable_known: bool,
     degraded_reason: Optional[str],
+    stale_rows: "list[dict]" | None = None,
 ) -> str:
     """The one guidance line, computed rather than authored. Three
     branches - no bump, bump, degraded - and no fourth. Every branch names a
@@ -597,13 +630,20 @@ def _build_update_guidance(
     operator a restart is destructive (P2, codex on PR #881)."""
     rev_label = (source_rev or "unknown")[:8]
     source_label = f"v{source_wire}" if source_wire is not None else "unknown"
+    stale_rows = stale_rows or []
+    running_stale = len(stale_rows)
+    restartable = sum(str(r.get("on_restart", "")).startswith(("restarts", "cycles")) for r in stale_rows)
+    pane_kept = sum(r.get("component") in ("pane-keeper", "thread-keeper") for r in stale_rows)
 
     # A degraded input (mux ls, agents list, wire) never overrides a *confidently*
     # known not-ready state - if both revs were read and match, there is no update
     # to warn about, regardless of what else failed to fetch. Only take the
     # degraded branch when readiness itself is uncertain (a rev is unreadable) or
     # an update actually is pending.
-    if not update_ready and revs_known:
+    # "Up to date" used to report no action while stale processes ran (x-f1f4).
+    if not update_ready and (revs_known or not degraded_reason):
+        if running_stale > 0:
+            return _current_but_stale(rev_label, running_stale, restartable, pane_kept)
         return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
     if degraded_reason:
@@ -618,9 +658,6 @@ def _build_update_guidance(
             f"update check degraded ({degraded_reason}) - {wire_label}; "
             f"{shells_label} at risk, --revive respawns {revivable_label}"
         )
-
-    if not update_ready:
-        return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
     if wire_bump:
         return (
@@ -647,7 +684,7 @@ def update_readiness(
     than raising, so a broken environment still gets a non-empty, honest
     guidance line (AC4-EDGE)."""
     from fno import doctor
-    from fno.restart import is_revivable
+    from fno.restart import REVIVABLE_STATUSES, is_revivable
 
     degraded: list[str] = []
 
@@ -722,12 +759,19 @@ def update_readiness(
     revivable = sum(
         1
         for r in agent_rows
-        if r.get("status") in ("writing", "quiet", "parked") and is_revivable(r)
+        if r.get("status") in REVIVABLE_STATUSES and is_revivable(r)
     )
 
     changelog: list[str] = []
     if resolved_source is not None and installed_rev and source_rev:
         changelog = _changelog_subjects(installed_rev, resolved_source, runner)
+
+    # Census rows (x-f188); never the name `running`: python_tool owns it.
+    census_rows = running_components(runner)
+    if census_rows is None:
+        degraded.append("running-process census unavailable")
+        census_rows = []
+    running_rows = [r for r in census_rows if r.get("verdict") == "stale"]
 
     degraded_reason = "; ".join(degraded) if degraded else None
 
@@ -745,6 +789,7 @@ def update_readiness(
         revivable=revivable,
         revivable_known=revivable_known,
         degraded_reason=degraded_reason,
+        stale_rows=running_rows,
     )
 
     # None (not 0) when the underlying fetch never happened - a count fno never
@@ -786,6 +831,8 @@ def update_readiness(
         "changelog": changelog,
         "guidance": guidance,
         "degraded": degraded_reason,
+        "running": running_rows,
+        "running_stale": len(running_rows),
     }
 
 
@@ -1278,7 +1325,7 @@ def _install_then_mark(
 def _await_binary(post_install: str, binary: Optional[str]) -> str:
     """Wrap ``post_install`` in a bounded wait for ``binary`` to exist.
 
-    Measured, not assumed: during ``uv tool install --reinstall`` the console
+    Measured, not assumed: during a ``uv tool install`` the console
     script ``<tools>/fno/bin/fno-py`` is deleted and recreated, and the
     ``~/.local/bin`` exposure dangles with it, for roughly half a second. (The
     venv's python3 never disappears, so the shebang interpreter is not the
@@ -1365,8 +1412,9 @@ def update_command(
 ) -> None:
     """Reinstall fno from its source directory.
 
-    Picks up local CLI source changes by running ``uv tool install --reinstall``
-    (or ``pip install --user --force-reinstall`` if uv is unavailable).
+    Picks up local CLI source changes by running ``uv tool install
+    --reinstall-package fno`` (or ``pip install --user --force-reinstall`` if
+    uv is unavailable).
     """
     # Normalize to plain bool: when called directly (not via CLI), Typer Option
     # defaults are OptionInfo objects, not False. Guard against both.
@@ -1401,16 +1449,29 @@ def update_command(
     typer.echo(f"Reinstalling fno from {resolved}")
 
     if shutil.which("uv"):
-        # --refresh busts uv's build cache. Without it, a path source at an
-        # unchanged version (fno stays 0.2.1 across rebuilds) can reinstall a
-        # stale cached wheel that predates newly-added modules, so `fno agents restart`
-        # etc. crash with ModuleNotFoundError even after `fno doctor update`.
+        # Reinstall ONLY the fno package. The wide `--reinstall` form removes
+        # every package in the tool venv, and that venv is shared by every fno
+        # process on the machine: for the length of the rewrite each of them
+        # importing anything raises ModuleNotFoundError (measured: 43 packages
+        # absent for seconds, including launchd daemons and mid-loop agent
+        # calls). `--reinstall-package fno` leaves every dependency in place;
+        # uv still resolves the whole environment, so a dependency the source
+        # adds or bumps installs as normal.
+        # --refresh-package fno busts uv's build cache for a path source at an
+        # unchanged version (fno stays 0.3.2 across rebuilds). Without a
+        # refresh, a stale cached wheel that predates newly-added modules can
+        # be what installs, so `fno agents restart` etc. crash with
+        # ModuleNotFoundError even after `fno doctor update`.
+        # Whole-environment rebuilds (broken venv, new interpreter) belong to
+        # `.claude-plugin/postinstall.sh` or a hand-run
+        # `uv tool install --force`; neither runs on a merge.
         # --compile-bytecode: ship the venv's own .pyc so no later process
         # writes into a tree a reinstall may be deleting
         # (docs/architecture/cli-lazy-imports.md).
         cmd = [
             "uv", "tool", "install",
-            "--reinstall", "--refresh", "--compile-bytecode",
+            "--reinstall-package", "fno", "--refresh-package", "fno",
+            "--compile-bytecode",
             str(resolved),
         ]
     elif shutil.which("pip"):
@@ -1484,8 +1545,8 @@ def update_command(
 
     # Machine-global mutations start here (cargo bins below, the uv/pip env
     # at the exec), so this is where the machine-scoped guard belongs - not
-    # at the verb entry. `uv tool install --reinstall` tears down the venv
-    # every running fno verb executes from, and a racing pair of cargo
+    # at the verb entry. The install rewrites the `fno` package inside the
+    # venv every running fno verb executes from, and a racing pair of cargo
     # installs interleaves the same binaries running sessions exec, so two
     # concurrent updates kill unrelated sessions mid-turn. REFUSE, never
     # queue: the loser's update is either already landed (next lines say so)

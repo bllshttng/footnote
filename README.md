@@ -28,7 +28,7 @@ The **crown** is that authority itself, three levels deep at most, and a session
 Claude Code:   /plugin marketplace add bllshttng/footnote
                /plugin install fno@footnote
 Gemini CLI:    gemini extensions install https://github.com/bllshttng/footnote
-Codex CLI:     fno config setup codex-plugin --channel release
+Codex CLI:     fno config plugin install codex
 ```
 
 Then configure with `/fno:setup` and point it at a feature:

@@ -122,3 +122,28 @@ def test_other_failed_read_is_reported_never_silent(tmp_path):
     result = _run_hook(tmp_path, env_extra={}, bin_dir=bin_dir)
     assert result.returncode == 0, result.stderr
     assert "could not be read" in result.stdout
+
+
+def test_reports_skipped_machine_turns_next_to_depth(tmp_path):
+    """AC: machine rows do not raise depth and the nudge names what capture skipped."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _fno_wrapper(bin_dir)
+    env = _queue_env(
+        tmp_path,
+        [
+            _user_row("real operator ask", "u-1", "2026-09-06T20:00:00.000Z"),
+            _user_row(
+                "<task-notification><task-id>t1</task-id></task-notification>",
+                "u-tn",
+                "2026-09-06T21:00:00.000Z",
+            ),
+            _user_row("[Request interrupted by user]", "u-int", "2026-09-06T21:01:00.000Z"),
+        ],
+    )
+    result = _run_hook(tmp_path, env_extra=env, bin_dir=bin_dir)
+    assert result.returncode == 0, result.stderr
+    assert ": 1 undispositioned" in result.stdout
+    assert "Skipped at capture: 2 machine turn(s)" in result.stdout
+    assert "task_notification=1" in result.stdout
+    assert "interrupt_marker=1" in result.stdout

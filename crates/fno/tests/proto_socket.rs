@@ -409,6 +409,44 @@ fn proto_racer_waits_out_a_live_marker_instead_of_binding_over_a_starter() {
 }
 
 #[test]
+fn proto_unreadable_startup_marker_refuses_instead_of_takeover() {
+    // x-6d3c: a waiter used to read a marker READ ERROR as "holder gone",
+    // delete the live starter's marker, claim the path, lose the bind, read
+    // the starter's startup silence as a stale socket (its pid sidecar does
+    // not exist yet), and unlink a live server - the CI two-server shape in
+    // persistence_two_cold_clients. The waiter no longer clears markers at
+    // all, and an unreadable marker refuses the claim instead. chmod 000
+    // makes the read fail (EACCES) while the holder stays fully live, so the
+    // refusal is deterministic.
+    let scratch = Scratch::new("unreadable-marker");
+    let sock = scratch.path("um.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let marker = fno::proto::startup_sidecar_path(&sock);
+    std::fs::write(&marker, format!("{}:1", std::process::id())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&marker).unwrap().permissions();
+    perms.set_mode(0o000);
+    std::fs::set_permissions(&marker, perms).unwrap();
+
+    match bind_or_probe(&sock) {
+        Err(err) => assert!(
+            err.to_string().contains("startup marker"),
+            "an unreadable marker must refuse the claim, got: {err}"
+        ),
+        Ok(BindOutcome::Bound(_)) => panic!("a live starter's socket was unlinked"),
+        Ok(BindOutcome::AlreadyRunning) => {
+            panic!("an unreadable marker was read as a serving server")
+        }
+    }
+    assert!(sock.exists(), "the live holder's socket must survive");
+    assert!(
+        marker.exists(),
+        "the unreadable marker must survive the refused claim"
+    );
+    drop(listener);
+}
+
+#[test]
 fn proto_non_tty_bare_fno_prints_notice_and_exits_zero() {
     // AC1-EDGE / exit criterion 6: `fno < /dev/null` never opens a TUI.
     let out = Command::new(env!("CARGO_BIN_EXE_fno"))

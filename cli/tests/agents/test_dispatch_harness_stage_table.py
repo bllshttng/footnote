@@ -50,10 +50,13 @@ def _settings(
     profile_provider: Optional[str] = None,
     legacy_harness: Optional[str] = None,
     verb: str = "target",
+    profile_route: Optional[str] = None,
 ) -> _Settings:
     from types import SimpleNamespace
 
-    profiles = {verb: {"provider": profile_provider}} if profile_provider else None
+    profiles = None
+    if profile_provider or profile_route:
+        profiles = {verb: {"provider": profile_provider, "route": profile_route}}
     # Attribute access, like the typed DispatchBlock the real model carries.
     dispatch = (
         SimpleNamespace(harness=legacy_harness, substrate="", command="")
@@ -144,3 +147,36 @@ def test_spawn_door_answers_the_same_harness() -> None:
     )
     assert "--harness" in argv
     assert argv[argv.index("--harness") + 1] == "codex"
+
+
+def test_dispatch_door_carries_the_stage_table_route() -> None:
+    """The route rides the same stage-table row the harness does: a dispatch
+    that forwards the harness but not the route sends a routed model to the
+    default endpoint, where it dies on first inference. The tuple must carry
+    both, so a caller can forward both."""
+    out = resolve_dispatch(
+        settings=_settings(profile_provider="claude",
+                           profile_route="zai,glm-5.3-flash[1m]")
+    )
+    assert out["harness"] == "claude"
+    assert out["route"] == "zai,glm-5.3-flash[1m]"
+    assert any("route=config(" in entry for entry in out["decision"])
+
+
+def test_dispatch_door_route_unset_reads_empty() -> None:
+    """No stage-table route: the field reads "" (never None/absent), so a
+    shell consumer's select(. != "") sees a clean absence."""
+    out = resolve_dispatch(settings=_settings(profile_provider="claude"))
+    assert out["route"] == ""
+    assert not any(entry.startswith("route=config") for entry in out["decision"])
+
+
+def test_configured_dispatch_route_reads_the_same_rung() -> None:
+    """The standalone reader answers the same rung the tuple does, with the
+    verb normalization (leading slash, fno: namespace) applied."""
+    from fno.dispatch_flags import configured_dispatch_route
+
+    assert configured_dispatch_route(
+        _settings(profile_route="zai/glm-5.3-flash[1m]"), verb="/fno:target"
+    ) == "zai/glm-5.3-flash[1m]"
+    assert configured_dispatch_route(_settings()) == ""
