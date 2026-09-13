@@ -252,6 +252,7 @@ fn dispatcher_passes_env_and_iteration() {
     write_stub_binary(&bin_dir, "claude", "exit 0");
 
     let output = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
@@ -342,6 +343,7 @@ fn e2e_binary_happy_path() {
     write_stub_binary(&bin_dir, "claude", "exit 0");
 
     let output = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
@@ -410,6 +412,7 @@ fn e2e_binary_iteration_ceiling() {
     write_stub_binary(&bin_dir, "claude", "exit 0");
 
     let output = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
@@ -482,6 +485,7 @@ fn e2e_binary_missing_driver_binary() {
     fs::create_dir_all(&empty_bin_dir).unwrap();
 
     let output = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
@@ -614,6 +618,7 @@ fn e2e_binary_megawalk_rejected() {
     write_stub_binary(&bin_dir, "claude", "exit 0");
 
     let output = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
@@ -664,6 +669,7 @@ fn e2e_resume_no_duplicate_session() {
     write_stub_binary(&bin_dir, "claude", "exit 0");
 
     let output = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
@@ -714,6 +720,7 @@ fn preflight_cli_alias_used_for_binary_check() {
         // Temporarily set PATH for this call (single-threaded test context).
         // We use a subprocess to avoid process-global mutation.
         std::process::Command::new(BINARY)
+            .envs(fno_agents::test_run::self_owner_env())
             .args([
                 "loop",
                 "run",
@@ -758,6 +765,7 @@ fn preflight_missing_binary_no_cli_alias() {
 
     // PATH has no "claude" binary - without --cli, preflight must check "claude" and fail 77.
     let result = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
@@ -803,6 +811,7 @@ fn negative_budget_rejected() {
 
     for bad_budget in ["-5", "-1", "0"] {
         let result = std::process::Command::new(BINARY)
+            .envs(fno_agents::test_run::self_owner_env())
             .args([
                 "loop",
                 "run",
@@ -906,6 +915,7 @@ fn preflight_missing_driver_invoke_rejected() {
     write_stub_binary(&bin_dir, "claude", "exit 0");
 
     let result = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
@@ -1039,6 +1049,7 @@ exit 0"#,
     write_stub_binary(&bin_dir, "claude", &fake_claude_body);
 
     let output = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
@@ -1130,6 +1141,7 @@ fn trailing_flag_missing_value_exits_2() {
     // message containing "--driver: missing value", not silently treat None as
     // the driver name (which would produce a confusing error downstream).
     let output = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args(["loop", "run", "--driver"])
         .output()
         .unwrap();
@@ -1183,6 +1195,7 @@ fn driver_persist_history_called_per_iteration() {
     write_stub_binary(&bin_dir, "claude", "exit 0");
 
     let output = std::process::Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",
@@ -1339,6 +1352,7 @@ fn write_stub_fno_board(dir: &Path, actionable: u64) {
 
 fn run_verb(args: &[&str], envs: &[(&str, &str)]) -> (String, String, Option<i32>) {
     let mut cmd = std::process::Command::new(BINARY);
+    cmd.envs(fno_agents::test_run::self_owner_env());
     cmd.args(args);
     for (k, v) in envs {
         cmd.env(k, v);

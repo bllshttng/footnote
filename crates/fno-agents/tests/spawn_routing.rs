@@ -845,6 +845,9 @@ fn spawn_gemini_once_happy_path() {
 
 /// Locate the fno-agents client binary from the build output dir.
 fn find_client_bin() -> std::path::PathBuf {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_fno-agents") {
+        return std::path::PathBuf::from(path);
+    }
     // `cargo test` sets CARGO_MANIFEST_DIR; binary lands under target/debug.
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // Walk up to workspace root (fno/crates/fno-agents -> fno/)
@@ -885,6 +888,7 @@ fn client_ask_unknown_name_exits_16() {
     }
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args(["ask", "ghost-client", "hello"])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
@@ -951,6 +955,7 @@ fn client_ask_full_codex_session_id_resumes_named_row() {
     }
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "ask",
             &addressed_session_id,
@@ -1000,6 +1005,7 @@ fn client_spawn_once_claude_is_headless_p_lane_not_bg() {
     }
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args(["spawn", "myagent", "hello", "--harness", "claude", "--once"])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
@@ -1055,6 +1061,7 @@ fn client_spawn_headless_claude_honors_timeout() {
 
     let start = std::time::Instant::now();
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "spawn",
             "wk",
@@ -1112,6 +1119,7 @@ fn client_spawn_substrate_bg_codex_uses_thread_lane() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "spawn",
             "myagent",
@@ -1155,6 +1163,7 @@ fn client_spawn_permission_mode_codex_headless_fails_closed() {
         return;
     }
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "spawn",
             "myagent",
@@ -1194,6 +1203,7 @@ fn client_spawn_permission_mode_and_yolo_mutually_exclusive() {
         return;
     }
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "spawn",
             "myagent",
@@ -1236,6 +1246,7 @@ fn client_spawn_substrate_headless_opencode_is_wired() {
     }
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "spawn",
             "myagent",
@@ -1285,6 +1296,7 @@ fn client_spawn_substrate_bg_opencode_routes_to_serve_lane() {
     }
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "spawn",
             "myagent",
@@ -1333,6 +1345,7 @@ fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
     }
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "spawn",
             "myagent",
@@ -1381,6 +1394,7 @@ fn client_spawn_substrate_bg_gemini_names_the_deprecation_not_a_missing_lane() {
     }
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "spawn",
             "myagent",
@@ -1441,6 +1455,7 @@ fn client_spawn_bg_no_provider_infers_harness() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args(["spawn", "myagent", "hello", "--substrate", "bg"])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
@@ -1448,8 +1463,12 @@ fn client_spawn_bg_no_provider_infers_harness() {
         .env("FNO_AGENTS_NO_STARTUP_RECONCILE", "1")
         .env("PATH", path)
         .env("CODEX_SESSION_ID", "test-sid") // exactly one marker -> codex inferred
+        .env_remove("CODEX_THREAD_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CLAUDE_SESSION_ID")
         .env_remove("GEMINI_SESSION_ID")
+        .env_remove("OPENCODE_SESSION_ID")
+        .env_remove("FNO_HARNESS_NAME")
         .output()
         .expect("failed to run fno-agents");
 
@@ -1480,6 +1499,7 @@ fn client_spawn_pane_no_provider_falls_through() {
     }
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args(["spawn", "myagent", "hello"]) // pane is the default substrate
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
@@ -1545,6 +1565,7 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
     }
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "spawn",
             "hp-agent",
@@ -1626,6 +1647,7 @@ fn client_spawn_bg_claude_bootstraps_the_first_daemon_worker() {
     }
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "spawn",
             "bootstrap-agent",
@@ -1681,6 +1703,7 @@ fn client_host_retired_prints_mux_pointer() {
     seed_registry(&home, "host-collide", "codex");
 
     let out = std::process::Command::new(&bin)
+        .envs(fno_agents::test_run::self_owner_env())
         .args(["host", "host-collide", "--harness", "codex"])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)

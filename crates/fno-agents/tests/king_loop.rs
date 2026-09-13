@@ -236,6 +236,7 @@ fn king_spawn_with(
     let stubs = home.join("stubs");
     let real_path = std::env::var("PATH").unwrap_or_default();
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"));
+    cmd.envs(fno_agents::test_run::self_owner_env());
     cmd.args([
         "loop-check",
         "--driver",
@@ -1218,6 +1219,7 @@ fn external_read_timeout_king_board_blocks_named() {
 
     // The killed read is named where the payload carries it.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "board",
             "--json",

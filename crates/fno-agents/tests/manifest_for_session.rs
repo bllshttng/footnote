@@ -59,6 +59,7 @@ fn two_worktrees() -> (tempfile::TempDir, PathBuf, PathBuf) {
 
 fn run(cwd: &Path, session_id: &str) -> Output {
     Command::new(BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .current_dir(cwd)
         .args(["manifest-for-session", "--harness-session-id", session_id])
         .output()

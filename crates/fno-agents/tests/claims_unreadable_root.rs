@@ -66,6 +66,7 @@ fn claim_list_exits_nonzero_on_an_unreadable_root() {
     write_live_lock(&dir);
     set_mode(&dir, 0o000);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fno-agents"));
+    cmd.envs(fno_agents::test_run::self_owner_env());
     cmd.args(["claim", "list", "--json", "--include-stale"])
         .env("FNO_CLAIMS_ROOT", &root)
         .env("HOME", &root);
@@ -100,6 +101,7 @@ fn claim_sweep_exits_nonzero_on_an_unreadable_dir() {
     write_live_lock(&dir);
     set_mode(&dir, 0o000);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fno-agents"));
+    cmd.envs(fno_agents::test_run::self_owner_env());
     cmd.args(["claim", "sweep", "--json", "--all", "--claims-dir"])
         .arg(&dir)
         .env("HOME", &root);

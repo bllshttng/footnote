@@ -241,6 +241,7 @@ fn run_finalize(env: &Env, reason: &str) -> std::process::Output {
 /// root).
 fn run_finalize_in(env: &Env, cwd: &Path, reason: &str) -> std::process::Output {
     Command::new(BIN)
+        .envs(fno_agents::test_run::self_owner_env())
         .arg("finalize")
         .arg("--state")
         .arg(&env.state)
@@ -287,6 +288,7 @@ fn run_finalize_with_transcript(
     transcript: &Path,
 ) -> std::process::Output {
     Command::new(BIN)
+        .envs(fno_agents::test_run::self_owner_env())
         .arg("finalize")
         .arg("--state")
         .arg(&env.state)
@@ -359,6 +361,7 @@ fn run_finalize_real_stamp(env: &Env, reason: &str) -> std::process::Output {
         repo.join("cli/src").display()
     );
     Command::new(BIN)
+        .envs(fno_agents::test_run::self_owner_env())
         .arg("finalize")
         .arg("--state")
         .arg(&env.state)
@@ -1261,6 +1264,7 @@ fn run_finalize_shimmed(env: &Env, reason: &str, gh_body: &str) -> std::process:
         std::env::var("PATH").unwrap_or_default()
     );
     Command::new(BIN)
+        .envs(fno_agents::test_run::self_owner_env())
         .arg("finalize")
         .arg("--state")
         .arg(&env.state)
@@ -2177,6 +2181,7 @@ fn run_finalize_with_stub(
     extra_env: &[(&str, &str)],
 ) -> std::process::Output {
     let mut cmd = Command::new(BIN);
+    cmd.envs(fno_agents::test_run::self_owner_env());
     cmd.arg("finalize")
         .arg("--state")
         .arg(&env.state)

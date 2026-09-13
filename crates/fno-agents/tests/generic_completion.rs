@@ -71,6 +71,7 @@ fn setup(response: &str) -> GenericEnv {
 
 fn run(env: &GenericEnv) -> Value {
     let output = Command::new(BIN)
+        .envs(fno_agents::test_run::self_owner_env())
         .arg("loop-check")
         .arg("--state")
         .arg(&env.state)

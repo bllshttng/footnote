@@ -215,6 +215,7 @@ fn daemon_dies_within_8s_of_its_test_owner() {
 
     let mut daemon = Command::new(daemon_bin())
         .env("FNO_AGENTS_HOME", &home)
+        .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_EVENTS_PATH", home.join(".fno/events.jsonl"))
         .env("FNO_AGENTS_NO_STARTUP_RECONCILE", "1")
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
@@ -284,6 +285,7 @@ fn daemon_refuses_a_dead_owner_at_start() {
 
     let mut daemon = Command::new(daemon_bin())
         .env("FNO_AGENTS_HOME", &home)
+        .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_TEST_OWNER_PID", owner_pid.to_string())
         .env("FNO_TEST_OWNER_BIRTH", owner_birth.to_string())
         .stdout(Stdio::null())
@@ -307,6 +309,36 @@ fn daemon_refuses_a_dead_owner_at_start() {
     assert_eq!(status.code(), Some(3), "stderr={stderr:?}");
     assert!(!home.join("supervisor.sock").exists());
     assert!(stderr.contains(&owner_pid.to_string()), "stderr={stderr:?}");
+}
+
+#[test]
+fn every_triad_spawning_test_file_declares_its_owner() {
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let exempt = ["retirement_e2e.rs", "test_run_lifecycle.rs"];
+    let mut matched = Vec::new();
+    for entry in std::fs::read_dir(&tests_dir).expect("read tests directory") {
+        let entry = entry.expect("read test entry");
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let source = std::fs::read_to_string(&path).expect("read test source");
+        let spawns_triad = source.contains("CARGO_BIN_EXE_fno-agents\"")
+            || source.contains("CARGO_BIN_EXE_fno-agents-daemon\"");
+        if !spawns_triad || exempt.contains(&name.as_str()) {
+            continue;
+        }
+        matched.push(name.clone());
+        assert!(
+            source.contains("self_owner_env"),
+            "{name} names a client or daemon bin without self_owner_env"
+        );
+    }
+    assert!(
+        matched.iter().any(|name| name == "daemon_e2e.rs"),
+        "positive control: daemon_e2e.rs must be scanned"
+    );
 }
 
 /// A PRODUCTION keeper (no test-owner env at all) must be unaffected by this

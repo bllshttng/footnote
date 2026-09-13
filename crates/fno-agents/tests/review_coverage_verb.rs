@@ -160,6 +160,7 @@ fn explicit_head_rejects_an_abbreviated_sha_without_writing_an_event() {
     assert!(!global.exists(), "the refused head wrote a global event");
 
     let output = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
         .args(args)
         .output()
         .unwrap();
