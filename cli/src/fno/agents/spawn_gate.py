@@ -2059,7 +2059,9 @@ def run_gate(
                             axes_read["admission"] = "refused"
                             raise
                         axes_read["admission"] = (
-                            budget_receipt.get("status") if budget_receipt else "off"
+                            str(budget_receipt.get("status"))
+                            if budget_receipt
+                            else "off"
                         )
                         _CURRENT_AXIS.set("max_live")
                         if substrate == "headless":

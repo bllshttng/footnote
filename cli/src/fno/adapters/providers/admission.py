@@ -392,13 +392,13 @@ def _admit(
                 evidence_age_s=verdict.evidence_age_s,
             )
     # Preview path: no lock, no write, no idempotency.
-    raw = None
+    raw_view: dict[str, Any] | None = None
     try:
-        raw = rs._read_disk_payload(state_path)
+        raw_view = rs._read_disk_payload(state_path)
     except Exception:  # noqa: BLE001 - a corrupt read reads as empty
-        raw = None
+        raw_view = None
     reservations = rs._drop_expired_reservations(
-        rs._parse_reservations_payload(raw or {}), now
+        rs._parse_reservations_payload(raw_view or {}), now
     )
     outstanding, count = _outstanding_and_count(reservations, pool)
     snap, freshness = _snapshot_for(
