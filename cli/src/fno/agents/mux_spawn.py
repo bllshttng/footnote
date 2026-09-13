@@ -1502,11 +1502,7 @@ def _mesh_env_wrapper(
     if precomputed is None:
         precomputed = _mesh_env_pairs(
             name, harness, role,
-            provenance=provenance,
-            account_env=account_env,
-            route_env=route_env,
-            seed_provenance=seed_provenance,
-            session_id=session_id,
+            provenance, account_env, route_env, seed_provenance, session_id,
         )
     unset, pairs = precomputed
     return ["env", *unset, *pairs, *argv]
@@ -3650,14 +3646,8 @@ def dispatch_spawn_pane(
     # One pairs computation feeds both the codex splice and the wrapper.
     seed_prov = _seed_provenance_env(message, provenance)
     mesh_unset, mesh_pairs = _mesh_env_pairs(
-        name,
-        provider,
-        launch_role,
-        provenance=provenance,
-        account_env=account_env,
-        route_env=route_env,
-        seed_provenance=seed_prov,
-        session_id=session_uuid,
+        name, provider, launch_role,
+        provenance, account_env, route_env, seed_prov, session_uuid,
     )
     if provider == "cursor-agent":
         # cursor-agent's create-chat mints the full UUID. It is a distinct

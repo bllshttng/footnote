@@ -246,12 +246,11 @@ supported = true
 rule_ids = ["approval_prompt"]
 keys = ["3"]
 
-# `codex` with no subcommand is the interactive create. Measured 2026-09-13
-# on codex-cli 0.154.0: a bare `codex -C` thread (01a09bcd) stayed absent
-# from the shared daemon's loaded set while a `--remote unix://` thread
-# (01a09c05) appeared there 4.3s after launch. `--remote` ignores a config
-# trust override, so an untrusted cwd parks on the trust screen and the
-# readiness probe fails the spawn rather than answering it.
+# `codex` bare is the interactive create. Measured 2026-09-13 (0.154.0): a
+# bare `codex -C` thread (01a09bcd) stayed absent from the daemon's loaded
+# set; a `--remote unix://` thread (01a09c05) appeared there 4.3s after
+# launch. `--remote` ignores a config trust override: the readiness probe
+# refuses, it never answers.
 [harness.codex.resume_strategy.forms.interactive_create]
 kind = "subcommand"
 pre_exec = ["codex", "app-server", "daemon", "start"]
