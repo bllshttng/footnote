@@ -28,6 +28,18 @@ from fno.config._routing_admission import AdmissionPolicy
 
 NOW = time.time()
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture(autouse=True)
+def _pin_rust_owner(monkeypatch):
+    """The admission owner is the Rust verb; pin THIS checkout's build so a
+    stale installed binary cannot answer the suite with the wrong math."""
+    if not os.environ.get("FNO_AGENTS_BIN"):
+        candidate = _REPO_ROOT / "crates" / "fno-agents" / "target" / "debug" / "fno-agents"
+        if candidate.is_file():
+            monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
+
 
 def _record(record_id: str = "rec-a") -> ProviderRecord:
     return ProviderRecord(

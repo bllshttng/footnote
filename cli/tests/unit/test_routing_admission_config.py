@@ -42,12 +42,11 @@ def test_armed_policy_resolves_demand_and_reserve_by_difficulty():
     })
     p = resolve_admission_policy(s)
     assert p.enabled is True
-    # The most specific row at or below the band wins.
-    assert p.demand_for("review", "medium") == 15
-    assert p.demand_for("review", "high") == 25
-    # An undeclared verb falls back to the default verb row.
-    assert p.demand_for("do", "high") == 0.0
-    assert p.reserve_for("do", "low") == 10
+    # The tables travel intact; the difficulty lookup itself lives in the
+    # Rust owner, which prices every receipt with the row it chose.
+    assert p.demand_pct["review"]["default"] == 15
+    assert p.demand_pct["review"]["high"] == 25
+    assert p.reserve_pct["default"]["default"] == 10
 
 
 def test_armed_percentage_out_of_range_refuses_with_exact_field_and_unit():

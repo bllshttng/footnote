@@ -54,6 +54,8 @@ When admission is armed, an unprovable claude principal refuses with `unknown_id
 
 Inside `provider-runtime-state.json`, under the existing document and update lock. There is no new state-root file and no second quota cache. Every existing writer of that document parses and re-persists the `reservations` block, so an unrelated health or usage write never eats a live worker's reservation. Rows expire after `routing.admission.reservation_ttl_seconds`. A committed worker is revalidated through refresh, never refunded merely because its TTL elapsed. Idempotency keys on the dispatch identity: a re-request by the same dispatch returns its held reservation, and two different dispatches never share a token. Releasing requires the holding dispatch's identity.
 
+The owner of the math and the disk is the `fno-agents admission` verb (`crates/fno-agents/src/admission.rs`), beside the other runtime-state readers. Python (`cli/src/fno/adapters/providers/admission.py`) is the transport plus the one thing that cannot move: the budget identity, whose proof reads the operator's Keychain. Python sends one JSON payload; the verb decides, locks, and persists.
+
 ## Who calls it
 
 The spawn gate reserves at its admit seams, as the last conjunct after cap, RAM, load, king share, and schema. A typed refusal exits with the provider-cap code and an `account_admission_refused` receipt naming the status, pool, binding window, and reset hint.

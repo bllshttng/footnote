@@ -7,6 +7,7 @@ an absence is never the proof.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -21,6 +22,18 @@ from fno.config._routing_admission import AdmissionPolicy
 # The gate seam and the deferral preview read the real clock, so the seeded
 # evidence must be fresh against time.time(), not a synthetic epoch.
 NOW = time.time()
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture(autouse=True)
+def _pin_rust_owner(monkeypatch):
+    """The admission owner is the Rust verb; pin THIS checkout's build so a
+    stale installed binary cannot answer the suite with the wrong math."""
+    if not os.environ.get("FNO_AGENTS_BIN"):
+        candidate = _REPO_ROOT / "crates" / "fno-agents" / "target" / "debug" / "fno-agents"
+        if candidate.is_file():
+            monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
 
 
 def _policy(**kw) -> AdmissionPolicy:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,18 @@ from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
 from fno.config._routing_admission import AdmissionPolicy
 
 TEN_MIN = 600.0
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture(autouse=True)
+def _pin_rust_owner(monkeypatch):
+    """The admission owner is the Rust verb; pin THIS checkout's build so a
+    stale installed binary cannot answer the suite with the wrong math."""
+    if not os.environ.get("FNO_AGENTS_BIN"):
+        candidate = _REPO_ROOT / "crates" / "fno-agents" / "target" / "debug" / "fno-agents"
+        if candidate.is_file():
+            monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
 
 
 def _policy(**kw) -> AdmissionPolicy:

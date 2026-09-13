@@ -471,8 +471,8 @@ def admission_cmd(
             f"remaining={receipt.remaining_admission_pct}% "
             f"outstanding={round(outstanding_pct, 2)}% "
             f"inflight={inflight}/{policy.max_inflight_per_pool} "
-            f"demand={policy.demand_for(verb, difficulty)}% "
-            f"reserve={policy.reserve_for(verb, difficulty)}%"
+            f"demand={receipt.demand_applied}% "
+            f"reserve={receipt.reserve_applied}%"
         )
         if receipt.reason:
             line += f" ({receipt.reason})"

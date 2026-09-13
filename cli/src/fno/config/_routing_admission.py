@@ -34,11 +34,6 @@ _DEGRADED_PREFIX = "routing.admission."
 #: The one vocabulary difficulty keys may use. Anything else is a config error.
 DIFFICULTIES = ("default", "low", "medium", "high")
 
-#: Ranks a difficulty name for the round-up lookup (the ``agents.profiles``
-#: idiom): a node's effective difficulty is the ceiling of its band, and the
-#: ``default`` key is the floor every band can fall back to.
-_DIFFICULTY_RANK = {"default": 0, "low": 1, "medium": 2, "high": 3}
-
 _CURRENCY_MARKER = re.compile(r"[$€£]|usd", re.IGNORECASE)
 
 _PERCENT_TABLES = ("demand_pct", "reserve_pct")
@@ -186,9 +181,9 @@ class RoutingAdmissionBlock(BaseModel):
 class AdmissionPolicy:
     """The resolved, error-free view readers consume.
 
-    Percent lookups take the most specific declared row at or below the
-    request's difficulty band, falling back to the ``default`` verb row, so
-    one row can cover a whole table.
+    A data bag only: the difficulty lookup and the whole decision live in
+    the Rust owner (``crates/fno-agents/src/admission.rs``), which returns
+    the priced axes on every receipt, so no display re-derives them.
     """
 
     enabled: bool = False
@@ -199,25 +194,6 @@ class AdmissionPolicy:
     #: Exact config errors recorded while the block was armed and malformed.
     #: Non-empty + enabled = the owner refuses rather than guessing.
     config_errors: dict[str, str] = dataclasses.field(default_factory=dict)
-
-    @staticmethod
-    def _lookup(
-        table: dict[str, dict[str, float]], verb: str, difficulty: str
-    ) -> float:
-        requested = _DIFFICULTY_RANK.get(difficulty, 3)
-        best_rank, best_pct = -1, 0.0
-        for source in (table.get(verb) or {}, table.get("default") or {}):
-            for name, pct in source.items():
-                rank = _DIFFICULTY_RANK.get(name, 99)
-                if rank <= requested and rank > best_rank:
-                    best_rank, best_pct = rank, pct
-        return best_pct
-
-    def demand_for(self, verb: str, difficulty: str) -> float:
-        return self._lookup(self.demand_pct, verb, difficulty)
-
-    def reserve_for(self, verb: str, difficulty: str) -> float:
-        return self._lookup(self.reserve_pct, verb, difficulty)
 
 
 def resolve_admission_policy(settings: object = None) -> AdmissionPolicy:

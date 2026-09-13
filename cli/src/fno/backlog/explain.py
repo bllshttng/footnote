@@ -291,7 +291,7 @@ def gates_for(
                                     else receipt.status
                                 )
                             ),
-                            f"reserve {policy.reserve_for('do', str(node.get('difficulty') or 'high')):.0f}%",
+                            f"reserve {receipt.reserve_applied if receipt.reserve_applied is not None else 0:.0f}%",
                             "pass" if receipt.admitted else ("refuse" if armed else "unknown"),
                             key="routing.admission",
                             note=(
