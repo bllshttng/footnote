@@ -3061,10 +3061,16 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str) -> tuple[
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return "refused", f"resume exit {proc.returncode}: {tail[-1] if tail else ''}"
     if not confirm_wake_landed(v.row_id, cwd, WAKE_MESSAGE, before_epoch, agent=agent):
+        # Carry resume's own last line into the refusal: exit 0 is exactly
+        # the receipt that lied here (x-6ac3), so its before -> after line
+        # is what the next operator needs without re-running anything.
+        # Empty output keeps today's text with no trailing separator.
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return (
             "refused",
             f"resume reported success but {WAKE_MESSAGE!r} is not in the "
-            f"transcript after the wake",
+            f"transcript after the wake"
+            + (f": {tail[-1]}" if tail else ""),
         )
     return "applied", f"woke {v.name}; message confirmed in transcript"
 

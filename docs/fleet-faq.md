@@ -76,9 +76,7 @@ Three verbs, and they are not interchangeable.
 
 When the old worker holds context you must otherwise pay to rebuild, prefer resume over spawn. A worker five hours into a port is worth more than a fresh one, even a stronger fresh one.
 
-**A caution on `resume -m`.** Resume takes `-m/--message` to hand the revived session an instruction. Once observed, `resume -m` against a session already in a terminal state printed `Done -> Done` and the message never reached the transcript. If you need an instruction to land, send it with `fno agents mail send` and verify it arrived rather than assuming the resume carried it.
-
-*Graduates to:* `resume -m` either delivering to a terminal session or refusing loudly, instead of reporting `Done -> Done` and dropping the payload.
+**Resume delivers the message, and the exit code says so.** Resume takes `-m/--message` to hand the session an instruction. On a claude session it wakes the worker headlessly, and exit 0 means the message is in the transcript. On a codex thread it hands the text to the codex daemon, and exit 0 means the daemon accepted it. Exit 16 means the message did not land, and the refusal names what is missing. A session already in a terminal state is never injected into, so an explicit message on one refuses instead of reporting `Done -> Done` with the payload dropped.
 
 ## My worker did real work and never reported it
 
