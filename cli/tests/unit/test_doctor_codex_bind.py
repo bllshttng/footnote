@@ -56,7 +56,7 @@ def _patch_common(monkeypatch, *, run_returncode: int = 0, pane_id_out: str = "7
         lambda session, pane_id, runner: (reaped.append((session, pane_id)), (True, ""))[1],
     )
     monkeypatch.setattr(
-        mux_spawn, "_codex_session_ids_loaded", lambda cwd, **_kw: set()
+        codex_pane, "_codex_session_ids_loaded", lambda cwd, **_kw: set()
     )
     monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: True)
     monkeypatch.setattr(mux_spawn, "_read_pane_tail", lambda *a, **k: "")
@@ -224,7 +224,7 @@ def test_daemon_oracle_uses_the_canary_codex_home(monkeypatch) -> None:
         homes.append(("candidate", codex_home))
         return SID
 
-    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", baseline)
+    monkeypatch.setattr(codex_pane, "_codex_session_ids_loaded", baseline)
     monkeypatch.setattr(
         mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None
     )

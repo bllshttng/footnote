@@ -880,14 +880,6 @@ def _backfill_codex_session_id(
     return None
 
 
-from fno.agents.codex_pane import (  # noqa: E402 - re-exported for doctor.py
-    _CODEX_DAEMON_PROBE_INTERVAL_S,
-    _codex_daemon_candidate,
-    _codex_session_ids_loaded,
-    _make_codex_bind_probe,
-)
-
-
 def pane_passthrough_tokens(
     passthrough: Optional[Sequence[str]],
     emitted: Sequence[str],
@@ -3659,9 +3651,8 @@ def dispatch_spawn_pane(
     # `--session-id` out of the argv it forwards, and it never wraps pi.
     pin_session = pin_session or provider == "pi"
     session_uuid = str(_uuid.uuid4()) if pin_session else None
-    # One pairs computation for the whole spawn (x-a095): the codex pane
-    # splice renders these same pairs as config-set leaves, and the env
-    # wrapper formats them for the TUI process itself.
+    # One pairs computation for the whole spawn (x-a095): the codex splice
+    # renders these pairs as config-set leaves; the wrapper formats them.
     seed_prov = _seed_provenance_env(message, provenance)
     mesh_unset, mesh_pairs = _mesh_env_pairs(
         name,
@@ -3701,11 +3692,11 @@ def dispatch_spawn_pane(
         passthrough=passthrough,
         computed_dirs=computed_writable_dirs,
     )
-    if provider == "codex":
+    if provider == "codex" and argv and argv[0] == provider:
         # A daemon-run tool inherits the daemon's env, not the TUI's, so the
-        # worker identity rides into the tool shell as config-set leaves
-        # (x-a095). Same seam as the route splice below: after argv[0],
-        # passthrough-checked, so a `-c` on both sides is a named refusal.
+        # identity rides as config-set leaves (x-a095); passthrough-checked
+        # like the route splice below. The argv[0] guard keeps the splice on
+        # the provider's own form.
         from fno.agents.codex_pane import codex_shell_env_args
 
         env_config_args = codex_shell_env_args(mesh_pairs)
@@ -3840,10 +3831,9 @@ def dispatch_spawn_pane(
         # correlate against a fabricated empty baseline.
         codex_daemon_baseline_ids: Optional[set[str]] = None
         if provider == "codex":
-            # The create form asserts the daemon (--remote unix://); start it
-            # before the pane and before the baseline snapshot below, so the
-            # oracle reads a daemon that is already up. Calls resolve through
-            # the module so a patch on codex_pane reaches them.
+            # The create form asserts the daemon; start it before the pane
+            # and the baseline snapshot below. Calls resolve through the
+            # module so a patch on codex_pane reaches them.
             from fno.agents import codex_pane
 
             codex_pane.ensure_codex_daemon(runner)

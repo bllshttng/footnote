@@ -137,7 +137,7 @@ def test_window_expiry_with_a_live_pane_is_still_booting() -> None:
 
 
 def _codex_probe(monkeypatch, *, candidate, alive: bool = True, baseline=frozenset()):
-    from fno.agents.mux_spawn import _make_codex_bind_probe
+    from fno.agents.codex_pane import _make_codex_bind_probe
 
     monkeypatch.setattr(codex_pane, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
     monkeypatch.setattr(mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None)
@@ -1184,7 +1184,7 @@ def test_daemon_candidate_names_the_disabled_oracle() -> None:
     """
     seen: list = []
     assert (
-        mux_spawn._codex_daemon_candidate(Path("/w/proj"), None, observed=seen) is None
+        codex_pane._codex_daemon_candidate(Path("/w/proj"), None, observed=seen) is None
     )
     assert seen == ["daemon: no pre-spawn baseline, oracle disabled for this spawn"]
 
@@ -1193,7 +1193,7 @@ def test_daemon_candidate_names_an_unreachable_app_server(monkeypatch) -> None:
     monkeypatch.setattr(codex_pane, "_codex_session_ids_loaded", lambda *a, **k: None)
     seen: list = []
     assert (
-        mux_spawn._codex_daemon_candidate(Path("/w/proj"), set(), observed=seen) is None
+        codex_pane._codex_daemon_candidate(Path("/w/proj"), set(), observed=seen) is None
     )
     assert seen == ["daemon: app-server unreachable"]
 
@@ -1205,7 +1205,7 @@ def test_daemon_candidate_names_ambiguity_and_counts_it(monkeypatch) -> None:
     )
     seen: list = []
     assert (
-        mux_spawn._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen) is None
+        codex_pane._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen) is None
     )
     assert seen == ["daemon: 2 new codex sessions for this cwd, ambiguous"]
 
@@ -1214,7 +1214,7 @@ def test_daemon_candidate_distinguishes_nothing_new_from_ambiguous(monkeypatch) 
     monkeypatch.setattr(codex_pane, "_codex_session_ids_loaded", lambda *a, **k: {"a"})
     seen: list = []
     assert (
-        mux_spawn._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen) is None
+        codex_pane._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen) is None
     )
     assert seen == ["daemon: no new codex session for this cwd"]
 
@@ -1226,8 +1226,8 @@ def test_the_sink_holds_the_newest_observation_only(monkeypatch) -> None:
         codex_pane, "_codex_session_ids_loaded", lambda *a, **k: next(loaded)
     )
     seen: list = []
-    mux_spawn._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen)
-    mux_spawn._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen)
+    codex_pane._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen)
+    codex_pane._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen)
     assert seen == ["daemon: no new codex session for this cwd"]
 
 
@@ -1278,7 +1278,7 @@ def test_the_probe_records_the_fd_oracle_miss(monkeypatch) -> None:
     monkeypatch.setattr(codex_pane, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
     monkeypatch.setattr(mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None)
     monkeypatch.setattr(codex_pane, "_codex_session_ids_loaded", lambda *a, **k: {"a"})
-    probe = mux_spawn._make_codex_bind_probe(
+    probe = codex_pane._make_codex_bind_probe(
         cwd=Path("/w/proj"),
         spawn_started_ms=0,
         child_pid=4242,
@@ -1312,7 +1312,7 @@ def test_the_probe_records_a_candidate_awaiting_its_repeat(monkeypatch) -> None:
     monkeypatch.setattr(codex_pane, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
     monkeypatch.setattr(mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None)
     monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: SID)
-    probe = mux_spawn._make_codex_bind_probe(
+    probe = codex_pane._make_codex_bind_probe(
         cwd=Path("/w/proj"),
         spawn_started_ms=0,
         child_pid=4242,

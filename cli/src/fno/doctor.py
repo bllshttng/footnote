@@ -3153,11 +3153,10 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
     import time
     import uuid as _uuid
 
+    from fno.agents.codex_pane import _codex_session_ids_loaded, _make_codex_bind_probe
     from fno.agents.mux_spawn import (
         _await_pane_binding,
-        _codex_session_ids_loaded,
         _lookup_child_pid,
-        _make_codex_bind_probe,
         _reap_spawned_pane,
         _run_mux,
         build_pane_argv,

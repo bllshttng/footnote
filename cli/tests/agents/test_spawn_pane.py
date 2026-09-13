@@ -328,11 +328,12 @@ def test_late_codex_identity_composes_across_every_peer_surface(
             str(rollout),
         ],
     )
-    # x-a095: this journey exercises the late-identity heal, not the daemon
-    # contract; the start command would otherwise exec a real provider binary.
+    # The daemon start would exec a real provider binary; the journey
+    # exercises the late-identity heal, not the daemon contract.
     from fno.agents import codex_pane
 
     monkeypatch.setattr(codex_pane, "ensure_codex_daemon", lambda *_a, **_k: None)
+
     spawned = None
     try:
         spawned = mux_spawn.dispatch_spawn_pane(
@@ -879,63 +880,6 @@ def test_codex_binding_expiry_runs_one_reconcile_backfill(
     assert result.bound is True
 
 
-def test_codex_binds_through_the_daemon_oracle_when_the_fd_probe_misses(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Codex 0.148 no longer holds the rollout fd in the pane's own process
-    tree (the app-server daemon it delegates to does), so the fd probe misses
-    every time; the daemon oracle behind it must still bind the row.
-
-    Wired at ``_make_codex_bind_probe`` rather than the daemon-candidate
-    function it composes: that function's own stability gate needs two
-    probes spaced by ``_CODEX_DAEMON_PROBE_INTERVAL_S``, which this module's
-    collapsed ``FNO_PANE_BINDING_WINDOW_S`` window has no room for. The
-    gate's own timing is covered directly in
-    test_spawn_codex_session_capture.py; this test only checks the dispatch
-    wiring picks up whatever the probe returns.
-    """
-    from fno.agents import codex_pane
-    from fno.agents.registry import load_registry
-
-    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
-    monkeypatch.setattr(
-        codex_pane, "_make_codex_bind_probe", lambda **_kwargs: (lambda: session_id)
-    )
-
-    result, _ = _spawn(
-        monkeypatch, tmp_path, provider=CODEX_HARNESS, codex_binding=False
-    )
-
-    row = load_registry()[0]
-    assert row.harness_session_id == session_id
-    assert result.session_uuid == session_id
-    assert result.bound is True
-
-
-def test_codex_daemon_ambiguity_still_reaps_rather_than_guessing(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Two new session ids in this cwd is a race between sibling panes; the
-    daemon oracle refuses to guess (returns None), so the spawn fails exactly
-    like today's binding-window-expired case rather than misbinding."""
-    from fno.agents.dispatch import DispatchAskError
-    from fno.agents import codex_pane
-    from fno.agents.registry import load_registry
-
-    monkeypatch.setattr(
-        codex_pane, "_make_codex_bind_probe", lambda **_kwargs: (lambda: None)
-    )
-
-    runner = FakeRunner()
-    with pytest.raises(DispatchAskError, match="session binding.*reaped"):
-        _spawn(
-            monkeypatch, tmp_path, provider=CODEX_HARNESS, runner=runner,
-            codex_binding=False,
-        )
-    assert load_registry() == []
-    assert runner.kill_calls
-
-
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     no_state_grant: None, tmp_path: Path, monkeypatch
 ) -> None:
@@ -1132,8 +1076,6 @@ def test_build_pane_argv_provider_forms(no_state_grant: None, tmp_path: Path) ->
     assert claude == ["claude", "--session-id", "uuid-1", "--", "task"]
 
     codex = build_pane_argv("codex", "task", tmp_path, False, None)
-    # x-a095: the create identity carries the daemon assertion, so the thread
-    # is minted in the shared app-server daemon, not in-process.
     assert codex[:5] == ["codex", "--remote", "unix://", "-C", str(tmp_path)]
     assert "--sandbox" in codex and codex[-1] == "task"
     # The codex seed rides behind clap's own end-of-options fence.
