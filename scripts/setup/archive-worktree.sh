@@ -210,6 +210,15 @@ else
   }
 fi
 
+# The build hash dir outlives git's removal; reclaim it while the manifest
+# can still answer. A partial deploy without the lib leaves the dir to the
+# sweep.
+_CARGO_BUILD_DIR_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/cargo-build-dir.sh"
+if [[ -f "$_CARGO_BUILD_DIR_LIB" ]]; then
+  # shellcheck source=/dev/null
+  source "$_CARGO_BUILD_DIR_LIB"
+fi
+
 measure_strict_state() {
   FORCE_DIRTY_STATUS=""
   FORCE_DIRTY_STATUS_RC=0
@@ -709,6 +718,9 @@ if [[ "${_WT_RECOVERABLE_ONLY:-0}" -eq 1 ]]; then
     exit 2
   fi
 fi
+# Reclaim the build hash dir while the manifest can still answer;
+# the sweep reaps what an unreadable resolution leaves behind.
+declare -F cargo_build_dir_remove_for_wt >/dev/null 2>&1 && cargo_build_dir_remove_for_wt "$TARGET" || true
 if ! git worktree remove $REMOVE_FLAGS "$TARGET"; then
   echo "archive-worktree: git worktree remove failed" >&2
   exit 4

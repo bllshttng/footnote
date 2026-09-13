@@ -78,7 +78,7 @@ pub enum Verdict {
     SendFailed,
 }
 
-fn notify_signals_path() -> PathBuf {
+pub(crate) fn notify_signals_path() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_NOTIFY_SIGNALS").filter(|v| !v.is_empty()) {
         return PathBuf::from(v);
     }
@@ -207,7 +207,7 @@ pub fn forget_at(path: &Path, key: &str) {
 // ---------------------------------------------------------------------------
 
 /// Board queues the arm subscribes to: key -> (pointer verb, count label).
-const BOARD_QUEUES: [(&str, &str, &str); 3] = [
+const BOARD_QUEUES: [(&str, &str, &str); 4] = [
     (
         "operator_question",
         "fno inbox outstanding",
@@ -222,6 +222,11 @@ const BOARD_QUEUES: [(&str, &str, &str); 3] = [
         "undriven_pr",
         "fno inbox board",
         "PR(s) undriven across checks",
+    ),
+    (
+        "failed_verdict",
+        "fno inbox outstanding",
+        "prove-it FAIL verdict(s) with no ruling",
     ),
 ];
 

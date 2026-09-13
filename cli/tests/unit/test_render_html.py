@@ -824,6 +824,30 @@ def test_the_live_claim_is_keyed_on_local_not_on_projection(tmp_path: Path):
     assert "re-rendered on every graph mutation" not in public
 
 
+def test_the_board_title_names_its_corpus(tmp_path: Path):
+    """Two boards reading different corpora must not share a title: the
+    whole-graph board is not "fno Backlog", it is every project. The eyebrow
+    names what the board reads (live work plus the shipped archive), not just
+    "live".
+    """
+    entries = [_entry("ab-14000001", project="fno", title="A node")]
+
+    scoped_path = tmp_path / "scoped.html"
+    render_graph_html(entries, scoped_path, project="etl")
+    all_path = tmp_path / "all.html"
+    render_graph_html(entries, all_path, all_projects=True)
+    default_path = tmp_path / "default.html"
+    render_graph_html(entries, default_path)
+
+    assert "<title>etl Backlog</title>" in scoped_path.read_text()
+    all_html = all_path.read_text()
+    assert "<title>All Projects Backlog</title>" in all_html
+    assert 'class="eyebrow">all projects' in all_html
+    default_html = default_path.read_text()
+    assert "<title>fno Backlog</title>" in default_html
+    assert "live + shipped archive" in default_html
+
+
 def test_the_light_palette_meets_wcag_aa_on_small_text():
     """Every pill, chip and badge on this board is 10.5px to 12.5px, so 4.5:1
     is the bar for all of them.

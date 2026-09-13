@@ -60,6 +60,18 @@ def _write_plan(
     return path
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_verdict_reader(monkeypatch: pytest.MonkeyPatch):
+    """Condition E shells the live verdict store by default; pin it empty so
+    these tests neither pay the subprocess nor read machine FAIL rows. Tests
+    that exercise condition E patch the reader seam themselves."""
+    import fno.graph._reconcile as reconcile
+
+    monkeypatch.setattr(
+        reconcile, "_verdict_reader_shellout", lambda plan_path: {"rows": []}
+    )
+
+
 @pytest.fixture
 def routed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Graph + ledger wired into the CLI; returns the graph path."""
@@ -288,6 +300,99 @@ def test_condition_d_fires_on_a_multi_wave_plan(tmp_path: Path):
     assert v.outcome == "promise_unmet"
     assert "deferred carve-out" in (v.reason or "")
     assert "promised 2 waves" not in (v.reason or "")
+
+
+# ---------------------------------------------------------------------------
+# condition E - open prove-it FAIL on the node's plan artifacts
+# ---------------------------------------------------------------------------
+# The verdict_reader seam returns the verb's payload ({read_at, rows,
+# unreadable}); the real reader shells fno-agents prove-it-verdicts, which the
+# module-wide hermetic fixture pins empty.
+
+
+def _verdict_payload(node: str, *, open_: bool, verdict: str = "FAIL") -> dict:
+    return {
+        "read_at": "2026-09-12T00:00:00Z",
+        "rows": [
+            {
+                "node": node,
+                "status": "done",
+                "report": f"/plans/{node}.md.artifacts/coverage/REPORT.md",
+                "verdict": verdict,
+                "claim": "the retirement done probe rejects incomplete evidence",
+                "mtime": "2026-09-08T20:56:56Z",
+                "open": open_,
+                "routed": False,
+                "ruled_by": None,
+            }
+        ],
+        "unreadable": [],
+    }
+
+
+def test_condition_e_open_fail_holds_the_close(tmp_path: Path):
+    """AC3-HP: an open FAIL on the node's own artifacts refuses with the path."""
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md")
+    v = resolve_promise_evidence(
+        {"id": "x-e1", "plan_path": str(plan)},
+        verdict_reader=lambda plan_path: _verdict_payload("x-e1", open_=True),
+    )
+    assert v.outcome == "promise_unmet"
+    assert v.exit_code == 6
+    assert "prove-it FAIL" in (v.reason or "")
+    assert "/plans/x-e1.md.artifacts/coverage/REPORT.md" in (v.reason or "")
+    assert "the retirement done probe rejects incomplete evidence" in (v.reason or "")
+    assert "fno inbox decide" in (v.reason or "")
+    assert "--force --reason" in (v.reason or "")
+
+
+def test_condition_e_ruled_or_retired_fail_closes_clean(tmp_path: Path):
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md")
+    # A ruled FAIL (open=false) and a PASS verdict both read closed: a newer
+    # PASS retires the FAIL and a decision naming the report rules it.
+    for payload in (
+        _verdict_payload("x-e2", open_=False),
+        _verdict_payload("x-e2", open_=False, verdict="PASS"),
+    ):
+        v = resolve_promise_evidence(
+            {"id": "x-e2", "plan_path": str(plan)},
+            verdict_reader=lambda plan_path, payload=payload: payload,
+        )
+        assert v.outcome == "ok", payload
+
+
+def test_condition_e_ignores_another_nodes_fail(tmp_path: Path):
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md")
+    v = resolve_promise_evidence(
+        {"id": "x-e3", "plan_path": str(plan)},
+        verdict_reader=lambda plan_path: _verdict_payload("x-other", open_=True),
+    )
+    assert v.outcome == "ok"
+
+
+def test_condition_e_failed_reader_degrades_to_named_warning(tmp_path: Path):
+    """AC3-ERR: a reader that raises is a warning, never a silent pass."""
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md")
+
+    def _boom(plan_path: str) -> dict:
+        raise OSError("binary missing")
+
+    v = resolve_promise_evidence(
+        {"id": "x-e4", "plan_path": str(plan)},
+        verdict_reader=_boom,
+    )
+    assert v.outcome == "ok"
+    assert v.warning is not None
+    assert "prove-it verdict read failed" in v.warning
+    assert "binary missing" in v.warning
 
 
 def test_carveout_ledger_root_resolves_from_the_nodes_project(tmp_path):

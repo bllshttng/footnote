@@ -253,7 +253,7 @@ def test_the_pointer_carries_the_node_and_truncates_the_note() -> None:
     assert body.startswith("note on x-0d08: the sideline glyph chain is wrong")
     assert "..." in body
     assert "fno backlog get x-0d08" in body
-    assert len(body.split()) < 40  # well under the 80-word pair budget
+    assert len(body.split()) < 40  # well under the 80-word per-message cap
 
 
 # --- the author is named, never mailed ---------------------------------------

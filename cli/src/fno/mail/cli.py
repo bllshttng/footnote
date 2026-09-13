@@ -376,9 +376,12 @@ def _reserve_budget(
     sender_key: str | None = None,
     recipient_key: str | None = None,
 ):
-    """Reserve the authored count after both pair identities are canonical."""
+    """Reserve a control send after both pair identities are canonical.
+
+    An ordinary body reserves nothing: rule 7 is its only word gate, so the
+    return is ``(None, words)`` and callers release unconditionally.
+    """
     from fno import style
-    from fno.config import load_settings
     from fno.mail import budget
 
     words = style.word_count(body)
@@ -391,38 +394,7 @@ def _reserve_budget(
             sender_key=sender_key,
             recipient_key=recipient_key,
         )
-    exempt = not _budget_enforced(body, allow_reason=allow_reason)
-    try:
-        reservation = budget.reserve(
-            sender=sender,
-            recipient=recipient,
-            words=words,
-            msg_id=msg_id,
-            enforce=not exempt,
-            sender_key=sender_key,
-            recipient_key=recipient_key,
-            cap=load_settings().style.pair_budget_words,
-        )
-    except budget.BudgetRefused as exc:
-        print(
-            f"refused: rolling word budget for {exc.pair}: {exc.marker()}",
-            file=sys.stderr,
-        )
-        # The refusal is the one moment the sender is listening: teach the
-        # control lane here, or the next incident re-derives nothing.
-        print(_CONTROL_HINT, file=sys.stderr)
-        raise typer.Exit(code=1) from exc
-    except budget.BudgetUnavailable as exc:
-        print(f"refused: {exc}", file=sys.stderr)
-        raise typer.Exit(code=1) from exc
-    return reservation, words
-
-
-_CONTROL_HINT = (
-    "operational control (stop, resume, scope change)? resend with the body's "
-    "first line starting `control:` -- its own lane, 60 words, exempt from "
-    "this budget"
-)
+    return None, words
 
 
 def _reserve_control_budget(
@@ -436,10 +408,9 @@ def _reserve_control_budget(
 ):
     """Reserve a control send against the control lane's own ledger.
 
-    Never touches the ordinary window: a stop must not spend the budget the
-    conversation after it needs. The stderr note is the receipt's lane marker,
-    in one place, for every lane that routes through here; it reads RESERVED
-    because delivery is proven later, by the lane's own receipt.
+    The stderr note is the receipt's lane marker, in one place, for every
+    lane that routes through here; it reads RESERVED because delivery is
+    proven later, by the lane's own receipt.
     """
     from fno.mail import budget
 
@@ -462,22 +433,10 @@ def _reserve_control_budget(
         print(f"refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=1) from exc
     print(
-        "control lane: reserved against its own 60-word window; "
-        "the pair budget is untouched",
+        "control lane: reserved against its own 60-word rolling window",
         file=sys.stderr,
     )
     return reservation, words
-
-
-def _budget_enforced(body: str, *, allow_reason: str | None = None) -> bool:
-    """Whether this send refuses over-budget; all sends still reserve."""
-    from fno import style
-
-    return not (
-        os.environ.get("FNO_STYLE_ENFORCE") == "0"
-        or bool(allow_reason and allow_reason.strip())
-        or style.has_exception(body)
-    )
 
 
 def _release_budget(reservation) -> None:
@@ -1492,8 +1451,8 @@ def cmd_pane_prepare(
     ),
     style_exception: Optional[str] = typer.Option(
         None, "--style-exception",
-        help="Reasoned one-send exception to the style and word-budget gates "
-        "on enveloped prose (a --raw send never enters them).",
+        help="Reasoned one-send exception to the style gates on enveloped "
+        "prose (a --raw send never enters them).",
     ),
 ) -> None:
     """Gate and envelope a pane payload read from stdin; print it on stdout.
@@ -1505,7 +1464,7 @@ def cmd_pane_prepare(
 
     Exit 0 prints the bytes to type. Exit 3 refuses and names why on stderr: the
     pane is showing an option prompt, hosts no registered agent, or the body
-    cannot be attributed. Exit 1 refuses on the style, body-cap, or word-budget
+    cannot be attributed. Exit 1 refuses on the style or body-cap
     gates the mail verbs enforce: this is the sole renderer every non-raw pane
     send passes through, so a sender refused by mail must not deliver the
     identical prose here instead.
@@ -1601,8 +1560,8 @@ def cmd_pane_prepare(
     # collides for codex siblings spawned inside one ~65s bucket, which fused
     # two distinct workers into one pair and refused normal parallel fanout.
     # The inbound-reset lookup keeps the display handles (bus envelopes carry
-    # handles). A row without a session id still gets a budget, keyed on the
-    # pane address rather than skipped.
+    # handles). A control body without a session id still reserves, keyed on
+    # the pane address rather than skipped.
     pane_address = f"pane {session}:{pane}"
     recipient = identity.handle if identity and identity.handle else pane_address
     _reserve_budget(
@@ -2147,7 +2106,7 @@ def _name_lane_send(
         generate_msg_id,
         write_new_thread,
     )
-    from fno.mail.envelope import harness_for_provider, wrap_fno_mail
+    from fno.mail.envelope import wrap_fno_mail
 
     self_send = False
     # The recipient's full session id when a lane resolved one; it stamps that
@@ -2246,15 +2205,9 @@ def _name_lane_send(
     # head-8 clock bucket. None when unprovable, and then omitted, never guessed.
     sender_session = _reply_session_for(from_name)
     def _envelope(to_session: Optional[str] = None) -> str:
-        # Through harness_for_provider like every other send path: the wire
-        # vocabulary is claude-code, and a raw "claude" here made the name lane
-        # the one producer disagreeing with dispatch, the relay, and the Rust
-        # contract. "cli" is the honest no-harness value.
         return wrap_fno_mail(
             message,
             from_=sender,
-            harness=harness_for_provider(sender_harness) if sender_harness else "cli",
-            model=sender_model,
             to=recipient,
             id=msg_id,
             reply_to=reply_to,
@@ -2577,6 +2530,11 @@ def _name_lane_send(
             # envelope does, so a drained reply resolves the collision-safe
             # address exactly as a live one does (node x-3a64).
             from_session=sender_session,
+            # And the same sender provenance the hosted and typed rows carry:
+            # the compact envelope no longer renders the model, so the durable
+            # row is where audit reads it.
+            provider_from=sender_harness,
+            from_model=sender_model,
             word_count=authored_words,
             origin=origin,
         )
@@ -4110,9 +4068,6 @@ def cmd_send(
                 from_name=stamp_from(from_name),
                 origin=mail_origin,
                 any_=any_live,
-                budget_enforce=_budget_enforced(
-                    content, allow_reason=style_exception
-                ),
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
@@ -4252,9 +4207,6 @@ def cmd_send(
             cwd=workdir,
             from_name=stamp_from(from_name),
             origin=mail_origin,
-            budget_enforce=_budget_enforced(
-                message, allow_reason=style_exception
-            ),
         )
     except DispatchAskError as exc:
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE

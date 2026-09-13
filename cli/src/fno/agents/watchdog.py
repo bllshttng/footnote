@@ -2764,7 +2764,6 @@ def _send_machine_report(
                     to[len("project:"):],
                     body,
                     cwd=Path.cwd(),
-                    budget_enforce=False,
                     origin="recovery",
                 )
             else:
@@ -2773,7 +2772,6 @@ def _send_machine_report(
                     body,
                     cwd=Path.cwd(),
                     from_name=sender,
-                    budget_enforce=False,
                     origin="recovery",
                 )
         else:
@@ -2783,7 +2781,6 @@ def _send_machine_report(
                     message=body,
                     provider=None,
                     cwd=Path.cwd(),
-                    budget_enforce=False,
                     origin="recovery",
                 )
             else:
@@ -2793,7 +2790,6 @@ def _send_machine_report(
                     provider=None,
                     cwd=Path.cwd(),
                     from_name=sender,
-                    budget_enforce=False,
                     origin="recovery",
                 )
     except DispatchAskError as exc:

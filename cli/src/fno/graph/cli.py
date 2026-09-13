@@ -3097,7 +3097,7 @@ def cmd_update(
     dispatch_verb: Optional[str] = typer.Option(
         None,
         "--dispatch-verb",
-        help="Verb a dispatcher launches this node with (US3), e.g. /think. Validated against config.dispatch.allowed_verbs or config.dispatch.verb_registry at dispatch, not here. Pass 'null' to clear (revert to the /target --no-merge default).",
+        help="Verb a dispatcher launches this node with (US3), e.g. /think. Refused at write when it is not one bare verb word; the config.dispatch allowlist still applies at dispatch. Pass 'null' to clear (revert to the /target --no-merge default).",
     ),
     dispatch_brief: Optional[str] = typer.Option(
         None,
@@ -6619,107 +6619,6 @@ def cmd_remove(
     # Rationale (10 lines): docs/architecture/graph-cli-rationale.md#cmd-remove-6902
 
 
-@cli.command(
-    "defer",
-    epilog="Paired verb: `fno backlog undefer <id>...` reverses this (hidden; run its own --help).",
-)
-def cmd_defer(
-    task_ids: List[str] = typer.Argument(
-        ...,
-        help="Feature IDs (ab-XXXXXXXX). Multiple via space and/or comma: 'ab-X,ab-Y ab-Z'.",
-    ),
-    reason: str = typer.Option(
-        ...,
-        "--reason",
-        "-R",
-        help="Why these nodes are being deferred (applies to all). Free text, surfaced in triage.",
-    ),
-    kind: Optional[str] = typer.Option(
-        None,
-        "--kind",
-        "-K",
-        help=(
-            "Classify the deferral (expired|blocked|wont_do|superseded|later|"
-            "contingent|carveout|internal_only|junk). Omitted: stamped only when "
-            "the reason exactly matches a known machine-stamped string."
-        ),
-    ),
-) -> None:
-    """Mark one or more backlog nodes as deferred. Sets ``deferred_at`` + ``deferred_reason``.
-
-    Atomic across the batch: if any ID is unknown, none are deferred.
-    Same reason applies to every ID in the batch.
-    """
-    from fno.graph._constants import (
-        DEFERRED_KINDS,
-        classify_deferred_reason,
-    )
-    from fno.graph.store import locked_mutate_graph
-    from fno.graph._intake import _find_node, _find_dependents
-
-    if kind is not None and kind not in DEFERRED_KINDS:
-        typer.echo(
-            f"Error: --kind must be one of {', '.join(DEFERRED_KINDS)}, got '{kind}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    ids = _expand_valid_ids(task_ids)
-
-    # Strip and validate the reason at the CLI boundary so direct invocation
-    # cannot land an empty-reason deferral. The triage validator already
-    # rejects blank reasons; matching that contract here keeps both write
-    # paths producing identically-shaped graph state.
-    cleaned_reason = reason.strip()
-    if not cleaned_reason:
-        typer.echo("Error: --reason cannot be blank", err=True)
-        raise typer.Exit(code=1)
-
-    def mutator(entries):
-        # Resolve every id and abort naming ALL missing ones before mutating,
-        # mirroring cmd_queue's all-or-nothing batch atomicity.
-        _require_nodes(entries, ids)
-        now = datetime.now(timezone.utc).isoformat()
-        for tid in ids:
-            node = _find_node(entries, tid)
-            dependents = _find_dependents(entries, tid)
-            if dependents:
-                typer.echo(
-                    f"WARN: Deferring {tid} blocks: {', '.join(dependents)}",
-                    err=True,
-                )
-            node["locked_by"] = None
-            node["locked_at"] = None
-            # Clear completed_at PER NODE, inside the loop. The precedence
-            # ladder is `done > deferred`, so hoisting this clear out of the
-            # loop (or skipping it for the batch) makes deferring a done node
-            # a silent no-op: completed_at would keep status pinned to done.
-            # Symmetric with cmd_done, which clears deferred_at on the reverse
-            # transition.
-            node["completed_at"] = None
-            node["deferred_at"] = now
-            node["deferred_reason"] = cleaned_reason
-            # Explicit --kind wins; else classify ONLY by exact match against
-            # the machine-stamped table (the maintain drain self-classifies
-            # with no flag). No match leaves the kind unset - an honest
-            # unknown, never a guess from prose. Sparse: no kind means no key
-            # (popped so a re-deferral of a previously stamped node clears it).
-            resolved_kind = kind or classify_deferred_reason(cleaned_reason)
-            if resolved_kind:
-                node["deferred_kind"] = resolved_kind
-            else:
-                node.pop("deferred_kind", None)
-        return entries
-
-    locked_mutate_graph(_graph_path(), mutator)
-    for tid in ids:
-        typer.echo(f'Deferred {tid}: "{cleaned_reason}"')
-    _project_plans_from_graph(ids)
-
-
-    # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#cmd-defer-7012
-
-
 def _expand_valid_ids(task_ids: list[str]) -> list[str]:
     """Expand one-or-many id args; refuse an empty set and non-node ids
     (the shared prologue of every batch-mutating verb)."""
@@ -8803,7 +8702,7 @@ def cmd_advance(
             try:
                 report = build_lane_fill_report(
                     epic=epic, project=project, node_id=explain_node, top=explain_top,
-                    max_dispatch=max_dispatch,
+                    max_dispatch=max_dispatch, provider=provider, model=model,
                 )
             except Exception as exc:  # noqa: BLE001 - never a partial verdict
                 typer.echo(f"advance --explain --epic: {exc}", err=True)

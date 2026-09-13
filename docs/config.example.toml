@@ -220,10 +220,6 @@ agent_routes = {}
 # Enable cross-model (codex/gemini) second-opinion review.
 enabled = false
 
-[style]
-# Rolling per-pair mail word budget inside the 10-minute window (default 80). Raise it alongside style.word_cap.mail: a higher per-message cap that leaves this at 80 refuses the very message the cap now permits.
-pair_budget_words = 80
-
 [style.word_cap]
 # Masked-word cap for style rule 7 on a mail body (default 80). The refusal names the number enforced here, not the built-in.
 mail = 80
@@ -647,11 +643,11 @@ sandbox = false
 [model_routing]
 # Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn.
 enabled = true
-# Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in.
+# Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, tier_models, wire_api}); 'zai' is built in. tier_models maps a Claude tier to a model ({opus = "glm-5.3[1m]"}); keys are opus|sonnet|haiku|fable and undeclared tiers keep the spawn model.
 providers = {}
 # Per-role target map (role -> 'provider/model', e.g. tidy: 'zai/glm-4.7'; legacy 'provider,model' comma form also accepted); manage via `fno config route set/unset`. The opt-in 'build' lane routes delivery spawns (/target bg).
 roles = {}
-# Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides).
+# Extra env merged into routed spawns (e.g. API_TIMEOUT_MS). Prefer tier_models for per-tier models; extra_env still wins as a hand pin.
 extra_env = {}
 
 [mux]

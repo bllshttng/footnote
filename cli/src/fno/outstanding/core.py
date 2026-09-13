@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional
 
 from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
 
@@ -120,6 +120,17 @@ class Capture:
         }
 
 
+class VerdictRow(NamedTuple):
+    """One open prove-it FAIL verdict (x-6d64): claimed outcome did not hold."""
+
+    node: str
+    report: str
+    verdict: str
+    claim: str
+    status: Optional[str] = None
+    mtime: Optional[str] = None
+
+
 @dataclass(frozen=True)
 class Outstanding:
     carveout_total: int
@@ -131,6 +142,9 @@ class Outstanding:
     capture_row_total: int = 0
     lane: "list[LaneItem]" = field(default_factory=list)
     lane_parked: int = 0
+    #: Open prove-it FAIL verdicts, plus the reader's failure: surfaced, never a silent zero.
+    verdicts: "list[VerdictRow]" = field(default_factory=list)
+    verdicts_error: Optional[str] = None
     #: The one project-scoped leg names its root; the machine-wide legs name
     #: their stores, so a zero in any stream is diagnosable instead of
     #: silently meaning either "clean" or "read from the wrong place".
@@ -138,9 +152,8 @@ class Outstanding:
 
     @property
     def empty(self) -> bool:
-        return (
-            self.carveout_total == 0 and not self.questions and not self.captures and not self.lane
-        )
+        clean = not (self.carveout_total or self.questions or self.captures or self.lane or self.verdicts)
+        return clean and self.verdicts_error is None
 
     def as_dict(self) -> "dict[str, Any]":
         by_project: "dict[str, int]" = {}
@@ -176,6 +189,11 @@ class Outstanding:
                 "total": len(self.lane),
                 "parked": self.lane_parked,
                 "items": [{"text": i.text, "line": i.line} for i in self.lane],
+            },
+            "verdicts": {
+                "total": len(self.verdicts),
+                "error": self.verdicts_error,
+                "items": [v._asdict() for v in self.verdicts],
             },
         }
 
@@ -738,6 +756,7 @@ def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:
     lane_read = lane if lane is not None else read_lane()
     if lane_read.error:
         raise OutstandingError(lane_read.error)
+    verdicts, verdicts_error = _read_open_verdicts()
     return Outstanding(
         carveout_total=len(rows),
         carveout_by_kind=by_kind,
@@ -748,8 +767,34 @@ def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:
         capture_row_total=capture_row_total,
         lane=open_items(lane_read),
         lane_parked=len(parked_items(lane_read)),
+        verdicts=verdicts,
+        verdicts_error=verdicts_error,
         carveout_root=str(Path(root)),
     )
+
+
+def _read_open_verdicts() -> "tuple[list[VerdictRow], Optional[str]]":
+    """Open prove-it FAIL rows from the Rust reader, or why it could not be
+    read. A failed call never raises: that would blank the questions leg."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        payload = verb_call("prove-it-verdicts", {})
+    except (VerbUnavailable, OSError, ValueError) as exc:
+        return [], str(exc)
+    rows = [
+        VerdictRow(
+            node=str(r.get("node") or ""),
+            report=str(r.get("report") or ""),
+            verdict=str(r.get("verdict") or "FAIL"),
+            claim=str(r.get("claim") or ""),
+            status=r.get("status"),
+            mtime=r.get("mtime"),
+        )
+        for r in payload.get("rows") or []
+        if r.get("open")
+    ]
+    return rows, None
 
 
 def _age_days(ts: str) -> Optional[int]:
@@ -911,6 +956,22 @@ def render(
             lines.append(
                 "  Rows are trimmed to one line; read a full question with: fno inbox outstanding -J"
             )
+        lines.append("")
+
+    if outstanding.verdicts:
+        lines.append(f"{_plural(len(outstanding.verdicts), 'prove-it FAIL verdict')} with no ruling.")
+        for v in outstanding.verdicts[:RENDER_CAP]:
+            claim = v.claim.split("\n", 1)[0].strip()
+            if len(claim) > 100:
+                claim = claim[:99] + "…"
+            where = f" ({v.status})" if v.status else ""
+            lines.append(f"  {v.node}{where}: {claim}")
+            lines.append(f"    Read: {v.report}")
+        lines.append("  Rule with: fno inbox decide <node> naming the report, or re-run /fno:review prove-it.")
+        lines.append("")
+
+    if outstanding.verdicts_error:
+        lines.append(f"prove-it verdicts could not be read ({outstanding.verdicts_error}).")
         lines.append("")
 
     if outstanding.captures:

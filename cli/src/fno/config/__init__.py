@@ -1253,20 +1253,6 @@ class StyleBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     word_cap: WordCapBlock = Field(default_factory=WordCapBlock)
-    # The rolling pair budget is a WINDOW instrument, not a per-text cap, so it
-    # is a sibling of word_cap rather than one of its surfaces. It moves WITH
-    # the per-message cap or it silently binds first: a project that raises
-    # word_cap.mail to 200 would still be refused at the 80-word window total,
-    # and the refusal would name a number the sender never set. That coupling is
-    # why the budget's cap became configurable at all.
-    pair_budget_words: int = 80
-
-    @field_validator("pair_budget_words")
-    @classmethod
-    def budget_is_positive(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("config.style.pair_budget_words must be >= 1")
-        return v
 
 
 class ReviewBlock(BaseModel):
@@ -3428,14 +3414,10 @@ class ParallelBlock(BaseModel):
 class ModelProvider(BaseModel):
     """One secondary model provider for role-based routing (z.ai, DeepSeek, ...).
 
-    ``protocol`` is how a worker talks to it: a ``claude --bg`` worker speaks the
-    Anthropic Messages API, so only ``anthropic``-protocol providers are usable
-    for the claude lane (use the vendor's Anthropic-compatible endpoint, e.g.
-    ``https://api.z.ai/api/anthropic`` or ``https://api.deepseek.com/anthropic``,
-    NOT its OpenAI ``/v4`` path). The API key is read from the process env var
-    named by ``api_key_env`` (falling back to ``api_key_file``); it never lives
-    in settings.yaml. ``zai`` is built in by default; list a provider here to
-    override it or to add another (e.g. ``deepseek``).
+    Anthropic-protocol only for the claude lane (the vendor's compatible
+    endpoint, not its OpenAI ``/v4`` path); the key comes from
+    ``api_key_env`` / ``api_key_file``, never settings.yaml. ``zai`` is built
+    in; list a provider here to override it or add another.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -3444,27 +3426,30 @@ class ModelProvider(BaseModel):
     base_url: str = ""
     api_key_env: str = ""
     api_key_file: Optional[str] = None
-    # Cheaper model for the background (haiku) tier so judgment-light background
-    # traffic runs cheap while opus/sonnet stay on the role model. Unset (None)
-    # keeps the role model on every tier. The built-in zai provider defaults it
-    # to glm-4.7; set it here to override or to give another provider a
-    # cheap background model.
+    # Cheaper model for the background (haiku) tier so judgment-light traffic
+    # runs cheap; unset keeps the role model there. Built-in zai: glm-4.7.
     haiku_model: Optional[str] = None
-    # Codex/OpenAI-lane only (protocol == "openai"): the codex wire protocol for
-    # this provider's endpoint. Third-party OpenAI-compatible endpoints (e.g.
-    # z.ai's paas/v4) speak Chat Completions -> "chat"; leave unset to default
-    # to "chat" when routing a codex-lane spawn. Ignored on the anthropic lane.
+    # Model per Claude tier ({opus = "glm-5.3[1m]"}) so /model offers a real
+    # choice; undeclared tiers keep the spawn model. Rules beside TIER_ALIASES.
+    tier_models: Optional[dict[str, str]] = None
+
+    @field_validator("tier_models")
+    @classmethod
+    def _validate_tier_models(cls, v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        from fno.config._tiers import validate_tier_models
+        return validate_tier_models(v)
+    # Codex/OpenAI-lane only (protocol == "openai"): the codex wire protocol
+    # for this provider's endpoint ("chat" for Chat Completions, the default;
+    # ignored on the anthropic lane).
     wire_api: Optional[str] = None
 
 
 class ModelRoutingBlock(BaseModel):
     """Role-based per-spawn model routing (config.model_routing in settings.yaml).
 
-    Routes auxiliary coordination roles (coordinate / tidy / orient /
-    consolidate) to a secondary provider (z.ai GLM by default) at spawn time
-    while production roles stay on the primary Anthropic model. Keys live in env
-    vars / .env files named per provider, never here. See
-    fno.agents.model_routing.
+    Routes auxiliary coordination roles to a secondary provider (z.ai GLM by
+    default) while production roles stay primary; provider keys live in env
+    vars / .env files, never here. See fno.agents.model_routing.
     """
 
     model_config = ConfigDict(extra="ignore")

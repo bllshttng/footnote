@@ -126,9 +126,6 @@ def handoff(
             "handoff doc unless --slug overrides."
         ),
     ),
-    session_legacy: Optional[str] = typer.Option(
-        None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
-    ),
     slug: str = typer.Option(
         "",
         "--slug",
@@ -160,13 +157,9 @@ def handoff(
     import datetime as _dt
     import re
 
-    from fno._flag_aliases import merge_deprecated_alias
     from fno.harness_identity import canonical_handle
     from fno.paths import handoffs_dir
 
-    session_id = merge_deprecated_alias(
-        session_id, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
-    )
     if scope:
         if session_id or slug:
             raise typer.BadParameter("--scope cannot be combined with --session-id/--slug")

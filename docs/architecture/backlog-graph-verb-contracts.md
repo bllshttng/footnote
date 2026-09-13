@@ -41,9 +41,9 @@ The crown walk goes outward and stops at the first scope with a live crown: the 
 
 The author is matched by identity, never by name shape: an address that names a registry row is the author when the row's ``harness_session_id`` matches the sender's under ``session_identity_key``; the bare ``endswith`` match stands only for role-prefixed holders that name no row. The author is named in the receipt but never mailed its own note.
 
-The body is a POINTER, never the note: the node id, the note's opening words, and the command to read it. A full body spends the 80-word rolling pair budget on the first send, and several notes share one 10-minute window.
+The body is a POINTER, never the note: the node id, the note's opening words, and the command to read it. A full body breaks rule 7's 80-word per-message cap on the first send.
 
-The delivery lives in the VERB, not in ``append_progress_note``. The status-fanout adapter writes its ``task_done`` / ``run_summary`` stamps through the store function, so machine progress lines never mail: one note per finished task would spend every pair budget on traffic no reader asked for. A fact somebody chose to record is the case that needs a reader.
+The delivery lives in the VERB, not in ``append_progress_note``. The status-fanout adapter writes its ``task_done`` / ``run_summary`` stamps through the store function, so machine progress lines never mail: one note per finished task is traffic no reader asked for. A fact somebody chose to record is the case that needs a reader.
 
 ``--quiet`` is the deliberate silent annotation. Delivery is the default because the two failure modes are not symmetric: a forgotten flag costs a redundant mail, where a forgotten mail costs the finding.
 
@@ -380,16 +380,20 @@ True when a done child carries a PR that GitHub never confirmed merged.
 
 Decide whether a node's plan promised work that has not all shipped.
 
-    Fires ONLY on an explicit declaration - a plan that declares neither
-    ``close_probes`` nor ``expected_url_count`` closes exactly as it does today.
-    Inferring "multi-wave" from ``## Wave N`` headings was rejected: the common
-    case (one .md == one PR == one node) uses waves as internal structure and
-    would false-positive identically to a half-ship, parking every such node on
-    autonomous /target. Coverage grows as /blueprint stamps ``expected_url_count``
-    going forward, so nothing retroactively parks.
+    Fires ONLY on an explicit declaration, with one exception (condition E
+    needs only a ``plan_path``, because the artifacts sidecar hangs off it) -
+    a plan that declares neither ``close_probes`` nor ``expected_url_count``
+    closes exactly as it does today unless its own plan artifacts carry an
+    open prove-it FAIL. Inferring "multi-wave" from ``## Wave N`` headings was
+    rejected: the common case (one .md == one PR == one node) uses waves as
+    internal structure and would false-positive identically to a half-ship,
+    parking every such node on autonomous /target. Coverage grows as
+    /blueprint stamps ``expected_url_count`` going forward, so nothing
+    retroactively parks.
 
-    Three conditions, first refusal wins. D reads the carve-out ledger and is
-    independent of the plan; B and C read the plan at ``node["plan_path"]``:
+    Four conditions, first refusal wins. D reads the carve-out ledger and is
+    independent of the plan; E reads the plan's artifacts sidecar and needs
+    only a ``plan_path``; B and C read the plan at ``node["plan_path"]``:
 
       D. Unharvested deferred carve-outs. The project ledger
          (``.fno/carveouts.jsonl``) still carries a ``deferred`` carve-out -
@@ -406,6 +410,17 @@ Decide whether a node's plan promised work that has not all shipped.
          (legacy, ambient shell, harness without a session id) block nothing
          at close time; they stay visible via ``fno backlog carveout list`` and the
          retro sweep, which are the repo-wide backstop.
+      E. Open prove-it FAIL verdict. The node's own
+         ``<plan>.artifacts/`` tree holds a terminal ``fno-prove-it:`` record
+         whose verdict is FAIL and which no ruling names. A FAIL is claimed
+         work whose outcome did not hold, so it holds the close of a node that
+         is still open; a done node is never reopened - the auditor is not a
+         doneness gate, a king rules. Two legal exits: a newer PASS record in
+         the same artifacts tree, or a decision that names the report
+         (``fno inbox decide <node>``); or close with --force --reason. The
+         verdict reader is injectable (the ``carveout_reader`` seam shape) and
+         a failed read degrades to ``ok`` with a warning, the same posture a
+         plan-read failure takes.
       B. Outcome probes. Any ``close_probes`` entry exits non-zero. Probes are
          delegated to ``fno-agents probe-run`` (the same runner the loop uses for
          ``done_probes``); a declared gate that cannot be evaluated fails closed.

@@ -37,7 +37,9 @@ run_gate() { ( cd "$REPO" && bash "$GATE" ) 2>&1; }
 
 # --- clean tree passes -------------------------------------------------------
 log "clean tree passes"
-printf '# doc\nnothing to see here.\n' > docs/clean.md
+# `footnote` stays tracked: it is the competitor scan's control token, and a
+# scope where the control misses is a refusal, not a pass.
+printf '# doc\nfootnote is the competitor scan control token.\nnothing to see here.\n' > docs/clean.md
 commit_all
 OUT=$(run_gate); RC=$?
 (( RC == 0 )) || fail "clean: expected 0, got $RC ($OUT)"

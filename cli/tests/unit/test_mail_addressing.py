@@ -40,9 +40,7 @@ def test_two_v7_siblings_collide_on_the_display_handle():
 
 
 def test_the_envelope_carries_the_full_session_when_given_one():
-    tag = fno_mail_open(
-        from_="01a025f8", harness="codex", model="m", from_session=V7_A
-    )
+    tag = fno_mail_open(from_="01a025f8", from_session=V7_A)
     assert f'from_session="{V7_A}"' in tag
     assert tag.startswith('<fno_mail from="01a025f8"')
 
@@ -50,9 +48,7 @@ def test_the_envelope_carries_the_full_session_when_given_one():
 def test_an_envelope_without_it_is_byte_unchanged():
     """Additive, and rendered last, so every pre-existing producer emits exactly
     the bytes it emitted before."""
-    assert fno_mail_open(from_="a", harness="claude-code", model="m") == (
-        '<fno_mail from="a" harness="claude-code" model="m">'
-    )
+    assert fno_mail_open(from_="a") == ('<fno_mail from="a">')
 
 
 def test_the_reply_resolver_prefers_the_full_session_over_the_handle():
@@ -60,8 +56,6 @@ def test_the_reply_resolver_prefers_the_full_session_over_the_handle():
     text = wrap_fno_mail(
         "hi",
         from_="01a025f8",
-        harness="codex",
-        model="m",
         id="msg-882e18",
         from_session=V7_A,
     )
@@ -71,7 +65,7 @@ def test_the_reply_resolver_prefers_the_full_session_over_the_handle():
 def test_a_legacy_envelope_still_resolves_through_its_handle():
     """An envelope written before the attribute existed is still sitting in live
     transcripts. Preferring the full id must not break reading the old shape."""
-    text = wrap_fno_mail("hi", from_="01a025f8", harness="codex", model="m", id="msg-1")
+    text = wrap_fno_mail("hi", from_="01a025f8", id="msg-1")
     assert sender_from_transcript_text(text, "msg-1") == "01a025f8"
 
 

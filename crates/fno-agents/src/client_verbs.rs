@@ -2859,11 +2859,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         // installed), which never runs this arm at all.
         // Route through `fno` (the wrapper every install puts on PATH, which
         // resolves the `fno-py` console script by absolute path -- see
-        // crates/fno/src/bootstrap.rs), not a bare `fno-py`: this binary has
-        // no PATH-robust resolver of its own, and a bare `fno-py` fails on a
-        // cargo-only install where only the mux (`fno`) is on PATH (the same
-        // gap cli/src/fno/_subprocess_util.py's `fno_py_cmd()` closes on the
-        // Python side). `FNO_AGENTS_RUNTIME=python` pins the child to Python
+        // crates/fno/src/bootstrap.rs), not a bare `fno-py`: that fails on a
+        // cargo-only install where only the mux (`fno`) is on PATH. Where
+        // even `fno` is off PATH, scrape::fno_py resolves directly (the
+        // twin of _subprocess_util.py's fno_py_cmd()). `FNO_AGENTS_RUNTIME=python` pins the child to Python
         // dispatch, mirroring `token_helper_output` above -- without it,
         // `resume` (in RUST_CLIENT_VERBS) would auto-route straight back into
         // this same binary and loop.

@@ -29,7 +29,7 @@ A	--tail must be >= 0 (got {tail})	py=cli/src/fno/agents/cli.py;rs=crates/fno-ag
 A	--workspace/-s needs a nonblank workspace name	py=cli/src/fno/agents/spawn_defaults.py;rs=crates/fno-agents/src/bin/client.rs|crates/fno/src/mux_cli.rs	# msg-twin
 A	caller-assigned-cwd-scoped	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: a session_binding strategy, twinned like preassigned-or-session-start because both validators enforce one closed vocabulary
 A	cpu_instrument_unreadable	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin: the receipt reason token both gates refuse with when the CPU instrument is unreadable
-A	fno_review_invocation_id	py=cli/src/fno/agents/dispatch.py;rs=crates/fno/src/mux_cli.rs	# protocol: both sides pass the same optional id so Python-owned mux telemetry does not duplicate the native event
+A	fno_review_invocation_id	py=cli/src/fno/agents/dispatch.py;rs=crates/fno/src/review_invocation.rs	# protocol: both sides pass the same optional id so Python-owned mux telemetry does not duplicate the native event (rs side moved out of mux_cli.rs, x-91ba)
 A	/scripts/ci/preflight.sh	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# data
 A	/var/lib/dbus/machine-id	py=cli/src/fno/claims/hostid.py;rs=crates/fno-agents/src/claims.rs|crates/fno/src/agents_view.rs	# data
 A	</fno_relay_compression>	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# protocol: schemas/spawn-brevity.json plus Python and Rust parity tests pin both runtime carriers
@@ -43,7 +43,7 @@ A	an unsupported submit contract cannot carry a nonzero delay	py=cli/src/fno/age
 A	cargo-test:fno-agents-e2e	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# protocol: the preflight receipt scope both trust lists compare against; scripts/tests/test_preflight_parity.sh fails when the two lists or preflight.sh disagree
 A	cargo-test:fno-agents-unit	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# protocol: the preflight receipt scope both trust lists compare against; scripts/tests/test_preflight_parity.sh fails when the two lists or preflight.sh disagree
 A	direct needs model and effort placeholders	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
-A	anthropic_default_haiku_model	py=cli/src/fno/agents/model_routing.py|cli/src/fno/route_cli.py;rs=crates/fno-agents/src/model_env_scrub.rs	# protocol: route_cli renders the tier and its staleness against the same registry model_routing resolves
+A	anthropic_default_haiku_model	py=cli/src/fno/route_cli.py;rs=crates/fno-agents/src/model_env_scrub.rs	# protocol: route_cli renders the tier and its staleness against the same registry model_routing resolves; model_routing now derives the key from TIER_ALIASES, so the literal is single-sourced away from it
 A	claim_idempotent_reacquired	py=cli/src/fno/claims/events.py|cli/src/fno/resume/receipt.py|cli/src/fno/scoreboard/fold.py;rs=crates/fno-agents/src/claims.rs|crates/fno-agents/src/events.rs	# protocol: events.rs carries the name in the retention-routing const, the set a parity test holds equal to schema.yaml
 A	claude logs: claude binary not found on path; install claude or check $path	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	claude_code_stop_hook_block_cap	py=cli/src/fno/agents/harnesses/claude.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
@@ -94,7 +94,7 @@ A	operator_question_closed	py=cli/src/fno/events/__init__.py|cli/src/fno/outstan
 A	postmortem_corrections_log	py=cli/src/fno/hermetic.py;rs=crates/fno-agents/src/finalize.rs	# protocol
 A	preassigned-or-session-start	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol
 A	permission_mode_requested	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol: receipt key both spawn builders emit byte-identically; it names intent, not outcome
-A	refused-newer-than-transcript	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon.rs	# protocol
+A	refused-newer-than-transcript	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon/list_rows.rs	# protocol
 A	registry read failed: {exc}	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/attach.rs	# msg-twin
 A	registry name must be 1-64 letters, numbers, underscores, or hyphens	py=cli/src/fno/agents/registry.py;rs=crates/fno-agents/src/state.rs	# msg-twin: the rename grammar refusal is the Python port's verbatim string
 A	review coverage waived for this head	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: the affirmative waiver value both gates demand on the single law row; review_coverage_paths.rs pins both carriers
@@ -113,7 +113,7 @@ A	spawn-gate: could not read available ram; skipping the floor check	py=cli/src/
 A	spawn-gate: forced past cap, ram floor, and load ceiling (--force)	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	spawn-gate: qos demotion of pid {pid} failed (non-fatal)	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	spawn-gate: worker slot claim {key} unavailable; proceeding uncounted	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
-A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon.rs	# protocol
+A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon/list_rows.rs	# protocol
 A	stopped: {name} ({short_id})	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/bin/client.rs	# msg-twin
 A	unsupported strategy has executable data	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	the child falls back to its account's own default.	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# msg-twin
@@ -135,7 +135,7 @@ A	fresh reviewer context required	py=cli/src/fno/config/__init__.py;rs=crates/fn
 A	--audit-worktree-touched	py=cli/src/fno/agents/cli.py|cli/src/fno/pr/_ritual.py;rs=crates/fno-agents/src/bin/client.rs|crates/fno-agents/src/client_tests.rs	# protocol: both runtimes carry the same internal post-merge worktree outcome
 A	effort must be a non-empty string when provided	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/src/graph_keeper.rs	# msg-twin: the ported store keeps the append_session_record validation contract identical on both sides of the keeper socket
 A	completed_window_seconds	py=scripts/analysis/graph-write-gate-audit.py;rs=crates/fno-agents/src/graph_keeper.rs	# protocol: the keeper emits this duration field and the gate audit consumes it; carrier-set drift must fail because either side changing alone makes the five-minute completeness check lie
-A	fno-agents-worker not found (set fno_agents_worker or install the runtime)	py=cli/src/fno/graph/store.py;rs=crates/fno/src/store_client.rs	# msg-twin: the client and the runtime resolver refuse a missing worker binary with the same sentence
+A	fno-agents-worker not found (set fno_agents_worker or install the runtime)	py=cli/src/fno/graph/store.py;rs=crates/fno/src/product_boundary.rs	# msg-twin: the client and the runtime resolver refuse a missing worker binary with the same sentence
 A	keeper closed the connection mid-frame	py=cli/src/fno/graph/store.py;rs=crates/fno/src/store_client.rs	# msg-twin: both frame readers report a torn frame identically
 A	locked_by_harness_session	py=cli/src/fno/backlog/note_notify.py|cli/src/fno/graph/cli.py|cli/src/fno/graph/grouped.py;rs=crates/fno-agents/src/backlog/model.rs|crates/fno-agents/src/court_fold.rs|crates/fno-agents/src/graph_store.rs	# protocol: a CANONICAL_FIELD_ORDER member; the Rust constant is the single source the Python renderers must agree with; court_fold.rs unions it into the session id list; note_notify.py reads the binding to reach a worker the claim misses
 A	merge_grant must be a mapping when provided	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/src/graph_keeper.rs	# msg-twin: the merge-grant validation contract is maintained identically on both sides of the keeper socket

@@ -67,6 +67,26 @@ There is a fourth case, and it long had no receipt at all. `--submit` defaults t
 
 Both defaults are correct and neither changes here. A send that submitted by default is the read-back gate's own failure case. A stray submit against a showing prompt selects the highlighted default and discards the payload. What was missing is that the doc said so nowhere, while `skills/using-fno/SKILL.md` lists this verb beside mail as a handoff channel. Measured twice on 2026-08-22. A king sent a ruling to a busy pane and to an idle one. Both times it got silence and a clean exit, and had delivered nothing. That is the `queued (durable)` shape again, a transport whose surface reads normal while the message sits.
 
+## The audit row: who told this worker to do that
+
+On 2026-08-21 answering that question took a twenty-minute forensic sweep. The dispatch had gone through `fno mux pane send`, and the pane verb wrote nothing. The mail lane wrote an `agent_raw_inject` row for unwrapped payloads, but a direct `pane send` never crossed it. The instrument existed and covered one of the two ways to put text at a worker's prompt.
+
+Every `fno mux pane send` now writes one `agent_raw_inject` row to `~/.fno/agents/events.jsonl`, at the verb itself. Any path that reaches the prompt through the floor is audited, and a third entry point inherits the row instead of repeating the gap. The row names the pane, the resolved recipient, the calling session and pid, the payload digest and byte length, the submit outcome, and a `source`. One row per dispatch: the CR, Tab, and arrow sends that submit the payload are control bytes, not dispatches, and write no row.
+
+Provenance is DECLARED, never sniffed. `--source <label>` names the caller. The mail lane passes `mail:<msg-id>`, which joins the audit row to the bus record the id was minted for. An absent label reads `unattributed:<pid>`, which is a value an operator can act on and never a blank. The floor never inspects the payload to decide any of this. `--raw` carries both a wrapped mail body and an operator's verbatim keystrokes. No byte inspection can tell them apart.
+
+The outcome vocabulary is the verb's own exit codes: `submitted`, `delivered`, `unconfirmed`, `identity-mismatch`, `dnd`, `unanswered`, `refused`. Exit 22 records `unconfirmed` and never `delivered`: the text landed and no post-submit marker appeared, which is exactly the distinction the row exists to preserve. `confirmed` carries the same fact as a boolean.
+
+The query the row exists to answer, given a worker's registry name or session id:
+
+```bash
+RIPGREP_CONFIG_PATH= rg '"lane":"pane-send"' ~/.fno/agents/events.jsonl | RIPGREP_CONFIG_PATH= rg '<worker-name-or-id>'
+```
+
+Each hit names `source` (who dispatched), `payload` (what was sent, first 512 chars) and `ts`. The `RIPGREP_CONFIG_PATH=` prefix matters: rg honors a user config file, and a load-bearing scripted read must not inherit one. To search the recipient's own transcript instead, add `-uu` the same way. A plain `rg` over `~/.claude/projects` can return zero for a string that is present. That convention lives in `AGENTS.md`. This doc points at it rather than restating it.
+
+The full field contract is `agent_raw_inject` in `cli/src/fno/events/schema.yaml`.
+
 ## `fno agents mail send --force`, and why it stays opt-in
 
 `--force` keeps every mail semantic and changes only the transport. Before it existed, a live-miss forced the sender to switch verbs. Switching verbs is what lost the envelope, the message id, the reply handle, and the outbox row.

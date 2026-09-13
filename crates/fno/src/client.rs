@@ -47,9 +47,9 @@ use crate::keys::{
 use crate::lane_colors_panel::LaneColorsUi;
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
-    self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentNoPaneReason,
-    AgentRow, AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg,
-    Color, Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget,
+    self, cell_flags, read_msg, write_msg, AgentBadge, AgentNoPaneReason, AgentRow,
+    AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg, Color,
+    Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget,
     PlacementFallback, ProtoError, ServerMsg, SquadMeta, TabMeta, BUILD_VERSION, MAX_MAIL_TEXT,
     MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
@@ -877,6 +877,10 @@ struct LayoutView {
     /// has been failing. Rendered as a header marker; the cards still show (a
     /// blank section would be worse than an honestly-labelled stale one).
     backlog_stale: bool,
+    /// (v79) Active-mission progress headers, their own lane so `squads` holds
+    /// only real workspaces. Drawn as the `~ missions` band; never a section an
+    /// agent row can be grouped under.
+    missions: Vec<SquadMeta>,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -3185,7 +3189,7 @@ impl View {
             .squads
             .iter()
             .map(|s| s.id)
-            .filter(|id| !is_mission_squad(*id) && Some(*id) != own)
+            .filter(|id| Some(*id) != own)
             .collect()
     }
 
@@ -3201,12 +3205,7 @@ impl View {
     /// already been fixed twice, and the `.take(9)` cap had to be removed
     /// twice. Now there is one.
     fn attach_dst_squads(&self) -> Vec<u64> {
-        self.layout
-            .squads
-            .iter()
-            .map(|s| s.id)
-            .filter(|id| !is_mission_squad(*id))
-            .collect()
+        self.layout.squads.iter().map(|s| s.id).collect()
     }
 
     /// Open the row context menu on `display_rows()` index `i`, anchored at
@@ -4828,10 +4827,8 @@ impl View {
                 // (SelectSquad to the squad you're on); it now toggles the
                 // caret locally instead (x-2f99). Inactive rows keep
                 // SelectSquad - auto-expand in set_layout completes the
-                // gesture when the resulting layout push lands. A mission
-                // squad has no server-side squad to select (SelectSquad would
-                // refuse "no such squad"), so it always just toggles locally.
-                None if row.squad == self.layout.active_squad || is_mission_squad(row.squad) => {
+                // gesture when the resulting layout push lands.
+                None if row.squad == self.layout.active_squad => {
                     Some(ChromeHit::CycleSection(squad_key(&self.layout, row.squad)?))
                 }
                 None => Some(ChromeHit::Cmds(vec![Command::SelectSquad(row.squad)])),
@@ -5426,7 +5423,6 @@ impl View {
             return chosen;
         }
         match key {
-            SectionKey::Mission(_) => self.expanded_or_live_only(key),
             // The `~ missions` band is a progress summary, not a workspace: it
             // opens Expanded (the mission names are the content) and the operator
             // collapses it explicitly. No LiveOnly tier - the names have no
@@ -5632,7 +5628,7 @@ impl View {
     /// keeps the by-key lookup for display-only callers.
     fn section_dead_rows(&self, key: &SectionKey, squad: Option<u64>) -> Vec<&AgentRow> {
         match key {
-            SectionKey::Squad(_) | SectionKey::Mission(_) => {
+            SectionKey::Squad(_) => {
                 let id = squad.or_else(|| {
                     self.layout
                         .squads
@@ -7376,15 +7372,9 @@ impl View {
         // single squad has no groups to separate (US3 verify: absent with 1
         // squad).
         let multi_squad = self.layout.squads.len() > 1;
-        // Real workspaces only: a mission squad renders later under the
-        // `~ missions` band, never as a workspace section (it can hold no agent).
-        let real_squads: Vec<&SquadMeta> = self
-            .layout
-            .squads
-            .iter()
-            .filter(|s| !is_mission_squad(s.id))
-            .collect();
-        for (idx, s) in real_squads.into_iter().enumerate() {
+        // `squads` carries only real workspaces: missions ride their own lane
+        // and render under the `~ missions` band below.
+        for (idx, s) in self.layout.squads.iter().enumerate() {
             // One spacer between consecutive workspace groups (never before the
             // first, so no leading blank and never doubled).
             if multi_squad && idx > 0 {
@@ -7500,11 +7490,7 @@ impl View {
         // Skip the collect entirely when the band is off (the documented reason
         // for the toggle) - display_rows is hot, called per compose.
         let missions: Vec<&SquadMeta> = if self.show_missions {
-            self.layout
-                .squads
-                .iter()
-                .filter(|s| is_mission_squad(s.id))
-                .collect()
+            self.layout.missions.iter().collect()
         } else {
             Vec::new()
         };
@@ -8279,9 +8265,7 @@ fn glyph_cols(ch: char) -> usize {
 /// (no cwd, not a mission) falls back to its name - degenerate, and better
 /// than dropping its state entirely.
 fn section_key(s: &SquadMeta) -> SectionKey {
-    if is_mission_squad(s.id) {
-        SectionKey::Mission(s.id)
-    } else if !s.canonical_cwd.is_empty() {
+    if !s.canonical_cwd.is_empty() {
         SectionKey::Squad(s.canonical_cwd.clone())
     } else {
         SectionKey::Squad(s.name.clone())
@@ -8301,8 +8285,6 @@ fn squad_key(layout: &LayoutView, id: u64) -> Option<SectionKey> {
 /// `section_key_matches_resolver` pins the two to the same answer.
 fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
     match key {
-        SectionKey::Mission(id) => is_mission_squad(s.id) && s.id == *id,
-        SectionKey::Squad(_) if is_mission_squad(s.id) => false,
         SectionKey::Squad(ident) if !s.canonical_cwd.is_empty() => &s.canonical_cwd == ident,
         SectionKey::Squad(ident) => &s.name == ident,
         SectionKey::Elsewhere | SectionKey::WorkQueue | SectionKey::Missions => false,
@@ -8314,12 +8296,10 @@ fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
 /// what counts as a live section.
 fn section_is_live(layout: &LayoutView, key: &SectionKey) -> bool {
     match key {
-        SectionKey::Squad(_) | SectionKey::Mission(_) => {
-            layout.squads.iter().any(|s| squad_matches(s, key))
-        }
-        // The `~ missions` band is live while any mission squad exists; the two
+        SectionKey::Squad(_) => layout.squads.iter().any(|s| squad_matches(s, key)),
+        // The `~ missions` band is live while any mission exists; the two
         // pull-sections are always considered live (their rows come and go).
-        SectionKey::Missions => layout.squads.iter().any(|s| is_mission_squad(s.id)),
+        SectionKey::Missions => !layout.missions.is_empty(),
         SectionKey::Elsewhere | SectionKey::WorkQueue => true,
     }
 }
@@ -10188,6 +10168,7 @@ async fn attach_and_run(
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
+            missions: Vec::new(),
         },
     );
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
@@ -10272,6 +10253,7 @@ async fn attach_and_run(
                 backlog,
                 backlog_lanes,
                 backlog_stale,
+                missions,
                 ..
             }) => {
                 view.set_layout(LayoutView {
@@ -10285,6 +10267,7 @@ async fn attach_and_run(
                     backlog,
                     backlog_lanes,
                     backlog_stale,
+                    missions,
                 });
                 break;
             }
@@ -10602,8 +10585,7 @@ async fn attach_and_run(
             let tx = conn_tx.clone();
             let gen = view.conn_gen;
             tokio::spawn(async move {
-                let outcome = crate::connections_view::load_all().await;
-                let _ = tx.send((gen, outcome));
+                crate::connections_view::load_all(tx, gen).await;
             });
         }
         // x-84d7: run a wanted single-flight mutation off the UI loop. The modal's
@@ -10770,8 +10752,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, .. }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, missions, .. }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, missions });
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).

@@ -3159,7 +3159,7 @@ event_types:
           description: "Optional. One token for why nothing was done (no_crowned_target, watchdog_off, wake_disabled, disabled, gate:disabled, drain_disabled, config_unreadable, bad_interval, project_disabled, no_workspace_path, env_broken, lock_held, quota, never). Absent or null when the arm acted."
         detail:
           type: string
-          description: "Optional. Short human detail (mission ids, counts, per-arm fields like targets/ab_live)."
+          description: "Optional. Short human detail (mission ids, counts, per-arm fields like targets/ab_live). A failed run carries the whole refusal text, bounded at 4000 chars, so the cause is recoverable from the row alone."
         interval_s:
           type: integer
           description: "The cadence this arm runs on, in seconds; the readout reads stale past twice this. 0 marks an event-driven arm (stop_hook): staleness does not apply."
@@ -3596,10 +3596,10 @@ event_types:
           description: "The injected text, verbatim when short (a slash command) and truncated for the event line when long. Leading-slash is the marker a human reads as 'invocation, not a typed ruling'."
         harness:
           type: string
-          description: "Recipient harness: claude, codex, etc."
+          description: "Recipient harness: claude, codex, etc. The pane-send floor writes 'unknown' when the pane hosts no registry row it can resolve."
         lane:
           type: string
-          description: "The live lane used: control.sock (claude), codex-daemon, or mux-pane."
+          description: "The live lane used: control.sock (claude), codex-daemon, pane-send (the `fno mux pane send` floor itself, which writes every prompt write, x-91ba), or mux-pane (legacy mail-lane pane deliveries)."
         target_cwd:
           type: string
           description: "Optional. Recipient working dir, for the authorship join (did the sender author that sha?)."
@@ -3618,6 +3618,36 @@ event_types:
         self_send:
           type: boolean
           description: "True when the caller explicitly addressed its own session with --to-self."
+        source:
+          type: string
+          description: "Optional (pane-send floor, x-91ba). DECLARED, not sniffed: the caller names itself via `pane send --source <label>`; the floor never inspects the payload to guess. Default `unattributed:<pid>` when no caller declares one."
+        payload_sha256:
+          type: string
+          description: "Optional (pane-send floor). SHA-256 over the exact bytes typed at the pane (post-wrap, post-cap), so a row joins to the payload the recipient actually saw without storing it twice."
+        payload_bytes:
+          type: integer
+          description: "Optional (pane-send floor). Byte length of the exact typed payload."
+        target_pane:
+          type: integer
+          description: "Optional (pane-send floor). The pane id the bytes were typed at, beside the target_session mux name."
+        target_name:
+          type: string
+          description: "Optional (pane-send floor). The occupant's registry row name when the pane hosts one."
+        caller_session:
+          type: string
+          description: "Optional (pane-send floor). The FNO_SESSION of the calling process when it sits in an fno pane; absent for a caller outside the mux."
+        caller_pid:
+          type: integer
+          description: "Optional (pane-send floor). The calling process's pid, always present beside an unattributed source."
+        submit:
+          type: boolean
+          description: "Optional (pane-send floor). Whether the send requested a submit carriage return."
+        outcome:
+          type: string
+          description: "Optional (pane-send floor). The attempt's verdict: submitted, delivered, unconfirmed, identity-mismatch, dnd, unanswered, or refused. Exit 22 is recorded unconfirmed, never delivered."
+        exit_code:
+          type: integer
+          description: "Optional (pane-send floor). The verb's own exit code the outcome word came from."
     consumers: [operator]
 
   - name: mail_origin_classified
@@ -4251,7 +4281,7 @@ event_types:
     consumers: [operator]
 
   - name: mission_activated
-    description: "Emitted by `fno backlog advance --epic <id>` (x-9608 K1) on the first epic advance of an epic mission: the epic node is marked mission_active=true (a durable graph field K2's drain loop reads) and converge pass 1 begins. Emitted once per activation - a re-run of an already-active mission runs the idempotent converge pass without re-emitting this. A mission is an epic node plus its transitive children (the parent edge is the mission key; mission_id is untouched)."
+    description: "Emitted by `fno backlog advance --epic <id>` (x-9608 K1) on the first epic advance of an epic mission: the epic node is marked mission_active=true (a durable graph field K2's drain loop reads) and converge pass 1 begins. Emitted once per activation - a re-run of an already-active mission runs the idempotent converge pass without re-emitting this. A mission is an epic node plus its transitive children (the parent edge is the mission key; mission_id is untouched). A crown grant over an epic (fno agents crown / fno agents spawn --crown) also emits this with source=crown, so a crowned epic can never lack the flag the drain reads."
     sources: [backlog]
     data:
       required: [epic_id]
@@ -4259,6 +4289,10 @@ event_types:
         epic_id:
           type: string
           description: "The epic (container) node id marked active."
+        source:
+          type: string
+          enum: [advance, crown]
+          description: "What armed the mission. Absent means the epic advance; `crown` means a crown grant armed it."
     consumers: [operator]
 
   - name: mission_deactivated

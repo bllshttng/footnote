@@ -278,9 +278,6 @@ FIELD_META: dict[str, Meta] = {
     "style.word_cap.encounter": Meta(
         "advanced", "Masked-word cap for the evidence on a `fno backlog encounter` vote (default 80). Over-length evidence is refused, never truncated.",
     ),
-    "style.pair_budget_words": Meta(
-        "advanced", "Rolling per-pair mail word budget inside the 10-minute window (default 80). Raise it alongside style.word_cap.mail: a higher per-message cap that leaves this at 80 refuses the very message the cap now permits.",
-    ),
     # --- config.preflight.* ---
     "preflight.required": Meta(
         "advanced", "Require a full local preflight receipt before opening a PR. Default false: CI is the merge gate and preflight is an opt-in rehearsal.",
@@ -617,13 +614,13 @@ FIELD_META: dict[str, Meta] = {
         question="Route auxiliary coordination work to a secondary model provider (production stays on Anthropic)?",
     ),
     "model_routing.providers": Meta(
-        "never", "Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in."
+        "never", "Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, tier_models, wire_api}); 'zai' is built in. tier_models maps a Claude tier to a model ({opus = \"glm-5.3[1m]\"}); keys are opus|sonnet|haiku|fable and undeclared tiers keep the spawn model."
     ),
     "model_routing.roles": Meta(
         "never", "Per-role target map (role -> 'provider/model', e.g. tidy: 'zai/glm-4.7'; legacy 'provider,model' comma form also accepted); manage via `fno config route set/unset`. The opt-in 'build' lane routes delivery spawns (/target bg)."
     ),
     "model_routing.extra_env": Meta(
-        "never", "Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides)."
+        "never", "Extra env merged into routed spawns (e.g. API_TIMEOUT_MS). Prefer tier_models for per-tier models; extra_env still wins as a hand pin."
     ),
     # --- config.status_sinks / config.status_fanout (x-2057) ---
     "status_sinks": Meta(

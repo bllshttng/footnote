@@ -33,7 +33,7 @@ trap 'rm -rf "$TMP_BASE"' EXIT
 
 make_repo() {
     local dir="$1"
-    mkdir -p "$dir"
+    mkdir -p "$dir/space"
     (
         cd "$dir"
         git init -q -b feature/hold-shape-test 2>/dev/null || {
@@ -73,7 +73,7 @@ expect_refusal() {
     else
         fail "$label must refuse. exit=$EC output: $OUT"
     fi
-    [[ ! -f "$T/.fno/target-state.md" ]] \
+    [[ ! -f "$T/.fno/target-state.md" && ! -f "$T/space/target-state.md" ]] \
         && pass "$label writes no state file" \
         || fail "$label wrote target-state.md despite refusal"
 }

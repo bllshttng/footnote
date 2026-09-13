@@ -52,8 +52,8 @@ REASON = (
     "produced the false claim 'no daemon running' while the daemon was live. "
     "For a COUNT use `| wc -l`. For an EXISTENCE claim read the full listing, or "
     "narrow the producer's own filter until it is short. Never truncate a zero "
-    "you intend to trust (AGENTS.md, 'Assert a positive marker, never an "
-    "absence')."
+    "you intend to trust (scripts/lib/assert-absent.sh: 'assert a positive "
+    "marker, never an absence')."
 )
 
 

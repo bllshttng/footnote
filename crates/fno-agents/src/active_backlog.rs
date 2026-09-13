@@ -682,22 +682,35 @@ fn resolve_sync_child(
     );
 }
 
+/// `#[serde(default)]` covers a MISSING key, never an explicit `null`, and the
+/// Python writer emits `"reason": null` on every dispatched child
+/// (`AdvanceResult.reason` is Optional; null is the honest value there). Read
+/// a null as the field default so the writer's truthful receipt parses.
+fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 /// One child row from the `advance --epic --json` receipt's `children[]`, the
 /// shared vocabulary with the per-child journal events at advance.py:3638.
-/// Every field defaulted so an evolving receipt never fails the parse.
+/// Every field defaulted so an evolving receipt never fails the parse; a
+/// null-valued string field reads as its default (`null_as_default`).
 #[derive(Debug, Default, Deserialize)]
 struct AdvanceChild {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     node_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     decision: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     reason: String,
     /// The failure text behind a `failed` row (the exception string), empty on
     /// skipped rows and on an older CLI's receipt, which serialized only the
     /// generic `reason`. The breaker's defer reason carries it so an operator
     /// reading `auto-failure: N (last: ...)` sees what actually broke.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     detail: String,
     /// Resolved launch substrate. `Some("headless")` is SYNCHRONOUS:
     /// `subprocess.run` returned only after the one-shot worker finished, so
@@ -889,7 +902,17 @@ fn dispatch_mission(
                 "active_backlog_skip",
                 json!({"reason": "advance-epic-unparseable", "mission": cfg.mission, "detail": format!("{e}")}),
             );
-            return (MissionDispatch::Continue, DispatchFacts::default());
+            // Not no_work: `DispatchFacts::default()` made mission_drain_tick
+            // read a refused receipt as an exhausted mission (ready=0 +
+            // stranded=N) - exactly the reading that hid real dispatches.
+            // The gate:{err} arm names the tick honestly instead.
+            return (
+                MissionDispatch::Continue,
+                DispatchFacts {
+                    error: Some("receipt-unparseable".to_string()),
+                    ..DispatchFacts::default()
+                },
+            );
         }
     };
     let mut facts = facts_from_receipt(&receipt);
@@ -1802,8 +1825,10 @@ mod tests {
         let r: AdvanceEpicReceipt = serde_json::from_slice(
             br#"{"epic_id":"x-e","error":null,"activated":true,"deactivated":false,
                  "all_done":false,"dispatched":["x-a"],
-                 "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"},
-                             {"node_id":"x-b","decision":"dispatched","substrate":"headless"}]}"#,
+                 "children":[{"node_id":"x-a","decision":"dispatched","reason":null,"detail":null,
+                              "short_id":"84a8d946","substrate":"thread","notes":[]},
+                             {"node_id":"x-b","decision":"dispatched","reason":null,"detail":null,
+                              "short_id":"84a8d947","substrate":"headless","notes":[]}]}"#,
         )
         .unwrap();
         assert_eq!(r.children.len(), 2);
@@ -1811,6 +1836,25 @@ mod tests {
         assert_eq!(r.children[1].substrate.as_deref(), Some("headless"));
         assert!(!r.deactivated);
         assert!(!r.all_done);
+    }
+
+    #[test]
+    fn advance_epic_receipt_parses_a_dispatched_child_with_null_strings() {
+        // The verbatim shape the CLI prints on a dispatch: reason and detail
+        // are Optional on AdvanceResult and null is the honest value there
+        // (advance.py AdvanceEpicResult.receipt). Before null_as_default this
+        // failed with "invalid type: null, expected a string" and every
+        // dispatching tick read as no_work.
+        let r: AdvanceEpicReceipt = serde_json::from_slice(
+            br#"{"epic_id":"x-epic","error":null,"activated":false,"deactivated":false,
+                 "all_done":false,"dispatched":["x-a"],
+                 "children":[{"node_id":"x-a","decision":"dispatched","reason":null,"detail":null,
+                              "short_id":"84a8d946","substrate":"thread","notes":[]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.children[0].decision, "dispatched");
+        assert_eq!(r.children[0].reason, "");
+        assert_eq!(r.children[0].detail, "");
     }
 
     #[test]
@@ -2699,8 +2743,10 @@ mod tests {
         let fno = stub_fno_advance(
             &tmp.path().join("bin"),
             r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a","x-b"],
-                "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"},
-                            {"node_id":"x-b","decision":"dispatched","substrate":"thread"}]}"#,
+                "children":[{"node_id":"x-a","decision":"dispatched","reason":null,"detail":null,
+                             "short_id":"84a8d946","substrate":"thread","notes":[]},
+                            {"node_id":"x-b","decision":"dispatched","reason":null,"detail":null,
+                             "short_id":"84a8d947","substrate":"thread","notes":[]}]}"#,
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, project_journal) = test_journal(tmp.path());
@@ -3135,6 +3181,85 @@ mod tests {
             .filter(|v| v["type"] == "control_plane_tick")
             .collect();
         assert_eq!(rows[0]["data"]["skip_reason"], "gate:disabled");
+    }
+
+    #[test]
+    fn mission_drain_tick_names_receipt_unparseable_instead_of_no_work() {
+        // A receipt the parse refuses is a gate error, never an exhausted
+        // mission: the tick names gate:receipt-unparseable, the stranded
+        // observer is not read, and the detail carries no stranded token -
+        // the reading that sent a king after a stall that was really this
+        // parse failure.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("observer-called");
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"children":[{"reason":7}]}"#,
+            r#"{"status":"ok","rows":[{}]}"#,
+            Some(&marker),
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        assert_eq!(row["data"]["skip_reason"], "gate:receipt-unparseable");
+        let detail = row["data"]["detail"].as_str().unwrap();
+        assert!(!detail.contains("stranded="), "detail was {detail}");
+        assert!(!marker.exists(), "stranded observer is no-work only");
+    }
+
+    #[test]
+    fn mission_drain_tick_dispatches_the_real_null_bearing_receipt() {
+        // The receipt the CLI actually prints on a dispatch carries
+        // "reason": null on the child. The tick must read acted=1 with no
+        // skip reason and the child in pending - never no_work.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","error":null,"activated":false,"deactivated":false,
+                "all_done":false,"dispatched":["x-a"],
+                "children":[{"node_id":"x-a","decision":"dispatched","reason":null,"detail":null,
+                             "short_id":"84a8d946","substrate":"thread","notes":[]}]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        assert_eq!(pending.len(), 1, "dispatched child must enter pending");
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        assert_eq!(row["data"]["acted"], 1);
+        assert!(row["data"]["skip_reason"].is_null());
+        assert!(
+            row["data"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("dispatched=1"),
+            "detail was {:?}",
+            row["data"]["detail"]
+        );
+        assert!(
+            journal_lines(&project_journal)
+                .iter()
+                .any(|l| l.contains("active_backlog_dispatched")),
+            "a dispatching tick must journal its dispatch"
+        );
     }
 
     // ── synchronous children (x-7f1f) ────────────────────────────────────────

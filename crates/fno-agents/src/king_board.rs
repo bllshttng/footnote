@@ -1168,6 +1168,7 @@ mod tests {
                 reachability: None,
                 basis: None,
                 last_activity_age_s: Some(30.0),
+                last_activity_basis: None,
                 last_event_at: None,
                 last_message: None,
                 observed_model: Value::Null,
@@ -1333,6 +1334,7 @@ mod tests {
                 reachability: None,
                 basis: None,
                 last_activity_age_s: Some(30.0),
+                last_activity_basis: None,
                 last_event_at: None,
                 last_message: None,
                 observed_model: Value::Null,
@@ -1425,6 +1427,7 @@ mod tests {
                 reachability: None,
                 basis: None,
                 last_activity_age_s: Some(30.0),
+                last_activity_basis: None,
                 last_event_at: None,
                 last_message: None,
                 observed_model: Value::Null,
@@ -1471,6 +1474,7 @@ mod tests {
                 reachability: None,
                 basis: None,
                 last_activity_age_s: Some(30.0),
+                last_activity_basis: None,
                 last_event_at: None,
                 last_message: None,
                 observed_model: Value::Null,
@@ -1622,6 +1626,7 @@ mod tests {
                 reachability: None,
                 basis: None,
                 last_activity_age_s: Some(30.0),
+                last_activity_basis: None,
                 last_event_at: None,
                 last_message: None,
                 observed_model: Value::Null,
@@ -1667,6 +1672,7 @@ mod tests {
             reachability: None,
             basis: None,
             last_activity_age_s: Some(age_s),
+            last_activity_basis: None,
             last_event_at: None,
             last_message: None,
             observed_model: Value::Null,
@@ -1938,7 +1944,7 @@ mod tests {
         });
         std::env::remove_var("FNO_AGENTS_HOME");
         let queues = payload.get("queues").and_then(Value::as_array).unwrap();
-        assert_eq!(queues.len(), 13, "{payload}");
+        assert_eq!(queues.len(), 14, "{payload}");
         assert_eq!(payload["exit_code"], 1, "{payload}");
         assert!(payload["unreadable"].as_i64().unwrap() > 0);
         let names: Vec<&str> = queues
@@ -1960,6 +1966,7 @@ mod tests {
                 "operator_question",
                 "carveout_pending",
                 "capture_pending",
+                "failed_verdict",
                 "unreachable_worker",
             ]
         );

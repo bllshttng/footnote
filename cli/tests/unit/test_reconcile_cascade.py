@@ -941,10 +941,18 @@ def test_reversible_defer_writers_preserve_contained_children():
     """Direct, maintenance, and triage defers must not unbundle the unit."""
     import inspect
 
+    import click
+    import typer
+
     from fno.graph import cli as gcli
     from fno.graph import triage
 
-    for writer in (gcli.cmd_defer, gcli.cmd_maintain, triage.cmd_apply):
+    # cmd_defer registers from lifecycle.py into the app, so the live
+    # registry (the way --help reads it) is the only stable address.
+    group = typer.main.get_command(gcli.cli)
+    cmd_defer = group.get_command(click.Context(group), "defer").callback
+
+    for writer in (cmd_defer, gcli.cmd_maintain, triage.cmd_apply):
         assert "_release_contained_children" not in inspect.getsource(writer)
 
     # Permanent death still releases children so they do not strand forever.

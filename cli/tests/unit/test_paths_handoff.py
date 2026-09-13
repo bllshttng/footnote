@@ -71,12 +71,11 @@ def test_slug_overrides_handle_key() -> None:
     assert result.output.strip().endswith("-my-feature.md")
 
 
-def test_deprecated_session_alias_still_resolves() -> None:
-    # --session is the hidden deprecated alias for --session-id; old call sites
-    # (and the plan's original spec) keep working.
+def test_deprecated_session_alias_is_gone() -> None:
+    # The hidden --session alias was removed to pay the flag-surface ratchet
+    # (operator ruling 2026-09-12); --session-id is the one spelling.
     result = runner.invoke(app, ["config", "paths", "handoff", "--session", SID, "--name-only"], env=_ENV)
-    assert result.exit_code == 0, result.output
-    assert result.output.strip().endswith(f"-{HANDLE}.md")
+    assert result.exit_code != 0
 
 
 def test_scope_mints_a_dated_crown_keyed_name() -> None:

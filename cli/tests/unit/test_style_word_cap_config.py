@@ -105,7 +105,16 @@ def test_no_style_block_resolves_to_todays_numbers(tmp_path, monkeypatch):
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
     assert settings.style.word_cap.mail == style.MESSAGE_WORD_CAP
     assert settings.style.word_cap.encounter == style.MESSAGE_WORD_CAP
-    assert settings.style.pair_budget_words == 80
+
+
+def test_a_removed_pair_budget_key_still_loads_and_binds_nothing(tmp_path, monkeypatch):
+    """An old project config that still sets the retired key loads cleanly."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  style:\n    pair_budget_words: 80\n",
+    )
+    assert not hasattr(settings.style, "pair_budget_words")
 
 
 def test_a_configured_cap_reads_back_per_surface(tmp_path, monkeypatch):
@@ -133,7 +142,7 @@ def test_every_new_leaf_has_a_registry_entry():
     """CI fails on registry incompleteness; catch it here instead of there."""
     from fno.config.registry import FIELD_META
 
-    for path in ("style.word_cap.mail", "style.word_cap.encounter", "style.pair_budget_words"):
+    for path in ("style.word_cap.mail", "style.word_cap.encounter"):
         assert path in FIELD_META, f"{path} has no FIELD_META entry"
 
 
@@ -165,22 +174,3 @@ def test_an_absent_style_block_leaves_mail_sending_byte_identical(tmp_path, monk
 
     # 80 masked words is exactly at today's cap, so it must still pass.
     mail_cli._enforce_style(_words(80))
-
-
-def test_the_rolling_pair_budget_reads_its_cap_from_config(tmp_path, monkeypatch):
-    """The window instrument moves with the per-message cap or it binds first."""
-    from fno.mail import budget
-
-    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setattr(budget, "_ledger_path", lambda pair: tmp_path / f"{pair}.json")
-
-    with pytest.raises(budget.BudgetRefused) as exc:
-        budget.reserve(
-            sender="alpha",
-            recipient="beta",
-            words=50,
-            msg_id="m1",
-            cap=40,
-        )
-    assert exc.value.cap == 40
-    assert "cap=40" in exc.value.marker()

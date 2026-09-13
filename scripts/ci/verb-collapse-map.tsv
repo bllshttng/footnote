@@ -222,6 +222,7 @@ backlog remove	T1	backlog remove	7
 backlog render-views	T1	backlog render-views	5
 backlog reopen	T1	backlog reopen	3
 backlog reprioritize	T1	backlog reprioritize	1
+backlog retract	T1	backlog retract	3
 backlog retro drain-postmortems	T1	backlog retro drain-postmortems	1	
 backlog retro run	T1	backlog retro run	16	
 backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7	
@@ -611,3 +612,4 @@ do review invocations	T1	do review invocations	3
 do review post-dispositions	T1	do review post-dispositions	1	
 doctor graph export	T1	doctor graph export	0
 backlog version	T1	backlog version	19	
+agents prove-it-verdicts	T1	agents prove-it-verdicts	1	

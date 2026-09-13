@@ -26,7 +26,7 @@ from typer.testing import CliRunner
 from fno.harness_identity import OwnedHarnessIdentity
 from fno.king.lane import LaneItem
 from fno.outstanding.cli import outstanding_app
-from fno.outstanding.core import RENDER_CAP, Outstanding, Question, render
+from fno.outstanding.core import RENDER_CAP, Outstanding, Question, VerdictRow, render
 
 runner = CliRunner()
 
@@ -101,6 +101,13 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         lambda: tmp_path / "my-priorities.md",
         raising=False,
     )
+    # The verdict leg shells the fno-agents binary; pin it to a clean read so
+    # these tests never touch the machine's real FAIL rows (tests that assert
+    # the leg patch this seam themselves).
+    monkeypatch.setattr(
+        "fno.outstanding.core._read_open_verdicts",
+        lambda: ([], None),
+    )
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
 
@@ -159,6 +166,70 @@ def test_carveout_leg_reports_the_age_of_the_oldest_row(root: Path):
     assert "oldest 2026-01-01" in result.output
     # The newer row's date must NOT be the one reported as oldest.
     assert "oldest 2026-08-01" not in result.output
+
+
+# --- prove-it verdict leg (x-6d64) -------------------------------------------
+
+
+def _open_fail_row() -> VerdictRow:
+    return VerdictRow(
+        node="x-70e1",
+        report="/plans/a.md.artifacts/coverage-audit-20260908/REPORT.md",
+        verdict="FAIL",
+        claim="The retirement done probe rejects incomplete evidence and requires the outcome",
+        status="done",
+        mtime="2026-09-08T20:56:56Z",
+    )
+
+
+def test_an_open_fail_verdict_renders_with_node_claim_and_ruling_verb(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "fno.outstanding.core._read_open_verdicts", lambda: ([_open_fail_row()], None)
+    )
+    result = runner.invoke(outstanding_app, [])
+    assert result.exit_code == 0, result.output
+    assert "1 prove-it FAIL verdict with no ruling." in result.output
+    assert "x-70e1 (done):" in result.output
+    assert "The retirement done probe rejects incomplete evidence" in result.output
+    assert "/plans/a.md.artifacts/coverage-audit-20260908/REPORT.md" in result.output
+    assert "fno inbox decide" in result.output
+
+
+def test_no_open_verdicts_renders_nothing_for_the_leg(root: Path):
+    # Zero rows stays silent; the one-row render above is its positive control.
+    result = runner.invoke(outstanding_app, [])
+    assert result.exit_code == 0
+    assert "prove-it FAIL" not in result.output
+
+
+def test_a_failed_verdict_read_names_itself_and_keeps_the_questions_leg(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC2-ERR: the verdict reader failing must not blank the other legs."""
+    monkeypatch.setattr(
+        "fno.outstanding.core._read_open_verdicts", lambda: ([], "the binary refused")
+    )
+    assert runner.invoke(outstanding_app, ["ask", "should the gate refuse?"]).exit_code == 0
+    result = runner.invoke(outstanding_app, [])
+    assert result.exit_code == 0, result.output
+    assert "prove-it verdicts could not be read (the binary refused)." in result.output
+    assert "1 open question" in result.output
+
+
+def test_collect_carries_the_verdicts_leg_in_as_dict(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno.outstanding.core import collect
+
+    monkeypatch.setattr(
+        "fno.outstanding.core._read_open_verdicts", lambda: ([_open_fail_row()], None)
+    )
+    payload = collect(root).as_dict()
+    assert payload["verdicts"]["total"] == 1
+    assert payload["verdicts"]["items"][0]["node"] == "x-70e1"
+    assert payload["verdicts"]["error"] is None
 
 
 # --- 2.2 an unreadable ledger is a stated failure ----------------------------

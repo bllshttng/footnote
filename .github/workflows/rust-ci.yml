@@ -32,6 +32,9 @@ on:
       - cli/src/fno/agents/registry_schema.toml
       - scripts/ci/check-provider-vocabulary-parity.sh
       - tests/ci/test_provider_vocabulary_parity.sh
+      - scripts/ci/check-product-boundaries.sh
+      - tests/mux-workspace-standalone.sh
+      - docs/architecture/product-boundaries.md
       - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - scripts/ci/check-review-app-parity.sh
@@ -296,6 +299,20 @@ jobs:
         run: |
           bash tests/ci/test_provider_vocabulary_parity.sh
           bash scripts/ci/check-provider-vocabulary-parity.sh
+
+      - name: Product boundary gate
+        # The boundary inventory's claims against the real manifests: the
+        # dev-only compile edge, one availability classifier, one PATH walk,
+        # and the recorded duplicate-decision debt. Doc + gate + module move
+        # together; the paths filter above carries all three.
+        run: bash scripts/ci/check-product-boundaries.sh
+
+      - name: Workspace standalone journey
+        # The conformance journey on the real binaries: server, plain shell
+        # panes, split, markers, the same child across viewer detach, doctor
+        # naming missing backends as advisory, and a full-component control.
+        # Runs after the test steps so both builds are warm.
+        run: bash tests/mux-workspace-standalone.sh
 
   stress:
     name: rust e2e concurrency stress (20 trials)

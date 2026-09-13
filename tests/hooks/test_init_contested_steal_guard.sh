@@ -52,15 +52,18 @@ make_repo() {
     cd "$_dir" || exit 1
     git init -q
     git config user.email t@t && git config user.name t
-    mkdir -p .fno claims-root
+    mkdir -p .fno claims-root bin space
     printf '# isolated\n' > .fno/config.toml
     printf 'work\n' > work.txt
     git add work.txt && git commit -qm init
+    # State-path stub: init reads its prior manifest through the scenario space.
+    cp "${REPO_ROOT}/tests/helpers/fno-agents-state-path-stub.sh" bin/fno-agents
+    chmod 755 bin/fno-agents
     # A valid prior-session manifest (NO terminal status so the reap decision
     # falls through to the claim/activity check). The claim fields are APPENDED
     # AFTER the closing frontmatter marker - init's real shape (x-ba4b), which
     # the archive block reads by scanning the whole file, not the frontmatter.
-    cat > .fno/target-state.md <<EOF
+    cat > space/target-state.md <<EOF
 ---
 session_id: prior-session-0000
 created_at: 2026-07-03T00:00:00Z
@@ -77,6 +80,8 @@ EOF
 run_init() {  # $1 = repo dir. stdout+stderr -> $2 file
   local dir="$1" outfile="$2"
   ( cd "$dir" && \
+    PATH="${dir}/bin:$PATH" \
+    FNO_TEST_SPACE="${dir}/space" \
     FNO_CLAIMS_ROOT="${dir}/claims-root" \
     TARGET_START=1 \
     TARGET_INPUT="$NODE" \
@@ -101,9 +106,9 @@ grep -qi 'contested' "$OUT_A" \
   || fail "(A): BLOCKED reason did not mention 'contested'"
 pass "(A): init refused with RESULT: BLOCKED reason=contested"
 
-[[ -f "${TMP_A}/.fno/target-state.md" ]] \
+[[ -f "${TMP_A}/space/target-state.md" ]] \
   || fail "(A): prior manifest was removed (must be preserved on refusal)"
-if compgen -G "${TMP_A}/.fno/target-state.terminal.*.md" >/dev/null; then
+if compgen -G "${TMP_A}/space/target-state.terminal.*.md" >/dev/null; then
   fail "(A): prior manifest was archived (steal) despite fresh activity"
 fi
 pass "(A): prior manifest preserved, not archived (no steal)"
@@ -120,7 +125,7 @@ run_init "$TMP_B" "$OUT_B"
 if grep -q '^RESULT: BLOCKED' "$OUT_B"; then
   fail "(B): init refused as contested on an abandoned worktree; got: $(cat "$OUT_B")"
 fi
-if ! compgen -G "${TMP_B}/.fno/target-state.terminal.*.md" >/dev/null; then
+if ! compgen -G "${TMP_B}/space/target-state.terminal.*.md" >/dev/null; then
   fail "(B): prior manifest was NOT archived on an abandoned worktree (stranded)"
 fi
 pass "(B): abandoned prior manifest reclaimed exactly as before (archived)"

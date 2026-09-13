@@ -17,7 +17,7 @@ use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use fno_agents::spawn_gate::machine_reading_notes;
-use fno_agents::usage::{verb_usage, CLIENT_VERB_USAGE};
+use fno_agents::usage::{verb_help, verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 
@@ -70,6 +70,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ping",
     "pr-heal",
     "probe-run",
+    "prove-it-verdicts",
     "test-run",
     "promote",
     "publish-review",
@@ -310,6 +311,12 @@ async fn run(args: Vec<String>) -> i32 {
     // stops at an `--argv`/`--` boundary so a `--help` inside a spawn/host argv
     // payload reaches the spawned command instead of being captured here.
     if is_help_request(&args[1..]) {
+        // A verb with a full help body owns its --help; the one-line table
+        // entry stays for the top-level list.
+        if let Some(body) = verb_help(verb) {
+            println!("{body}");
+            return 0;
+        }
         if let Some(usage) = verb_usage(verb) {
             println!("usage: fno-agents {usage}");
             return 0;
@@ -353,6 +360,13 @@ async fn run(args: Vec<String>) -> i32 {
     // `probe-run`: see its own doc in acceptance_evidence.rs. Direct dispatch.
     if verb == "probe-run" {
         return fno_agents::acceptance_evidence::run_probe_run(&args[1..]);
+    }
+
+    // `prove-it-verdicts`: the one reader for terminal prove-it records
+    // (x-6d64, see its own doc in prove_it_verdicts.rs). Direct dispatch; no
+    // daemon RPC - a verdict read walks the graph and plan artifacts files.
+    if verb == "prove-it-verdicts" {
+        return fno_agents::prove_it_verdicts::run_prove_it_verdicts(&args[1..]);
     }
 
     // `test-run`: the native process-group owner behind `fno doctor test`
@@ -1543,7 +1557,9 @@ fn spawn_needs_python_seam(params: &Value) -> bool {
 /// Exec the Python front door with the given spawn argv. `fno` is the entry
 /// point on a deployed machine; a bare venv install (CI runners included)
 /// only ships `fno-py`, so a NotFound on the first candidate falls through
-/// to it. Returns the last exec error so the caller's refusal names reality.
+/// to the PATH-robust resolver ([`fno_agents::scrape::fno_py`]) - a bare
+/// name here failed whenever the wheel bin was off PATH (x-cf15). Returns
+/// the last exec error so the caller's refusal names reality.
 fn exec_python_front(args: &[String]) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(fno_agents::scrape::fno_bin())
@@ -1552,7 +1568,7 @@ fn exec_python_front(args: &[String]) -> std::io::Error {
         .env("FNO_AGENTS_RUNTIME", "python")
         .exec();
     if err.kind() == std::io::ErrorKind::NotFound {
-        return std::process::Command::new("fno-py")
+        return std::process::Command::new(fno_agents::scrape::fno_py())
             .arg("agents")
             .args(args)
             .env("FNO_AGENTS_RUNTIME", "python")
@@ -2394,15 +2410,9 @@ fn arms_readout(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // The global journal derives from the agents root we already hold (its
-    // parent dir), never a hand-built path: the root is the declared resolver
-    // surface, so an FNO_AGENTS_HOME override reaches this scan by construction.
-    let global = home
-        .root()
-        .parent()
-        .map(|p| p.join("events.jsonl"))
-        .unwrap_or_else(|| home.events_jsonl());
-    let journals = vec![home.events_jsonl(), global];
+    // The journal list is owned by tick_ledger::journals, so the readout and
+    // the arm_watch daemon arm fold the same files and cannot drift.
+    let journals = fno_agents::tick_ledger::journals(home);
     let arms = fno_agents::tick_ledger::read_arms(&journals, now_unix);
     let trace = fno_agents::tick_ledger::read_tick_trace(&journals, now_unix);
     (arms, trace)

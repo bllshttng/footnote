@@ -5124,12 +5124,11 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
     return wrap_fno_mail(
         cur,
         from_=ctx.from_,
-        harness=ctx.harness,
-        model=ctx.model,
         node=ctx.node,
         to=ctx.to,
         from_session=ctx.from_session,
         origin=ctx.origin,
+        to_session=ctx.to_session,
     )
 
 
@@ -5647,6 +5646,7 @@ def _mux_pane_send(
     review_invocation_id: Optional[str] = None,
     origin: Optional[str] = None,
     self_send: bool = False,
+    source_label: Optional[str] = None,
 ) -> bool | str:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
@@ -5823,50 +5823,11 @@ def _mux_pane_send(
             _record_failure("pre-submit")
             return False
 
-    # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
-    # the <cross-session-message> peer-follow-up container) leaves no agent-authored
-    # marker in the recipient transcript, so record it in the ledger. Both wrapped
-    # forms carry their own marker, so excluding only <fno_mail> would log every
-    # routine peer follow-up as a false raw-inject. The mux pane lane never reaches
-    # the Rust mail-inject binary, so this site is mandatory, not decorative.
-    # Emitted AFTER the send with the transport's own answer: an emit-before-send
-    # leaves a phantom record asserting an injection that a stalled pane or an
-    # absent `fno mux` never performed. Best-effort -- a write failure never
-    # breaks or fails the send.
-    audit_unwrapped = not text.lstrip().startswith(
-        ("<fno_mail", "<cross-session-message")
-    )
-
-    def _audit_raw_inject(confirmed: bool) -> None:
-        if not audit_unwrapped:
-            return
-        try:
-            from fno.events import agent_raw_inject, append_event
-
-            # Write the CANONICAL {type, source, data} envelope to the SAME log
-            # the Rust mail-inject binary uses (~/.fno/agents/events.jsonl). That
-            # file is canonical-shape only; the flat {kind, ...} emitter would put
-            # a second shape in one file and a consumer reading data.target_session
-            # (where schema.yaml says it lives) would silently miss every mux
-            # record -- the exact audit gap this event exists to close.
-            append_event(
-                agent_raw_inject(
-                    target_session=getattr(entry, "harness_session_id", "") or "",
-                    payload=text[:512],
-                    harness=getattr(entry, "harness", "") or "",
-                    lane="mux-pane",
-                    target_cwd=getattr(entry, "cwd", None),
-                    sender=sender,
-                    origin=origin,
-                    self_send=self_send,
-                    confirmed=confirmed,
-                    source="daemon",
-                ),
-                events.daemon_lifecycle_log(),
-                lock_timeout_seconds=2,
-            )
-        except Exception:
-            pass
+    # Audit floor (x-91ba): the row this pane write leaves is written by the
+    # Rust verb itself (`fno mux pane send`), one layer below, so it covers a
+    # direct caller too. This lane only DECLARES its provenance (--source) so
+    # the floor's row joins the bus record; it must not write a second row of
+    # its own, or every pane dispatch reads as two.
 
     fno_bin = os.environ.get("FNO_BIN") or "fno"
     pane = str(pane_id)
@@ -5990,6 +5951,10 @@ def _mux_pane_send(
         )
         if expected_fno_id:
             send_args.extend(["--fno-id", str(expected_fno_id)])
+        if source_label:
+            # The floor's audit row joins this dispatch to its bus record by
+            # the mail id; declared, never sniffed from the wrapped body.
+            send_args.extend(["--source", source_label])
         if guarded:
             send_args.append("--guarded")
         pasted = _run(send_args, stdin_text=text)
@@ -6119,11 +6084,9 @@ def _mux_pane_send(
         outcome: bool | str = sent
         if sent and review and (getattr(entry, "harness", "") or "") == "codex":
             outcome = _review_outcome()
-        _audit_raw_inject(outcome in {True, "started", "queued"})
         return outcome
 
     if not _verify_pane_occupant():
-        _audit_raw_inject(False)
         return False
 
     # Baseline BEFORE the paste (not after): the confirm below scans only lines
@@ -6220,7 +6183,6 @@ def _mux_pane_send(
                 _record_failure("unconfirmed")
         elif not sent:
             _record_failure(last_attempt_phase)
-        _audit_raw_inject(outcome in {True, "started", "queued"})
         return outcome
     finally:
         if claimed:
@@ -7193,8 +7155,6 @@ def _deliver_live(
         wrapped = wrap_fno_mail(
             body,
             from_=mail.from_,
-            harness=mail.harness,
-            model=mail.model,
             node=mail.node,
             to=mail.to,
             id=mail.id,
@@ -7247,6 +7207,7 @@ def _deliver_live(
                 gate=True,
                 sender=from_name or None,
                 failure_out=attempt_failure,
+                source_label=(f"mail:{mail.id}" if mail is not None else None),
             )
             if mux_delivered:
                 return True
@@ -7356,20 +7317,20 @@ def _deliver_live(
     # never reaches _deliver_live, unaffected).
     relay_ctxs = None
     if mail is not None:
-        from fno.mail.envelope import harness_for_provider
-
         relay_ctxs = {from_name: mail}
         # Only wrap the recipient's relay turns when it has a resolvable short id;
         # otherwise leave that side raw rather than emit <fno_mail from=""> (codex
         # peer P2). mail.to is the recipient short resolved in dispatch_send.
         if mail.to:
+            # x-3dcc: this ctx wraps B's replies, which are injected into A, so
+            # the recipient-crown line reads A's session (mail.from_session).
             relay_ctxs[entry.name] = _MailCtx(
                 from_=mail.to,
-                harness=harness_for_provider(entry.harness),
                 model="unknown",
                 to=mail.from_,
                 from_session=entry.harness_session_id or None,
                 origin="peer",
+                to_session=mail.from_session,
             )
     if _switchboard_exchange(
         entry.name,
@@ -7513,8 +7474,6 @@ def _queue_durable_fallback(
     durable_body = wrap_fno_mail(
         message,
         from_=mail_ctx.from_,
-        harness=mail_ctx.harness,
-        model=mail_ctx.model,
         node=mail_ctx.node,
         to=mail_ctx.to,
         id=mail_ctx.id,
@@ -7534,6 +7493,9 @@ def _queue_durable_fallback(
             provider_to=entry.harness,
             provider_from=provider_from,
             from_session=from_session,
+            # The envelope no longer renders the model (x-d7cf); the durable
+            # row carries it, matching what the live hosted path records.
+            from_model=mail_ctx.model,
             owner=owner or DurableOwner.WAKE_DAEMON.value,
             origin=mail_ctx.origin,
             # Count the raw body, not the wire wrapper: Rule 7 and the rolling
@@ -7648,41 +7610,25 @@ def _reserve_send_budget(
     recipient: str,
     message: str,
     msg_id: str,
-    enforce: bool,
 ):
-    """Reserve one canonical pair before any outward send side effect."""
+    """Reserve the control lane's ledger before any outward send side effect.
+
+    An ordinary body reserves nothing (rule 7 is its only word gate), so this
+    returns None and callers release unconditionally.
+    """
     from fno import style
     from fno.mail import budget
 
+    if not budget.is_control(message):
+        return None
     words = style.word_count(message)
-    if budget.is_control(message):
-        # The control lane keeps its own ledger: a stop or resume must arrive
-        # even when the pair's ordinary window is spent.
-        try:
-            return budget.reserve_control(
-                sender=sender, recipient=recipient, words=words, msg_id=msg_id
-            )
-        except budget.BudgetRefused as exc:
-            raise DispatchAskError(
-                f"refused: control word budget for {exc.pair}: {exc.marker()}",
-                exit_code=1,
-            ) from exc
-        except budget.BudgetUnavailable as exc:
-            raise DispatchAskError(f"refused: {exc}", exit_code=1) from exc
     try:
-        return budget.reserve(
-            sender=sender,
-            recipient=recipient,
-            words=words,
-            msg_id=msg_id,
-            enforce=enforce,
+        return budget.reserve_control(
+            sender=sender, recipient=recipient, words=words, msg_id=msg_id
         )
     except budget.BudgetRefused as exc:
         raise DispatchAskError(
-            f"refused: rolling word budget for {exc.pair}: {exc.marker()}\n"
-            "operational control (stop, resume, scope change)? resend with the "
-            "body's first line starting `control:` -- its own lane, 60 words, "
-            "exempt from this budget",
+            f"refused: control word budget for {exc.pair}: {exc.marker()}",
             exit_code=1,
         ) from exc
     except budget.BudgetUnavailable as exc:
@@ -7698,7 +7644,6 @@ def dispatch_send(
     from_name: str = _FROM_NAME_DEFAULT,
     *,
     registry_stamp_timeout_seconds: float = 1.0,
-    budget_enforce: bool = True,
     origin: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
@@ -7971,7 +7916,6 @@ def dispatch_send(
                 recipient=budget_recipient,
                 message=message,
                 msg_id=msg_id,
-                enforce=budget_enforce,
             )
 
             live_attempted = False
@@ -8080,8 +8024,6 @@ def dispatch_send(
                         hosted_body = wrap_fno_mail(
                             message,
                             from_=mail_ctx.from_,
-                            harness=mail_ctx.harness,
-                            model=mail_ctx.model,
                             node=mail_ctx.node,
                             to=mail_ctx.to,
                             id=mail_ctx.id,
@@ -8321,7 +8263,6 @@ def dispatch_send(
                     recipient=timeout_recipient,
                     message=message,
                     msg_id=msg_id,
-                    enforce=budget_enforce,
                 )
                 ctx_token = _DISPATCH_CTX.set(ctx_for_timeout)
                 try:
@@ -8572,7 +8513,6 @@ def dispatch_send_to_project(
     from_name: str = _FROM_NAME_DEFAULT,
     any_: bool = False,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
-    budget_enforce: bool = True,
     origin: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Async send addressed to a project (anycast over the registry).
@@ -8609,10 +8549,6 @@ def dispatch_send_to_project(
 
     if res.recipient is not None:
         # Exactly one live peer (or --any winner): deliver live by name.
-        # Omit the default kwarg so existing in-process adapters that implement
-        # the pre-budget dispatch signature keep working. The exception lane
-        # passes False explicitly because it changes enforcement.
-        budget_kwargs = {} if budget_enforce else {"budget_enforce": False}
         result = dispatch_send(
             name=res.recipient,
             message=message,
@@ -8621,7 +8557,6 @@ def dispatch_send_to_project(
             lock_timeout=lock_timeout,
             from_name=from_name,
             origin=origin,
-            **budget_kwargs,
         )
         return replace(result, recipient=res.recipient, to_project=project)
 
@@ -8654,7 +8589,6 @@ def dispatch_send_to_project(
         recipient=project,
         message=message,
         msg_id=msg_id,
-        enforce=budget_enforce,
     )
 
     try:

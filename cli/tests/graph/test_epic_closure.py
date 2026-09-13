@@ -111,6 +111,12 @@ def test_wont_do_holds_but_superseded_does_not():
         assert holds_epic_open({"id": "a", "status": "deferred", "deferred_kind": kind})
 
 
+def test_retracted_deferral_never_holds_an_epic_open():
+    # a retraction is a decision, not a delay: same rule as wont_do
+    assert not holds_epic_open({"id": "a", "status": "deferred", "deferred_kind": "retracted"})
+    assert holds_epic_open({"id": "a", "status": "deferred", "deferred_kind": "later"})
+
+
 def test_stuck_epics_verb_reports_and_never_mutates(tmp_path, monkeypatch):
     from fno.graph import cli as graph_cli
 

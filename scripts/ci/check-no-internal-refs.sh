@@ -188,11 +188,25 @@ if [[ -z "$competitor_terms" ]]; then
     exit 1
 fi
 
+# The competitor scan goes through assert-absent.sh: a zero with no live
+# control is a refusal, never a clean pass. `footnote` is the control token
+# (1816 hits under -Iinw across this tree, measured 2026-09-12); it runs in
+# the same argv as the probe, so it validates the tool that produces the
+# answer. rc=2 lands here as a gate failure, not a swallowed continue.
+ASSERT_ABSENT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/assert-absent.sh"
+
 while IFS= read -r term; do
     [[ -z "$term" ]] && continue
-    if ! term_hits=$(git grep -Iinw -e "$term" 2>/dev/null); then
-        continue
-    fi
+    helper_rc=0
+    helper_out=$(bash "$ASSERT_ABSENT" --control footnote --probe "$term" -- git grep -Iinw -e {}) || helper_rc=$?
+    case $helper_rc in
+        0) continue ;;
+        1) term_hits=$helper_out ;;
+        *)
+            echo "check-no-internal-refs: assert-absent refused the scan for term '$term'; a zero is never reported clean" >&2
+            exit 1
+            ;;
+    esac
     while IFS= read -r hit; do
         [[ -z "$hit" ]] && continue
         hit_file="${hit%%:*}"

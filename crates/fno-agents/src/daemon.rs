@@ -40,7 +40,10 @@ use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
 mod list_rows;
-use self::list_rows::{attention_sort_key, handle_list, rendered_status_from_truth};
+use self::list_rows::{
+    activity_basis_from_truth, apply_row_contradiction, attention_sort_key, basis_word_from_truth,
+    handle_list, rendered_status_from_truth,
+};
 pub(crate) use self::list_rows::{progress_from_truth, registry_truth_handle};
 mod prune_outcome;
 pub(crate) use self::prune_outcome::PruneOutcome;
@@ -2223,9 +2226,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // Screen-manifest scrape gate: at most one sweep in flight (a slow mux
     // stalls its own sweep, never the loop or a pile-up of sweeps).
     let scrape_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Terminal-stop sweep gate (x-fcbf): same one-in-flight discipline. Each
-    // `claude stop` is a subprocess; a large marker set must never serialize
-    // inline in the select arm and starve accept()/SIGTERM.
+    // Terminal-stop sweep gate (x-fcbf): same one-in-flight discipline; a large
+    // marker set must never serialize inline and starve accept()/SIGTERM.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Orphaned-test-binary reap gate: same one-in-flight discipline. The verb
@@ -2236,14 +2238,14 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut last_liveness_sweep = Instant::now();
     // Machine watch (x-d6ad): the arm owns its cadence, gate and memory.
     let machine_watch = crate::machine_watch::Arm::default();
+    let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     // Retirement-sweep cadence (x-d354): the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
     let mut last_gc_sweep = Instant::now();
     let retire_interval_next = crate::gc::seed_retire_interval_cell(&ctx.opts.agents_config_cwd);
     // Dead-row GC gate (x-ef7f): its dormant check shells out to the truth
-    // probe, so it gets the same one-in-flight discipline as the sweeps beside
-    // it rather than running inline in the select arm.
+    // probe, so it gets the same one-in-flight discipline as its neighbors.
     let gc_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Idle-exit liveness probe gate + verdict handoff: the probe is blocking
     // I/O (a connect per socket candidate), so the arm spawns it and reads
@@ -2407,6 +2409,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 );
                 // The machine gets an arm (x-d6ad): bands the box, escalates, gates nothing.
                 crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
+                crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's
                 // measurement, refreshed every SERVED_LIVENESS_CADENCE with
                 // no lifecycle write. Off-loop behind a one-in-flight gate,
@@ -4945,194 +4948,6 @@ async fn read_worker_snapshot(sock: &std::path::Path) -> Option<String> {
         .and_then(|r| r.get("text").and_then(|t| t.as_str()).map(String::from))
 }
 
-/// Map a truth probe onto the wire value `list` renders.
-///
-/// Prefers the shared reachability verdict, which is derived once (Python-side,
-/// `fno/agents/reachability.py`) with the falsifiers applied. The `state` arm
-/// below is a COMPATIBILITY FALLBACK for a `fno` too old to emit the verdict,
-/// not a second opinion: it maps transcript activity alone, so a session whose
-/// process died forty minutes ago still reads `working` there and renders live.
-///
-/// Note the fallback and the verdict disagree deliberately on quiet rows. The
-/// fallback calls a silent row `orphaned`; the verdict calls it `unknown`,
-/// because silence is absence of evidence and this registry lists REACHABLE
-/// agents rather than live processes -- a row is never condemned for being
-/// quiet, only for an affirmative falsification.
-///
-/// STATUS is served ACTIVITY, so a confirmed-live pid is not an input here
-/// (x-c672): a process being up says nothing about when its transcript last
-/// moved, and the Python list lane has no pid census, so a pid lift here would
-/// read the same row as two different words on the two lanes. An unanswered
-/// activity age is `unknown` on both.
-fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
-    let value = value?;
-    if let Some(raw) = value.as_str() {
-        return chrono::DateTime::parse_from_rfc3339(raw)
-            .ok()
-            .map(|parsed| parsed.with_timezone(&chrono::Utc));
-    }
-    let micros = value.as_u64()?;
-    if micros <= 1_000_000_000_000 {
-        return None;
-    }
-    chrono::DateTime::from_timestamp_micros(micros as i64)
-}
-
-/// Refuse a row-level verdict when the same emitted row carries fresher
-/// evidence against it. This is deliberately pure and shared by the fixture
-/// test with Python; the caller supplies all fields before the row is written.
-/// `now` is injected so the fixture's fixed clock and production's wall clock
-/// assert the same rules.
-fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<chrono::Utc>) {
-    // The falsifier as it ARRIVED, snapshotted before any rule below rewrites
-    // `basis`. Python's `_supervisor_contradicted` reads the input mapping, so
-    // reading the mutated map here would name a different falsifier than the
-    // twin for the same row, and the shared fixture has no case where two
-    // rules fire together to catch it.
-    let incoming_basis = row
-        .get("basis")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    // `status` for the same reason, and the reason generalises: Python reads
-    // the input `row` and writes a SEPARATE `projected` dict, so every rule
-    // there sees the original. This twin mutates `row` in place, so any rule
-    // reading `status` after an earlier one rewrote it diverges from Python
-    // for that row. Today the two rules are mutually exclusive - `terminal`
-    // is `orphaned`/`exited` and this one needs `spawning` - so nothing
-    // changes; snapshot anyway, because relying on that exclusion is a rule
-    // no test states and the next rule added here will not know it.
-    let incoming_status = row
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let event_at = row_timestamp(row.get("last_event_at"));
-    let reconciled_at = row_timestamp(row.get("last_reconciled_at"));
-    let terminal = matches!(
-        row.get("status").and_then(Value::as_str),
-        Some("orphaned" | "exited")
-    );
-    if terminal && event_at.is_some() && reconciled_at.is_some() && event_at > reconciled_at {
-        row.insert("status".into(), json!("unknown"));
-        row.insert("basis".into(), json!("stale-verdict-fresher-event"));
-    }
-
-    let message_at = row_timestamp(row.get("last_message_at"));
-    let message_is_too_new = match (message_at, event_at) {
-        (Some(message), Some(event)) => message - event > chrono::Duration::seconds(2),
-        _ => false,
-    };
-    if message_is_too_new {
-        row.insert("last_message_at".into(), Value::Null);
-        row.insert(
-            "last_message_at_basis".into(),
-            json!("refused-newer-than-transcript"),
-        );
-    }
-
-    // (x-d401) A stored `spawning` token a live pid has outlived: the token
-    // stopped being a measurement. Fires only on POSITIVE liveness (the
-    // caller measured a live pid and injected `pid_alive: true`); unknown
-    // keeps the token, and a missing `created_at` is absent age evidence,
-    // not staleness. Mirrors `_spawning_outlived_by_a_live_pid` in Python;
-    // rows read `spawning` for 3-16 hours while alive (x-0248).
-    if incoming_status == "spawning"
-        && row.get("pid_alive") == Some(&Value::Bool(true))
-        // `> Duration::seconds(600)`, not `num_seconds() > 600`: num_seconds
-        // truncates, so a 600.5s-old row read `spawning` here and `live` in
-        // Python, whose timedelta compare keeps the fraction.
-        && row_timestamp(row.get("created_at"))
-            .is_some_and(|created_at| now - created_at > chrono::Duration::seconds(600))
-    {
-        row.insert("status".into(), json!("quiet"));
-        row.insert("basis".into(), json!("stale-spawning-live-pid"));
-    }
-    row.remove("pid_alive");
-
-    // Both keys ALWAYS ride the row, as `reachability`/`basis` and
-    // `progress`/`progress_basis` already do on this same row. A conditional
-    // key cannot be told apart from a producer that forgot to set one, and the
-    // list-row contract in schemas/agents-list-row.json is an exact key set.
-    let (origin, origin_basis) = liveness_origin(row);
-    row.insert("liveness_origin".into(), origin);
-    row.insert(
-        "liveness_origin_basis".into(),
-        origin_basis.map_or(Value::Null, |basis| json!(basis)),
-    );
-    // (x-d401, x-d4a6) A superseded supervisor claim beside the falsifier
-    // that beat it: `superseded_live_status` is a caller-injected input (like
-    // `pid`), popped here; only the basis key survives, null when no
-    // supersession happened. PRESENCE is the caller's assertion that a
-    // supersession happened; which words claim nothing lives in the gate
-    // that stamps this input (read.py's {idle, done} admission set) - a
-    // second word list here once denied a supersession the gate had stamped.
-    // Mirrors `_supervisor_contradicted` in Python.
-    let superseded = row
-        .get("superseded_live_status")
-        .and_then(Value::as_str)
-        .is_some_and(|word| !word.is_empty());
-    let contradicted = superseded
-        && row.get("reachability").and_then(Value::as_str) == Some("unreachable")
-        && !incoming_basis.is_empty();
-    row.insert(
-        "live_status_basis".into(),
-        if contradicted {
-            json!(format!("contradicted-by-{incoming_basis}"))
-        } else {
-            Value::Null
-        },
-    );
-    row.remove("superseded_live_status");
-}
-
-/// Parse one row timestamp into `(value, basis)`, separating absent from
-/// unreadable. Mirrors `_read_field` in cli/src/fno/agents/row_contradiction.py.
-///
-/// Folding the two together is what let `liveness_origin: null` mean five
-/// different things at once, so a reader holding one null could not tell
-/// "nothing was recorded" from "something this parser cannot read".
-fn row_field_with_basis(
-    row: &Map<String, Value>,
-    key: &str,
-    label: &str,
-) -> (Option<chrono::DateTime<chrono::Utc>>, Option<String>) {
-    match row.get(key) {
-        None | Some(Value::Null) => (None, Some(format!("{label}-absent"))),
-        raw => match row_timestamp(raw) {
-            Some(parsed) => (Some(parsed), None),
-            None => (None, Some(format!("{label}-unreadable"))),
-        },
-    }
-}
-
-/// Return `(liveness_origin, basis)` for one row. Mirrors `_liveness_origin`
-/// in cli/src/fno/agents/row_contradiction.py, and the shared fixture at
-/// schemas/agents-row-contradiction.json drives both.
-///
-/// THE PID GATE COMES FIRST. This producer already checked it and the Python
-/// one did not, so a pidless row read `survivor` there and null here: one
-/// field, two reachable implementations, one guard. A non-null origin carries
-/// no basis, because the value is its own evidence.
-fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
-    if !row.get("pid").is_some_and(|value| !value.is_null()) {
-        return (Value::Null, Some("pid-absent".to_string()));
-    }
-    let (created_at, basis) = row_field_with_basis(row, "created_at", "created-at");
-    let Some(created_at) = created_at else {
-        return (Value::Null, basis);
-    };
-    let (pid_started_at, basis) = row_field_with_basis(row, "pid_start_time", "pid-start");
-    let Some(pid_started_at) = pid_started_at else {
-        return (Value::Null, basis);
-    };
-    if (pid_started_at - created_at).num_seconds() > 600 {
-        (json!("resumed"), None)
-    } else {
-        (json!("survivor"), None)
-    }
-}
-
 /// The attention window this surface orders by. Session-truth's stall window
 /// is 7200s and correct FOR REAPING; for display it is exactly the gap a
 /// dead-under-two-hours worker hides in, so the ordering window is ten
@@ -5149,7 +4964,12 @@ const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "model_basis"];
 
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
-    F: Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
+    F: Fn(
+        &[String],
+    ) -> (
+        std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
+        crate::truth_probe::BatchOutcome,
+    ),
 {
     let all = req
         .params
@@ -5283,7 +5103,7 @@ where
             .filter(|h| seen.insert(h.clone()))
             .collect()
     };
-    let truths = truth_fn(&handles);
+    let (truths, batch_outcome) = truth_fn(&handles);
     // The instrument's own receipt (x-e3cc): a page where the probe answered
     // nothing must be readable AS that, not as 43 rows confidently `unknown`.
     // The rendered status word cannot carry the distinction (the vocabulary is
@@ -5304,13 +5124,20 @@ where
             // off what evidence, and only the triple separates a positive
             // transcript reading from a fired falsifier. Null on a `fno` too old
             // to emit them: a stale probe that did not answer must read as
-            // absent, never as no-evidence.
+            // absent, never as no-evidence. Both basis legs are worded, never
+            // blank-on-a-guess: `basis_word_from_truth` decides between an
+            // absent reading and a page the batch never measured, and
+            // `activity_basis_from_truth` names the age's instrument beside
+            // it.
+            let basis_word = basis_word_from_truth(truth.as_ref(), batch_outcome);
+            let activity_basis = activity_basis_from_truth(truth.as_ref(), batch_outcome);
             let evidence = (
                 json!(truth.as_ref().and_then(|t| t.reachability.as_deref())),
-                json!(truth.as_ref().and_then(|t| t.basis.as_deref())),
+                basis_word,
                 json!(truth.as_ref().and_then(|t| t.last_activity_age_s)),
                 json!(truth.as_ref().and_then(|t| t.last_event_at.as_deref())),
                 json!(truth.as_ref().and_then(|t| t.last_message.as_deref())),
+                activity_basis,
             );
             // The orthogonal axis: reachability answers "can I reach this
             // process"; progress answers "is it advancing, awaiting the
@@ -5319,6 +5146,7 @@ where
             // reachability value.
             let (progress, progress_basis) = progress_from_truth(
                 truth.as_ref(),
+                batch_outcome,
                 e.harness_name(),
                 e.route_settings_path.as_deref(),
             );
@@ -5359,8 +5187,14 @@ where
         )
         .map(
             |(e, rendered_status, observed_model, evidence, progress, progress_basis)| {
-                let (reachability, basis, last_activity_age_s, last_event_at, last_message) =
-                    evidence;
+                let (
+                    reachability,
+                    basis,
+                    last_activity_age_s,
+                    last_event_at,
+                    last_message,
+                    last_activity_basis,
+                ) = evidence;
                 // Return the full row shape matching Python's serialize_entry. The
                 // key set is pinned by schemas/agents-list-row.json, asserted here
                 // and by the Python test; edit that file before adding a key.
@@ -5517,6 +5351,14 @@ where
                     "progress": progress,
                     "progress_basis": progress_basis,
                     "last_activity_age_s": last_activity_age_s,
+                    // The instrument the age came from (`last-entry` |
+                    // `mtime` | `opencode-db`), the resolver's reason word
+                    // (`not-found` | `no-records` | `resolver-error`) when it
+                    // could not resolve the handle, or `unmeasured` when the
+                    // batch never ran for this page - never a bare null: the
+                    // three unknown-reason words are the difference between
+                    // "no transcript" and "the resolver crashed".
+                    "last_activity_basis": last_activity_basis,
                     // The absolute stamp of the newest transcript activity and the
                     // flattened LAST-turn text, from the same probe as the age -
                     // the pair that makes a wedged-but-`working` row visible. Null
@@ -11882,6 +11724,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             reachability: None,
             basis: None,
             last_activity_age_s: None,
+            last_activity_basis: None,
             last_event_at: None,
             last_message: None,
             observed_model: Value::Null,
@@ -12413,13 +12256,18 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     /// test against the raw seam.
     fn per_handle(
         f: impl Fn(&str) -> Option<crate::truth_probe::TruthProbe>,
-    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>
-    {
+    ) -> impl Fn(
+        &[String],
+    ) -> (
+        std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
+        crate::truth_probe::BatchOutcome,
+    ) {
         move |handles: &[String]| {
-            handles
+            let map: std::collections::HashMap<String, crate::truth_probe::TruthProbe> = handles
                 .iter()
                 .filter_map(|h| Some((h.clone(), f(h)?)))
-                .collect()
+                .collect();
+            (map, crate::truth_probe::BatchOutcome::Measured)
         }
     }
 
@@ -12433,6 +12281,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             reachability: Some(reachability.into()),
             basis: Some("transcript".into()),
             last_activity_age_s: Some(12.0),
+            last_activity_basis: None,
             last_event_at: Some("2026-08-15T17:00:00+00:00".into()),
             last_message: Some(
                 "Still growing (101 lines, 26 percent through the pytest run)".into(),
@@ -12453,7 +12302,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         Some(probe)
     }
 
-    fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
+    pub(super) fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
         Ctx {
             home,
             emitter: EventEmitter::new(std::path::PathBuf::from("/dev/null"), "daemon"),
@@ -12518,7 +12367,7 @@ done
     /// dir): a worker's `<root>/<short_id>/worker.sock` must fit in SUN_LEN
     /// (~104 chars on macOS), so switchboard tests that bind real worker sockets
     /// need a short root. Mirrors the stream_worker test harness.
-    fn short_home(tag: &str) -> AgentsHome {
+    pub(super) fn short_home(tag: &str) -> AgentsHome {
         use std::sync::atomic::{AtomicU32, Ordering};
         static C: AtomicU32 = AtomicU32::new(0);
         let n = C.fetch_add(1, Ordering::Relaxed);
@@ -12529,7 +12378,7 @@ done
     }
 
     /// Seed a held-stream-thread registry row (claude + full UUID + Live).
-    fn seed_stream_row(home: &AgentsHome, name: &str, short_id: &str) {
+    pub(super) fn seed_stream_row(home: &AgentsHome, name: &str, short_id: &str) {
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
                 substrate: None,
@@ -12940,27 +12789,6 @@ done
         std::fs::remove_dir_all(home.root()).ok();
     }
 
-    #[test]
-    fn row_contradiction_fixture_matches_python_projection() {
-        const FIXTURE: &str = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../schemas/agents-row-contradiction.json"
-        ));
-        let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture is valid JSON");
-        let now = chrono::DateTime::parse_from_rfc3339(
-            fixture["now"].as_str().expect("fixture now is a string"),
-        )
-        .expect("fixture now is a timestamp")
-        .with_timezone(&chrono::Utc);
-        for case in fixture["cases"].as_array().expect("cases is an array") {
-            let mut row = case["row"].as_object().expect("row is an object").clone();
-            apply_row_contradiction(&mut row, now);
-            for (key, expected) in case["expected"].as_object().expect("expected is an object") {
-                assert_eq!(row.get(key), Some(expected), "case={}", case["name"]);
-            }
-        }
-    }
-
     /// The reachability EVIDENCE reaches the row, not just the verdict the
     /// rendered word was picked from.
     ///
@@ -13125,6 +12953,7 @@ done
                     reachability: Some("reachable".into()),
                     basis: Some("transcript".into()),
                     last_activity_age_s: Some(3.5),
+                    last_activity_basis: None,
                     last_event_at: None,
                     last_message: None,
                     observed_model: json!({
@@ -13467,10 +13296,11 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, |handles: &[String]| {
             calls.borrow_mut().push(handles.to_vec());
-            handles
+            let map = handles
                 .iter()
                 .map(|h| (h.clone(), probe("working").unwrap()))
-                .collect()
+                .collect();
+            (map, crate::truth_probe::BatchOutcome::Measured)
         });
 
         let calls = calls.into_inner();
@@ -13497,11 +13327,12 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, |handles: &[String]| {
             // Answers for the first handle only; the second is simply missing.
-            handles
+            let map = handles
                 .iter()
                 .take(1)
                 .map(|h| (h.clone(), probe("working").unwrap()))
-                .collect()
+                .collect();
+            (map, crate::truth_probe::BatchOutcome::Measured)
         });
 
         let agents = response.result().unwrap()["agents"].clone();
