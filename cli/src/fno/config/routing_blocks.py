@@ -22,6 +22,44 @@ class RoutingAdmissionBlock(BaseModel):
     demand_pct: dict[str, dict[str, Any]] = Field(default_factory=dict)
     reserve_pct: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
+    @field_validator("max_inflight_per_pool", mode="before")
+    @classmethod
+    def _coerce_inflight(cls, v: object) -> object:
+        """A value pydantic would reject (fractional, bool, non-numeric)
+        degrades to the default; a whole int, including an invalid 0 or
+        negative, travels so the owner refuses it armed."""
+        return (
+            v
+            if isinstance(v, int) and not isinstance(v, bool)
+            else (
+                int(v)
+                if isinstance(v, float) and v.is_integer()
+                else 3
+            )
+        )
+
+    @field_validator("reservation_ttl_seconds", mode="before")
+    @classmethod
+    def _coerce_ttl(cls, v: object) -> object:
+        return (
+            v
+            if isinstance(v, int) and not isinstance(v, bool)
+            else (
+                int(v)
+                if isinstance(v, float) and v.is_integer()
+                else 900
+            )
+        )
+
+    @field_validator("demand_pct", "reserve_pct", mode="before")
+    @classmethod
+    def _coerce_tables(cls, v: object) -> object:
+        """A non-table, or a row that is not itself a table, degrades to an
+        empty table; leaf values stay raw for the owner to validate."""
+        if not isinstance(v, dict):
+            return {}
+        return {name: row for name, row in v.items() if isinstance(row, dict)}
+
 
 def resolve_admission_policy(settings: object = None) -> RoutingAdmissionBlock | None:
     """The armed admission block, or None when disarmed or unreadable."""
