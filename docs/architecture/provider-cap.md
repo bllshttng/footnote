@@ -1,6 +1,6 @@
 # Provider cap actor
 
-The one armed surface that owns every provider-cap move (x-7e05). The watchdog measures a strand. Only this actor can stop, move, or resume a session for quota reasons.
+The one armed surface that owns every provider-cap move. The watchdog measures a strand. Only this actor can stop, move, or resume a session for quota reasons.
 
 ## Status and arming
 
@@ -35,7 +35,7 @@ Migration per member, journalled to `<home>/provider-cap/<lane>-<epoch>.jsonl`:
 
 ## Returning
 
-Planned as wave 4 of node x-7e05 and not built yet: canary first, then a trickle, never a clock-only return. The one-liner: resume one canary at reset, require a clean survive window, then announce or trickle the rest. See the node record for the settled design.
+Planned as a dedicated follow-up node and not built yet: canary first, then a trickle, never a clock-only return. The one-liner: resume one canary at reset, require a clean survive window, then announce or trickle the rest.
 
 ## Config
 

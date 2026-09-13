@@ -25,10 +25,8 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
-import hashlib
 import logging
 import re
-import shutil
 import subprocess
 import time
 from collections import Counter, namedtuple
