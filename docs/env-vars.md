@@ -130,6 +130,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_PR_STATUS_BACKOFF_CAP` | py | unclear: cli/src/fno/pr/_cache.py:85 |
 | `FNO_PR_STATUS_CACHE_DIR` | py+rs | unclear: cli/src/fno/pr/_cache.py:92 |
 | `FNO_PR_STATUS_TTL` | py | unclear: cli/src/fno/pr/_cache.py:78 |
+| `FNO_PY` | rs | Overrides the resolved fno-py console script path (tests and nonstandard installs); empty falls through to the resolver legs. |
 | `FNO_REAL_GH` | py | unclear: cli/src/fno/pr/_quota.py:142 |
 | `FNO_RECLAIM_STATE_ROOT` | rs | unclear: crates/fno-agents/src/plugin_install.rs:22 |
 | `FNO_RECLAIM_TEMP_ROOT` | rs | unclear: crates/fno-agents/src/reclaim.rs:80 |
@@ -213,6 +214,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `USERPROFILE` | rs | unclear: crates/fno-agents/src/publish_review.rs:195 |
 | `WORKTREE_STATUS_REGISTRY` | py | unclear: cli/src/fno/agents/registry.py:2525 |
 | `XDG_CACHE_HOME` | rs | unclear: crates/fno/src/bootstrap.rs:1395 |
+| `XDG_DATA_HOME` | rs | Relocates uv's tools dir where the fno-py console script is resolved; unset reads the default ~/.local/share/uv layout. |
 | `XDG_RUNTIME_DIR` | py | unclear: cli/src/fno/mcp/sidecar.py:100 |
 | `XDG_STATE_HOME` | py | unclear: cli/src/fno/mcp/client.py:118 |
 | `ZDOTDIR` | rs | unclear: crates/fno/src/pty.rs:1770 |

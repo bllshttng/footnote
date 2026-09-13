@@ -182,21 +182,13 @@ pub(crate) fn run_json(cmd: Vec<String>, cwd: &Path, timeout: Duration) -> Sourc
 }
 
 /// The argv prefix for a Python `fno` self-shellout, resolved without a PATH
-/// dependency (board.py `_fno` -> `_subprocess_util.fno_py_cmd`): the
-/// `fno-py` console script, found on PATH first, then the bare name so a
-/// genuinely-missing CLI surfaces a real subprocess error rather than a
-/// silent no-op. A cargo-only install has no `fno` on PATH; `fno-py` (in
-/// `~/.local/bin`) is what the mux forwards to, and PATH usually carries it.
+/// dependency (`scrape::fno_py`, x-cf15): `FNO_PY`, then the `fno-py`
+/// console script beside this binary, then the uv tools bin; the bare name
+/// last so a genuinely-missing CLI surfaces a real subprocess error rather
+/// than a silent no-op. Was PATH-scan-then-bare, which died on an install
+/// whose wheel bin was off PATH - the "undispatched is unreadable" reads.
 pub(crate) fn fno_py_cmd() -> Vec<String> {
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join("fno-py");
-            if candidate.is_file() {
-                return vec![candidate.display().to_string()];
-            }
-        }
-    }
-    vec!["fno-py".to_string()]
+    vec![crate::scrape::fno_py().to_string_lossy().into_owned()]
 }
 
 /// Held back from the sources so the board can still serialize and print its

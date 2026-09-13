@@ -1154,17 +1154,15 @@ fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) -> CpuAdmis
 const FOOTPRINT_PROBE_BUDGET: Duration = Duration::from_secs(8);
 
 /// The probe argv: the narrow console script when it resolves, else the
-/// same `--json --cause-only` reading through `fno-py` (version skew: an
-/// older wheel without the script). `fno` itself is deliberately NOT a
+/// same `--json --cause-only` reading through `fno_py_cmd()` (PATH-robust:
+/// x-cf15). `fno` itself is deliberately NOT a
 /// candidate: it is the Rust shim, and a gate probe must not route through
-/// its provisioning waits. `None` means no probe resolves, and the refusal
-/// names that instead of pretending the instrument answered.
+/// its provisioning waits. The fno-py leg always yields an argv; a
+/// genuinely missing wheel surfaces as a failed read the refusal names,
+/// rather than a probe silently declared absent.
 fn footprint_probe_argv() -> Option<Vec<String>> {
     if resolves_on_path("fno-footprint-cause") {
         return Some(vec!["fno-footprint-cause".to_string()]);
-    }
-    if !resolves_on_path("fno-py") {
-        return None;
     }
     let mut argv = crate::king_board::fno_py_cmd();
     argv.extend(
