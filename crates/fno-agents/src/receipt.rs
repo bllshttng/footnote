@@ -76,7 +76,7 @@ pub struct ReapReceipt {
     /// retirement was decided on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment: Option<serde_json::Value>,
-    /// Set when the retention window expired the EXPENDABLE detail (ledger
+    /// Set when the retention window expired the expendable detail (ledger
     /// enrichment, per-effect rows) but the identity-critical core was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details_expired_at: Option<String>,

@@ -7,25 +7,6 @@ use std::time::Duration;
 use super::{first_line_or, fno_bin};
 use crate::spawn_journal::ReentryVerdict;
 
-#[cfg(test)]
-thread_local! {
-    /// Hermetic seam over the off-loop re-entry plan: a staged verdict or
-    /// refusal comes back without shelling out. Safe across the tokio::spawn
-    /// boundary because `#[tokio::test]` defaults to the current-thread
-    /// runtime, where the spawned task runs on the test's own thread.
-    static REENTRY_PLAN_STUB: std::cell::RefCell<Option<Result<ReentryVerdict, String>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Hermetic seam over the off-loop resume-argv shell-out: a staged argv
-    /// (or failure) comes back without shelling out. Same runtime contract as
-    /// [`REENTRY_PLAN_STUB`].
-    static RESUME_ARGV_STUB: std::cell::RefCell<Option<Result<Vec<String>, String>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 /// (x-eb79) Shell `fno-agents resume-argv <harness> <sid> --cwd <dir> [--cd]
 /// --json` OFF the core loop, bounded like `run_reentry_plan`. The one
 /// implementation of the codex resume argv the gestures consume - this
@@ -38,10 +19,6 @@ pub(super) async fn run_resume_argv(
     grant_cwd: &str,
     pin_cd: bool,
 ) -> Result<Vec<String>, String> {
-    #[cfg(test)]
-    if let Some(staged) = RESUME_ARGV_STUB.with(|stub| stub.borrow().clone()) {
-        return staged;
-    }
     const ARGV_TIMEOUT: Duration = Duration::from_secs(20);
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
@@ -404,10 +381,6 @@ pub(super) async fn run_reentry_plan(
     name: &str,
     transition: &str,
 ) -> Result<ReentryVerdict, String> {
-    #[cfg(test)]
-    if let Some(staged) = REENTRY_PLAN_STUB.with(|stub| stub.borrow().clone()) {
-        return staged;
-    }
     const PLAN_TIMEOUT: Duration = Duration::from_secs(20);
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
