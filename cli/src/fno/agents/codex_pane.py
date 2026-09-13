@@ -72,13 +72,17 @@ def ensure_codex_daemon(
 
 
 def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
-    """Render ``K=V`` pairs as ``-c shell_environment_policy.set.K="<V>"``.
+    """Render ``K=V`` pairs as ONE ``-c shell_environment_policy.set={...}``.
 
     A daemon-run tool inherits the daemon's env, not the TUI's, so worker
-    identity stops at the TUI without this; the JSON string is a valid TOML
-    basic string and merges with the config.toml ``set`` table.
+    identity stops at the TUI without this. One inline table, not one flag
+    per pair: measured 2026-09-13, repeated `-c` leaves of the same table do
+    not merge on the daemon lane (only the first reached the tool); a single
+    override replaces atomically. The JSON object is a valid TOML inline
+    table and merges with the config.toml ``set`` table at the override
+    layer.
     """
-    args: list[str] = []
+    table: dict[str, str] = {}
     for pair in pairs:
         key, sep, value = pair.partition("=")
         if not sep or not _ENV_KEY_RE.fullmatch(key):
@@ -88,8 +92,10 @@ def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
                 "shell_environment_policy config path",
                 exit_code=2,
             )
-        args += ["-c", f"shell_environment_policy.set.{key}={json.dumps(value)}"]
-    return args
+        table[key] = value
+    if not table:
+        return []
+    return ["-c", f"shell_environment_policy.set={json.dumps(table)}"]
 
 
 #: Rate-limit for the daemon oracle (a websocket round trip).
