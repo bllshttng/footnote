@@ -361,6 +361,9 @@ This is what makes the mission render as its own group in the mux sideline.
 On a default setup this command therefore does nothing at all and says so quietly.
 Confirm with `fno config get auto_continue.enabled` and arm it if the track is meant to walk itself.
 
+A crown over an epic arms the mission by itself: the grant sets `mission_active` and emits `mission_activated` with `source: crown`.
+So `fno backlog advance --epic` is the dispatch lever, not the activation step - the epic it names is already a mission.
+
 The verb is idempotent and respects `config.parallel.max_lanes` per project, but it dispatches real workers.
 Cap it when the wave is wider than you meant to fund.
 
