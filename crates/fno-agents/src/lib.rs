@@ -108,6 +108,7 @@ pub mod gemini_ask;
 mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
+pub mod law_match;
 
 pub mod graph_store;
 pub mod harness_capabilities;
