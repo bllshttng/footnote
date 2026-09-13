@@ -54,6 +54,9 @@ run 1 '"Not touched here" heading gated' $'### Not touched here\nthe frobnicator
 run 0 'untracked prose AFTER a later heading is NOT gated' \
   $'## Out of scope\nrefactor - x-b6e2\n## Notes\nthis deliberately not touched prose is outside the section'
 run 1 'out-of-scope with hyphen spelling' $'## Out-of-scope\nthe thing we skipped'
+run 1 'Explicitly not in this PR heading gated' $'## Explicitly not in this PR\n- mux transport wiring'
+run 0 'Explicitly not in this PR, tracked' $'## Explicitly not in this PR\n- mux transport wiring - tracked as x-7649'
+run 0 'Not in this PR heading, tracked' $'### Not in this PR\n- item - x-b6e2'
 
 # --- empty section is a no-op ------------------------------------------------
 run 0 'empty OOS section' $'## Out of scope\n\n## Verification\nran tests'

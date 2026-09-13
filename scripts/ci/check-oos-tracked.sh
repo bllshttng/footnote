@@ -9,7 +9,7 @@
 # again, so the deferred work silently evaporates.
 #
 # NARROW by design: it fires ONLY when the body has an explicit "Out of scope"
-# (or "Not touched here") heading. Incidental prose elsewhere is never scanned -
+# (or "Not touched here" / "Not in this PR") heading. Incidental prose elsewhere is never scanned -
 # the section heading is the smell; free-text deferral phrasing is not gated.
 #
 # Rule inside that section:
@@ -61,7 +61,8 @@ match() {
 
 # --- 1. locate the "Out of scope" section ------------------------------------
 # Heading forms (case-insensitive, markdown ATX heading only): "Out of scope",
-# "Out-of-scope", "Not touched here". Section body runs to the next ATX heading
+# "Out-of-scope", "Not touched here", "Not in this PR", each with an optional
+# leading "Explicitly". Section body runs to the next ATX heading
 # or EOF. bash 3.2 safe: line-by-line, no mapfile.
 in_section=0
 section_lines=()
@@ -69,7 +70,7 @@ found_heading=0
 while IFS= read -r line; do
   if match '^#{1,6}[[:space:]]' "$line"; then
     # a heading: does it open, or (if we were inside) close, the OOS section?
-    if match '^#{1,6}[[:space:]]*(out.?of.?scope|not touched here)' "$line" i; then
+    if match '^#{1,6}[[:space:]]*(explicitly[[:space:]]+)?(out.?of.?scope|not touched here|not in this pr)' "$line" i; then
       in_section=1; found_heading=1; continue
     elif [[ "$in_section" -eq 1 ]]; then
       in_section=0   # next heading ends the section
