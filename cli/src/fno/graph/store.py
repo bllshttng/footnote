@@ -1286,21 +1286,17 @@ def _emit_graph_tx_event(**data: Any) -> None:
         pass
 
 
-def locked_mutate_graph(path: Path, mutator) -> list[dict]:
-    """Locked read-modify-write via the store keeper. Recomputes statuses
-    after mutation; retries on an interleaved writer; surfaces a wedged
-    store as GraphLockTimeout inside the deadline instead of blocking.
+def commit_rows_via_store(path: Path, mutator) -> list[dict]:
+    """The modern raw write: begin, apply the mutator client-side, publish
+    through the keeper's row-commit with the bounded retry, and return the
+    committed rows. The write seam for callers whose mutation has no named
+    op yet; `locked_mutate_graph` is the same pipeline kept as the legacy
+    name the remaining (pre-wave-9) callers still use.
 
     The mutator runs client-side against the begin snapshot; the keeper
     re-derives the write pipeline (slugs, statuses, touched_at, closure
     detection, canonicalization) and publishes under the bounded lock with
-    a backup. Renders, claim releases, and the nudge run after the
-    publish lands -- the same post-lock position the file leg used.
-
-    The plan-rung map is computed over the MUTATED rows (the rows the
-    keeper's recompute will see), so a node a mutator just bound to a plan
-    derives from that plan on the same write, exactly as the pre-port store
-    did.
+    a backup.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1339,6 +1335,12 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     else:  # pragma: no cover - the for/else only fires without break/raise
         raise RuntimeError("unreachable: tx loop exited without a commit")
     return _finish_mutation(path, outcome)
+
+
+def locked_mutate_graph(path: Path, mutator) -> list[dict]:
+    """The legacy name of `commit_rows_via_store`, kept for the callers
+    wave 9 has not moved yet."""
+    return commit_rows_via_store(path, mutator)
 
 
 # ---------------------------------------------------------------------------

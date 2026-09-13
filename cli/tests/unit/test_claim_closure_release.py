@@ -52,8 +52,16 @@ def _write_claim(key: str, *, holder: str, pid: int, expires_at_ms: int, root: P
 
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
+    """Seed the graph the way the store writes it: every row carries the
+    fields the typed api requires (the store stamps them on every write)."""
+    complete = []
+    for e in entries:
+        row = {"type": "feature", "priority": "p2", "status": "idea", **e}
+        row.setdefault("title", e.get("id", "node"))
+        row.setdefault("slug", e.get("id", "node"))
+        complete.append(row)
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": entries}) + "\n")
+    p.write_text(json.dumps({"entries": complete}) + "\n")
     return p
 
 

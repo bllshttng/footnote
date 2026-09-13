@@ -334,7 +334,15 @@ def _isolated_graph(tmp_path, monkeypatch):
 
 
 def _seed_graph(graph_path, entries):
-    graph_path.write_text(json.dumps({"entries": entries}))
+    """Seed rows in the shape the store writes: the typed api drops rows
+    missing its required fields, and the store stamps them on every write."""
+    complete = []
+    for e in entries:
+        row = {"type": "feature", "priority": "p2", "status": "idea", **e}
+        row.setdefault("title", e.get("id", "node"))
+        row.setdefault("slug", e.get("id", "node"))
+        complete.append(row)
+    graph_path.write_text(json.dumps({"entries": complete}))
 
 
 def _plan(tmp_path, name: str, files: list[str]) -> str:

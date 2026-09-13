@@ -23,9 +23,10 @@ def _graph_path():
 
 
 def _read_node(node_id: str, graph_path) -> Optional[dict]:
-    from fno.graph.store import read_graph
+    from fno.graph import api as graph_api
 
-    return next((e for e in read_graph(graph_path) if e.get("id") == node_id), None)
+    row = graph_api.node(node_id, path=graph_path)
+    return row.model_dump(by_alias=True) if row else None
 
 
 def _invoking_session_id() -> Optional[str]:
@@ -98,7 +99,7 @@ def _release_node_lockfile(node_id: str) -> str:
 def _clear_locked_by(task_id: str, *, expect_locked_by: object = _UNSET) -> Optional[str]:
     """The shared graph clear: ``locked_by``/``locked_at`` -> None. Returns the resolved node id. ``expect_locked_by`` (requeue passes the value its first read saw) aborts when a claim landed between that read and this commit; the sentinel keeps unclaim's operator override unconditional."""
     from fno.graph._intake import _find_node
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     resolved_id: Optional[str] = None
 
@@ -116,7 +117,7 @@ def _clear_locked_by(task_id: str, *, expect_locked_by: object = _UNSET) -> Opti
         node["locked_at"] = None
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     return resolved_id
 
 
@@ -152,7 +153,12 @@ def verify_lock_stamp_receipt(stored_node: dict, locked_by: str, fallback_id: st
         # Earned-success rule, same as unclaim: a lock clear that left the
         # node in_progress on its own open do rows did not return it to the
         # queue, so the receipt refuses and names the verb that settles it.
-        if stored_node.get("status") == "in_progress":
+        # persisted_status when the caller read typed, raw status otherwise:
+        # derived `status` ignores open do rows and would miss the wedge.
+        stored_status = stored_node.get("persisted_status")
+        if stored_status is None:
+            stored_status = stored_node.get("status")
+        if stored_status == "in_progress":
             from fno.graph.statuses import is_open_do_row
 
             _wedge_refusal(
@@ -188,7 +194,7 @@ def _unclaim_node(task_id: str) -> None:
     lock_note = _release_node_lockfile(node_id)
 
     after = _read_node(node_id, _graph_path())
-    if (after or {}).get("status") == "in_progress":
+    if (after or {}).get("persisted_status") == "in_progress":
         _wedge_refusal("unclaim", node_id, sum(is_open_do_row(r) for r in ((after or {}).get("sessions") or [])))
 
     typer.echo(f"Unclaimed {node_id} ({lock_note})")
@@ -200,17 +206,23 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     from fno.agents.session_truth import _humanize_age, resolve_session_truth
     from fno.claims.core import claim_status
     from fno.claims.io import claims_root_for
+    from fno.graph import api as graph_api
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import is_open_do_row
-    from fno.graph.store import read_graph, reap_open_session_record
+    from fno.graph.store import reap_open_session_record
 
-    match = resolve_node(node, read_graph(_graph_path()))
+    rows = [
+        n.model_dump(by_alias=True)
+        for n in graph_api.nodes(include_archived=True, path=_graph_path()).nodes
+    ]
+
+    match = resolve_node(node, rows)
     if match.kind != "exact":
         typer.echo(f"requeue: no exact node matches {node!r}.", err=True)
         raise typer.Exit(code=2)
     row = match.candidates[0]
     node_id = row["id"]
-    status_before = row.get("status")
+    status_before = row.get("persisted_status")
 
     # has_pr outranks open_do in the derivation, so an in_review node never reaches the settle; refusing here also keeps requeue off any PR.
     if status_before != "in_progress":
@@ -261,7 +273,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     _release_node_lockfile(node_id)
 
     after = _read_node(node_id, _graph_path())
-    status_after = (after or {}).get("status")
+    status_after = (after or {}).get("persisted_status")
     remaining = sum(is_open_do_row(r) for r in ((after or {}).get("sessions") or []))
     if after is None or status_after == "in_progress":
         typer.echo(f"requeue: {node_id} still reads in_progress after settling ({remaining} open do row(s) remain).", err=True)

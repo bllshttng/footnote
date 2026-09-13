@@ -543,10 +543,43 @@ def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:
     ready status here would resurrect a finished node into the comparison set and
     let it block a dispatchable one.
     """
+def api_nodes_wire(graph_path):
+    """Every working-graph row as a wire-shaped dict, through the typed api
+    (the rows the store itself serializes), for folds that predate the
+    typed-model switch. A store that was never created reads as empty, the
+    same tolerance the raw read seam had."""
+    from fno.graph import api as graph_api
+    from fno.graph.store import StoreUnavailable
+
+    try:
+        conn = graph_api.nodes(include_archived=True, path=graph_path)
+    except StoreUnavailable:
+        if not Path(graph_path).exists():
+            return []
+        raise
+    return [
+        n.model_dump(by_alias=True)
+        for n in conn.nodes
+    ]
+
+
+def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:
+    """Collision-comparable graph entries for every node a live worker holds.
+
+    Two claim shapes count as in flight, because both mean somebody is editing
+    those files: a ``lane-slot:`` holder (a peer lane) and a bare ``node:<id>``
+    claim (a manually started or non-lane ``/target``, which holds no slot).
+    Reading only lane slots would leave the gate blind to every hand-run worker.
+
+    Entries pass through with their real fields: ``find_collisions`` rejects
+    anything done/deferred/superseded itself, and a claim outliving its node
+    (a corpse claim) is exactly the case that filter exists for - synthesizing a
+    ready status here would resurrect a finished node into the comparison set and
+    let it block a dispatchable one.
+    """
     from fno.claims.core import list_claims
     from fno.claims.lanes import LANE_HOLDER_PREFIX, LANE_SLOT_PREFIX
     from fno.graph.collision import has_file_surface, resolve_plan_path
-    from fno.graph.store import read_graph
     from fno.paths import graph_json
 
     held: set[str] = set()
@@ -561,7 +594,7 @@ def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:
     if not held:
         return []
     entries = [
-        e for e in read_graph(graph_json())
+        e for e in api_nodes_wire(graph_json())
         if e.get("id") in held and e.get("plan_path")
     ]
     # A comparator with no readable surface is skipped inside find_collisions,
@@ -2526,10 +2559,9 @@ def _join_node(
     """
     from fno.claims.core import claim_status
     from fno.graph.collision import resolve_plan_path
-    from fno.graph.store import read_graph
     from fno.paths import graph_json
 
-    entry = next((e for e in read_graph(graph_json()) if e.get("id") == node_id), None)
+    entry = next((e for e in api_nodes_wire(graph_json()) if e.get("id") == node_id), None)
     if entry is None:
         raise JoinRefuse(2, f"no graph node {node_id}")
     plan_raw = entry.get("plan_path")
@@ -3478,11 +3510,10 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     graph read error so advance_dependents skips rather than guessing (Failure
     Modes: Errors).
     """
-    from fno.graph.store import read_graph
     from fno.paths import graph_json
     from fno.graph.ladder import is_cold_dispatchable
 
-    entries = read_graph(graph_json())
+    entries = api_nodes_wire(graph_json())
     # Containers are never dispatched as workers (x-33b2): a dependent that is
     # itself some other node's `parent` is an epic, and `/target` builds its
     # leaves, not the box. Mirror cmd_next's `_pick_ready` exclusion on this
@@ -3555,11 +3586,10 @@ def _project_unblocked(node_ids: list[str]) -> None:
     if not node_ids:
         return
     try:
-        from fno.graph.store import read_graph
         from fno.paths import graph_json
         from fno.plan._project import project_graph_nodes
 
-        project_graph_nodes(read_graph(graph_json()), node_ids)
+        project_graph_nodes(api_nodes_wire(graph_json()), node_ids)
     except Exception as exc:  # noqa: BLE001 - convergence, never fatal
         sys.stderr.write(f"warning: unblocked-dependent projection failed: {exc}\n")
 
@@ -4207,12 +4237,12 @@ def _spawn_headroom(provider: Optional[str] = None) -> int:
 def _set_mission_active(epic_id: str, active: bool) -> bool:
     """Set/clear the epic's ``mission_active`` graph field. Returns whether it changed.
 
-    One locked graph mutation via locked_mutate_graph (never a direct Edit/Write -
+    One locked graph mutation via commit_rows_via_store (never a direct Edit/Write -
     the HARD-GATE). Idempotent: setting an already-active mission (or clearing an
     inactive one) is a no-op that returns False.
     """
     from fno.graph._intake import _find_node
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.paths import graph_json
 
     changed = [False]
@@ -4230,7 +4260,7 @@ def _set_mission_active(epic_id: str, active: bool) -> bool:
             changed[0] = True
         return entries
 
-    locked_mutate_graph(graph_json(), mutator)
+    commit_rows_via_store(graph_json(), mutator)
     return changed[0]
 
 
@@ -4268,11 +4298,10 @@ def advance_epic(
     ev_path = events_path if events_path is not None else _events_path(project_root)
 
     from fno.graph._intake import _find_node, descendants_of
-    from fno.graph.store import read_graph
     from fno.paths import graph_json
 
     try:
-        entries = read_graph(graph_json())
+        entries = api_nodes_wire(graph_json())
     except Exception as exc:  # noqa: BLE001 - a graph read fault skips cleanly
         return AdvanceEpicResult(epic_id, error=f"graph-error: {str(exc)[:120]}")
 

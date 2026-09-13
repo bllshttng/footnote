@@ -924,7 +924,7 @@ def test_direct_dependents_carry_difficulty(monkeypatch):
         {"id": "ab-dep00002", "project": "fno", "blocked_by": ["ab-closed11"],
          "status": "ready", "model_tier": "low", "cwd": "/w"},
     ]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda p: graph)
+    monkeypatch.setattr("fno.backlog.advance.api_nodes_wire", lambda p: graph)
     deps = {d["id"]: d for d in adv._direct_dependents("ab-closed11", "fno")}
     assert deps["ab-dep00001"]["difficulty"] == "high"
     assert deps["ab-dep00002"]["difficulty"] is None
@@ -948,7 +948,7 @@ def test_direct_dependents_admit_plan_less_idea(monkeypatch):
         {"id": "ab-block01", "project": "fno", "blocked_by": ["ab-closed11"],
          "status": "blocked", "cwd": "/w"},
     ]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda p: graph)
+    monkeypatch.setattr("fno.backlog.advance.api_nodes_wire", lambda p: graph)
     ids = [d["id"] for d in adv._direct_dependents("ab-closed11", "fno")]
     assert "ab-cold01" in ids
     assert "ab-stub001" not in ids
@@ -2410,7 +2410,7 @@ def test_direct_dependents_tags_same_and_cross_project(monkeypatch):
         {"id": "ab-blocked", "project": "fno", "blocked_by": ["ab-A"], "status": "blocked"},
         {"id": "ab-other", "project": "fno", "blocked_by": ["ab-Z"], "status": "ready"},
     ]
-    monkeypatch.setattr(store, "read_graph", lambda p: entries)
+    monkeypatch.setattr("fno.backlog.advance.api_nodes_wire", lambda p: entries)
     monkeypatch.setattr(paths, "graph_json", lambda: Path("/unused/graph.json"))
 
     deps = adv._direct_dependents("ab-A", "fno")
@@ -2497,7 +2497,7 @@ def test_direct_dependents_admits_ready_and_cold_idea(monkeypatch):
         # not a dependent of A -> EXCLUDED
         {"id": "F", "project": "web", "status": "ready", "blocked_by": []},
     ]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    monkeypatch.setattr("fno.backlog.advance.api_nodes_wire", lambda path=None: entries)
     deps = adv._direct_dependents("A", "etl")
     by_id = {d["id"]: d for d in deps}
     assert set(by_id) == {"B", "C", "G"}  # ready + cold-idea dependents, both projects
@@ -2511,7 +2511,7 @@ def test_direct_dependents_treats_missing_closed_project_as_cross(monkeypatch):
     entries = [
         {"id": "B", "project": "web", "status": "ready", "blocked_by": ["A"]},
     ]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    monkeypatch.setattr("fno.backlog.advance.api_nodes_wire", lambda path=None: entries)
     deps = adv._direct_dependents("A", None)
     assert [d["id"] for d in deps] == ["B"]
 
@@ -2526,7 +2526,7 @@ def test_direct_dependents_skips_pr_in_flight(monkeypatch):
         # ready cross-project dep with NO pr -> INCLUDED
         {"id": "C", "project": "web", "status": "ready", "blocked_by": ["A"]},
     ]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    monkeypatch.setattr("fno.backlog.advance.api_nodes_wire", lambda path=None: entries)
     deps = adv._direct_dependents("A", "etl")
     assert [d["id"] for d in deps] == ["C"]
 
@@ -2538,7 +2538,7 @@ def test_direct_dependents_skips_non_dict_and_idless(monkeypatch):
         {"project": "web", "status": "ready", "blocked_by": ["A"]},  # no id
         {"id": "B", "project": "web", "status": "ready", "blocked_by": ["A"]},
     ]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    monkeypatch.setattr("fno.backlog.advance.api_nodes_wire", lambda path=None: entries)
     deps = adv._direct_dependents("A", "etl")
     assert [d["id"] for d in deps] == ["B"]
 
@@ -2554,7 +2554,7 @@ def test_direct_dependents_skips_epic_dependent(monkeypatch):
         # L is a ready leaf dependent of A (no children) -> dispatched.
         {"id": "L", "project": "web", "status": "ready", "blocked_by": ["A"]},
     ]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    monkeypatch.setattr("fno.backlog.advance.api_nodes_wire", lambda path=None: entries)
     deps = adv._direct_dependents("A", "etl")
     assert [d["id"] for d in deps] == ["L"]  # epic E skipped, leaf L kept
 
@@ -2570,7 +2570,7 @@ def test_direct_dependents_skips_plan_held_successor(tmp_path, monkeypatch):
         {"id": "A", "status": "done", "project": "etl"},
         {"id": "B", "status": "ready", "project": "etl", "blocked_by": ["A"], "plan_path": str(plan)},
     ]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    monkeypatch.setattr("fno.backlog.advance.api_nodes_wire", lambda path=None: entries)
     assert adv._direct_dependents("A", "etl") == []
 
 

@@ -254,17 +254,17 @@ def test_requeue_aborts_when_claim_lands_mid_verb(tmp_graph, claims_root, monkey
     _seed(tmp_graph, [_wedged_node()])
     _dead_truth(monkeypatch)
     import fno.graph.store as gs
-    real_mutate = gs.locked_mutate_graph
+    real_commit = gs.commit_rows_via_store
 
-    def racing_mutate(path, mutator):
+    def racing_commit(path, mutator):
         def injected(entries):
             for e in entries:
                 if e.get("id") == NODE_ID:
                     e["locked_by"] = "target-session:late"
             return mutator(entries)
-        return real_mutate(path, injected)
+        return real_commit(path, injected)
 
-    monkeypatch.setattr(gs, "locked_mutate_graph", racing_mutate)
+    monkeypatch.setattr(gs, "commit_rows_via_store", racing_commit)
     result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
     assert result.exit_code != 0
     assert "target-session:late" in _out(result)
