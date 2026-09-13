@@ -1048,14 +1048,14 @@ def seam_crossings(update: bool = False) -> None:
 # here so a comment body is checkable at all, and docs/style-rules.md says
 # plainly that nothing enforces it. A surface that reads as a guard and refuses
 # nothing is worse than no surface.
-_STYLE_SURFACES = ("mail", "pr-body", "markdown", "comment")
+_STYLE_SURFACES = ("mail", "encounter", "pr-body", "markdown", "comment")
 
 
 def style(
     surface: str = typer.Option(
         "mail",
         "--surface",
-        help="Where the text is read: mail, pr-body, markdown, or comment. Mail also carries an 80-word message cap.",
+        help="Where the text is read: mail, encounter, pr-body, markdown, or comment. Mail and encounter also carry an 80-word message cap.",
     ),
     stdin: bool = typer.Option(
         False,
@@ -1191,7 +1191,7 @@ def style(
 
     if not violations:
         raise typer.Exit(0)
-    typer.echo(style_mod.format_violations(violations), err=True)
+    typer.echo(style_mod.format_violations(violations, surface=surface), err=True)
     raise typer.Exit(1)
 
 
@@ -1959,7 +1959,7 @@ def lint(
     ),
     surface: str = typer.Option(
         "mail", "--surface",
-        help="style: where the text is read - mail, pr-body, or markdown.",
+        help="style: where the text is read - mail, encounter, pr-body, markdown, or comment.",
     ),
     stdin: bool = typer.Option(False, "--stdin", help="style: read the body from standard input."),
     files: Optional[list[Path]] = typer.Option(
