@@ -106,3 +106,43 @@ def test_pane_wrapper_sets_and_clears_the_pin():
     adhoc = mux_spawn._mesh_env_wrapper("w", "claude", None, ["claude"])
     i = adhoc.index("FNO_WORKTREE_POLICY")
     assert adhoc[i - 1] == "-u"
+
+
+def test_rust_seam_exports_pin_for_foreign_cwd(tmp_path, monkeypatch, capsys):
+    """The Rust route execs before cmd_spawn, so the seam exports the pin for
+    an explicit foreign --cwd; the exec'd binary's env carries it."""
+    from fno.agents.rust_runtime import _export_worktree_policy_pin_at_seam
+
+    caller = _make_repo(tmp_path / "caller")
+    target = _make_repo(tmp_path / "target")
+    monkeypatch.chdir(caller)
+    monkeypatch.delenv("FNO_WORKTREE_POLICY", raising=False)
+    _export_worktree_policy_pin_at_seam(
+        ["spawn", "--cwd", str(target), "do the thing"],
+    )
+    import os
+
+    assert os.environ["FNO_WORKTREE_POLICY"] == "never"
+    assert "undeclared repo" in capsys.readouterr().err
+
+
+def test_rust_seam_silent_for_own_repo_and_ambient(tmp_path, monkeypatch):
+    """Own-repo targets and an already-set override export nothing."""
+    from fno.agents.rust_runtime import _export_worktree_policy_pin_at_seam
+
+    caller = _make_repo(tmp_path / "caller")
+    monkeypatch.chdir(caller)
+    monkeypatch.delenv("FNO_WORKTREE_POLICY", raising=False)
+    _export_worktree_policy_pin_at_seam(
+        ["spawn", "--cwd", str(caller), "do the thing"],
+    )
+    import os
+
+    assert "FNO_WORKTREE_POLICY" not in os.environ
+
+    target = _make_repo(tmp_path / "target")
+    monkeypatch.setenv("FNO_WORKTREE_POLICY", "external")
+    _export_worktree_policy_pin_at_seam(
+        ["spawn", "--cwd", str(target), "do the thing"],
+    )
+    assert os.environ["FNO_WORKTREE_POLICY"] == "external"

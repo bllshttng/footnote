@@ -2068,6 +2068,12 @@ def cmd_spawn(
             "work.workspaces.<slug>.projects[].worktree to change it)",
             file=sys.stderr,
         )
+    elif os.environ.get("FNO_WORKTREE_POLICY"):
+        # An explicit ambient override rides the same overlay: the pane
+        # wrapper's set-or-clear would otherwise strip what the operator set,
+        # while bg/headless children inherit it - two substrates disagreeing.
+        prov_env = dict(prov_env) if prov_env is not None else {}
+        prov_env["FNO_WORKTREE_POLICY"] = os.environ["FNO_WORKTREE_POLICY"]
 
     # The loop gate, on the same message and for the same reason as the carrier
     # above. resolve_dispatch runs this check too, and the comment three lines
