@@ -45,7 +45,7 @@ One binding per attempt. The file slot is `.fno/artifacts/handoff/task-context-<
 
 Content decides staleness. Revalidation re-reads each required source under the worktree and compares sha256. A code HEAD that moved without touching a required source never stales the binding. A cosmetic HEAD change is not a task revision. An authorized task revision re-prepares: the new binding gets a new digest and replaces the file slot. Receipts keep the old digest as history. Changed constraints never auto-override. A required source that changed must revalidate through a new binding.
 
-Identity expectations are per-door. A door checks the identities it knows. The init gate knows node + root. The receipt door passes session when named. The journey fixtures pass all three. An absent expectation key is unchecked at that door. It is never a silent pass elsewhere.
+Identity expectations are per-door. A door checks the identities it knows. The init gate knows node + root. The receipt door passes a named session. The journey fixtures pass all three. An absent expectation key is unchecked at that door. It is never a silent pass elsewhere.
 
 ## Inspect a binding
 
