@@ -1085,7 +1085,6 @@ def tick() -> None:
                            detail=f"outcome={outcome}" + (f" ({', '.join(bits)})" if bits else ""))
 
         def _phase_merge(_slice_s: float) -> None:
-            nonlocal result
             if result is None or not result.execute_queue:
                 return
             from fno.pr_watch._dispatch import run_execute_queue
@@ -1266,8 +1265,6 @@ def tick() -> None:
         # a proven-stale canonical through its SessionStart hook.
         sweep_started = True
         _run_phase("sweep", _phase_sweep, on_end=_sweep_ended)
-        # The durable-grant merge attempts drain in their own phase (see
-        # run_execute_queue): the merge call must not spend the sweep's slice.
         _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")

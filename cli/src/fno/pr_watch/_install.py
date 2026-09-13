@@ -262,8 +262,8 @@ def _run_launchctl_timed(*args: str, timeout_s: float = _LAUNCHCTL_TIMEOUT_S) ->
 def _tick_in_flight() -> Optional[int]:
     """PID of a live, young ``pr-watch:tick`` claim holder, else None.
 
-    A live claim under one StartInterval (600s, above the 480s tick ceiling)
-    is a tick mid-flight; an older one is a hung tick and the bounce proceeds.
+    Under one StartInterval (600s) is a tick mid-flight; older is a hung tick
+    and the bounce proceeds. Contract: docs/architecture/pr-watch-merge-phase.md.
     """
     try:
         from fno.claims.core import claim_status
@@ -313,8 +313,8 @@ def bounce(
     instead perform that work at install time, against the plist's own schedule.
 
     ``defer_when_ticking``: a heal fired mid-tick would kill the very tick the
-    verdict wrongly called dead, so it defers and runs no launchctl step. A
-    refresh that loads a new binary must not pass it.
+    verdict wrongly called dead, so it defers; a new-binary refresh must not
+    pass it.
     """
     if uid is None:
         uid = os.getuid()

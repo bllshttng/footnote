@@ -1179,8 +1179,8 @@ def _run_tick(
                 skipped += 1
 
             elif decision.kind == "execute":
-                # Queue for the merge phase: a ~120s attempt inside this
-                # slice hit the SIGALRM before the receipt (see run_execute_queue).
+                # Queued, never run here: the merge phase owns the call (see
+                # run_execute_queue and the merge-phase doc).
                 grant = (
                     grant_verdict.grant
                     if grant_verdict is not None and isinstance(grant_verdict.grant, dict)
@@ -1261,8 +1261,7 @@ def run_execute_queue(
     claim: Any,
 ) -> tuple[int, int]:
     """Run the sweep's queued durable-grant merges; returns ``(executed,
-    skipped)``. One retry is persisted BEFORE each call, so an alarm cut
-    parks at ``max_retries`` instead of replaying the PR every tick."""
+    skipped)``. Contract: docs/architecture/pr-watch-merge-phase.md."""
     from fno.pr_watch._state import WatermarkStore
 
     if not result.execute_queue:
@@ -1289,9 +1288,7 @@ def run_execute_queue(
         try:
             entry = store.get(key)
             if not isinstance(entry, dict) or entry.get("merge_dispatched"):
-                # The fresh load under the lock sees a merge an overlapping
-                # tick already completed; never attempt a second one.
-                continue
+                continue  # an overlapping tick already merged it (doc: contract)
             left = phase_seconds_left()
             if left is not None and left < _FIRE_FLOOR_S:
                 emit("pr_watch_skipped", {"pr": pr, "reason": "execute-budget"})
@@ -1302,8 +1299,8 @@ def run_execute_queue(
             except (TypeError, ValueError):
                 prior_retries = 0
             _grant("reserved", pr, cand, grant_fields)
-            # set() persists per write: spending the retry BEFORE the call
-            # makes an alarm cut count as one failed attempt.
+            # Spent BEFORE the call: set() persists per write, so an alarm
+            # cut mid-call counts as one failed attempt.
             entry["retries"] = prior_retries + 1
             store.set(key, entry)
             set_tick_phase("merge:execute")
