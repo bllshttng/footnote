@@ -466,7 +466,7 @@ def folder_audit(
     plans_root = Path(plans_dir_opt) if plans_dir_opt else plans_content_dir()
 
     try:
-        rows = [n.model_dump(exclude_none=True) for n in graph_api.nodes(include_archived=True).nodes]
+        rows = [n.model_dump(by_alias=True) for n in graph_api.nodes(include_archived=True).nodes]
         entries = recompute_statuses(rows)
     except (GraphCorruptError, OSError) as exc:
         typer.echo(
@@ -611,10 +611,12 @@ def migrate_keys(
 
 def _plan_sync_watermark() -> Path:
     """Watermark gating the sweep, a sibling of graph.json (the global graph the
-    sweep is driven by), so all sessions share one gate keyed to the one graph."""
+    sweep is driven by), so all sessions share one gate keyed to the one graph.
+    The name is version-stamp-specific: an old mtime float beside the counter
+    would read as "already synced" forever."""
     from fno.paths import graph_json
 
-    return graph_json().parent / ".plan-sync-watermark"
+    return graph_json().parent / ".plan-sync-watermark-v2"
 
 
 def _read_watermark(path: Path) -> Optional[float]:

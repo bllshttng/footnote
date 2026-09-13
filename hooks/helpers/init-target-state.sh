@@ -1329,9 +1329,11 @@ EOF
     _NODE_ID=$(python3 - "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' || true
 import os, sys
 
-from fno.graph import api as graph_api
-
 raw_target, repo_root = sys.argv[1], sys.argv[2]
+# The plugin repo's own checkout backs the import; a bare python3 without it
+# must degrade to "no node resolved", never a traceback that unclaims the run.
+sys.path.insert(0, os.path.join(repo_root, "cli", "src"))
+from fno.graph import api as graph_api
 if not os.path.isabs(raw_target):
     raw_target = os.path.join(repo_root, raw_target)
 try:

@@ -543,23 +543,9 @@ def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:
     ready status here would resurrect a finished node into the comparison set and
     let it block a dispatchable one.
     """
-def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:
-    from fno.graph.api import wire_rows
-    """Collision-comparable graph entries for every node a live worker holds.
-
-    Two claim shapes count as in flight, because both mean somebody is editing
-    those files: a ``lane-slot:`` holder (a peer lane) and a bare ``node:<id>``
-    claim (a manually started or non-lane ``/target``, which holds no slot).
-    Reading only lane slots would leave the gate blind to every hand-run worker.
-
-    Entries pass through with their real fields: ``find_collisions`` rejects
-    anything done/deferred/superseded itself, and a claim outliving its node
-    (a corpse claim) is exactly the case that filter exists for - synthesizing a
-    ready status here would resurrect a finished node into the comparison set and
-    let it block a dispatchable one.
-    """
     from fno.claims.core import list_claims
     from fno.claims.lanes import LANE_HOLDER_PREFIX, LANE_SLOT_PREFIX
+    from fno.graph.api import wire_rows
     from fno.graph.collision import has_file_surface, resolve_plan_path
     from fno.paths import graph_json
 
@@ -3519,12 +3505,12 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
         if closed_node_id not in (e.get("blocked_by") or []):
             continue
         # "now-unblocked" == ready OR a plan-less idea (x-e24a): blocker done + no
-        # other open blocker. A still-blocked dependent reads `blocked` (status
-        # derivation resolves an unresolved blocker to blocked, never idea), so an
-        # idea-status dependent is genuinely unblocked and cold-dispatchable; a
-        # claimed/done/deferred one reads its own bucket. A linked-but-undesigned
-        # stub (Rung.IDEA) is filtered out by is_cold_dispatchable's rung check.
-        if e.get("status") != "ready" and not is_cold_dispatchable(e):
+        # other open blocker. The stored status is the honest readiness here:
+        # the derived view still reads `blocked` from the non-empty blocked_by
+        # edge the close just satisfied (the readiness overlay is render-only).
+        # A plan-less idea dependent is genuinely unblocked and
+        # cold-dispatchable; a claimed/done/deferred one reads its own bucket.
+        if (e.get("persisted_status") or e.get("status")) != "ready" and not is_cold_dispatchable(e):
             continue
         if selection_guards(e, by_id, staleness_days=staleness_days):
             continue  # dead-ancestor or stale-quarantine - do not revive

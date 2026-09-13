@@ -732,7 +732,9 @@ def cmd_session_reap_open(
             rebound.get(field)
             for field in ("completed_at", "superseded_by", "deferred_at", "pr_number")
         )
+        # A blocked node outranks in_progress; the store never persists it.
         or rebound.get("persisted_status") == "blocked"
+        or rebound.get("status") == "blocked"
     )
     expected_in_progress = bool(rebound.get("locked_by")) or remaining > 0
     status_ok = higher_precedence or (

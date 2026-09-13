@@ -175,12 +175,15 @@ done <<< "$PINNED_PHRASES"
 # when the value, or any one sentence of it, equals a filed node's title after
 # whitespace-collapse, trailing-period strip, and case-folding. The read goes
 # through the store api (the typed client is import-light; this checkout's
-# `cli/src` is on the path), never the file. No fno CLI is the legitimate
-# skip (a consumer repo without a working store); an unreadable store fails
-# loud, on the shipped-verb registry precedent above.
-if [[ -n "$GRAD_LINES" ]] && command -v fno >/dev/null 2>&1; then
+# `cli/src` is on the path), never the file. No graph file is the legitimate
+# skip (a consumer repo without a working store); a graph that exists but
+# cannot be read fails loud, on the shipped-verb registry precedent above.
+# FNO_GRAPH_JSON (or GRAPH_JSON) pins the store, so a sandbox or a consumer
+# repo can point the gate at its own graph.
+GRAPH_TARGET="${FNO_GRAPH_JSON:-${GRAPH_JSON:-$HOME/.fno/graph.json}}"
+if [[ -n "$GRAD_LINES" && -f "$GRAPH_TARGET" ]]; then
   REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  if ! GRAD_REPORT="$(GRAD_LINES="$GRAD_LINES" PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
+  if ! GRAD_REPORT="$(GRAPH_TARGET="$GRAPH_TARGET" GRAD_LINES="$GRAD_LINES" PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
 import os
 import re
 import sys
@@ -195,10 +198,13 @@ try:
     # `api` op the typed client wraps, and store.py imports nothing outside
     # the standard library. The typed layer needs pydantic, which a bare
     # python3 does not carry.
-    from fno.graph._constants import GRAPH_JSON
+    from pathlib import Path
+
     from fno.graph.store import _client_for
 
-    reply = _client_for(GRAPH_JSON).request(
+    graph_path = Path(os.environ["GRAPH_TARGET"])
+
+    reply = _client_for(graph_path).request(
         "api", {"op": "nodes", "filter": {}, "include_archived": True}
     )
 except Exception as exc:

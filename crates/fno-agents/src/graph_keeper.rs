@@ -270,6 +270,13 @@ struct StoreState {
     /// True while the render trigger's subprocess runs, so overlapping 1 s
     /// ticks never stack two passes.
     render_in_flight: std::sync::atomic::AtomicBool,
+    /// Consecutive render failures: drives the retry backoff, reset on the
+    /// first success, so a keeper whose view pass can never run stops paying
+    /// one spawn plus one durable event per second.
+    render_failures: std::sync::atomic::AtomicU32,
+    /// The instant the trigger last RAN a pass (success or failure): the
+    /// backoff measures quiet time against this, not the tick clock.
+    last_render_attempt: Mutex<Option<std::time::Instant>>,
     events: Option<PathBuf>,
     /// The (dev, ino) of the socket path at bind time: the seat's proof.
     /// Unlinks are guarded by it, and an idle keeper whose path was rebound
@@ -468,6 +475,17 @@ fn trigger_render(state: &StoreState) {
     trigger_render_with(state, run_render_pass);
 }
 
+/// Backoff between render attempts after consecutive failures: double from
+/// the settle floor each time, capped at ten minutes. A permanently failing
+/// pass then costs one spawn per cap window, not one per second.
+fn render_backoff(failures: u32) -> Duration {
+    let shift = failures.min(10);
+    RENDER_SETTLE
+        .checked_mul(1u32 << shift)
+        .unwrap_or(Duration::from_secs(600))
+        .min(Duration::from_secs(600))
+}
+
 /// The injectable body of [`trigger_render`]: tests pass their own pass
 /// runner instead of the subprocess.
 fn trigger_render_with(state: &StoreState, run: impl FnOnce() -> Result<(), (i32, String)>) {
@@ -481,6 +499,23 @@ fn trigger_render_with(state: &StoreState, run: impl FnOnce() -> Result<(), (i32
     if !render_due(state, &current, rendered.as_deref(), RENDER_SETTLE) {
         return;
     }
+    // Backoff gate: after failures, wait out the doubled quiet window since
+    // the last attempt before paying for another one. A fresh write still
+    // renders at the settle floor: the backoff only delays RETRIES of a pass
+    // that already failed at this version.
+    let failures = state.render_failures.load(Ordering::SeqCst);
+    if failures > 0 {
+        if let Some(last) = state
+            .last_render_attempt
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+        {
+            if last.elapsed() < render_backoff(failures) {
+                return;
+            }
+        }
+    }
     if state
         .render_in_flight
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -488,10 +523,18 @@ fn trigger_render_with(state: &StoreState, run: impl FnOnce() -> Result<(), (i32
     {
         return;
     }
+    {
+        let mut last = state
+            .last_render_attempt
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *last = Some(std::time::Instant::now());
+    }
     let outcome = run();
     match &outcome {
         Ok(()) => {
             if let Err(error) = crate::backlog::set_rendered_version(&state.graph, &current) {
+                state.render_failures.fetch_add(1, Ordering::SeqCst);
                 if let Some(events) = &state.events {
                     let emitter = crate::events::EventEmitter::new(events, "daemon");
                     let _ = emitter.emit(
@@ -503,9 +546,12 @@ fn trigger_render_with(state: &StoreState, run: impl FnOnce() -> Result<(), (i32
                         }),
                     );
                 }
+            } else {
+                state.render_failures.store(0, Ordering::SeqCst);
             }
         }
         Err((exit, stderr_tail)) => {
+            state.render_failures.fetch_add(1, Ordering::SeqCst);
             if let Some(events) = &state.events {
                 let emitter = crate::events::EventEmitter::new(events, "daemon");
                 let _ = emitter.emit(
@@ -721,6 +767,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         gate_metrics: Mutex::new(GateMetrics::new()),
         last_write: Mutex::new(None),
         render_in_flight: std::sync::atomic::AtomicBool::new(false),
+        render_failures: std::sync::atomic::AtomicU32::new(0),
+        last_render_attempt: Mutex::new(None),
         events: cfg.events.clone(),
         sock_ino,
         startup_fp,
@@ -2985,6 +3033,10 @@ fn api_op(
             }))
         }
         "version" => Ok(json!({ "version": api::version(store)? })),
+        "rows" => Ok(json!({
+            "rows": api::rows(store)?,
+            "version": api::version(store)?,
+        })),
         _ => api_mutation(store, op, params),
     }
 }
@@ -3228,6 +3280,8 @@ mod tests {
             gate_metrics: Mutex::new(GateMetrics::new()),
             last_write: Mutex::new(None),
             render_in_flight: std::sync::atomic::AtomicBool::new(false),
+            render_failures: std::sync::atomic::AtomicU32::new(0),
+            last_render_attempt: Mutex::new(None),
             events: None,
             sock_ino: None,
             startup_fp: None,
@@ -3300,6 +3354,8 @@ mod tests {
             gate_metrics: Mutex::new(GateMetrics::new()),
             last_write: Mutex::new(None),
             render_in_flight: std::sync::atomic::AtomicBool::new(false),
+            render_failures: std::sync::atomic::AtomicU32::new(0),
+            last_render_attempt: Mutex::new(None),
             events: None,
             sock_ino: None,
             startup_fp: None,
@@ -3764,6 +3820,8 @@ mod tests {
             gate_metrics: Mutex::new(GateMetrics::new()),
             last_write: Mutex::new(None),
             render_in_flight: std::sync::atomic::AtomicBool::new(false),
+            render_failures: std::sync::atomic::AtomicU32::new(0),
+            last_render_attempt: Mutex::new(None),
             events: None,
             sock_ino: None,
             startup_fp: None,
@@ -3955,6 +4013,8 @@ mod tests {
             gate_metrics: Mutex::new(GateMetrics::new()),
             last_write: Mutex::new(None),
             render_in_flight: std::sync::atomic::AtomicBool::new(false),
+            render_failures: std::sync::atomic::AtomicU32::new(0),
+            last_render_attempt: Mutex::new(None),
             events,
             sock_ino: None,
             startup_fp: None,
@@ -4059,5 +4119,44 @@ mod tests {
         assert!(journal.contains("graph_render_failed"), "{journal}");
         assert!(journal.contains("boom"), "{journal}");
         assert!(journal.contains("\"exit\":3"), "{journal}");
+    }
+
+    /// A failed pass backs off: an immediate second tick does not re-run the
+    /// pass, one past the doubled quiet window retries, and a success resets
+    /// the failure count.
+    #[test]
+    fn render_failure_backs_off_until_the_window_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let _current = seed_render_store(&graph);
+        let state = render_trigger_state(graph.clone(), None);
+        let runs = std::cell::Cell::new(0u32);
+        trigger_render_with(&state, || {
+            runs.set(runs.get() + 1);
+            Err((3, "boom".into()))
+        });
+        assert_eq!(runs.get(), 1);
+        trigger_render_with(&state, || {
+            runs.set(runs.get() + 1);
+            Ok(())
+        });
+        assert_eq!(runs.get(), 1, "inside the backoff window the retry is held");
+        // Age the last attempt past the doubled window: the retry fires.
+        {
+            let mut last = state.last_render_attempt.lock().unwrap();
+            *last = last.map(|t| t - render_backoff(1) - Duration::from_secs(1));
+        }
+        trigger_render_with(&state, || {
+            runs.set(runs.get() + 1);
+            Ok(())
+        });
+        assert_eq!(runs.get(), 2, "past the window the retry runs");
+        assert_eq!(
+            state
+                .render_failures
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "success resets the failure count"
+        );
     }
 }

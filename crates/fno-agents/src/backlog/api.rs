@@ -1002,7 +1002,31 @@ pub fn session_end(
                 continue;
             }
             let Ok(mut parsed) = Node::from_json(row) else {
-                return Ok(false);
+                // A row the typed model cannot represent still owes its
+                // close: fill ended_at on the raw session rows rather than
+                // skipping the settle forever (the sweep would re-list the
+                // same stale row every pass). The payload carries no typed
+                // node on this path.
+                let Some(list) = row.get_mut("sessions").and_then(Value::as_array_mut) else {
+                    return Ok(false);
+                };
+                let mut closed = false;
+                for record in list.iter_mut() {
+                    let Some(obj) = record.as_object_mut() else {
+                        continue;
+                    };
+                    if obj.get("session_id").and_then(Value::as_str) == Some(session_id)
+                        && obj.get("ended_at").and_then(Value::as_str).is_none()
+                    {
+                        obj.insert(
+                            "ended_at".into(),
+                            Value::String(crate::graph_store::now_isoformat()),
+                        );
+                        obj.insert("ended_by".into(), Value::String(ended_by.to_string()));
+                        closed = true;
+                    }
+                }
+                return Ok(closed);
             };
             let Some(list) = &mut parsed.sessions else {
                 return Ok(false);

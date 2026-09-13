@@ -996,7 +996,7 @@ def status(
 
                 reply = {
                     "entries": [
-                        e for e in read_graph_strict(graph_json())
+                        e for e in graph_api_strict.wire_rows(path=graph_json())
                         if isinstance(e, dict) and e.get("id") == node_id
                     ],
                 }
