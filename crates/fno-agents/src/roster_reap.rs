@@ -650,6 +650,7 @@ mod tests {
             "sid-1".to_string(),
             vec![("x-bbbb".to_string(), "in_review".to_string())],
         );
+        g.work_index = g.index.clone();
         let summary = run(
             &no_home(),
             900,
@@ -686,6 +687,7 @@ mod tests {
             "sid-1".to_string(),
             vec![("x-bbbb".to_string(), "in_review".to_string())],
         );
+        g.work_index = g.index.clone();
         let summary = run(
             &no_home(),
             900,
@@ -1090,6 +1092,7 @@ mod tests {
         g.pr_state.insert("x-aaaa".into(), (None, 0, 0));
         g.index
             .insert("sid-1".into(), vec![("x-aaaa".into(), "do".into())]);
+        g.work_index = g.index.clone();
         let at_all = run(
             &no_home(),
             900,

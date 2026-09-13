@@ -1340,6 +1340,21 @@ pub(crate) fn work_state_key(session_id: &str) -> String {
 /// working graph plus the archive; `status` is the entry's stored `status`
 /// field only, never a derived overlay.
 pub fn sessions_index(entries: &[Value]) -> HashMap<String, Vec<(String, String)>> {
+    sessions_index_with(entries, true)
+}
+
+/// The same reverse join with PR-link ship rows EXCLUDED: the stamp opens the
+/// row and no terminal closes it, so a ship row is provenance of the link,
+/// never of work. Feeds [`work_state`]; node attribution keeps the
+/// full [`sessions_index`].
+pub fn work_index(entries: &[Value]) -> HashMap<String, Vec<(String, String)>> {
+    sessions_index_with(entries, false)
+}
+
+fn sessions_index_with(
+    entries: &[Value],
+    include_ship: bool,
+) -> HashMap<String, Vec<(String, String)>> {
     let mut index: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for entry in entries {
         let Some(node_id) = entry_id(entry) else {
@@ -1361,6 +1376,9 @@ pub fn sessions_index(entries: &[Value]) -> HashMap<String, Vec<(String, String)
             if sid.is_empty() {
                 continue;
             }
+            if !include_ship && row.get("phase").and_then(Value::as_str) == Some("ship") {
+                continue;
+            }
             index
                 .entry(work_state_key(sid))
                 .or_default()
@@ -1370,7 +1388,9 @@ pub fn sessions_index(entries: &[Value]) -> HashMap<String, Vec<(String, String)
     index
 }
 
-/// The WORK-done question for one session against a [`sessions_index`].
+/// The WORK-done question for one session against a [`work_index`]: a ship
+/// row is provenance of the PR link, never of work, so the caller
+/// must pass the ship-excluded join. Attribution asks [`sessions_index`].
 pub fn work_state(index: &HashMap<String, Vec<(String, String)>>, session_id: &str) -> WorkState {
     let Some(named) = index.get(&work_state_key(session_id)) else {
         return WorkState::NoProvenance;
@@ -2536,7 +2556,7 @@ mod tests {
                 "sessions": [{"session_id": "S", "phase": "review", "harness": "claude"}],
             }),
         ];
-        let index = sessions_index(&entries);
+        let index = work_index(&entries);
         assert_eq!(
             work_state(&index, "S"),
             WorkState::AllDone {
@@ -2565,7 +2585,7 @@ mod tests {
                 "sessions": [{"session_id": "S", "phase": "review", "harness": "claude"}],
             }),
         ];
-        let index = sessions_index(&entries);
+        let index = work_index(&entries);
         assert_eq!(
             work_state(&index, "S"),
             WorkState::Open {
@@ -2579,7 +2599,7 @@ mod tests {
             "id": "N4", "status": "done",
             "sessions": [{"session_id": "ses_CaseKept", "phase": "do", "harness": "opencode"}],
         })];
-        let index = sessions_index(&opencode);
+        let index = work_index(&opencode);
         assert_eq!(
             work_state(&index, "ses_CaseKept"),
             WorkState::AllDone {
@@ -2587,6 +2607,44 @@ mod tests {
             }
         );
         assert_eq!(work_state(&index, "ses_casekept"), WorkState::NoProvenance);
+    }
+
+    #[test]
+    fn a_ship_row_is_link_provenance_never_work() {
+        // The PR-link stamp opens the row and no terminal closes it,
+        // so the WORK question skips it - a session named only by ship rows
+        // reads NoProvenance, and a do row beside the ship row still holds.
+        let entries = vec![
+            json!({
+                "id": "N1", "status": "in_review",
+                "sessions": [{"session_id": "S", "phase": "ship", "harness": "claude"}],
+            }),
+            json!({
+                "id": "N2", "status": "in_progress",
+                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+            }),
+        ];
+        let work = work_index(&entries);
+        assert_eq!(
+            work_state(&work, "S"),
+            WorkState::Open {
+                node: "N2".into(),
+                status: "in_progress".into()
+            }
+        );
+        let ship_only = vec![json!({
+            "id": "N1", "status": "in_review",
+            "sessions": [{"session_id": "S", "phase": "ship", "harness": "claude"}],
+        })];
+        assert_eq!(
+            work_state(&work_index(&ship_only), "S"),
+            WorkState::NoProvenance
+        );
+        // Attribution keeps the ship row: the join still names the node.
+        assert_eq!(
+            sessions_index(&ship_only)["s"],
+            vec![("N1".to_string(), "in_review".to_string())]
+        );
     }
 
     #[test]

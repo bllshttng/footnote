@@ -356,6 +356,9 @@ impl Default for StateFilesReapSummary {
 #[derive(Debug, Default, Clone)]
 pub struct GraphRead {
     pub index: HashMap<String, Vec<(String, String)>>,
+    /// The ship-row-excluded join: the WORK question reads this,
+    /// attribution reads [`GraphRead::index`].
+    pub work_index: HashMap<String, Vec<(String, String)>>,
     pub open_do: HashMap<String, Vec<String>>,
     /// Normalized session id -> the phases its sessions[] rows carry. The
     /// planning lane reads this to recognize a planner row (blueprint/think)
@@ -467,6 +470,7 @@ pub(crate) fn read_graph_entries_raw(home: &AgentsHome) -> Option<Vec<Value>> {
 pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let entries = read_graph_entries_raw(home)?;
     let index = graph_store::sessions_index(&entries);
+    let work_index = graph_store::work_index(&entries);
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
     let mut phases: HashMap<String, Vec<String>> = HashMap::new();
     let mut closed_planning: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -551,6 +555,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     }
     Some(GraphRead {
         index,
+        work_index,
         open_do,
         phases,
         closed_planning,
@@ -1108,7 +1113,7 @@ pub fn provenance_verdict(
     graph: &GraphRead,
     transcripts: Option<&[std::path::PathBuf]>,
 ) -> ProvenanceVerdict {
-    let mut work = graph_store::work_state(&graph.index, sid);
+    let mut work = graph_store::work_state(&graph.work_index, sid);
     // The full cascade runs EVEN WHEN the reverse join answers: the later
     // sources are witnesses, not substitutes, so a source naming a
     // DIFFERENT node holds the row instead of the answer riding on the
