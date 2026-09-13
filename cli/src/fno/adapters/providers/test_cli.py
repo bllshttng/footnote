@@ -2575,8 +2575,6 @@ class TestListIdentityColumn:
         """Per-record doctor findings ride the row as ` !<problem>`."""
         import json as _json
 
-        from fno.adapters.providers import managed
-
         self._pair_env(tmp_path, monkeypatch)
         blob = _json.dumps({
             "claudeAiOauth": {"accessToken": "t", "expiresAt": 1783352000000}
