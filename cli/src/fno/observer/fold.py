@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fno.cost._register import LEDGER_SESSION_UNRESOLVED
-from fno.plan._doc import FrontmatterError, ParseError, PlanDoc, load_plan_text
+from fno.plan._doc import FrontmatterError, ParseError, load_plan_text
 from fno.plan.brief import BriefParseError, parse_execution_strategy
 from fno.plan.execution_validation import validate_execution
 from fno.scoreboard.fold import (
@@ -187,33 +187,18 @@ def _surface_collisions(plan_text: str) -> Optional[list[str]]:
     except (FrontmatterError, ParseError):
         return None
     if any(v.field == "waves" for v in violations):
-        # No waves declared: the validator's surface-collision check is
-        # wave-scoped and never runs. A single task cannot collide with
-        # itself, so that shape is still a measured pass; two or more tasks
-        # with no wave grouping is genuinely unchecked - a gap, never a
-        # fabricated pass.
-        task_count = _task_count(doc)
-        return None if task_count is None or task_count > 1 else []
+        # No waves: the check above never ran. A single task cannot collide
+        # with itself (still a measured pass); more than one is a real gap.
+        try:
+            tasks = parse_execution_strategy(doc.get_section("Execution Strategy") or "").get("tasks", [])
+        except (BriefParseError, TypeError, ValueError):
+            tasks = None
+        return None if not isinstance(tasks, list) or len(tasks) > 1 else []
     return [
         v.message
         for v in violations
         if v.field.startswith("waves.") and v.field.endswith(".surface")
     ]
-
-
-def _task_count(doc: PlanDoc) -> Optional[int]:
-    """Number of ``tasks:`` entries in the plan's Execution Strategy, or None
-    if the section is missing or does not parse - reuses the validator's own
-    parser rather than a second reader of the same YAML."""
-    strategy_text = doc.get_section("Execution Strategy")
-    if strategy_text is None:
-        return None
-    try:
-        strategy = parse_execution_strategy(strategy_text)
-    except (BriefParseError, TypeError, ValueError):
-        return None
-    tasks = strategy.get("tasks", [])
-    return len(tasks) if isinstance(tasks, list) else None
 
 
 def score_blueprint_item(item: dict, *, plan_text: Optional[str]) -> dict[str, Optional[str]]:
