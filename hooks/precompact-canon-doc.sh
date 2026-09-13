@@ -74,6 +74,16 @@ fi
 # No session id -> nothing useful to point at. Emit nothing, exit clean.
 [[ -n "$SID" ]] || exit 0
 
+# ---------------------------------------------------------------------------
+# Compaction marker (x-7e05 wave 1): stamp "this session is compacting" so the
+# cap actor and every idle reader can tell a compacting session from an idle
+# one. Best-effort: a failed mark must not fail the hook, so every failure
+# degrades to no marker (the reader reports Unknown, never a false all-clear).
+# ---------------------------------------------------------------------------
+if command -v fno-agents >/dev/null 2>&1; then
+  fno-agents compaction mark --session "$SID" >/dev/null 2>&1 || true
+fi
+
 # Short id for display. Labeled tail-8 because that is the mail handle today;
 # the full SID above is the authoritative identity key regardless.
 SHORT="${SID: -8}"

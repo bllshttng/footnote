@@ -34,6 +34,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "claim",
     "codex-assign-project",
     "codex-loaded-threads",
+    "compaction",
     "component-verdict",
     "court-orphans",
     "court-fold",
@@ -432,6 +433,10 @@ async fn run(args: Vec<String>) -> i32 {
     // `test-run`, so the parity tests stay in sync.
     if verb == "fleet-incident" {
         return fno_agents::fleet_incident::run_fleet_incident(&args[1..]);
+    }
+
+    if verb == "compaction" {
+        return fno_agents::compaction::run_compaction(&args[1..]);
     }
 
     // `announce`: fleet announcements (see announce.rs doc). Direct

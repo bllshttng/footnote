@@ -82,6 +82,7 @@ pub mod codex_inject;
 pub mod codex_store;
 pub mod codex_thread;
 mod codex_thread_entry;
+pub mod compaction;
 mod completion_output;
 pub mod component_update;
 pub mod court_fold;
