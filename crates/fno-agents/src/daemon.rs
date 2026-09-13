@@ -2193,7 +2193,6 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // Machine watch (x-d6ad): the arm owns its cadence, gate and memory.
     let machine_watch = crate::machine_watch::Arm::default();
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
-    // Provider-cap actor (x-7e05): measures every tick, acts when armed.
     let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
     // Retirement-sweep cadence (x-d354): the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
