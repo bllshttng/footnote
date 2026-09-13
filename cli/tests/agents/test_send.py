@@ -3182,7 +3182,14 @@ def _team_invoke(monkeypatch, args: list[str]):
 
 def _team_fake_writer(monkeypatch, returncode: int = 0, stdout: str = "", stderr: str = ""):
     """Capture the announce send subprocess; returns the list of invocations."""
+    import shutil
     import subprocess
+
+    # CI has no fno-agents binary installed; the shim's on-PATH check must
+    # see one or every team test dies before the writer is invoked.
+    monkeypatch.setattr(
+        shutil, "which", lambda name: f"/tmp/{name}" if name == "fno-agents" else None
+    )
 
     calls: list[dict[str, object]] = []
 
