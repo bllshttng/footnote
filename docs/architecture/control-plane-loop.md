@@ -17,15 +17,18 @@ Every scheduled arm appends one `control_plane_tick` row to the journal it alrea
 The arms:
 
 - `king_wake`, `watchdog`, `pr_watch_merge`: they ride the pr-watch launchd tick.
+- `notify_watch`: the state-change signals arm, also on the pr-watch launchd tick.
 - `active_backlog`: the daemon's mission drain, one row per tick.
 - `auto_continue`: every `advance` call, plus a 1800s reconcile heartbeat from the launchd agent. The heartbeat is gated on `FNO_CONTROL_PLANE_SCHEDULER` so a SessionStart reconcile cannot mask a dead agent.
 - `stop_hook`: the shim below, one row per fire.
+- `reap`, `retire`, `machine_watch`: the daemon's own arms, one row per tick.
+- `arm_watch`: the daemon arm that pages the operator about arms broken past the threshold (below).
 
 The row shape is owned by `crates/fno-agents/src/tick_ledger.rs`. Python arms emit through `cli/src/fno/control_plane.py`. `cli/src/fno/events/schema.yaml` pins both validators on the shape.
 
 The readout: `fno agents status` prints one row per arm. When a row's newest tick is older than twice the row's own `interval_s`, the row is red. An arm that never ticked reads red with `skip_reason: never`. A fresh row whose skip reason is a failure token (`timeout`, `error`, `wake_failed`, `sweep_failed`, `notify_failed`) reads `FAIL`. A scheduler does not stop one arm at a time. When every interval-bearing arm on it misses a run and no arm ticks within twice the shortest interval, the readout reads them all red. The job stopped, not the arm. `fno doctor` prints the row's rendered `line` for every red (stale or failing) arm. A row without a `line` (older binary) falls back to the skip-reason sentence. `stop_hook` is event-driven (`interval_s: 0`) and never reads stale from quiet. An unreadable readout reports unknown, never green.
 
-Every red row names its cause as the first rule that holds. If no rule fires, the row reads `unexplained`, so a reader can see the rules ran:
+Every red row names its cause as the first rule that holds. If no rule fires, the row reads `unexplained`, so a reader can see the rules ran. When arms stay failing, or go stale from a dead scheduler, longer than `[notify] arm_failing_after_s` (default 1800), the `arm_watch` arm sends one operator notice. The notice is deduped on the set of arms and their anchors, and recovery is silent.
 
 - `daemon_young`: A daemon-scheduled arm reads `pending`, not red, while the daemon is up less than twice the interval. The first window has not elapsed.
 - `stale_daemon`: The daemon predates the installed build. Run `fno agents restart`.
