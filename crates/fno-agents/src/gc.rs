@@ -2041,6 +2041,7 @@ mod tests {
             open_do: HashMap::new(),
             phases: HashMap::new(),
             closed_planning: HashMap::new(),
+            plan_written: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
             pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
         }));
@@ -2152,6 +2153,7 @@ mod tests {
             open_do: HashMap::new(),
             phases: HashMap::new(),
             closed_planning: HashMap::new(),
+            plan_written: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
             pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
         }));

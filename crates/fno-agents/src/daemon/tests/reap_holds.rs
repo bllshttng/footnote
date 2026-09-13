@@ -674,6 +674,122 @@ fn the_witness_gate_releases_a_parked_witness_and_refuses_an_active_one() {
     );
 }
 
+/// d-81c6da7e AC3-HP: an idea-node planner hold ages on the same clock the
+/// other reaper holds use, reads `escalated` past the threshold, and its
+/// reason is the string a release answers.
+#[test]
+fn an_idea_planner_hold_ages_and_escalates_past_the_threshold() {
+    let (dir, home) = staged_graph_home();
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-idea",
+            "status": "idea",
+            "sessions": [{
+                "phase": "blueprint",
+                "harness": "codex",
+                "session_id": "s-idea",
+                "started_at": "2026-09-01T00:00:00Z",
+            }],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "bp-x-idea".into();
+        e.short_id = "bp-x-idea".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-idea".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let mut summary = gc_sweep::run(
+        &home,
+        &EventEmitter::new(home.events_jsonl(), "daemon"),
+        900,
+        true,
+        7,
+        &crate::gc_sweep::read_graph_entries,
+        &|_| None,
+        &uniform_ages(5401),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+    );
+    summary.mark_escalated(std::time::Duration::from_secs(5400));
+    let h = find_hold(&summary, "bp-x-idea");
+    assert_eq!(h.reason, "planning assignment not finished by this session");
+    assert_eq!(h.age_s, Some(5401));
+    assert!(h.escalated, "{h:?}");
+}
+
+/// d-81c6da7e AC3-EDGE: the release lifts the marker question by ruling -
+/// the row retires past the 1200 s planner grace, and the basis carries
+/// the release prefix plus the `released` marker.
+#[test]
+fn gc_sweep_release_retires_a_released_planner() {
+    let (dir, home) = staged_graph_home();
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-idea",
+            "status": "idea",
+            "sessions": [{
+                "phase": "blueprint",
+                "harness": "codex",
+                "session_id": "s-idea",
+                "started_at": "2026-09-01T00:00:00Z",
+            }],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "bp-x-idea".into();
+        e.short_id = "bp-x-idea".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-idea".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let release = gc_sweep::Release {
+        handle: "bp-x-idea".to_string(),
+        reason: "planning assignment not finished by this session".to_string(),
+        detail: "x-idea idea: no close and no plan written by this session".to_string(),
+    };
+    let summary = gc_sweep::run_with_release(
+        &home,
+        &EventEmitter::new(home.events_jsonl(), "daemon"),
+        900,
+        false,
+        7,
+        &crate::gc_sweep::read_graph_entries,
+        &|_| None,
+        &uniform_ages(5401),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+        Some(&release),
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    assert_eq!(summary.retired[0].0, "bp-x-idea", "{:?}", summary.retired);
+    let basis = &summary.retired[0].1;
+    assert!(
+        basis.starts_with("released planning assignment not finished by this session held "),
+        "basis: {basis}"
+    );
+    assert!(
+        basis.contains("planning finished on x-idea: released"),
+        "basis: {basis}"
+    );
+}
+
 /// AC4-HP: the unevaluated gate renders in both formats, named, and
 /// never reads as a retirement - the text says the gate was not evaluated
 /// and apply may still refuse, the JSON exposes the same id and reason, and

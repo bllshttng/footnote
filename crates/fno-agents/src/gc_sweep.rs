@@ -387,6 +387,34 @@ pub struct GraphRead {
     /// (x-5aef task 1.2). The positive marker the planner's own close
     /// writes; its absence means this assignment never finished.
     pub closed_planning: HashMap<String, std::collections::HashSet<String>>,
+    /// Lowercased session id -> the node ids where THIS session wrote the
+    /// node's plan (marker 2, d-81c6da7e): the node's `plan_path` names an
+    /// existing file and no other session's planning row on it started
+    /// earlier. Row order is the authorship fact, never plan mtime.
+    pub plan_written: HashMap<String, std::collections::HashSet<String>>,
+}
+
+/// Does the node's `plan_path` name an existing file (marker 2)? A leading
+/// `~/` expands against `$HOME`; a relative path joins the node's `cwd`.
+/// An unresolvable path (no HOME, no cwd, no file) refuses: it proves no
+/// plan was written here.
+fn plan_file_exists(plan_path: &str, cwd: Option<&str>) -> bool {
+    let path = match plan_path.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) => std::path::PathBuf::from(home).join(rest),
+            Err(_) => return false,
+        },
+        None => std::path::PathBuf::from(plan_path),
+    };
+    let path = if path.is_relative() {
+        match cwd {
+            Some(cwd) => std::path::PathBuf::from(cwd).join(path),
+            None => return false,
+        }
+    } else {
+        path
+    };
+    path.is_file()
 }
 
 /// One row the pass decided to retire, with everything the write tail needs.
@@ -527,6 +555,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
     let mut phases: HashMap<String, Vec<String>> = HashMap::new();
     let mut closed_planning: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let mut plan_written: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut statuses: HashMap<String, String> = HashMap::new();
     let mut pr_state: HashMap<String, (Option<String>, usize, usize)> = HashMap::new();
     for entry in &entries {
@@ -564,6 +593,11 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
         let Some(rows) = entry.get("sessions").and_then(Value::as_array) else {
             continue;
         };
+        // Marker 2's inputs: every blueprint/think row on the node, as
+        // (session, parseable started_at). Collected first, so authorship
+        // is judged over the node's whole planner set, never one row
+        // alone.
+        let mut planning_rows: Vec<(String, Option<u64>)> = Vec::new();
         for row in rows {
             let sid = row.get("session_id").and_then(Value::as_str).map(str::trim);
             let Some(sid) = sid.filter(|s| !s.is_empty()) else {
@@ -604,6 +638,46 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                     .or_default()
                     .insert(node_id.to_string());
             }
+            if phase == "blueprint" || phase == "think" {
+                let started = row
+                    .get("started_at")
+                    .and_then(Value::as_str)
+                    .and_then(crate::tick_ledger::parse_rfc3339_unix);
+                planning_rows.push((sid.to_ascii_lowercase(), started));
+            }
+        }
+        // Marker 2 (d-81c6da7e): attribute the plan to its author. The
+        // stat runs only on a node with a planner and a plan_path, so a
+        // node with neither costs nothing. A session qualifies when its
+        // own row carries a parseable `started_at` and no OTHER session's
+        // row is missing one, unparseable, or strictly earlier - unknown
+        // order never proves this session came first. Same-second rows
+        // both qualify.
+        if !planning_rows.is_empty() {
+            let plan_path = entry
+                .get("plan_path")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let cwd = entry.get("cwd").and_then(Value::as_str);
+            if let Some(plan_path) = plan_path {
+                if plan_file_exists(plan_path, cwd) {
+                    for (sid_l, mine) in &planning_rows {
+                        let Some(mine) = mine else {
+                            continue;
+                        };
+                        let no_earlier_other = planning_rows.iter().all(|(other, theirs)| {
+                            other == sid_l || matches!(theirs, Some(t) if t >= mine)
+                        });
+                        if no_earlier_other {
+                            plan_written
+                                .entry(sid_l.clone())
+                                .or_default()
+                                .insert(node_id.to_string());
+                        }
+                    }
+                }
+            }
         }
     }
     Some(GraphRead {
@@ -612,6 +686,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
         open_do,
         phases,
         closed_planning,
+        plan_written,
         statuses,
         pr_state,
     })
@@ -1623,6 +1698,17 @@ pub(crate) fn run_with_release(
         } else {
             Vec::new()
         };
+        // Marker 2 (d-81c6da7e): the nodes where THIS session wrote the
+        // plan - the second finished marker, beside the closed set.
+        let planning_plan_written = if is_planning {
+            graph
+                .plan_written
+                .get(&sid.to_ascii_lowercase())
+                .map(|set| set.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         // x-2774 changes 1, 3 and 6: the session-shaped releases. The
         // harness's terminal state, a live newer peer on the same node, a
         // parked or never-started node, and a recorded merge the status lags
@@ -1677,7 +1763,7 @@ pub(crate) fn run_with_release(
                 release_note = Some(release_basis_prefix(&r.reason, hold_age_s, &r.detail));
             }
         }
-        let row = GcRow {
+        let mut row = GcRow {
             origin: e.origin.clone(),
             crowned: e.crown_level.is_some(),
             work,
@@ -1687,7 +1773,7 @@ pub(crate) fn run_with_release(
             branch_merged: None,
             planning,
             planning_closed,
-            planning_plan_written: Vec::new(),
+            planning_plan_written,
             planning_released: false,
             confirm_hold,
             session_terminal,
@@ -1696,7 +1782,35 @@ pub(crate) fn run_with_release(
             pid_gone,
             release_quiet: release_quiet_row,
         };
-        let (action, reason) = gc_decide(&row, grace_secs);
+        let (mut action, mut reason) = gc_decide(&row, grace_secs);
+        // d-81c6da7e: a release matched to the planning hold answers the
+        // marker question by ruling. Flip the row's released flag and
+        // decide again - the second verdict flows through the same gates,
+        // so only the planner's quiet clock stands between the row and its
+        // retirement.
+        if action == GcAction::Keep {
+            if let Some(KeepReason::PlanningUnclosed { node, status }) = &reason {
+                if release_note.is_none() {
+                    let hold_reason = KeepReason::PlanningUnclosed {
+                        node: node.clone(),
+                        status: status.clone(),
+                    }
+                    .as_str();
+                    let detail =
+                        format!("{node} {status}: no close and no plan written by this session");
+                    if let Some(r) = release_for_row {
+                        if r.matches(hold_reason, &detail) {
+                            row.planning_released = true;
+                            release_note =
+                                Some(release_basis_prefix(hold_reason, hold_age_s, &detail));
+                            let (next_action, next_reason) = gc_decide(&row, grace_secs);
+                            action = next_action;
+                            reason = next_reason;
+                        }
+                    }
+                }
+            }
+        }
         if action == GcAction::Keep {
             if let Some(r) = release_for_row {
                 if release_note.is_none() {
@@ -1760,8 +1874,27 @@ pub(crate) fn run_with_release(
                 Some(KeepReason::PrStateContradicts { node, detail }) => {
                     summary.kept_pr_contradicts.push((id, node, detail))
                 }
-                Some(KeepReason::PlanningUnclosed { node, .. }) => {
-                    summary.kept_planning_unclosed.push((id, node))
+                Some(KeepReason::PlanningUnclosed { node, status }) => {
+                    summary
+                        .kept_planning_unclosed
+                        .push((id.clone(), node.clone()));
+                    // d-81c6da7e: the unfinished planner is a held row, not
+                    // a silent keep - the hold ages, escalates past
+                    // agents.hold_escalate_after_s, and lifts by release.
+                    summary.holds.push(Hold {
+                        id,
+                        reason: KeepReason::PlanningUnclosed {
+                            node: node.clone(),
+                            status: status.clone(),
+                        }
+                        .as_str(),
+                        detail: format!(
+                            "{node} {status}: no close and no plan written by this session"
+                        ),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
                 }
                 // GraphUnreadable / OpenDoRow are decided above, before the
                 // policy ran; they cannot arrive here.
@@ -2083,7 +2216,21 @@ pub(crate) fn run_with_release(
                 // and it is never anonymous. The arm order mirrors the
                 // release precedence in gc_decide: terminal state, then live
                 // peer, then inactive status, then recorded merge.
-                if let Some(peer) = &probed.superseded_by_live_peer {
+                if let Some(assignments) = &probed.planning {
+                    if assignments
+                        .iter()
+                        .any(|(n, _)| probed.planning_closed.contains(n))
+                    {
+                        format!("planning finished on {node}: closed by this session")
+                    } else if assignments
+                        .iter()
+                        .any(|(n, _)| probed.planning_plan_written.contains(n))
+                    {
+                        format!("planning finished on {node}: plan written")
+                    } else {
+                        format!("planning finished on {node}: released")
+                    }
+                } else if let Some(peer) = &probed.superseded_by_live_peer {
                     format!("superseded on {node} by live peer {peer}")
                 } else if let Some(state) = &probed.session_terminal {
                     format!(
@@ -2102,8 +2249,16 @@ pub(crate) fn run_with_release(
         // that reads "quiet past grace" when the transcript was actually
         // inside grace misreports why the row went; the pid evidence is the
         // reason it went when it did.
+        // d-81c6da7e: a planner row's quiet clock is 1200 s, so the pid
+        // suffix names an early fire against the planner grace, not the
+        // default one.
+        let quiet_gate = if probed.planning.is_some() {
+            crate::gc::PLANNING_IDLE_RETIRE_SECS
+        } else {
+            grace_secs
+        };
         let mut basis =
-            if probed.pid_gone && probed.transcript_age_s.is_some_and(|age| age <= grace_secs) {
+            if probed.pid_gone && probed.transcript_age_s.is_some_and(|age| age <= quiet_gate) {
                 format!("{basis}; pid {} is gone", e.pid.unwrap_or(0))
             } else {
                 basis
