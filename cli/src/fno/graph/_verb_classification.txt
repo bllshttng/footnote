@@ -33,6 +33,8 @@ rank
 reprioritize
 defer
 undefer
+# retract: defer + deferred_kind=retracted stamped in one act
+retract
 # stamps contained_in + parent under the lock
 contain
 queue

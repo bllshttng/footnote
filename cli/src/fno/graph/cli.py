@@ -6720,6 +6720,35 @@ def cmd_defer(
     # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#cmd-defer-7012
 
 
+@cli.command(
+    "retract",
+    epilog="Reversal: `fno backlog undefer <id>...` (hidden; run its own --help).",
+)
+def cmd_retract(
+    task_ids: List[str] = typer.Argument(
+        ...,
+        help="Feature IDs (ab-XXXXXXXX). Multiple via space and/or comma: 'ab-X,ab-Y ab-Z'.",
+    ),
+    reason: str = typer.Option(
+        ...,
+        "--reason",
+        "-R",
+        help="The false premise this row was filed on (applies to all). Surfaced by `fno backlog undefer` and the think-inspect receipt.",
+    ),
+) -> None:
+    """Retract one or more backlog nodes: defer + stamp ``deferred_kind: retracted``.
+
+    One act for a row filed on a false premise. The deferral removes it from
+    every dispatch reader, and the retracted kind is the halt signal the
+    blueprint consolidation gate reads, so planning against it stops too.
+    Forwards to ``cmd_defer`` with the kind forced; batch atomicity and the
+    blank-reason refusal are inherited.
+    """
+    cmd_defer(task_ids=task_ids, reason=reason, kind="retracted")
+
+    # Rationale (3 lines): docs/architecture/graph-cli-rationale.md#cmd-retract
+
+
 def _expand_valid_ids(task_ids: list[str]) -> list[str]:
     """Expand one-or-many id args; refuse an empty set and non-node ids
     (the shared prologue of every batch-mutating verb)."""
