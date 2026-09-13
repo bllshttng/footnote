@@ -312,13 +312,6 @@ def test_explicit_route_rejects_empty_target(provider: str, model: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _zai(tier_models: dict[str, str] | None = None) -> SettingsModel:
-    providers: dict[str, object] = {"zai": {"tier_models": tier_models}}
-    if tier_models is None:
-        providers = {}
-    return _settings(providers=providers)
-
-
 def test_tier_map_layers_over_blanket_fill() -> None:
     # AC1-HP: undeclared tiers keep the spawn model; opus moves; haiku keeps
     # the provider's haiku_model (the folded-in default).
@@ -374,7 +367,7 @@ def test_haiku_model_only_composes_unchanged() -> None:
     # AC3-INV: a provider with haiku_model and no tier_models composes exactly
     # the pre-tier_models shape: spawn model on four keys, cheap haiku.
     route = mr.resolve_explicit_route(
-        "zai", "glm-5.3", settings=_zai(), env={"ZAI_API_KEY": "k"}
+        "zai", "glm-5.3", settings=_settings(), env={"ZAI_API_KEY": "k"}
     )
     assert route is not None
     model_keys = {k: route[k] for k in mr.MODEL_ENV_KEYS}
