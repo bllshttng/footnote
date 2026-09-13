@@ -355,8 +355,7 @@ def sweep(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the run summary as JSON."),
 ) -> None:
     """Retrospective read-only sweep: score a recorded corpus and emit events.
-    ``--judge N`` (blueprint only) is fno-agents' flag (node x-72fc), read out
-    of raw argv below rather than declared as a typer.Option.
+    --judge N is fno-agents' flag (x-72fc); read from raw argv, not typer.Option.
 
     States on stdout: ``ok`` (run_complete emitted), ``insufficient`` (<10
     attributable items, no run_complete), ``partial`` (a coverage gap is
@@ -365,9 +364,8 @@ def sweep(
     """
     judge_n = 0
     if "--judge" in ctx.args:
-        i = ctx.args.index("--judge")
         try:
-            judge_n = int(ctx.args[i + 1])
+            judge_n = int(ctx.args[ctx.args.index("--judge") + 1])
         except (IndexError, ValueError):
             raise typer.BadParameter("--judge needs an integer")
 
@@ -430,9 +428,8 @@ def sweep(
     )
     summary["cost_usd"] = 0.0  # sweep is a read-only fold
     if judge_n > 0 and skill == "blueprint":
-        # Judge the N newest (chronological) items before run_complete closes
-        # the run, so findings never read a false zero on judge dimensions.
-        # A judge fault must not lose the code run's record, hence the guard.
+        # Judge the newest N before run_complete closes the run (never loses
+        # the code record on a judge fault, hence the guard).
         try:
             for item in items[-judge_n:]:
                 _judge_one_item(item, run_id, events_paths)
@@ -472,8 +469,7 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
     return f"session {sid} node {nid}: {dimension}={verdict}"
 
 
-# the advisory five-question judge: grading lives in fno-agents
-# (crates/fno-agents/src/blueprint_judge.rs, x-9983's flag-registry port).
+# the advisory five-question judge (grading: crates/fno-agents/src/blueprint_judge.rs).
 
 
 def _judge_via_rust(argv: list[str]) -> Optional[dict]:
@@ -524,9 +520,8 @@ def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[
         typer.echo(f"  {dimension}: {verdict} - {reason[:160]}")
         _emit_finding(
             run_id=run_id, item=item, dimension=dimension, verdict=verdict,
-            # cost-untracked: the headless spawn exposes no spend at this layer,
-            # and 0.0 here means untracked (the sweep's convention), not free.
-            evidence=f"cost-untracked; {reason}", cost_usd=0.0, skill_ref=None, events_paths=events_paths,
+            evidence=f"cost-untracked; {reason}", cost_usd=0.0,  # untracked, not free
+            skill_ref=None, events_paths=events_paths,
         )
     return "judged", fails
 
@@ -539,7 +534,6 @@ def judge_cmd(ctx: typer.Context) -> None:
     """Advisory five-question judge: never blocks; a judge error is never a fail.
     Every flag is fno-agents' (node x-72fc); forwards raw argv, no typer.Option."""
     args = ctx.args
-    force = "--force" in args or "-F" in args
     if "--labels" in args:
         out = _judge_via_rust(args)
         if out is None:
@@ -555,7 +549,7 @@ def judge_cmd(ctx: typer.Context) -> None:
     plan = args[args.index("--plan") + 1] if "--plan" in args else None
     if plan is None:
         raise typer.BadParameter("give --plan or --labels")
-    if not force and loop_level("blueprint_judge") == "report":
+    if "--force" not in args and "-F" not in args and loop_level("blueprint_judge") == "report":
         typer.echo("skipped level=report")
         return
     plan_path = Path(plan)
