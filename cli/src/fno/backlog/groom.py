@@ -232,13 +232,15 @@ def _run_mechanical(age: int) -> dict[str, str]:
     three. Each leg is idempotent, so a retry after a released claim is safe.
     """
     from fno import _subprocess_util
+    from fno.backlog.single_flight import child_env
 
     results: dict[str, str] = {}
     for name, args in _mechanical_legs(age):
         cmd = [*_subprocess_util.fno_py_cmd(), "backlog", *args]
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=_LEG_TIMEOUT_S
+                cmd, capture_output=True, text=True, timeout=_LEG_TIMEOUT_S,
+                env=child_env() if name == "reconcile" else None,
             )
         except Exception as exc:  # noqa: BLE001 - a wedged leg must not abort the pass
             results[name] = f"failed: {type(exc).__name__}: {str(exc)[:120]}"

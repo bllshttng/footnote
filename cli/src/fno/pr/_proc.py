@@ -10,6 +10,8 @@ fields, parse JSON in one spot).
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence
@@ -61,23 +63,36 @@ def run(
     Raises :class:`ToolMissing` when the binary itself is absent (the bash
     ``command -v`` guard), so callers can preserve the script's missing-tool
     exit code rather than surfacing a Python traceback.
+
+    On a timeout the child's whole process group is killed before the
+    ``subprocess.TimeoutExpired`` re-raises: a plain child kill orphans the
+    helpers the child spawned in turn (x-626f).
     """
     global GH_CALLS
     if cmd and cmd[0] == "gh":
         GH_CALLS += 1
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             list(cmd),
             cwd=cwd,
             env=dict(env) if env is not None else None,
-            input=input_text,
+            stdin=subprocess.PIPE if input_text is not None else None,
             text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         # FileNotFoundError fires when argv[0] is not on PATH. (A missing cwd
         # also raises it, but callers pass an existing cwd.)
         raise ToolMissing(cmd[0]) from exc
-    return Result(returncode=proc.returncode, stdout=proc.stdout or "", stderr=proc.stderr or "")
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()
+        raise
+    return Result(returncode=proc.returncode, stdout=stdout or "", stderr=stderr or "")

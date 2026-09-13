@@ -52,6 +52,10 @@ class FakeRunner:
 
     def __call__(self, argv, *, cwd=None, timeout=None):
         self.calls.append(list(argv))
+        if argv and argv[0] == "env":
+            # env(1) prefix (x-626f): KEY=VAL pairs, then the real tool. The
+            # record keeps the full argv so tests can assert on the env.
+            argv = argv[2:]
         head = argv[0]
         if head == "gh":
             if "list" in argv:
@@ -115,11 +119,17 @@ def _bare(tmp_path, runner, *, autonomous=False, pr=7, parking_lot=None,
     return r
 
 
+def _tool_argv(argv: list[str]) -> list[str]:
+    """argv past the env(1) prefix the reconcile leg rides (x-626f)."""
+    return argv[2:] if argv[:1] == ["env"] else argv
+
+
 def _argv_sub(calls, sub):
     """First fno call argv whose fno subcommand == sub."""
     for c in calls:
-        if len(c) > 1 and c[0] != "gh" and c[1] == sub:
-            return c
+        t = _tool_argv(c)
+        if len(t) > 1 and t[0] != "gh" and t[1] == sub:
+            return t
     return None
 
 
@@ -251,8 +261,9 @@ def test_run_exits_nonzero_when_a_leg_fails(tmp_path, capsys, monkeypatch):
     class _FailReconcile(FakeRunner):
         def __call__(self, argv, *, cwd=None, timeout=None):
             self.calls.append(list(argv))
-            sub = argv[1] if len(argv) > 1 and argv[0] != "gh" else ""
-            if sub == "backlog" and "reconcile" in argv and "session" not in argv:
+            t = _tool_argv(argv)
+            sub = t[1] if len(t) > 1 and t[0] != "gh" else ""
+            if sub == "backlog" and "reconcile" in t and "session" not in t:
                 return Result(1, "corrupt graph", "")
             return FakeRunner.__call__(self, argv, cwd=cwd, timeout=timeout)
 
@@ -1085,3 +1096,17 @@ def test_lane_project_reads_worktree_local_override(tmp_path, monkeypatch):
 
     assert r.ctx.project == "fno"
     assert r.ctx.lane_project == "fno-lane-node"
+
+
+def test_reconcile_leg_is_parent_bound(tmp_path):
+    """x-626f: the reconcile leg rides the env(1) prefix with
+    FNO_DIE_WITH_PARENT, so a killed ritual cannot orphan the child to init."""
+    import os
+
+    runner = FakeRunner()
+    r = _bare(tmp_path, runner)
+    r.leg_stamp()
+    hits = [c for c in runner.calls if "reconcile" in c]
+    assert hits, "leg_stamp must run the reconcile leg"
+    assert hits[0][0] == "env"
+    assert f"FNO_DIE_WITH_PARENT={os.getpid()}" in hits[0]

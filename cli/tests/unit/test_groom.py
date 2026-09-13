@@ -824,3 +824,28 @@ def test_staleness_clamps_a_future_marker_to_zero(claims_root):
 )
 def test_due_fires_only_past_the_threshold(freshness, due):
     assert G.groom_is_due(freshness) is due
+
+
+def test_reconcile_leg_is_parent_bound(monkeypatch):
+    """x-626f: the mechanical reconcile leg spawns with FNO_DIE_WITH_PARENT,
+    so a killed groom cannot orphan the child to init. REAL_MECHANICAL dodges
+    the autouse _run_mechanical stub; the subprocess fake keeps every leg
+    in-process."""
+    import os
+
+    seen = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        seen.append((list(cmd), kwargs))
+        return _Proc()
+
+    monkeypatch.setattr(G.subprocess, "run", _fake_run)
+    REAL_MECHANICAL(30)
+    hits = [kw for cmd, kw in seen if "reconcile" in cmd]
+    assert hits, "the mechanical legs must include the reconcile leg"
+    assert hits[0].get("env", {}).get("FNO_DIE_WITH_PARENT") == str(os.getpid())

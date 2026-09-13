@@ -34,6 +34,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
@@ -1009,12 +1010,25 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
             return []
 
         from fno import _subprocess_util
+        from fno.backlog.single_flight import POST_MERGE_RECONCILE_TIMEOUT_S, child_env
 
-        res = run(
-            [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile",
-             "--pr-number", str(pr_number), "--repo", repo, "--json"],
-            cwd=cwd or os.getcwd(),
-        )
+        # Bounded and parent-bound (x-626f): the timeout group-kills a wedged
+        # child (see _proc.run), and child_env exits the child when WE die.
+        try:
+            res = run(
+                [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile",
+                 "--pr-number", str(pr_number), "--repo", repo, "--json"],
+                cwd=cwd or os.getcwd(),
+                timeout=POST_MERGE_RECONCILE_TIMEOUT_S,
+                env=child_env(),
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"fno do pr merge: reconcile for PR #{pr_number} timed out after "
+                f"{int(POST_MERGE_RECONCILE_TIMEOUT_S)}s; a later sweep closes the merged nodes",
+                file=sys.stderr,
+            )
+            return []
         if not res.ok:
             # A non-zero reconcile (gh query down, evidence refused) leaves the
             # node(s) OPEN - the exact gap this closes. run() returns rather
@@ -1480,6 +1494,27 @@ def _run_post_merge_followups(
         )
 
 
+def _merge_lock_early_release() -> Callable[[], None]:
+    """Release the lock ``_merge_lock`` acquired in this process. Re-derives
+    the same key/holder; ``release_claim`` is silent on a gone or
+    successor-held lock, so the early fire and the ``finally`` compose.
+    """
+
+    def _release() -> None:
+        try:
+            from fno.claims.core import release_claim
+            from fno.paths import resolve_canonical_repo_root
+
+            release_claim(
+                f"merge:{resolve_canonical_repo_root()}",
+                f"pr-merge:{os.getpid()}",
+            )
+        except Exception:  # noqa: BLE001 - pid-liveness frees it anyway
+            pass
+
+    return _release
+
+
 def _finish_confirmed_merge(
     pr_number: int,
     strategy: str,
@@ -1488,8 +1523,14 @@ def _finish_confirmed_merge(
     success_reason: str,
     *,
     prior_cleanup_failure: str = "",
+    release_lock: Optional[Callable[[], None]] = None,
 ) -> int:
     """Emit and finalize one confirmed merge, including remote cleanup truth."""
+    # The race the lock closes ended at the merged receipt; release before
+    # the unbounded post-merge work (x-626f). Holder-checked, so the
+    # finally-release in _merge_lock stays correct.
+    if release_lock is not None:
+        release_lock()
     cleanup_parts = [prior_cleanup_failure] if prior_cleanup_failure else []
     remote_cleanup = _post_merge_remote_delete(pr_number, repo, auto_merge)
     if remote_cleanup:
@@ -2156,6 +2197,7 @@ def run_merge(
             (state, refusal, covered_head, note),
             approved=posture_approved,
             auto_merge_source=posture_source,
+            release_lock=(_merge_lock_early_release() if lock == "acquired" else None),
         )
 
 
@@ -2265,6 +2307,7 @@ def _do_merge(
     gate_verdict: Optional[tuple] = None,
     approved: Optional[bool] = None,
     auto_merge_source: str = "",
+    release_lock: Optional[Callable[[], None]] = None,
 ) -> int:
     """Steps (3)-(4): authorize through the one owner, then run the effect.
 
@@ -2334,5 +2377,6 @@ def _do_merge(
             auto_merge,
             note or "merged immediately",
             prior_cleanup_failure=(f"failed: {cleanup_failure}" if cleanup_failure else ""),
+            release_lock=release_lock,
         )
     return _emit_authorized_outcome(pr_number, receipt, strategy)
