@@ -1997,23 +1997,6 @@ def run_merge(
         _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
 
-    # (2b) The flake probe. Rerun-recovery reads workflow-run history at a
-    # head - facts IMMUTABLE once the owner pins that head - so the read runs
-    # out here, before the serialized merge lock: network reads inside the
-    # lock stretch the window every queued merge waits on. The hold/journal
-    # decision itself stays in _do_merge, ahead of the coverage stamp.
-    flake = None
-    if auto_merge.require_checks_pass:
-        try:
-            from fno.pr._status import rerun_recovery
-
-            flake = rerun_recovery(pr_number, repo)
-        except Exception as exc:  # noqa: BLE001 - the probe must not wedge a merge
-            sys.stderr.write(
-                f"pr-merge: rerun-recovery probe unavailable ({exc}); "
-                "merging without the flake hold\n"
-            )
-
     # (2a-pre) Terminal exemption, the same one the authorized-merge owner
     # takes on a MERGED or CLOSED PR: this gate protects what WOULD merge, and
     # a merged or closed PR has no would-merge left. Without it, retrying
@@ -2091,6 +2074,24 @@ def run_merge(
             + note[len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :],
             file=sys.stderr,
         )
+
+    # (2b) The flake probe, pinned to covered_head. Rerun-recovery reads
+    # workflow-run history at the head the gate just pinned - facts immutable
+    # at that SHA - so the decision cannot describe one head while the owner
+    # authorizes another. Still outside the serialized lock: network reads
+    # inside the lock stretch the window every queued merge waits on. The
+    # hold/journal decision itself stays in _do_merge, ahead of the stamp.
+    flake = None
+    if auto_merge.require_checks_pass:
+        try:
+            from fno.pr._status import rerun_recovery
+
+            flake = rerun_recovery(pr_number, repo, sha=covered_head or None)
+        except Exception as exc:  # noqa: BLE001 - the probe must not wedge a merge
+            sys.stderr.write(
+                f"pr-merge: rerun-recovery probe unavailable ({exc}); "
+                "merging without the flake hold\n"
+            )
 
     # covered_head (from the gate) pins the merge so a racing push after the
     # coverage check cannot land an unreviewed head (x-0eaf TOCTOU). The

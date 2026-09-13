@@ -249,12 +249,18 @@ def _serve(row: dict, *, stale: bool) -> int:
     # A degraded-coverage note must survive the coalescing this module
     # exists to do: without this, the note reaches only the one session
     # whose live read produced the row and none of the serves that follow.
-    from fno.pr._status import coverage_recompute_note, failures_note, verdict_line
+    from fno.pr._status import (
+        coverage_recompute_note,
+        failures_note,
+        rerun_recovery_note,
+        verdict_line,
+    )
 
     sys.stderr.write(verdict_line(out) + "\n")
     sys.stdout.write(json.dumps(out) + "\n")
     coverage_recompute_note(out.get("review_coverage") or {})
     failures_note(out)
+    rerun_recovery_note(out)
     return code
 
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Collection, Optional, Sequence
 
@@ -232,8 +233,11 @@ def _recovery_from_run_rows(run_rows, attempts_of, failed_jobs_of) -> dict:
     """Pure over pre-computed rows (no gh), like `fno.pr._merge._overlaps`.
 
     A run recovers only when its LATEST attempt passed and an EARLIER attempt
-    carries a real failed conclusion; `failed` names that attempt's jobs.
+    carries a real failed conclusion. `recovered` reads the attempt row
+    alone; `failed` names that attempt's jobs and stays optional - a failed
+    attempt the jobs API cannot enumerate still proves recovery.
     """
+    recovered = False
     failed: list[str] = []
     for row in run_rows:
         if str(row.get("conclusion") or "") != "success":
@@ -254,8 +258,9 @@ def _recovery_from_run_rows(run_rows, attempts_of, failed_jobs_of) -> dict:
                 0 < n < latest
                 and str(attempt.get("conclusion") or "") in _RERUN_FAIL_CONCLUSIONS
             ):
+                recovered = True
                 failed.extend(failed_jobs_of(run_id, n))
-    return {"recovered": bool(failed), "failed": failed}
+    return {"recovered": recovered, "failed": failed}
 
 
 def rerun_recovery(pr_number, cwd: Optional[str] = None, sha: Optional[str] = None) -> dict:
@@ -308,6 +313,21 @@ def rerun_recovery(pr_number, cwd: Optional[str] = None, sha: Optional[str] = No
         return _recovery_from_run_rows(rows[:_RERUN_MAX_RUNS], _attempts, _failed_jobs)
     except Exception:  # noqa: BLE001 - fail open: a fact, never a second red
         return dict(_NO_RECOVERY)
+
+
+def rerun_recovery_note(payload: dict) -> None:
+    """Print the rerun-recovery warning from a payload, on stderr.
+
+    Payload-keyed so the cached path replays it: `_cache._serve` re-renders
+    every human note from the stored row, and a warning that reached only the
+    one session whose live read produced the row warns nobody else.
+    """
+    if payload.get("rerun_recovered"):
+        names = ", ".join(payload.get("recovered_failures") or ["unknown"])
+        sys.stderr.write(
+            "note: green on re-run; earlier failed attempt: " + names
+            + ". A passing re-run is a recovery, not proof the defect is gone.\n"
+        )
 
 
 def coverage_recompute_note(coverage: dict) -> None:
@@ -1080,6 +1100,12 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         if rerun is not None
         else {}
     )
+    # The ready conjunct answers "may this merge", so it must agree with the
+    # merge gate: a rerun-recovered green is held there, and a status that
+    # says ready: true beside a held merge is the disagreement that cost a
+    # session its merge once already.
+    if rerun is not None and rerun.get("recovered"):
+        blockers.append("rerun_recovered_green")
     payload = {
         "pr": pr,
         # The commit this verdict describes, so a caller can pin the
@@ -1192,12 +1218,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # note channel this function uses below.
     sys.stderr.write(verdict_line(payload) + "\n")
     sys.stdout.write(json.dumps(payload) + "\n")
-    if rerun is not None and rerun.get("recovered"):
-        sys.stderr.write(
-            "note: green on re-run; earlier failed attempt: "
-            + ", ".join(rerun.get("failed") or ["unknown"])
-            + ". A passing re-run is a recovery, not proof the defect is gone.\n"
-        )
+    rerun_recovery_note(payload)
     # Same discipline as the unresolved-findings note below: a number a human
     # would misread gets its instruction beside it, on stderr. An unsettled
     # entry has two distinct causes and they need distinct instructions: a

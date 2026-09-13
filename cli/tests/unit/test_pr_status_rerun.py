@@ -67,6 +67,13 @@ def test_cancelled_earlier_attempt_is_not_a_failed_attempt():
     assert _core(rows, attempts, {}) == {"recovered": False, "failed": []}
 
 
+def test_failed_attempt_with_no_job_names_still_recovers():
+    # The attempt row proves recovery on its own; job names are diagnostics.
+    rows = [_run("6", "success", 2)]
+    attempts = {"6": [_att(1, "startup_failure"), _att(2, "success")]}
+    assert _core(rows, attempts, {}) == {"recovered": True, "failed": []}
+
+
 # ---- wrapper fail-open ----
 
 
@@ -177,6 +184,9 @@ def test_recovered_green_payload_names_the_failed_checks(monkeypatch, capsys):
     assert out["recovered_failures"] == ["smoke-pytest (7)"]
     assert "green on re-run" in err
     assert "smoke-pytest (7)" in err
+    # The ready conjunct agrees with the merge gate: a held merge is not ready.
+    assert out["ready"] is False
+    assert "rerun_recovered_green" in out["ready_blockers"]
 
 
 def test_clean_green_payload_carries_the_probed_false(monkeypatch, capsys):
