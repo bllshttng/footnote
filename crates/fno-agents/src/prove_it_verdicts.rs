@@ -314,21 +314,43 @@ fn load_rulings() -> Vec<Value> {
 }
 
 /// The LIVE rulings: decisions whose `text` can still retire a FAIL. Mirrors
-/// `fno inbox decisions`' lifecycle derivation over the same index rows: a
-/// `decision_retracted` row retires its `target_decision_id` (newest
-/// `(ts, reason)` wins) and a decision whose `supersedes` names another
-/// retires that one (newest `(ts, decision_id)` wins). Without this, an
-/// overturned ruling would keep a FAIL hidden after the king changed their
-/// mind. ids compare casefolded, the Python reader's own rule.
+/// `fno inbox decisions`' read: the index stores event ENVELOPES
+/// (`{type, ts, data}`) that the Python reader flattens (data fields at the
+/// top plus `_event_type` and the envelope's `ts`) and rows that are neither
+/// a decision nor a retraction envelope are discarded as damaged. It then
+/// derives lifecycle: a `decision_retracted` row retires its
+/// `target_decision_id` (newest `(ts, reason)` wins) and a decision whose
+/// `supersedes` names another retires that one (newest `(ts, decision_id)`
+/// wins). Only LIVE rulings retire a FAIL, so an overturned ruling un-hides
+/// the FAIL again. ids compare casefolded, the Python reader's own rule.
 fn derive_live_rulings(text: &str) -> Vec<Value> {
-    let rows: Vec<Value> = text
-        .lines()
-        .filter_map(|line: &str| serde_json::from_str::<Value>(line).ok())
-        .collect();
+    let mut rows: Vec<Value> = Vec::new();
+    for line in text.lines() {
+        let Ok(env) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(data) = env.get("data").and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(etype) = env.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if etype != "operator_decision" && etype != "decision_retracted" {
+            continue;
+        }
+        let mut flat = Value::Object(data.clone());
+        let obj = flat.as_object_mut().expect("just built");
+        obj.insert("_event_type".to_string(), json!(etype));
+        obj.insert(
+            "ts".to_string(),
+            env.get("ts").cloned().unwrap_or(Value::Null),
+        );
+        rows.push(flat);
+    }
     let is_decision = |row: &Value| {
         matches!(
             row.get("_event_type").and_then(Value::as_str),
-            None | Some("") | Some("operator_decision")
+            Some("operator_decision")
         )
     };
     let rank = |row: &Value, tie: &str| {
@@ -715,40 +737,63 @@ mod tests {
         assert_eq!(ruling_for(&[], report_path), None);
     }
 
+    fn jsonl_of_envelopes(rows: &[(&str, &str, Value)]) -> String {
+        rows.iter()
+            .map(|(etype, ts, data)| json!({"type": etype, "ts": ts, "data": data}).to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn an_overturned_ruling_no_longer_retires_a_fail() {
         let report = "/plans/a.md.artifacts/REPORT.md";
-        let jsonl = |rows: &[Value]| -> String {
-            rows.iter()
-                .map(|r| r.to_string())
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        // The index stores ENVELOPES ({type, ts, data}); the fixture mirrors
+        // the real row shape, not a flattened convenience copy.
+        // the real row shape, not a flattened convenience copy.
         let live = json!({"decision_id": "d-1", "text": format!("ruled: {report} stays")});
-        // Live ruling retires; a superseding or retracting decision un-retires.
+        // A live ruling retires; an overturned one does not.
         assert_eq!(
-            ruling_for(&derive_live_rulings(&jsonl(&[live.clone()])), report),
+            ruling_for(
+                &derive_live_rulings(&jsonl_of_envelopes(&[(
+                    "operator_decision",
+                    "2026-09-10T00:00:00Z",
+                    live.clone()
+                )])),
+                report
+            ),
             Some("d-1".to_string())
         );
         let superseding =
             json!({"decision_id": "d-2", "supersedes": "D-1", "text": "changed my mind"});
-        let rulings = derive_live_rulings(&jsonl(&[live.clone(), superseding]));
+        let rulings = derive_live_rulings(&jsonl_of_envelopes(&[
+            ("operator_decision", "2026-09-10T00:00:00Z", live.clone()),
+            ("operator_decision", "2026-09-11T00:00:00Z", superseding),
+        ]));
         assert_eq!(
             ruling_for(&rulings, report),
             None,
             "superseded ruling is not live"
         );
-        let retraction = json!({
-            "_event_type": "decision_retracted",
-            "target_decision_id": "d-1",
-            "ts": "2026-09-11T00:00:00Z",
-            "reason": "wrong",
-        });
-        let rulings = derive_live_rulings(&jsonl(&[live, retraction]));
+        let retraction = json!({"target_decision_id": "d-1", "reason": "wrong"});
+        let rulings = derive_live_rulings(&jsonl_of_envelopes(&[
+            ("operator_decision", "2026-09-10T00:00:00Z", live.clone()),
+            ("decision_retracted", "2026-09-11T00:00:00Z", retraction),
+        ]));
         assert_eq!(
             ruling_for(&rulings, report),
             None,
             "retracted ruling is not live"
+        );
+        // A flat row with no envelope is a damaged line: discarded, and the
+        // decision beside it still retires.
+        let flat = json!({"decision_id": "d-9", "text": format!("{report} retired")}).to_string();
+        let envelopes = jsonl_of_envelopes(&[("operator_decision", "2026-09-10T00:00:00Z", live)]);
+        let envelopes = format!("{envelopes}\n{flat}");
+        let rulings = derive_live_rulings(&envelopes);
+        assert_eq!(
+            ruling_for(&rulings, report),
+            Some("d-1".to_string()),
+            "the flat row is skipped; the envelope row survives"
         );
     }
 
