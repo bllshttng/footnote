@@ -756,9 +756,9 @@ def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
 def _worktree_policy_pin_at_seam(args: "Sequence[str]") -> dict:
     """The worktree-policy pin for the Rust route, or ``{}``.
 
-    Auto mode execs the Rust client before ``cmd_spawn`` runs; the caller hands
-    the pin to :func:`route_to_rust`, which merges it into the environment
-    immediately before the exec so nothing that survives the call sees it.
+    The caller hands the pin to :func:`route_to_rust`, which merges it into
+    the environment immediately before the exec, so nothing that survives the
+    call sees it."""
     Only an explicit ``--cwd`` can name a foreign repo."""
 
     try:

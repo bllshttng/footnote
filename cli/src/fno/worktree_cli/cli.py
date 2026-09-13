@@ -600,8 +600,7 @@ def policy(
 
     Line 1 is the policy (never|harness-native|external); later lines carry
     `base=` (non-never), `source=`, and a `requested=/degraded=true` clause in
-    `ensure`'s vocabulary. Shares the SAME resolver `ensure` uses, so bash
-    callers get the identical verdict with no second precedence impl. A parse
+    `ensure`'s vocabulary. Shares the SAME resolver `ensure` uses. A parse
     error / out-of-enum value exits 1 with the reason on stderr.
     """
     from fno.worktree_paths import resolve_worktree_policy
