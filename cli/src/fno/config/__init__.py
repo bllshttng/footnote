@@ -3441,8 +3441,7 @@ class ModelProvider(BaseModel):
     api_key_env: str = ""
     api_key_file: Optional[str] = None
     # Cheaper model for the background (haiku) tier so judgment-light traffic
-    # runs cheap while opus/sonnet stay on the role model; unset keeps the role
-    # model there. The built-in zai provider defaults it to glm-4.7.
+    # runs cheap; unset keeps the role model there. Built-in zai: glm-4.7.
     haiku_model: Optional[str] = None
     # Model per Claude tier ({opus = "glm-5.3[1m]"}) so /model offers a real
     # choice; undeclared tiers keep the spawn model. Rules beside TIER_ALIASES.
@@ -3466,9 +3465,8 @@ class ModelRoutingBlock(BaseModel):
     """Role-based per-spawn model routing (config.model_routing in settings.yaml).
 
     Routes auxiliary coordination roles to a secondary provider (z.ai GLM by
-    default) at spawn time while production roles stay primary. Keys live in
-    env vars / .env files named per provider, never here. See
-    fno.agents.model_routing.
+    default) while production roles stay primary; provider keys live in env
+    vars / .env files, never here. See fno.agents.model_routing.
     """
 
     model_config = ConfigDict(extra="ignore")
