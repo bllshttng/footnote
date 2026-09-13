@@ -64,6 +64,11 @@ fi
 exit 0
 STUB
 chmod +x "$STUB_BIN/fno"
+# The state-path stub: init resolves its manifest through `fno-agents state
+# path` when a binary answers, so this pins the answer to the scenario space
+# dir run_init chooses and the reads below follow it.
+cp "$REPO_ROOT/tests/helpers/fno-agents-state-path-stub.sh" "$STUB_BIN/fno-agents"
+chmod +x "$STUB_BIN/fno-agents"
 
 make_repo() {
     local dir="$1"
@@ -100,6 +105,7 @@ run_init() {
               TARGET_SIZE STUB_STATUS STUB_PR STUB_MARKER STUB_ARCHIVED STUB_ARCHIVED_RC
         env TARGET_START=1 TARGET_SESSION_ID=review-gate-test-session \
             CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd" \
+            FNO_TEST_SPACE="$cwd/space" \
             PATH="$STUB_BIN:$PATH" "$@" bash "$INIT_SCRIPT" 2>&1
     )
     return $?
@@ -117,7 +123,7 @@ grep -q "REFUSED: node $NODE is in_review" <<<"$OUT" && pass "AC1-HP: refusal na
 grep -q "#999" <<<"$OUT" && pass "AC1-HP: refusal names open PR number" || fail "AC1-HP: PR number missing. Got: $OUT"
 grep -q "/pr check" <<<"$OUT" && pass "AC1-HP: refusal points at /pr check" || fail "AC1-HP: /pr check hint missing. Got: $OUT"
 grep -q "TARGET_ALLOW_IN_REVIEW=1" <<<"$OUT" && pass "AC1-HP: refusal documents override env" || fail "AC1-HP: override env hint missing. Got: $OUT"
-[[ ! -f "$T/.fno/target-state.md" ]] && pass "AC1-HP: no state file written" || fail "AC1-HP: target-state.md written despite refusal"
+[[ ! -f "$T/space/target-state.md" ]] && pass "AC1-HP: no state file written" || fail "AC1-HP: target-state.md written despite refusal"
 
 # --- AC2-HP: override forces a fresh run ------------------------------------
 echo ""
@@ -126,7 +132,7 @@ T="$TMP_BASE/ac2"; make_repo "$T"
 OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=in_review STUB_PR=999 TARGET_ALLOW_IN_REVIEW=1); EC=$?
 [[ $EC -eq 0 ]] && pass "AC2-HP: exit 0 with override" || fail "AC2-HP: expected exit 0, got $EC. Output: $OUT"
 ! grep -q "REFUSED" <<<"$OUT" && pass "AC2-HP: no refusal under override" || fail "AC2-HP: unexpected refusal under override. Got: $OUT"
-[[ -f "$T/.fno/target-state.md" ]] && pass "AC2-HP: state file written under override" || fail "AC2-HP: state file missing under override"
+[[ -f "$T/space/target-state.md" ]] && pass "AC2-HP: state file written under override" || fail "AC2-HP: state file missing under override"
 
 # --- AC3-ERR: free-text input is never guarded (no probe) -------------------
 echo ""
@@ -136,7 +142,7 @@ OUT=$(run_init "$T" TARGET_INPUT="fix the login bug" STUB_STATUS=in_review STUB_
 [[ $EC -eq 0 ]] && pass "AC3-ERR: exit 0 on free-text" || fail "AC3-ERR: expected exit 0, got $EC. Output: $OUT"
 ! grep -q "REFUSED" <<<"$OUT" && pass "AC3-ERR: no refusal on free-text" || fail "AC3-ERR: unexpected refusal on free-text. Got: $OUT"
 [[ ! -f "$MK" ]] && pass "AC3-ERR: guard never probed backlog get" || fail "AC3-ERR: guard probed status for a free-text input"
-[[ -f "$T/.fno/target-state.md" ]] && pass "AC3-ERR: state file written on free-text" || fail "AC3-ERR: state file missing on free-text"
+[[ -f "$T/space/target-state.md" ]] && pass "AC3-ERR: state file written on free-text" || fail "AC3-ERR: state file missing on free-text"
 
 # --- AC4-EDGE: non-in_review status proceeds -------------------------------
 echo ""
@@ -159,15 +165,15 @@ echo ""
 echo "--- AC5-FR: refuse then override bootstraps clean ---"
 T="$TMP_BASE/ac5"; make_repo "$T"
 run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=in_review STUB_PR=999 >/dev/null 2>&1
-[[ ! -f "$T/.fno/target-state.md" ]] && pass "AC5-FR: refusal left no state" || fail "AC5-FR: refusal left a state file"
+[[ ! -f "$T/space/target-state.md" ]] && pass "AC5-FR: refusal left no state" || fail "AC5-FR: refusal left a state file"
 OUT=$(run_init "$T" TARGET_INPUT="$NODE" STUB_STATUS=in_review STUB_PR=999 TARGET_ALLOW_IN_REVIEW=1); EC=$?
-[[ $EC -eq 0 && -f "$T/.fno/target-state.md" ]] && pass "AC5-FR: override re-run bootstraps clean" || fail "AC5-FR: override re-run failed (exit $EC). Output: $OUT"
+[[ $EC -eq 0 && -f "$T/space/target-state.md" ]] && pass "AC5-FR: override re-run bootstraps clean" || fail "AC5-FR: override re-run failed (exit $EC). Output: $OUT"
 
 # --- AC5-FR: resume (valid state present) never fires the guard ------------
 echo ""
 echo "--- AC5-FR: resume skips the guard entirely ---"
-T="$TMP_BASE/ac5b"; make_repo "$T"; mkdir -p "$T/.fno"; MK="$T/probed.marker"
-cat > "$T/.fno/target-state.md" <<'MANIFEST'
+T="$TMP_BASE/ac5b"; make_repo "$T"; mkdir -p "$T/space"; MK="$T/probed.marker"
+cat > "$T/space/target-state.md" <<'MANIFEST'
 ---
 session_id: preexisting
 input: "ab-12345678"

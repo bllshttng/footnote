@@ -179,11 +179,12 @@ esac
 ABIEOF
   chmod +x "$sbx/stub-bin/fno"
 
-  # A real `fno-agents` on the ambient PATH resolves STATE_FILE into the
-  # space regime, and every legacy-path assertion below goes dark while the
-  # manifest silently lands in ~/.fno/spaces/. The sandbox is the world
-  # here, so fno-agents is pinned absent.
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$sbx/stub-bin/fno-agents"
+  # State-path stub: init resolves its manifest, events and cancel sentinel
+  # into the sandbox space dir. Other verbs delegate to the real fno-agents
+  # when one is on the ambient PATH; init only calls `fno` (the stub above)
+  # for claims, so the fiction of this sandbox is unchanged.
+  mkdir -p "$sbx/space"
+  cp "$REPO_ROOT/tests/helpers/fno-agents-state-path-stub.sh" "$sbx/stub-bin/fno-agents"
   chmod +x "$sbx/stub-bin/fno-agents"
 
   echo "$sbx"
@@ -203,6 +204,7 @@ run_init() {
         TARGET_TRANSCRIPT_ID="${session_id}" \
         CLAUDE_PLUGIN_ROOT="$REPO_ROOT" \
         PATH="$sbx/stub-bin:$PATH" \
+        FNO_TEST_SPACE="$sbx/space" \
         CALL_LOG="$sbx/call-log" \
         "$@" \
         bash "$INIT_SCRIPT" 2>&1
@@ -226,7 +228,7 @@ SBX4="$(make_init_sandbox t4)"
 touch "$SBX4/call-log"
 
 # Write a delegated event that names this session as the child
-cat > "$SBX4/.fno/events.jsonl" <<EOF
+cat > "$SBX4/space/events.jsonl" <<EOF
 {"ts":"2026-06-05T12:00:00Z","type":"delegated","source":"target","data":{"node_id":"${INIT_NODE}","from_session":"20260605T110000Z-11111-ffffff","child_session":"${CHILD_HEX}","generation":2,"boundary":"blueprint-do"}}
 EOF
 
@@ -242,9 +244,9 @@ OUT4="$(
     TARGET_CLAIM_WAIT_INTERVAL=0
 )"
 
-check_file_absent "T4: .target-cancelled NOT created" "$SBX4/.fno/.target-cancelled"
+check_file_absent "T4: .target-cancelled NOT created" "$SBX4/space/.target-cancelled"
 # State file should have been written with claim fields (not just blocked)
-if grep -q "target_claim_key" "$SBX4/.fno/target-state.md" 2>/dev/null; then
+if grep -q "target_claim_key" "$SBX4/space/target-state.md" 2>/dev/null; then
   echo "PASS: T4: target_claim_key written on eventual success"
   pass=$((pass+1))
 else
@@ -265,7 +267,7 @@ CHILD_HEX5="ccdd5678"
 SBX5="$(make_init_sandbox t5)"
 touch "$SBX5/call-log"
 
-cat > "$SBX5/.fno/events.jsonl" <<EOF
+cat > "$SBX5/space/events.jsonl" <<EOF
 {"ts":"2026-06-05T12:00:00Z","type":"delegated","source":"target","data":{"node_id":"${INIT_NODE5}","from_session":"20260605T110000Z-11111-ffffff","child_session":"${CHILD_HEX5}","generation":2,"boundary":"blueprint-do"}}
 EOF
 
@@ -280,9 +282,9 @@ OUT5="$(
     TARGET_CLAIM_WAIT_INTERVAL=0
 )"
 
-check_file_absent "T5: .target-cancelled NOT created" "$SBX5/.fno/.target-cancelled"
+check_file_absent "T5: .target-cancelled NOT created" "$SBX5/space/.target-cancelled"
 check_contains "T5: RESULT: BLOCKED printed" "RESULT: BLOCKED" "$OUT5"
-if grep -q "handoff_claim_wait_timeout" "$SBX5/.fno/target-state.md" 2>/dev/null; then
+if grep -q "handoff_claim_wait_timeout" "$SBX5/space/target-state.md" 2>/dev/null; then
   echo "PASS: T5: blocked_reason=handoff_claim_wait_timeout"
   pass=$((pass+1))
 else
@@ -302,7 +304,7 @@ SBX6="$(make_init_sandbox t6)"
 touch "$SBX6/call-log"
 
 # No events.jsonl (empty)
-touch "$SBX6/.fno/events.jsonl"
+touch "$SBX6/space/events.jsonl"
 
 # acquire always fails rc=1
 ALWAYS_FAIL6="$SBX6/always-fail"
@@ -313,8 +315,8 @@ OUT6="$(
     ACQUIRE_RC_FILE="$ALWAYS_FAIL6"
 )"
 
-check_file_exists "T6: .target-cancelled created (true duplicate)" "$SBX6/.fno/.target-cancelled"
-if grep -q "claim_held_by_other" "$SBX6/.fno/target-state.md" 2>/dev/null; then
+check_file_exists "T6: .target-cancelled created (true duplicate)" "$SBX6/space/.target-cancelled"
+if grep -q "claim_held_by_other" "$SBX6/space/target-state.md" 2>/dev/null; then
   echo "PASS: T6: blocked_reason=claim_held_by_other"
   pass=$((pass+1))
 else

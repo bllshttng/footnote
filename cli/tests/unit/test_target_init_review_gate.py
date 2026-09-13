@@ -18,6 +18,7 @@ import typer
 from typer.testing import CliRunner
 
 from fno.config import ReviewerDescriptor, load_settings
+from fno.paths import target_state_path
 from fno.review_capability import (
     SessionCapability,
     detect_session,
@@ -560,7 +561,11 @@ def test_init_command_writes_no_state_when_it_refuses(
     )
 
     assert r.exit_code == 2
+    # Absence at BOTH resolutions: the refusal runs before the script, so if it
+    # regressed, the script would write the space path and a legacy-only check
+    # would still pass (conftest pins FNO_SPACES_DIR for this process).
     assert not (repo / ".fno" / "target-state.md").exists()
+    assert not target_state_path(repo).exists()
 
 
 def test_codex_can_satisfy_a_subagent_dispatch_gate():

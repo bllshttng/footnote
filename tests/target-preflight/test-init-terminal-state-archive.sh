@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP_BASE"' EXIT
 make_repo() {
     local dir="$1"
     local branch="$2"
-    mkdir -p "$dir"
+    mkdir -p "$dir/bin" "$dir/space"
     (
         cd "$dir"
         git init -q -b "$branch" 2>/dev/null || { git init -q; git checkout -q -b "$branch"; }
@@ -36,15 +36,19 @@ make_repo() {
         echo "# test" > README.md
         git add README.md
         git commit -q -m "init"
+        # State-path stub: planted manifests and archives live in the scenario
+        # space dir, where init reads and writes them.
+        cp "$REPO_ROOT/tests/helpers/fno-agents-state-path-stub.sh" bin/fno-agents
+        chmod 755 bin/fno-agents
     )
 }
 
-# Plant a state file with the given status in $dir/.fno/target-state.md.
+# Plant a state file with the given status in $dir/space/target-state.md.
 plant_state() {
     local dir="$1"
     local status="$2"
-    mkdir -p "$dir/.fno"
-    cat > "$dir/.fno/target-state.md" <<EOF
+    mkdir -p "$dir/space"
+    cat > "$dir/space/target-state.md" <<EOF
 ---
 status: $status
 session_id: planted-fixture-20260522
@@ -66,7 +70,7 @@ EOF
 plant_claim_state() {
     local dir="$1"
     local key="${2:-}"
-    mkdir -p "$dir/.fno"
+    mkdir -p "$dir/space"
     {
         echo "---"
         echo "session_id: planted-claim-fixture-20260626"
@@ -78,7 +82,7 @@ plant_claim_state() {
         echo "---"
         echo ""
         echo "# Planted immutable manifest (claim-based fixture)"
-    } > "$dir/.fno/target-state.md"
+    } > "$dir/space/target-state.md"
 }
 
 # Stub `fno` on PATH so the reaper's `fno agents claim status <key> --json` is
@@ -108,7 +112,9 @@ run_init() {
     (
         cd "$cwd"
         unset TARGET_START TARGET_INPUT TARGET_PLAN_PATH TARGET_LOCATION_OK TARGET_SIZE
-        env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" "$@" bash "$INIT_SCRIPT" 2>&1
+        env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" FNO_TARGET_INIT_GATED=1 \
+            PATH="$cwd/bin:$PATH" FNO_TEST_SPACE="$cwd/space" \
+            "$@" bash "$INIT_SCRIPT" 2>&1
     )
     return $?
 }
@@ -137,13 +143,13 @@ fi
 # not the planted COMPLETE. Verify by reading the status line.
 # Fresh init must have run: the immutable manifest carries no status field, so
 # verify freshness by the planted orphan content being gone, not a status line.
-if ! grep -q "planted-fixture-20260522" "$T/.fno/target-state.md" 2>/dev/null; then
+if ! grep -q "planted-fixture-20260522" "$T/space/target-state.md" 2>/dev/null; then
     pass "AC1: live manifest is fresh (planted orphan replaced)"
 else
     fail "AC1: live manifest still the planted orphan (fresh init did not run)"
 fi
 # Archive file should exist with the timestamped name pattern.
-if ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
+if ls "$T/space/"target-state.terminal.*.md >/dev/null 2>&1; then
     pass "AC1: archive file present"
 else
     fail "AC1: no target-state.terminal.*.md archive found"
@@ -167,7 +173,7 @@ if grep -q "prior session (status BLOCKED)" <<<"$OUT"; then
 else
     fail "AC2: archive announcement missing. Got: $OUT"
 fi
-if ! grep -q "planted-fixture-20260522" "$T/.fno/target-state.md" 2>/dev/null; then
+if ! grep -q "planted-fixture-20260522" "$T/space/target-state.md" 2>/dev/null; then
     pass "AC2: live manifest is fresh after BLOCKED archive"
 else
     fail "AC2: live manifest still the planted orphan after BLOCKED archive"
@@ -199,7 +205,7 @@ T="$TMP_BASE/ac4-in-progress"
 make_repo "$T" "feature/x"
 plant_state "$T" "IN_PROGRESS"
 # Save the planted session_id so we can verify it survives.
-PLANTED_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
+PLANTED_SID=$(grep "^session_id:" "$T/space/target-state.md" | head -1)
 OUT=$(run_init "$T" 2>&1)
 EC=$?
 if [[ $EC -eq 0 ]]; then
@@ -208,14 +214,14 @@ else
     fail "AC4: expected exit 0, got $EC. Output: $OUT"
 fi
 # The script should NOT have archived; the original session_id should be intact.
-LIVE_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
+LIVE_SID=$(grep "^session_id:" "$T/space/target-state.md" | head -1)
 if [[ "$LIVE_SID" == "$PLANTED_SID" ]]; then
     pass "AC4: original session_id preserved (no clobber)"
 else
     fail "AC4: session_id changed. Planted: $PLANTED_SID, Live: $LIVE_SID"
 fi
 # No archive file should exist for an IN_PROGRESS preserve.
-if ! ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
+if ! ls "$T/space/"target-state.terminal.*.md >/dev/null 2>&1; then
     pass "AC4: no archive file (correctly preserved IN_PROGRESS)"
 else
     fail "AC4: archive file created despite IN_PROGRESS preserve"
@@ -228,7 +234,7 @@ T="$TMP_BASE/ac5-name"
 make_repo "$T" "feature/x"
 plant_state "$T" "COMPLETE"
 OUT=$(run_init "$T" 2>&1)
-ARCHIVE=$(ls "$T/.fno/"target-state.terminal.*.md 2>/dev/null | head -1)
+ARCHIVE=$(ls "$T/space/"target-state.terminal.*.md 2>/dev/null | head -1)
 if [[ -n "$ARCHIVE" ]]; then
     # Filename pattern: target-state.terminal.YYYYMMDDTHHMMSSZ.md
     if basename "$ARCHIVE" | grep -qE '^target-state\.terminal\.[0-9]{8}T[0-9]{6}Z\.md$'; then
@@ -255,7 +261,7 @@ STUB6="$TMP_BASE/stub6"; make_fno_stub "$STUB6"
 # Claim key without "live" -> stub reports state free -> orphan -> reap.
 # owner_pid is the always-dead 999999; it must NOT be what drives the reap.
 plant_claim_state "$T" "node:gone-test"
-OUT=$(run_init "$T" PATH="$STUB6:$PATH" 2>&1)
+OUT=$(run_init "$T" PATH="$STUB6:$T/bin:$PATH" 2>&1)
 EC=$?
 if [[ $EC -eq 0 ]]; then
     pass "AC6: init succeeds when prior claim is not live"
@@ -267,12 +273,12 @@ if grep -q "dead claim node:gone-test (free)" <<<"$OUT"; then
 else
     fail "AC6: dead-claim archive announcement missing. Got: $OUT"
 fi
-if ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
+if ls "$T/space/"target-state.terminal.*.md >/dev/null 2>&1; then
     pass "AC6: archive file present"
 else
     fail "AC6: no archive found; orphan manifest survived (the original bug)"
 fi
-if ! grep -q "planted-claim-fixture" "$T/.fno/target-state.md" 2>/dev/null; then
+if ! grep -q "planted-claim-fixture" "$T/space/target-state.md" 2>/dev/null; then
     pass "AC6: live manifest is fresh (planted orphan replaced)"
 else
     fail "AC6: live manifest still the planted orphan"
@@ -288,21 +294,21 @@ STUB7="$TMP_BASE/stub7"; make_fno_stub "$STUB7"
 # even though owner_pid 999999 is dead. This is the codex P1 guarantee: never
 # clobber a live session's manifest off a transient owner_pid.
 plant_claim_state "$T" "node:live-sess"
-PLANTED_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
-OUT=$(run_init "$T" PATH="$STUB7:$PATH" 2>&1)
+PLANTED_SID=$(grep "^session_id:" "$T/space/target-state.md" | head -1)
+OUT=$(run_init "$T" PATH="$STUB7:$T/bin:$PATH" 2>&1)
 EC=$?
 if [[ $EC -eq 0 ]]; then
     pass "AC7: init succeeds with a live claim"
 else
     fail "AC7: expected exit 0, got $EC. Output: $OUT"
 fi
-LIVE_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
+LIVE_SID=$(grep "^session_id:" "$T/space/target-state.md" | head -1)
 if [[ "$LIVE_SID" == "$PLANTED_SID" ]]; then
     pass "AC7: live-claim manifest preserved (no clobber, dead owner_pid ignored)"
 else
     fail "AC7: live-claim manifest changed. Planted: $PLANTED_SID, Live: $LIVE_SID"
 fi
-if ! ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
+if ! ls "$T/space/"target-state.terminal.*.md >/dev/null 2>&1; then
     pass "AC7: no archive file (correctly preserved live claim)"
 else
     fail "AC7: archived a live-claim manifest"
@@ -317,21 +323,21 @@ STUB8="$TMP_BASE/stub8"; make_fno_stub "$STUB8"
 # No target_claim_key at all + dead owner_pid 999999. The reaper must NOT reap
 # on the transient owner_pid; a no-claim manifest is preserved.
 plant_claim_state "$T" ""
-PLANTED_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
-OUT=$(run_init "$T" PATH="$STUB8:$PATH" 2>&1)
+PLANTED_SID=$(grep "^session_id:" "$T/space/target-state.md" | head -1)
+OUT=$(run_init "$T" PATH="$STUB8:$T/bin:$PATH" 2>&1)
 EC=$?
 if [[ $EC -eq 0 ]]; then
     pass "AC8: init succeeds with a no-claim manifest"
 else
     fail "AC8: expected exit 0, got $EC. Output: $OUT"
 fi
-LIVE_SID=$(grep "^session_id:" "$T/.fno/target-state.md" | head -1)
+LIVE_SID=$(grep "^session_id:" "$T/space/target-state.md" | head -1)
 if [[ "$LIVE_SID" == "$PLANTED_SID" ]]; then
     pass "AC8: no-claim manifest preserved (transient owner_pid not used)"
 else
     fail "AC8: no-claim manifest changed. Planted: $PLANTED_SID, Live: $LIVE_SID"
 fi
-if ! ls "$T/.fno/"target-state.terminal.*.md >/dev/null 2>&1; then
+if ! ls "$T/space/"target-state.terminal.*.md >/dev/null 2>&1; then
     pass "AC8: no archive file (correctly preserved no-claim manifest)"
 else
     fail "AC8: archived a no-claim manifest off a transient owner_pid"

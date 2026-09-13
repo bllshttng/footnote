@@ -61,6 +61,10 @@ make_repo() {
   printf '# isolated\n' > "${_dir}/.fno/config.toml"
   mkdir -p "${_dir}/home/.fno"
   printf '# isolated global\n' > "${_dir}/home/.fno/config.toml"
+  # State-path stub: pins init's manifest location to the scenario space dir.
+  mkdir -p "${_dir}/bin" "${_dir}/space"
+  cp "${SCRIPT_DIR}/../../tests/helpers/fno-agents-state-path-stub.sh" "${_dir}/bin/fno-agents"
+  chmod 755 "${_dir}/bin/fno-agents"
 }
 
 # ── (a) TARGET_SESSION_ID preset is written verbatim ─────────────────
@@ -71,6 +75,8 @@ _ALL_TMPS+=("$TMP_A")
 
 (cd "$TMP_A" && \
   HOME="${TMP_A}/home" \
+  PATH="${TMP_A}/bin:$PATH" \
+  FNO_TEST_SPACE="${TMP_A}/space" \
   TARGET_START=1 \
   TARGET_INPUT="test-session-id-preset" \
   TARGET_SESSION_ID="preset-key-123" \
@@ -79,7 +85,7 @@ _ALL_TMPS+=("$TMP_A")
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(a): init exited non-zero"
 
-STATE_A="${TMP_A}/.fno/target-state.md"
+STATE_A="${TMP_A}/space/target-state.md"
 [[ -f "$STATE_A" ]] || fail "(a): target-state.md was not created"
 
 # Read the session_id field
@@ -120,6 +126,8 @@ _ALL_TMPS+=("$TMP_B")
 
 (cd "$TMP_B" && \
   HOME="${TMP_B}/home" \
+  PATH="${TMP_B}/bin:$PATH" \
+  FNO_TEST_SPACE="${TMP_B}/space" \
   TARGET_START=1 \
   TARGET_INPUT="test-session-id-generated" \
   CODEX_THREAD_ID= \
@@ -128,7 +136,7 @@ _ALL_TMPS+=("$TMP_B")
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(b): init exited non-zero"
 
-STATE_B="${TMP_B}/.fno/target-state.md"
+STATE_B="${TMP_B}/space/target-state.md"
 [[ -f "$STATE_B" ]] || fail "(b): target-state.md was not created"
 
 SESSION_ID_B=$(grep '^session_id:' "$STATE_B" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
@@ -175,6 +183,8 @@ _ALL_TMPS+=("$TMP_C")
 STDERR_C="${TMP_C}/init-stderr.txt"
 (cd "$TMP_C" && \
   HOME="${TMP_C}/home" \
+  PATH="${TMP_C}/bin:$PATH" \
+  FNO_TEST_SPACE="${TMP_C}/space" \
   TARGET_START=1 \
   TARGET_INPUT="test-heredoc-no-subst" \
   CODEX_THREAD_ID= \
@@ -183,7 +193,7 @@ STDERR_C="${TMP_C}/init-stderr.txt"
   bash "$INIT" >/dev/null 2>"$STDERR_C") \
   || fail "(c): init exited non-zero"
 
-STATE_C="${TMP_C}/.fno/target-state.md"
+STATE_C="${TMP_C}/space/target-state.md"
 [[ -f "$STATE_C" ]] || fail "(c): target-state.md was not created"
 
 # The literal comment (backticks intact) must be present verbatim.
@@ -215,6 +225,8 @@ _orphan_init() {  # $1 = failure label, $2 = TARGET_INPUT
     cd "$TMP_D" || exit 99
     {
       HOME="${TMP_D}/home" \
+  PATH="${TMP_D}/bin:$PATH" \
+  FNO_TEST_SPACE="${TMP_D}/space" \
         TARGET_START=1 \
         TARGET_INPUT="$_input" \
         CODEX_THREAD_ID="019f48e4-codex-thread" \
@@ -238,7 +250,7 @@ _ALL_TMPS+=("$TMP_D")
 
 _orphan_init "(d)" "test-codex-thread-id"
 
-STATE_D="${TMP_D}/.fno/target-state.md"
+STATE_D="${TMP_D}/space/target-state.md"
 [[ -f "$STATE_D" ]] || fail "(d): target-state.md was not created"
 
 SESSION_ID_D=$(grep '^session_id:' "$STATE_D" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
@@ -263,25 +275,25 @@ pass "(d): Codex thread remains owner metadata while target session id is unique
 
 # A successful finalize event is the explicit run boundary for claimless
 # free-text targets. Re-enter the SAME worktree/thread to prove the prior
-# manifest rotates before the next run id is minted.
-mkdir -p "${TMP_D}/.fno"
+# manifest rotates before the next run id is minted. The finalize probe reads
+# the event log from the resolved space dir (SPACE_DIR under the stub).
 printf '%s\n' \
   "{\"type\":\"session_finalized\",\"data\":{\"session_id\":\"${SESSION_ID_D}\",\"termination_reason\":\"NoWork\",\"ship\":false}}" \
-  > "${TMP_D}/.fno/events.jsonl"
+  > "${TMP_D}/space/events.jsonl"
 _orphan_init "(d)" "test-codex-thread-id-second-run"
-SESSION_ID_E=$(grep '^session_id:' "${TMP_D}/.fno/target-state.md" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
+SESSION_ID_E=$(grep '^session_id:' "${TMP_D}/space/target-state.md" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
 [[ "$SESSION_ID_E" != "$SESSION_ID_D" ]] \
   || fail "(d): two completed targets in one worktree/thread reused session_id '${SESSION_ID_D}'"
-compgen -G "${TMP_D}/.fno/target-state.terminal.*.md" >/dev/null \
+compgen -G "${TMP_D}/space/target-state.terminal.*.md" >/dev/null \
   || fail "(d): completed claimless target manifest was not archived"
 pass "(d): completed targets in one worktree/thread receive distinct session ids"
 
 # A shipped terminal is also a run boundary (the normal delivery path).
 printf '%s\n' \
   "{\"type\":\"session_finalized\",\"data\":{\"session_id\":\"${SESSION_ID_E}\",\"termination_reason\":\"DonePRGreen\",\"ship\":true}}" \
-  >> "${TMP_D}/.fno/events.jsonl"
+  >> "${TMP_D}/space/events.jsonl"
 _orphan_init "(d)" "test-codex-thread-id-third-run"
-SESSION_ID_F=$(grep '^session_id:' "${TMP_D}/.fno/target-state.md" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
+SESSION_ID_F=$(grep '^session_id:' "${TMP_D}/space/target-state.md" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
 [[ "$SESSION_ID_F" != "$SESSION_ID_E" ]] \
   || fail "(d): shipped target reused session_id '${SESSION_ID_E}'"
 pass "(d): NoWork and shipped terminal boundaries both rotate claimless runs"
