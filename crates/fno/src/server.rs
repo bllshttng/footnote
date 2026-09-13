@@ -9578,13 +9578,13 @@ impl Core {
             })
             .collect();
         // Synthetic "mission squad" headers: one per active mission, done/total
-        // and the rotation `(i of n)` baked into the name so no proto bump is
-        // needed. Renders even with zero tagged workers - "nothing running"
-        // must stay visible, never vanish (empty-but-active). Identity +
-        // naming: mission_squad.
-        squads.extend(crate::mission_squad::headers(&self.missions.missions));
+        // and the rotation `(i of n)` baked into the name. They ride their own
+        // lane, never `squads`, because a mission is a progress header the
+        // client draws as a band. Renders even with zero tagged workers -
+        // "nothing running" must stay visible. Identity: mission_squad.
         ServerMsg::Layout {
             squads,
+            missions: crate::mission_squad::headers(&self.missions.missions),
             active_squad: view.0,
             panes: rects.to_vec(),
             focus,
@@ -20801,12 +20801,12 @@ mod tests {
         ];
         let sid = crate::mission_squad::mission_sid("x-aaaa");
         let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
-        let squads = match &msg {
-            ServerMsg::Layout { squads, .. } => squads,
+        let missions = match &msg {
+            ServerMsg::Layout { missions, .. } => missions,
             _ => unreachable!(),
         };
-        let header = squads.iter().find(|s| s.id == sid).expect("mission header");
-        assert_eq!(header.name, "mux-squad  1/2");
+        assert_eq!(missions[0].id, sid);
+        assert_eq!(missions[0].name, "mux-squad  1/2");
         let rows = core.agent_rows();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.squad != Some(sid)));
@@ -20827,11 +20827,11 @@ mod tests {
             node_to_epic: HashMap::new(),
         };
         let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
-        let squads = match &msg {
-            ServerMsg::Layout { squads, .. } => squads,
+        let missions = match &msg {
+            ServerMsg::Layout { missions, .. } => missions,
             _ => unreachable!(),
         };
-        assert!(squads
+        assert!(missions
             .iter()
             .any(|s| s.id == crate::mission_squad::mission_sid("x-aaaa")));
     }
