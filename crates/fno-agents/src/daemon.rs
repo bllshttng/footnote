@@ -2193,6 +2193,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // Machine watch (x-d6ad): the arm owns its cadence, gate and memory.
     let machine_watch = crate::machine_watch::Arm::default();
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
+    // Provider-cap actor (x-7e05): measures every tick, acts only when armed.
+    let provider_cap = crate::provider_cap_verbs::Arm::default();
     // Retirement-sweep cadence (x-d354): the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
@@ -2364,6 +2366,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // The machine gets an arm (x-d6ad): bands the box, escalates, gates nothing.
                 crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
                 crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
+                crate::provider_cap_verbs::maybe_tick(
+                    &provider_cap,
+                    ctx.home.clone(),
+                    ctx.opts.agents_config_cwd.clone(),
+                );
                 // Serve-only liveness tick: the served pair is the sweep's
                 // measurement, refreshed every SERVED_LIVENESS_CADENCE with
                 // no lifecycle write. Off-loop behind a one-in-flight gate,

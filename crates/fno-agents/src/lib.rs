@@ -88,6 +88,8 @@ pub mod component_update;
 pub mod court_fold;
 pub mod cursor_agent;
 pub mod daemon;
+pub mod provider_cap;
+pub mod provider_cap_verbs;
 pub mod delivery_completion;
 pub mod digest;
 pub mod disposition_gate;
