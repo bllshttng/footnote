@@ -317,6 +317,12 @@ def enabled(monkeypatch, tmp_path):
         "fno.pr._reviews.publish_coverage_status",
         lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
     )
+    # Same hermeticity for the flake hold: no merge case here is about rerun
+    # recovery, so the probe answers never-recovered (tests about it override).
+    monkeypatch.setattr(
+        "fno.pr._status.rerun_recovery",
+        lambda pr, cwd=None: {"recovered": False, "failed": []},
+    )
     # The graph_json hermeticity pin this fixture used to carry is closed at
     # the reader now: the autouse _hermetic_merge_hold_gate fixture in
     # tests/conftest.py defaults hold_for_pr to no hold for every test.
@@ -442,6 +448,65 @@ def test_fence_crash_failopen_emits_gate_escape(enabled, monkeypatch, capsys, tm
     assert args[0] == "other"
     assert "incarnation-fence" in (kwargs.get("detail") or "")
     assert kwargs.get("pr") == 42
+
+
+# ---- rerun-recovery flake hold ----
+
+
+def _flake_recovered(monkeypatch, failed=None):
+    monkeypatch.setattr(
+        "fno.pr._status.rerun_recovery",
+        lambda pr, cwd=None: {"recovered": True, "failed": failed or ["smoke-pytest (7)"]},
+    )
+
+
+def test_rerun_recovered_green_is_held_without_the_flag(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    monkeypatch.setattr(_merge, "run", FakeRun(toplevel=str(tmp_path)))
+    monkeypatch.setattr(
+        _merge,
+        "_pr_head_ref_and_oid",
+        lambda pr, repo, runner=None: ("feature/x", "abc123", "OPEN"),
+    )
+    _owner_answers(monkeypatch, "authorized")
+    _flake_recovered(monkeypatch)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "held"
+    assert "rerun-recovered green" in obj["reason"]
+    assert "smoke-pytest (7)" in obj["reason"]
+    assert "--accept-flake" in obj["reason"]
+
+
+def test_accept_flake_merges_and_journals_the_acceptance(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge,
+        "_pr_head_ref_and_oid",
+        lambda pr, repo, runner=None: ("feature/x", "abc123", "OPEN"),
+    )
+    _capture_posture(monkeypatch, outcome="merged")
+    _flake_recovered(monkeypatch)
+    events = []
+    monkeypatch.setattr("fno.events.append_event", lambda ev: events.append(ev))
+
+    assert _merge.run_merge(["42", "--accept-flake"], cwd=str(tmp_path)) == 0
+    cap = capsys.readouterr()
+    receipt = json.loads(cap.out.strip().splitlines()[-1])
+    assert receipt["outcome"] == "merged"
+    assert "flake override accepted" in cap.err
+    flake_events = [e for e in events if e.get("type") == "merge_flake_accepted"]
+    assert len(flake_events) == 1
+    data = flake_events[0]["data"]
+    assert data["pr"] == 42
+    assert data["head"] == "abc123"
+    assert data["failed_checks"] == ["smoke-pytest (7)"]
 
 
 def _write_manifest(tmp_path, body: str) -> None:

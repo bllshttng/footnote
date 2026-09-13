@@ -1825,12 +1825,15 @@ def run_merge(
     """
     repo = cwd or os.getcwd()
     pr_raw = ""
+    accept_flake = False
     for arg in argv:
         # A legacy ``--invoker=...`` is silently accepted and ignored (x-04ab
         # removed the flag + its gate). Never break a merge command on a stray
         # flag an un-updated caller still passes.
         if arg.startswith("--invoker="):
             continue
+        elif arg == "--accept-flake":
+            accept_flake = True
         elif arg[:1].isdigit():
             pr_raw = arg
         else:
@@ -2198,6 +2201,7 @@ def run_merge(
             auto_merge_source=posture_source,
             release_lock=release_now,
             timeout_s=timeout_s,
+            accept_flake=accept_flake,
         )
 
 
@@ -2310,6 +2314,7 @@ def _do_merge(
     auto_merge_source: str = "",
     release_lock: Optional[Callable[[], None]] = None,
     timeout_s: float = 300.0,
+    accept_flake: bool = False,
 ) -> int:
     """Steps (3)-(4): authorize through the one owner, then run the effect.
 
@@ -2334,6 +2339,46 @@ def _do_merge(
     decision = _authorized_merge(pr_number, repo, decide_only=True, timeout_s=timeout_s, **ask)
     if decision.get("outcome") != "authorized":
         return _emit_authorized_outcome(pr_number, decision, strategy)
+
+    # The flake hold: a rerun-recovered green is not a clean green. The checks
+    # verdict reads only the latest rollup, so a CI failure recovered by a
+    # re-run authorizes like never-failed - the path that merged a known
+    # shard-ordering flake and reded main with it. Sits before the coverage
+    # stamp: a head this gate holds must not green for the web button.
+    flake = None
+    if auto_merge.require_checks_pass:
+        try:
+            from fno.pr._status import rerun_recovery
+
+            flake = rerun_recovery(pr_number, repo)
+        except Exception as exc:  # noqa: BLE001 - the probe must not wedge a merge
+            sys.stderr.write(
+                f"pr-merge: rerun-recovery probe unavailable ({exc}); "
+                "merging without the flake hold\n"
+            )
+    if flake is not None and flake.get("recovered"):
+        failed = ", ".join(flake.get("failed") or []) or "unknown checks"
+        if not accept_flake:
+            _emit(
+                pr_number, "held",
+                f"rerun-recovered green (earlier failed attempt: {failed}); merge held. "
+                f"Sanctioned override: fno do pr merge {pr_number} --accept-flake",
+                "none", err=True,
+            )
+            return 2
+        try:
+            from fno.events import _build, append_event
+
+            append_event(_build("merge_flake_accepted", "python", {
+                "pr": pr_number,
+                "head": ask["covered_head"],
+                "failed_checks": list(flake.get("failed") or []),
+            }))
+        except Exception as exc:  # noqa: BLE001 - best-effort, never blocks
+            sys.stderr.write(
+                f"pr-merge: merge_flake_accepted emit failed ({exc}); merge outcome unaffected\n"
+            )
+        sys.stderr.write(f"flake override accepted: {failed}\n")
 
     # Server-visible receipt of the verdict the gate acted on, written from the
     # SAME answer that satisfied the gate here (gate_verdict, threaded down)

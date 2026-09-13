@@ -412,6 +412,10 @@ def _stub_merge_world(monkeypatch, tmp_path):
         "fno.pr._reviews.publish_coverage_status",
         lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
     )
+    monkeypatch.setattr(
+        "fno.pr._status.rerun_recovery",
+        lambda pr, cwd=None: {"recovered": False, "failed": []},
+    )
 
 
 def test_merge_durable_grant_absent_skips_without_gh(tmp_path, monkeypatch, capsys):

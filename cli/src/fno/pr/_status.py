@@ -221,6 +221,94 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     return ("green", 0, counts)
 
 
+# Conclusions that count as a real failed attempt. CANCELLED stays out: a
+# taken-away run is not a concluded failure (cf. `verdict_for`'s unsettled_fail).
+_RERUN_FAIL_CONCLUSIONS = ("failure", "timed_out", "startup_failure")
+_NO_RECOVERY: dict = {"recovered": False, "failed": []}
+_RERUN_MAX_RUNS = 20  # one status read must not become a hundred gh calls
+
+
+def _recovery_from_run_rows(run_rows, attempts_of, failed_jobs_of) -> dict:
+    """Pure over pre-computed rows (no gh), like `fno.pr._merge._overlaps`.
+
+    A run recovers only when its LATEST attempt passed and an EARLIER attempt
+    carries a real failed conclusion; `failed` names that attempt's jobs.
+    """
+    failed: list[str] = []
+    for row in run_rows:
+        if str(row.get("conclusion") or "") != "success":
+            continue  # only a run that now passes can have recovered
+        try:
+            latest = int(row.get("run_attempt") or 1)
+        except (TypeError, ValueError):
+            continue
+        run_id = str(row.get("id") or "").strip()
+        if latest <= 1 or not run_id:
+            continue  # a first-attempt pass never failed
+        for attempt in attempts_of(run_id):
+            try:
+                n = int(attempt.get("run_attempt") or 0)
+            except (TypeError, ValueError):
+                continue
+            if (
+                0 < n < latest
+                and str(attempt.get("conclusion") or "") in _RERUN_FAIL_CONCLUSIONS
+            ):
+                failed.extend(failed_jobs_of(run_id, n))
+    return {"recovered": bool(failed), "failed": failed}
+
+
+def rerun_recovery(pr_number, cwd: Optional[str] = None) -> dict:
+    """Rerun-recovery fact for a PR head: ``{recovered: bool, failed: [names]}``.
+
+    `verdict_for` reads only the latest rollup, so a failure recovered by a
+    re-run is indistinguishable from never-failed - the silent path that
+    merged a shard-ordering flake and reded main. ANY read error fails open:
+    a fact beside the verdict, never a second red.
+    """
+    try:
+        from fno.pr._proc import run
+        from fno.pr._rest import _slug_or_reason, fetch_pr_info_rest
+
+        slug, _why = _slug_or_reason(cwd)
+        info, _reason = (
+            fetch_pr_info_rest(str(pr_number), cwd=cwd, repo=slug) if slug else (None, "")
+        )
+        sha = str((info or {}).get("head_sha") or "").strip()
+        if not sha:
+            return dict(_NO_RECOVERY)
+
+        def _get(path: str):
+            res = run(["gh", "api", f"repos/{slug}{path}"], cwd=cwd)
+            return json.loads(res.stdout) if res.ok else None
+
+        rows = _get(f"/actions/runs?head_sha={sha}&per_page=100")
+        if isinstance(rows, dict):
+            rows = rows.get("workflow_runs")
+        if not isinstance(rows, list):
+            return dict(_NO_RECOVERY)
+
+        def _attempts(run_id: str) -> list:
+            data = _get(f"/actions/runs/{run_id}/attempts?per_page=100")
+            if isinstance(data, dict):
+                data = data.get("workflow_runs")
+            return data if isinstance(data, list) else []
+
+        def _failed_jobs(run_id: str, attempt: int) -> list:
+            data = _get(f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
+            jobs = data.get("jobs") if isinstance(data, dict) else data
+            return [
+                str(j["name"])
+                for j in jobs or []
+                if j.get("name")
+                and str(j.get("conclusion") or "") in _RERUN_FAIL_CONCLUSIONS
+            ]
+
+        return _recovery_from_run_rows(rows[:_RERUN_MAX_RUNS], _attempts, _failed_jobs)
+    except Exception:  # noqa: BLE001 - fail open: a fact, never a second red
+        return dict(_NO_RECOVERY)
+
+
 def coverage_recompute_note(coverage: dict) -> None:
     """Print the coverage recompute note on stderr.
 
@@ -977,6 +1065,16 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             )
             coverage_status_repost = "reposted" if posted else f"repost failed: {note}"
     owner_guidance = _review_owner_guidance(coverage, activity.worktree)
+    # Rerun recovery, probed on every green read of a live PR (fail-open).
+    rerun = rerun_recovery(pr, cwd) if verdict == "green" and not is_terminal else None
+    rerun_fields = (
+        {
+            "rerun_recovered": bool(rerun.get("recovered")),
+            "recovered_failures": list(rerun.get("failed") or []),
+        }
+        if rerun is not None
+        else {}
+    )
     payload = {
         "pr": pr,
         # The commit this verdict describes, so a caller can pin the
@@ -998,6 +1096,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # reads, the failing step, its first error line, and the steps
         # fail-fast never reached (an unreached step is not a pass).
         **({"failures": failures} if failures is not None else {}),
+        # Present iff the probe ran: an absent key and a probed-false are not
+        # the same fact.
+        **rerun_fields,
         "optional_reviews": reviews.get("optional_reviews", "unknown"),
         "optional_reviews_unresolved": unresolved,
         "optional_reviews_resolved_unchanged": resolved_unchanged,
@@ -1086,6 +1187,12 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # note channel this function uses below.
     sys.stderr.write(verdict_line(payload) + "\n")
     sys.stdout.write(json.dumps(payload) + "\n")
+    if rerun is not None and rerun.get("recovered"):
+        sys.stderr.write(
+            "note: green on re-run; earlier failed attempt: "
+            + ", ".join(rerun.get("failed") or ["unknown"])
+            + ". A passing re-run is a recovery, not proof the defect is gone.\n"
+        )
     # Same discipline as the unresolved-findings note below: a number a human
     # would misread gets its instruction beside it, on stderr. An unsettled
     # entry has two distinct causes and they need distinct instructions: a
