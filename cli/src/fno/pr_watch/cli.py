@@ -1087,6 +1087,7 @@ def tick() -> None:
         def _phase_merge(_slice_s: float) -> None:
             if result is None or not result.execute_queue:
                 return
+            assert cfg is not None
             from fno.pr_watch._dispatch import run_execute_queue
             executed, skipped = run_execute_queue(
                 result,
