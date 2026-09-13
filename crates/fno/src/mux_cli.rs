@@ -4490,8 +4490,8 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
 // file shrink-only.
 mod thread_verb;
 pub use thread_verb::thread;
-// The `fno mux web stop|reap` verbs, same child-module pattern: this
-// over-budget file stays shrink-only.
+// The `fno mux web reap` verb, same child-module pattern: this over-budget
+// file stays shrink-only.
 mod web_ctl;
 pub use web_ctl::web;
 // (v71) The prune aftermath (reload live servers + the receipt), same rule.

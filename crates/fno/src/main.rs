@@ -124,9 +124,8 @@ enum Role {
     /// recorded start token, then SIGINTs (the bridge's graceful exit) with a
     /// SIGKILL escalation for a wedged one.
     MuxWeb(fno::web::WebArgs),
-    /// `mux web stop [<name>] [--json] | mux web reap [--json]`: the lifecycle
-    /// verbs over the `--web` bridge marker. Same carry-verbatim shape;
-    /// `mux_cli::web` parses.
+    /// `mux web reap [--json]`: the corpse sweep for the `--web` bridge
+    /// marker. Same carry-verbatim shape; `mux_cli::web` parses.
     MuxWebCtl(Vec<OsString>),
     /// A verb named in [`MUX_TOMBSTONES`]: refuse, naming what replaced it.
     MuxRemoved(String),
@@ -262,8 +261,8 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 Some(w) => Role::MuxWeb(w),
                 None => Role::MuxUsage,
             },
-            // `mux web stop|reap ...`: the bridge marker's off switch and
-            // corpse sweep. A bare `mux web` falls through to MuxUsage.
+            // `mux web reap ...`: the bridge marker's corpse sweep. A bare
+            // `mux web` falls through to MuxUsage.
             Some("web") if args.len() > 2 => Role::MuxWebCtl(args[2..].to_vec()),
             // `mux pane <verb> ...`: hand the rest to the pane verb family;
             // a bare `mux pane` (no verb) falls through to MuxUsage. Nothing
