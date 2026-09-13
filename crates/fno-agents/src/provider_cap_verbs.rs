@@ -238,15 +238,7 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
                 if cfg.enabled {
                     let d = run_armed(
                         &home,
-                        &crate::provider_cap::CapScan {
-                            registry: home.registry_json(),
-                            projects_dir: crate::claude_drive::claude_projects_dir(),
-                            runtime_state: crate::provider_cap::runtime_state_path(),
-                            settings_candidates: crate::provider_cap::settings_candidates(
-                                &config_cwd,
-                            ),
-                            compaction_home: home.root().to_path_buf(),
-                        },
+                        &crate::provider_cap::default_scan(&home, &config_cwd),
                         &snap,
                         &cfg,
                         now,

@@ -337,20 +337,25 @@ pub struct CapScan {
     pub compaction_home: std::path::PathBuf,
 }
 
+/// The env-resolved scan, built once and shared by the status verb and the
+/// armed arm so the two cannot resolve different inputs.
+pub fn default_scan(home: &AgentsHome, cwd: &Path) -> CapScan {
+    CapScan {
+        registry: home.registry_json(),
+        projects_dir: crate::claude_drive::claude_projects_dir(),
+        runtime_state: runtime_state_path(),
+        settings_candidates: settings_candidates(cwd),
+        compaction_home: home.root().to_path_buf(),
+    }
+}
+
 pub fn snapshot(
     home: &AgentsHome,
     cwd: &Path,
     now_epoch: i64,
     cfg: &ProviderCapConfig,
 ) -> Result<CapSnapshot, String> {
-    let scan = CapScan {
-        registry: home.registry_json(),
-        projects_dir: crate::claude_drive::claude_projects_dir(),
-        runtime_state: runtime_state_path(),
-        settings_candidates: settings_candidates(cwd),
-        compaction_home: home.root().to_path_buf(),
-    };
-    snapshot_with(&scan, now_epoch, cfg)
+    snapshot_with(&default_scan(home, cwd), now_epoch, cfg)
 }
 
 pub fn snapshot_with(
@@ -688,6 +693,15 @@ pub fn destinations(
         .unwrap_or_default();
     Ok(eligible
         .iter()
+        // Trap 3: UNKNOWN headroom is not a destination. The walk keeps it
+        // eligible for a single spawn (guessing exhausted holds a node), but a
+        // fleet move onto an unmeasured lane is the move this node forbids.
+        .filter(|e| {
+            matches!(
+                e.get("verdict").and_then(Value::as_str),
+                Some("ok") | Some("low")
+            )
+        })
         .filter_map(|e| {
             let id = e.get("id").and_then(Value::as_str)?.to_string();
             let flags = e
@@ -796,13 +810,15 @@ pub fn run_leave_lane(
                     &ask_body(lane),
                     Some("fno agents provider-cap status"),
                 );
+                // Journalled on the state change only: an open question
+                // otherwise writes a line every 120s tick until answered.
+                journal(
+                    home,
+                    &lane.lane,
+                    now_epoch,
+                    &json!({"step": "decision", "decision": "ask"}),
+                );
             }
-            journal(
-                home,
-                &lane.lane,
-                now_epoch,
-                &json!({"step": "decision", "decision": "ask", "open": already}),
-            );
             "ask".to_string()
         }
         LeaveDecision::Act(names) => {
@@ -1354,7 +1370,13 @@ mod tests {
             "agents:\n  fallback:\n    default:\n      - harness: codex\n        route: openai\n        model: gpt-5.6-sol\n        account: codex-main\n",
         )
         .unwrap();
-        std::fs::write(root.join("runtime-state.json"), "{}").unwrap();
+        // Fresh healthy usage for the destination, else the UNKNOWN filter
+        // correctly refuses it (trap 3).
+        std::fs::write(
+            root.join("runtime-state.json"),
+            r#"{"usage":{"codex-main":{"probed_at":9999999999,"windows":[{"label":"5h","used_pct":10,"resets_at":9999999999}]}}}"#,
+        )
+        .unwrap();
         CapScan {
             registry: root.join("registry.json"),
             projects_dir: root.clone(),
