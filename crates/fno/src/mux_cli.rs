@@ -7695,10 +7695,16 @@ mod tests {
         // byte-identical --raw payload never launches a renderer and arrives
         // verbatim. The received BYTES are asserted, not `raw: true`.
         // (x-91ba) Serializes against the audit test: this test's dispatches
-        // write audit rows into the process-global agents events file.
+        // write audit rows into the process-global agents events file, so the
+        // env is redirected to a scratch dir and never the operator's real
+        // journal.
         let _agents = FNO_AGENTS_HOME_GUARD
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let agents_dir = std::env::temp_dir().join(format!("fno-agents-sendgates-{}", line!()));
+        let _ = std::fs::remove_dir_all(&agents_dir);
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &agents_dir);
         let sock = control_test_sock("send-gates");
         let _ = std::fs::remove_file(&sock);
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -7777,6 +7783,9 @@ mod tests {
             ),
             other => panic!("expected PaneSend at the socket, got {other:?}"),
         }
+
+        std::env::remove_var("FNO_AGENTS_HOME");
+        let _ = std::fs::remove_dir_all(&agents_dir);
     }
 
     #[test]
@@ -7789,10 +7798,16 @@ mod tests {
         // in-process, before any control connection, while a small raw payload
         // in the same run still delivers.
         // (x-91ba) Serializes against the audit test: this test's dispatches
-        // write audit rows into the process-global agents events file.
+        // write audit rows into the process-global agents events file, so the
+        // env is redirected to a scratch dir and never the operator's real
+        // journal.
         let _agents = FNO_AGENTS_HOME_GUARD
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let agents_dir = std::env::temp_dir().join(format!("fno-agents-rawcap-{}", line!()));
+        let _ = std::fs::remove_dir_all(&agents_dir);
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &agents_dir);
         let sock = control_test_sock("raw-cap");
         let _ = std::fs::remove_file(&sock);
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -7849,6 +7864,9 @@ mod tests {
             ),
             other => panic!("expected PaneSend at the socket, got {other:?}"),
         }
+
+        std::env::remove_var("FNO_AGENTS_HOME");
+        let _ = std::fs::remove_dir_all(&agents_dir);
     }
 
     #[test]
