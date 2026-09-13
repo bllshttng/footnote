@@ -567,14 +567,9 @@ def history_cmd(
 def checkin_cmd(ctx: typer.Context) -> None:
     """Run the reign check-in body: gather, print, diff, journal.
 
-    Flags pass through to the native beat: [--scope <scope>] [--no-emit]
-    [--json]. One verb runs what a king used to hand-assemble from six to
-    eight calls. The gather, print, diff and row write live in the native
-    ``king-checkin`` verb, which reuses the court fold and the history scan
-    in process; this shell resolves the caller's crown and the paths Python
-    owns. The printed numbers and the stored row come from one dict; a
-    failed reader gets its own line and the beat continues. It never
-    decides: no spawn, no reap, no lever.
+    Flags pass through to the native ``king-checkin`` beat: [--scope
+    <scope>] [--no-emit] [--json]. This shell resolves the caller's crown
+    and the paths Python owns; the beat never decides.
     """
     import subprocess
 
@@ -590,11 +585,9 @@ def checkin_cmd(ctx: typer.Context) -> None:
     from fno.rust_binary import resolve_binary
 
     passed = list(ctx.args)
-    explicit_scope = ""
-    for i, token in enumerate(passed):
-        if token == "--scope" and i + 1 < len(passed):
-            explicit_scope = passed[i + 1]
-            break
+    explicit_scope = next(
+        (passed[i + 1] for i, t in enumerate(passed) if t == "--scope" and i + 1 < len(passed)), ""
+    )
     try:
         crown = resolve_scope(explicit_scope)
     except HistoryUnreadable as exc:
@@ -629,25 +622,24 @@ def checkin_cmd(ctx: typer.Context) -> None:
         from fno.king.state import resolve_king_manifest_path
 
         caller = calling_agent_row()
-        sid = getattr(caller, "harness_session_id", None) or getattr(caller, "cc_session_id", None) or ""
+        sid = getattr(caller, "harness_session_id", None) or ""
         if sid:
             state, _ = resolve_king_manifest_path(sid, getattr(caller, "harness", None))
     except Exception:  # noqa: BLE001 - an unresolvable crown reads the fleet board
         state = None
     if state is not None:
         argv += ["--board-state", str(state)]
-    level = None
     try:
         from fno.agents.registry import load_registry
 
-        for row in load_registry():
-            if getattr(row, "crown_scope", None) == crown and getattr(row, "crown_level", None) is not None:
-                level = row.crown_level
-                break
-    except Exception:  # noqa: BLE001 - a levelless crown degrades the fold, not the beat
-        level = None
-    if level is not None:
+        level = next(
+            r.crown_level
+            for r in load_registry()
+            if getattr(r, "crown_scope", None) == crown and r.crown_level is not None
+        )
         argv += ["--level", str(level)]
+    except Exception:  # noqa: BLE001 - a levelless crown degrades the fold, not the beat
+        pass
     proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     if proc.stdout:
         typer.echo(proc.stdout.rstrip("\n"))

@@ -173,8 +173,9 @@ def test_map_covers_current_surface_once():
     # (x-6d64): 611 -> 612. This branch allocates `backlog retract`, the
     # one-act defer + retracted-kind stamp the blueprint consolidation gate
     # halts on: 612 -> 613. `agents king checkin`, the one verb that runs
-    # the reign check-in body and journals its row: 613 -> 614.
-    assert len(mapped) == 614, (
+    # the reign check-in body and journals its row, plus its direct-dispatch
+    # alias `agents king-checkin` beside king-history's: 613 -> 615.
+    assert len(mapped) == 615, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
