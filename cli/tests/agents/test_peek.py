@@ -1427,6 +1427,106 @@ def test_peek_resolved_but_empty_transcript_blames_neither_store_nor_idle(
     assert "no activity yet" not in out.getvalue()
 
 
+def _quiet_claude_fleet(tmp_path, monkeypatch, session_id):
+    """A row named for its agent holding a full uuid, plus its stale transcript.
+
+    The x-f715 shape: the live listing is liveness-gated, so nothing here
+    answers a live resolver, and the exact row match takes only the name
+    ("king-harness-pi") and the full session id - the 8-hex handle hits
+    neither. The durable-store rung is the only reader left.
+    """
+    from fno import paths
+    from fno.agents.registry import AgentEntry, write_registry
+
+    proj = tmp_path / "projects" / "-tmp-proj"
+    proj.mkdir(parents=True)
+    t = proj / f"{session_id}.jsonl"
+    t.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "quiet but present"}],
+                },
+                "timestamp": "2026-09-13T17:06:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    old = time.time() - 7200
+    os.utime(t, (old, old))
+
+    registry_path = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="king-harness-pi",
+                harness="claude",
+                harness_session_id=session_id,
+                status="orphaned",
+                origin="adopted",
+                cwd="/tmp/proj",
+                log_path="",
+                short_id="",
+            )
+        ],
+        path=registry_path,
+    )
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry_path)
+
+
+def test_peek_resolves_a_quiet_session_by_short_session_id(tmp_path, monkeypatch):
+    """A session the roster, truth and mail all resolve must not read as gone.
+
+    x-f715: peek refused a short-id handle with "peer not found in the
+    registry" while three other readers resolved the same session. The refusal
+    named an absence the roster contradicted, and the crown rerouted a launch
+    order on the strength of it.
+    """
+    session_id = "647b3a9c-6544-43fe-899e-704382f3d973"
+    _quiet_claude_fleet(tmp_path, monkeypatch, session_id)
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        session_id[:8],
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path / "projects",
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 0, err.getvalue()
+    assert "quiet but present" in out.getvalue()
+    assert "peer not found" not in err.getvalue()
+    assert "fno agents adopt" not in err.getvalue()
+
+
+def test_peek_follow_on_a_reachable_session_does_not_tail(tmp_path, monkeypatch):
+    """A durable-store hit carries no live-writer proof, so --follow must not block.
+
+    Same rung as the recovered-row guard: the tail is the whole answer, and
+    liveness stays truth's verdict.
+    """
+    session_id = "647b3a9c-6544-43fe-899e-704382f3d973"
+    _quiet_claude_fleet(tmp_path, monkeypatch, session_id)
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        session_id[:8],
+        follow=True,
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path / "projects",
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 0
+    assert "quiet but present" in out.getvalue()
+    assert "no writer to tail" in err.getvalue()
+
+
 def test_status_events_with_nothing_to_scope_on_returns_nothing():
     """An unidentifiable session must not inherit the whole shared events file.
 

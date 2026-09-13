@@ -827,6 +827,24 @@ def _row_as_session(row) -> Optional[_RegistrySession]:
     )
 
 
+def _reachable_session(handle: str, projects_root: Optional[Path]):
+    """Last rung before the refusal: the durable stores truth and mail send read.
+
+    Discovery is liveness-gated and the exact row match above takes only the
+    name and the full session id, so a quiet session addressed by its 8-hex
+    short id fell through both while roster, truth and mail all resolved it
+    (x-f715). A hit here carries no live-writer proof, so the caller marks it
+    like a row-derived session.
+    """
+    from fno.agents.discover import StoreReadError, resolve_reachable
+
+    try:
+        session, _suggestions = resolve_reachable(handle, projects_dir=projects_root)
+    except StoreReadError as exc:
+        return exc.resolved
+    return session
+
+
 def _adoptable_sessions(
     handle: str,
     *,
@@ -1122,6 +1140,9 @@ def peek(
         # reader needs, so read the conversation rather than deny it exists.
         session = _row_as_session(row)
         row_derived = session is not None
+        if session is None:
+            session = _reachable_session(handle, projects_root)
+            row_derived = session is not None
 
     if session is None:
         # Name the instrument. Both reads above (the live-session resolver and
@@ -1156,7 +1177,7 @@ def peek(
     agent = getattr(session, "agent", "claude")
     session_id = getattr(session, "session_id", "")
     short_id = getattr(session, "short_id", "")
-    cwd = getattr(session, "cwd", "")
+    cwd = getattr(session, "cwd", "") or ""
 
     if not json_out:
         out.write(
@@ -1252,9 +1273,9 @@ def peek(
         # dead; liveness verdicts belong to `fno agents truth`. Refusing to
         # tail is still right, because nothing here can observe the writer.
         err.write(
-            f"--follow: {handle} resolved from its registry row, not from a live "
-            "session, so there is no writer to tail; showed the tail only. "
-            "For a liveness verdict: fno agents truth\n"
+            f"--follow: {handle} resolved from durable state (a registry row or "
+            "transcript store), not from a live session, so there is no writer "
+            "to tail; showed the tail only. For a liveness verdict: fno agents truth\n"
         )
         return EXIT_OK
 
