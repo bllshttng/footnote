@@ -92,20 +92,35 @@ PANES0=$("$FNO" mux pane ls --json 2>/dev/null | jq 'length')
 [ "$PANES0" = "0" ] || fail "a fresh server carries unexpected panes: $PANES0"
 
 PA=$("$FNO" mux pane run --cwd "$TMP_ROOT/work" -- /bin/bash | tr -d '[:space:]')
-PB=$("$FNO" mux pane run --cwd "$TMP_ROOT/work" -- /bin/bash | tr -d '[:space:]')
-case "$PA$PB" in ''|*[!0-9]*) fail "pane ids are not numeric: '$PA' '$PB'";; esac
-log "panes: $PA $PB"
+case "$PA" in ''|*[!0-9]*) fail "first pane id is not numeric: '$PA'";; esac
+
+# The split is the REAL PaneSplit verb on the existing pane, not a second
+# run: the journey claims to prove split, so it must drive split. The split
+# receipt prints the new pane id; the ls that follows confirms it exists.
+PB=$("$FNO" mux pane split "$PA" --direction right | tr -d '[:space:]')
+case "$PB" in ''|*[!0-9]*|0) fail "split produced no usable pane id: '$PB'";; esac
+sleep 1
+SPLIT_LIVE=$("$FNO" mux pane ls --json | jq -r --argjson id "$PB" \
+  '[.[].pane_id] | index($id) != null')
+[ "$SPLIT_LIVE" = "true" ] || fail "the split pane $PB is not listed by the server"
+log "panes: $PA (run) $PB (split)"
 
 send_marker() {
   local pane="$1" tag="$2" file="$3"
   # --raw: plain keystrokes. The default guarded send renders through the
   # Python porcelain, which is a delivery-backed view, not workspace behavior.
-  "$FNO" mux pane send "$pane" --text "echo $tag > $file" --submit --raw >/dev/null 2>&1 \
+  # The marker exchange is proven by the FILE the child writes: a split pane's
+  # grid stays empty until a client views it, so pane output is not a witness
+  # here, but tee's file is the child's own receipt.
+  "$FNO" mux pane send "$pane" --text "echo $tag | tee $file" --submit --raw >/dev/null 2>&1 \
     || fail "pane send failed for pane $pane"
-  sleep 1
-  "$FNO" mux pane read "$pane" --lines 20 2>/dev/null | grep -q "$tag" \
-    || fail "marker $tag did not surface in pane $pane"
-  grep -q "$tag" "$file" || fail "marker file $file missing the tag"
+  local tries=0
+  while [ "$tries" -lt 10 ]; do
+    sleep 1
+    [ -f "$file" ] && grep -q "$tag" "$file" && return 0
+    tries=$((tries + 1))
+  done
+  fail "marker $tag never landed in $file from pane $pane"
 }
 
 MA1="$TMP_ROOT/mark-a1.txt"

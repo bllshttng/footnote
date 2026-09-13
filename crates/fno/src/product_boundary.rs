@@ -122,13 +122,24 @@ pub fn graph_worker_spawn_error(bin: &Path, err: std::io::Error) -> String {
     format!("cannot spawn {GRAPH_WORKER_BIN} ({}): {err}", bin.display())
 }
 
+/// A path the runtime could actually execute: a regular file with an
+/// executable bit. Existence alone lies - a directory or a non-runnable file
+/// would read "available" and then fail at spawn time with no remedy shown.
+pub(crate) fn runnable_file(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(p) {
+        Ok(m) => m.is_file() && m.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
+}
+
 /// The ONE PATH walk for a paired binary. store_client's worker resolver and
 /// the runtime observation both land here.
 pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+        .find(|p| runnable_file(p))
 }
 
 /// Resolve the runtime binary the way attach does, then settle a bare PATH
@@ -143,7 +154,7 @@ fn resolve_runtime_bin() -> PathBuf {
 }
 
 fn runtime_availability(bin: &Path) -> (Availability, String) {
-    if bin.exists() {
+    if runnable_file(bin) {
         (
             Availability::Available,
             format!("resolved {}", bin.display()),
@@ -261,7 +272,7 @@ pub fn digest_observation(cwd: &Path) -> DigestObservation {
 }
 
 pub(crate) fn digest_observation_at(enabled: bool, now: u64) -> DigestObservation {
-    let backend_present = resolve_runtime_bin().exists();
+    let backend_present = runnable_file(&resolve_runtime_bin());
     let (state, why) = digest_state_for(enabled, backend_present);
     DigestObservation {
         state,
@@ -273,6 +284,7 @@ pub(crate) fn digest_observation_at(enabled: bool, now: u64) -> DigestObservatio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn observation_serializes_snake_case_with_all_fields() {
@@ -320,6 +332,10 @@ mod tests {
     fn runtime_observation_reports_present_and_missing() {
         let bin = std::env::temp_dir().join(format!("fno-pb-test-{}", std::process::id()));
         std::fs::write(&bin, b"").unwrap();
+        // A plain file is not yet runnable: existence alone must not read as
+        // available, or a broken installation shows healthy with no remedy.
+        assert_eq!(runtime_availability(&bin).0, Availability::Unavailable);
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
             runtime_availability(&bin),
             (
