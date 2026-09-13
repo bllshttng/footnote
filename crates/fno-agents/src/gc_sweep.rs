@@ -943,7 +943,12 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
     let mut settled = Vec::new();
     for row in &stale {
         match crate::backlog::api::session_end(
-            &store, &row.node, &row.session_id, "reap-sweep", Some("do"), Some(&row.harness),
+            &store,
+            &row.node,
+            &row.session_id,
+            "reap-sweep",
+            Some("do"),
+            Some(&row.harness),
         ) {
             Ok(payload) if payload.success => settled.push(row.clone()),
             Ok(_) => {}
@@ -985,7 +990,12 @@ fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<
         };
         let harness = eligible.harness.clone();
         match crate::backlog::api::session_end(
-            &store, node, session_id, "reap-release", Some("do"), Some(&harness),
+            &store,
+            node,
+            session_id,
+            "reap-release",
+            Some("do"),
+            Some(&harness),
         ) {
             Ok(payload) if payload.success => return Ok(true),
             Ok(_) => return Ok(false),

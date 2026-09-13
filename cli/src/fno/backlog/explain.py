@@ -322,7 +322,7 @@ def build_report(
     _refuse_tracker_owned_on_external_backend("advance")
 
     from fno.backlog import advance as adv
-    from fno.graph import api as graph_api
+    from fno.graph.api import wire_rows
     from fno.paths import graph_json
 
     # One call into the native leg. The narration reads the reply's drops;
@@ -341,11 +341,8 @@ def build_report(
 
     winner = survivors[0] if survivors else None
     subject_id = node_id or (winner or {}).get("id")
-    rows = [
-        n.model_dump(by_alias=True)
-        for n in graph_api.nodes(include_archived=True, path=graph_json()).nodes
-    ]
-    by_id = {e.get("id"): e for e in rows if e.get("id")}
+    # The total fold: an explain answers for every row, even a typed-drop.
+    by_id = {e.get("id"): e for e in wire_rows(path=graph_json()) if e.get("id")}
     subject = by_id.get(subject_id) if subject_id else None
 
     asked: dict = {}

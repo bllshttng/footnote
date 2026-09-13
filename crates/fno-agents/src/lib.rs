@@ -891,6 +891,9 @@ mod tests {
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
+    // The keeper's render trigger failed a pass (waves 8-9 store cutover);
+    // carries the version and a stderr tail, and the backoff retries it.
+    "graph_render_failed",
     "agent_stopped",
     // Stop/rm claims release (x-9c91): the receipt event for the claims a
     // stopped or removed worker held; one emit per stop/rm that ran one.

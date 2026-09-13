@@ -151,7 +151,7 @@ def cmd_session_add(
             return None
         from fno.graph.statuses import is_open_phase_row
 
-        for entry in read_graph(_graph_path()) or []:
+        for entry in wire_rows(path=_graph_path()) or []:
             if not (isinstance(entry, dict) and entry.get("id") == node_id):
                 continue
             for row in entry.get("sessions") or []:

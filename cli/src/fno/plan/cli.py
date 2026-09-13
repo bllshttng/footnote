@@ -457,18 +457,18 @@ def folder_audit(
         None, "--plans-dir", help="Plans dir to scan (default: resolved plans-content dir)."
     ),
 ) -> None:
-    from fno.graph import api as graph_api
     from fno.graph.statuses import recompute_statuses
-    from fno.graph.store import GraphCorruptError
-    from fno.paths import plans_content_dir
+    from fno.graph.store import GraphCorruptError, GraphUnreadableError, read_graph_strict
+    from fno.paths import graph_json, plans_content_dir
     from fno.plan._folder_audit import scan
 
     plans_root = Path(plans_dir_opt) if plans_dir_opt else plans_content_dir()
 
     try:
-        rows = [n.model_dump(by_alias=True) for n in graph_api.nodes(include_archived=True).nodes]
-        entries = recompute_statuses(rows)
-    except (GraphCorruptError, OSError) as exc:
+        # Strict through the configured path: healed bytes must not read as
+        # "no folder owners" - an unreadable graph refuses toward defer.
+        entries = recompute_statuses(read_graph_strict(graph_json()))
+    except (GraphCorruptError, GraphUnreadableError, OSError) as exc:
         typer.echo(
             f"fno do plan folder-audit: graph unreadable ({exc}) - failing toward defer",
             err=True,
