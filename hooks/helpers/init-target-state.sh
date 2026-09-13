@@ -1353,11 +1353,13 @@ except OSError:
     sys.exit(0)
 try:
     from fno.graph.api import wire_rows
+    from fno.graph.store import shutdown_keeper
     from fno.paths import graph_json
 
     # The total fold: a minimal row the typed model would drop can still be
     # the plan's delivery unit.
-    entries = wire_rows(path=graph_json())
+    path = graph_json()
+    entries = wire_rows(path=path)
 except Exception:
     sys.exit(0)
 # Collect ALL holders, then prefer the delivery unit (x-e957). First-match-wins
@@ -1384,6 +1386,12 @@ if len(matches) > 1:
     units = [e for e in matches if not e.get("contained_in")]
     if len(units) == 1:
         matches = units
+# A bootstrap lookup leaves nothing running: the session reaper counts a
+# keeper rooted in a sandbox tmp tree as a leak.
+try:
+    shutdown_keeper(path)
+except Exception:
+    pass
 if len(matches) == 1:
     print(matches[0].get("id") or "")
 elif len(matches) > 1:
