@@ -136,14 +136,33 @@ fn nested_owner() -> Option<(u32, u64)> {
     owner_from_env()
 }
 
-/// The declared test-run owner from `FNO_TEST_OWNER_PID`/`FNO_TEST_OWNER_BIRTH`,
-/// verified against the LIVE process (never trusted on the name alone) - the
-/// one parser test-owned keeper lanes share (pane_keeper.rs, graph_keeper.rs)
-/// so a malformed or foreign token reads the same way everywhere.
-pub fn owner_from_env() -> Option<(u32, u64)> {
+/// The declared test-run owner from `FNO_TEST_OWNER_PID`/`FNO_TEST_OWNER_BIRTH`.
+/// This only parses the identity; callers that need liveness must use
+/// `owner_from_env` or `owner_alive` separately.
+pub fn declared_owner_from_env() -> Option<(u32, u64)> {
     let pid: u32 = std::env::var("FNO_TEST_OWNER_PID").ok()?.parse().ok()?;
     let birth: u64 = std::env::var("FNO_TEST_OWNER_BIRTH").ok()?.parse().ok()?;
-    owner_alive(pid, birth).then_some((pid, birth))
+    Some((pid, birth))
+}
+
+/// The declared test-run owner, verified against the LIVE process (never
+/// trusted on the name alone). Nested test runs use this form so a stale token
+/// re-acquires the suite claim instead of inheriting ownership.
+pub fn owner_from_env() -> Option<(u32, u64)> {
+    let owner = declared_owner_from_env()?;
+    owner_alive(owner.0, owner.1).then_some(owner)
+}
+
+/// The current process identity in the environment shape inherited by every
+/// test-spawned daemon or client.
+pub fn self_owner_env() -> [(&'static str, String); 2] {
+    let pid = std::process::id();
+    let birth = crate::daemon::process_start_time(pid)
+        .expect("the current test process must have a readable birth time");
+    [
+        ("FNO_TEST_OWNER_PID", pid.to_string()),
+        ("FNO_TEST_OWNER_BIRTH", birth.to_string()),
+    ]
 }
 
 /// Whether `pid` is still the SAME incarnation that was born at `birth` - a
@@ -156,7 +175,8 @@ pub fn owner_alive(pid: u32, birth: u64) -> bool {
 /// at least every 250ms and calls `on_death` once, then exits - the one
 /// shape both keeper families (`pane_keeper.rs`, `graph_keeper.rs`) use to
 /// bind their lifetime to that owner instead of each hand-rolling its own
-/// poll.
+/// poll. The daemon is the third consumer alongside the pane and graph
+/// keepers.
 pub fn spawn_owner_watchdog(
     owner_pid: u32,
     owner_birth: u64,
@@ -551,5 +571,20 @@ mod tests {
         std::env::remove_var("FNO_TEST_OWNER_PID");
         std::env::remove_var("FNO_TEST_OWNER_BIRTH");
         assert_eq!(result, Some((pid, birth)));
+    }
+
+    #[test]
+    fn declared_owner_accepts_a_dead_well_formed_token_without_liveness() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_TEST_OWNER_PID", "1");
+        std::env::set_var("FNO_TEST_OWNER_BIRTH", "424242424242");
+        let declared = declared_owner_from_env();
+        let live = owner_from_env();
+        std::env::remove_var("FNO_TEST_OWNER_PID");
+        std::env::remove_var("FNO_TEST_OWNER_BIRTH");
+        assert_eq!(declared, Some((1, 424242424242)));
+        assert_eq!(live, None);
     }
 }

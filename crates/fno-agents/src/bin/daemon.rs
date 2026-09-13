@@ -27,6 +27,17 @@ fn main() {
         return;
     }
 
+    // Test harnesses may launch children with SIGTERM blocked. The daemon owns
+    // its SIGTERM listener below, so do not inherit a mask that makes graceful
+    // shutdown permanently pending.
+    #[cfg(unix)]
+    unsafe {
+        let mut set = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+    }
+
     // A failed daemon must surface a non-zero exit and a clear stderr line; it
     // must never panic silently (Silent-Failure-Hunter posture).
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -59,6 +70,27 @@ fn main() {
             );
             std::process::exit(2);
         }
+    }
+
+    if let Some((owner_pid, owner_birth)) = fno_agents::test_run::declared_owner_from_env() {
+        if !fno_agents::test_run::owner_alive(owner_pid, owner_birth) {
+            eprintln!(
+                "fno-agents-daemon: test owner pid={owner_pid} birth={owner_birth} is not alive; refusing to start (unset FNO_TEST_OWNER_PID outside a test run)"
+            );
+            std::process::exit(3);
+        }
+        fno_agents::test_run::spawn_owner_watchdog(
+            owner_pid,
+            owner_birth,
+            "fno-daemon-test-owner",
+            move || {
+                eprintln!(
+                    "fno-agents-daemon: test_owner_reaped owner_pid={owner_pid} owner_birth={owner_birth}"
+                );
+                // SAFETY: SIGTERM to self enters the existing graceful shutdown arm.
+                unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+            },
+        );
     }
 
     let home = AgentsHome::from_env();

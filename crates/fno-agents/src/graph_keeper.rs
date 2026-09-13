@@ -874,7 +874,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     // store past its own run. The watchdog sets the SAME `shutdown` flag an
     // explicit Shutdown frame does, so the accept loop below needs no
     // separate owner-liveness check of its own.
-    if let Some((owner_pid, owner_birth)) = crate::test_run::owner_from_env() {
+    if let Some((owner_pid, owner_birth)) = crate::test_run::declared_owner_from_env() {
         let shutdown = Arc::clone(&shutdown);
         crate::test_run::spawn_owner_watchdog(
             owner_pid,
