@@ -457,18 +457,36 @@ pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
             .unwrap_or_default();
     let audience = resolve_audience(&parsed.scope, &registry, &projects);
 
-    // Rate limit, counted from the bus (decision 8).
+    // One scan serves both the rate limit (decision 8) and the supersede
+    // list (decision 7): a newer announcement with the same subject+scope
+    // replaces the older standing one.
     let now = chrono::Utc::now();
-    let recent = read_bus_segments(&paths.bus_live)
-        .iter()
-        .filter(|m| row_str(m, "kind") == Some(ANNOUNCE_KIND))
-        .filter(|m| row_str(m, "from") == Some(parsed.from.as_str()))
-        .filter(|m| {
-            row_str(m, "ts")
+    let fleet_scope = format!("fleet:{}", parsed.scope);
+    let mut recent = 0usize;
+    let mut supersedes: Vec<String> = Vec::new();
+    for m in read_bus_segments(&paths.bus_live) {
+        if row_str(&m, "kind") != Some(ANNOUNCE_KIND) {
+            continue;
+        }
+        if row_str(&m, "from") == Some(parsed.from.as_str())
+            && row_str(&m, "ts")
                 .and_then(parse_iso)
                 .is_some_and(|t| now.signed_duration_since(t).num_seconds() < 3600)
-        })
-        .count();
+        {
+            recent += 1;
+        }
+        if row_str(&m, "to") == Some(fleet_scope.as_str())
+            && !expired(&m, now)
+            && m.get("meta")
+                .and_then(|meta| row_str(meta, "subject"))
+                .unwrap_or("")
+                == parsed.subject
+        {
+            if let Some(id) = row_str(&m, "id") {
+                supersedes.push(id.to_string());
+            }
+        }
+    }
     if recent >= HOURLY_LIMIT {
         eprintln!(
             "announce: refused: rate limit is {HOURLY_LIMIT} announcements per \
@@ -476,31 +494,6 @@ pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
             parsed.from
         );
         return 2;
-    }
-
-    // Supersede: a newer announcement with the same subject+scope replaces the
-    // older standing one (decision 7).
-    let mut supersedes: Vec<String> = Vec::new();
-    for m in read_bus_segments(&paths.bus_live) {
-        if row_str(&m, "kind") != Some(ANNOUNCE_KIND) {
-            continue;
-        }
-        if row_str(&m, "to") != Some(format!("fleet:{}", parsed.scope).as_str()) {
-            continue;
-        }
-        let subject = m
-            .get("meta")
-            .and_then(|meta| row_str(meta, "subject"))
-            .unwrap_or("");
-        if subject != parsed.subject {
-            continue;
-        }
-        if expired(&m, now) {
-            continue;
-        }
-        if let Some(id) = row_str(&m, "id") {
-            supersedes.push(id.to_string());
-        }
     }
 
     let ttl = match parse_expires(&parsed.expires_raw) {
@@ -1397,6 +1390,19 @@ mod tests {
             !out.contains("maintenance at noon"),
             "stale news skipped: {out}"
         );
+        std::fs::remove_dir_all(&f.root).ok();
+    }
+
+    #[test]
+    fn argv_surfaces_refuse_bad_and_missing_args() {
+        // The hook scripts drive these exact flags; a rename here must fail
+        // loudly here, not degrade every boundary to silence.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let f = fixture("argv");
+        assert_eq!(run_announce_read(&[], &f.paths), 2, "missing --session-id");
+        assert_eq!(run_announce_read(&["--bogus".to_string()], &f.paths), 2);
+        assert_eq!(run_announce_status(&[], &f.paths), 2, "missing <id>");
+        assert_eq!(run_announce_status(&["--json".to_string()], &f.paths), 2);
         std::fs::remove_dir_all(&f.root).ok();
     }
 
