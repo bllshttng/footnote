@@ -173,12 +173,12 @@ def test_map_covers_current_surface_once():
     # publish-review` and `pr publish-review`, the bot-identity backfill
     # door and its forwarded spelling: 609 -> 611. Upstream allocates
     # `agents prove-it-verdicts`, the terminal prove-it record reader
-    # (x-6d64): 613 -> 614. This branch allocates `backlog retract`, the
+    # (x-6d64): 611 -> 612. Upstream allocates `backlog retract`, the
     # one-act defer + retracted-kind stamp the blueprint consolidation gate
-    # halts on: 614 -> 615. `agents announce`, the fleet-announcement
+    # halts on: 612 -> 613. `agents announce`, the fleet-announcement
     # writer/reader/status surface the binary dispatches directly: counted
-    # from the merged file, 615 -> 616.
-    assert len(mapped) == 616, (
+    # from the merged file, 613 -> 614.
+    assert len(mapped) == 614, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
