@@ -1296,15 +1296,12 @@ def resolve_owned_identity_cmd() -> None:
         env["CLAUDE_CODE_SESSION_ID"] = env["TARGET_TRANSCRIPT_ID"]
 
     def _collide(harness: str, sid: str, own_pair: Optional[tuple[str, str]]) -> Optional[str]:
-        # own_pair arrives from claims.self_identity (the canonical pair it
-        # completed there, None when it could not); the registry applies the
-        # agreement check, so this site never answers the own-row question
-        # itself - it had a second, COMPLETE-stamp-gated answer and that is
-        # the leg this verb deleted (x-0992).
+        # own_pair arrives from claims.self_identity (None when it could not);
+        # the registry applies the agreement check, so this site never answers
+        # the own-row question itself (x-0992).
         return row_owning_session_id(sid, self_binding=own_pair)
 
-    # Same injection seam self_stamp uses: the codex rollout fd proves the
-    # pane's own id where no env-carried marker can (x-a409).
+    # Same injection seam self_stamp uses (x-a409).
     from fno.agents.codex_rollout import codex_rollout_witness
 
     owned = resolve_self_identity(env, collide=_collide, witness=codex_rollout_witness)

@@ -113,10 +113,8 @@ def resolve_self_identity(
 
     # x-a409: a name_only codex stamp carries no id and codex never carries
     # CODEX_THREAD_ID in its own env, so the attester cannot complete the
-    # pair and the collider read the session's own backfilled row as foreign.
-    # A marker value the rollout witness sees in a live fd IS this process's
-    # id (an fd cannot be forged by a leaked marker); the thread id wins
-    # because codex sets CODEX_SESSION_ID to the ROOT session.
+    # pair. A marker value the rollout witness sees in a live fd IS this
+    # process's id; the thread id wins (CODEX_SESSION_ID is the ROOT session).
     witnessed_value: Optional[str] = None
     if (
         witness is not None

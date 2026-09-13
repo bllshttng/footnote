@@ -844,8 +844,7 @@ def resolve_owned_identity(
         if not identity.harness:
             return OwnedHarnessIdentity(None, None, present, "ambiguous")
         if identity.session_id is None:
-            # Proven family, no id (x-a409): a prover and markers present fall
-            # through to the loop below; anything else refuses.
+            # Proven family, no id (x-a409): settle by proof below if we can.
             if prove is None or not present:
                 return OwnedHarnessIdentity(None, None, present, "ambiguous")
         else:
