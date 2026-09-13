@@ -62,7 +62,7 @@ _deny_text() {
 Delegate it: fno agents spawn '/fno:target <id>' --node <id> --substrate thread
 Or hand the whole scope out: fno backlog advance --epic <scope>
 Unblock authority is yours and is allowed: claim release, mail, backlog levers, notes, plan writes.
-A subagent of this session is exempt: a Task tool call from this session carries the subagent's agent id, and this guard reads it. Your own main thread is never exempt."
+A subagent of this session is exempt: its tool calls carry the subagent's agent id, and this guard reads that marking. Your own main thread is never exempt."
 }
 _block() {
     _guard_mark king-delegation-guard block 2>/dev/null || true
