@@ -1333,6 +1333,44 @@ def test_claude_resume_skip_with_explicit_message_refuses_exit_16() -> None:
     assert "Working" in res.stderr
 
 
+def test_claude_resume_does_not_poll_the_confirm_window_without_a_transcript(
+    monkeypatch,
+) -> None:
+    """When the transcript store could not be read BEFORE the wake, no
+    marker can land in it after, so the confirm cadence must not burn its
+    full polling window before the same refusal."""
+    import fno.agents.watchdog as watchdog_mod
+
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+        harness_session_id="sess-uuid-1",
+    )
+    confirm_calls: list[int] = []
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        watchdog_mod,
+        "confirm_wake_landed",
+        lambda *a, **kw: confirm_calls.append(1) or True,
+    )
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: None,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
+    )
+    assert res.exit_code == 16
+    assert confirm_calls == [], "no pre-wake transcript, no confirm poll"
+
+
 def test_claude_resume_rechecks_state_after_a_timed_out_attempt(monkeypatch) -> None:
     """A wake that lands but whose subprocess outlives the timeout must not
     be scored a failure: the post-attempt state read must run even when
