@@ -487,15 +487,18 @@ def test_codex_explicit_external_policy_honors_configured_allocator(
 
 
 def test_policy_verb_reports_never_and_default(main_repo: Path, tmp_path: Path) -> None:
-    """The read-only `policy` verb shares the resolver: `never` prints bare
-    `never`; the default prints `harness-native` + a base line."""
+    """The read-only `policy` verb shares the resolver: line 1 is the bare
+    policy word (bash readers take line 1), later lines carry source=; the
+    default prints `harness-native` + a base line."""
     _write_config(
         main_repo / ".fno",
         f'[[work.workspaces.default.projects]]\npath = "{main_repo}"\nworktree = "never"\n',
     )
     res = runner.invoke(app, ["worktree", "policy", "--repo", str(main_repo)])
     assert res.exit_code == 0, res.stderr
-    assert res.stdout.strip() == "never"
+    lines = res.stdout.strip().splitlines()
+    assert lines[0] == "never"
+    assert "source=per-project" in lines
 
     # A fresh repo with no config -> default harness-native under claude.
     other = tmp_path / "other"

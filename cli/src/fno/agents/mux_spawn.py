@@ -1745,7 +1745,7 @@ def _mesh_env_wrapper(
     # origin capture would then persist into every node the pane files.
     # `env -u` on an unset var is a harmless no-op.
     resolved_prov = {k: v for k, v in (provenance or {}).items() if v}
-    for _k in PROVENANCE_KEYS:
+    for _k in (*PROVENANCE_KEYS, "FNO_WORKTREE_POLICY"):  # the pin rides set-or-clear; it is not node provenance
         if _k not in resolved_prov:
             unset += ["-u", _k]
     pairs += [f"{k}={v}" for k, v in resolved_prov.items()]
