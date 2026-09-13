@@ -58,7 +58,7 @@ def test_note_body_file_roundtrip_quotes_and_newlines(tmp_graph):
     )
     assert r.exit_code == 0, r.output
     stored = json.loads(r.stdout.strip().splitlines()[-1])
-    assert stored["note"]["text"] == BODY.strip()
+    assert stored["text"] == BODY.strip()
 
 
 def test_note_body_file_and_positional_refused(tmp_graph):
