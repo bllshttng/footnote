@@ -1,15 +1,4 @@
-"""Which codex session does THIS process's rollout prove? (x-a409)
-
-codex holds its rollout fd open and the first-line session_meta carries the id,
-so the fd is process ground a leaked env marker cannot forge. The witness here
-is what lets a name_only-stamped codex pane complete its own identity: the pane
-tree (or, after sibling x-a095 moves pane threads into the shared app-server,
-the daemon) holds the rollout, and the witness names every session id that
-rollout ground vouches for.
-
-Split out of mux_spawn: that module sits over the file-budget line and may only
-shrink; this question deserves its own file.
-"""
+"""Which codex session does THIS process's rollout prove? (x-a409)"""
 from __future__ import annotations
 
 import os
@@ -20,18 +9,14 @@ from typing import Mapping, Optional
 def _codex_session_ids_for_pid(pid: int, *, psutil_mod=None) -> frozenset:
     """Every distinct codex session id open as a rollout in pid's tree.
 
-    codex holds its rollout fd open and the first-line session_meta carries the
-    id, so a process identifies its session deterministically: each pane's tree
-    holds a distinct rollout, so a same-cwd sibling can never be mis-identified
-    (Codex P1, #603). The pid AND its descendants are inspected: a wrapper
-    launcher (the @openai/codex Node shim) holds the pane pid while its native
-    child opens the rollout (Codex P1, #603 r5). The id comes from
-    session_meta.payload.id, not the filename UUID, which is not always the
-    session id in older turn-id layouts (Codex P2, #603 r5).
+    Each pane's tree holds a distinct rollout fd, so a same-cwd sibling can
+    never be mis-identified (Codex P1, #603); the pid and its descendants are
+    inspected because a wrapper launcher holds the pane pid while its native
+    child opens the rollout. The id is session_meta.payload.id, not the
+    filename UUID, which is not always the session id (Codex P2, #603 r5).
 
-    Returns an empty set when psutil is unavailable, the process is gone, or no
-    rollout is open yet; a tree holding MORE than one distinct session returns
-    both (the caller decides whether that is ambiguous).
+    Empty set when psutil is unavailable, the process is gone, or no rollout
+    is open yet; more than one distinct session returns all of them.
     """
     psu = psutil_mod
     if psu is None:
@@ -72,12 +57,7 @@ def _codex_session_ids_for_pid(pid: int, *, psutil_mod=None) -> frozenset:
 
 
 def _codex_session_id_for_pid(pid: int, *, psutil_mod=None) -> Optional[str]:
-    """The codex TUI's session id from its tree's open rollout, or None.
-
-    One-element wrapper over :func:`_codex_session_ids_for_pid`: a tree holding
-    exactly one distinct session returns it; anything else (none, ambiguous)
-    returns None.
-    """
+    """The sole session id in pid's tree, or None (none open, or ambiguous)."""
     ids = _codex_session_ids_for_pid(pid, psutil_mod=psutil_mod)
     if len(ids) == 1:
         return next(iter(ids))
@@ -89,23 +69,13 @@ def codex_rollout_witness(
 ) -> frozenset:
     """Session ids a live codex rollout witnesses for THIS process (x-a409).
 
-    Injected into claims.resolve_self_identity as the witness that lets a
-    name_only-stamped codex pane complete its own identity: the pane's tree
-    holds its rollout fd open, and a leaked marker cannot forge an fd. Two
-    oracles, strong first:
-
-    1. The tree scan (:func:`_codex_session_ids_for_pid` on this process's
-       resolved pid) - the fd lives in the pane.
-    2. The daemon oracle (``fno-agents codex-loaded-threads``), only when the
-       tree scan is empty. After sibling x-a095 moves pane threads into the
-       shared app-server, the daemon holds the rollout fd and the scan returns
-       nothing. The daemon list carries no pid, so this oracle is weaker: it
-       requires the present CODEX_THREAD_ID to match a row's session_id AND the
-       row's cwd to match this process's cwd AND the match to be unique, and
-       witnesses nothing on any other shape (None, zero rows, two rows).
-
-    Returns an empty set for every non-codex harness and every failure; it
-    must never raise (identity resolution degrades, never crashes).
+    Injected into claims.resolve_self_identity: a rollout fd is process ground
+    a leaked env marker cannot forge. Strong oracle first (the tree scan);
+    when it is empty - the post-x-a095 shape, where the shared app-server
+    daemon holds the fd - the daemon oracle requires the present
+    CODEX_THREAD_ID to match a row's session_id at this process's cwd,
+    uniquely. Any other answer, any non-codex harness, any failure: empty set.
+    Never raises.
     """
     try:
         if harness != "codex":

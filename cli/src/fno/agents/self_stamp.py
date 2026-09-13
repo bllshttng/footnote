@@ -39,9 +39,7 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
         # proves self.
         return row_owning_session_id(session_id, self_binding=own_pair)
 
-    # The rollout witness rides the same injection seam as collide: claims
-    # cannot import agents, and the codex pane needs the fd oracle to prove
-    # its own id where no env-carried marker can (x-a409).
+    # Same injection seam as collide: claims cannot import agents (x-a409).
     from fno.agents.codex_rollout import codex_rollout_witness
 
     return _resolve_self_identity(
@@ -92,9 +90,8 @@ def identity_ambiguity_message(identity) -> str:
     )
     rejection = identity.rejected[0] if identity.rejected else None
     # An owned_by_live_row rejection is a different ambiguity than mixed
-    # families: the id under test belongs to a live row (often the session's
-    # OWN backfilled row, x-a409), so "multiple harness markers" sends the
-    # operator hunting for inherited env that is not there.
+    # families (x-a409): "multiple markers" sends the operator hunting for
+    # inherited env that is not there.
     if rejection:
         opening = (
             "cannot decide which session is 'self': id "

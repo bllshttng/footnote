@@ -77,11 +77,10 @@ def resolve_self_identity(
     and hands it over.
 
     ``witness(harness) -> frozenset[session_id]`` names the session ids a live
-    rollout fd witnesses for this process (codex only; see
-    ``fno.agents.mux_spawn.codex_rollout_witness``). It lets a name_only stamp
-    complete its own pair where no env-carried marker can prove self
-    (x-a409): the id comes from the fd, not from the marker under test, so it
-    is not circular.
+    rollout fd witnesses for this process (see
+    ``fno.agents.codex_rollout.codex_rollout_witness``). The id comes from the
+    fd, not the marker under test, so completing a name_only stamp's pair with
+    it is not circular (x-a409).
     """
     from fno.claims.session_pid import resolve_session_harness
 
@@ -127,16 +126,12 @@ def resolve_self_identity(
         == session_identity_key(attested_session_id)
     )
 
-    # x-a409: a name_only codex stamp names no id, and codex never carries
-    # CODEX_THREAD_ID in its own env, so neither the stamp nor the attester can
-    # complete the pair - the collider then ran self-blind and read the
-    # session's OWN backfilled row as a foreign owner. The injected witness is
-    # the rollout fd the codex tree (or, post-x-a095, the daemon) holds open:
-    # process ground a leaked marker cannot forge. A marker value the witness
-    # sees in a live rollout IS this process's id, so it completes
-    # canonical_session_id exactly as an attested match would. The thread id
-    # wins when present because codex sets CODEX_SESSION_ID to the ROOT
-    # session and CODEX_THREAD_ID per thread.
+    # x-a409: a name_only codex stamp carries no id and codex never carries
+    # CODEX_THREAD_ID in its own env, so the attester cannot complete the
+    # pair and the collider read the session's own backfilled row as foreign.
+    # A marker value the rollout witness sees in a live fd IS this process's
+    # id (an fd cannot be forged by a leaked marker); the thread id wins
+    # because codex sets CODEX_SESSION_ID to the ROOT session.
     witnessed_value: Optional[str] = None
     if (
         witness is not None
@@ -184,9 +179,6 @@ def resolve_self_identity(
             session_identity_key(canonical.session_id),
         )
     elif witnessed_value:
-        # The witness-completed pair: same ground as a COMPLETE stamp (a live
-        # rollout named the id), so the registry's own-row agreement check
-        # applies to it too (x-a409 AC1).
         own_pair = (true_harness, session_identity_key(witnessed_value))
 
     return _fill_spawn_record(

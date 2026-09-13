@@ -844,10 +844,8 @@ def resolve_owned_identity(
         if not identity.harness:
             return OwnedHarnessIdentity(None, None, present, "ambiguous")
         if identity.session_id is None:
-            # Proven family, no id: a name_only stamp over a same-family marker
-            # conflict (x-a409). With a prover AND markers present, the marker
-            # loop below settles it by proof; anything else has nothing to
-            # settle it with and refuses.
+            # Proven family, no id (x-a409): a prover and markers present fall
+            # through to the loop below; anything else refuses.
             if prove is None or not present:
                 return OwnedHarnessIdentity(None, None, present, "ambiguous")
         else:
@@ -945,12 +943,10 @@ def resolve_owned_identity(
                 value, family, present, "single" if len(distinct) == 1 else "proven", rejected_t
             )
         # Proven family but multiple DISTINCT ids: proof is harness-level, not
-        # id-level, so the specific id is unknown. Keep the proven harness (do
-        # not mislabel a proven-codex session as claude) and null the id, rather
-        # than pick by precedence and risk an inherited same-family stranger.
-        # One measured exception: codex sets CODEX_SESSION_ID to the ROOT
-        # session and CODEX_THREAD_ID per thread, so for a proven codex family
-        # the thread id names this process (x-a409 AC3).
+        # id-level, so keep the proven harness and null the id rather than pick
+        # by precedence. One measured exception: codex sets CODEX_SESSION_ID to
+        # the ROOT session and CODEX_THREAD_ID per thread, so the thread id
+        # names this process (x-a409).
         if family == "codex":
             thread_rows = [p for p in proven if p[0] == "CODEX_THREAD_ID"]
             if thread_rows:
