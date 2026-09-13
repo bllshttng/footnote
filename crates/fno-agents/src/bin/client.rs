@@ -555,6 +555,12 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
     }
 
+    // `backlog-notes` (x-920a wave 3): inventory, digest migration, and
+    // history readback over the note corpus. Direct dispatch, daemon-free.
+    if verb == "backlog-notes" {
+        return fno_agents::backlog::note_migrate::run_notes(&args[1..]);
+    }
+
     // `backlog-note` (x-920a): the native note action. Daemon-free write; the
     // Python `fno backlog note` bridge owns evidence checks, identity,
     // archived refusal, crown candidates and the mail transport, this action

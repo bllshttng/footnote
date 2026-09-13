@@ -17,6 +17,7 @@ pub const REASON_STATE_CLEARED: &str = "state_cleared";
 pub const REASON_NOTE_MIGRATED: &str = "note_migrated";
 pub const REASON_TERMINAL_EVACUATED: &str = "terminal_evacuated";
 pub const REASON_MACHINE_RECORD: &str = "machine_record";
+pub const REASON_DETAILS_ARCHIVED: &str = "details_archived";
 
 /// One journal record. `original` is the EXACT pre-image value (the prior
 /// `current_state` object, or one legacy `progress_notes` row) - never a
@@ -27,6 +28,10 @@ pub struct HistoryRecord {
     pub reason: String,
     /// Revision the pre-image carried; absent when the node had no state.
     pub prior_revision: Option<u64>,
+    /// Source position of the original inside its array (migration keys on
+    /// node + position, so identical bodies at different positions stay
+    /// distinct records).
+    pub position: Option<u64>,
     original: Value,
     pub source_session_id: Option<String>,
     pub source_harness: Option<String>,
@@ -45,6 +50,7 @@ impl HistoryRecord {
             "node_id": self.node_id,
             "reason": self.reason,
             "prior_revision": self.prior_revision,
+            "position": self.position,
             "original": self.original,
             "source_session_id": self.source_session_id,
             "source_harness": self.source_harness,
@@ -89,6 +95,7 @@ fn record_from_line(line: &str) -> Option<HistoryRecord> {
             .unwrap_or_default()
             .to_string(),
         prior_revision: v.get("prior_revision").and_then(Value::as_u64),
+        position: v.get("position").and_then(Value::as_u64),
         original: v.get("original").cloned().unwrap_or(Value::Null),
         source_session_id: v
             .get("source_session_id")
@@ -106,21 +113,26 @@ fn record_from_line(line: &str) -> Option<HistoryRecord> {
     })
 }
 
-/// A logical identity: same node, same reason, same prior revision and same
-/// original bytes is the SAME record. Re-running a migration, or retrying a
-/// state write whose publication failed after the journal landed, must not
-/// multiply logical records; the identity scan is the dedupe.
+/// A logical identity: same node, same reason, same prior revision, same
+/// source position and same original bytes is the SAME record. Re-running a
+/// migration, or retrying a state write whose publication failed after the
+/// journal landed, must not multiply logical records; the identity scan is
+/// the dedupe.
 fn logical_identity(
     node_id: &str,
     reason: &str,
     prior_revision: Option<u64>,
+    position: Option<u64>,
     hash: &str,
 ) -> String {
     format!(
-        "{node_id}\u{1f}{reason}\u{1f}{}\u{1f}{hash}",
+        "{node_id}\u{1f}{reason}\u{1f}{}\u{1f}{}\u{1f}{hash}",
         prior_revision
             .map(|r| r.to_string())
-            .unwrap_or_else(|| "-".into())
+            .unwrap_or_else(|| "-".into()),
+        position
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into()),
     )
 }
 
@@ -140,6 +152,7 @@ fn scan_identities(path: &Path) -> std::collections::HashSet<String> {
             &rec.node_id,
             &rec.reason,
             rec.prior_revision,
+            rec.position,
             &rec.content_hash,
         ));
     }
@@ -155,12 +168,13 @@ pub fn append(
     node_id: &str,
     reason: &str,
     prior_revision: Option<u64>,
+    position: Option<u64>,
     original: &Value,
     source_session_id: Option<&str>,
     source_harness: Option<&str>,
 ) -> Result<HistoryRecord, String> {
     let content_hash = sha256_hex(&canonical_bytes(original));
-    let identity = logical_identity(node_id, reason, prior_revision, &content_hash);
+    let identity = logical_identity(node_id, reason, prior_revision, position, &content_hash);
     let path = history_path(graph);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("history mkdir: {e}"))?;
@@ -174,6 +188,7 @@ pub fn append(
                     &rec.node_id,
                     &rec.reason,
                     rec.prior_revision,
+                    rec.position,
                     &rec.content_hash,
                 ) == identity
                 {
@@ -188,6 +203,7 @@ pub fn append(
         node_id: node_id.to_string(),
         reason: reason.to_string(),
         prior_revision,
+        position,
         original: original.clone(),
         source_session_id: source_session_id.map(str::to_string),
         source_harness: source_harness.map(str::to_string),
