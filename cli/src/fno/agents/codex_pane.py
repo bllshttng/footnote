@@ -25,8 +25,7 @@ def ensure_codex_daemon(
 ) -> None:
     """Start (or confirm) the shared app-server daemon before a codex pane.
 
-    The command is the create form's ``pre_exec``; a failure raises before
-    any pane exists.
+    The command is the create form's ``pre_exec``; failure raises pre-pane.
     """
     from fno.agents.harness_map import capabilities
 
@@ -72,8 +71,8 @@ def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
 
     A daemon-run tool inherits the daemon's env, not the TUI's. Measured
     2026-09-13 on codex-cli 0.154.0: only the FIRST ``-c`` per config key
-    applies, so one leaf carries ``FNO_AGENT_SELF`` and merges with the
-    operator's set table; the other pairs stay on the env(1) wrapper.
+    applies, so one leaf carries ``FNO_AGENT_SELF``; other pairs stay on
+    the env(1) wrapper.
     """
     chosen = next((p for p in pairs if p.startswith("FNO_AGENT_SELF=")), None)
     chosen = chosen or (pairs[0] if pairs else "")
