@@ -113,8 +113,8 @@ class Envelope:
     to_kind: Optional[str] = None
     # Send-time masked prose count (x-3700). Additive: a row written before this
     # field existed reads back as None and never acquires a fabricated count.
-    # The send lane supplies it so the row, Rule 7, and the rolling budget all
-    # carry the count of the SAME string -- the raw body, not the wire wrapper.
+    # The send lane supplies it so the row and Rule 7 both carry the count of
+    # the SAME string -- the raw body, not the wire wrapper.
     word_count: Optional[int] = None
     # Provenance axis for the authority trailer (ruling d-b328d8c4): the drain
     # render stamps mail_trailer(origin) from the record itself, never from

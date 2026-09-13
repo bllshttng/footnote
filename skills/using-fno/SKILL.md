@@ -18,7 +18,7 @@ Think fully. Send outcome, reason, next action. Drop articles only where clear. 
 
 Use `Status: X. Why Y. Done at Z.` or `Approval: Problem X. Options Y/Z. Recommend Z because A. Your call?`
 
-Budget-refused stop, resume, or scope change? Start the body with `control:`: own 60-word lane, pair budget untouched.
+Stop, resume, or scope change? Start the body with `control:`: own 60-word lane, skips the style check.
 
 ## 1. Workflow commands (orchestration, reasoning-required)
 

@@ -13,6 +13,8 @@ own case. A false positive there refuses correct markdown.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 import typer
 
@@ -791,3 +793,39 @@ def test_fix_never_touches_a_fenced_block():
     fixed, residue = style.fix(text, surface="pr-body")
     assert fixed == text
     assert residue == []
+
+
+# --- fix(): the negation invariant --------------------------------------------
+# fix() is the only code that rewrites a mail body. A rewrite that dropped a
+# negation would invert a sent instruction, so every fixable rewrite must keep
+# the whole-word negation counts exactly.
+
+_NEGATION_WORDS = ("not", "no", "never", "none", "nothing", "cannot", "without", "nor")
+
+
+def _negation_counts(text: str) -> dict[str, int]:
+    return {w: len(re.findall(rf"\b{w}\b", text.lower())) for w in _NEGATION_WORDS}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Positive control: the semicolon split rewrites the body, so the
+        # assertion proves a rewrite happened and negations survived it.
+        "do not merge; CI is not green",
+        "never merge; there is no green build, nor a rerun without review",
+        "cannot ship this\nnone of the checks pass; nothing else blocks",
+        # No fixable violation: fix returns the input unchanged.
+        "do not merge because CI is not green",
+    ],
+)
+def test_fix_preserves_negation_words(body):
+    fixed, _residue = style.fix(body, surface="pr-body")
+    assert _negation_counts(fixed) == _negation_counts(body)
+
+
+def test_fix_negation_control_rewrites_and_keeps_not():
+    body = "do not merge; CI is not green"
+    fixed, _residue = style.fix(body, surface="pr-body")
+    assert fixed != body
+    assert _negation_counts(fixed)["not"] == 2

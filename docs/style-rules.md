@@ -48,9 +48,9 @@ The cap counts words after the same masking pass as rules 1 to 6. Code, paths, f
 
 Rule 7 inherits the existing escapes. Add a `style-exception:` line with a reason, or pass `--style-exception`. The refusal is written to stderr, so it is not charged the mail cap.
 
-The send boundary also caps each canonical sender-recipient pair at `config.style.pair_budget_words` masked words, 80 by default, in a rolling 10-minute window. Any inbound `send` from that recipient resets the pair to zero. Self-sends and non-send audit or migration rows do not reset it. A style exception or `FNO_STYLE_ENFORCE=0` bypasses refusal for that send but still records and reserves the real word count. A refused attempt does not reserve words. Raise `pair_budget_words` alongside `word_cap.mail`: a higher per-message cap that leaves the window at 80 refuses the very message the cap now permits.
+The per-pair rolling word window (80 masked words per 10 minutes) was removed on 2026-09-13. Agents routed around the quota by writing long notes on a node and mailing short pointers, so the gate measured compliance, not conversation. A style rule applies at every length, and rule 7 stays the only word gate on an ordinary send.
 
-Operational control has its own lane. When the pair window is spent, a stop, a resume, or a scope change must still arrive. To use the lane, start the body's first line with `control:`. Such a body is exempt from the pair budget and skips the style check. It rides a separate rolling window, capped at 60 words per pair. The lane stays bounded. The control window is strictly smaller than the pair budget, so a chatter channel gains nothing by moving through it. A control body over 60 words refuses. An over-budget ordinary refusal names the escape in its own text.
+Operational control has its own lane. A stop, a resume, or a scope change must always arrive. To use the lane, start the body's first line with `control:`. Such a body skips the style check. It rides its own rolling ledger, capped at 60 words per pair per 10 minutes. The cap is fixed policy and deliberately unconfigurable, so a chatter channel gains nothing by moving through it. A control body over 60 words refuses.
 
 ### Which surfaces take the cap, and why progress notes do not
 

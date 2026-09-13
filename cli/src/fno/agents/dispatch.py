@@ -7610,41 +7610,25 @@ def _reserve_send_budget(
     recipient: str,
     message: str,
     msg_id: str,
-    enforce: bool,
 ):
-    """Reserve one canonical pair before any outward send side effect."""
+    """Reserve the control lane's ledger before any outward send side effect.
+
+    An ordinary body reserves nothing (rule 7 is its only word gate), so this
+    returns None and callers release unconditionally.
+    """
     from fno import style
     from fno.mail import budget
 
+    if not budget.is_control(message):
+        return None
     words = style.word_count(message)
-    if budget.is_control(message):
-        # The control lane keeps its own ledger: a stop or resume must arrive
-        # even when the pair's ordinary window is spent.
-        try:
-            return budget.reserve_control(
-                sender=sender, recipient=recipient, words=words, msg_id=msg_id
-            )
-        except budget.BudgetRefused as exc:
-            raise DispatchAskError(
-                f"refused: control word budget for {exc.pair}: {exc.marker()}",
-                exit_code=1,
-            ) from exc
-        except budget.BudgetUnavailable as exc:
-            raise DispatchAskError(f"refused: {exc}", exit_code=1) from exc
     try:
-        return budget.reserve(
-            sender=sender,
-            recipient=recipient,
-            words=words,
-            msg_id=msg_id,
-            enforce=enforce,
+        return budget.reserve_control(
+            sender=sender, recipient=recipient, words=words, msg_id=msg_id
         )
     except budget.BudgetRefused as exc:
         raise DispatchAskError(
-            f"refused: rolling word budget for {exc.pair}: {exc.marker()}\n"
-            "operational control (stop, resume, scope change)? resend with the "
-            "body's first line starting `control:` -- its own lane, 60 words, "
-            "exempt from this budget",
+            f"refused: control word budget for {exc.pair}: {exc.marker()}",
             exit_code=1,
         ) from exc
     except budget.BudgetUnavailable as exc:
@@ -7660,7 +7644,6 @@ def dispatch_send(
     from_name: str = _FROM_NAME_DEFAULT,
     *,
     registry_stamp_timeout_seconds: float = 1.0,
-    budget_enforce: bool = True,
     origin: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
@@ -7933,7 +7916,6 @@ def dispatch_send(
                 recipient=budget_recipient,
                 message=message,
                 msg_id=msg_id,
-                enforce=budget_enforce,
             )
 
             live_attempted = False
@@ -8281,7 +8263,6 @@ def dispatch_send(
                     recipient=timeout_recipient,
                     message=message,
                     msg_id=msg_id,
-                    enforce=budget_enforce,
                 )
                 ctx_token = _DISPATCH_CTX.set(ctx_for_timeout)
                 try:
@@ -8532,7 +8513,6 @@ def dispatch_send_to_project(
     from_name: str = _FROM_NAME_DEFAULT,
     any_: bool = False,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
-    budget_enforce: bool = True,
     origin: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Async send addressed to a project (anycast over the registry).
@@ -8569,10 +8549,6 @@ def dispatch_send_to_project(
 
     if res.recipient is not None:
         # Exactly one live peer (or --any winner): deliver live by name.
-        # Omit the default kwarg so existing in-process adapters that implement
-        # the pre-budget dispatch signature keep working. The exception lane
-        # passes False explicitly because it changes enforcement.
-        budget_kwargs = {} if budget_enforce else {"budget_enforce": False}
         result = dispatch_send(
             name=res.recipient,
             message=message,
@@ -8581,7 +8557,6 @@ def dispatch_send_to_project(
             lock_timeout=lock_timeout,
             from_name=from_name,
             origin=origin,
-            **budget_kwargs,
         )
         return replace(result, recipient=res.recipient, to_project=project)
 
@@ -8614,7 +8589,6 @@ def dispatch_send_to_project(
         recipient=project,
         message=message,
         msg_id=msg_id,
-        enforce=budget_enforce,
     )
 
     try:
