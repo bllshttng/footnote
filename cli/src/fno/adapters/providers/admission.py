@@ -329,6 +329,7 @@ def _admit(
             for existing in reservations.values():
                 if (
                     existing.get("dispatch_id") == dispatch_id
+                    and existing.get("provider_id") == record.id
                     and existing.get("state") in _TERMINAL_STATES
                 ):
                     return AdmissionReceipt(
@@ -450,6 +451,7 @@ def commit_reservation(
     dispatch_id: str,
     session_id: str | None = None,
     ttl_seconds: int | None = None,
+    policy: Any | None = None,
     now: float | None = None,
     repo_root: Path | None = None,
 ) -> bool:
@@ -459,6 +461,7 @@ def commit_reservation(
         reservation_id,
         dispatch_id=dispatch_id,
         ttl_seconds=ttl_seconds,
+        policy=policy,
         now=now,
         repo_root=repo_root,
         mutator=lambda record: record.update(
@@ -472,6 +475,7 @@ def refresh_reservation(
     *,
     dispatch_id: str,
     ttl_seconds: int | None = None,
+    policy: Any | None = None,
     now: float | None = None,
     repo_root: Path | None = None,
 ) -> bool:
@@ -481,6 +485,7 @@ def refresh_reservation(
         reservation_id,
         dispatch_id=dispatch_id,
         ttl_seconds=ttl_seconds,
+        policy=policy,
         now=now,
         repo_root=repo_root,
         mutator=lambda record: None,
@@ -491,6 +496,7 @@ def release_reservation(
     reservation_id: str,
     *,
     dispatch_id: str,
+    policy: Any | None = None,
     now: float | None = None,
     repo_root: Path | None = None,
 ) -> bool:
@@ -500,6 +506,7 @@ def release_reservation(
         reservation_id,
         dispatch_id=dispatch_id,
         ttl_seconds=None,
+        policy=policy,
         now=now,
         repo_root=repo_root,
         mutator=None,
@@ -511,6 +518,7 @@ def _mutate(
     *,
     dispatch_id: str,
     ttl_seconds: int | None,
+    policy: Any | None,
     now: float | None,
     repo_root: Path | None,
     mutator,  # Callable[[dict], None] | None; None = remove
@@ -518,7 +526,13 @@ def _mutate(
     if now is None:
         now = time.time()
     if ttl_seconds is None:
-        ttl_seconds = resolve_admission_policy().reservation_ttl_seconds
+        # Same basis as the reserve: an injected policy wins, the live
+        # config answers otherwise, so the lease never changes owners'
+        # minds about its own expiry.
+        if policy is not None:
+            ttl_seconds = policy.reservation_ttl_seconds
+        else:
+            ttl_seconds = resolve_admission_policy().reservation_ttl_seconds
     state_path = rs._resolve_state_path(repo_root)
     with _lock(state_path):
         raw = rs._read_disk_payload(state_path)

@@ -282,11 +282,14 @@ def gates_for(
                     out.append(
                         Gate(
                             "account-budget",
-                            f"{receipt.remaining_admission_pct if receipt.remaining_admission_pct is not None else receipt.status}"
-                            + (
-                                f"% ({receipt.binding_window})"
-                                if receipt.binding_window
-                                else ""
+                            (
+                                f"{receipt.remaining_admission_pct}% ({receipt.binding_window})"
+                                if receipt.remaining_admission_pct is not None
+                                else (
+                                    f"{receipt.status} ({receipt.binding_window})"
+                                    if receipt.binding_window
+                                    else receipt.status
+                                )
                             ),
                             f"reserve {policy.reserve_for('do', str(node.get('difficulty') or 'high')):.0f}%",
                             "pass" if receipt.admitted else ("refuse" if armed else "unknown"),

@@ -88,14 +88,14 @@ def _child_reserve(state_path_str: str, dispatch_id: str, result_queue) -> None:
         result_queue.put((f"error: {exc!r}", None))
 
 
-def test_concurrent_reserves_admit_only_what_the_window_covers(tmp_path):
+def test_concurrent_reserves_admit_only_what_the_window_covers(tmp_path, monkeypatch):
     """40% remains, 10% reserve, 10% demand each: exactly 3 of 6 may win.
 
     Winners are mutually exclusive by the file lock: a fourth admit would
     spend demand that was already promised to a live worker.
     """
     state_path = tmp_path / "runtime-state.json"
-    os.environ["FNO_RUNTIME_STATE_PATH"] = str(state_path)
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(state_path))
     _seed(state_path, used_pct=60.0)
 
     ctx = mp.get_context("spawn")

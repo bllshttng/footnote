@@ -438,7 +438,6 @@ def admission_cmd(
     from fno.adapters.providers.admission import (
         outstanding_for_pool,
         preview_admission,
-        resolve_pool,
     )
     from fno.adapters.providers.loader import load_providers
     from fno.config._routing_admission import resolve_admission_policy
@@ -452,21 +451,19 @@ def admission_cmd(
     rows: list[dict[str, object]] = []
     loaded = load_providers()
     for record in loaded.records:
-        pool, identity_error = resolve_pool(record, by_id=loaded.by_id)
+        # One binding resolution per record: the receipt carries the pool the
+        # preview used, so the row never re-probes the identity a second time.
+        receipt = preview_admission(
+            record, verb=verb, difficulty=difficulty, policy=policy
+        )
+        pool = receipt.pool
         outstanding_pct, inflight = (
             outstanding_for_pool(pool) if pool else (0.0, 0)
         )
-        if record is None or pool is None:
-            status, detail = "unknown_identity", (identity_error or "")
-            remaining, binding = None, None
-        else:
-            receipt = preview_admission(
-                record, verb=verb, difficulty=difficulty, policy=policy
-            )
-            status = receipt.status
-            detail = receipt.reason or ""
-            remaining = receipt.remaining_admission_pct
-            binding = receipt.binding_window
+        status = receipt.status
+        detail = receipt.reason or ""
+        remaining = receipt.remaining_admission_pct
+        binding = receipt.binding_window
         rows.append({
             "preview": True,
             "record": record.id,
