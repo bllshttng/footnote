@@ -33,13 +33,19 @@ pub fn web(args: &[OsString], _env_session: Option<&str>) -> i32 {
 /// Can anything accept a TCP connection on (bind, port) right now? One probe
 /// per resolved address, 300 ms each, first answer wins: startup's bind tries
 /// every resolved address until one succeeds, so a live bridge can sit on the
-/// second of them.
+/// second of them. The whole question is bounded in time, not by an address
+/// count - a many-address hostname must not hide its listener past a cap.
 fn bridge_alive(bind: &str, port: u16) -> bool {
     use std::net::ToSocketAddrs;
+    use std::time::Instant;
     let Ok(addrs) = (bind, port).to_socket_addrs() else {
         return false;
     };
-    for addr in addrs.take(8) {
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    for addr in addrs {
+        if Instant::now() >= deadline {
+            break;
+        }
         if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
             return true;
         }
