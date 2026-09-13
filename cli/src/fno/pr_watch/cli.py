@@ -343,6 +343,7 @@ _RECOVERY_ROOT_FLOOR_S = 3.0
 _PHASE_CAP_S: dict[str, float] = {
     "settings": 60,
     "sweep": 150,
+    "merge": 150,
     "king_wake": 100,
     "notify_watch": 30,
     "heal": 30,
@@ -1058,6 +1059,20 @@ def tick() -> None:
                            ("disabled", "lock_held", "quota_skip", "error", "timeout") else None,
                            detail=f"outcome={outcome}" + (f" ({', '.join(bits)})" if bits else ""))
 
+        def _phase_merge(_slice_s: float) -> None:
+            if result is None or not result.execute_queue:
+                return
+            assert cfg is not None
+            from fno.pr_watch._dispatch import run_execute_queue
+            executed, skipped = run_execute_queue(
+                result,
+                emit=_emit_event,
+                notify=lambda message, **_kw: _notify_parked(message),
+                max_retries=cfg.retries,
+                claim=ClaimAdapter(),
+            )
+            typer.echo(f"pr-watch merge phase: executed={executed} skipped={skipped}")
+
 
         # Stranded-worktree recovery, same arming gate as the fleet
         # watchdog above: this is a second read of the same "is recovery
@@ -1225,6 +1240,7 @@ def tick() -> None:
         # a proven-stale canonical through its SessionStart hook.
         sweep_started = True
         _run_phase("sweep", _phase_sweep, on_end=_sweep_ended)
+        _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")
         _run_phase("heal", _phase_heal)
@@ -1410,6 +1426,7 @@ def heal() -> None:
             fno_binary=_resolve_fno_binary(),
             install_path=os.environ.get("PATH", "/usr/bin:/bin"),
             interval=settings.pr_watch.interval_seconds,
+            defer_when_ticking=True,
         )
         typer.echo(f"pr-watch heal: {msg}")
         if rc != 0:

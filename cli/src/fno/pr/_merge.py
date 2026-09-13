@@ -1787,7 +1787,9 @@ def _overlaps(base_paths: List[str], pr_paths: List[str]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def run_merge_for_durable_grant(pr_number: int, cwd: str) -> int:
+def run_merge_for_durable_grant(
+    pr_number: int, cwd: str, timeout_s: float = 300.0
+) -> int:
     """The watcher's internal durable-grant merge entry (returns run_merge's code).
 
     Canonical ``run_merge`` with ``authority="durable_grant"``: the parked
@@ -1795,13 +1797,16 @@ def run_merge_for_durable_grant(pr_number: int, cwd: str) -> int:
     in-flight review, incarnation fence, stub manifest, coverage, posture,
     CI - runs identically. The exit code is the receipt's outcome: 0 merged,
     2 held/skipped (retryable, no failure budget consumed), anything else a
-    failed attempt.
+    failed attempt. ``timeout_s`` bounds the authorized-merge owner call.
     """
-    return run_merge([str(int(pr_number))], cwd=cwd, authority="durable_grant")
+    return run_merge(
+        [str(int(pr_number))], cwd=cwd, authority="durable_grant", timeout_s=timeout_s
+    )
 
 
 def run_merge(
-    argv: Sequence[str], cwd: Optional[str] = None, *, authority: str = "manifest"
+    argv: Sequence[str], cwd: Optional[str] = None, *,
+    authority: str = "manifest", timeout_s: float = 300.0,
 ) -> int:
     """Merge one PR through the canonical guard chain.
 
@@ -2188,6 +2193,7 @@ def run_merge(
             approved=posture_approved,
             auto_merge_source=posture_source,
             release_lock=release_now,
+            timeout_s=timeout_s,
         )
 
 
@@ -2221,6 +2227,7 @@ def _authorized_merge(
     require_checks: bool = False,
     covered_head: str = "",
     decide_only: bool = False,
+    timeout_s: float = 300.0,
 ) -> dict:
     """Ask the one authorized-merge operation, in fno-agents.
 
@@ -2252,7 +2259,7 @@ def _authorized_merge(
         # The door's 30s default reported it UNREACHABLE while it was merely
         # still running, and an unread authorization refuses the merge - so a
         # slow network made this verb unable to merge at all.
-        return verb_call("authorized-merge", payload, timeout=300)
+        return verb_call("authorized-merge", payload, timeout=timeout_s)
     except VerbUnavailable as exc:
         return {
             "outcome": "unknown",
@@ -2298,6 +2305,7 @@ def _do_merge(
     approved: Optional[bool] = None,
     auto_merge_source: str = "",
     release_lock: Optional[Callable[[], None]] = None,
+    timeout_s: float = 300.0,
 ) -> int:
     """Steps (3)-(4): authorize through the one owner, then run the effect.
 
@@ -2319,7 +2327,7 @@ def _do_merge(
     # Authorize BEFORE publishing anything. The coverage status greens the head
     # for the web button, which enforces only the coverage context, so stamping
     # it ahead of a refusal would open the door this verb is about to close.
-    decision = _authorized_merge(pr_number, repo, decide_only=True, **ask)
+    decision = _authorized_merge(pr_number, repo, decide_only=True, timeout_s=timeout_s, **ask)
     if decision.get("outcome") != "authorized":
         return _emit_authorized_outcome(pr_number, decision, strategy)
 
@@ -2350,7 +2358,7 @@ def _do_merge(
     # those guards read. The second pass is the price of that window, not an
     # oversight: it doubles the owner's probe spawns, and a merge is rare
     # enough to pay it. Do not "optimize" it into one pass.
-    receipt = _authorized_merge(pr_number, repo, **ask)
+    receipt = _authorized_merge(pr_number, repo, timeout_s=timeout_s, **ask)
     if receipt.get("outcome") == "merged":
         # Two different fields, and collapsing them is a bug: `note` says HOW
         # the merge landed (the worktree-held REST recovery is a success),

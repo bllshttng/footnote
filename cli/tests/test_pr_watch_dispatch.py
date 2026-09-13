@@ -3901,14 +3901,24 @@ def _arm_durable_grant(
 
 
 class TestDurableGrantExecution:
-    """The OPEN-granted action: reserved -> canonical merge -> executed/held/failed."""
+    """The OPEN-granted action: the sweep queues it, the merge phase runs
+    reserved -> canonical merge -> executed/held/failed ."""
 
-    def _tick(self, tmp_path, deps, monkeypatch, rc, store_path=None):
+    def _tick(self, tmp_path, deps, monkeypatch, rc, store_path=None, max_retries=2):
         from fno.pr_watch._dispatch import tick
+
+        merge_calls: list[dict] = []
+        self._merge_calls = merge_calls
+
+        def _fake_merge(pr, cwd, timeout_s=300.0):
+            merge_calls.append({"pr": pr, "timeout_s": timeout_s})
+            if isinstance(rc, BaseException):
+                raise rc
+            return rc
 
         monkeypatch.setattr(
             "fno.pr._merge.run_merge_for_durable_grant",
-            lambda pr, cwd: rc,
+            _fake_merge,
         )
         return tick(
             graph_path=tmp_path / "graph.json",
@@ -3923,8 +3933,24 @@ class TestDurableGrantExecution:
             notify=deps["notify"],
             post_merge_readiness_fn=deps["post_merge_readiness"],
             now_iso="2026-06-14T12:00:00Z",
-            max_retries=2,
+            max_retries=max_retries,
             graphql_remaining_fn=lambda: (4800, None),
+        )
+
+    def _drain(self, result, deps, monkeypatch, tmp_path, *, budget_left=None,
+               max_retries=2):
+        from fno.pr_watch._dispatch import run_execute_queue
+        import fno.pr_watch._dispatch as d
+
+        if budget_left is not None:
+            monkeypatch.setattr(d, "_phase_deadline", budget_left)
+        return run_execute_queue(
+            result,
+            store_path=tmp_path / "state.json",
+            emit=deps["emit"],
+            notify=deps["notify"],
+            max_retries=max_retries,
+            claim=deps["claim"],
         )
 
     def _grant_events(self, deps, phase):
@@ -3940,11 +3966,12 @@ class TestDurableGrantExecution:
         )
         _arm_durable_grant(monkeypatch, tmp_path)
         result = self._tick(tmp_path, deps, monkeypatch, 0)
+        executed, skipped = self._drain(result, deps, monkeypatch, tmp_path)
 
-        assert result.acted == 1
+        assert (executed, skipped) == (1, 0)
         reserved = self._grant_events(deps, "reserved")
-        executed = self._grant_events(deps, "executed")
-        assert len(reserved) == 1 and len(executed) == 1
+        executed_events = self._grant_events(deps, "executed")
+        assert len(reserved) == 1 and len(executed_events) == 1
         assert reserved[0]["data"]["actor"] == "pr-watch"
         assert reserved[0]["data"]["pr"] == 1
         assert reserved[0]["data"]["node_id"] == "x-abc12345"
@@ -3965,7 +3992,8 @@ class TestDurableGrantExecution:
             obs_map={1: _make_obs(pr_number=1, state="OPEN")},
         )
         _arm_durable_grant(monkeypatch, tmp_path)
-        self._tick(tmp_path, deps, monkeypatch, 2)
+        result = self._tick(tmp_path, deps, monkeypatch, 2)
+        self._drain(result, deps, monkeypatch, tmp_path)
 
         assert len(self._grant_events(deps, "held")) == 1
         assert not self._grant_events(deps, "failed")
@@ -3982,8 +4010,10 @@ class TestDurableGrantExecution:
         )
         _arm_durable_grant(monkeypatch, tmp_path)
         store_path = _seed_tracked_entry(tmp_path)
-        self._tick(tmp_path, deps, monkeypatch, 1, store_path=store_path)
-        self._tick(tmp_path, deps, monkeypatch, 1, store_path=store_path)
+        result = self._tick(tmp_path, deps, monkeypatch, 1, store_path=store_path)
+        self._drain(result, deps, monkeypatch, tmp_path)
+        result = self._tick(tmp_path, deps, monkeypatch, 1, store_path=store_path)
+        self._drain(result, deps, monkeypatch, tmp_path)
 
         failed = self._grant_events(deps, "failed")
         assert len(failed) == 2
@@ -4030,35 +4060,179 @@ class TestDurableGrantExecution:
             e["type"] != "merge_grant_execution" for e in deps["events"]
         )
 
-    def test_execute_arm_ignores_fire_budget(self, tmp_path, monkeypatch):
-        """The fire floor gates the spawn arm only. A durable-grant execution
-        is the canonical merge core bounded by its own guards, so it still
-        runs - and the scan receipt still counts it - on a tick with no room
-        to fire a spawn."""
-        from types import SimpleNamespace
+    @staticmethod
+    def _seed_entries(tmp_path, prs):
+        from fno.pr_watch._state import WatermarkStore
 
-        import fno.pr_watch._dispatch as d
+        store_path = tmp_path / "state.json"
+        store = WatermarkStore(path=store_path)
+        for pr in prs:
+            store.set(f"owner/repo#{pr}", {
+                "last_review_ts": None,
+                "last_seen_state": "OPEN",
+                "merge_dispatched": False,
+                "retries": 0,
+                "parked": None,
+            })
+        return store_path
+
+    def test_sweep_queues_and_mints_receipt_without_calling_merge(
+        self, tmp_path, monkeypatch
+    ):
+        """AC1-HP (sweep half): one granted OPEN PR and 5 more
+        candidates, the sweep queues the granted PR, still reads every
+        candidate, mints the receipt, and never calls the merge."""
+        cands = [_make_candidate(repo_dir=tmp_path)] + [
+            _make_candidate(node_id=f"x-extra{i}", pr_number=i, repo_dir=tmp_path)
+            for i in range(2, 7)
+        ]
+        obs = {pr: _make_obs(pr_number=pr, state="OPEN") for pr in range(1, 7)}
+        deps = _make_tick_deps(tmp_path, candidates=cands, obs_map=obs)
+        _arm_durable_grant(monkeypatch, tmp_path, approved=True)
+        store_path = self._seed_entries(tmp_path, range(1, 7))
+        result = self._tick(tmp_path, deps, monkeypatch, 0, store_path=store_path)
+
+        assert self._merge_calls == []
+        assert not self._grant_events(deps, "reserved")
+        assert len(result.execute_queue) == 1
+        queued_cand, queued_key, _grant = result.execute_queue[0]
+        assert queued_cand.pr_number == 1 and queued_key == "owner/repo#1"
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["merge_scan"]["scanned"] == 6
+        assert receipt["merge_scan"]["eligible"] == 1
+        assert receipt["merge_scan"]["attempted"] == 1
+
+    def test_merge_phase_executes_queued_pr(self, tmp_path, monkeypatch):
+        """AC1-HP (merge-phase half): the queued PR executes under the
+        merge phase and the store records the merge."""
+        cands = [_make_candidate(repo_dir=tmp_path)] + [
+            _make_candidate(node_id=f"x-extra{i}", pr_number=i, repo_dir=tmp_path)
+            for i in range(2, 7)
+        ]
+        obs = {pr: _make_obs(pr_number=pr, state="OPEN") for pr in range(1, 7)}
+        deps = _make_tick_deps(tmp_path, candidates=cands, obs_map=obs)
+        _arm_durable_grant(monkeypatch, tmp_path, approved=True)
+        store_path = self._seed_entries(tmp_path, range(1, 7))
+        result = self._tick(tmp_path, deps, monkeypatch, 0, store_path=store_path)
+        executed, skipped = self._drain(result, deps, monkeypatch, tmp_path)
+
+        assert (executed, skipped) == (1, 0)
+        assert [c["pr"] for c in self._merge_calls] == [1]
+        from fno.pr_watch._state import WatermarkStore
+
+        entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
+        assert entry["merge_dispatched"] is True
+        assert entry["retries"] == 0
+
+    def test_drain_skips_entry_already_merged_by_overlapping_tick(
+        self, tmp_path, monkeypatch
+    ):
+        """The tick lock is gone by merge-phase time, so an overlapping tick
+        may have merged the queued PR already; the fresh load under the
+        per-PR lock sees merge_dispatched and attempts nothing."""
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
+            obs_map={1: _make_obs(pr_number=1, state="OPEN")},
+        )
+        _arm_durable_grant(monkeypatch, tmp_path)
+        result = self._tick(tmp_path, deps, monkeypatch, 0)
+        from fno.pr_watch._state import WatermarkStore
+
+        store = WatermarkStore(path=tmp_path / "state.json")
+        entry = store.get("owner/repo#1")
+        entry["merge_dispatched"] = True
+        store.set("owner/repo#1", entry)
+        executed, skipped = self._drain(result, deps, monkeypatch, tmp_path)
+
+        assert (executed, skipped) == (0, 0)
+        assert self._merge_calls == []
+        assert not self._grant_events(deps, "reserved")
+
+    def test_merge_cut_mid_call_spends_one_retry(self, tmp_path, monkeypatch):
+        """AC1-HP (the outage shape): the merge call is cut by the
+        phase alarm mid-call. The retry spent BEFORE the call survives, so
+        the cut counts as one failed attempt and the receipt still reads
+        scanned=6."""
+        from fno.pr_watch.cli import TickDeadlineExceeded
+
+        cands = [_make_candidate(repo_dir=tmp_path)] + [
+            _make_candidate(node_id=f"x-extra{i}", pr_number=i, repo_dir=tmp_path)
+            for i in range(2, 7)
+        ]
+        obs = {pr: _make_obs(pr_number=pr, state="OPEN") for pr in range(1, 7)}
+        deps = _make_tick_deps(tmp_path, candidates=cands, obs_map=obs)
+        _arm_durable_grant(monkeypatch, tmp_path, approved=True)
+        store_path = self._seed_entries(tmp_path, range(1, 7))
+        result = self._tick(
+            tmp_path, deps, monkeypatch, TickDeadlineExceeded(), store_path=store_path
+        )
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["merge_scan"]["scanned"] == 6
+
+        import pytest
+
+        with pytest.raises(TickDeadlineExceeded):
+            self._drain(result, deps, monkeypatch, tmp_path)
+        from fno.pr_watch._state import WatermarkStore
+
+        entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
+        assert entry["retries"] == 1
+        assert not entry.get("parked")
+
+    def test_three_failed_ticks_park_and_fourth_attempts_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """AC2-EDGE: a PR whose merge times out three ticks in a row
+        parks at retries-exhausted, and a fourth tick queues nothing for it."""
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
+            obs_map={1: _make_obs(pr_number=1, state="OPEN")},
+        )
+        _arm_durable_grant(monkeypatch, tmp_path)
+        store_path = _seed_tracked_entry(tmp_path)
+        for _ in range(3):
+            result = self._tick(
+                tmp_path, deps, monkeypatch, 1, store_path=store_path, max_retries=3
+            )
+            self._drain(result, deps, monkeypatch, tmp_path, max_retries=3)
+
+        assert len(self._grant_events(deps, "failed")) == 3
+        parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
+        assert parked and parked[0]["data"]["reason"] == "retries-exhausted"
+        result = self._tick(
+            tmp_path, deps, monkeypatch, 1, store_path=store_path, max_retries=3
+        )
+        assert result.execute_queue == []
+        assert len(self._grant_events(deps, "reserved")) == 3
+
+    def test_execute_budget_skips_without_calling_merge(self, tmp_path, monkeypatch):
+        """AC3-EDGE: under _FIRE_FLOOR_S of merge-phase slice left, the
+        queue emits execute-budget, calls no merge, and leaves retries alone."""
+        import time as _time
 
         deps = _make_tick_deps(
             tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
             obs_map={1: _make_obs(pr_number=1, state="OPEN")},
         )
-        _arm_durable_grant(monkeypatch, tmp_path, approved=True)
+        _arm_durable_grant(monkeypatch, tmp_path)
+        result = self._tick(tmp_path, deps, monkeypatch, 0)
+        executed, skipped = self._drain(
+            result, deps, monkeypatch, tmp_path,
+            budget_left=_time.monotonic() + 10.0,
+        )
 
-        clock = {"t": 1000.0}
-        monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
-        # 35s of phase left -> _ritual_timeout() = 25 < _FIRE_FLOOR_S.
-        monkeypatch.setattr(d, "_phase_deadline", clock["t"] + 35.0)
-        self._tick(tmp_path, deps, monkeypatch, 0)
-
-        executed = [
+        assert (executed, skipped) == (0, 1)
+        assert self._merge_calls == []
+        budget = [
             e for e in deps["events"]
-            if e["type"] == "merge_grant_execution" and e["data"].get("phase") == "executed"
+            if e["type"] == "pr_watch_skipped"
+            and e["data"].get("reason") == "execute-budget"
         ]
-        assert [e["data"]["pr"] for e in executed] == [1]
-        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
-        assert receipt["merge_scan"]["eligible"] == 1
-        assert receipt["merge_scan"]["attempted"] == 1
+        assert [e["data"]["pr"] for e in budget] == [1]
+        from fno.pr_watch._state import WatermarkStore
+
+        entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
+        assert entry["retries"] == 0
 
     def test_quiet_tick_still_proves_the_scan_ran(self, tmp_path, monkeypatch):
         """AC12-HP: a completed tick with zero eligible PRs carries the scan
@@ -4190,17 +4364,28 @@ class TestScanResumesLeastRecentlyPolled:
                 update={"auto_merge": AutoMergeBlock(enabled=True, grant="dispatch")}
             ),
         )
-        monkeypatch.setattr("fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd: 0)
+        monkeypatch.setattr(
+            "fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd, timeout_s=300.0: 0
+        )
 
+        results = []
         for _ in range(5):
             # 10 reads per tick: the read floor is 15s, so the window is
             # deadline - 15; each read costs 1s of the faked clock.
             deadline = clock["t"] + 24.0
             res = self._tick(tmp_path, deps, monkeypatch, store_path, deadline=deadline)
+            results.append(res)
             assert not res.quota_skip
 
         # Every PR observed exactly once, in ten-PR windows, no repeats.
         assert reads == prs
+        # PR 45 was queued by the fifth window; the merge phase drains it.
+        from fno.pr_watch._dispatch import run_execute_queue
+
+        run_execute_queue(
+            results[-1], store_path=store_path, emit=deps["emit"],
+            notify=deps["notify"], max_retries=2, claim=deps["claim"],
+        )
         executed = [
             e for e in deps["events"]
             if e["type"] == "merge_grant_execution" and e["data"].get("phase") == "executed"
@@ -4263,13 +4448,21 @@ class TestScanResumesLeastRecentlyPolled:
                 update={"auto_merge": AutoMergeBlock(enabled=True, grant="dispatch")}
             ),
         )
-        monkeypatch.setattr("fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd: 0)
+        monkeypatch.setattr(
+            "fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd, timeout_s=300.0: 0
+        )
 
         res = self._tick(tmp_path, deps, monkeypatch, store_path,
                          deadline=clock["t"] + 110.0)
 
         assert reads == prs, f"every state-backed candidate is rich-read: {reads}"
-        assert res.acted == 1
+        from fno.pr_watch._dispatch import run_execute_queue
+
+        executed, _skipped = run_execute_queue(
+            res, store_path=store_path, emit=deps["emit"],
+            notify=deps["notify"], max_retries=2, claim=deps["claim"],
+        )
+        assert executed == 1
         state = WatermarkStore(path=store_path).load()
         stamped = [k for k, v in state.items() if isinstance(v, dict) and v.get("last_polled_at")]
         assert len(stamped) == 11, "every rich read stamped its cursor"

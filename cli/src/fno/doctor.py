@@ -4473,10 +4473,13 @@ def doctor_command(
                     fno_binary=_resolve_fno_binary(),
                     install_path=os.environ.get("PATH", "/usr/bin:/bin"),
                     interval=int(pw.get("interval_seconds") or 600),
+                    defer_when_ticking=True,
                 )
                 typer.echo(f"fno doctor: --fix pr-watch refresh: {rmsg}", err=True)
             else:
-                hmsg, _ = heal_watcher(launch_agents_dir=_LAUNCH_AGENTS_DIR)
+                hmsg, _ = heal_watcher(
+                    launch_agents_dir=_LAUNCH_AGENTS_DIR, defer_when_ticking=True
+                )
                 typer.echo(f"fno doctor: --fix pr-watch heal: {hmsg}", err=True)
 
         # A stale plugin cache is counted in `blockers`, and nothing on this path
