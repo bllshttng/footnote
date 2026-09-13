@@ -89,3 +89,20 @@ def test_pin_silent_when_operator_env_already_decided(tmp_path, monkeypatch):
     target = _make_repo(tmp_path / "target")
     monkeypatch.setenv("FNO_WORKTREE_POLICY", "external")
     assert undeclared_dispatch_pin(target, caller, "claude") == {}
+
+
+def test_pane_wrapper_sets_and_clears_the_pin():
+    """The pin rides the pane env wrapper set-or-clear, without joining the
+    node-provenance tuple: set when this spawn resolved it, cleared when not,
+    so a nested child never inherits a pin for a repo it never targeted."""
+    from fno.agents import mux_spawn
+
+    bound = mux_spawn._mesh_env_wrapper(
+        "w", "claude", None, ["claude"],
+        provenance={"FNO_WORKTREE_POLICY": "never"},
+    )
+    assert "FNO_WORKTREE_POLICY=never" in bound
+
+    adhoc = mux_spawn._mesh_env_wrapper("w", "claude", None, ["claude"])
+    i = adhoc.index("FNO_WORKTREE_POLICY")
+    assert adhoc[i - 1] == "-u"

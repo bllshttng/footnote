@@ -2616,7 +2616,10 @@ def cmd_spawn(
         from fno.agents.mux_spawn import PROVENANCE_KEYS
 
         prov_prev.update({k: os.environ.get(k) for k in PROVENANCE_KEYS})
-        for _k in PROVENANCE_KEYS:
+        # The worktree-policy pin clears like the group but is not node
+        # provenance, so it joins by name instead of joining the tuple.
+        prov_prev["FNO_WORKTREE_POLICY"] = os.environ.get("FNO_WORKTREE_POLICY")
+        for _k in (*PROVENANCE_KEYS, "FNO_WORKTREE_POLICY"):
             os.environ.pop(_k, None)
         os.environ.update(prov_env)
         # TARGET_NO_MERGE was set-or-cleared above, before the substrate

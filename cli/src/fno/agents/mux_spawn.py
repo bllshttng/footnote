@@ -1745,7 +1745,7 @@ def _mesh_env_wrapper(
     # origin capture would then persist into every node the pane files.
     # `env -u` on an unset var is a harmless no-op.
     resolved_prov = {k: v for k, v in (provenance or {}).items() if v}
-    for _k in PROVENANCE_KEYS:
+    for _k in (*PROVENANCE_KEYS, "FNO_WORKTREE_POLICY"):  # the pin rides set-or-clear; it is not node provenance
         if _k not in resolved_prov:
             unset += ["-u", _k]
     pairs += [f"{k}={v}" for k, v in resolved_prov.items()]
@@ -1764,20 +1764,17 @@ def _mesh_env_wrapper(
 
 #: The provenance env keys, as one set. Callers that export them must set or
 #: clear the whole group together so a child never sees a mix of its own node
-#: and its parent's slug, plan, claim holder, or worktree-policy pin.
+#: and its parent's slug, plan, or claim holder.
 #:
-#: ``FNO_NODE_CLAIM_HOLDER`` belongs here because it is written beside
-#: ``FNO_NODE`` for a node-driven spawn, and a copy left behind would offer a
-#: later child the prior worker's handover holder to name back - the one thing
-#: that proves successorship. ``FNO_WORKTREE_POLICY`` rides for the same
-#: set-or-clear reason: a child dispatched into a different repo must not
-#: inherit the pin its parent resolved for a repo it never targeted.
+#: ``FNO_NODE_CLAIM_HOLDER`` belongs here for the same reason the other three
+#: do: it is written beside ``FNO_NODE`` for a node-driven spawn, and a copy
+#: left behind would offer a later child the prior worker's handover holder to
+#: name back - which is the one thing that proves successorship.
 PROVENANCE_KEYS: tuple[str, ...] = (
     "FNO_NODE",
     "FNO_SLUG",
     "FNO_PLAN",
     "FNO_NODE_CLAIM_HOLDER",
-    "FNO_WORKTREE_POLICY",
 )
 
 #: Re-exported (x-3a64), never redefined: the clear list must not drift from the
