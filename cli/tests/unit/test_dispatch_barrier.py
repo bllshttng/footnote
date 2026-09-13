@@ -786,7 +786,7 @@ def test_a_resume_registry_failure_never_took_the_reservation(monkeypatch, tmp_p
     result = runner.invoke(
         agents_app,
         [
-            "spawn", "--name", "w1", "hi",
+            "spawn", "--name", "w1", "/fix hi",
             "--harness", "claude", "--substrate", "bg",
             "--node", "x-abcd", "--resume", "11111111-2222-3333-4444-555555555555",
         ],
@@ -816,7 +816,7 @@ def test_a_resume_route_without_a_provider_never_took_the_reservation(
     result = runner.invoke(
         agents_app,
         [
-            "spawn", "--name", "w1", "hi",
+            "spawn", "--name", "w1", "/fix hi",
             "--harness", "claude", "--substrate", "bg",
             "--node", "x-abcd", "--resume", "11111111-2222-3333-4444-555555555555",
         ],
@@ -871,7 +871,7 @@ def test_a_one_shot_releases_the_reservation_in_seconds_not_at_ttl(
         # pre-existing `not spawn_succeeded` arm and prove nothing about the
         # one-shot split. The stub hid that. codex + --once is a path a caller
         # can actually reach.
-        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--once",
+        ["spawn", "--name", "w1", "/fix hi", "--harness", "codex", "--once",
          "--node", "x-abcd"],
     )
     elapsed = time.monotonic() - started
@@ -893,7 +893,7 @@ def test_a_headless_substrate_releases_the_reservation(monkeypatch, tmp_path):
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude",
+        ["spawn", "--name", "w1", "/fix hi", "--harness", "claude",
          "--substrate", "headless", "--node", "x-abcd"],
     )
     assert result.exit_code == 0, result.output
@@ -929,7 +929,7 @@ def test_a_pane_spawn_still_holds_the_reservation_for_its_worker(
     )
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude",
+        ["spawn", "--name", "w1", "/fix hi", "--harness", "claude",
          "--substrate", "pane", "--node", "x-abcd"],
     )
     assert result.exit_code == 0, result.output
