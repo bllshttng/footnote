@@ -29,21 +29,27 @@ use crate::daemon::pid_is_ours;
 use crate::state::{load_registry, Registry};
 use crate::AgentStatus;
 
-/// Exit codes, distinct from existing dispatch codes (2, 13, 14, 15, 18, 127).
+/// Exit codes, allocated by the shared table in
+/// `cli/src/fno/agents/spawn_gate.py` and kept unique across both trees by
+/// `cli/tests/unit/test_exit_code_allocation.py` (values >= 64 claim a number
+/// once). Distinct from the convention codes (2, 13, 14, 15, 18, 127).
 pub const EXIT_QUEUE_TIMEOUT: i32 = 75;
 pub const EXIT_NO_WAIT: i32 = 76;
 pub const EXIT_RAM_REFUSED: i32 = 77;
 /// The lane declares nothing about how it stands toward the fno state root
 /// (epic rule R3). NOT "declares no carrier": an unsandboxed lane needs none.
-pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 78;
+/// Rust-only concept: 78 is the Python gate's EXIT_PROVIDER_CAP, and a
+/// permanent refusal must never read as a transient capacity one.
+pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 84;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
 /// A durable fleet incident stop is active (x-77db) - refused before every
 /// bypass branch, `--force` and `FNO_SPAWN_GATE=0` included. In-flight
-/// workers are untouched; only new admission is refused.
-pub const EXIT_FLEET_STOP: i32 = 80;
+/// workers are untouched; only new admission is refused. Same number as the
+/// Python gate's EXIT_FLEET_STOP (byte-parity for the fleet pair).
+pub const EXIT_FLEET_STOP: i32 = 82;
 /// The incident state exists but cannot be read: fail closed, and say this is
 /// a CANNOT-TELL refusal, never a stop verdict.
-pub const EXIT_FLEET_STOP_UNAVAILABLE: i32 = 81;
+pub const EXIT_FLEET_STOP_UNAVAILABLE: i32 = 83;
 
 /// The first admission boundary of the native gate (x-77db): a durable
 /// incident stop or an unreadable incident state refuses before the
@@ -463,7 +469,9 @@ pub fn state_root_grant_gate(harness: &str, substrate: &str, roots: &[String]) -
     let contract = match crate::harness_capabilities::HarnessContract::packaged() {
         Ok(contract) => contract,
         Err(error) => {
-            eprintln!("refused: the harness capability contract is unreadable ({error})");
+            eprintln!(
+                "spawn-gate: refused: the harness capability contract is unreadable ({error})"
+            );
             eprintln!(
                 "  a state root resolves for this spawn and no lane can be verified to carry it."
             );
@@ -476,7 +484,7 @@ pub fn state_root_grant_gate(harness: &str, substrate: &str, roots: &[String]) -
     // R3: name the root. A refusal that says "denied" without saying WHICH
     // directory sends the reader back to the code to find out.
     eprintln!(
-        "refused: the {harness}/{substrate} lane does not declare how it stands \
+        "spawn-gate: refused: the {harness}/{substrate} lane does not declare how it stands \
          toward the state root"
     );
     for root in roots {
