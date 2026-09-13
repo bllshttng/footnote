@@ -31,16 +31,6 @@ const IDENTITY_TIMEOUT: Duration = Duration::from_millis(5000);
 /// Longest account name cell before an ellipsis clamp (x-e9c3).
 const MAX_NAME_COL: usize = 18;
 
-/// Clamp a cell for display: over the cap it truncates and appends `…`, so a
-/// long name narrows the column instead of the column widening forever.
-fn clamp_cell(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let cut: String = s.chars().take(max - 1).collect();
-    format!("{cut}…")
-}
-
 /// One account record, as emitted by `fno config accounts list -J` (task 1.1).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Account {
@@ -1125,8 +1115,12 @@ impl ConnectionsView {
         let names: Vec<String> = self
             .accounts
             .iter()
-            .map(|a| clamp_cell(&a.id, MAX_NAME_COL))
-            .chain(self.pending.iter().map(|p| clamp_cell(&p.id, MAX_NAME_COL)))
+            .map(|a| crate::client::ellipsize(&a.id, MAX_NAME_COL))
+            .chain(
+                self.pending
+                    .iter()
+                    .map(|p| crate::client::ellipsize(&p.id, MAX_NAME_COL)),
+            )
             .collect();
         let clis: Vec<String> = self
             .accounts
