@@ -15,7 +15,6 @@ from typing import Callable, Optional, Sequence
 from fno.agents.dispatch import DispatchAskError
 
 _CODEX_DAEMON_START_TIMEOUT_S = 15  # `daemon start` no-ops when running.
-
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
