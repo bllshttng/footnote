@@ -383,6 +383,10 @@ The verdict is `matched`, `mismatch`, `ambiguous` or `unknown`. Only one of them
 
 A reading is bound to the credential generation that produced it. Identity is proven before the usage request, which stops another account's numbers being fetched at all. A sign-in that lands after the request is a separate window, and a reading from it is discarded with `identity_changed`. The marker matters as much as the discard: a missing snapshot alone reads exactly like a probe that never ran.
 
+The accounts list and the Connections modal carry an identity column read from the same owner, so a row states who its credential is proved to serve. A matched row names its own record. A mismatch renders `!serves <record>`: the active stamp names the account that put a credential in the slot, the slot credential presents as the named record, and the row shows both instead of papering over the gap. `?<reason>` marks anything unproved, and two credential roots observing one principal flag `!shared-identity`. A row never names an account it did not prove. The fix for a drift is the manual one: a foreground `/logout` and `/login` as the account that belongs in the slot, or a re-register of that account's snapshot.
+
+One lane fact, observed on Claude Code 2.1.266: the Keychain item is chosen by whether `CLAUDE_CONFIG_DIR` is set at all, not by which account will read it, and a daemon-spawned background session receives its token at spawn and never reads the Keychain, so a login change reaches new spawns only.
+
 ### Switching claude accounts is manual, by design
 
 Two claude accounts on one machine are two separate session stores, and that separation is the point. The operator signs out of canonical `claude` and signs back in as the other account. It takes about a minute, and live sessions need remote control re-enabled afterwards.
