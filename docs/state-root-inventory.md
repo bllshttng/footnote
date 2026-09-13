@@ -148,7 +148,7 @@ One file per session, per day, or per throttle window.
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `latches/.context-nudge-*` | `hooks/context-nudge.sh` | pruned by the same hook at `-mtime +2` |
-| `latches/.worktree-create-<session-id>` | `hooks/worktree-setup.sh` (and its /speculate copy) | create-attempt counter; deleted by the same hook on a successful create, stale copies pruned at `-mtime +2` |
+| `latches/.worktree-create-<session-id>` | `hooks/worktree-setup.sh` (and its /speculate copy) | create-attempt counter, deleted by the same hook on a successful create, stale copies pruned at `-mtime +2` |
 | `.a2a-confirmed` | `agents/dispatch.py` | single file, overwritten |
 | `.active-backlog-nudge` | `active_backlog.py`, `crates/fno-agents/src/active_backlog.rs` | single file |
 | `.worktree-hook-root` | `hooks/session-start.sh` | single file |

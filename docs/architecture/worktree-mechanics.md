@@ -38,27 +38,23 @@ The hook relocates off `worktrees_base` directly.
 
 ## The unmanaged-repo over-reach
 
-The plugin is installed at the user level, so its hooks fire in every git repo on the machine, managed or not.
-A repo that declares nothing anywhere still resolves a policy (the built-in `harness-native`, degraded to `external` without a native harness), and a repo whose HEAD sits on `main` or `master` then reads as `canonical-protected` to the location gate and `never-ok` to nothing.
-Measured 2026-09-13 in a fresh `git init` repo with no `.fno` and no config: `fno agents workspace worktree policy --repo <r>` printed bare `external` with no hint it had degraded, and `check-impl-location.sh` from inside printed `verdict=canonical-protected`.
-A worker spawned into that repo is blocked from editing it and pointed into worktree ceremony the repo never asked for.
+The plugin installs at the user level, so its hooks fire in every git repo on the machine, managed or not. A repo that declares nothing still resolves a policy: the built-in `harness-native`, degraded to `external` without a native harness. A repo whose HEAD sits on `main` or `master` then reads as `canonical-protected` to the location gate. A worker spawned there is blocked from editing and pushed into worktree ceremony the repo never asked for.
 
-Three mechanisms close the gap, and each is load-bearing.
-`FNO_WORKTREE_POLICY` is an env override above every config layer, flowing into the same fail-closed validation as a config value; a resolver receipt that reads `source=env` is the operator's proof of who set it.
-The dispatcher pins `never` for a spawn into an undeclared FOREIGN repo (repo identity is the git common dir, so a linked worktree dispatching into its own canonical checkout is not foreign) and prints `worktree=never (undeclared repo; ...)` on the dispatch receipt.
-`policy_cmd` prints `source=` and the degraded clause in `ensure`'s vocabulary, and the location helper reads LINE 1 of that receipt, because a whole-output exact match against the multi-line receipt would block every `never` repo.
+Measured 2026-09-13 in a fresh `git init` repo with no `.fno` and no config. The policy receipt printed bare `external` with no hint it had degraded. `check-impl-location.sh` from inside printed `verdict=canonical-protected`.
 
-The ceremony itself is now ceilinged.
-A dead worker on 2026-08-22 ran create ceremony forever inside a foreign repo: create, relocate, exit, re-enter, then silence, with nothing surfacing the stall.
-The `WorktreeCreate` hook counts create requests per session in a session-keyed latch (`latches/.worktree-create-<session-id>`, writer owns the lifetime per [state-root-inventory](state-root-inventory.md)); past three attempts it aborts the supported way, exit 0 with empty stdout, and stderr names the repo, the count, and the escape (`FNO_WORKTREE_POLICY=never`, or declaring the project).
-A successful create clears the latch, so only repeated failing ceremony accumulates; payloads with no session_id, which is how manual callers invoke the copy, are never counted.
-The cap is per-session by design and is not a time bound: a ceiling for a hang nobody has re-observed would be machinery ahead of evidence.
+Three mechanisms close the gap. `FNO_WORKTREE_POLICY` is an env override above every config layer. It flows into the same fail-closed validation as a config value. A receipt reading `source=env` is the operator's proof of who set it.
 
-The repro status is honest and partial.
-The isolated live-worker repro (one spawned worker into a fresh `git init` repo, watched at raw stdout, tasked with a one-file edit) did NOT run: `fno agents spawn` was refused by the fleet footprint gate, `cpu_share_undecidable`, with 31 bg-socket rows unattributed and the 60% ceiling inside the 19.4-75.8% attribution band.
-The refusal is a hold, not something to force past, so the two hook-level measurements above were re-observed directly instead and the live-run question stays open.
-Which exact call stopped returning on 2026-08-22 is therefore unpinned; the guards on that path have also changed since the event, so the loop may no longer reproduce.
-Rerunning the repro when the footprint gate can decide is the remaining step, and the positive control that matters is the file on disk actually changing, not three assertions that the worker was not blocked.
+The dispatcher pins `never` for a spawn into an undeclared FOREIGN repo. Repo identity is the git common dir, so a linked worktree dispatching into its own canonical checkout is not foreign. The dispatch receipt prints `worktree=never` and names the target repo undeclared.
+
+`policy_cmd` prints `source=` and the degraded clause in `ensure`'s vocabulary. The location helper reads LINE 1 of that receipt. A whole-output exact match against the multi-line receipt can block every `never` repo.
+
+The ceremony itself is now ceilinged. A dead worker on 2026-08-22 ran create ceremony forever inside a foreign repo. It created, relocated, exited, re-entered, then went silent. The `WorktreeCreate` hook counts create requests per session in a session-keyed latch. The latch lives at `latches/.worktree-create-<session-id>`, per [state-root-inventory](state-root-inventory.md). Past three attempts the hook aborts the supported way: exit 0 with empty stdout. Non-zero falls back to the harness's default flow and creates the worktree being refused. The refusal names the repo, the count, and the escape: `FNO_WORKTREE_POLICY=never`, or declaring the project.
+
+A successful create clears the latch. Only repeated failing ceremony accumulates. Payloads with no session_id are never counted. Manual callers invoke the copy that way. The cap is per-session and is not a time bound. A ceiling for a hang nobody has re-observed is machinery ahead of evidence.
+
+The repro status is honest and partial. The isolated live-worker repro did not run. The design was one spawned worker in a fresh `git init` repo, watched at raw stdout, tasked with a one-file edit. `fno agents spawn` was refused by the fleet footprint gate: `cpu_share_undecidable`. 31 bg-socket rows were unattributed, and the 60% ceiling sat inside the 19.4-75.8% attribution band. The refusal is a hold, not something to force past. The two hook-level measurements above were re-observed directly instead. The live-run question stays open.
+
+Which exact call stopped returning on 2026-08-22 is unpinned. The guards on that path changed after the event, so the exact loop shape is probably gone. When the footprint gate can decide, rerun the repro. The positive control that matters is the file on disk actually changing. Three "not blocked" assertions with no file written describe 2026-08-22 exactly.
 
 ## Claude Code's worktree Bash isolation
 
