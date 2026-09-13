@@ -547,7 +547,7 @@ provider_health_marker_ttl_seconds = 120
 [recovery.watchdog]
 # Whether the external fleet watchdog lane runs on the pr_watch tick (default false). The depth it goes to is recovery.watchdog.mode.
 enabled = false
-# How far an enabled watchdog lane goes: report (default; publish the unfinished-work report: in_progress nodes with free claims, done branches ahead of origin/main, dirty ownerless worktrees, and ownerless PRs older than 24h, each finding naming its clearing verb) | wake (report, plus resume positively stalled sessions) | handoff (also permit a proved cross-provider outage transaction). Reroute never fires from a tick; it needs a manual `fno agents watchdog --apply-all`.
+# How far an enabled watchdog lane goes: report (default; publish the unfinished-work report: in_progress nodes with free claims, done branches ahead of origin/main, dirty ownerless worktrees, and ownerless open PRs (a PR whose owner reads unknown waits 24h), each finding naming its clearing verb) | wake (report, plus resume positively stalled sessions) | handoff (also permit a proved cross-provider outage transaction). Reroute never fires from a tick; it needs a manual `fno agents watchdog --apply-all`.
 mode = "report"
 # Mail handle the unfinished-work digest is pushed to when the finding set changes (agent name, short id, or project:<slug>). Empty (default) mails nobody.
 mail_to = ""

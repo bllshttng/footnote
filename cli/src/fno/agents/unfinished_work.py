@@ -445,7 +445,9 @@ def classify(
             if finding is not None:
                 findings.append(finding)
 
-    # Dimension 4: ownerless open PRs older than the ceiling.
+    # Dimension 4: ownerless open PRs (a PR whose owner reads unknown waits
+    # 24h). The owner question comes before the age question: a gone owner
+    # reads ownerless at any age.
     if unknown[KIND_PR] is None:
         for pr in obs.prs:
             if pr.state is None:
@@ -457,12 +459,12 @@ def classify(
                 _mark_unknown(KIND_PR, f"opened_at unreadable for pr {pr.pr_number}")
                 continue
             age = obs.now_epoch - pr.opened_at_epoch
-            if age <= pr_stale_after_s:
-                continue
             verdict = _owner_set_verdict(pr.owner_probes, obs.registry_ok)
             if verdict == LIVE:
                 continue
             if verdict == OWNER_UNKNOWN:
+                if age <= pr_stale_after_s:
+                    continue
                 _mark_unknown(
                     KIND_PR, f"owner liveness unreadable for pr {pr.pr_number}"
                 )
