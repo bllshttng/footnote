@@ -405,8 +405,8 @@ def _repo_identity(path: Path) -> Optional[tuple[Path, Path]]:
 
 
 UNDECLARED_REPO_RECEIPT = (
-    "worktree=never (undeclared repo; declare "
-    "work.workspaces.<slug>.projects[].worktree to change it)"
+    "worktree=never (undeclared repo; declare work."
+    "workspaces.<slug>.projects[].worktree to change it)"
 )
 
 
