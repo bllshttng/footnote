@@ -199,6 +199,7 @@ def register_lifecycle_commands(
 
     @cli.command(
         "retract",
+        hidden=True,  # the advertised surface caps at 12; the lifecycle table in docs/backlog-usage.md is its discovery surface
         epilog="Reversal: `fno backlog undefer <id>...` (hidden; run its own --help).",
     )
     def cmd_retract(
