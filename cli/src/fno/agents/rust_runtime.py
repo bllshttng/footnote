@@ -279,6 +279,10 @@ RUST_CLIENT_VERBS = frozenset(
         # dispatch in client.rs (no daemon RPC); the mail shim and the hook
         # scripts invoke the binary directly. Parity-synced.
         "announce",
+        # Shared-account capacity admission (the routing-admission owner):
+        # payload JSON in, the receipt out; Python calls it via
+        # fno.rust_binary.verb_call (keeps the parity test in sync).
+        "admission",
     }
 )
 
