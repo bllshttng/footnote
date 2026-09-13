@@ -5,8 +5,10 @@
 # refused source authorship with a reason naming the delegation verbs (AC1);
 # the unblock allowlist, the plans-directory carveout, and the off knob allow
 # (AC2); a pass shape, an uncrowned row, and an unreadable registry all allow,
-# the unreadable case with a line on stderr (AC3). The registry row, reign
-# manifest, knob and plans dir are stubbed per case; no real fno state.
+# the unreadable case with a line on stderr (AC3); a Task limb of the court
+# allows via its payload agent_id or its subagents/ transcript, anything else
+# fail-closes (x-d5d7). The registry row, reign manifest, knob and plans dir
+# are stubbed per case; no real fno state.
 
 set -uo pipefail
 
@@ -83,6 +85,9 @@ UNCROWNED='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","crown_
 edit_payload() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$TMP/repo" "$1"; }
 bash_payload() { printf '{"tool_name":"Bash","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"command":"%s"}}' "$SID" "$TMP/repo" "$1"; }
 edit_payload_t() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"%s","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$2" "$TMP/repo" "$1"; }
+# $1 file, $2 transcript_path, $3 agent_id - the subagent-borne shape carries
+# the parent session id plus the harness's per-call subagent marker.
+edit_payload_ag() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"%s","agent_id":"%s","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$2" "$3" "$TMP/repo" "$1"; }
 
 # ── AC1-HP: crowned court + Edit on a source file -> deny naming both verbs ──
 registry_fixture "$CROWNED"
@@ -261,14 +266,34 @@ OUT="$(run_guard "$(bash_payload "fno backlog session close x-1 --launch '/fno:t
   || fail "glue session close rc=$RC out=$OUT"
 
 # ── Limb carve-out: a Task subagent of this very court is a limb, not the king.
-# Its payload carries the parent's session_id, so sections 2-4 see the crown;
-# its transcript lives under the session's own subagents/ directory.
+# Its payload carries the parent's session_id, so sections 2-4 see the crown,
+# plus a non-empty agent_id, the per-call subagent marker; the transcript path
+# names the parent transcript for king and limb alike, so the on-disk
+# subagents/ layout is only the second signature (x-d5d7).
 SUBTRANS="$TMP/transcripts/$SID/subagents/agent-x.jsonl"
 OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$SUBTRANS")")"; RC=$?
 ERR="$(cat "$TMP/stderr.txt")"
 [[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"limb of crowned session $SID"* ]] \
   && pass "limb: subagent transcript Write allowed, stderr names the limb" \
   || fail "limb allow rc=$RC out=$OUT err=$ERR"
+
+# The live x-d5d7 shape: the payload's transcript_path names the PARENT main
+# transcript (measured: it is never the limb's subagents file), and only the
+# agent_id marks the call as subagent-borne. This blocked a real limb on
+# 2026-09-13; it must allow.
+MAINTRANS="$TMP/transcripts/$SID/main.jsonl"
+OUT="$(run_guard "$(edit_payload_ag "$SRC_FILE" "$MAINTRANS" "agent-a4f5701e9783b4bfe")")"; RC=$?
+ERR="$(cat "$TMP/stderr.txt")"
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"limb (agent_id agent-a4f5701e9783b4bfe) of crowned session $SID"* ]] \
+  && pass "limb: agent_id allows with a parent main transcript, stderr names the agent" \
+  || fail "limb agent_id rc=$RC out=$OUT err=$ERR"
+
+# A bg job limb may carry an empty transcript_path entirely; agent_id still
+# decides. Named and unnamed limbs both carry it.
+OUT="$(run_guard "$(edit_payload_ag "$SRC_FILE" "" "agent-hotfix-restart-json")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "limb: agent_id allows with an empty transcript (bg job shape)" \
+  || fail "limb agent_id empty-transcript rc=$RC out=$OUT"
 
 # A foreign session's subagents dir is not this court's limb: fail closed.
 FOREIGNTRANS="$TMP/transcripts/sess-other/subagents/agent-y.jsonl"
@@ -277,8 +302,8 @@ echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/nul
   && pass "limb: foreign session's subagents transcript denied" \
   || fail "limb foreign rc=$RC out=${OUT:0:300}"
 
-# A main-thread transcript (parent dir is not subagents/) keeps court treatment.
-MAINTRANS="$TMP/transcripts/$SID/main.jsonl"
+# A main-thread transcript (parent dir is not subagents/) and no agent_id
+# keeps court treatment.
 OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$MAINTRANS")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
   && pass "limb: main-thread transcript denied" \

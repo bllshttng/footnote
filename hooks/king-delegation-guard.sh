@@ -23,9 +23,12 @@
 # redirect body is stripped of trailing `;|&` before the fd-dup check; a real
 # target outside the plans dir still refuses. Second, a Task subagent of the
 # crowned session is a limb, not the king: its payload carries the parent's
-# session id, but its transcript alone lives under that session id's
-# subagents/ directory, the one positive signature the carve-out reads. Any
-# other transcript shape fail-closes.
+# session id (so sections 2-4 see the crown) plus a non-empty agent_id, the
+# harness's only per-call subagent marker. The transcript path does not
+# discriminate - it names the parent transcript for king and limb alike
+# (measured 2026-09-13, x-d5d7), so a transcript under the session id's
+# subagents/ directory is kept only as a second signature for harnesses that
+# populate it. Any other shape fail-closes.
 #
 # NEVER blocks by accident. Any failure to read the payload, the registry,
 # the manifest, or the config exits 0 and allows - the compact-hook contract
@@ -59,7 +62,7 @@ _deny_text() {
 Delegate it: fno agents spawn '/fno:target <id>' --node <id> --substrate thread
 Or hand the whole scope out: fno backlog advance --epic <scope>
 Unblock authority is yours and is allowed: claim release, mail, backlog levers, notes, plan writes.
-A subagent of this session is exempt: its transcript under this session id's subagents/ directory. An empty or main-thread transcript is not."
+A subagent of this session is exempt: a Task tool call from this session carries the subagent's agent id, and this guard reads it. Your own main thread is never exempt."
 }
 _block() {
     _guard_mark king-delegation-guard block 2>/dev/null || true
@@ -85,7 +88,7 @@ fi
 if [[ -z "$PAYLOAD" ]]; then
     _approve
 fi
-TOOL="" FILE_PATH="" COMMAND="" SID="" TRANSCRIPT="" CWD=""
+TOOL="" FILE_PATH="" COMMAND="" SID="" TRANSCRIPT="" CWD="" AGENT_ID=""
 {
     read -r TOOL
     read -r FILE_PATH
@@ -93,6 +96,7 @@ TOOL="" FILE_PATH="" COMMAND="" SID="" TRANSCRIPT="" CWD=""
     read -r SID
     read -r TRANSCRIPT
     read -r CWD
+    read -r AGENT_ID
 } < <(printf '%s' "$PAYLOAD" | python3 -c '
 import json, sys
 try:
@@ -106,6 +110,7 @@ print((ti.get("command") or "").replace("\n", " "))
 print(e.get("session_id") or "")
 print(e.get("transcript_path") or "")
 print(e.get("cwd") or "")
+print(e.get("agent_id") or "")
 ' 2>/dev/null) || true
 if [[ -z "$TOOL" ]]; then
     _approve
@@ -230,11 +235,19 @@ sys.exit(0 if os.path.realpath(p) == os.path.realpath(h) else 1)
 
 # ── 6c. Limb carve-out: a Task subagent of this very court is a limb, not the
 #      king. Its payload carries the parent's session_id, so sections 2-4 see
-#      the crown; its transcript alone lives under the session's own
-#      subagents/ directory - a mechanical, on-disk signature. A limb doing
-#      what its king told it to do is delegation working, not a king
-#      implementing. Any other transcript shape (empty, main-thread, a foreign
-#      session's subagents dir) keeps the court treatment: fail closed.
+#      the crown. The harness marks subagent-borne tool calls with a non-empty
+#      agent_id - the one per-call field that separates a limb from the king's
+#      own main thread. The transcript path cannot do that job: it names the
+#      parent transcript for both (measured 2026-09-13, x-d5d7), so the on-disk
+#      subagents/ layout is only the second signature, for harnesses that
+#      populate it. A limb doing what its king told it to do is delegation
+#      working, not a king implementing. Any other shape (no agent_id, empty or
+#      main-thread transcript, a foreign session's subagents dir) keeps the
+#      court treatment: fail closed.
+if [[ -n "$AGENT_ID" ]]; then
+    echo "king-delegation-guard: limb (agent_id $AGENT_ID) of crowned session $SID; allowing" >&2
+    _approve
+fi
 if [[ -n "$TRANSCRIPT" ]]; then
     TDIR="$(dirname "$TRANSCRIPT")"
     if [[ "$(basename "$TDIR")" == "subagents" && "$(basename "$(dirname "$TDIR")")" == "$SID" ]]; then
