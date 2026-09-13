@@ -942,7 +942,9 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
     }
     let mut settled = Vec::new();
     for row in &stale {
-        match crate::backlog::api::session_end(&store, &row.node, &row.session_id, "reap-sweep") {
+        match crate::backlog::api::session_end(
+            &store, &row.node, &row.session_id, "reap-sweep", Some("do"), Some(&row.harness),
+        ) {
             Ok(payload) if payload.success => settled.push(row.clone()),
             Ok(_) => {}
             Err(err) => return Err(SettleRefusal::Retry(err.0)),
@@ -971,14 +973,20 @@ fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<
     const ATTEMPTS: usize = 5;
     for attempt in 0..ATTEMPTS {
         // The same eligibility the batch settle applies: the pair must sit
-        // in the current stale set, re-read fresh each attempt.
-        let eligible = plan_stale_do_rows(home)
+        // in the current stale set, re-read fresh each attempt. The matching
+        // row also hands the settle its harness, so the fill names the exact
+        // window it closes instead of any open row for this session id.
+        let stale_rows = plan_stale_do_rows(home);
+        let matched = stale_rows
             .iter()
-            .any(|r| r.node == node && r.session_id.eq_ignore_ascii_case(session_id));
-        if !eligible {
+            .find(|r| r.node == node && r.session_id.eq_ignore_ascii_case(session_id));
+        let Some(eligible) = matched else {
             return Ok(false);
-        }
-        match crate::backlog::api::session_end(&store, node, session_id, "reap-release") {
+        };
+        let harness = eligible.harness.clone();
+        match crate::backlog::api::session_end(
+            &store, node, session_id, "reap-release", Some("do"), Some(&harness),
+        ) {
             Ok(payload) if payload.success => return Ok(true),
             Ok(_) => return Ok(false),
             Err(err) if attempt + 1 < ATTEMPTS => {

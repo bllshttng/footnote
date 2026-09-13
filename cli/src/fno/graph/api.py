@@ -2,11 +2,7 @@
 
 Each call drives the store keeper's ``api`` command (one op per function,
 same name and fields) and parses the reply into ``fno.graph.types`` models.
-The backend is the store's own choice; callers never learn which one
-answered. This wave ships the six functions the plan's verification names
-plus the AC16 typed views; the remaining Rust names gain wrappers when
-group 3 moves their first callers. ``cmd_version`` is the
-``fno backlog version`` verb body, registered in ``fno.graph.cli``.
+``cmd_version`` is the ``fno backlog version`` verb body.
 """
 from __future__ import annotations
 
@@ -63,12 +59,7 @@ def nodes(
     order_by: str = "ordinal",
     path: Path = GRAPH_JSON,
 ) -> NodeConnection:
-    page = {
-        "first": first,
-        "after": after,
-        "include_archived": include_archived,
-        "order_by": order_by,
-    }
+    page = {"first": first, "after": after, "include_archived": include_archived, "order_by": order_by}
     body = filter.model_dump(exclude_none=True) if filter else {}
     return _connection(_api("nodes", {"filter": body, **page}, path=path))
 

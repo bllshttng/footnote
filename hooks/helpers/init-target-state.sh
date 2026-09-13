@@ -1321,12 +1321,20 @@ EOF
   if [[ -n "$_GUARD_NODE" ]]; then
     _NODE_ID="$_GUARD_NODE"
   elif [[ -n "$INITIAL_PLAN_PATH" ]] && command -v fno >/dev/null 2>&1; then
+    # The typed import needs the CLI's own dependencies (pydantic et al), which
+    # a host python3 may lack. uv is how the plugin installs `fno`, so prefer
+    # the project's managed runtime; the bare python3 fallback keeps the same
+    # degrade-to-unclaimed shape on a host without uv.
+    _RUNNER=(python3)
+    if command -v uv >/dev/null 2>&1; then
+      _RUNNER=(uv run --quiet --project "$REPO_ROOT/cli" python)
+    fi
     # `2>&1 >` is NOT a typo and the order matters: it points the resolver's
     # stderr at THIS shell's stderr before stdout is captured, so a traceback
     # still stays quiet-ish but the deliberate ambiguity note reaches the
     # operator. Plain `2>/dev/null` discarded that note, which made the previous
     # fix decorative - the run still proceeded unclaimed in silence.
-    _NODE_ID=$(python3 - "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' || true
+    _NODE_ID=$("${_RUNNER[@]}" - "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' || true
 import os, sys
 
 raw_target, repo_root = sys.argv[1], sys.argv[2]

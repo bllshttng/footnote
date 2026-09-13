@@ -1196,31 +1196,37 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
     return outcome["entries"]
 
 
-def render_canonical_views() -> None:
+def render_canonical_views() -> int:
     """Replay the canonical post-publish views from a fresh read.
 
     The store's NATIVE writers (the mux reorder verbs) land graph bytes
     through the keeper without the Python post-publish pass; this is the
     pass they replay, so a native write leaves the same derived views
     (graph.md, the configured board targets) a CLI write would. Every step
-    is best-effort: a render failure never rewrites history.
+    is best-effort: a render failure never rewrites history. Returns the
+    count of failed views, so the caller refuses the exit 0 the keeper reads.
     """
     from fno import paths as _paths
 
+    failures: list[str] = []
     graph = _paths.graph_json()
     entries = read_graph(graph)
     try:
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
         pass
-    render_view_projections(entries, True, Path(graph))
+    render_view_projections(entries, True, Path(graph), failures=failures)
+    return len(failures)
 
 
-def render_view_projections(entries: list[dict], is_canonical: bool, path: Path) -> list[dict]:
+def render_view_projections(
+    entries: list[dict], is_canonical: bool, path: Path, *, failures: list[str] | None = None
+) -> list[dict]:
     """The view projections a landed publish owes: the readiness overlay,
     graph.md, and the canonical/configured board targets (or a sibling
     graph.html for test graphs). Returns the overlay-applied entries, so the
-    caller's list matches what the render drew."""
+    caller's list matches what the render drew. A ``failures`` list collects
+    one entry per failed view; the default keeps the stderr warning."""
     from fno.graph.render import render_graph_md
     from fno.graph import _constants as _gc
     from fno.paths import vault_root
@@ -1233,6 +1239,13 @@ def render_view_projections(entries: list[dict], is_canonical: bool, path: Path)
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
         pass
+    def _fail(message: str) -> None:
+        # Collectors get the reason; fire-and-forget keeps stderr.
+        if failures is not None:
+            failures.append(message)
+        else:
+            print(f"Warning: {message}", file=sys.stderr)
+
     md_target = _gc.GRAPH_MD if is_canonical else path.with_name("graph.md")
     try:
         _obsidian = vault_root() is not None
@@ -1241,7 +1254,7 @@ def render_view_projections(entries: list[dict], is_canonical: bool, path: Path)
     try:
         render_graph_md(entries, md_target, obsidian=_obsidian)
     except OSError as e:
-        print(f"Warning: graph.md render failed: {e}", file=sys.stderr)
+        _fail(f"graph.md render failed: {e}")
     _archived = entries_with_archive(entries)
     if is_canonical:
         try:
@@ -1251,13 +1264,13 @@ def render_view_projections(entries: list[dict], is_canonical: bool, path: Path)
             if _canonical_row is not None:
                 render_one_target(_canonical_row, _archived)
         except Exception as e:
-            print(f"Warning: canonical board render failed: {e}", file=sys.stderr)
+            _fail(f"canonical board render failed: {e}")
         try:
             from fno.graph.roadmap_public import render_configured_targets
 
             render_configured_targets(_archived, skip_canonical=True)
         except Exception as e:
-            print(f"Warning: configured render targets failed: {e}", file=sys.stderr)
+            _fail(f"configured render targets failed: {e}")
     else:
         # Test and temporary graphs retain a sibling HTML artifact without
         # ever touching the operator's configured targets.
@@ -1266,7 +1279,7 @@ def render_view_projections(entries: list[dict], is_canonical: bool, path: Path)
 
             render_graph_html(_archived, path.with_name("graph.html"))
         except OSError as e:
-            print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
+            _fail(f"graph.html render failed: {e}")
     return entries
 
 
@@ -1288,16 +1301,11 @@ def _emit_graph_tx_event(**data: Any) -> None:
 
 
 def commit_rows_via_store(path: Path, mutator) -> list[dict]:
-    """The modern raw write: begin, apply the mutator client-side, publish
-    through the keeper's row-commit with the bounded retry, and return the
-    committed rows. The write seam for callers whose mutation has no named
-    op yet; `locked_mutate_graph` is the same pipeline kept as the legacy
-    name the remaining (pre-wave-9) callers still use.
-
-    The mutator runs client-side against the begin snapshot; the keeper
-    re-derives the write pipeline (slugs, statuses, touched_at, closure
-    detection, canonicalization) and publishes under the bounded lock with
-    a backup.
+    """The modern raw write: begin, mutate client-side, publish through the
+    keeper's row-commit with the bounded retry, return the committed rows.
+    The write seam for callers with no named op; `locked_mutate_graph` is
+    the legacy name the remaining (pre-wave-9) callers still use. The
+    keeper re-derives the write pipeline and publishes under its lock.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

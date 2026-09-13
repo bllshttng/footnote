@@ -4956,18 +4956,17 @@ def cmd_board(
 
 @cli.command("render-views", hidden=True)
 def cmd_render_views() -> None:
-    """Replay the canonical post-publish views after a native store write.
-
-    The store's native writers (the mux reorder verbs) land graph bytes
-    through the keeper without the Python post-publish pass. This verb
-    replays that pass over a fresh read, so a native write leaves the same
-    graph.md and configured board targets a CLI write would. Best-effort by
-    contract: a render failure exits 0 with a stderr warning, because the
-    write already landed and history never rewinds over a view.
+    """Replay the canonical post-publish views after a native store write:
+    a fresh read renders the same graph.md and configured board targets a
+    CLI write would. A failed view exits nonzero, so the keeper withholds
+    the rendered_version stamp and its backoff retries the pass.
     """
     from fno.graph.store import render_canonical_views
 
-    render_canonical_views()
+    failed = render_canonical_views()
+    if failed:
+        typer.echo(f"render-views: {failed} view(s) failed", err=True)
+        raise typer.Exit(code=1)
 
 
 # -- get --

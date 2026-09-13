@@ -52,27 +52,46 @@ resolve_arg() {
         return 0
     fi
     # A GRAPH_JSON override is a sandbox contract (the shim's own tests, and
-    # callers pinning a scratch graph): resolve against that file with the
-    # full-tier resolver, never the ambient store the verb reads.
-    if [[ -n "${GRAPH_JSON:-}" && ! -f "${GRAPH_JSON:-}" ]]; then
-        echo "[graph-resolve] $GRAPH_JSON missing; using '$arg' as-is" >&2
-        echo "$arg"
-        return 0
+    # callers pinning a scratch graph): resolve against that file. Otherwise
+    # resolve against the ambient store through the configured path,
+    # backend-switched like every other reader. Both ride the plugin's own
+    # cli/src, so the full resolver tiers (exact id, unique prefix, opt-in
+    # title fuzzy) survive whether this copy runs from a repo checkout or a
+    # deployed plugin directory. Exit contract:
+    #   0 plan_path | 1 no match | 3 no plan_path | 4 ambiguous
+    #   5 package unimportable -> the `fno backlog get` fallback below
+    #   6 external tracker backend -> pass the arg through unchanged
+    local plugin_root="${FNO_RESOLVE_PLUGIN_ROOT:-}"
+    if [[ -z "$plugin_root" ]]; then
+        plugin_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     fi
-    if [[ -n "${GRAPH_JSON:-}" ]]; then
-        local sandbox_result
-        sandbox_result=$(GRAPH_JSON="$GRAPH_JSON" QUERY="$arg" python3 - <<'PYEOF' 2>/dev/null
+    local sandbox_result rc
+    sandbox_result=$(PLUGIN_ROOT="$plugin_root" QUERY="$arg" python3 - <<'PYEOF' 2>/dev/null
 import os, sys
-sys.path.insert(0, os.path.join(os.getcwd(), "cli", "src"))
+sys.path.insert(0, os.path.join(os.environ["PLUGIN_ROOT"], "cli", "src"))
 try:
     from fno.graph.fuzzy import resolve_id
     from fno.graph.store import read_graph_strict
 except ImportError:
     sys.exit(5)
+graph = os.environ.get("GRAPH_JSON") or ""
+if not graph:
+    try:
+        from fno.paths import graph_json as configured_graph
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            sys.exit(6)
+        graph = str(configured_graph())
+    except Exception:
+        sys.exit(6)
 from pathlib import Path
-entries = read_graph_strict(Path(os.environ["GRAPH_JSON"]))
+try:
+    entries = read_graph_strict(Path(graph))
+except Exception:
+    sys.exit(1)
 match = resolve_id(os.environ["QUERY"], entries)
-if match.kind in ("exact", "fuzzy") and match.candidates:
+if match.kind in ("exact", "fuzzy", "branch_derived") and match.candidates:
     matched = match.candidates[0]
     if matched.get("plan_path"):
         sys.stdout.write(matched["plan_path"])
@@ -83,19 +102,26 @@ if match.kind == "ambiguous":
 sys.exit(1)
 PYEOF
 )
-        rc=$?
-        [[ $rc -ne 0 ]] && sandbox_result=""
-        if [[ $rc -eq 0 && -n "$sandbox_result" ]]; then
-            echo "$sandbox_result"
-            return 0
-        fi
-        if [[ $rc -eq 1 ]]; then
-            echo "[graph-resolve] no match for '$arg'" >&2
-        elif [[ $rc -eq 3 ]]; then
-            echo "[graph-resolve] node '$arg' has no plan_path" >&2
-        elif [[ $rc -eq 4 ]]; then
-            echo "[graph-resolve] ambiguous '$arg'" >&2
-        fi
+    rc=$?
+    [[ $rc -ne 0 ]] && sandbox_result=""
+    if [[ $rc -eq 0 && -n "$sandbox_result" ]]; then
+        echo "$sandbox_result"
+        return 0
+    fi
+    if [[ $rc -eq 6 ]]; then
+        echo "$arg"
+        return 0
+    fi
+    if [[ $rc -eq 5 ]]; then
+        : # fall through to the `fno backlog get` fallback below
+    elif [[ $rc -eq 1 ]]; then
+        echo "[graph-resolve] no match for '$arg'" >&2
+    elif [[ $rc -eq 3 ]]; then
+        echo "[graph-resolve] node '$arg' has no plan_path" >&2
+    elif [[ $rc -eq 4 ]]; then
+        echo "[graph-resolve] ambiguous '$arg'" >&2
+    fi
+    if [[ $rc -ne 5 ]]; then
         [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
         echo "$arg"
         return 0
@@ -103,6 +129,7 @@ PYEOF
 
     if ! command -v fno >/dev/null 2>&1; then
         echo "[graph-resolve] fno CLI unavailable; using '$arg' as-is" >&2
+        [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
         echo "$arg"
         return 0
     fi

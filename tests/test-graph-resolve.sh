@@ -194,13 +194,12 @@ else
     fail "missing graph.json" "expected 'ab-9728b70b', got '$result'"
 fi
 
-# 9. Package absent: the store-cutover resolver has one degradation, not
-# a second resolver leg. When fno.graph is unimportable the sandbox
-# heredoc exits rc=5 and the resolver soft-fails by echoing the arg
-# unchanged, exactly like any other unresolved query. The resolver
-# self-inserts <cwd>/cli/src onto sys.path, so the simulation runs from
-# the empty directory itself: no cli/src beside it, and PYTHONPATH
-# shadowed, the import of fno.graph.fuzzy fails.
+# 9. Package absent: the resolver has one degradation, not a second
+# resolver leg. When fno.graph is unimportable the heredoc exits rc=5
+# and the arg echoes unchanged, exactly like any other unresolved query
+# before the `fno backlog get` fallback runs. FNO_RESOLVE_PLUGIN_ROOT
+# points the import at the empty directory, so the import of
+# fno.graph.fuzzy fails the same way a host without the package would.
 echo "test 9: package import failure passes the arg through (rc=5)"
 EMPTY_DIR=$(mktemp -d -t graph-resolve-empty.XXXXXX)
 trap 'rm -rf "$STDERR_CAPTURE" "$EMPTY_DIR"' EXIT
@@ -208,9 +207,8 @@ trap 'rm -rf "$STDERR_CAPTURE" "$EMPTY_DIR"' EXIT
 # 9a. Full ab-id with the package absent echoes unchanged.
 : > "$STDERR_CAPTURE"
 result=$(
-    cd "$EMPTY_DIR" || exit 99
-    export GRAPH_JSON="$FIXTURE"
-    export PYTHONPATH="$EMPTY_DIR"
+    export GRAPH_JSON="$FIXTURE" PYTHONPATH="$EMPTY_DIR" FNO_RESOLVE_PLUGIN_ROOT="$EMPTY_DIR"
+    export PATH="/usr/bin:/bin"   # no `fno` on PATH either: both legs dead
     bash -c "source '$RESOLVER' && resolve_arg 'ab-9728b70b'" 2>"$STDERR_CAPTURE"
 )
 if [[ "$result" == "ab-9728b70b" ]]; then
@@ -220,8 +218,8 @@ else
 fi
 if [[ "${RESOLVE_STRICT:-}" != "1" ]]; then
     rc_probe=$(
-        cd "$EMPTY_DIR" || exit 99
-        export GRAPH_JSON="$FIXTURE" PYTHONPATH="$EMPTY_DIR" RESOLVE_STRICT=1
+        export GRAPH_JSON="$FIXTURE" PYTHONPATH="$EMPTY_DIR" FNO_RESOLVE_PLUGIN_ROOT="$EMPTY_DIR" RESOLVE_STRICT=1
+        export PATH="/usr/bin:/bin"
         bash -c "source '$RESOLVER' && resolve_arg 'ab-9728b70b' >/dev/null" 2>/dev/null
     )
     rc=$?
@@ -235,9 +233,8 @@ fi
 # 9b. Partial ab-id with the package absent echoes unchanged too.
 : > "$STDERR_CAPTURE"
 result=$(
-    cd "$EMPTY_DIR" || exit 99
-    export GRAPH_JSON="$FIXTURE"
-    export PYTHONPATH="$EMPTY_DIR"
+    export GRAPH_JSON="$FIXTURE" PYTHONPATH="$EMPTY_DIR" FNO_RESOLVE_PLUGIN_ROOT="$EMPTY_DIR"
+    export PATH="/usr/bin:/bin"   # no `fno` either: both legs dead
     bash -c "source '$RESOLVER' && resolve_arg 'ab-9728'" 2>"$STDERR_CAPTURE"
 )
 if [[ "$result" == "ab-9728" ]]; then

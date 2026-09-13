@@ -892,6 +892,8 @@ def test_reap_open_session_record_removes_exact_open_row_with_readback(tmp_path)
         "status_before": "in_progress",
         "status_after": "in_progress",
         "remaining_open_do": 1,
+        # The keeper's receipt names the settled node on every form.
+        "node_ids": ["ab-reap0001"],
     }
     rows = json.loads(path.read_text())["entries"][0]["sessions"]
     assert [(r["harness"], r["session_id"]) for r in rows] == [("codex", "live-session")]

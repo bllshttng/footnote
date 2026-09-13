@@ -521,7 +521,8 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
         assert_eq!(one.additional_prs.unwrap().len(), 1);
         let payload = session_append(store, "ab-one", session_row("s-2")).unwrap();
         assert!(payload.success);
-        let payload = session_end(store, "ab-one", "s-2", "operator").unwrap();
+        let payload =
+            session_end(store, "ab-one", "s-2", "operator", Some("do"), Some("claude")).unwrap();
         assert!(payload.success);
         let one = node(store, "ab-one").unwrap().unwrap();
         let s2 = one
@@ -531,8 +532,32 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
             .find(|row| row.session_id == "s-2")
             .unwrap();
         assert_eq!(s2.ended_by.as_deref(), Some("operator"));
-        let again = session_end(store, "ab-one", "s-2", "operator").unwrap();
+        let again =
+            session_end(store, "ab-one", "s-2", "operator", Some("do"), Some("claude")).unwrap();
         assert!(!again.success, "ending twice refuses");
+        let mut review_row = session_row("s-review");
+        review_row.phase = "review".into();
+        let other = session_append(store, "ab-one", review_row).unwrap();
+        assert!(other.success);
+        // A settle names its window: an open row of ANOTHER phase with the
+        // same session id stays untouched (codex P2, gc_sweep scope).
+        let payload = session_end(
+            store,
+            "ab-one",
+            "s-review",
+            "operator",
+            Some("do"),
+            Some("claude"),
+        );
+        assert!(matches!(payload, Ok(p) if !p.success));
+        let one = node(store, "ab-one").unwrap().unwrap();
+        let review = one
+            .sessions
+            .unwrap()
+            .into_iter()
+            .find(|row| row.session_id == "s-review")
+            .unwrap();
+        assert!(review.ended_at.is_none());
         let payload = dispatch_set(
             store,
             "ab-one",

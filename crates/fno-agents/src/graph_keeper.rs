@@ -2975,7 +2975,7 @@ fn handle_api(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
         .and_then(Value::as_str)
         .ok_or_else(|| StoreError::Invalid("api needs an op".into()))?;
     let store = crate::backlog::api::Store::new(&state.graph);
-    const READ_OPS: &[&str] = &["node", "nodes", "comments", "version"];
+    const READ_OPS: &[&str] = &["node", "nodes", "comments", "version", "rows"];
     if READ_OPS.contains(&op) {
         let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
         return api_op(&store, op, params);
@@ -3164,7 +3164,16 @@ fn api_mutation(
         "session_end" => {
             let session_id = param_str(params, "session_id")?;
             let ended_by = param_str(params, "ended_by")?;
-            let payload = api::session_end(store, id.unwrap_or_default(), session_id, ended_by)?;
+            let phase = params.get("phase").and_then(Value::as_str);
+            let harness = params.get("harness").and_then(Value::as_str);
+            let payload = api::session_end(
+                store,
+                id.unwrap_or_default(),
+                session_id,
+                ended_by,
+                phase,
+                harness,
+            )?;
             Ok(json!({
                 "success": payload.success,
                 "node": payload.node.map(|n| n.to_json()),

@@ -994,7 +994,17 @@ pub fn session_end(
     id: &str,
     session_id: &str,
     ended_by: &str,
+    phase: Option<&str>,
+    harness: Option<&str>,
 ) -> Result<Payload<Node>, ApiError> {
+    // A session may hold several open rows on one node (one per phase), so a
+    // settle that matches on session_id alone would fabricate ended_at on
+    // unrelated think/review/ship provenance. Callers name the phase and
+    // harness they are settling; a record only matches when they agree.
+    let matches_window = |rec_phase: Option<&str>, rec_harness: Option<&str>| -> bool {
+        phase.map_or(true, |want| rec_phase == Some(want))
+            && harness.map_or(true, |want| rec_harness == Some(want))
+    };
     let mut updated: Option<Node> = None;
     let ok = mutate(store, |rows| {
         for row in rows.iter_mut() {
@@ -1017,6 +1027,10 @@ pub fn session_end(
                     };
                     if obj.get("session_id").and_then(Value::as_str) == Some(session_id)
                         && obj.get("ended_at").and_then(Value::as_str).is_none()
+                        && matches_window(
+                            obj.get("phase").and_then(Value::as_str),
+                            obj.get("harness").and_then(Value::as_str),
+                        )
                     {
                         obj.insert(
                             "ended_at".into(),
@@ -1033,7 +1047,10 @@ pub fn session_end(
             };
             let mut closed = false;
             for record in list.iter_mut() {
-                if record.session_id == session_id && record.ended_at.is_none() {
+                if record.session_id == session_id
+                    && record.ended_at.is_none()
+                    && matches_window(Some(&record.phase), Some(&record.harness))
+                {
                     record.ended_at = Some(crate::graph_store::now_isoformat());
                     record.ended_by = Some(ended_by.to_string());
                     closed = true;
