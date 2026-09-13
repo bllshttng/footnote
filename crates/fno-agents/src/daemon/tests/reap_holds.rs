@@ -710,3 +710,31 @@ fn ac4_hp_dry_run_unverified_renders_in_text_and_json_without_counting_retired()
     assert_eq!(v["retired"], serde_json::json!([]));
     assert_eq!(v["dry_run"], serde_json::json!(true));
 }
+
+/// The release refusal names the dry-run-only bucket: a row held out of
+/// `retired` by an unevaluated gate is a positive statement about the row's
+/// state, never an unnamed keep (codex P2 on this branch). The seam is
+/// [`row_bucket_in`] because production seams cannot stage the terminal
+/// roster evidence an unverified row needs.
+#[test]
+fn the_release_refusal_names_the_unverified_gate() {
+    let dry = GcSummary {
+        dry_run_unverified: vec![(
+            "w1".to_string(),
+            "active-surface removal was not evaluated".to_string(),
+        )],
+        ..Default::default()
+    };
+    let home = tmp_home("release-unverified");
+    assert_eq!(
+        crate::reap_release::row_bucket_in(&home, &dry, "w1"),
+        "dry-run-unverified (a retirement gate was not evaluated)"
+    );
+    // The arm must not swallow the fallthrough: a handle no bucket names
+    // and no registry row answers still reads as unnamed.
+    assert_eq!(
+        crate::reap_release::row_bucket_in(&home, &dry, "ghost"),
+        "no registry row names this handle"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}

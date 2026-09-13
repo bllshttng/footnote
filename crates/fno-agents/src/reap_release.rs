@@ -139,15 +139,20 @@ fn load_registry_row(home: &AgentsHome, handle: &str) -> Option<state::RegistryE
 
 /// Where a row sits when it has no hold, by scanning the dry run's buckets.
 fn row_bucket(home: &AgentsHome, cwd: &Path, grace_secs: i64, handle: &str) -> String {
-    let dry = crate::gc::gc_sweep_dry_run(home, grace_secs);
-    let in_plain = [
-        dry.kept_operator,
-        dry.kept_crowned,
-        dry.kept_no_provenance,
-        dry.kept_graph_unreadable,
-    ]
-    .iter()
-    .any(|rows: &Vec<String>| rows.iter().any(|id| id == handle));
+    row_bucket_in(home, &crate::gc::gc_sweep_dry_run(home, grace_secs), handle)
+}
+
+/// The classifier over an already-computed summary, split from
+/// [`row_bucket`] so a test can stage a summary production seams cannot
+/// produce (a dry-run-unverified row needs terminal roster evidence).
+pub(crate) fn row_bucket_in(home: &AgentsHome, dry: &gc_sweep::GcSummary, handle: &str) -> String {
+    let in_plain = dry
+        .kept_operator
+        .iter()
+        .chain(&dry.kept_crowned)
+        .chain(&dry.kept_no_provenance)
+        .chain(&dry.kept_graph_unreadable)
+        .any(|id| id == handle);
     if in_plain {
         return "a keep bucket this report names".to_string();
     }
@@ -175,6 +180,9 @@ fn row_bucket(home: &AgentsHome, cwd: &Path, grace_secs: i64, handle: &str) -> S
     }
     if dry.stop_refused.iter().any(|(id, _)| id == handle) {
         return "stop refused".to_string();
+    }
+    if dry.dry_run_unverified.iter().any(|(id, _)| id == handle) {
+        return "dry-run-unverified (a retirement gate was not evaluated)".to_string();
     }
     if load_registry_row(home, handle).is_some() {
         "a keep bucket this report does not name".to_string()
