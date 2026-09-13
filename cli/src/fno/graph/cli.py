@@ -8629,11 +8629,7 @@ def cmd_advance(
     stop: bool = typer.Option(
         False, "--stop", help="With --epic: deactivate the mission (clear mission_active) and dispatch nothing.",
     ),
-    loose: bool = typer.Option(
-        False,
-        "--loose",
-        help="With --project: drain the project territory's loose (parentless) ready nodes - no mission lifecycle, never retires (x-e221 rung-1).",
-    ),
+    loose: bool = typer.Option(False, "--loose", help="With --project: drain the territory's loose ready nodes (x-e221)."),
     continuation: bool = typer.Option(
         False, "--continuation", hidden=True,
         help="With --epic: K2 daemon-drain mode - never (re)activate the mission; retire an already-inactive one (dispatches nothing, reports deactivated).",
@@ -8797,14 +8793,8 @@ def cmd_advance(
             raise typer.Exit(code=2)
         from fno.backlog.advance import run_advance_loose
 
-        run_advance_loose(
-            project,
-            max_dispatch=max_dispatch,
-            json_out=json_out,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-        )
+        run_advance_loose(project, max_dispatch=max_dispatch, json_out=json_out,
+                          verbose=verbose, model=model, provider=provider)
         return
     if stop or max_dispatch is not None or continuation:
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)
