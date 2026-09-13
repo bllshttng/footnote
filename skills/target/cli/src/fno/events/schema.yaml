@@ -5402,8 +5402,8 @@ event_types:
           description: "The historical session's real session_id - no new ID scheme is minted for corpus items."
         dimension:
           type: string
-          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged]
-          description: "Which rubric dimension this finding scores. structural_validity/collision_free/shipped_outcome are blueprint dimensions (replay scores the first two only, per Review Amendment A1); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (x-6ff0, sweep-only)."
+          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged, persona, surface_fit, uncovered_case, deletable, duplication]
+          description: "Which rubric dimension this finding scores. structural_validity was RETIRED 2026-09-12 (x-9983): the failure-modes heading it graded is no longer refused, so it is kept in this enum only so historical events validate, and it is never emitted again. collision_free/shipped_outcome are the blueprint code dimensions (fold.BLUEPRINT_DIMENSIONS); persona/surface_fit/uncovered_case/deletable/duplication are the blueprint judge dimensions (fold.JUDGE_DIMENSIONS, model-graded, never replayable); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (x-6ff0, sweep-only)."
         verdict:
           type: string
           enum: [pass, degraded, fail]
@@ -5456,7 +5456,7 @@ event_types:
           description: "Attributable-and-scored fraction of the window's total rows, 0-100 - the same coverage-honesty rule fno whoami scoreboard already enforces, carried into this event since x-0ca7's original proposal did not have one."
         failure_ranking:
           type: array
-          description: "[{dimension, fail_count}] sorted by fail_count descending - only the dimensions actually scorable in this run (a replay batch's ranking carries structural_validity/collision_free only, per Review Amendment A1)."
+          description: "[{dimension, fail_count}] sorted by fail_count descending - only the dimensions actually scorable in this run (a replay batch's ranking carries collision_free only, per Review Amendment A1 as amended by x-9983)."
         skill_ref:
           type: [string, "null"]
           description: "Git ref under test; absent/null for a retrospective sweep against HEAD, present for a replay batch."

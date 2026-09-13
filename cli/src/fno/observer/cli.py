@@ -536,7 +536,7 @@ def judge_cmd(
     node: Optional[str] = typer.Option(None, "--node", help="Graph node id for title/details context."),
     labels: Optional[Path] = typer.Option(None, "--labels", help="labels.yaml: run calibration instead."),
     split: str = typer.Option("dev", "--split", help="Calibration split (dev|test)."),
-    force: bool = typer.Option(False, "--force", help="Judge even at level=report."),
+    force: bool = typer.Option(False, "--force", "-F", help="Judge even at level=report."),
 ) -> None:
     """Advisory five-question judge: never blocks; a judge error is never a fail."""
     if labels is not None:

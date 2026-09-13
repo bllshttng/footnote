@@ -59,10 +59,11 @@ def _gather_context(dimension: str, plan_text: str) -> str:
         chunks = []
         if syms:
             # One scan for the whole symbol set: a per-symbol loop is N full
-            # tree walks before the model call even starts.
+            # tree walks before the model call even starts. rg skips hidden
+            # dirs by default, which covers .claude; graphify-out stays excluded.
             h = subprocess.run(
                 ["rg", "-l", "-F", *[e for s in syms for e in ("-e", s)],
-                 "--glob", "!.claude/**", "--glob", "!graphify-out/**", "."],
+                 "--glob", "!graphify-out/**", "."],
                 capture_output=True, text=True, timeout=60,
             )
             if h.returncode == 0:
