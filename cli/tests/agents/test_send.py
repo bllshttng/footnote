@@ -3169,55 +3169,10 @@ def test_lock_timeout_queue_keeps_a_bus_only_row_on_its_designed_lane(
     )
 
 
+
 # ---------------------------------------------------------------------------
-# AC2-HP/EDGE/STOPPED: `mail team` fleet fan-out (x-77db)
+# AC2: `mail team` is the one writer's shim (x-8cfb)
 # ---------------------------------------------------------------------------
-
-def _register_team_rows() -> None:
-    """Three live rows (one a crowned king) + one terminal row."""
-    from fno.agents.registry import AgentEntry, write_registry
-
-    write_registry([
-        AgentEntry(
-            name="red",
-            harness="claude",
-            harness_session_id="abcd1234-1111-7222-8333-444455556666",
-            cwd="/tmp",
-            log_path="/tmp/red.log",
-            short_id="abcd1234",
-            status="live",
-        ),
-        AgentEntry(
-            name="blue",
-            harness="claude",
-            harness_session_id="bbbb2222-1111-7222-8333-444455556666",
-            cwd="/tmp",
-            log_path="/tmp/blue.log",
-            short_id="bbbb2222",
-            status="live",
-        ),
-        AgentEntry(
-            name="king",
-            harness="claude",
-            harness_session_id="cccc3333-1111-7222-8333-444455556666",
-            cwd="/tmp",
-            log_path="/tmp/king.log",
-            short_id="cccc3333",
-            status="live",
-            crown_level=1,
-            crown_scope="epic/x-test",
-        ),
-        AgentEntry(
-            name="gone",
-            harness="claude",
-            harness_session_id="dddd4444-1111-7222-8333-444455556666",
-            cwd="/tmp",
-            log_path="/tmp/gone.log",
-            short_id="dddd4444",
-            status="exited",
-        ),
-    ])
-
 
 def _team_invoke(monkeypatch, args: list[str]):
     from fno.mail.cli import mail_app
@@ -3225,200 +3180,179 @@ def _team_invoke(monkeypatch, args: list[str]):
     return CliRunner().invoke(mail_app, args)
 
 
-def _team_inject_ok(monkeypatch) -> list[str]:
-    """Hosted delivery for every claude recipient; returns captured recipients."""
-    from fno.agents import dispatch as dispatch_mod
-    from fno.agents.harnesses import claude as claude_mod
+def _team_fake_writer(monkeypatch, returncode: int = 0, stdout: str = "", stderr: str = ""):
+    """Capture the announce send subprocess; returns the list of invocations."""
+    import subprocess
 
-    monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
-    injects: list[str] = []
+    calls: list[dict[str, object]] = []
 
-    def _ok(recipient: str, text: str, **_k) -> bool:
-        injects.append(recipient)
-        return True
+    class _Proc:
+        pass
 
-    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", _ok)
-    return injects
+    def fake_run(args, **kwargs):
+        calls.append({
+            "args": args,
+            "input": kwargs.get("input"),
+            "stdout": stdout,
+            "stderr": stderr,
+            "returncode": returncode,
+        })
+        proc = _Proc()
+        proc.returncode = returncode
+        proc.stdout = stdout
+        proc.stderr = stderr
+        return proc
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
 
 
-def _team_json(result) -> dict:
-    return json.loads(result.stdout.strip().splitlines()[-1])
-
-
-def test_team_scope_all_fans_out_through_the_send_core(
+def test_team_shim_invokes_the_one_writer_once(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """AC2-HP: scope all delivers to every live row, skips terminal rows."""
+    """AC2-HP: dispatch_send is never called; one announce send runs with the
+    body on stdin and its stdout/exit relayed."""
     use_tmpdir(monkeypatch, tmp_path)
-    _register_team_rows()
-    injects = _team_inject_ok(monkeypatch)
-
-    result = _team_invoke(monkeypatch, ["team", "--scope", "all", "fleet notice", "--json"])
-
-    assert result.exit_code == 0, result.output
-    payload = _team_json(result)
-    names = [row["name"] for row in payload["receipts"]]
-    assert sorted(names) == ["blue", "king", "red"], names
-    assert "gone" not in names
-    assert payload["sent"] == 3 and payload["queued"] == 0 and payload["failed"] == 0
-    assert len(injects) == 3
-
-
-def test_team_kings_scope_keeps_only_crown_holders(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """AC2-HP: kings keeps rows holding a crown, drops everyone else."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _register_team_rows()
-    injects = _team_inject_ok(monkeypatch)
-
-    result = _team_invoke(monkeypatch, ["team", "--scope", "kings", "crown notice", "--json"])
-
-    assert result.exit_code == 0, result.output
-    payload = _team_json(result)
-    assert [row["name"] for row in payload["receipts"]] == ["king"]
-    assert len(injects) == 1
-
-
-def test_team_dedups_one_session_listed_twice(tmp_path: Path, monkeypatch) -> None:
-    """AC2-HP: two rows sharing one session identity receive exactly once."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import AgentEntry, write_registry
-
-    write_registry([
-        AgentEntry(
-            name="red",
-            harness="codex",
-            harness_session_id="deadbeef-0000-0000-0000-000000000001",
-            cwd="/tmp",
-            log_path="/tmp/red.log",
-            status="live",
-        ),
-        AgentEntry(
-            name="red-again",
-            harness="codex",
-            harness_session_id="deadbeef-0000-0000-0000-000000000001",
-            cwd="/tmp",
-            log_path="/tmp/red.log",
-            status="live",
-        ),
-    ])
-    from types import SimpleNamespace
-
     from fno.agents import dispatch as dispatch_mod
 
-    calls: list[str] = []
+    def explode(**_kwargs):
+        raise AssertionError("dispatch_send must never run on the announce path")
 
-    def fake_send(name: str, **_kwargs):
-        calls.append(name)
-        return SimpleNamespace(msg_id="msg-test", delivery="hosted")
+    monkeypatch.setattr(dispatch_mod, "dispatch_send", explode)
+    calls = _team_fake_writer(
+        monkeypatch,
+        stdout='{"id":"msg-test","scope":"all","audience":3}\n',
+    )
 
-    monkeypatch.setattr(dispatch_mod, "dispatch_send", fake_send)
-
-    result = _team_invoke(monkeypatch, ["team", "--scope", "all", "once only", "--json"])
+    result = _team_invoke(
+        monkeypatch, ["team", "--scope", "all", "one bus line", "--json"]
+    )
 
     assert result.exit_code == 0, result.output
-    payload = _team_json(result)
-    assert payload["sent"] == 1 and len(calls) == 1
+    assert len(calls) == 1, calls
+    argv = calls[0]["args"]
+    assert argv[1:3] == ["announce", "send"]
+    assert "--scope" in argv and "all" in argv
+    assert "--sender-kind" in argv
+    assert calls[0]["input"] == "one bus line"
+    assert "msg-test" in result.output
 
 
-def test_team_partial_failure_names_failures_and_keeps_successes(
+def test_team_sender_kind_is_agent_only_for_an_owned_identity(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """AC2-EDGE: one refused recipient exits 1, names it, delivers the rest."""
+    """AC2-HP: a resolvable owned harness identity stamps agent; a bare shell
+    (no markers) stamps operator."""
     use_tmpdir(monkeypatch, tmp_path)
-    _register_team_rows()
-    _team_inject_ok(monkeypatch)
+    import fno.harness_identity as hi_mod
 
-    from fno.agents import dispatch as dispatch_mod
+    from fno.harness_identity import OwnedHarnessIdentity
 
-    real = dispatch_mod.dispatch_send
+    calls = _team_fake_writer(monkeypatch)
 
-    def flaky(name: str, **kwargs):
-        if name == "blue":
-            raise RuntimeError("boom: blue refused")
-        return real(name=name, **kwargs)
+    def owned(env=None, **_kw):
+        return OwnedHarnessIdentity(
+            session_id="abcd1234-1111-2222-3333-444455556666", harness="claude"
+        )
 
-    monkeypatch.setattr(dispatch_mod, "dispatch_send", flaky)
+    monkeypatch.setattr(hi_mod, "resolve_owned_identity", owned)
+    _team_invoke(monkeypatch, ["team", "--scope", "all", "from a session"])
+    owned_argv = calls[-1]["args"]
+    assert owned_argv[owned_argv.index("--sender-kind") + 1] == "agent"
 
-    result = _team_invoke(monkeypatch, ["team", "--scope", "all", "mixed news", "--json"])
+    def empty(env=None, **_kw):
+        return OwnedHarnessIdentity(session_id=None, harness=None)
 
-    assert result.exit_code == 1, result.output
-    payload = _team_json(result)
-    assert payload["sent"] == 2 and payload["failed"] == 1
-    failed = [row for row in payload["receipts"] if "error" in row]
-    assert [row["name"] for row in failed] == ["blue"]
-    assert "boom" in failed[0]["error"]
+    monkeypatch.setattr(hi_mod, "resolve_owned_identity", empty)
+    _team_invoke(monkeypatch, ["team", "--scope", "all", "from a shell"])
+    shell_argv = calls[-1]["args"]
+    assert shell_argv[shell_argv.index("--sender-kind") + 1] == "operator"
 
 
-def test_team_empty_scope_refused(tmp_path: Path, monkeypatch) -> None:
+def test_team_passthrough_flags_reach_the_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-HP: --subject / --expires / --urgent are forwarded verbatim."""
+    use_tmpdir(monkeypatch, tmp_path)
+    calls = _team_fake_writer(monkeypatch)
+
+    result = _team_invoke(
+        monkeypatch,
+        [
+            "team", "--scope", "kings", "shift change",
+            "--subject", "maintenance", "--expires", "45m", "--urgent",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    argv = calls[-1]["args"]
+    assert argv[argv.index("--subject") + 1] == "maintenance"
+    assert argv[argv.index("--expires") + 1] == "45m"
+    assert "--urgent" in argv
+
+
+def test_team_style_refusal_fires_before_the_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-ERR: a body failing the style lint exits non-zero and the Rust
+    writer is never invoked."""
+    use_tmpdir(monkeypatch, tmp_path)
+    calls = _team_fake_writer(monkeypatch)
+    bad_body = "Stop work; report where you are."
+
+    result = _team_invoke(
+        monkeypatch, ["team", "--scope", "all", bad_body]
+    )
+
+    assert result.exit_code != 0, result.output
+    assert calls == [], "the writer must not run past a refused body"
+
+
+def test_team_body_cap_refused_before_the_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-ERR: an over-cap body exits non-zero before any subprocess."""
+    use_tmpdir(monkeypatch, tmp_path)
+    calls = _team_fake_writer(monkeypatch)
+
+    result = _team_invoke(
+        monkeypatch, ["team", "--scope", "all", "x" * (1024 * 1024 + 1)]
+    )
+
+    assert result.exit_code != 0, result.output
+    assert calls == []
+
+
+def test_team_writer_failure_relays_the_exit_and_stderr(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-ERR: a refused announce (authority/rate limit) surfaces as a
+    non-zero exit with the writer's own words."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _team_fake_writer(
+        monkeypatch,
+        returncode=2,
+        stderr="announce: refused: rate limit is 6 announcements per rolling hour\n",
+    )
+
+    result = _team_invoke(monkeypatch, ["team", "--scope", "all", "spam"])
+
+    assert result.exit_code == 2, result.output
+    assert "rate limit" in result.output
+
+
+def test_team_empty_scope_relays_the_writer_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
     """AC2-EDGE: an empty scope never reports fleet-wide success."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import write_registry
-
-    write_registry([])
+    _team_fake_writer(
+        monkeypatch,
+        returncode=1,
+        stderr="announce send: no live recipients in scope 'all'\n",
+    )
 
     result = _team_invoke(monkeypatch, ["team", "--scope", "all", "nobody home"])
 
     assert result.exit_code == 1, result.output
     assert "no live recipients" in result.output
-
-
-def test_team_body_validated_before_any_delivery(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """AC2-EDGE: a body over the cap is refused before the FIRST send."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _register_team_rows()
-
-    from fno.agents import dispatch as dispatch_mod
-
-    def explode(**_kwargs):
-        raise AssertionError("no delivery may be attempted past a refused body")
-
-    monkeypatch.setattr(dispatch_mod, "dispatch_send", explode)
-
-    result = _team_invoke(monkeypatch, ["team", "--scope", "all", "x" * (1024 * 1024 + 1)])
-
-    assert result.exit_code != 0, result.output
-
-
-def test_team_human_summary_line(tmp_path: Path, monkeypatch) -> None:
-    """AC2-HP: without --json the per-recipient receipts are followed by the
-    exact `team scope=<scope>: sent N, queued N, failed N` summary."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _register_team_rows()
-    _team_inject_ok(monkeypatch)
-
-    result = _team_invoke(monkeypatch, ["team", "--scope", "all", "fleet notice"])
-
-    assert result.exit_code == 0, result.output
-    assert "team scope=all: sent 3, queued 0, failed 0" in result.output
-
-
-def test_team_stopped_fleet_still_delivers(tmp_path: Path, monkeypatch) -> None:
-    """AC2-STOPPED: an active incident stop never gates the announcement channel."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _register_team_rows()
-    injects = _team_inject_ok(monkeypatch)
-
-    # The incident record lives in a pinned home shaped like the default:
-    # the sandbox home is one per pytest process, and a stopped record there
-    # refuses every later spawn-gate test on the worker.
-    agents_home = tmp_path / ".fno" / "agents"
-    agents_home.mkdir(parents=True, exist_ok=True)
-    (agents_home / "fleet-stop.json").write_text(json.dumps({
-        "version": 1,
-        "state": "stopped",
-        "generation": 7,
-        "changed_at": "2026-09-11T00:00:00Z",
-        "changed_by": "operator",
-        "reason": "wedged lock",
-    }))
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
-
-    result = _team_invoke(monkeypatch, ["team", "--scope", "all", "we are stopped", "--json"])
-
-    assert result.exit_code == 0, result.output
-    payload = _team_json(result)
-    assert payload["sent"] == 3 and len(injects) == 3
