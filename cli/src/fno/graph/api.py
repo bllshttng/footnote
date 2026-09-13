@@ -65,8 +65,7 @@ def nodes(
 
 
 def comments(node_id: str, *, first: Optional[int] = None, path: Path = GRAPH_JSON) -> list:
-    """The node's progress notes, typed; the connection's page info is
-    keeper-side detail no caller needs this wave."""
+    """The node's progress notes, typed; page info is keeper-side detail."""
     reply = _api("comments", {"id": node_id, "first": first}, path=path)
     return [Comment.model_validate(row) for row in reply.get("nodes", [])]
 
@@ -99,8 +98,8 @@ def cmd_version() -> None:
 
 
 def wire_rows(*, path: Path = GRAPH_JSON) -> list[dict]:
-    """Wire-shaped rows; absent store reads empty. An unrepresentable row
-    rides through verbatim, and dumped status IS the stored status."""
+    """Wire rows; absent store reads empty; unrepresentable rows ride
+    verbatim; the dumped status IS the stored status."""
     from fno.graph.store import StoreUnavailable
     from pydantic import ValidationError
 
@@ -115,7 +114,7 @@ def wire_rows(*, path: Path = GRAPH_JSON) -> list[dict]:
         try:
             dumped = Node.model_validate(row).model_dump(by_alias=True)
         except ValidationError:
-            out.append(row)
+            out.append(row)  # an unrepresentable row rides verbatim
             continue
         if dumped.get("persisted_status"):
             dumped["status"] = dumped["persisted_status"]

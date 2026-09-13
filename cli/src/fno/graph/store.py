@@ -55,6 +55,8 @@ from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched 
     GRAPH_MD,
 )
 
+
+
 # Transaction retry budget: a conflict means another writer committed between
 # our begin and commit, and the fleet is not human-rate - colliding writers
 # are correlated by construction, so the retry sleeps a FULL-JITTER
@@ -1179,12 +1181,19 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
     for release in outcome["closure_releases"]:
         release_node_claim_at_closure(release["id"], rung=release["rung"])
 
-    # No render here. The canonical keeper's render trigger is the ONE render
-    # path: it debounces (2 s after the last write) and replays
-    # `fno backlog render-views`, covering Python writes, mux native ops, the
-    # daemon settle, and Rust mutations with one pass. An in-call render made
-    # every writer re-run the projections and made the native writers replay
-    # them a second time.
+    # The client renders in-call when the write landed on the configured
+    # store; the keeper's trigger replays the pass for native writers and
+    # retries failures. A scratch graph renders only its own siblings.
+    from fno import paths as _paths
+
+    try:
+        configured = Path(_paths.graph_json()) == path
+    except Exception:  # noqa: BLE001 - an unresolvable config still owes a render
+        configured = False
+    try:
+        render_view_projections(outcome["entries"], configured, path)
+    except Exception as exc:  # noqa: BLE001 - a render failure never fails the write
+        print(f"Warning: post-publish render failed: {exc}", file=sys.stderr)
     # Wake the active-backlog drain daemon (x-c070): best-effort, never
     # wedges the mutation.
     try:
@@ -1204,29 +1213,32 @@ def render_canonical_views() -> int:
     pass they replay, so a native write leaves the same derived views
     (graph.md, the configured board targets) a CLI write would. Every step
     is best-effort: a render failure never rewrites history. Returns the
-    count of failed views, so the caller refuses the exit 0 the keeper reads.
+    count of failed views so the caller can refuse a false success.
     """
     from fno import paths as _paths
 
     failures: list[str] = []
-    graph = _paths.graph_json()
+    graph = Path(_paths.graph_json())
     entries = read_graph(graph)
     try:
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
         pass
-    render_view_projections(entries, True, Path(graph), failures=failures)
+    # Canonical targets only for the configured store; a keeper hosting a
+    # sandbox graph renders its siblings, never the operator's board.
+    from fno.graph import _constants as _gc
+
+    canonical = graph == _gc.GRAPH_JSON
+    render_view_projections(entries, canonical, graph, failures=failures)
     return len(failures)
 
 
 def render_view_projections(
     entries: list[dict], is_canonical: bool, path: Path, *, failures: list[str] | None = None
 ) -> list[dict]:
-    """The view projections a landed publish owes: the readiness overlay,
-    graph.md, and the canonical/configured board targets (or a sibling
-    graph.html for test graphs). Returns the overlay-applied entries, so the
-    caller's list matches what the render drew. A ``failures`` list collects
-    one entry per failed view; the default keeps the stderr warning."""
+    """The view projections a landed publish owes. Returns the overlay-applied
+    entries. A ``failures`` list collects one entry per failed view; the
+    default keeps the stderr warning."""
     from fno.graph.render import render_graph_md
     from fno.graph import _constants as _gc
     from fno.paths import vault_root
@@ -1241,10 +1253,8 @@ def render_view_projections(
         pass
     def _fail(message: str) -> None:
         # Collectors get the reason; fire-and-forget keeps stderr.
-        if failures is not None:
-            failures.append(message)
-        else:
-            print(f"Warning: {message}", file=sys.stderr)
+        (failures.append(message) if failures is not None
+         else print(f"Warning: {message}", file=sys.stderr))
 
     md_target = _gc.GRAPH_MD if is_canonical else path.with_name("graph.md")
     try:

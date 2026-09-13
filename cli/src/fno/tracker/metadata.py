@@ -56,12 +56,11 @@ def _graph_store_path() -> Path:
 
 
 def read_entries(reader: str, *, strict: bool = False) -> list[dict]:
-    """Raw default-backend entries, for the guarded metadata reader class.
+    """Raw default-backend entries; ``reader`` names the calling module.
 
-    ``reader`` names the calling module (diagnostics read better than a bare
-    traceback). Raises :class:`ExternalMetadataUnavailable` before any store
-    read when an external backend is selected. Non-strict keeps the soft
-    contract: corrupt degrades to an empty answer, unreachable still raises.
+    Raises :class:`ExternalMetadataUnavailable` before any store read under an
+    external backend. Non-strict keeps the soft contract: corrupt degrades to
+    an empty answer, unreachable still raises.
     """
     from . import active_backend_name
 

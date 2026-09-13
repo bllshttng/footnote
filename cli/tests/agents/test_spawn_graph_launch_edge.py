@@ -29,6 +29,7 @@ def graph(monkeypatch):
     nothing here: the assertions are the skip decision and what the mutator
     does to the row.
     """
+    import fno.graph.api as graph_api
     import fno.graph.store as store
 
     entries = [{"id": "x-1234", "title": "a node", "status": "ready"}]
@@ -38,8 +39,8 @@ def graph(monkeypatch):
         calls.append(1)
         return mutator(entries)
 
-    monkeypatch.setattr(store, "read_graph", lambda *a, **k: entries)
-    monkeypatch.setattr(store, "locked_mutate_graph", fake_mutate)
+    monkeypatch.setattr(graph_api, "wire_rows", lambda *a, **k: entries)
+    monkeypatch.setattr(store, "commit_rows_via_store", fake_mutate)
     return entries, calls
 
 
@@ -119,7 +120,7 @@ def test_a_racing_first_launch_still_wins_under_the_lock(graph, parent):
         entries[0]["spawned_by_session"] = "the-racing-launcher"
         return mutator(entries)
 
-    store.locked_mutate_graph = racing_mutate
+    store.commit_rows_via_store = racing_mutate
 
     _stamp_launch_edge("x-1234")
 

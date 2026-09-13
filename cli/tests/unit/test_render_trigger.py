@@ -73,16 +73,18 @@ def _seed(graph, title):
     )
 
 
-def test_write_path_no_longer_renders_inline(paths, monkeypatch):
-    """A store write lands bytes but writes NO view file: rendering is the
-    trigger's job, not the write path's."""
+def test_write_path_renders_the_configured_store_inline(paths, monkeypatch):
+    """A write against the configured store renders the configured targets
+    in the same call, so CLI consumers read a fresh board without waiting
+    out the trigger's settle. The trigger exists for the writers that bypass
+    this client (mux native ops, Rust mutations) and to retry failures."""
     graph = paths["graph"]
     target = paths["target"]
     _config(monkeypatch, target)
-    _seed(graph, "Render inline never")
+    _seed(graph, "Render follows write inline")
 
     assert graph.exists(), "the store write landed"
-    assert not target.exists(), "the write rendered no view inline"
+    assert "Render follows write inline" in target.read_text(encoding="utf-8")
 
 
 def test_render_pass_renders_configured_targets(paths, monkeypatch):
