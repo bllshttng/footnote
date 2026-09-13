@@ -277,8 +277,10 @@ def _tick_in_flight() -> Optional[int]:
     if info.get("state") != "live":
         return None
     acquired = info.get("acquired_at")
+    if not acquired:
+        return None
     try:
-        young = bool(acquired) and (int(time.time() * 1000) - int(acquired)) < 600_000
+        young = (int(time.time() * 1000) - int(acquired)) < 600_000
     except (TypeError, ValueError):
         return None
     if not young:
