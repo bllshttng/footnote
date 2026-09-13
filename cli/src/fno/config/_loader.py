@@ -19,9 +19,13 @@ if TYPE_CHECKING:
     from fno.config import SettingsModel
 
 
-class SettingsRefused(click.ClickException):
+class SettingsRefused(click.ClickException, ValueError):
     """A settings file carries a value the schema refuses; the message names
-    the file, the key, the value and the legal set."""
+    the file, the key, the value and the legal set.
+
+    Also a ValueError: pydantic's ValidationError is one, so consumers whose
+    refusal contract was ValueError keep holding without a per-caller edit.
+    """
 
 
 def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
