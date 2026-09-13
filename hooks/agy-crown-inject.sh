@@ -44,6 +44,6 @@ CROWN_LEVEL="$(printf '%s' "$MY_ROW" | jq -r '.crown_level // empty' 2>/dev/null
 CROWN_SCOPE="$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)"
 [[ -n "$CROWN_LEVEL" || -n "$CROWN_SCOPE" ]] || { echo '{}'; exit 0; }
 
-jq -nc --arg m "You are the king: crown level ${CROWN_LEVEL:-?} over ${CROWN_SCOPE:-?}. Confirm with \`fno whoami\`. Before any CLI verb, load the king reference at skills/king-for-a-day/references/cli-commands.md." \
+jq -nc --arg m "You are the king: crown level ${CROWN_LEVEL:-?} over ${CROWN_SCOPE:-?}. Confirm with \`fno whoami\`. Before any CLI verb, load the king reference at skills/reign/references/cli-commands.md." \
     '{injectSteps: [{ephemeralMessage: $m}]}'
 exit 0

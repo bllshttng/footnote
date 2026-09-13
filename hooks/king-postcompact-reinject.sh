@@ -29,7 +29,7 @@ else
 fi
 CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
 MARKER_LIB="$PLUGIN_ROOT/scripts/lib/canon-doc-marker.sh"
-BRIEF="$PLUGIN_ROOT/skills/king-for-a-day/references/postcompact-brief.md"
+BRIEF="$PLUGIN_ROOT/skills/reign/references/postcompact-brief.md"
 
 [[ -r "$CARRIER_LIB" ]] || exit 0
 # shellcheck source=../scripts/lib/postcompact-carrier.sh
@@ -193,7 +193,7 @@ fi
 # Reign limb (x-7b36): when the crowned scope's manifest reports a shape AND
 # names THIS session, this is a tenured reign, and its beat needs re-teaching
 # after a compact. Reads the same manifest every king arm resolves; a missing
-# manifest or a foreign session id means the king-for-a-day brief above is the
+# manifest or a foreign session id means the brief above is the
 # whole teaching, so nothing is appended (fail to the narrower rule).
 REIGN_MANIFEST="$(fno agents king manifest-path --harness-session-id "$SID" 2>/dev/null || true)"
 if [[ -n "$REIGN_MANIFEST" && -f "$REIGN_MANIFEST" ]]; then

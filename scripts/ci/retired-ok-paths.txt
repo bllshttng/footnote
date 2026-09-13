@@ -5,7 +5,7 @@
 # which is where a declaration belongs: the next reader finds it without
 # leaving the line. This file exists for the one case where that is not free.
 # A byte-budgeted file is re-read on a schedule, so a marker in it is paid
-# again every time. skills/king-for-a-day/references/postcompact-brief.md is
+# again every time. skills/reign/references/postcompact-brief.md is
 # re-injected into every king's context on every compaction and a test
 # enforces its size; the 62-byte marker put it 36 bytes over. Moving the
 # budget was refused, and correctly: a budget that moves for the first thing
@@ -20,4 +20,4 @@
 # ugly" is not one.
 #
 # Format: <repo-relative path>|<why the marker cannot live in the file>
-skills/king-for-a-day/references/postcompact-brief.md|Re-injected into every king on every compaction and byte-budgeted by tests/hooks/test_king_postcompact_reinject.sh, so an in-file marker is paid per session forever. Its one hit forbids the command rather than teaching it.
+skills/reign/references/postcompact-brief.md|Re-injected into every king on every compaction and byte-budgeted by tests/hooks/test_king_postcompact_reinject.sh, so an in-file marker is paid per session forever. Its one hit forbids the command rather than teaching it.
