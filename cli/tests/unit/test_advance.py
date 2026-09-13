@@ -592,7 +592,7 @@ def test_spawn_failure_records_the_refusal_not_a_clipped_head(iso, monkeypatch):
     assert failed_ticks
     detail = failed_ticks[-1]["data"].get("detail") or ""
     # No window: the tick row carries the whole error. A tail window the size
-    # of the refusal lands mid-sentence when the stderr is longer (x-782e:
+    # of the refusal lands mid-sentence when the stderr is longer (the row's
     # `error=` read empty-looking) and a head window cut mid-flag, so both the
     # exit context and the full refusal must survive.
     assert "exited 79" in detail
@@ -601,8 +601,8 @@ def test_spawn_failure_records_the_refusal_not_a_clipped_head(iso, monkeypatch):
 
 def test_gate_refusal_detail_fallback_keeps_stderr_over_200():
     """No spawn-gate: line on stderr -> the detail is the WHOLE stderr. The
-    200-char head fallback cut the 2026-09-08 x-7aa8 refusal mid-flag at
-    --mo and left the cause unrecoverable from the status surface."""
+    200-char head fallback cut a real refusal mid-flag and left the cause
+    unrecoverable from the status surface."""
     stderr = (
         "fno agents spawn: applied model=opus (agents.profiles.blueprint.model)\n"
         + "x" * 260
