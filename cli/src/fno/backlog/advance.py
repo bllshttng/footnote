@@ -4040,8 +4040,7 @@ def _spawn_budget(provider: Optional[str] = None) -> _LaneBudget:
         from fno.agents.spawn_defaults import resolve_lane_vendor
 
         # The pin is a HARNESS; provider_limits is keyed by VENDOR. Resolve
-        # through the shipped mapper - a raw harness key would miss and
-        # silently drop the one cap that binds.
+        # through the shipped mapper - a raw harness key would miss.
         pin_vendor = resolve_lane_vendor([], harness=provider) or provider
         scoped: dict = {pin_vendor: limits.get(pin_vendor)}
     else:
@@ -4058,11 +4057,7 @@ def _spawn_budget(provider: Optional[str] = None) -> _LaneBudget:
 
     admission = _cpu_axis()
     if admission.verdict != "admit":
-        _LOG.warning(
-            "cpu axis %s, dispatch width 0: %s",
-            admission.verdict,
-            admission.reason,
-        )
+        _LOG.warning("cpu axis %s, dispatch width 0: %s", admission.verdict, admission.reason)
         fleet = 0
     binding: Optional[str]
     binding_remaining: Optional[int]
@@ -4122,11 +4117,8 @@ def _child_lane_vendor(
         prof_harness = (getattr(profile, "provider", "") or "").strip() or None
         if route is None and prof_model is None and prof_harness is None:
             return None  # nothing the spawn would inherit names a lane
-        argv = ["fno"]
-        if route:
-            argv += ["--route", route]
-        if prof_model:
-            argv += ["--model", prof_model]
+        argv = ["fno"] + (["--route", route] if route else [])
+        argv += ["--model", prof_model] if prof_model else []
         return resolve_lane_vendor(argv, harness=prof_harness)
     except Exception:  # noqa: BLE001 - an unresolvable lane falls back to the binding cap
         return None
@@ -4394,9 +4386,7 @@ def advance_epic(
             dispatched.append(res.node_id or child["id"])
             total += 1
             if lane is not None:
-                budget.dispatched_by_vendor[lane] = (
-                    budget.dispatched_by_vendor.get(lane, 0) + 1
-                )
+                budget.dispatched_by_vendor[lane] = budget.dispatched_by_vendor.get(lane, 0) + 1
         if res.decision == "skipped" and res.exit_code not in (None, _spawn_gate.EXIT_PROVIDER_CAP):
             # A global refusal (load, RAM, queue, registry) ends the pass: the
             # condition is identical for every remaining child. A 78 skip is
