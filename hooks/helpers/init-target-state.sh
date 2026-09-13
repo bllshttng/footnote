@@ -911,9 +911,8 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # is already caught by the claim acquire below; this closes the dead-prior-
   # session, PR-still-open gap the free claim does not. Fail-open: refuse only
   # on an exact in_review read - any error/empty/other-status proceeds
-  # unchanged. _GRAPH_FILE is hoisted here (was defined in the claim block).
-  # GRAPH_JSON_PATH (config.sh's shell-stub) honors config.paths.graph_json; fall back to the default (as scripts/lib/graph-resolve.sh does).
-  _GRAPH_FILE="${GRAPH_JSON_PATH:-${HOME}/.fno/graph.json}"
+  # unchanged. Graph reads run through the shipped verb (`fno backlog get`);
+  # no resolver here opens the store file.
   _GUARD_NODE=""
   _GUARD_MATCHES=""   # space-joined distinct id-shaped tokens that ARE graph nodes
   _GUARD_AMBIGUOUS=0
@@ -1321,15 +1320,18 @@ EOF
   _NODE_ID=""
   if [[ -n "$_GUARD_NODE" ]]; then
     _NODE_ID="$_GUARD_NODE"
-  elif [[ -f "$_GRAPH_FILE" && -n "$INITIAL_PLAN_PATH" ]]; then
+  elif [[ -n "$INITIAL_PLAN_PATH" ]] && command -v fno >/dev/null 2>&1; then
     # `2>&1 >` is NOT a typo and the order matters: it points the resolver's
     # stderr at THIS shell's stderr before stdout is captured, so a traceback
     # still stays quiet-ish but the deliberate ambiguity note reaches the
     # operator. Plain `2>/dev/null` discarded that note, which made the previous
     # fix decorative - the run still proceeded unclaimed in silence.
-    _NODE_ID=$(python3 - "$_GRAPH_FILE" "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' || true
-import json, os, sys
-graph_path, raw_target, repo_root = sys.argv[1], sys.argv[2], sys.argv[3]
+    _NODE_ID=$(python3 - "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' || true
+import os, sys
+
+from fno.graph import api as graph_api
+
+raw_target, repo_root = sys.argv[1], sys.argv[2]
 if not os.path.isabs(raw_target):
     raw_target = os.path.join(repo_root, raw_target)
 try:
@@ -1337,10 +1339,9 @@ try:
 except OSError:
     sys.exit(0)
 try:
-    data = json.load(open(graph_path))
+    conn = graph_api.nodes(include_archived=True)
 except Exception:
     sys.exit(0)
-entries = data.get("entries", []) if isinstance(data, dict) else data
 # Collect ALL holders, then prefer the delivery unit (x-e957). First-match-wins
 # picked whichever came first in entry order, and adopted children precede the
 # group child that was minted for them - so `--plan-path <shared plan>` resolved
@@ -1349,22 +1350,22 @@ entries = data.get("entries", []) if isinstance(data, dict) else data
 # Same rule as `_resolve_dispatch_node` in target_cli.py, deliberately: two
 # resolvers for one question that disagree is worse than either answer.
 matches = []
-for entry in entries:
-    plan_path = entry.get("plan_path")
+for node in conn.nodes:
+    plan_path = node.plan_path
     if not plan_path:
         continue
     abs_plan = plan_path if os.path.isabs(plan_path) else os.path.join(repo_root, plan_path)
     try:
         if os.path.realpath(abs_plan) == target:
-            matches.append(entry)
+            matches.append(node)
     except OSError:
         pass
 if len(matches) > 1:
-    units = [e for e in matches if not e.get("contained_in")]
+    units = [e for e in matches if not e.contained_in]
     if len(units) == 1:
         matches = units
 if len(matches) == 1:
-    print(matches[0].get("id", ""))
+    print(matches[0].id or "")
 elif len(matches) > 1:
     # Ambiguous and un-narrowable: two or more UNCONTAINED holders (a shape the
     # write-site refusal now prevents creating). Print nothing rather than pick
@@ -1376,7 +1377,7 @@ elif len(matches) > 1:
         "[init-target-state] note: %d nodes share this plan_path and none is a "
         "single delivery unit (%s); resolving to no node, so this session runs "
         "UNCLAIMED. Name the node explicitly, or fix the duplicate binding.\n"
-        % (len(matches), ", ".join(str(m.get("id")) for m in matches[:4]))
+        % (len(matches), ", ".join(str(m.id) for m in matches[:4]))
     )
 PYEOF
 )
@@ -1798,8 +1799,8 @@ PYEOF
     # Graph lock stamp on claim success: unconditional (overwriting a stale prior
     # owner is the point), retried once. Non-fatal - the TTL claim is
     # authoritative and the graph field is display/routing metadata, so a
-    # lock-contended graph.json must not abort init (AC9-FR).
-    if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]]; then
+    # contended or absent store must not abort init (AC9-FR).
+    if [[ "$_NODE_OWNED" -eq 1 ]]; then
       _STAMP_LOG="$STATE_DIR/.init-claim.log"
       # Harness stamp (US6): the holder's provider + harness-session UUID (the
       # _HARNESS_SESSION computed once above), so an operator/peek can jump from a

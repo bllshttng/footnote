@@ -13,8 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-import typer
-
 from fno.graph._constants import GRAPH_JSON
 from fno.graph.store import _client_for
 from fno.graph.types import (
@@ -104,4 +102,6 @@ def comment_create(node_id: str, input: CommentCreateInput, *, path: Path = GRAP
 
 def cmd_version() -> None:
     """Print the store's mutation counter: it grows one per write."""
+    import typer
+
     typer.echo(version())

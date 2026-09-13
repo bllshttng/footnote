@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # autocorrect-pack.sh - assemble a review packet for the autocorrect loop.
 #
-# Reads corrections.log, ~/.fno/graph.json (BLOCKED state mirror), and
+# Reads corrections.log, the backlog store's BLOCKED state mirror, and
 # the git log of ~/.claude/, and produces a yaml document containing events
 # within the time window plus the current full text of every rule file
 # referenced by those events.
@@ -23,7 +23,6 @@ source "$SCRIPT_DIR/lib/corrections-lock.sh"
 CLAUDE_DIR="${CLAUDE_DIR_OVERRIDE:-$HOME/.claude}"
 LOG_PATH="$(corrections_log_path)"
 WATERMARK_PATH="$CLAUDE_DIR/.corrections-watermark"
-GRAPH_PATH="${FNO_GRAPH_PATH:-$HOME/.fno/graph.json}"
 
 WINDOW_DAYS=30
 SEVERITY_FILTER="S1,S2"
@@ -163,7 +162,7 @@ UNIQ_IMPLICATED="$TMPDIR_PACK/implicated-uniq.txt"
 sort -u "$IMPLICATED_LIST" > "$UNIQ_IMPLICATED"
 
 # -------------------------------------------------------------------
-# graph.json BLOCKED state, if available.
+# Backlog BLOCKED state, if available.
 # -------------------------------------------------------------------
 GRAPH_BLOCKED="$TMPDIR_PACK/graph-blocked.yaml"
 : > "$GRAPH_BLOCKED"
@@ -171,19 +170,23 @@ GRAPH_BLOCKED="$TMPDIR_PACK/graph-blocked.yaml"
 # packet's reader is a model. Rendering both as `[]` is what made the
 # .nodes/.entries bug read as good news for its whole life.
 GRAPH_BLOCKED_STATUS=unavailable
-if [[ -f "$GRAPH_PATH" ]] && command -v jq >/dev/null 2>&1; then
-  # Select nodes where status == "blocked" OR blocked_count > 0.
+if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  # The snapshot verb is the read seam: it answers backend-neutrally and
+  # keeps moving after the SQLite flip, where a file read would freeze. The
+  # document carries the same `.entries` list the file did.
   #
-  # The entry list lives under `.entries`; this read asked for `.nodes` and so
-  # selected from an empty list on every run since it was written, shipping an
-  # empty BLOCKED section that looked like "nothing is blocked". jq's stderr is
-  # no longer discarded for the same reason -- silencing it is what let a read
-  # that never matched anything pass for a read that found nothing.
+  # The entry list lives under `.entries`; an earlier read asked for
+  # `.nodes` and so selected from an empty list on every run since it was
+  # written, shipping an empty BLOCKED section that looked like "nothing is
+  # blocked". jq's stderr is no longer discarded for the same reason --
+  # silencing it is what let a read that never matched anything pass for a
+  # read that found nothing.
   #
-  # Stays jq rather than a verb: no `fno backlog` verb lists by status without a
-  # query, and nothing selected here (`blocked`, blocked_count) is a field the
-  # migration pass rewrites.
-  jq -r '
+  # Stays jq rather than a verb: no `fno backlog` verb lists by status without
+  # a query, and nothing selected here (`blocked`, blocked_count) is a field
+  # the migration pass rewrites.
+  if fno backlog status --snapshot > "$TMPDIR_PACK/graph-snapshot.json" 2>/dev/null; then
+    jq -r '
     .entries // [] | .[] |
     select((.status // ._status) == "blocked" or (.blocked_count // 0) > 0) |
     {
@@ -196,7 +199,10 @@ if [[ -f "$GRAPH_PATH" ]] && command -v jq >/dev/null 2>&1; then
     "    title: " + (.title | tojson) + "\n" +
     "    blocked_count: " + (.blocked_count | tostring) + "\n" +
     "    last_blocked_reason: " + (.last_blocked_reason | tojson)
-  ' "$GRAPH_PATH" >> "$GRAPH_BLOCKED" && GRAPH_BLOCKED_STATUS=ok || GRAPH_BLOCKED_STATUS=failed
+  ' "$TMPDIR_PACK/graph-snapshot.json" >> "$GRAPH_BLOCKED" && GRAPH_BLOCKED_STATUS=ok || GRAPH_BLOCKED_STATUS=failed
+  else
+    GRAPH_BLOCKED_STATUS=failed
+  fi
 fi
 
 # -------------------------------------------------------------------
@@ -242,7 +248,7 @@ OUTPUT="$TMPDIR_PACK/packet.yaml"
   elif [[ "$GRAPH_BLOCKED_STATUS" == "ok" ]]; then
     emit "  []  # read succeeded; no blocked nodes"
   else
-    emit "  []  # NOT READ ($GRAPH_BLOCKED_STATUS): graph.json missing, jq absent, or the query failed"
+    emit "  []  # NOT READ ($GRAPH_BLOCKED_STATUS): fno or jq absent, or the snapshot query failed"
   fi
   emit ""
   emit "git_log_claude_dir: |"
