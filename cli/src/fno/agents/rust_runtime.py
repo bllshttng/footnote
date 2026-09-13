@@ -232,7 +232,7 @@ RUST_CLIENT_VERBS = frozenset(
         "graph-get",
         "bash-census",
         "session-start-bytes",
-        # Blueprint judge verb (x-9983): daemon-free grading read, never `fno agents`.
+        # Blueprint judge verb: daemon-free grading read, never `fno agents`.
         "judge",
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
         "court-orphans",

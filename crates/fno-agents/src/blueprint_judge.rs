@@ -1,9 +1,10 @@
 //! `fno-agents judge` -- the grading half of the advisory five-question
-//! blueprint judge (x-9983). Daemon-free, like `graph-get`/`bash-census`: not
-//! a routable `fno agents` verb, so it stays out of `ALL_CLIENT_ACTIONS`.
+//! blueprint judge. Daemon-free, like `graph-get`/`bash-census`: never a
+//! routable `fno agents <verb>` invocation, though listed in
+//! `ALL_CLIENT_ACTIONS` for the binary's own verb-surface probe.
 //!
 //! Ported off `cli/src/fno/observer/judge.py` per the flag-registry ratchet
-//! (node x-72fc, operator ruling 2026-09-12): a new CLI flag is Rust work.
+//! (operator ruling 2026-09-12): a new CLI flag is Rust work.
 //! This verb owns the lens prompts, the model spawn, and verdict parsing; it
 //! emits no events and mints no run_id. The Python wrapper
 //! (`cli/src/fno/observer/cli.py::judge_cmd`/`sweep`) still does the
@@ -15,6 +16,7 @@
 //! (advisory, never fails); calibration mode exits 1 when any control
 //! disagrees, matching the retired Python `judge_cmd --labels` contract.
 
+use crate::evidence::truncate_chars;
 use crate::graph_get::{default_graph_path, find_entry};
 use crate::graph_store::{read_defaulted, s_str};
 use crate::paths::worktree_repo_root;
@@ -34,10 +36,6 @@ pub const JUDGE_DIMENSIONS: [&str; 5] = [
 pub const JUDGE_MODEL: &str = "sonnet";
 
 type Lenses = (String, HashMap<String, String>);
-
-fn truncate_chars(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
-}
 
 fn lenses_path(cwd: &Path) -> PathBuf {
     worktree_repo_root(cwd).join("evals/blueprint-judge/lenses.md")
@@ -328,8 +326,10 @@ fn run_calibration(labels_path: &Path, split: &str, cwd: &Path, spawn: Spawn) ->
     let base = labels_path.parent().unwrap_or(Path::new("."));
     let lenses = load_lenses(&lenses_path(cwd));
 
-    // (n, tp, tn) per dimension.
-    let mut dims: HashMap<String, (u32, u32, u32)> = HashMap::new();
+    // (n, n_fail_labeled, n_pass_labeled, tp, tn) per dimension. tp/tn count
+    // correct judge verdicts on the rows actually labeled that class, so the
+    // rate below is a per-class recall, not a fraction of every row.
+    let mut dims: HashMap<String, (u32, u32, u32, u32, u32)> = HashMap::new();
     let mut disagreements: Vec<Value> = Vec::new();
     let mut controls_wrong = 0u32;
 
@@ -352,26 +352,40 @@ fn run_calibration(labels_path: &Path, split: &str, cwd: &Path, spawn: Spawn) ->
             continue;
         };
         for (dimension, label_v) in labels {
+            if !JUDGE_DIMENSIONS.contains(&dimension.as_str()) {
+                continue; // an unknown dimension key is a labels.yaml typo, not a score
+            }
             let Some(label) = label_v.as_str() else {
                 continue;
             };
             let (verdict, reason) =
                 judge_plan(&plan_text, &node_text, dimension, cwd, &lenses, spawn);
-            let s = dims.entry(dimension.clone()).or_insert((0, 0, 0));
+            let s = dims.entry(dimension.clone()).or_insert((0, 0, 0, 0, 0));
             s.0 += 1;
-            if verdict.as_deref() == Some("fail") && label == "fail" {
+            if label == "fail" {
                 s.1 += 1;
+                if verdict.as_deref() == Some("fail") {
+                    s.3 += 1;
+                }
             }
-            if verdict.as_deref() == Some("pass") && label == "pass" {
+            if label == "pass" {
                 s.2 += 1;
+                if verdict.as_deref() == Some("pass") {
+                    s.4 += 1;
+                }
             }
-            if verdict.as_deref() != Some(label) {
-                disagreements.push(json!({
-                    "plan": plan_rel, "dimension": dimension, "label": label,
-                    "judge": verdict, "reason": truncate_chars(&reason, 120),
-                }));
-                if control {
-                    controls_wrong += 1;
+            // A None verdict is a judge fault or an unparseable answer, not a
+            // scored disagreement (matching the Python side's "gap, never a
+            // fabricated verdict" rule) -- it never spends a control.
+            if let Some(v) = verdict.as_deref() {
+                if v != label {
+                    disagreements.push(json!({
+                        "plan": plan_rel, "dimension": dimension, "label": label,
+                        "judge": verdict, "reason": truncate_chars(&reason, 120),
+                    }));
+                    if control {
+                        controls_wrong += 1;
+                    }
                 }
             }
         }
@@ -379,15 +393,18 @@ fn run_calibration(labels_path: &Path, split: &str, cwd: &Path, spawn: Spawn) ->
 
     let dimensions: serde_json::Map<String, Value> = dims
         .into_iter()
-        .map(|(d, (n, tp, tn))| {
-            let rate = |k: u32| {
-                if n > 0 {
-                    Some((k as f64 / n as f64 * 1000.0).round() / 1000.0)
+        .map(|(d, (n, n_fail, n_pass, tp, tn))| {
+            let rate = |k: u32, of: u32| {
+                if of > 0 {
+                    Some((k as f64 / of as f64 * 1000.0).round() / 1000.0)
                 } else {
                     None
                 }
             };
-            (d, json!({"n": n, "tp_rate": rate(tp), "tn_rate": rate(tn)}))
+            (
+                d,
+                json!({"n": n, "tp_rate": rate(tp, n_fail), "tn_rate": rate(tn, n_pass)}),
+            )
         })
         .collect();
     println!(

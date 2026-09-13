@@ -73,6 +73,7 @@ Enforced by `fno.plan._status.validate_transition(old, new)`. Backward transitio
 BLUEPRINT_WRITE_ALLOWLIST = frozenset({
     "Execution Strategy",
     "File Ownership Map",
+    "Five questions",
     "Patterns to Reuse",
     "kill_criteria",
     "execution_mode",
@@ -80,6 +81,7 @@ BLUEPRINT_WRITE_ALLOWLIST = frozenset({
     "acceptance_contract",
     "consolidation",
     "difficulty",
+    "join",
 })
 ```
 

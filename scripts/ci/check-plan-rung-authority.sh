@@ -376,8 +376,8 @@ fi
 # Both consume activation-specific markers, never `status:`.
 # ---------------------------------------------------------------------------
 echo "--- Rust: no plan-status reader ---"
-# blueprint_judge.rs (x-9983) grades plan prose against five product
-# questions; it never classifies `status:` frontmatter.
+# blueprint_judge.rs grades plan prose against five product questions;
+# it never classifies `status:` frontmatter.
 EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/blueprint_judge.rs
 crates/fno-agents/src/delivery_completion.rs
 crates/fno-agents/src/kill_criteria.rs"

@@ -33,7 +33,7 @@ import typer
 from fno.loops import loop_level
 from fno.observer import fold
 from fno.plan._doc import load_plan_text
-from fno.rust_binary import resolve_binary
+from fno.rust_binary import find_dev_binary, resolve_binary
 
 observer_app = typer.Typer(
     name="observer",
@@ -354,7 +354,7 @@ def sweep(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the run summary as JSON."),
 ) -> None:
     """Retrospective read-only sweep: score a recorded corpus and emit events.
-    --judge N is fno-agents' flag (x-72fc); read from raw argv, not typer.Option.
+    --judge N is fno-agents' flag; read from raw argv, not typer.Option.
 
     States on stdout: ``ok`` (run_complete emitted), ``insufficient`` (<10
     attributable items, no run_complete), ``partial`` (a coverage gap is
@@ -471,9 +471,17 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
 # the advisory five-question judge (grading: crates/fno-agents/src/blueprint_judge.rs).
 
 
+def _arg_value(args: list[str], flag: str) -> Optional[str]:
+    """The token after ``flag`` in a raw argv list, or None if absent or trailing."""
+    if flag not in args:
+        return None
+    i = args.index(flag) + 1
+    return args[i] if i < len(args) else None
+
+
 def _judge_via_rust(argv: list[str]) -> Optional[dict]:
     """One fno-agents judge round-trip: JSON out, None on any fault (a coverage gap, never a fabricated verdict)."""
-    binary = resolve_binary()
+    binary = find_dev_binary() or resolve_binary()
     if binary is None:
         typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
         return None
@@ -484,12 +492,13 @@ def _judge_via_rust(argv: list[str]) -> Optional[dict]:
         typer.echo(f"judge fault: {exc}", err=True)
         return None
     except ValueError:
-        typer.echo(f"judge fault: bad output: {result.stdout[:200]}", err=True)
+        typer.echo(f"judge fault: bad output (stdout={result.stdout[:200]!r} stderr={result.stderr[:200]!r})", err=True)
         return None
 
 
 def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[str, int]:
-    """("judged", fail_count) or ("gap", 0) - a gap is coverage, never a fail."""
+    """("judged", fail_count), ("gap", 0) for no section, or ("fault", 0) for a
+    failed round-trip - a gap or a fault is coverage, never a fabricated fail."""
     pp = item.get("plan_path")
     try:
         text = Path(pp).read_text(encoding="utf-8") if pp else ""
@@ -501,7 +510,7 @@ def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[
     argv = ["--plan", str(pp)] + (["--node", str(item["graph_node_id"])] if item.get("graph_node_id") else [])
     out = _judge_via_rust(argv)
     if out is None:
-        return "judged", 0
+        return "fault", 0
     fails = 0
     for row in out.get("rows", []):
         dimension, verdict, reason = row["dimension"], row.get("verdict"), row.get("reason", "")
@@ -523,7 +532,7 @@ def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
 )
 def judge_cmd(ctx: typer.Context) -> None:
-    """Advisory five-question judge, never blocking. Every flag is fno-agents' (x-72fc); forwards raw argv, no typer.Option."""
+    """Advisory five-question judge, never blocking. Every flag is fno-agents'; forwards raw argv, no typer.Option."""
     args = ctx.args
     if "--labels" in args:
         out = _judge_via_rust(args)
@@ -537,7 +546,7 @@ def judge_cmd(ctx: typer.Context) -> None:
             typer.echo(f"controls wrong: {out['controls_wrong']}")
             raise typer.Exit(1)
         return
-    plan = args[args.index("--plan") + 1] if "--plan" in args else None
+    plan = _arg_value(args, "--plan")
     if plan is None:
         raise typer.BadParameter("give --plan or --labels")
     if "--force" not in args and "-F" not in args and loop_level("blueprint_judge") == "report":
@@ -547,7 +556,7 @@ def judge_cmd(ctx: typer.Context) -> None:
     if not plan_path.exists():
         typer.echo(f"unanswered: no plan at {plan_path}")
         raise typer.Exit(1)
-    node = args[args.index("--node") + 1] if "--node" in args else None
+    node = _arg_value(args, "--node")
     typer.echo(f"judging {plan_path} ({node or 'no node'})")
     status, fails = _judge_one_item(
         {"skill_id": "fno:blueprint", "session_id": None, "graph_node_id": node, "plan_path": str(plan_path)},
@@ -556,6 +565,9 @@ def judge_cmd(ctx: typer.Context) -> None:
     if status == "gap":
         typer.echo("unanswered: plan carries no ## Five questions section; no judge call")
         return
+    if status == "fault":
+        typer.echo("unanswered: the fno-agents judge round-trip failed; see the fault line above")
+        raise typer.Exit(1)
     if fails:
         typer.echo("revise the plan once, or write a one-line disposition under that question; intake proceeds either way")
 

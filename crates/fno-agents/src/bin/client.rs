@@ -477,7 +477,7 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
     }
-    // `judge` (x-9983): the blueprint judge's grading half (lens prompts,
+    // `judge`: the blueprint judge's grading half (lens prompts,
     // model spawn, verdict parsing). Daemon-free like graph-get; the Python
     // `fno doctor observer judge` / `sweep --judge` wrappers shell HERE and
     // own event emission (fno.events single-sourced there).

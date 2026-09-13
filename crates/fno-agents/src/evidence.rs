@@ -259,7 +259,7 @@ fn head_sha(root: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn truncate_chars(s: &str, n: usize) -> String {
+pub(crate) fn truncate_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 

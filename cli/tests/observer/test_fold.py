@@ -107,6 +107,24 @@ def test_collision_free_rides_the_validator():
     assert fold.score_blueprint_item({}, plan_text="# diff\nplain text\n")["collision_free"] is None
 
 
+def test_collision_free_is_a_gap_not_a_fabricated_pass_without_waves():
+    # AC1-ERR (regression): a plan whose Execution Strategy declares no
+    # `waves:` block never reaches the validator's wave-scoped surface check,
+    # even when two tasks claim the same file - the old flat-task scan this
+    # replaced would have failed it, so reporting "pass" here would be a
+    # fabricated verdict, not a measured one.
+    plan_text = (
+        "---\ntitle: t\n---\n\n## Execution Strategy\n\n```yaml\n"
+        "execution_mode: parallel\n"
+        "tasks:\n- id: '1'\n  title: t\n  surface: ['a.py', 'b.py']\n"
+        "  verify: uv run pytest -q\n  acceptance: ['AC1']\n"
+        "- id: '2'\n  title: t\n  surface: ['b.py', 'c.py']\n"
+        "  verify: uv run pytest -q\n  acceptance: ['AC1']\n"
+        "```\n"
+    )
+    assert fold.score_blueprint_item({}, plan_text=plan_text)["collision_free"] is None
+
+
 def test_review_precision_pass_degraded_fail():
     assert fold.score_review_item(addressed_ids={"c1"}, skipped_ids={"c2"}, all_finding_ids={"c1", "c2"}) == {"finding_precision": "pass"}
     assert fold.score_review_item(addressed_ids={"c1"}, skipped_ids=set(), all_finding_ids={"c1", "c2"}) == {"finding_precision": "degraded"}
