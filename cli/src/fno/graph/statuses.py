@@ -202,9 +202,7 @@ def is_open_phase_row(row: object, phase: str) -> bool:
         and bool(row["session_id"].strip())
         and isinstance(row.get("started_at"), str)
         and bool(row["started_at"].strip())
-        # Absent OR null counts open: the typed dump materializes ended_at
-        # None on a window the store still holds open.
-        and row.get("ended_at") is None
+        and row.get("ended_at") is None  # absent OR null counts open
     )
 
 

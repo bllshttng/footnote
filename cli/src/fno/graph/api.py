@@ -108,9 +108,8 @@ def cmd_version() -> None:
 
 
 def wire_rows(*, path: Path = GRAPH_JSON) -> list[dict]:
-    """Wire-shaped rows for dict-speaking folds; absent store reads empty.
-    Total like the Rust rows() seam: a row the typed model cannot represent
-    rides through verbatim, so a legacy row never silently vanishes."""
+    """Wire-shaped rows; absent store reads empty. An unrepresentable row
+    rides through verbatim, and dumped status IS the stored status."""
     from fno.graph.store import StoreUnavailable
     from pydantic import ValidationError
 
@@ -123,7 +122,11 @@ def wire_rows(*, path: Path = GRAPH_JSON) -> list[dict]:
     out: list[dict] = []
     for row in reply.get("rows") or []:
         try:
-            out.append(Node.model_validate(row).model_dump(by_alias=True))
+            dumped = Node.model_validate(row).model_dump(by_alias=True)
         except ValidationError:
             out.append(row)
+            continue
+        if dumped.get("persisted_status"):
+            dumped["status"] = dumped["persisted_status"]
+        out.append(dumped)
     return out

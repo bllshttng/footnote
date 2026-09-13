@@ -259,7 +259,8 @@ def test_an_absent_entry_releases_its_pinned_phrase(tmp_path: Path) -> None:
 def _seeded_graph(tmp_path: Path) -> Path:
     graph = tmp_path / "graph.json"
     graph.write_text(
-        '{"entries": [{"id": "x-1234", "title": "A real guard"}]}',
+        '{"entries": [{"id": "x-1234", "title": "A real guard", "slug": "x-1234",'
+        ' "type": "feature", "priority": "p2", "status": "idea"}]}',
         encoding="utf-8",
     )
     return graph

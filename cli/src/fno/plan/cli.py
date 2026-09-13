@@ -611,9 +611,8 @@ def migrate_keys(
 
 def _plan_sync_watermark() -> Path:
     """Watermark gating the sweep, a sibling of graph.json (the global graph the
-    sweep is driven by), so all sessions share one gate keyed to the one graph.
-    The name is version-stamp-specific: an old mtime float beside the counter
-    would read as "already synced" forever."""
+    sweep is driven by), so all sessions share one gate keyed to the one
+    graph. The v2 name keeps an old mtime float from reading as synced."""
     from fno.paths import graph_json
 
     return graph_json().parent / ".plan-sync-watermark-v2"

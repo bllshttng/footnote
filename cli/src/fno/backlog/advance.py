@@ -3504,12 +3504,9 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
             continue
         if closed_node_id not in (e.get("blocked_by") or []):
             continue
-        # "now-unblocked" == ready OR a plan-less idea (x-e24a): blocker done + no
-        # other open blocker. The stored status is the honest readiness here:
-        # the derived view still reads `blocked` from the non-empty blocked_by
-        # edge the close just satisfied (the readiness overlay is render-only).
-        # A plan-less idea dependent is genuinely unblocked and
-        # cold-dispatchable; a claimed/done/deferred one reads its own bucket.
+        # "now-unblocked" == ready OR a plan-less idea (x-e24a). The stored
+        # status is the honest readiness: the derived view still reads
+        # `blocked` from the blocked_by edge the close just satisfied.
         if (e.get("persisted_status") or e.get("status")) != "ready" and not is_cold_dispatchable(e):
             continue
         if selection_guards(e, by_id, staleness_days=staleness_days):

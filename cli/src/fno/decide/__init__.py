@@ -783,7 +783,7 @@ def _project(event: dict[str, Any]) -> str | None:
             break
         return entries
 
-    graph_store.commit_rows_via_store(graph_store.GRAPH_JSON, mutator)
+    graph_store.locked_mutate_graph(graph_store.GRAPH_JSON, mutator)
     return matched[0] if matched else None
 
 
