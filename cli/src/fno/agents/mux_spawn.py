@@ -3815,8 +3815,7 @@ def dispatch_spawn_pane(
         # correlate against a fabricated empty baseline.
         codex_daemon_baseline_ids: Optional[set[str]] = None
         if provider == "codex":
-            # Start the daemon the create form asserts; through the module so
-            # patches on codex_pane reach these calls.
+            # Through the module so patches on codex_pane reach these calls.
             from fno.agents import codex_pane
 
             codex_pane.ensure_codex_daemon(runner)

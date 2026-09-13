@@ -1,8 +1,7 @@
 """The codex pane lane's daemon-owned-thread helpers (x-a095).
 
 Remote Control is served by the shared ``codex app-server`` daemon, which
-loads only threads it owns; the pane lane starts it (the create form's
-``pre_exec``) and launches against it (``--remote unix://``).
+loads only threads it owns; the pane lane starts it and launches against it.
 """
 
 from __future__ import annotations
@@ -163,8 +162,7 @@ def _codex_daemon_candidate(
             observed[:] = [text]
 
     if baseline_ids is None:
-        # No window length can fix this one: the daemon oracle is disabled for
-        # the whole spawn, so saying so beats any timeout.
+        # No window fixes this: the oracle is off for the whole spawn.
         _note("daemon: no pre-spawn baseline, oracle disabled for this spawn")
         return None
     loaded = (
@@ -244,8 +242,7 @@ def _make_codex_bind_probe(
         _note(f"fd: no codex rollout on pane child pid {child_pid}")
         now_s = time.monotonic()
         if now_s - last_probe_s[0] < _CODEX_DAEMON_PROBE_INTERVAL_S:
-            # A rate-limit skip is not an observation, so the fd note above
-            # stands as the newest thing anything actually looked at.
+            # A rate-limit skip is not an observation; the fd note stands.
             return None
         last_probe_s[0] = now_s
         candidate = _codex_daemon_candidate(
@@ -259,8 +256,7 @@ def _make_codex_bind_probe(
                 _note(f"daemon: candidate {candidate} awaiting a repeat probe")
             prev_candidate[0] = candidate
             return None
-        # The same single candidate repeated - trust it, unless the mux has
-        # just told us the pane itself is already gone.
+        # The candidate repeated - trust it unless the pane is gone.
         if _mux_pane_alive(mux, runner, timeout=_PROBE_TIMEOUT_S) is False:
             _note("daemon: candidate dropped, pane already gone")
             return None
