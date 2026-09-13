@@ -592,6 +592,20 @@ def test_compute_plan_fidelity_refuses_declared_exclusions_when_plan_forbids(mon
     assert decision["carveouts_pr"] == 1599
 
 
+def test_compute_plan_fidelity_refuses_when_the_body_parser_is_absent(monkeypatch, tmp_path):
+    """A bare install ships no check-oos-tracked.sh: the gate refuses, never passes."""
+    import fno.paths as paths
+
+    fid, plan = _forbidden_setup(
+        monkeypatch, tmp_path, carveouts_line="carveouts: forbidden\n",
+        body_reader=lambda pr, root: _SPECIMEN_BODY,
+    )
+    monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: tmp_path / "absent" / rel)
+    decision = fid.compute_plan_fidelity(plan_path=str(plan))
+    assert decision["refused"] is True
+    assert "carve-out check unreadable" in decision["reason"], decision["reason"]
+
+
 def test_compute_plan_fidelity_treats_a_typoed_carveouts_value_as_forbidden(monkeypatch, tmp_path):
     fid, plan = _forbidden_setup(
         monkeypatch, tmp_path, carveouts_line="carveouts: forbiden\n",
