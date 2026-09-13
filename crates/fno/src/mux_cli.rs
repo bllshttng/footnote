@@ -2426,6 +2426,12 @@ pub enum PaneCmd {
         /// hatch keeps one shape across every enveloped lane. A raw send
         /// never renders, so the flag beside `--raw` has no effect.
         style_exception: Option<String>,
+        /// (x-91ba) `--source <label>`: caller-declared provenance for the
+        /// audit row. The mail lane declares `mail`; absent, the row reads
+        /// `unattributed:<pid>`. Declared, never sniffed from the payload:
+        /// `--raw` carries both a wrapped mail body and an operator's
+        /// verbatim keystrokes, which no byte inspection can tell apart.
+        provenance: Option<String>,
     },
     Wait {
         pane: u64,
@@ -2543,7 +2549,10 @@ pub const PANE_SEND_RAW_HELP: &str = "pane send wraps the text in an <fno_mail> 
 default, so a worker can tell a peer's message from its operator's, and refuses a pane showing \
 an option prompt. The enveloped body passes the same style and word-budget gates as mail; \
 --style-exception <reason> excepts one reasoned send. --raw types the bytes verbatim for \
-genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit.";
+genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit. \
+Every send writes one audit row to ~/.fno/agents/events.jsonl naming the pane, the recipient and \
+the caller; --source <label> declares that provenance (the mail lane declares mail; a bare \
+invocation reads unattributed:<pid>).";
 
 /// `pane run --worker`'s one line, same posture as [`PANE_SEND_RAW_HELP`]: the
 /// flag records the pane as a squad member joined to the registry row by name,
@@ -2774,6 +2783,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut submit = false;
     let mut raw = false;
     let mut style_exception: Option<String> = None;
+    let mut provenance: Option<String> = None;
     let mut quiet_ms = None;
     let mut pattern = None;
     let mut timeout_s = None;
@@ -2820,6 +2830,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             "--style-exception" => {
                 style_exception = Some(flag_value(args, &mut i, "--style-exception")?)
             }
+            "--source" => provenance = Some(flag_value(args, &mut i, "--source")?),
             "--quiet-ms" => {
                 quiet_ms = Some(parse_u64(
                     &flag_value(args, &mut i, "--quiet-ms")?,
@@ -2862,6 +2873,9 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     // `--raw` check, which sits after only because bool is Copy.
     if style_exception.is_some() && verb != "send" {
         return Err("--style-exception pairs only with pane send".into());
+    }
+    if provenance.is_some() && verb != "send" {
+        return Err("--source pairs only with pane send".into());
     }
     let cmd = match verb {
         "ls" => PaneCmd::Ls { fno_id },
@@ -2915,6 +2929,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 raw,
                 expected_identity: fno_id,
                 style_exception,
+                provenance,
             }
         }
         "wait" => PaneCmd::Wait {
@@ -4693,6 +4708,10 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
     // every other verb operates on an existing server. `pane ls` against no
     // server is "no panes" (exit 0); the rest are an error (nothing to act on).
     let mut review_command = None;
+    // (x-91ba) The pane-send audit row, staged where the exact bytes are
+    // known; emitted once the outcome (exit code) is known - inline on the
+    // submit path, in the shared tail on the paste path.
+    let mut pane_send_audit: Option<PaneSendAudit> = None;
     let (verb, read_timeout) = match cmd {
         // pane() intercepts the keeper read before dispatch; it needs no
         // server and this arm exists to keep the match total.
@@ -4754,6 +4773,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             raw,
             expected_identity,
             style_exception,
+            provenance,
         } => {
             let bytes = match source {
                 SendSource::Text(t) => t.into_bytes(),
@@ -4776,6 +4796,14 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             let bytes = if raw {
                 if bytes.len() > RAW_PANE_SEND_CAP_BYTES {
                     eprintln!("fno mux pane send: {}", paste_cap_refusal(bytes.len()));
+                    PaneSendAudit::new(
+                        pane,
+                        expected_identity.as_deref(),
+                        &bytes,
+                        submit,
+                        provenance.as_deref(),
+                    )
+                    .emit(session, EXIT_ERROR);
                     return EXIT_ERROR;
                 }
                 bytes
@@ -4784,10 +4812,28 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     Ok(b) => b,
                     Err(e) => {
                         eprintln!("fno mux pane send: {e}");
+                        PaneSendAudit::new(
+                            pane,
+                            expected_identity.as_deref(),
+                            &bytes,
+                            submit,
+                            provenance.as_deref(),
+                        )
+                        .emit(session, EXIT_ERROR);
                         return EXIT_ERROR;
                     }
                 }
             };
+            // (x-91ba) Stage the row here, where the exact typed bytes are
+            // known; the submit path emits inline below, the paste path in
+            // the shared tail once the reply's exit code is known.
+            pane_send_audit = Some(PaneSendAudit::new(
+                pane,
+                expected_identity.as_deref(),
+                &bytes,
+                submit,
+                provenance.as_deref(),
+            ));
             review_command = if raw {
                 review_invocation_command(&bytes)
             } else {
@@ -4803,6 +4849,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     expected_identity.as_deref(),
                     json,
                 );
+                if let Some(audit) = pane_send_audit.take() {
+                    audit.emit(session, code);
+                }
                 if review_command.is_some() {
                     let receipt = match code {
                         EXIT_OK => "submitted",
@@ -4894,6 +4943,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     return EXIT_OK;
                 }
                 eprintln!("fno mux pane: cannot reach session {session:?}: {e}");
+                if let Some(audit) = pane_send_audit.take() {
+                    audit.emit(session, EXIT_ERROR);
+                }
                 return EXIT_ERROR;
             }
         }
@@ -4929,6 +4981,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             EXIT_ERROR
         }
     };
+    if let Some(audit) = pane_send_audit.take() {
+        audit.emit(session, code);
+    }
     if review_command.is_some() {
         append_review_invocation(
             session,
@@ -6030,6 +6085,191 @@ fn append_review_invocation_at(
     let _ = result;
 }
 
+/// (x-91ba) One audit row per prompt write: the record `fno mux pane send`
+/// writes to the agents events journal so "who told this worker to do that"
+/// is one grep, not a transcript sweep. The mail lane's rows already live in
+/// `agent_raw_inject`; the floor reuses that type so a reader greps one kind.
+/// The provenance (`source`) is DECLARED by the caller via `--source`, never
+/// sniffed from the bytes: `--raw` carries both an already-wrapped mail body
+/// and an operator's verbatim keystrokes, which no inspection can tell apart.
+struct PaneSendAudit {
+    pane: u64,
+    expected_identity: Option<String>,
+    digest: String,
+    payload_bytes: usize,
+    preview: String,
+    submit: bool,
+    provenance: Option<String>,
+}
+
+impl PaneSendAudit {
+    /// Digest and preview the EXACT bytes about to be typed at the pane
+    /// (post-wrap, post-cap), so the row identifies what actually landed.
+    fn new(
+        pane: u64,
+        expected_identity: Option<&str>,
+        bytes: &[u8],
+        submit: bool,
+        provenance: Option<&str>,
+    ) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        PaneSendAudit {
+            pane,
+            expected_identity: expected_identity.map(str::to_string),
+            digest: format!("{:x}", hasher.finalize()),
+            payload_bytes: bytes.len(),
+            preview: String::from_utf8_lossy(bytes).chars().take(512).collect(),
+            submit,
+            provenance: provenance
+                .map(str::to_string)
+                .filter(|p| !p.trim().is_empty()),
+        }
+    }
+
+    fn emit(self, session: &str, exit_code: i32) {
+        self.emit_at(&pane_send_audit_events_path(), session, exit_code);
+    }
+
+    /// Best-effort, like every other events write: a failed or refused row
+    /// must not break the send itself. The envelope and field names match the
+    /// Rust mail-inject rows (`EventEmitter`'s unified x-2901 shape).
+    fn emit_at(self, path: &Path, session: &str, exit_code: i32) {
+        let pid = std::process::id();
+        // The occupant identity is resolved from the registry by pane address,
+        // never from the payload; a pane with no row simply carries no name.
+        let registry = pane_send_registry_identity(session, self.pane);
+        let (outcome, confirmed) = pane_send_outcome(exit_code, self.submit);
+        let verb: Option<String> = self
+            .preview
+            .strip_prefix('/')
+            .and_then(|p| p.split_whitespace().next())
+            .map(str::to_string);
+        let mut data = serde_json::Map::new();
+        data.insert("lane".into(), "pane-send".into());
+        data.insert("target_session".into(), session.to_string().into());
+        data.insert("target_pane".into(), self.pane.into());
+        if let Some(id) = self
+            .expected_identity
+            .or_else(|| registry.as_ref().and_then(|(_, _, id)| id.clone()))
+        {
+            data.insert("target_fno_id".into(), id.into());
+        }
+        if let Some((name, harness, _)) = &registry {
+            data.insert("target_name".into(), name.clone().into());
+        }
+        // The schema requires `harness` on every row; a pane with no registry
+        // row is honestly "unknown", never a blank.
+        data.insert(
+            "harness".into(),
+            registry
+                .as_ref()
+                .and_then(|(_, harness, _)| harness.clone())
+                .unwrap_or_else(|| "unknown".into())
+                .into(),
+        );
+        data.insert("payload".into(), self.preview.into());
+        data.insert("payload_sha256".into(), self.digest.into());
+        data.insert("payload_bytes".into(), self.payload_bytes.into());
+        let source = match &self.provenance {
+            Some(label) => label.clone(),
+            None => format!("unattributed:{pid}"),
+        };
+        data.insert("source".into(), source.into());
+        if let Some(caller) = std::env::var_os("FNO_SESSION")
+            .filter(|v| !v.is_empty())
+            .and_then(|v| v.into_string().ok())
+        {
+            data.insert("caller_session".into(), caller.into());
+        }
+        data.insert("caller_pid".into(), pid.into());
+        data.insert("submit".into(), self.submit.into());
+        data.insert("confirmed".into(), confirmed.into());
+        data.insert("outcome".into(), outcome.into());
+        data.insert("exit_code".into(), exit_code.into());
+        data.insert("verb".into(), verb.into());
+        let event = serde_json::json!({
+            "ts": review_invocation_timestamp(),
+            "type": "agent_raw_inject",
+            "source": "daemon",
+            "data": data,
+        });
+        let _ = (|| -> std::io::Result<()> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            writeln!(file, "{event}")
+        })();
+    }
+}
+
+/// The audit outcome vocabulary. Every pane-send exit code is representable,
+/// and exit 22 (text landed, no post-submit marker) is NEVER "delivered" or
+/// "submitted": that exact distinction is what the row exists to preserve.
+fn pane_send_outcome(exit_code: i32, submit: bool) -> (&'static str, bool) {
+    if exit_code == EXIT_OK {
+        return (if submit { "submitted" } else { "delivered" }, true);
+    }
+    let outcome = if exit_code == EXIT_SUBMIT_UNCONFIRMED {
+        "unconfirmed"
+    } else if exit_code == EXIT_TARGET_IDENTITY_MISMATCH {
+        "identity-mismatch"
+    } else if exit_code == EXIT_TARGET_DND {
+        "dnd"
+    } else if exit_code == EXIT_CONTROL_UNANSWERED {
+        "unanswered"
+    } else {
+        "refused"
+    };
+    (outcome, false)
+}
+
+/// The pane occupant's registry row (name, harness, durable identity) for
+/// `session:pane`, resolved once per row write. Same file the sideline parses;
+/// unreadable means None, never a failed send.
+fn pane_send_registry_identity(
+    session: &str,
+    pane: u64,
+) -> Option<(String, Option<String>, Option<String>)> {
+    let raw = std::fs::read_to_string(crate::agents_view::registry_path()).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    crate::agents_view::derive_rows(&raw, now)?
+        .into_iter()
+        .find_map(|row| {
+            let hit = row.mux.as_ref().map(|(s, p)| (s.as_str(), *p)) == Some((session, pane));
+            hit.then(|| {
+                (
+                    row.name.clone(),
+                    row.harness.clone(),
+                    row.effective_identity().map(str::to_string),
+                )
+            })
+        })
+}
+
+/// The agents events journal the mail lane and daemon already write
+/// (`~/.fno/agents/events.jsonl`, `FNO_AGENTS_HOME` redirects tests), mirrored
+/// from fno-agents' `AgentPaths` - the crates share no types, the FILE is the
+/// contract.
+fn pane_send_audit_events_path() -> PathBuf {
+    if let Some(home) = std::env::var_os("FNO_AGENTS_HOME").filter(|v| !v.is_empty()) {
+        return PathBuf::from(&home).join("events.jsonl");
+    }
+    let base = match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => PathBuf::from(home).join(".fno").join("agents"),
+        _ => PathBuf::from(".fno").join("agents"),
+    };
+    base.join("events.jsonl")
+}
+
 fn review_invocation_timestamp() -> String {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -6716,6 +6956,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
     }
@@ -7657,6 +7898,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         assert_eq!(
@@ -7669,6 +7911,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         // --guarded opts the send into the server-side turn-taken interlock.
@@ -7684,6 +7927,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         assert_eq!(
@@ -7698,6 +7942,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         // --raw opts OUT of the envelope (node x-3a64). Default false is the
@@ -7715,6 +7960,7 @@ mod tests {
                 raw: true,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         assert_eq!(
@@ -7731,6 +7977,7 @@ mod tests {
                 raw: false,
                 expected_identity: Some("addressed".into()),
                 style_exception: None,
+                provenance: None,
             }
         );
         // The bare-submit keystroke the attribution refusal promises (x-3081):
@@ -7748,6 +7995,7 @@ mod tests {
                 raw: true,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         // Every other source-less form is still a usage error: `--raw` or
@@ -7785,6 +8033,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: Some("quoted".into()),
+                provenance: None,
             }
         );
         // A valueless flag and a non-send verb are usage errors, mirroring
@@ -7803,6 +8052,11 @@ mod tests {
         // nonzero exit with no PaneSend reaching the socket, while the
         // byte-identical --raw payload never launches a renderer and arrives
         // verbatim. The received BYTES are asserted, not `raw: true`.
+        // (x-91ba) Serializes against the audit test: this test's dispatches
+        // write audit rows into the process-global agents events file.
+        let _agents = FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let sock = control_test_sock("send-gates");
         let _ = std::fs::remove_file(&sock);
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -7846,6 +8100,7 @@ mod tests {
             raw,
             expected_identity: None,
             style_exception: None,
+            provenance: None,
         };
 
         std::env::set_var("FNO_BIN", &script);
@@ -7891,6 +8146,11 @@ mod tests {
         // size limit at all, an ungated prose channel. The cap refuses
         // in-process, before any control connection, while a small raw payload
         // in the same run still delivers.
+        // (x-91ba) Serializes against the audit test: this test's dispatches
+        // write audit rows into the process-global agents events file.
+        let _agents = FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let sock = control_test_sock("raw-cap");
         let _ = std::fs::remove_file(&sock);
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -7919,6 +8179,7 @@ mod tests {
             raw: true,
             expected_identity: None,
             style_exception: None,
+            provenance: None,
         };
 
         let over = dispatch("t", &sock, false, send_cmd(big));
@@ -7946,6 +8207,220 @@ mod tests {
             ),
             other => panic!("expected PaneSend at the socket, got {other:?}"),
         }
+    }
+
+    // -- pane-send audit rows (x-91ba) --------------------------------------
+
+    /// Serializes tests that point FNO_AGENTS_HOME at a scratch dir; cargo
+    /// runs this binary's tests on parallel threads against one process env.
+    static FNO_AGENTS_HOME_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn read_audit_rows(path: &std::path::Path, needle: &str) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(needle))
+            .map(|line| serde_json::from_str(line).expect("audit row is one JSON object"))
+            .collect()
+    }
+
+    #[test]
+    fn pane_send_parse_source_flag_declares_provenance() {
+        assert_eq!(
+            parse_pane_args(&os(&["send", "2", "--text", "hi", "--source", "mail"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Text("hi".into()),
+                guarded: false,
+                submit: false,
+                raw: false,
+                expected_identity: None,
+                style_exception: None,
+                provenance: Some("mail".into()),
+            }
+        );
+        // A valueless flag and a non-send verb are usage errors, mirroring
+        // --style-exception: a silently ignored flag would read as "the row
+        // carried the declared source".
+        assert!(parse_pane_args(&os(&["send", "2", "--text", "hi", "--source"])).is_err());
+        assert!(parse_pane_args(&os(&["read", "2", "--source", "mail"])).is_err());
+    }
+
+    #[test]
+    fn pane_send_audit_outcome_vocabulary_never_claims_delivery_for_exit_22() {
+        assert_eq!(pane_send_outcome(EXIT_OK, true), ("submitted", true));
+        assert_eq!(pane_send_outcome(EXIT_OK, false), ("delivered", true));
+        // Exit 22 is the distinction the row exists to preserve: text landed,
+        // no post-submit marker. It never reads as delivered or submitted.
+        let (outcome, confirmed) = pane_send_outcome(EXIT_SUBMIT_UNCONFIRMED, true);
+        assert_eq!(outcome, "unconfirmed");
+        assert!(!confirmed);
+        assert_ne!(outcome, "delivered");
+        assert_ne!(outcome, "submitted");
+        assert_eq!(
+            pane_send_outcome(EXIT_TARGET_IDENTITY_MISMATCH, true).0,
+            "identity-mismatch"
+        );
+        assert_eq!(pane_send_outcome(EXIT_TARGET_DND, true).0, "dnd");
+        assert_eq!(pane_send_outcome(EXIT_ERROR, true).0, "refused");
+    }
+
+    #[test]
+    fn pane_send_audit_source_is_declared_not_sniffed() {
+        // A payload that LOOKS like a wrapped mail body still records the
+        // caller-declared source: sniffing would make an operator who pastes
+        // that string read as the mail lane (AC3-HP).
+        let dir = std::env::temp_dir().join(format!("fno-audit-no-sniff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let body = "<fno_mail>\nfrom: someone\n\nhi\n</fno_mail>";
+        PaneSendAudit::new(3, None, body.as_bytes(), false, None).emit_at(&path, "t", EXIT_OK);
+        let rows = read_audit_rows(&path, "pane-send");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["type"], "agent_raw_inject");
+        let data = &rows[0]["data"];
+        assert_eq!(data["lane"], "pane-send");
+        assert!(
+            data["source"]
+                .as_str()
+                .unwrap()
+                .starts_with("unattributed:"),
+            "an undeclared source reads unattributed:<pid>, got {:?}",
+            data["source"]
+        );
+        assert_eq!(data["payload"], body);
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(body.as_bytes());
+        assert_eq!(data["payload_sha256"], format!("{:x}", hasher.finalize()));
+        assert_eq!(data["payload_bytes"], body.len());
+        assert_eq!(data["confirmed"], true);
+        assert_eq!(data["outcome"], "delivered");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pane_send_audit_writes_one_row_per_dispatch_on_land_and_refuse() {
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        let agents_guard = FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let fno_bin_guard = FNO_BIN_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-audit-dispatch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = dir.join("events.jsonl");
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
+
+        // The delivered leg: one fake server, one raw send, one row.
+        let sock = control_test_sock("audit-rows");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let connections = std::sync::Arc::new(AtomicU32::new(0));
+        let connections_srv = connections.clone();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            connections_srv.fetch_add(1, AtomicOrdering::SeqCst);
+            let _msg: ClientMsg = read_msg_sync(&mut s).unwrap();
+            write_msg_sync(&mut s, &ServerMsg::Ok).unwrap();
+        });
+
+        let delivered = dispatch(
+            "t",
+            &sock,
+            false,
+            PaneCmd::Send {
+                pane: 7,
+                source: SendSource::Text("audit probe".into()),
+                guarded: false,
+                submit: false,
+                raw: true,
+                expected_identity: None,
+                style_exception: None,
+                provenance: None,
+            },
+        );
+        server.join().unwrap();
+        assert_eq!(delivered, EXIT_OK);
+
+        // The refused leg: a renderer that refuses the way the style gate
+        // does. It must record the attempt AND reach no socket.
+        let script = std::env::temp_dir().join(format!(
+            "fno-audit-refused-renderer-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho 'pane send refused: rule 1' >&2\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("FNO_BIN", &script);
+        let refused = dispatch(
+            "t",
+            &sock,
+            false,
+            PaneCmd::Send {
+                pane: 7,
+                source: SendSource::Text("you should fix this; it breaks.".into()),
+                guarded: false,
+                submit: false,
+                raw: false,
+                expected_identity: None,
+                style_exception: None,
+                provenance: Some("mail".into()),
+            },
+        );
+        std::env::remove_var("FNO_BIN");
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&sock);
+        assert_eq!(refused, EXIT_ERROR);
+        assert_eq!(
+            connections.load(AtomicOrdering::SeqCst),
+            1,
+            "only the delivered leg may open a control connection"
+        );
+
+        // The events file is process-global while this test holds the env:
+        // concurrent sends from sibling tests also land here, so each leg is
+        // read back by its own payload needle, never by the file's total.
+        let delivered_rows = read_audit_rows(&events, "audit probe");
+        assert_eq!(
+            delivered_rows.len(),
+            1,
+            "exactly one audit row for the delivered dispatch"
+        );
+        let delivered_row = &delivered_rows[0];
+        assert_eq!(delivered_row["data"]["lane"], "pane-send");
+        assert_eq!(delivered_row["data"]["target_pane"], 7);
+        assert_eq!(delivered_row["data"]["payload"], "audit probe");
+        assert_eq!(delivered_row["data"]["outcome"], "delivered");
+        assert_eq!(delivered_row["data"]["confirmed"], true);
+        assert!(delivered_row["data"]["source"]
+            .as_str()
+            .unwrap()
+            .starts_with("unattributed:"));
+        let refused_rows = read_audit_rows(&events, "you should fix this");
+        assert_eq!(
+            refused_rows.len(),
+            1,
+            "exactly one audit row for the refused dispatch"
+        );
+        let refused_row = &refused_rows[0];
+        assert_eq!(refused_row["data"]["outcome"], "refused");
+        assert_eq!(refused_row["data"]["source"], "mail");
+        assert_eq!(refused_row["data"]["confirmed"], false);
+        assert_eq!(refused_row["data"]["exit_code"], EXIT_ERROR);
+
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(agents_guard);
+        drop(fno_bin_guard);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
