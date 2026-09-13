@@ -346,7 +346,7 @@ def _set_member_pr_refs(
     merge-time `fno backlog reconcile` close each member by its own pr_number.
     """
     from fno.graph._intake import _find_node
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.paths import graph_json
 
     ids = set(member_ids)
@@ -361,7 +361,7 @@ def _set_member_pr_refs(
                 node["pr_number"] = pr_number
         return entries
 
-    locked_mutate_graph(graph_json(), mutator)
+    commit_rows_via_store(graph_json(), mutator)
 
 
 def _clear_member_batch_marks(member_ids: list[str], *, root: Path) -> None:
@@ -379,7 +379,7 @@ def _clear_member_batch_marks(member_ids: list[str], *, root: Path) -> None:
     deferred to cv-30d898f0 (the same 2h-TTL follow-up).
     """
     from fno.graph._intake import _find_node
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.paths import graph_json
 
     ids = set(member_ids)
@@ -391,7 +391,7 @@ def _clear_member_batch_marks(member_ids: list[str], *, root: Path) -> None:
                 node["batch"] = None
         return entries
 
-    locked_mutate_graph(graph_json(), mutator)
+    commit_rows_via_store(graph_json(), mutator)
 
 
 def ship_batch(

@@ -34,6 +34,7 @@ from fno.graph._verb_classification import (
     _NO_GRAIN_ON_EXTERNAL_BACKEND,
     _TRACKER_OWNED_VERBS,
 )
+from fno.graph.api import wire_rows  # noqa: F401 - re-export for lazy importers
 from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
     DESCRIPTION_HELP,
     ENCOUNTER_EVIDENCE_HELP,
@@ -931,7 +932,7 @@ def _append_creation_encounter(path: Path, node_id: str, evidence: str) -> None:
                 word_cap=load_settings().style.word_cap.encounter,
             )
             if violations:
-                raise ValueError(style.format_violations(violations, surface="encounter"))
+                raise ValueError(style.format_violations(violations))
 
         try:
             identity = resolve_self_identity()
@@ -1044,7 +1045,7 @@ def _create_node_impl(
         mint_node_id,
         normalize_difficulty,
     )
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import (
         VALID_NODE_TYPES,
         detect_project_from_settings,
@@ -1233,7 +1234,7 @@ def _create_node_impl(
             rollup_error[0] = str(exc)
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
 
     if new_id_holder[0] is not None and evidence is not None:
         _append_creation_encounter(_graph_path(), new_id_holder[0], evidence)
@@ -1265,10 +1266,9 @@ def _create_node_impl(
     # warning and never fails the filing or touches its exit code.
     if new_id_holder[0] is not None:
         try:
-            from fno.graph.store import read_graph
             from fno.graph._intake import _find_node, _warn_similar_nodes
 
-            post_entries = read_graph(_graph_path())
+            post_entries = wire_rows(path=_graph_path())
             node = _find_node(post_entries, new_id_holder[0] or "")
             if node is not None:
                 _warn_similar_nodes(node, post_entries, intake_hint=False)
@@ -1423,10 +1423,11 @@ def _fold_candidates(
     # A live plan surface is an independent fold signal when the filing names
     # one of the same files. The claim holder comes from the lockfile, not the
     # graph snapshot's stale locked_by field.
+    import re
     from pathlib import Path
     from fno.graph.collision import parse_files_to_modify
 
-    incoming_files = discovery.filing_paths(details or "")
+    incoming_files = set(re.findall(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", details or ""))
     if incoming_files:
         known = {item["id"] for item in out}
         for node in entries:
@@ -1589,9 +1590,9 @@ def cmd_idea(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=2)
 
-        from fno.graph.store import append_wave_note, read_graph
+        from fno.graph.store import append_wave_note
 
-        entries = read_graph(_graph_path())
+        entries = wire_rows(path=_graph_path())
         try:
             target_id = _resolve_asserted_id(wave_of, entries, flag="--wave-of")
         except ValueError as exc:
@@ -1633,7 +1634,6 @@ def cmd_idea(
 
     if difficulty is not None and not separate:
         from fno.graph._constants import normalize_difficulty
-        from fno.graph.store import read_graph
         import shlex
 
         try:
@@ -1641,7 +1641,7 @@ def cmd_idea(
         except ValueError:
             normalized_difficulty = None
         if normalized_difficulty is not None:
-            entries = read_graph(_graph_path())
+            entries = wire_rows(path=_graph_path())
             try:
                 candidates, candidate_source = _fold_candidates(
                     title=title,
@@ -1795,7 +1795,7 @@ def cmd_decompose(
     _refuse_create_on_external_backend()
     import sys as _sys
     from fno.graph._constants import mint_node_id, validate_priority_write
-    from fno.graph.store import locked_mutate_graph, read_graph, GraphUnreadableError
+    from fno.graph.store import commit_rows_via_store, GraphUnreadableError
     from fno.graph._intake import _find_node, _would_create_cycle
     from fno.graph._decompose import (
         _UNSET,
@@ -1866,7 +1866,7 @@ def cmd_decompose(
     max_children: object = _UNSET
     epic_doc_rel: Optional[str] = None
     try:
-        epic_node = _find_node(read_graph(_graph_path()), epic_id)
+        epic_node = _find_node(wire_rows(path=_graph_path()), epic_id)
         epic_plan_path = epic_node.get("plan_path") if epic_node else None
         if epic_node is not None and epic_plan_path:
             epic_doc = plan_base(epic_plan_path)
@@ -2228,7 +2228,7 @@ def cmd_decompose(
     epic_cwd_box: list = [None]
     downgrade_box: list[list[str]] = [[]]
     try:
-        locked_mutate_graph(_graph_path(), mutator)
+        commit_rows_via_store(_graph_path(), mutator)
     except DecomposeError as e:
         emit_error(ctx, str(e))
         raise typer.Exit(code=e.exit_code)
@@ -2246,10 +2246,16 @@ def cmd_decompose(
     # plan_path from it, and fan-out 4a reuses it. One read, not two. A read
     # failure degrades to an empty map (scaffold falls back to today's date, the
     # fan-out step is a no-op) rather than wedging the already-committed mutation.
-    from fno.graph.store import read_graph as _read_graph
+    from fno.graph import api as graph_api
 
     try:
-        by_id = {e.get("id"): e for e in _read_graph(_graph_path())}
+        by_id = {
+            e.get("id"): e
+            for e in (
+                n.model_dump(by_alias=True)
+                for n in graph_api.nodes(include_archived=True, path=_graph_path()).nodes
+            )
+        }
     except Exception:  # noqa: BLE001 - never wedge the report on a re-read failure
         by_id = {}
 
@@ -2555,7 +2561,7 @@ def _intake_impl(
     `_intake.py` helpers can be exercised by tests without going through Typer.
     """
     from fno.graph._constants import PRIORITY_ORDER
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import (
         _prepare_intake,
         _build_intake_node,
@@ -2635,7 +2641,7 @@ def _intake_impl(
     # carries (an intake mints new nodes).
     _refuse_create_on_external_backend()
 
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
 
     if roadmap_id and not force_new_roadmap:
         has_roadmap = any(e.get("roadmap_id") == roadmap_id for e in entries)
@@ -2699,7 +2705,7 @@ def _intake_impl(
                 es, claim_id, plan_path=plan_path, spec=spec, project=project
             )
 
-        locked_mutate_graph(_graph_path(), claim_mutator)
+        commit_rows_via_store(_graph_path(), claim_mutator)
         typer.echo(
             f'linked plan to {claim_id} via {claim_source}: "{spec["title"]}" - '
             f"take the work lock: fno do target start {claim_id}"
@@ -2710,7 +2716,7 @@ def _intake_impl(
         try:
             from fno.plan._project import project_graph_nodes
 
-            project_graph_nodes(read_graph(_graph_path()), [claim_id])
+            project_graph_nodes(wire_rows(path=_graph_path()), [claim_id])
         except Exception as e:  # noqa: BLE001 - additive; never wedge the claim
             sys.stderr.write(f"warning: post-claim plan projection failed: {e}\n")
         return
@@ -2724,7 +2730,7 @@ def _intake_impl(
         return es
 
     try:
-        locked_mutate_graph(_graph_path(), mutator)
+        commit_rows_via_store(_graph_path(), mutator)
     except ValueError as exc:
         # Build-time refusals (the difficulty gate, an invalid band) land as
         # a clean one-line error on the single-file lane; the multi lane
@@ -2737,7 +2743,7 @@ def _intake_impl(
     try:
         from fno.graph._intake import _warn_unknown_project, _find_node
 
-        post_entries = read_graph(_graph_path())
+        post_entries = wire_rows(path=_graph_path())
         node = _find_node(post_entries, new_id_holder[0] or "")
         landed_project = node.get("project") if node else None
         _warn_unknown_project(landed_project)
@@ -2752,7 +2758,7 @@ def _intake_impl(
     try:
         from fno.graph._intake import _find_node, _warn_similar_nodes
 
-        post_entries = read_graph(_graph_path())
+        post_entries = wire_rows(path=_graph_path())
         node = _find_node(post_entries, new_id_holder[0] or "")
         if node is not None:
             _warn_similar_nodes(node, post_entries, intake_hint=True)
@@ -2766,7 +2772,7 @@ def _intake_impl(
         try:
             from fno.plan._project import project_graph_nodes
 
-            project_graph_nodes(read_graph(_graph_path()), [new_id_holder[0]])
+            project_graph_nodes(wire_rows(path=_graph_path()), [new_id_holder[0]])
         except Exception as e:  # noqa: BLE001 - additive; never wedge the intake
             sys.stderr.write(f"warning: post-intake plan projection failed: {e}\n")
 
@@ -2781,7 +2787,7 @@ def _intake_impl(
             from fno.graph._intake import _find_node
             from fno.provenance.spawn_think import on_node_born
 
-            born_node = _find_node(read_graph(_graph_path()), new_id_holder[0])
+            born_node = _find_node(wire_rows(path=_graph_path()), new_id_holder[0])
             if born_node is not None:
                 # Already the persisted, slugged node -> skip the re-read.
                 on_node_born(born_node, persisted=True)
@@ -2914,7 +2920,7 @@ def cmd_encounter(
         cap = load_settings().style.word_cap.encounter
         violations = style.check(evidence, surface="encounter", word_cap=cap)
         if violations:
-            typer.echo(style.format_violations(violations, surface="encounter"), err=True)
+            typer.echo(style.format_violations(violations), err=True)
             raise typer.Exit(code=4)
 
     record: dict[str, object] = {
@@ -2963,10 +2969,9 @@ def cmd_encounter(
     # external-backend guard to sit on; here the read rides the guard this
     # tracker-owned verb already carries.
     from fno.graph._intake import _find_node
-    from fno.graph.store import read_graph
 
     try:
-        stored = _find_node(read_graph(_graph_path()), task_id)
+        stored = _find_node(wire_rows(path=_graph_path()), task_id)
         total = len(stored.get("encounters") or []) if stored else 0
     except Exception:  # noqa: BLE001 - a receipt count must not fail a landed write
         total = 0
@@ -2995,7 +3000,6 @@ def cmd_demand(
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph.demand import demand_rows, format_rows
-    from fno.graph.store import read_graph
     from fno.tracker import active_backend_name
 
     # An encounter is footnote-minted metadata that lives only in the graph, and
@@ -3011,7 +3015,7 @@ def cmd_demand(
         )
         raise typer.Exit(code=1)
 
-    rows = demand_rows(read_graph(_graph_path()))
+    rows = demand_rows(wire_rows(path=_graph_path()))
     if json_output:
         typer.echo(json.dumps(rows, separators=(",", ":")))
     else:
@@ -3095,7 +3099,7 @@ def cmd_update(
     dispatch_verb: Optional[str] = typer.Option(
         None,
         "--dispatch-verb",
-        help="Verb a dispatcher launches this node with (US3), e.g. /think. Refused at write when it is not one bare verb word; the config.dispatch allowlist still applies at dispatch. Pass 'null' to clear (revert to the /target --no-merge default).",
+        help="Verb a dispatcher launches this node with (US3), e.g. /think. Validated against config.dispatch.allowed_verbs or config.dispatch.verb_registry at dispatch, not here. Pass 'null' to clear (revert to the /target --no-merge default).",
     ),
     dispatch_brief: Optional[str] = typer.Option(
         None,
@@ -3212,7 +3216,7 @@ def cmd_update(
         normalize_tag,
         validate_priority_write,
     )
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import (
         _parse_blocker_list,
         _validate_blocker_ids,
@@ -3837,7 +3841,7 @@ def cmd_update(
         # the shape every bypass has taken.
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     _dispatch_overrides.emit(brief_warning_box[0])
 
     # Mutation receipts read the committed, recomputed row. Flags express the
@@ -4107,7 +4111,7 @@ def cmd_next(
         ),
     ),
 ) -> None:
-    from fno.graph.store import locked_mutate_graph, read_graph, read_graph_strict
+    from fno.graph.store import commit_rows_via_store, read_graph_strict
     from fno.graph._intake import (
         detect_project,
         descendants_of,
@@ -4355,7 +4359,7 @@ def cmd_next(
                     result[0] = _dispatch_node_summary(target)
                 return entries
 
-            locked_mutate_graph(_graph_path(), mutator)
+            commit_rows_via_store(_graph_path(), mutator)
     else:
         if _external:
             assert pre_entries is not None
@@ -4379,7 +4383,7 @@ def cmd_next(
         from fno.backlog.advance import _guard_staleness_days
 
         recv_entries = (
-            pre_entries if _external else (read_graph(_graph_path()) if claim else entries)
+            pre_entries if _external else (wire_rows(path=_graph_path()) if claim else entries)
         ) or []
         scope_ids = (
             descendants_of(recv_entries, parent_target_id)
@@ -4837,10 +4841,9 @@ def cmd_lanes(
 
     nodes: dict = {}
     try:
-        from fno.graph.store import read_graph
 
         nodes = {
-            e["id"]: e for e in read_graph(_graph_path()) if isinstance(e, dict) and e.get("id")
+            e["id"]: e for e in wire_rows(path=_graph_path()) if isinstance(e, dict) and e.get("id")
         }
     except Exception:  # noqa: BLE001 - rollup degrades to claims-only rows
         pass
@@ -5737,7 +5740,7 @@ def cmd_task_list(
     """
     from pathlib import Path
 
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph.tasks import ensure_task_rows
 
     node_id, plan_path = _task_plan_or_exit(node, _graph_path())
@@ -5753,7 +5756,7 @@ def cmd_task_list(
     # Fast path: every plan id already has a row -> print without the lock.
     # An id-less plan with no rows has nothing to materialize on ANY poll, so
     # it refuses here too rather than paying a full locked write each time.
-    for e in read_graph(_graph_path()):
+    for e in wire_rows(path=_graph_path()):
         if isinstance(e, dict) and e.get("id") == node_id:
             rows = [r for r in e.get("tasks") or [] if isinstance(r, dict)]
             known = {r.get("id") for r in rows}
@@ -5775,7 +5778,7 @@ def cmd_task_list(
                 break
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     if not materialized:
         typer.echo(f"no tasks declared by {plan_path}", err=True)
         raise typer.Exit(code=2)
@@ -5830,7 +5833,7 @@ def cmd_task_update(
     from fno.claims.self_identity import resolve_task_holder
     from fno.claims.session_pid import resolve_session_harness, resolve_session_pid
     from fno.claims.tasks import acquire_task, release_task, task_key
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph.tasks import TASK_STATUSES
 
     if status not in TASK_STATUSES:
@@ -5924,7 +5927,7 @@ def cmd_task_update(
                     break
             return entries
 
-        locked_mutate_graph(_graph_path(), mutator)
+        commit_rows_via_store(_graph_path(), mutator)
         return found[0] if found else None
 
     def _release_claim_or_note() -> None:
@@ -6522,7 +6525,7 @@ def cmd_cost(
     import click
 
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     session = merge_deprecated_alias(
         session, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
@@ -6550,7 +6553,7 @@ def cmd_cost(
         typer.echo(f"Error: feature {task_id} not found", err=True)
         raise typer.Exit(code=1)
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     typer.echo(f"Recorded ${amount_f:.2f} for {task_id} (session {session})")
 
 
@@ -6571,12 +6574,12 @@ def cmd_remove(
     """Delete a node from the graph permanently. This verb exists and works.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import _find_node, _find_dependents
 
     _require_node_id(task_id)
 
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
     dependents = _find_dependents(entries, task_id)
     if dependents and not force:
         typer.echo(f"Removing {task_id} will orphan blocked_by in: {', '.join(dependents)}")
@@ -6610,12 +6613,113 @@ def cmd_remove(
         _freed_box[0] = _release_contained_children(entries, task_id)
         return [e for e in entries if e.get("id") != task_id]
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     _echo_freed(_freed_box[0], task_id)
     typer.echo(f"Removed {task_id}" + (f" (orphaned deps in {dependents})" if dependents else ""))
 
 
     # Rationale (10 lines): docs/architecture/graph-cli-rationale.md#cmd-remove-6902
+
+
+@cli.command(
+    "defer",
+    epilog="Paired verb: `fno backlog undefer <id>...` reverses this (hidden; run its own --help).",
+)
+def cmd_defer(
+    task_ids: List[str] = typer.Argument(
+        ...,
+        help="Feature IDs (ab-XXXXXXXX). Multiple via space and/or comma: 'ab-X,ab-Y ab-Z'.",
+    ),
+    reason: str = typer.Option(
+        ...,
+        "--reason",
+        "-R",
+        help="Why these nodes are being deferred (applies to all). Free text, surfaced in triage.",
+    ),
+    kind: Optional[str] = typer.Option(
+        None,
+        "--kind",
+        "-K",
+        help=(
+            "Classify the deferral (expired|blocked|wont_do|superseded|later|"
+            "contingent|carveout|internal_only|junk). Omitted: stamped only when "
+            "the reason exactly matches a known machine-stamped string."
+        ),
+    ),
+) -> None:
+    """Mark one or more backlog nodes as deferred. Sets ``deferred_at`` + ``deferred_reason``.
+
+    Atomic across the batch: if any ID is unknown, none are deferred.
+    Same reason applies to every ID in the batch.
+    """
+    from fno.graph._constants import (
+        DEFERRED_KINDS,
+        classify_deferred_reason,
+    )
+    from fno.graph.store import commit_rows_via_store
+    from fno.graph._intake import _find_node, _find_dependents
+
+    if kind is not None and kind not in DEFERRED_KINDS:
+        typer.echo(
+            f"Error: --kind must be one of {', '.join(DEFERRED_KINDS)}, got '{kind}'",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    ids = _expand_valid_ids(task_ids)
+
+    # Strip and validate the reason at the CLI boundary so direct invocation
+    # cannot land an empty-reason deferral. The triage validator already
+    # rejects blank reasons; matching that contract here keeps both write
+    # paths producing identically-shaped graph state.
+    cleaned_reason = reason.strip()
+    if not cleaned_reason:
+        typer.echo("Error: --reason cannot be blank", err=True)
+        raise typer.Exit(code=1)
+
+    def mutator(entries):
+        # Resolve every id and abort naming ALL missing ones before mutating,
+        # mirroring cmd_queue's all-or-nothing batch atomicity.
+        _require_nodes(entries, ids)
+        now = datetime.now(timezone.utc).isoformat()
+        for tid in ids:
+            node = _find_node(entries, tid)
+            dependents = _find_dependents(entries, tid)
+            if dependents:
+                typer.echo(
+                    f"WARN: Deferring {tid} blocks: {', '.join(dependents)}",
+                    err=True,
+                )
+            node["locked_by"] = None
+            node["locked_at"] = None
+            # Clear completed_at PER NODE, inside the loop. The precedence
+            # ladder is `done > deferred`, so hoisting this clear out of the
+            # loop (or skipping it for the batch) makes deferring a done node
+            # a silent no-op: completed_at would keep status pinned to done.
+            # Symmetric with cmd_done, which clears deferred_at on the reverse
+            # transition.
+            node["completed_at"] = None
+            node["deferred_at"] = now
+            node["deferred_reason"] = cleaned_reason
+            # Explicit --kind wins; else classify ONLY by exact match against
+            # the machine-stamped table (the maintain drain self-classifies
+            # with no flag). No match leaves the kind unset - an honest
+            # unknown, never a guess from prose. Sparse: no kind means no key
+            # (popped so a re-deferral of a previously stamped node clears it).
+            resolved_kind = kind or classify_deferred_reason(cleaned_reason)
+            if resolved_kind:
+                node["deferred_kind"] = resolved_kind
+            else:
+                node.pop("deferred_kind", None)
+        return entries
+
+    commit_rows_via_store(_graph_path(), mutator)
+    for tid in ids:
+        typer.echo(f'Deferred {tid}: "{cleaned_reason}"')
+    _project_plans_from_graph(ids)
+
+
+    # Rationale (9 lines): docs/architecture/graph-cli-rationale.md#cmd-defer-7012
 
 
 def _expand_valid_ids(task_ids: list[str]) -> list[str]:
@@ -6661,7 +6765,6 @@ def cmd_queued(
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
 ) -> None:
     """List nodes the user has queued for action. JSON output, sorted by priority."""
-    from fno.graph.store import read_graph
     from fno.graph._intake import filter_by_project, _graph_sort_key_fn
     from fno.tracker import active_backend_name
 
@@ -6672,7 +6775,7 @@ def cmd_queued(
         typer.echo("[]")
         return
 
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
     queued = [
         e
         for e in entries
@@ -6718,7 +6821,7 @@ def cmd_queue(
     Atomic across the batch: if any ID is unknown, none of the nodes
     are queued. Same reason applies to every ID in the batch.
     """
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import _find_node
 
     ids = _expand_valid_ids(task_ids)
@@ -6734,7 +6837,7 @@ def cmd_queue(
             node["queued_reason"] = cleaned_reason
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     suffix = f': "{cleaned_reason}"' if cleaned_reason else ""
     for tid in ids:
         typer.echo(f"Queued {tid}{suffix}")
@@ -6753,7 +6856,7 @@ def cmd_unqueue(
     Reports each ID's prior state; warns (non-fatally) for IDs that
     were not actually queued.
     """
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import _find_node
 
     ids = _expand_valid_ids(task_ids)
@@ -6770,7 +6873,7 @@ def cmd_unqueue(
             node["queued_reason"] = None
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     for tid in not_queued:
         typer.echo(f"warning: {tid} was not queued", err=True)
     for tid in ids:
@@ -6881,7 +6984,7 @@ def cmd_pick(
     import subprocess
     import tempfile
 
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import filter_by_project, _find_node, _graph_sort_key_fn
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.render_html import _load_obsidian_vault, _obsidian_url
@@ -6899,7 +7002,7 @@ def cmd_pick(
         typer.echo("Error: awk not found on PATH (needed for live marker updates).", err=True)
         raise typer.Exit(code=1)
 
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
     allowed = {"ready"}
     if include_ideas:
         allowed.add("idea")
@@ -7113,7 +7216,7 @@ def cmd_pick(
         results["unqueued_applied"] = unqueued_applied
         return graph_entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     queued_applied = results["queued_applied"]
     unqueued_applied = results["unqueued_applied"]
 
@@ -7150,7 +7253,7 @@ def cmd_contain(
     """
     import json as _json
 
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import _find_node
     from fno.graph._contain import contain_into, refuse_dead_owner
     from fno.graph._decompose import DecomposeError
@@ -7222,7 +7325,7 @@ def cmd_contain(
         return entries
 
     try:
-        locked_mutate_graph(_graph_path(), mutator)
+        commit_rows_via_store(_graph_path(), mutator)
     except DecomposeError as e:
         from fno.handoff.output import emit_error
 
@@ -7298,7 +7401,7 @@ def cmd_backfill_deferred_kind(
     overwritten; non-deferred nodes are never touched.
     """
     from fno.graph._constants import classify_deferred_reason
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.store import commit_rows_via_store
 
     extra_map: dict[str, str] = {}
     if map_file is not None:
@@ -7312,7 +7415,7 @@ def cmd_backfill_deferred_kind(
         return classify_deferred_reason(node.get("deferred_reason"), extra_map)
 
     if not apply:
-        entries = read_graph(_graph_path())
+        entries = wire_rows(path=_graph_path())
         would: dict[str, int] = {}
         unclassified = 0
         for e in entries:
@@ -7344,7 +7447,7 @@ def cmd_backfill_deferred_kind(
                 counts[kind] = counts.get(kind, 0) + 1
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     if json_output:
         typer.echo(json.dumps({"applied": True, "stamped": counts}))
     else:
@@ -7373,9 +7476,8 @@ def cmd_stuck_epics(
     human ruling.
     """
     from fno.graph.epics import stuck_epics
-    from fno.graph.store import read_graph
 
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
     rows = stuck_epics(entries)
     if json_output:
         typer.echo(json.dumps({"stuck_epics": rows}, default=lambda o: o.__dict__))
@@ -7590,7 +7692,7 @@ def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
     import copy
 
     from fno.graph.statuses import recompute_statuses
-    from fno.graph.store import _read_json, read_graph
+    from fno.graph.store import _read_json
 
     persisted: dict[str, str] = {}
     for entry in _read_json(path):
@@ -7600,7 +7702,7 @@ def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
             persisted[node_id] = status
 
     derived: dict[str, str] = {}
-    for entry in recompute_statuses(copy.deepcopy(read_graph(path))):
+    for entry in recompute_statuses(copy.deepcopy(wire_rows(path=path))):
         node_id = entry.get("id") if isinstance(entry, dict) else None
         status = entry.get("status") if isinstance(entry, dict) else None
         if isinstance(node_id, str) and isinstance(status, str):
@@ -8105,11 +8207,10 @@ def cmd_done(
         if active_backend_name() == "graph":
             from fno.done.cli import _current_branch
             from fno.graph.fuzzy import resolve_id
-            from fno.graph.store import read_graph as _read_graph_for_resolve
 
             _match = resolve_id(
                 task_id,
-                _read_graph_for_resolve(_graph_path()),
+                wire_rows(path=_graph_path()),
                 git_branch=_current_branch(),
             )
             if _match.kind in ("exact", "fuzzy", "branch_derived"):
@@ -8147,7 +8248,7 @@ def cmd_done(
             err=True,
         )
         raise typer.Exit(code=2)
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import node_pr_refs
 
@@ -8173,7 +8274,7 @@ def cmd_done(
     # -- Step 1: Idempotency + node-lookup read (outside the lock) --
     # We must discover idempotency and PR refs before acquiring the lock, so
     # that gh I/O (which can be slow) never blocks other graph mutations.
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
     node = _find_node(entries, task_id)
     if not node:
         typer.echo(f"Error: feature {task_id} not found", err=True)
@@ -8266,7 +8367,7 @@ def cmd_done(
         plan_path_out[0] = n.get("plan_path")
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
 
     if already_holder[0]:
         typer.echo(f"{task_id} is already done", err=True)
@@ -8437,7 +8538,7 @@ def cmd_reopen(
     """Clear a node's completion, returning it to its underlying state.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
         node_pr_refs,
@@ -8456,7 +8557,7 @@ def cmd_reopen(
         raise typer.Exit(code=2)
 
     # -- Step 1: locate the node (outside the lock, like cmd_done) --
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
     node = _find_node(entries, task_id)
     if not node:
         from fno.graph._archive_lookup import archived_entry
@@ -8565,7 +8666,7 @@ def cmd_reopen(
         warned_out.extend(warned)
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
 
     if raced_box[0]:
         typer.echo(
@@ -8607,7 +8708,7 @@ def cmd_reopen(
     # status was derived during the mutation while the plan still read `done`.
     for nid in [canonical_id_box[0], *cascade_out]:
         _project_plans_from_graph([nid], force_status_off_terminal_for=nid)
-    locked_mutate_graph(_graph_path(), lambda entries: entries)
+    commit_rows_via_store(_graph_path(), lambda entries: entries)
 
 
 @cli.command("advance", hidden=True)
@@ -8696,7 +8797,7 @@ def cmd_advance(
             try:
                 report = build_lane_fill_report(
                     epic=epic, project=project, node_id=explain_node, top=explain_top,
-                    max_dispatch=max_dispatch, provider=provider, model=model,
+                    max_dispatch=max_dispatch,
                 )
             except Exception as exc:  # noqa: BLE001 - never a partial verdict
                 typer.echo(f"advance --explain --epic: {exc}", err=True)
@@ -8752,9 +8853,8 @@ def cmd_advance(
         canonical_epic = epic
         try:
             from fno.graph._intake import _find_node
-            from fno.graph.store import read_graph
 
-            _epic_node = _find_node(read_graph(_graph_path()), epic)
+            _epic_node = _find_node(wire_rows(path=_graph_path()), epic)
             if _epic_node and _epic_node.get("id"):
                 canonical_epic = _epic_node["id"]
         except Exception:  # noqa: BLE001 - an unreadable graph keys on the raw arg
@@ -8791,9 +8891,8 @@ def cmd_advance(
     if closed:
         try:
             from fno.graph._intake import _find_node
-            from fno.graph.store import read_graph
 
-            _cn = _find_node(read_graph(_graph_path()), closed)
+            _cn = _find_node(wire_rows(path=_graph_path()), closed)
             closed_project = _cn.get("project") if _cn else None
         except Exception:  # noqa: BLE001 - non-fatal; advance_deps fails closed on None
             closed_project = None
@@ -8870,10 +8969,9 @@ def cmd_reconcile_findings(
     """
     import subprocess
 
-    from fno.graph.store import read_graph
     from fno.retro.reconcile_findings import scan_addressed_findings
 
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
     warnings: list = []
     findings = scan_addressed_findings(entries, warnings=warnings)
     for w in warnings:
@@ -8990,7 +9088,7 @@ def _reconcile_once(
 ) -> None:
     """Run one reconcile pass: the body of `cmd_reconcile`, gate-free."""
     _refuse_tracker_owned_on_external_backend("reconcile")
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
         _ListingCache,
@@ -9096,7 +9194,7 @@ def _reconcile_once(
                 _box["bound"] = list(result.bound_ids)
             return entries2
 
-        locked_mutate_graph(_graph_path(), _mutator)
+        commit_rows_via_store(_graph_path(), _mutator)
         return (_box["refusal"], _box["bound"])
 
     # --pr-number: bind every exact Backlog-Closure claim on this PR to its
@@ -9108,7 +9206,7 @@ def _reconcile_once(
     closure_bound: list[str] = []
     closure_refused: Optional[str] = None
     supersession_files_by_pr: dict[int, list[str]] = {}
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
     # : leftover model_tier rows read as no band everywhere now (the
     # compat read died with the field), so the daily sweep names them until
     # the one-shot migration clears the key. Self-extinguishing: zero rows,
@@ -9183,7 +9281,7 @@ def _reconcile_once(
                     repo,
                 )
                 if not dry_run:
-                    entries = read_graph(_graph_path())  # real bind just persisted
+                    entries = wire_rows(path=_graph_path())  # real bind just persisted
                 if closure_refused and not json_out:
                     typer.echo(
                         f"warning: reconcile --pr-number {pr_number}: refused "
@@ -9248,11 +9346,11 @@ def _reconcile_once(
                     _box.extend(_open_fill(entries2))
                     return entries2
 
-                locked_mutate_graph(_graph_path(), _open_mutator)
+                commit_rows_via_store(_graph_path(), _open_mutator)
                 open_bound = _box
                 # Real fills just persisted: reread so the scan below consumes
                 # the healed rows rather than the pre-heal snapshot.
-                entries = read_graph(_graph_path())
+                entries = wire_rows(path=_graph_path())
         if not json_out:
             for b in open_bound:
                 typer.echo(
@@ -9361,7 +9459,7 @@ def _reconcile_once(
                 )
         if auto_bound_any:
             if not dry_run:
-                entries = read_graph(_graph_path())  # real binds just persisted
+                entries = wire_rows(path=_graph_path())  # real binds just persisted
             records = scan_merge_drift(entries, node_id=node, listings=listings)
 
     status_drift = _status_drift(_graph_path()) if _full_sweep else {}
@@ -9770,7 +9868,7 @@ def _reconcile_once(
         # project/cwd from the pre-lock `entries` snapshot risks stale routing if
         # a concurrent reparent/reproject landed between scan and lock, and a
         # cascade parent only reachable in the locked graph would resolve to None.
-        post_entries = locked_mutate_graph(_graph_path(), mutator)
+        post_entries = commit_rows_via_store(_graph_path(), mutator)
         supersession_unverified.extend(supersession_unverified_acc)
         blocked_by_settlement.extend(blocked_by_settlement_acc)
 
@@ -10050,7 +10148,7 @@ def _reconcile_once(
                             n["reverted"] = True
                     return entries2
 
-                locked_mutate_graph(_graph_path(), _stamp_reverts)
+                commit_rows_via_store(_graph_path(), _stamp_reverts)
             reverted_stamped = [{"node_id": nid, "revert_pr": rpr} for nid, rpr in pairs]
         except Exception as exc:  # noqa: BLE001 - never abort the sweep
             typer.echo(f"warning: revert detection skipped: {exc}", err=True)
@@ -10067,8 +10165,10 @@ def _reconcile_once(
 
             _cu = run_sync_catchup()
             sync_catchup = {
-                "outcome": _cu.outcome, "stale": _cu.stale,
-                "pr_number": _cu.pr_number, "swept": _cu.swept, "detail": _cu.detail,
+                "outcome": _cu.outcome,
+                "pr_number": _cu.pr_number,
+                "swept": _cu.swept,
+                "detail": _cu.detail,
             }
             if _cu.outcome not in ("disabled", "fresh") and not json_out:
                 typer.echo(f"sync catch-up: {_cu.outcome}", err=True)
@@ -10144,7 +10244,7 @@ def _reconcile_once(
         if dry_run:
             _ew_entries = _sim if _sim is not None else entries
         else:
-            _ew_entries = read_graph(_graph_path())
+            _ew_entries = wire_rows(path=_graph_path())
         _ew_epics: set = set()
         for _cid in closure_claims:
             _cn = _find_node(_ew_entries, _cid)
@@ -10178,7 +10278,7 @@ def _reconcile_once(
 
     _harvest_nodes = {
         e.get("id"): e
-        for e in (post_entries or read_graph(_graph_path()))
+        for e in (post_entries or wire_rows(path=_graph_path()))
         if isinstance(e, dict) and e.get("id")
     }
     _filled, _marked = harvest_ledger_sessions(_harvest_nodes, dry_run=dry_run)
@@ -10473,7 +10573,7 @@ def cmd_reprioritize(
         False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
     ),
 ) -> None:
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import _find_node
 
     _require_node_id(task_id)
@@ -10493,7 +10593,7 @@ def cmd_reprioritize(
             node["blocks_everything"] = True
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     typer.echo(f"Reprioritized {task_id}: {old_holder[0]} -> {priority}")
 
 
@@ -10506,7 +10606,7 @@ def cmd_migrate_priorities(
 ) -> None:
     """Dry-run or apply the explicit legacy p0 re-band migration."""
     from fno.graph.migrations import migrate_legacy_p0, rollback_legacy_p0
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.store import commit_rows_via_store
 
     if apply and rollback:
         typer.echo("Error: --apply and --rollback are mutually exclusive", err=True)
@@ -10518,17 +10618,17 @@ def cmd_migrate_priorities(
             holder.append(rollback_legacy_p0(entries))
             return entries
 
-        locked_mutate_graph(_graph_path(), rollback_mutator)
+        commit_rows_via_store(_graph_path(), rollback_mutator)
         receipt = holder[0]
     elif not apply:
-        receipt = migrate_legacy_p0(read_graph(_graph_path()), apply=False)
+        receipt = migrate_legacy_p0(wire_rows(path=_graph_path()), apply=False)
     else:
 
         def mutator(entries: list[dict]) -> list[dict]:
             holder.append(migrate_legacy_p0(entries, apply=True))
             return entries
 
-        locked_mutate_graph(_graph_path(), mutator)
+        commit_rows_via_store(_graph_path(), mutator)
         receipt = holder[0]
     typer.echo(json.dumps(receipt, sort_keys=True))
 
@@ -10544,7 +10644,7 @@ def cmd_migrate_difficulty(
 ) -> None:
     """Dry-run or apply the difficulty migrations."""
     from fno.graph.migrations import backfill_difficulty, migrate_model_tier
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.store import commit_rows_via_store
 
     def _run(entries: list[dict]) -> dict:
         try:
@@ -10562,10 +10662,10 @@ def cmd_migrate_difficulty(
             holder.append(_run(entries))
             return entries
 
-        locked_mutate_graph(_graph_path(), mutator)
+        commit_rows_via_store(_graph_path(), mutator)
         receipt = holder[0]
     else:
-        receipt = _run(read_graph(_graph_path()))
+        receipt = _run(wire_rows(path=_graph_path()))
     typer.echo(json.dumps(receipt, sort_keys=True))
 
 
@@ -10579,7 +10679,7 @@ def cmd_migrate_updated_at(
 ) -> None:
     """Dry-run or apply the one-shot __updated_at residue migration."""
     from fno.graph.migrations import migrate_updated_at
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.store import commit_rows_via_store
 
     if apply:
         holder: list[dict] = []
@@ -10588,10 +10688,10 @@ def cmd_migrate_updated_at(
             holder.append(migrate_updated_at(entries, apply=True))
             return entries
 
-        locked_mutate_graph(_graph_path(), mutator)
+        commit_rows_via_store(_graph_path(), mutator)
         receipt = holder[0]
     else:
-        receipt = migrate_updated_at(read_graph(_graph_path()), apply=False)
+        receipt = migrate_updated_at(wire_rows(path=_graph_path()), apply=False)
     typer.echo(json.dumps(receipt, sort_keys=True))
 
 
@@ -10623,11 +10723,10 @@ def cmd_archive(
     from datetime import datetime, timezone
 
     from fno.graph.store import (
+        commit_rows_via_store,
         _apply_graph_defaults,
         _read_json,
         _write_json,
-        read_graph,
-        locked_mutate_graph,
         GraphCorruptError,
     )
     from fno.graph.archive import (
@@ -10692,7 +10791,7 @@ def cmd_archive(
             pass
 
     if not apply:
-        entries, retired = retire_stale_postmortems(read_graph(_graph_path()), now)
+        entries, retired = retire_stale_postmortems(wire_rows(path=_graph_path()), now)
         to_archive, _rem, skipped = _split(entries)
         typer.echo(
             f"[dry-run] would archive {len(to_archive)} terminal node(s) "
@@ -10740,7 +10839,7 @@ def cmd_archive(
         _write_json(merge_into_archive(existing, stamped), archive_path)
         return remaining
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     if receipt["moved"]:
         typer.echo(f"Archived {receipt['moved']} terminal node(s) to {_archive_path()}")
     else:
@@ -10776,11 +10875,10 @@ def cmd_archive_dedupe_ids(
     ``previous_id`` -- `fno backlog get <old-id>` still resolves it after.
     """
     from fno.graph.store import (
+        commit_rows_via_store,
         _apply_graph_defaults,
         _read_json,
         _write_json,
-        read_graph,
-        locked_mutate_graph,
         GraphCorruptError,
     )
     from fno.graph.archive import remint_archive_collisions
@@ -10797,7 +10895,7 @@ def cmd_archive_dedupe_ids(
     if not apply:
         working_ids = {
             nid
-            for e in read_graph(_graph_path())
+            for e in wire_rows(path=_graph_path())
             if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         _, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
@@ -10827,7 +10925,7 @@ def cmd_archive_dedupe_ids(
             _write_json(patched, archive_path)
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
 
     if not remap_holder:
         typer.echo("No colliding archive ids found.")
@@ -10892,13 +10990,12 @@ def cmd_album(
         )
         raise typer.Exit(code=2)
 
-    from fno.graph.store import read_graph
 
     archive_path = _archive_path()
     entries = (
         [
             e
-            for e in read_graph(archive_path)
+            for e in wire_rows(path=archive_path)
             if isinstance(e, dict)
             # The shared row-status read: legacy archive rows carry only completed_at ().
             and derived_status(e) == "done"
@@ -10984,17 +11081,16 @@ def cmd_unarchive(
     """
     from fno.graph._intake import _find_node
     from fno.graph.store import (
+        commit_rows_via_store,
         GraphCorruptError,
         _apply_graph_defaults,
         _read_json,
         _write_json,
-        locked_mutate_graph,
-        read_graph,
     )
 
     _require_node_id(task_id)
 
-    if _find_node(read_graph(_graph_path()), task_id) is not None:
+    if _find_node(wire_rows(path=_graph_path()), task_id) is not None:
         typer.echo(f"warning: {task_id} is already in the working graph", err=True)
         return
 
@@ -11043,7 +11139,7 @@ def cmd_unarchive(
             return entries
         return [*entries, row]
 
-    locked_mutate_graph(_graph_path(), add_to_working)
+    commit_rows_via_store(_graph_path(), add_to_working)
 
     resolved = (row_box[0] or {}).get("id") or task_id
     archive_write_error: list[str] = []
@@ -11070,7 +11166,7 @@ def cmd_unarchive(
                 archive_write_error.append(str(exc))
         return entries
 
-    locked_mutate_graph(_graph_path(), drop_from_archive)
+    commit_rows_via_store(_graph_path(), drop_from_archive)
 
     for exc in archive_write_error:
         typer.echo(
@@ -11248,7 +11344,7 @@ def _do_intake_multi(
     allow_no_surface: bool = False,
 ) -> None:
     """Multi-path intake flow delegating to intake helpers."""
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import (
         _prepare_intake,
         _build_intake_node,
@@ -11261,7 +11357,7 @@ def _do_intake_multi(
     )
     cli_project = getattr(args, "project", None)
     _refuse_create_on_external_backend()
-    _validate_cli_deps(cli_deps, read_graph(_graph_path()))
+    _validate_cli_deps(cli_deps, wire_rows(path=_graph_path()))
 
     resolved: list[dict] = []
     for raw in all_paths:
@@ -11281,7 +11377,7 @@ def _do_intake_multi(
         )
         raise typer.Exit(code=4)
 
-    preview_entries = read_graph(_graph_path())
+    preview_entries = wire_rows(path=_graph_path())
     # Rationale (8 lines): docs/architecture/graph-cli-rationale.md#do-intake-multi-11781
     from fno.graph.store import plan_path_owner_conflict
 
@@ -11438,7 +11534,7 @@ def _do_intake_multi(
                     landed_projects.add(node["project"])
         return es
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
 
     # A claimed node gets the same nav-field projection the single-plan claim
     # path runs; additive and guarded so it never wedges the batch.
@@ -11446,7 +11542,7 @@ def _do_intake_multi(
         try:
             from fno.plan._project import project_graph_nodes
 
-            project_graph_nodes(read_graph(_graph_path()), claimed_ids)
+            project_graph_nodes(wire_rows(path=_graph_path()), claimed_ids)
         except Exception as e:  # noqa: BLE001
             _safe_stderr_warn(f"warning: post-claim projection skipped: {e}\n")
 
@@ -11455,7 +11551,7 @@ def _do_intake_multi(
     try:
         from fno.graph._intake import _find_node, _warn_similar_nodes
 
-        post_entries = read_graph(_graph_path())
+        post_entries = wire_rows(path=_graph_path())
         for nid in new_ids:
             node = _find_node(post_entries, nid)
             if node is not None:
@@ -11522,7 +11618,6 @@ def cmd_find(
     """
     from fno.graph.fuzzy import resolve_id, resolve_node, search_entries
     from fno.graph.slug import format_handle
-    from fno.graph.store import read_graph
 
     entries = _display_entries("find")
     q = (query or "").strip()
@@ -11610,7 +11705,7 @@ def cmd_find(
             # malformed archived entry must degrade to a miss, never propagate a
             # crash to the caller (design "Errors").
             try:
-                archived = read_graph(archive_path)
+                archived = wire_rows(path=archive_path)
                 hits = [
                     {**e, "_archived": True}
                     for e in _resolve_against(archived)
@@ -11809,7 +11904,7 @@ def cmd_supersede(
     stranding under a dead unit. Reverse with ``unsupersede``.
     """
     from fno.graph._constants import has_node_id_prefix
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import _find_node
 
     if not has_node_id_prefix(new_id):
@@ -11958,7 +12053,7 @@ def cmd_supersede(
         ]
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     typer.echo(f"superseded {replaces} with {new_id}")
     _echo_freed(_freed_box[0], replaces)
     if _parent_freed_box[0]:

@@ -167,6 +167,10 @@ def _seed_node(g: Path, plan_path: str) -> None:
     g.write_text(json.dumps({"entries": [{
         "id": "ab-cost0001",
         "title": "Costed node",
+        "slug": "ab-cost0001",
+        "type": "feature",
+        "priority": "p2",
+        "status": "ready",
         "plan_path": plan_path,
         "cost_usd": None,
         "cost_sessions": [],
@@ -207,6 +211,10 @@ def test_backlog_done_does_not_overwrite_existing_cost(tmp_path, monkeypatch):
     g.write_text(json.dumps({"entries": [{
         "id": "ab-cost0001",
         "title": "Pre-costed",
+        "slug": "ab-cost0001",
+        "type": "feature",
+        "priority": "p2",
+        "status": "ready",
         "plan_path": "internal/plans/costed.md",
         "cost_usd": 9.99,
         "cost_sessions": [{"session_id": "pre", "cost_usd": 9.99}],

@@ -61,12 +61,26 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _advance_result(decision: str = "disabled") -> SimpleNamespace:
+<<<<<<< HEAD
     # notes/json_receipt: newer AdvanceResult contract; a dev binary present
     # (FNO_AGENTS_BIN) routes --json through json_receipt(), which CI's
     # binary-less skip never reaches.
     return SimpleNamespace(
         decision=decision, event="", reason="", node_id=None, short_id=None,
         notes=(), json_receipt=lambda: {"decision": decision},
+=======
+    # Shape mirrors advance.AdvanceResult: the --json branch calls
+    # json_receipt(), the human branch calls render().
+    return SimpleNamespace(
+        decision=decision,
+        event="",
+        reason="",
+        node_id=None,
+        short_id=None,
+        notes=[],
+        json_receipt=lambda: {"decision": decision},
+        render=lambda: [decision],
+>>>>>>> 07847305a (feat(graph): curation callers move onto named mutations)
     )
 
 

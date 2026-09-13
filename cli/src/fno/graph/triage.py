@@ -1229,7 +1229,7 @@ def cmd_apply(
     ),
 ) -> None:
     """Apply a validated proposal to the graph under a single locked mutation."""
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     data = _load_proposal(proposal)
 
@@ -1326,7 +1326,7 @@ def cmd_apply(
         applied["duplicates_flagged"] = len(cleaned_locked["duplicates"])
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
 
     # Telemetry (x-64cb US2): the mutation has committed; emit is best-effort and
     # must precede the Exit(3) below so a partial apply still records what landed.

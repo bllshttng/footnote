@@ -77,9 +77,9 @@ def _graph_path() -> Path:
 
 
 def _entries_for(graph_path: Path) -> list[dict[str, Any]]:
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
 
-    return [entry for entry in read_graph(graph_path) if isinstance(entry, dict)]
+    return [entry for entry in wire_rows(path=graph_path) if isinstance(entry, dict)]
 
 
 def candidates(
@@ -314,10 +314,10 @@ def expired_worklist(
     from collections import Counter
 
     from fno.graph import relatedness
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
 
     before = graph_path.read_bytes()
-    entries = read_graph(graph_path)
+    entries = wire_rows(path=graph_path)
     expired = [
         entry
         for entry in entries

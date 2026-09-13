@@ -1,6 +1,6 @@
 """Fuzzy id and domain matching for graph entries.
 
-Near-pure: callers pass already-loaded entries (from `read_graph()`) and get
+Near-pure: callers pass already-loaded entries (from the graph read) and get
 back a discriminated result dataclass the CLI can format into a user-facing
 message. The one exception is `resolve_node`'s bare-hex tier, which consults
 the fail-open, lru-cached `node_id_prefix()` (file I/O) to re-prefix; the import

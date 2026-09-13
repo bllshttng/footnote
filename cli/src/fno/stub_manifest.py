@@ -146,6 +146,12 @@ def _node_pr_numbers(node: dict) -> set[int]:
     for raw in candidates:
         if raw is None:
             continue
+        # The typed read hands back PullRequest-shaped dicts; a raw read
+        # hands back ints or /pull/<n> URLs. Both name a number.
+        if isinstance(raw, dict):
+            raw = raw.get("number", raw.get("url"))
+            if raw is None:
+                continue
         try:
             out.add(int(raw))
             continue
@@ -166,9 +172,9 @@ def _node_for_pr(pr_number: int, graph_path: Optional[Path]) -> Optional[dict]:
     external backend selection degrades to None = the default hard merge path."""
     try:
         if graph_path is not None:
-            from fno.graph.store import read_graph
+            from fno.graph.api import wire_rows
 
-            entries = read_graph(graph_path)
+            entries = wire_rows(path=graph_path)
         else:
             from fno.tracker.metadata import read_entries
 

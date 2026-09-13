@@ -43,6 +43,7 @@ def _node(node_id: str, priority: str = "p2", **over) -> dict:
         "id": node_id,
         "slug": f"slug-{node_id}",
         "title": f"node {node_id}",
+        "type": "feature",
         "status": "ready",
         "priority": priority,
         "_kanban_column": "Next",
@@ -216,7 +217,10 @@ def test_json_output_carries_the_same_rows(tmp_graph):
     _write(
         tmp_graph,
         _node("zz-0001", "p3", encounters=[_enc("s1"), _enc("s2"), _enc("s3")]),
-        _node("zz-0002", "p0", encounters=[_enc("s4")], sessions=[{"session_id": "s4"}]),
+        _node("zz-0002", "p0", encounters=[_enc("s4")], sessions=[{
+            "phase": "do", "harness": "claude", "session_id": "s4",
+            "started_at": "2026-09-01T00:00:00Z",
+        }]),
     )
     result = runner.invoke(app, ["backlog", "demand", "--json"])
     assert result.exit_code == 0, result.output
