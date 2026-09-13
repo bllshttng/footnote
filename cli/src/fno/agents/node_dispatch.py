@@ -42,6 +42,7 @@ class NodeSpawnArgs:
     vendor: Optional[str]
     verb: str
     verb_source: str
+    session_phase: Optional[str]
     grid_reason: Optional[str]
     decision: list
     is_reconcile: bool
@@ -218,6 +219,24 @@ def resolve_node_spawn(
     target_cmd = resolved["command"]
     spawn_env = resolved.get("env") or {}
 
+    # A registry verb is unknown to the spawn door's verb table (x-007c): the
+    # descriptor's declared phase rides the argv, else the door refuses a
+    # --node spawn it cannot label. A config read failure degrades to None,
+    # which is that refusal with its remedy - never a guessed label.
+    descriptor_phase: Optional[str] = None
+    try:
+        from fno.config._dispatch_verbs import canonical_verb_key, resolvable_verbs
+
+        dispatch_cfg = getattr(settings_obj, "dispatch", None)
+        registry = getattr(dispatch_cfg, "verb_registry", None) or {}
+        allowed = getattr(dispatch_cfg, "allowed_verbs", None)
+        declared = resolvable_verbs(registry, allowed).get(
+            canonical_verb_key(effective_verb or node_verb or "")
+        )
+        descriptor_phase = (getattr(declared, "session_phase", None) or "").strip() or None
+    except Exception:  # noqa: BLE001 - a config read never guesses a label
+        descriptor_phase = None
+
     prov = launch or resolved["harness"]  # alias kept; resolver owns the default
     if launch_axis and launch_axis != resolved["harness"]:
         raise SpawnError(
@@ -275,6 +294,7 @@ def resolve_node_spawn(
         vendor=vendor,
         verb=receipt_verb,
         verb_source=verb_source,
+        session_phase=descriptor_phase,
         grid_reason=grid_why,
         decision=list(resolved.get("decision") or []),
         is_reconcile=is_reconcile,
@@ -344,5 +364,9 @@ def node_spawn_argv(
     cmd += ["--node", args.node_id]
     if args.node_slug:
         cmd += ["--slug", args.node_slug]
+    if args.session_phase:
+        # x-007c: a registry verb's declared phase. The spawn door refuses an
+        # unlabeled --node spawn, so an outside verb must carry its label.
+        cmd += ["--session-phase", args.session_phase]
     cmd += ["--name", args.agent_name, args.command]
     return cmd

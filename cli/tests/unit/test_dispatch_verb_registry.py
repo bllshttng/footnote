@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from fno.agents.harness_map import DispatchResolveError, resolve_dispatch
+from fno.agents.node_dispatch import NodeSpawnArgs, node_spawn_argv
 from fno.config import DispatchVerbDescriptor, load_settings, resolvable_verbs
 from fno.review_capability import resolve_skill_presence
 
@@ -72,6 +73,41 @@ dispatch:
     assert d.requires == "skill"
     assert d.takes_node_id is True
     assert d.asserts == "doc"
+
+
+def test_descriptor_session_phase_parses_and_defaults_absent():
+    """x-007c: the descriptor carries the row phase an outside verb's worker
+    is stamped with; unset stays None so the spawn door keeps its refusal."""
+    assert REG["/security-audit"].session_phase is None
+    d = DispatchVerbDescriptor(invocation="/marketing", session_phase="do")
+    assert d.session_phase == "do"
+
+
+def _spawn_args(**over) -> NodeSpawnArgs:
+    base = dict(
+        node_id="x-1", node_cwd=None, node_slug=None, harness="claude",
+        resolved_harness="claude", substrate="bg", command="/marketing x-1",
+        model=None, route=None, resolved_route=None, account=None,
+        dispatch_account=None, permission_mode="", agent_name="n",
+        vendor=None, verb="/marketing", verb_source="declared",
+        session_phase=None, grid_reason=None, decision=[],
+        is_reconcile=False, env={},
+    )
+    base.update(over)
+    return NodeSpawnArgs(**base)
+
+
+def test_node_spawn_argv_carries_the_declared_phase():
+    """A registry verb's declared phase rides the spawn argv: the door refuses
+    an unlabeled --node spawn, so the builder is the one place the label is
+    attached for every dispatching caller."""
+    argv = node_spawn_argv(_spawn_args(session_phase="do"), cwd="/w")
+    assert argv[argv.index("--session-phase") + 1] == "do"
+    assert argv[argv.index("--node") + 1] == "x-1"
+
+
+def test_node_spawn_argv_omits_an_undeclared_phase():
+    assert "--session-phase" not in node_spawn_argv(_spawn_args(), cwd="/w")
 
 
 def test_resolvable_verbs_canonicalizes_keys_and_drops_builtins():

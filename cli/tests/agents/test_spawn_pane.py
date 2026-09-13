@@ -2143,8 +2143,7 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
     res = CliRunner().invoke(
         agents_cli.agents_app,
         ["spawn", "peer", "--harness", "claude", "--substrate", "pane",
-         "--node", "x-84a8", "--slug", "s", "--plan", "p.md",
-         "--session-phase", "do"],
+         "--node", "x-84a8", "--slug", "s", "--plan", "p.md", "--session-phase", "do"],
     )
     assert res.exit_code == 0, res.output
     # The claim holder rides with the provenance group: the worker names it back
