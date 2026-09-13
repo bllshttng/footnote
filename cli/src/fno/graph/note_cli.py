@@ -1,8 +1,7 @@
 """``fno backlog note``: the Rust note action's public bridge (x-920a).
 
 The native action owns state policy, history routing, and the budget; this
-bridge keeps the recipient walk, evidence checks, identity, archived
-refusal, and mail transport - each owned by exactly one implementation.
+bridge keeps the recipient walk, evidence checks, identity, and transport.
 """
 from __future__ import annotations
 
@@ -129,7 +128,6 @@ def cmd_note(
 
 
 def _receipt(stdout: str) -> Optional[dict]:
-    """The one JSON receipt line the native action prints on stdout."""
     for line in reversed((stdout or "").strip().splitlines()):
         if line.startswith("{"):
             try:
