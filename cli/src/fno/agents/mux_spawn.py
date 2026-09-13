@@ -1764,20 +1764,19 @@ def _mesh_env_wrapper(
 
 #: The provenance env keys, as one set. Callers that export them must set or
 #: clear the whole group together so a child never sees a mix of its own node
-#: and its parent's slug, plan, or claim holder.
+#: and its parent's slug, plan, claim holder, or worktree-policy pin.
 #:
-#: ``FNO_NODE_CLAIM_HOLDER`` belongs here for the same reason the other three
-#: do: it is written beside ``FNO_NODE`` for a node-driven spawn, and a copy
-#: left behind would offer a later child the prior worker's handover holder to
-#: name back - which is the one thing that proves successorship.
+#: ``FNO_NODE_CLAIM_HOLDER`` belongs here because it is written beside
+#: ``FNO_NODE`` for a node-driven spawn, and a copy left behind would offer a
+#: later child the prior worker's handover holder to name back - the one thing
+#: that proves successorship. ``FNO_WORKTREE_POLICY`` rides for the same
+#: set-or-clear reason: a child dispatched into a different repo must not
+#: inherit the pin its parent resolved for a repo it never targeted.
 PROVENANCE_KEYS: tuple[str, ...] = (
     "FNO_NODE",
     "FNO_SLUG",
     "FNO_PLAN",
     "FNO_NODE_CLAIM_HOLDER",
-    # A worktree-policy pin rides the group: set-or-clear is the only safe
-    # inheritance rule for it too. A child dispatched into a different repo
-    # must not inherit the parent's pin for a repo it never targeted.
     "FNO_WORKTREE_POLICY",
 )
 
