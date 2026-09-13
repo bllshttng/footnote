@@ -79,6 +79,7 @@ class Question:
     ask: Optional[str] = None
     options: tuple[str, ...] = ()
     blocks: tuple[str, ...] = ()
+    subject: Optional[str] = None
     live: Optional[bool] = None
 
     def as_dict(self, *, rank: Optional[int] = None) -> "dict[str, Any]":
@@ -93,6 +94,7 @@ class Question:
             "ask": self.ask,
             "options": list(self.options),
             "blocks": list(self.blocks),
+            "subject": self.subject,
             "live": self.live,
             "rank": rank,
         }
@@ -400,6 +402,7 @@ def read_open_questions(
                 ask=data.get("ask") or None,
                 options=tuple(data.get("options") or ()),
                 blocks=tuple(data.get("blocks") or ()),
+                subject=data.get("subject") or None,
             )
         elif rec.get("type") == QUESTION_CLOSED_EVENT:
             qid = data.get("question_id")

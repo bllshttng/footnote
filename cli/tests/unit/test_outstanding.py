@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths import project_log
+from fno.rust_binary import VerbUnavailable, find_dev_binary
 from typer.testing import CliRunner
 
 from fno.harness_identity import OwnedHarnessIdentity
@@ -29,6 +30,11 @@ from fno.outstanding.cli import outstanding_app
 from fno.outstanding.core import RENDER_CAP, Outstanding, Question, VerdictRow, render
 
 runner = CliRunner()
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
 
 
 def _write_carveouts(root: Path, rows: list[dict]) -> Path:
@@ -354,6 +360,7 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
         "ask": "pick one",
         "options": ["index", "journal"],
         "blocks": ["x-one", "x-two"],
+        "subject": None,
         "live": True,
         "rank": 1,
     }
@@ -455,6 +462,9 @@ class TestAskReceiptNamesVisibility:
 
 
 class TestAskRefusedWhenLiveLawRules:
+    # These four route the exact tier through the real binary (`law-match`),
+    # so they need the compiled dev build, not just the patched lifecycle read.
+    @requires_rust
     def test_the_pr1717_question_exits_2_and_records_nothing(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -471,6 +481,7 @@ class TestAskRefusedWhenLiveLawRules:
         assert "review-coverage" in refused.output
         assert len(_question_rows(root)) == 1, "the refused ask recorded nothing new"
 
+    @requires_rust
     def test_a_named_subject_hits_even_on_unrelated_text(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -490,6 +501,7 @@ class TestAskRefusedWhenLiveLawRules:
         assert drifted.exit_code == 2, drifted.output
         assert "review-coverage" in drifted.output
 
+    @requires_rust
     def test_a_named_other_subject_asks_and_records_the_subject(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -503,6 +515,7 @@ class TestAskRefusedWhenLiveLawRules:
         assert len(rows) == 1
         assert rows[0]["data"]["subject"] == "pr-heal"
 
+    @requires_rust
     def test_a_question_with_no_matching_words_asks(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -522,6 +535,117 @@ class TestAskRefusedWhenLiveLawRules:
         assert "live-law lookup failed" in allowed.output
         rows = _question_rows(root)
         assert len(rows) == 1, "a broken index must not eat the question"
+
+
+_NEARBY_ANSWER = {
+    "ok": True,
+    "exact": [],
+    "nearby": [
+        {
+            "decision_id": "d-4b39ad4c",
+            "subject": "file-budget",
+            "decision": "A size-budget refusal is never answered by raising the allowance.",
+            "shared": ["budget"],
+        }
+    ],
+    "uncited": ["d-4b39ad4c"],
+    "nearby_refusal": (
+        "outstanding: refused: live law on a nearby subject may already answer this. "
+        "d-4b39ad4c (file-budget): A size-budget refusal is never answered by raising "
+        "the allowance. Read each with fno inbox decisions <id>. If your question still "
+        "stands, name every id above in the question and ask again."
+    ),
+}
+
+
+class TestAskNearbyLawRefusal:
+    """The nearby tier (x-cf6a): a per-PR subject can never exact-match a
+    general law, so naming --subject used to switch the whole check off.
+    Fake-matcher tests: the matcher runs in the crate; these pin the ask
+    verb's contract around it."""
+
+    def test_a_nearby_refusal_exits_2_and_records_nothing(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        clean = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
+        answers = iter([clean, _NEARBY_ANSWER])
+        monkeypatch.setattr(
+            "fno.outstanding.cli._law_match", lambda *a, **k: next(answers)
+        )
+        # Positive control: an allowed ask records a row, so the absence below
+        # is the gate's doing and not an empty journal.
+        control = runner.invoke(outstanding_app, ["ask", "which base do we rebase on?"])
+        assert control.exit_code == 0, control.output
+        assert len(_question_rows(root)) == 1
+
+        refused = runner.invoke(
+            outstanding_app,
+            [
+                "ask",
+                "PR 1847 shrank +207 to +142. Requesting a budget-exception label.",
+                "--subject",
+                "pr-1847-budget-exception",
+            ],
+        )
+        assert refused.exit_code == 2, refused.output
+        assert "d-4b39ad4c" in refused.output
+        assert len(_question_rows(root)) == 1, "the refused ask recorded nothing"
+
+    def test_citing_the_listed_ids_records_the_question(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        answer = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
+        monkeypatch.setattr(
+            "fno.outstanding.cli._law_match", lambda *a, **k: answer
+        )
+        allowed = runner.invoke(
+            outstanding_app,
+            [
+                "ask",
+                "PR 1847 shrank +207 to +142. d-4b39ad4c is in view; asking anyway.",
+                "--subject",
+                "pr-1847-budget-exception",
+            ],
+        )
+        assert allowed.exit_code == 0, allowed.output
+        rows = _question_rows(root)
+        assert len(rows) == 1
+        assert rows[0]["data"]["subject"] == "pr-1847-budget-exception"
+
+    def test_a_failed_matcher_fails_open_and_records(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        def broken(*a, **k):
+            raise VerbUnavailable("binary missing")
+
+        monkeypatch.setattr("fno.outstanding.cli._law_match", broken)
+        allowed = runner.invoke(outstanding_app, ["ask", "still worth recording"])
+        assert allowed.exit_code == 0, allowed.output
+        assert "live-law lookup failed" in allowed.output
+        assert len(_question_rows(root)) == 1
+
+    def test_json_rows_carry_the_subject(
+        self, root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        answer = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
+        monkeypatch.setattr(
+            "fno.outstanding.cli._law_match", lambda *a, **k: answer
+        )
+        assert (
+            runner.invoke(
+                outstanding_app,
+                ["ask", "one", "--subject", "file-budget-exception"],
+            ).exit_code
+            == 0
+        )
+        assert runner.invoke(outstanding_app, ["ask", "two"]).exit_code == 0
+
+        from fno.outstanding.core import read_open_questions
+
+        by_id = {q.id: q.as_dict() for q in read_open_questions(root, liveness_budget_seconds=0)}
+        subjects = {row["subject"] for row in by_id.values()}
+        assert "file-budget-exception" in subjects
+        assert None in subjects
 
 
 def test_live_is_computed_for_json_and_missing_asker_is_stale(

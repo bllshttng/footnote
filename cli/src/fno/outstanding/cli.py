@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import secrets
 from pathlib import Path
 from typing import List
@@ -155,30 +154,33 @@ def report(
         typer.echo(block, nl=False)
 
 
-def _live_law_hits(question: str, subject: str | None, node: str | None) -> dict[str, list[str]]:
-    """Live law-lane decisions whose subject this question is about.
-
-    Matched two ways: a subject NAMED via --subject (or a --node that spells
-    one) always hits; otherwise the question text must carry every token of
-    a hyphenated subject (review-coverage needs both words), and only when no
-    subject was named - an explicit subject is a deliberate act, not a guess
-    to second-guess. Losing the lookup is worse than one unneeded ask, so
-    the caller catches everything (d-0fa92eb9, q-8a3bf752: no agent asks a
+def _law_match(question: str, subject: str | None, node: str | None) -> dict:
+    """Live law-lane decisions that speak to this question, matched in the
+    fno-agents crate (d-b6cc1a2a puts new code in `crates/`; the matcher is
+    `fno-agents law-match`). This side keeps only the decision-lifecycle read:
+    `list_decisions` owns live-row state, and the verb takes rows, not a
+    filesystem. Losing the lookup is worse than one unneeded ask, so the
+    caller catches everything (d-0fa92eb9, q-8a3bf752: no agent asks a
     question the operator already settled).
     """
     from fno.decide import list_decisions
+    from fno.rust_binary import verb_call
 
     _, rows, _damaged = list_decisions(None, limit=None, lane="law", state="live")
-    words = set(re.findall(r"[a-z0-9]+", question.lower()))
-    named = {s.casefold() for s in (subject, node) if s}
-    hits: dict[str, list[str]] = {}
-    for row in rows:
-        key = str(row.get("subject") or "").strip()
-        tokens = set(key.lower().split("-"))
-        by_text = not subject and len(tokens) >= 2 and tokens <= words
-        if key and (key.casefold() in named or by_text):
-            hits.setdefault(key, []).append(str(row.get("decision_id")))
-    return hits
+    laws = [
+        {key: row.get(key) for key in ("decision_id", "subject", "decision", "ts")}
+        for row in rows
+    ]
+    return verb_call(
+        "law-match",
+        {
+            "mode": "ask",
+            "question": question,
+            "subject": subject,
+            "node": node,
+            "laws": laws,
+        },
+    )
 
 
 @outstanding_app.command("ask")
@@ -233,23 +235,29 @@ def ask(
             err=True,
         )
     try:
-        hits = _live_law_hits(question, subject, node)
+        answer = _law_match(question, subject, node)
     except Exception as exc:  # noqa: BLE001 - fail open: record the question
         typer.echo(
             f"outstanding: live-law lookup failed ({exc}); recording anyway",
             err=True,
         )
-        hits = {}
-    if hits:
-        for key, ids in hits.items():
-            line = (
-                f"outstanding: refused: live law already rules on '{key}' "
-                f"({', '.join(ids)}). Read it: fno inbox decisions {key} "
-                f"--lane law --state live. Act on the law; do not ask {display_name()}."
-            )
-            if not subject:
-                line += " If the question is about another subject, name it with --subject."
-            typer.echo(line, err=True)
+        answer = {"exact": [], "nearby_refusal": None}
+    for hit in answer.get("exact") or []:
+        key = hit["subject"]
+        ids = hit["ids"]
+        line = (
+            f"outstanding: refused: live law already rules on '{key}' "
+            f"({', '.join(ids)}). Read it: fno inbox decisions {key} "
+            f"--lane law --state live. Act on the law; do not ask {display_name()}."
+        )
+        if not subject:
+            line += " If the question is about another subject, name it with --subject."
+        typer.echo(line, err=True)
+    if answer.get("exact"):
+        raise typer.Exit(2)
+    refusal = answer.get("nearby_refusal")
+    if refusal:
+        typer.echo(refusal, err=True)
         raise typer.Exit(2)
     qid = f"q-{secrets.token_hex(4)}"
     session_id = _session_id()
