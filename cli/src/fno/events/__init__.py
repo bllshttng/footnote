@@ -1156,6 +1156,38 @@ def operator_question(
     return _build("operator_question", source, data)
 
 
+def day_boundary(
+    *,
+    boundary_id: str,
+    kind: str,
+    cutoff: str,
+    prior_boundary_id: str | None = None,
+    featured: list[str] | None = None,
+    completed: int | None = None,
+    open_count: int | str | None = None,
+    opened: int | None = None,
+    closed: int | None = None,
+    retractions: int | None = None,
+    source: str = "target",
+) -> dict[str, Any]:
+    """Build the bounded durable record for one human day boundary."""
+    if kind not in {"start", "end"}:
+        raise ValidationError("day boundary kind must be start or end")
+    data: dict[str, Any] = {"boundary_id": boundary_id, "kind": kind, "cutoff": cutoff}
+    for key, value in (
+        ("prior_boundary_id", prior_boundary_id),
+        ("featured", featured),
+        ("completed", completed),
+        ("open", open_count),
+        ("opened", opened),
+        ("closed", closed),
+        ("retractions", retractions),
+    ):
+        if value is not None:
+            data[key] = value
+    return _build("day_boundary", source, data)
+
+
 def operator_question_closed(
     *,
     question_id: str,
@@ -1934,6 +1966,7 @@ __all__ = [
     "mission_started",
     "QUESTION_CAP",
     "operator_question",
+    "day_boundary",
     "operator_question_closed",
     "operator_decision",
     "decision_retracted",

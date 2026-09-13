@@ -25,6 +25,7 @@ from fno.inbox.operator_turns import operator_app
 from fno.king.cli import board_cmd
 from fno.law import law_app
 from fno.notify.cli import notify_app
+from fno.outstanding.day import day_app
 from fno.outstanding.cli import outstanding_app
 
 inbox_app = typer.Typer(
@@ -38,6 +39,7 @@ inbox_app = typer.Typer(
 inbox_app.add_typer(approvals_app, name="approvals")
 inbox_app.add_typer(notify_app, name="notify")
 inbox_app.add_typer(outstanding_app, name="outstanding")
+inbox_app.add_typer(day_app, name="day")
 inbox_app.add_typer(law_app, name="law")
 # The queue verb is `user`; the pre-rename spelling stays as a hidden
 # alias so existing scripts keep working.

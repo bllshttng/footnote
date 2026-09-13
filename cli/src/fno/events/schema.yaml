@@ -3771,6 +3771,37 @@ event_types:
           description: "Optional. The operator_decision id the subsequent clear records, joined by the reader."
     consumers: [operator, fno-agents needs]
 
+  - name: day_boundary
+    retention: durable
+    description: "A deterministic project-scoped morning or end-of-day readback folded from existing journals, backlog completion records, and the operator-question lifecycle. The stored row is the bounded historical report; Markdown and JSON rendering are exports. Repeated invocation of the same boundary kind on the same local day reuses the existing row and does not advance question attention."
+    sources: [operator, target, hook, daemon, test]
+    data:
+      required: [boundary_id, kind, cutoff]
+      properties:
+        boundary_id:
+          type: string
+        kind:
+          type: string
+          enum: [start, end]
+        cutoff:
+          type: string
+        prior_boundary_id:
+          type: string
+        featured:
+          type: array
+          items: { type: string }
+        completed:
+          type: integer
+        open:
+          type: [integer, string]
+        opened:
+          type: integer
+        closed:
+          type: integer
+        retractions:
+          type: integer
+    consumers: [operator, fno-agents feed]
+
   - name: operator_decision
     retention: durable
     description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno inbox decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno inbox decisions` reads. The provider-outage daemon records only its terminal transaction results here, stamped with authority_source=daemon-automation; observations and intermediate phases never become decisions. See docs/architecture/decision-record.md."
