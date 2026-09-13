@@ -3686,10 +3686,7 @@ def dispatch_spawn_pane(
         pane_passthrough_tokens(passthrough, env_config_args)
         argv = [argv[0], *env_config_args, *argv[1:]]
     elif provider == "codex" and argv:
-        print(
-            f"codex pane: identity leaves skipped; argv[0] is {argv[0]!r}",
-            file=sys.stderr,
-        )
+        print(f"codex pane: identity leaves skipped; argv[0] is {argv[0]!r}", file=sys.stderr)
     if codex_route is not None:
         argv = [argv[0], *codex_route.config_args, *argv[1:]]
         # x-1caa: the route's config args splice AFTER build_pane_argv, so the

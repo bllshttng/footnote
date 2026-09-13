@@ -1,8 +1,6 @@
-"""The codex pane lane's daemon-owned-thread helpers.
-
-Remote Control is served by the shared ``codex app-server`` daemon, which
-loads only threads it owns; the pane lane starts it and launches against it.
-"""
+"""The codex pane lane's daemon-owned-thread helpers: start the shared
+``codex app-server`` daemon, launch against it, name the worker to its
+tools."""
 
 from __future__ import annotations
 
@@ -27,9 +25,8 @@ def ensure_codex_daemon(
 ) -> None:
     """Start (or confirm) the shared app-server daemon before a codex pane.
 
-    The command is the create form's ``pre_exec`` through
-    ``capabilities("codex")``, never hardcoded. A failure raises before any
-    pane exists.
+    The command is the create form's ``pre_exec``; a failure raises before
+    any pane exists.
     """
     from fno.agents.harness_map import capabilities
 
@@ -74,11 +71,9 @@ def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     """Render the worker's own identity as ONE ``-c`` config-set leaf.
 
     A daemon-run tool inherits the daemon's env, not the TUI's. Measured
-    2026-09-13 on codex-cli 0.154.0, headless: only the FIRST ``-c`` per
-    top-level config key is applied, one leaf replaces the config's
-    ``[shell_environment_policy.set]`` table, and an inline-table value is
-    refused at load. One leaf therefore carries ``FNO_AGENT_SELF``; the
-    other pairs stay on the env(1) wrapper.
+    2026-09-13 on codex-cli 0.154.0: only the FIRST ``-c`` per config key
+    applies, so one leaf carries ``FNO_AGENT_SELF`` and merges with the
+    operator's set table; the other pairs stay on the env(1) wrapper.
     """
     chosen = next((p for p in pairs if p.startswith("FNO_AGENT_SELF=")), None)
     chosen = chosen or (pairs[0] if pairs else "")
@@ -206,10 +201,9 @@ def _make_codex_bind_probe(
     racing into one cwd can otherwise show only one of them as "the new id"
     on a given poll, and the repeat turns a false single candidate into a
     correctly-ambiguous pair. A daemon-sourced candidate is also
-    liveness-checked - the daemon is detached from the pane, so seeing a
-    session there does not prove the pane is still up. ``condition``
-    collects WHY a poll declined, newest last, so a blown window names a
-    condition instead of a clock.
+    liveness-checked, because the detached daemon seeing a session does not
+    prove the pane is still up. ``condition`` collects WHY a poll declined,
+    newest last, so a blown window names a condition, not a clock.
     """
     used = oracle_used if oracle_used is not None else []
     last_probe_s = [0.0]
