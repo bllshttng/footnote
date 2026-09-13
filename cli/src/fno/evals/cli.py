@@ -15,7 +15,6 @@
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Optional
 
@@ -248,64 +247,33 @@ def macro_command(
     events: Optional[list[Path]] = typer.Option(None, "--events", help="Event journal path (repeatable)."),
 ) -> None:
     """Find recurring labelled failure patterns in existing event journals."""
-    from fno.evals.macro import build_leaderboard, drilldown, load_events
-    from fno.events.cli import _parse_find_since
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
     from fno.paths import event_journals
+    from fno.rust_binary import resolve_binary
 
-    try:
-        since_dt = _parse_find_since(since)
-    except ValueError as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno evals macro: the fno-agents binary was not found. It ships in the "
+            "`pip install fno` wheel and with the plugin; reinstall fno or run "
+            "`fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
-    journal_paths = events if events else event_journals()
-    rows, coverage = load_events(journal_paths, since=since_dt)
-    patterns = build_leaderboard(rows, window=window, include_all=include_all)["leaderboard"]
-
+    argv = [str(binary), "evals-macro", "--since", since, "--window", str(window)]
     if topic is not None:
-        result = drilldown(rows, topic, window=window, include_all=include_all)
-        if not result["count"]:
-            present = ", ".join(item["pattern"] for item in patterns) or "none"
-            message = f"macro: no '{topic}' rows since {since}; patterns present: {present}"
-            if json_output:
-                typer.echo(json.dumps({"error": message, "patterns": [item["pattern"] for item in patterns]}))
-            else:
-                typer.echo(message)
-            raise typer.Exit(code=1)
-        payload = {**result, "coverage": coverage}
-        if json_output:
-            typer.echo(json.dumps(payload, indent=2))
-        else:
-            typer.echo(f"macro: {topic}")
-            for session in result["sessions"]:
-                typer.echo(f"  session {session['session_id']} node {session['node_id'] or '-'} at {session['ts']}")
-                chain = " -> ".join(
-                    f"{event['ts']} {event['type']} {event['label'] or '-'}"
-                    for event in session["chain"]
-                )
-                typer.echo(f"    chain: {chain}")
-        raise typer.Exit(code=0)
-
+        argv += ["--topic", topic]
+    if include_all:
+        argv.append("--all")
     if json_output:
-        typer.echo(json.dumps({"leaderboard": patterns, "coverage": coverage}, indent=2))
-    else:
-        if not coverage["complete"]:
-            details = f"{coverage['malformed_lines']} malformed lines skipped"
-            if coverage.get("invalid_timestamps"):
-                details += f", {coverage['invalid_timestamps']} invalid timestamps skipped"
-            typer.echo(f"coverage: {len(coverage['paths'])} journals, {details}")
-        if not rows:
-            typer.echo(f"macro: no events since {since}")
-            raise typer.Exit(code=0)
-        typer.echo("rank  sessions  count  nodes  first  last  pattern  top suspect (lift)")
-        for rank, item in enumerate(patterns[:20], start=1):
-            suspect = item["suspects"][0] if item["suspects"] else None
-            suspect_text = f"{suspect['pattern']} ({suspect['lift']:.2f})" if suspect else "-"
-            typer.echo(
-                f"{rank:>4}  {item['sessions']:>8}  {item['count']:>5}  {item['nodes']:>5}  "
-                f"{item['first_seen'] or '-'}  {item['last_seen'] or '-'}  {item['pattern']}  {suspect_text}"
-            )
-    raise typer.Exit(code=0)
+        argv.append("--json")
+    for path in events if events else event_journals():
+        argv += ["--events", str(path)]
+    result = subprocess.run(argv, check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 @evals_app.command("graduate")

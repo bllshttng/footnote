@@ -147,7 +147,7 @@ def load_ledger_rows(path: Path, *, _retry: bool = True) -> list[dict]:
     return [r for r in rows if isinstance(r, dict)]
 
 
-def read_jsonl_events_with_coverage(paths: list[Path], kinds: set[str] | None) -> dict:
+def read_jsonl_events_with_coverage(paths: list[Path], kinds: set[str]) -> dict:
     """Read and deduplicate journals while retaining input-integrity coverage."""
     out: list[dict] = []
     seen_events: set[str] = set()
@@ -193,7 +193,7 @@ def read_jsonl_events_with_coverage(paths: list[Path], kinds: set[str] | None) -
                             path_malformed += 1
                             malformed_lines += 1
                             continue
-                    if kinds is None or (e.get("kind") or e.get("type")) in kinds:
+                    if (e.get("kind") or e.get("type")) in kinds:
                         signature = json.dumps(e, sort_keys=True, separators=(",", ":"))
                         if signature not in seen_events:
                             seen_events.add(signature)
@@ -228,7 +228,7 @@ def read_jsonl_events_with_coverage(paths: list[Path], kinds: set[str] | None) -
     }
 
 
-def read_jsonl_events(paths: list[Path], kinds: set[str] | None) -> list[dict]:
+def read_jsonl_events(paths: list[Path], kinds: set[str]) -> list[dict]:
     """Compatibility reader for views that do not consume integrity coverage."""
     return read_jsonl_events_with_coverage(paths, kinds)["events"]
 

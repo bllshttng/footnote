@@ -1,78 +1,50 @@
-"""Macro-eval folding over the existing event journals."""
+"""The macro verb delegates to the native fno-agents binary (the fold lives in Rust)."""
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
+import subprocess
+from pathlib import Path
 
-from fno.evals.macro import build_leaderboard, load_events
+from typer.testing import CliRunner
 
+from fno.evals.cli import evals_app
 
-def _event(ts: str, event_type: str, *, session: str | None = None,
-           node: str | None = None, **data: object) -> dict:
-    payload = dict(data)
-    if session is not None:
-        payload["session_id"] = session
-    if node is not None:
-        payload["node_id"] = node
-    return {"ts": ts, "type": event_type, "data": payload}
+runner = CliRunner()
 
 
-def test_leaderboard_ranks_upstream_suspect_for_repeated_failure() -> None:
-    rows = [
-        _event("2026-09-12T10:00:00Z", "loop_check_watch_idle", session="s1", node="n1", reason="ci"),
-        _event("2026-09-12T10:01:00Z", "termination", session="s1", node="n1", reason="Budget"),
-        _event("2026-09-12T11:00:00Z", "loop_check_watch_idle", session="s2", node="n2", reason="ci"),
-        _event("2026-09-12T11:01:00Z", "termination", session="s2", node="n2", reason="Budget"),
-        _event("2026-09-12T12:00:00Z", "loop_check_watch_idle", session="s3", node="n3", reason="ci"),
-    ]
+def test_macro_refuses_without_the_binary(monkeypatch) -> None:
+    from fno import rust_binary
 
-    result = build_leaderboard(rows)
-    budget = next(item for item in result["leaderboard"] if item["pattern"] == "termination:Budget")
-
-    assert budget["sessions"] == 2
-    assert budget["count"] == 2
-    assert budget["nodes"] == 2
-    assert budget["suspects"][0]["pattern"] == "loop_check_watch_idle:ci"
-    assert budget["suspects"][0]["lift"] == 1.6667
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    result = runner.invoke(evals_app, ["macro"])
+    assert result.exit_code == 2
+    assert "fno-agents binary was not found" in result.output
 
 
-def test_leaderboard_keeps_unassigned_rows_and_filters_noise() -> None:
-    rows = [
-        _event("2026-09-12T10:00:00Z", "termination", reason="Budget"),
-        _event("2026-09-12T10:01:00Z", "guard_decision", session="s1", reason="allow"),
-        _event("2026-09-12T10:02:00Z", "termination", session="s1", reason="DonePRGreen"),
-        _event("2026-09-12T10:03:00Z", "termination", session="s1", reason="DoneBatched"),
-        _event("2026-09-12T10:04:00Z", "termination", session="s1", reason="DonePlanned"),
-    ]
+def test_macro_forwards_flags_and_journals(monkeypatch, tmp_path: Path) -> None:
+    import fno.paths
+    from fno import rust_binary
 
-    result = build_leaderboard(rows)
-    patterns = {item["pattern"] for item in result["leaderboard"]}
-    budget = next(item for item in result["leaderboard"] if item["pattern"] == "termination:Budget")
-    assert patterns == {"termination:Budget"}
-    assert budget["count"] == 1
-    assert budget["unassigned"] == 1
-
-    all_result = build_leaderboard(rows, include_all=True)
-    all_patterns = {item["pattern"] for item in all_result["leaderboard"]}
-    assert "guard_decision:allow" in all_patterns
-    assert "termination:DonePRGreen" in all_patterns
-
-
-def test_load_events_reports_malformed_lines_and_returns_valid_rows(tmp_path) -> None:
     journal = tmp_path / "events.jsonl"
-    journal.write_text(
-        json.dumps(_event("2026-09-12T10:00:00Z", "termination", reason="Budget"))
-        + "\nnot json\n"
-        + json.dumps(_event("2026-09-12T10:01:00Z", "termination", reason="NoProgress"))
-        + "\n"
-        + json.dumps(_event("not-a-timestamp", "termination", reason="Interrupted"))
-        + "\n",
-        encoding="utf-8",
+    journal.touch()
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: tmp_path / "fno-agents")
+    monkeypatch.setattr(fno.paths, "event_journals", lambda: [journal])
+    captured: dict = {}
+
+    def fake_run(argv, check=False):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = runner.invoke(
+        evals_app,
+        ["macro", "--since", "7d", "--window", "9", "--all", "--json",
+         "--topic", "termination:Budget"],
     )
-
-    rows, coverage = load_events([journal], since=datetime(2026, 9, 1, tzinfo=timezone.utc))
-
-    assert len(rows) == 2
-    assert coverage["malformed_lines"] == 1
-    assert coverage["invalid_timestamps"] == 1
-    assert coverage["complete"] is False
+    assert result.exit_code == 0
+    argv = captured["argv"]
+    assert argv[1] == "evals-macro"
+    assert "--all" in argv and "--json" in argv
+    assert argv[argv.index("--since") + 1] == "7d"
+    assert argv[argv.index("--window") + 1] == "9"
+    assert argv[argv.index("--topic") + 1] == "termination:Budget"
+    assert argv[argv.index("--events") + 1] == str(journal)
