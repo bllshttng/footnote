@@ -297,6 +297,34 @@ def test_an_unresolvable_child_lane_returns_none(monkeypatch):
     assert adv._child_lane_vendor({"id": "x"}, model=None, provider=None) is None
 
 
+def test_a_silent_resolver_never_miskeys_the_vendor_table(monkeypatch):
+    """No overlay opinion: only a raw vendor pin scopes; a harness pin falls
+    back to the configured caps (budget) / the binding cap (child lane)."""
+    from fno.agents import spawn_defaults
+    from fno.backlog import advance as adv
+
+    _wire(monkeypatch, max_live=30, slots=0, limits={"zai": 20}, live={"zai": 20})
+    monkeypatch.setattr(
+        spawn_defaults, "resolve_lane_vendor", lambda argv, env=None, *, harness=None: None
+    )
+    # A harness pin with no vendor opinion keeps the configured caps binding.
+    assert adv._spawn_headroom("claude") == 0
+    assert adv._spawn_headroom("zai") == 0  # a raw vendor pin still scopes
+    assert adv._child_lane_vendor({"id": "x"}, model=None, provider="claude") is None
+    assert adv._child_lane_vendor({"id": "x"}, model=None, provider="zai") == "zai"
+
+
+def test_a_fleet_full_pass_prices_no_child_lane(monkeypatch):
+    """The fleet bound fires before the vendor resolution: a full fleet never
+    pays a grid read per refused child."""
+    from fno.backlog import advance as adv
+
+    _wire(monkeypatch, max_live=30, slots=30, limits={})
+    monkeypatch.setattr(adv, "_child_lane_vendor", _boom)
+    budget = adv._spawn_budget()
+    assert adv._lane_cap_verdict({"id": "x"}, budget, total=0) == (True, None, 0)
+
+
 def test_a_profile_with_no_routing_names_no_lane(monkeypatch):
     """Nothing the spawn would inherit names a lane, so the child keeps the
     binding-provider rule instead of pricing against the caller's own env."""

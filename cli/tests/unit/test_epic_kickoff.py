@@ -629,10 +629,10 @@ def test_headroom_bounds_dispatches_this_pass(iso, tmp_path, monkeypatch):
     lane_caps = [e for e in _events(iso)
                  if e["type"] == "advance_skipped" and e["data"]["reason"] == "lane-cap"]
     assert len(lane_caps) == 1
-    # x-fa3a: the detail names the cap that fired - the fallback binding cap,
-    # since a lane-less child keeps the old rule - at the headroom LEFT after
-    # the first dispatch consumed the pass's one free lane.
-    assert "lane=binding:" in lane_caps[0]["data"]["detail"]
+    # x-fa3a: the detail names the cap that fired - the fleet bound, since the
+    # lane-less world stub prices nothing - at the headroom LEFT after the
+    # first dispatch consumed the pass's one free lane.
+    assert "lane=fleet" in lane_caps[0]["data"]["detail"]
     assert "headroom=0" in lane_caps[0]["data"]["detail"]
 
 
