@@ -1063,7 +1063,7 @@ def _read_pr_metadata(pr_number: int, cwd: Path) -> dict[str, Any]:
 
 def _resolve_self_review_identity() -> tuple[str, str]:
     """Return the owned harness and full session id for the self-send lane."""
-    from fno.claims.self_identity import resolve_self_identity
+    from fno.agents.self_stamp import resolve_self_identity
 
     identity = resolve_self_identity()
     harness = (identity.harness or "").strip()
@@ -1274,19 +1274,11 @@ def resolve_owned_identity_cmd() -> None:
     on the manifest; precedence alone launders an inherited marker into
     ownership, so it calls this verb instead. Returns the proven (or
     collision-surviving) identity plus any collision detected, as ``KEY=value``
-    lines on stdout. The caller parses what it needs and treats a stale ``fno``
-    without this verb (Click exit 2) as 'unavailable', falling back to today's
-    precedence rather than bricking init.
+    lines on stdout; the caller treats a stale ``fno`` without this verb as
+    'unavailable' rather than bricking init.
 
     Resolution routes through :func:`fno.claims.self_identity.resolve_self_identity`,
-    the one owned-identity implementation every caller shares (x-0992). The
-    verb's former private proof policy and its own_binding construction - both
-    gated on a COMPLETE canonical stamp, which a pane-spawned worker never
-    carries - lived here and refused every such worker by its own registry row;
-    they are deleted, not forked behind a flag. The prover is still process-tree
-    truth and the collider is still the cause-agnostic backstop; the own-row
-    suppression now lives where the canonical pair is completed, in
-    claims.self_identity.
+    the one owned-identity implementation every caller shares (x-0992).
 
     Read-only; writes no state. Always exits 0 - it is a resolver, not a gate.
     """
@@ -1304,14 +1296,15 @@ def resolve_owned_identity_cmd() -> None:
         env["CLAUDE_CODE_SESSION_ID"] = env["TARGET_TRANSCRIPT_ID"]
 
     def _collide(harness: str, sid: str, own_pair: Optional[tuple[str, str]]) -> Optional[str]:
-        # own_pair arrives from claims.self_identity (the canonical pair it
-        # completed there, None when it could not); the registry applies the
-        # agreement check, so this site never answers the own-row question
-        # itself - it had a second, COMPLETE-stamp-gated answer and that is
-        # the leg this verb deleted (x-0992).
+        # own_pair arrives from claims.self_identity (None when it could not);
+        # the registry applies the agreement check, so this site never answers
+        # the own-row question itself (x-0992).
         return row_owning_session_id(sid, self_binding=own_pair)
 
-    owned = resolve_self_identity(env, collide=_collide)
+    # Same injection seam self_stamp uses (x-a409).
+    from fno.agents.codex_rollout import codex_rollout_witness
+
+    owned = resolve_self_identity(env, collide=_collide, witness=codex_rollout_witness)
     # AC5-CON: record any non-trivial resolution (a refused collision or a
     # non-single disposition) so a future leak is reconstructable from the event
     # log alone. A single-family resolve can still carry a refused collision, so
@@ -3076,7 +3069,7 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
         if own_id and holder == f"target-session:{own_id}":
             return True
     try:
-        from fno.claims.self_identity import resolve_self_identity
+        from fno.agents.self_stamp import resolve_self_identity
 
         own_sid = (resolve_self_identity().session_id or "").strip()
     except Exception:
@@ -3173,7 +3166,7 @@ def _successor_claim_holder() -> Optional[str]:
     entropy. An unresolved identity is a refusal because the claim would not
     answer who acquired it.
     """
-    from fno.claims.self_identity import resolve_self_identity
+    from fno.agents.self_stamp import resolve_self_identity
 
     identity = resolve_self_identity()
     session_id = (identity.session_id or "").strip()

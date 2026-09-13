@@ -88,8 +88,9 @@ fi
 #     silent for 18h. On `dead` we now fire `fno do pr watch heal` (enabled-gated,
 #     claim single-flighted, detached so session start never waits on launchctl)
 #     instead of only advising. A `wedged` verdict (ticking, every tick failing)
-#     takes the refresh cure: a bounce re-runs the same plist, a re-render does
-#     not. Best-effort; never blocks session start.
+#     also takes heal: it re-renders through refresh_watcher and defers while a
+#     tick holds the claim, so the cure cannot kill a live tick .
+#     Best-effort; never blocks session start.
 if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     if pw_json="$(fno do pr watch status --json 2>/dev/null || true)" && [[ -n "$pw_json" ]]; then
         pw_verdict="$(printf '%s' "$pw_json" | jq -r '.verdict // empty' 2>/dev/null || true)"
@@ -99,8 +100,8 @@ if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
             (fno do pr watch heal >/dev/null 2>&1 &)
         elif [[ "$pw_verdict" == "wedged" ]]; then
             pw_detail="$(printf '%s' "$pw_json" | jq -r '.detail // ""' 2>/dev/null || true)"
-            echo "pr-watch: wedged (${pw_detail}); self-heal started (fno do pr watch refresh)"
-            (fno do pr watch refresh >/dev/null 2>&1 &)
+            echo "pr-watch: wedged (${pw_detail}); self-heal started (fno do pr watch heal)"
+            (fno do pr watch heal >/dev/null 2>&1 &)
         fi
     fi
 fi

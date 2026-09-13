@@ -288,6 +288,13 @@ RUST_CLIENT_VERBS = frozenset(
         # dispatch in client.rs (no daemon RPC); the mail shim and the hook
         # scripts invoke the binary directly. Parity-synced.
         "announce",
+        # Provider-cap actor (x-7e05): status/decide/mark verbs over the
+        # daemon snapshot. Direct dispatch in client.rs (no daemon RPC for
+        # status; decide records the operator's answer). Parity-synced.
+        "provider-cap",
+        # PreCompact stamp writer/reader (x-7e05): the hook invokes the
+        # binary directly (`fno-agents compaction mark`). Parity-synced.
+        "compaction",
     }
 )
 
@@ -438,6 +445,11 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Pure Python: reads the registry + graph archive; no Rust client port, so
     # it must never auto-route to the daemon.
     "yard",
+    # The provider-cap relay (x-7e05): argv passthrough to the Rust client's
+    # provider-cap verbs (status/decide). No parsing in Python; the Rust side
+    # owns the snapshot, the decision ladder and the journal. Hidden on the
+    # help surface (menu cap), so it is registered but never advertised.
+    "provider-cap",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
@@ -509,6 +521,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict (x-f188); invoked by fno.update.running_components, not `fno agents` routing.",
     "fleet-incident": "Durable fleet incident breaker (x-77db): stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it (exit 0 clear, 1 stopped or unavailable); check [--json] is the admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches.",
     "announce": "Fleet announcements: send --scope S [--subject T] [--expires 24h] [--urgent] reads the body on stdin and appends ONE kind=announce bus line (operator or crowned agent, 6/hour); read --session-id ID --boundary B renders unseen standing announcements once per session; status ID [--json] reads the sender's receipts (audience/landed/pending/woken/unreachable/late). The public surface is `fno agents mail team`; hooks call the binary directly.",
+    "compaction": "Compaction stamps: mark --session <id> writes the PreCompact stamp the provider-cap actor reads (best-effort, always exits 0); status --session <id> reads the stamp against the transcript's own boundary. The hook calls the binary directly.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other

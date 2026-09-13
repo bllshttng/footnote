@@ -102,6 +102,11 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
     },
+    ArmSpec {
+        arm: "provider_cap",
+        default_interval_s: crate::provider_cap::PROVIDER_CAP_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+    },
 ];
 
 /// Build the `data` object of one tick row. `skip_reason` is a single token
@@ -844,14 +849,23 @@ mod tests {
     /// AC8-HP: the readout knows the arm even before its first tick - one
     /// `KNOWN_ARMS` row, daemon scheduler, the 300s beat.
     #[test]
-    fn arm_watch_is_the_eleventh_known_arm_on_the_daemon() {
-        assert_eq!(KNOWN_ARMS.len(), 11);
+    fn arm_watch_is_the_eleventh_known_arm_and_provider_cap_the_twelfth() {
+        assert_eq!(KNOWN_ARMS.len(), 12);
         let spec = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "arm_watch")
             .expect("arm_watch row");
         assert_eq!(spec.default_interval_s, 300);
         assert_eq!(spec.scheduler, SCHED_DAEMON);
+        let cap = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "provider_cap")
+            .expect("provider_cap row");
+        assert_eq!(
+            cap.default_interval_s,
+            crate::provider_cap::PROVIDER_CAP_INTERVAL_S
+        );
+        assert_eq!(cap.scheduler, SCHED_DAEMON);
     }
 
     fn write_rows(path: &Path, rows: &[Value]) {

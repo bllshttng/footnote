@@ -343,6 +343,7 @@ _RECOVERY_ROOT_FLOOR_S = 3.0
 _PHASE_CAP_S: dict[str, float] = {
     "settings": 60,
     "sweep": 150,
+    "merge": 150,
     "king_wake": 100,
     "notify_watch": 30,
     "heal": 30,
@@ -596,18 +597,9 @@ def tick() -> None:
                             _fleet_refused += 1
                         _emit_event(event_type, data)
 
-                    # Local import: the watchdog package pulls the harness layer.
-                    from fno.agents.watchdog import handoff_armed as _wd_handoff
-
                     _fleet_candidates = run_recovery_sweep(
                         settings.recovery,
                         emit=emit_recovery,
-                        # Legacy failover stands down only for "handoff", where the
-                        # provider-outage supervisor owns the transaction instead.
-                        # "report" and "wake" still need it: neither mode arms the
-                        # supervisor, so gating this on "off" alone would silently
-                        # drop the old safety net the moment either is turned on.
-                        provider_failover=not _wd_handoff(settings),
                     )
                     _fleet_swept = True
                     typer.echo(f"recovery sweep: candidates={_fleet_candidates}")
@@ -749,25 +741,9 @@ def tick() -> None:
                         ),
                         provider_outages=provider_outages,
                     )
-                    try:
-                        handoffs = _wd.supervise_provider_handoffs(
-                            provider_outages, provider_rows,
-                            settings=settings, now_s=now,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - PR polling stays live
-                        handoffs = [{
-                            "phase": "refused",
-                            "reason": "provider_supervisor_exception",
-                            "detail": repr(exc)[:400],
-                            "count": 1,
-                        }]
-                    for handoff in handoffs:
-                        event = (
-                            "provider_handoff_refused"
-                            if handoff.get("phase") == "refused"
-                            else "provider_handoff_transition"
-                        )
-                        _wd.emit_event(event, handoff)
+                    # Provider-outage handoff supervision moved to the
+                    # provider-cap actor (x-7e05); measure_provider_outages
+                    # stays as report lines only.
 
                     # Internal recovery, wake mode only. Session verdicts drive
                     # nothing here in report mode, and their receipts stay
@@ -1083,6 +1059,20 @@ def tick() -> None:
                            ("disabled", "lock_held", "quota_skip", "error", "timeout") else None,
                            detail=f"outcome={outcome}" + (f" ({', '.join(bits)})" if bits else ""))
 
+        def _phase_merge(_slice_s: float) -> None:
+            if result is None or not result.execute_queue:
+                return
+            assert cfg is not None
+            from fno.pr_watch._dispatch import run_execute_queue
+            executed, skipped = run_execute_queue(
+                result,
+                emit=_emit_event,
+                notify=lambda message, **_kw: _notify_parked(message),
+                max_retries=cfg.retries,
+                claim=ClaimAdapter(),
+            )
+            typer.echo(f"pr-watch merge phase: executed={executed} skipped={skipped}")
+
 
         # Stranded-worktree recovery, same arming gate as the fleet
         # watchdog above: this is a second read of the same "is recovery
@@ -1250,6 +1240,7 @@ def tick() -> None:
         # a proven-stale canonical through its SessionStart hook.
         sweep_started = True
         _run_phase("sweep", _phase_sweep, on_end=_sweep_ended)
+        _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")
         _run_phase("heal", _phase_heal)
@@ -1435,6 +1426,7 @@ def heal() -> None:
             fno_binary=_resolve_fno_binary(),
             install_path=os.environ.get("PATH", "/usr/bin:/bin"),
             interval=settings.pr_watch.interval_seconds,
+            defer_when_ticking=True,
         )
         typer.echo(f"pr-watch heal: {msg}")
         if rc != 0:
