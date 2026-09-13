@@ -74,6 +74,15 @@ pub fn run_prove_it_verdicts(args: &[String]) -> i32 {
         }
         i += 1;
     }
+    // --route is a WRITE against the live store; a --graph read redirect
+    // would make the note's target disagree with the rows it was derived from.
+    if route && graph_overridden {
+        eprintln!(
+            "fno-agents prove-it-verdicts: --route writes notes to the live store, \
+             so it refuses --graph (the fixture read and the live write would disagree)"
+        );
+        return 2;
+    }
     // Same blind-read guard as graph-get: under an external tracker backend
     // the graph store is not authoritative (an explicit --graph is trusted).
     if !graph_overridden && external_backend_selected() {
@@ -301,15 +310,82 @@ fn load_rulings() -> Vec<Value> {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
-    text.lines()
+    derive_live_rulings(&text)
+}
+
+/// The LIVE rulings: decisions whose `text` can still retire a FAIL. Mirrors
+/// `fno inbox decisions`' lifecycle derivation over the same index rows: a
+/// `decision_retracted` row retires its `target_decision_id` (newest
+/// `(ts, reason)` wins) and a decision whose `supersedes` names another
+/// retires that one (newest `(ts, decision_id)` wins). Without this, an
+/// overturned ruling would keep a FAIL hidden after the king changed their
+/// mind. ids compare casefolded, the Python reader's own rule.
+fn derive_live_rulings(text: &str) -> Vec<Value> {
+    let rows: Vec<Value> = text
+        .lines()
         .filter_map(|line: &str| serde_json::from_str::<Value>(line).ok())
-        .filter(|row: &Value| {
-            matches!(
-                row.get("_event_type").and_then(Value::as_str),
-                None | Some("") | Some("operator_decision")
-            )
-        })
+        .collect();
+    let is_decision = |row: &Value| {
+        matches!(
+            row.get("_event_type").and_then(Value::as_str),
+            None | Some("") | Some("operator_decision")
+        )
+    };
+    let rank = |row: &Value, tie: &str| {
+        (
+            row.get("ts")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            row.get(tie)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        )
+    };
+    let mut retired: std::collections::BTreeMap<String, (String, String)> = Default::default();
+    for row in rows
+        .iter()
+        .filter(|r| r.get("_event_type").and_then(Value::as_str) == Some("decision_retracted"))
+    {
+        let target = row
+            .get("target_decision_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        if target.is_empty() {
+            continue;
+        }
+        let r = rank(row, "reason");
+        if retired.get(&target).map_or(true, |prev| *prev < r) {
+            retired.insert(target, r);
+        }
+    }
+    for row in rows.iter().filter(|r| is_decision(r)) {
+        let target = row
+            .get("supersedes")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        if target.is_empty() {
+            continue;
+        }
+        let r = rank(row, "decision_id");
+        if retired.get(&target).map_or(true, |prev| *prev < r) {
+            retired.insert(target, r);
+        }
+    }
+    rows.into_iter()
+        .filter(is_decision)
         .filter(|row| row.get("text").and_then(Value::as_str).is_some())
+        .filter(|row| {
+            let id = row
+                .get("decision_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_lowercase();
+            id.is_empty() || !retired.contains_key(&id)
+        })
         .collect()
 }
 
@@ -637,6 +713,53 @@ mod tests {
 
         assert_eq!(ruling_for(&rulings, "/nowhere/else.md"), None);
         assert_eq!(ruling_for(&[], report_path), None);
+    }
+
+    #[test]
+    fn an_overturned_ruling_no_longer_retires_a_fail() {
+        let report = "/plans/a.md.artifacts/REPORT.md";
+        let jsonl = |rows: &[Value]| -> String {
+            rows.iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let live = json!({"decision_id": "d-1", "text": format!("ruled: {report} stays")});
+        // Live ruling retires; a superseding or retracting decision un-retires.
+        assert_eq!(
+            ruling_for(&derive_live_rulings(&jsonl(&[live.clone()])), report),
+            Some("d-1".to_string())
+        );
+        let superseding =
+            json!({"decision_id": "d-2", "supersedes": "D-1", "text": "changed my mind"});
+        let rulings = derive_live_rulings(&jsonl(&[live.clone(), superseding]));
+        assert_eq!(
+            ruling_for(&rulings, report),
+            None,
+            "superseded ruling is not live"
+        );
+        let retraction = json!({
+            "_event_type": "decision_retracted",
+            "target_decision_id": "d-1",
+            "ts": "2026-09-11T00:00:00Z",
+            "reason": "wrong",
+        });
+        let rulings = derive_live_rulings(&jsonl(&[live, retraction]));
+        assert_eq!(
+            ruling_for(&rulings, report),
+            None,
+            "retracted ruling is not live"
+        );
+    }
+
+    #[test]
+    fn route_refuses_a_graph_override() {
+        let args: Vec<String> = vec![
+            "--route".to_string(),
+            "--graph".to_string(),
+            "/tmp/fake-graph.json".to_string(),
+        ];
+        assert_eq!(run_prove_it_verdicts(&args), 2);
     }
 
     #[test]
