@@ -144,6 +144,22 @@ fi
 # No resolvable doc path -> a bare discard list with no pointer is worth little.
 [[ -n "$DOC_PATH" ]] || exit 0
 
+# A doc path that is itself a symlink: resolve it, so the atomic rename below
+# replaces the real file and the link keeps pointing at the fresh content.
+# Renaming over the link would silently replace the link with a regular file.
+# Plain readlink resolves one hop per call, which stays portable to hosts
+# whose readlink has no -f.
+for _hop in 1 2 3 4 5; do
+  [[ -L "$DOC_PATH" ]] || break
+  _link="$(readlink "$DOC_PATH" 2>/dev/null)" || break
+  [[ -n "$_link" ]] || break
+  case "$_link" in
+    /*) DOC_PATH="$_link" ;;
+    *) DOC_PATH="$(dirname "$DOC_PATH")/$_link" ;;
+  esac
+done
+unset _hop _link
+
 # ---------------------------------------------------------------------------
 # Gather mechanical facts. Each degrades to an empty/omitted value, never an
 # error. Bounded subprocess calls only.
@@ -338,6 +354,18 @@ PY
 # the session filled at full context (the compact that triggers this hook would
 # otherwise erase the judgment right when post-compact context needs it).
 # ---------------------------------------------------------------------------
+_session_block_raw() {
+  # $1 = heading label substring. The verbatim body between the markers under
+  # the matching "## <label>" heading, or "" when the doc is absent or the
+  # label has no block.
+  awk -v label="$1" '
+    /^## / { heading = $0; next }
+    /<!-- fno:session -->/ { grab = (index(heading, label) > 0); next }
+    grab && /<!-- \/fno:session -->/ { grab=0; next }
+    grab { print }
+  ' "$DOC_PATH" 2>/dev/null
+}
+
 _session_block() {
   # $1 = heading label substring, $2 = default instruction text. Matched by
   # the "## <label>" heading immediately above each marker, not by ordinal
@@ -346,12 +374,7 @@ _session_block() {
   # correctly, instead of silently landing in the wrong slot.
   local label="$1" default="$2" preserved=""
   if [[ -f "$DOC_PATH" ]]; then
-    preserved="$(awk -v label="$label" '
-      /^## / { heading = $0; next }
-      /<!-- fno:session -->/ { grab = (index(heading, label) > 0); next }
-      grab && /<!-- \/fno:session -->/ { grab=0; next }
-      grab { print }
-    ' "$DOC_PATH" 2>/dev/null)"
+    preserved="$(_session_block_raw "$label")"
   fi
   if [[ -n "$(printf '%s' "$preserved" | tr -d '[:space:]')" ]]; then
     printf '%s\n' "$preserved"
@@ -402,13 +425,71 @@ if [[ "$USER_SEED" == "1" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Assemble the doc. Auto block fully regenerated; the two session blocks are
-# preserved-or-defaulted. Ensure the parent dir exists (handoffs_dir may resolve
-# to a path that does not yet exist, e.g. the state-dir fallback on a fresh
-# setup); without this the write fails silently and the pointer below would lie.
+# Content gate: refuse the whole write when a block the doc still holds as
+# real judgment captured back as its default placeholder. That combination
+# only happens when the capture misread - a read racing another refresh, a
+# doc briefly vanishing - and writing would stamp placeholders over judgment
+# (the 2026-09-13 crown-doc loss). Leaving the doc untouched is always safe:
+# the next fire reads again. Never blocks: the pointer below still prints.
+# ---------------------------------------------------------------------------
+WRITE_REFUSED=0
+_gate_block() { # $1 label, $2 captured value, $3 default text
+  [[ "$WRITE_REFUSED" == "1" ]] && return 0
+  local raw=""
+  [[ -f "$DOC_PATH" ]] && raw="$(_session_block_raw "$1")"
+  if [[ -n "$(printf '%s' "$raw" | tr -d '[:space:]')" && "$raw" != "$3" && "$2" == "$3" ]]; then
+    WRITE_REFUSED=1
+    echo "canon doc: captured '$1' reads empty while the doc holds it; refusing to overwrite $DOC_PATH" >&2
+  fi
+  return 0
+}
+_gate_block "Merge order and why" "$SB1" "$DEFAULT_MERGE"
+_gate_block "Open decisions awaiting the operator" "$SB2" "$DEFAULT_DECISIONS"
+if [[ "$IS_CROWNED" == "1" ]]; then
+  _gate_block "Gaps and open thinking" "$SB3" "$DEFAULT_GAPS"
+  _gate_block "Workarounds in force" "$SB4" "$DEFAULT_WORKAROUNDS"
+fi
+# The user block gets the same guard: it is the one section the machine never
+# writes, so re-seeding its placeholder over real notes is the same loss.
+if [[ "$WRITE_REFUSED" == "0" && -f "$DOC_PATH" ]] \
+  && command -v canon_doc_is_placeholder >/dev/null 2>&1 \
+  && command -v canon_doc_extract_marker >/dev/null 2>&1; then
+  _uprior="$(canon_doc_extract_marker "$DOC_PATH" user 2>/dev/null || true)"
+  if [[ -n "$(printf '%s' "$_uprior" | tr -d '[:space:]')" ]] \
+    && ! canon_doc_is_placeholder "$_uprior" \
+    && canon_doc_is_placeholder "$USER_BLOCK"; then
+    WRITE_REFUSED=1
+    echo "canon doc: captured user block reads empty while the doc holds notes; refusing to overwrite $DOC_PATH" >&2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Assemble the doc into a fresh temp file in the doc's own directory, then
+# rename it over the doc. Auto block fully regenerated; the session blocks are
+# preserved-or-defaulted. The old `> "$DOC_PATH"` truncated the doc on open,
+# so a hook killed mid-assembly left a partial doc and a refresh overlapping
+# another one captured that partial and stamped placeholders over judgment.
+# rename(2) within one directory is atomic, so a reader or a killed writer
+# never sees a partial file. Ensure the parent dir exists (handoffs_dir may
+# resolve to a path that does not yet exist, e.g. the state-dir fallback on a
+# fresh setup); without this the write fails silently and the pointer below
+# would lie.
 # ---------------------------------------------------------------------------
 mkdir -p "$(dirname "$DOC_PATH")" 2>/dev/null || true
-{
+_TMP_OUT=""
+_doc_tmp_cleanup() { [[ -n "$_TMP_OUT" ]] && rm -f "$_TMP_OUT" 2>/dev/null; return 0; }
+trap _doc_tmp_cleanup EXIT
+if [[ "$WRITE_REFUSED" != "1" ]]; then
+  _TMP_OUT="$(mktemp "$(dirname "$DOC_PATH")/.canon-doc.tmp.XXXXXX" 2>/dev/null)" || _TMP_OUT=""
+fi
+if [[ -n "$_TMP_OUT" ]]; then
+  # Keep the mode the doc already had: mktemp is 0600 and a shared-vault
+  # reader must not lose access because the hook refreshed the doc.
+  if [[ -f "$DOC_PATH" ]]; then
+    _mode="$(stat -f '%Lp' "$DOC_PATH" 2>/dev/null || stat -c '%a' "$DOC_PATH" 2>/dev/null || echo 644)"
+    chmod "$_mode" "$_TMP_OUT" 2>/dev/null || true
+  fi
+  {
   if [[ -n "$(printf '%s' "$PRIOR" | tr -d '[:space:]')" ]]; then
     printf '%s\n\n' "$PRIOR"
   fi
@@ -457,7 +538,12 @@ mkdir -p "$(dirname "$DOC_PATH")" 2>/dev/null || true
   echo "<!-- fno:user -->"
   printf '%s\n' "$USER_BLOCK"
   echo "<!-- /fno:user -->"
-} > "$DOC_PATH" 2>/dev/null || true
+  } > "$_TMP_OUT" 2>/dev/null || true
+  mv -f "$_TMP_OUT" "$DOC_PATH" 2>/dev/null || true
+  _TMP_OUT=""
+else
+  echo "canon doc: could not create a temp file beside $DOC_PATH; leaving the doc untouched" >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Stdout: spend the budget on DISCARD, not preserve. The base compaction prompt
