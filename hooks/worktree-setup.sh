@@ -57,6 +57,44 @@ if [[ -n "$_gate_repo" ]] && command -v fno >/dev/null 2>&1; then
     _WT_BASE="$(printf '%s\n' "$_WT_POLICY_OUT" | sed -n 's/^base=//p' | head -1)"
 fi
 
+# Session-keyed create-attempt cap: a worker must never sit in worktree
+# ceremony with no ceiling. Count every create request (a payload carrying a
+# `name`); a SUCCESSFUL create deletes the latch, so only repeated failing
+# ceremony accumulates. Past the cap, abort the supported way - exit 0 with
+# EMPTY stdout; non-zero would fall back to CC's default flow and create the
+# very worktree being refused.
+_CAP_SESSION=""
+if command -v jq >/dev/null 2>&1; then
+    _CAP_SESSION="$(printf '%s' "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)"
+fi
+if [[ -z "$_CAP_SESSION" ]] && command -v python3 >/dev/null 2>&1; then
+    _CAP_SESSION="$(printf '%s' "$HOOK_INPUT" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except (json.JSONDecodeError, ValueError):
+    d = {}
+print(d.get("session_id", "") or "")
+' 2>/dev/null || true)"
+fi
+_CAP_LATCH=""
+if [[ -n "$_WT_NAME" && -n "$_CAP_SESSION" ]] && command -v fno >/dev/null 2>&1; then
+    _cap_stub="$(fno config paths shell-stub 2>/dev/null || true)"
+    [ -n "$_cap_stub" ] && [ -f "$_cap_stub" ] && . "$_cap_stub" 2>/dev/null || true
+    _CAP_LATCH_DIR="${LATCHES_DIR:-${STATE_DIR:-$HOME/.fno}/latches}"
+    mkdir -p "$_CAP_LATCH_DIR" 2>/dev/null || true
+    find "$_CAP_LATCH_DIR" -maxdepth 1 -name '.worktree-create-*' -mtime +2 -delete 2>/dev/null || true
+    _CAP_LATCH="$_CAP_LATCH_DIR/.worktree-create-$_CAP_SESSION"
+    _ATTEMPTS="$(cat "$_CAP_LATCH" 2>/dev/null || true)"
+    case "$_ATTEMPTS" in ''|*[!0-9]*) _ATTEMPTS=0 ;; esac
+    _ATTEMPTS=$((_ATTEMPTS + 1))
+    printf '%s' "$_ATTEMPTS" > "$_CAP_LATCH" 2>/dev/null || true
+    if [[ "$_ATTEMPTS" -gt 3 ]]; then
+        echo "WorktreeCreate: create attempt $_ATTEMPTS for repo '${_gate_repo:-unknown}' in session ${_CAP_SESSION:0:12}; capping worktree ceremony at 3 attempts. Fix: FNO_WORKTREE_POLICY=never, or declare work.workspaces.<slug>.projects[].worktree for this repo." >&2
+        exit 0
+    fi
+fi
+
 if [[ -z "$WORKTREE_PATH" ]]; then
     # No .path from CC is normal (the contract lists only `name`). $(pwd) is a
     # safe fallback only in a linked worktree; on the canonical checkout emitting
@@ -310,5 +348,10 @@ echo "Worktree ready: $WORKTREE_PATH" >&2
 
 # CC contract: emit the absolute worktree path on stdout as the sole success
 # signal. Everything else in this hook logs to stderr so stdout stays clean.
+# The successful create ends this ceremony episode, and the latch's writer
+# owns its lifetime, so the session starts over clean.
+if [[ -n "$_CAP_LATCH" ]]; then
+    rm -f "$_CAP_LATCH" 2>/dev/null || true
+fi
 echo "$WORKTREE_PATH"
 exit 0
