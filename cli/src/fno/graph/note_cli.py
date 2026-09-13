@@ -159,8 +159,7 @@ def _write_state(
     if reads:
         argv.extend(["--reads", json.dumps(reads, separators=(",", ":"))])
     if session_id:
-        argv.append("--self-session")
-        argv.append(session_id)
+        argv.extend(["--self-session", session_id])
     if quiet:
         argv.append("--quiet")
     proc = subprocess.run(argv, input=text, text=True, check=False, capture_output=True)
