@@ -1,0 +1,14 @@
+# Retired skill names and their lifecycle disposition.
+# Format: <skill name>|<cut|demoted|merged>|<ruling or reason>
+# Retiring a skill is one line here. Special renamed and cut-surface matchers
+# stay in check-no-stale-skill-refs.sh because they have different boundaries.
+distill|cut|existing retired-skill population
+megaspec|cut|existing retired-skill population
+tower-play|cut|existing retired-skill population
+tower-watch|cut|existing retired-skill population
+copy-this|cut|existing retired-skill population
+token-doctor|demoted|existing retired-skill population
+codemap|demoted|existing retired-skill population
+git-worktrees|demoted|existing retired-skill population
+target-preflight|merged|existing retired-skill population
+target-postmortem|merged|existing retired-skill population

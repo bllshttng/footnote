@@ -16,11 +16,6 @@
 
 set -euo pipefail
 
-CUT_SKILLS=(distill megaspec tower-play tower-watch copy-this)
-DEMOTED_SKILLS=(token-doctor codemap git-worktrees)
-MERGED_SKILLS=(target-preflight target-postmortem)
-ALL_RETIRED=("${CUT_SKILLS[@]}" "${DEMOTED_SKILLS[@]}" "${MERGED_SKILLS[@]}")
-
 # Production code paths. Anything outside these directories is treated as
 # allowlisted by default (design docs, prose, top-level READMEs, etc.).
 SCAN_PATHS=(
@@ -53,6 +48,43 @@ ALLOWLIST_PATHS=(
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT"
+
+REGISTRY="scripts/ci/retired-skills.txt"
+if [[ ! -r "$REGISTRY" ]]; then
+  echo "AUDIT ERROR: retired-skill registry missing or unreadable at $REGISTRY" >&2
+  exit 2
+fi
+
+declare -a CUT_SKILLS=() DEMOTED_SKILLS=() MERGED_SKILLS=() ALL_RETIRED=()
+registry_rows=0
+registry_line=0
+while IFS= read -r line || [[ -n "$line" ]]; do
+  registry_line=$((registry_line + 1))
+  case "$line" in ''|'#'*) continue ;; esac
+  skill=""; kind=""; reason=""; extra=""
+  IFS='|' read -r skill kind reason extra <<<"$line"
+  [[ -n "$skill" && -n "$kind" && -n "$reason" && -z "$extra" ]] || {
+    echo "AUDIT ERROR: malformed retired-skill registry line $registry_line" >&2
+    exit 2
+  }
+  if [[ "$skill" =~ [^a-zA-Z0-9_-] ]]; then
+    echo "AUDIT ERROR: malformed skill name '$skill' on registry line $registry_line" >&2
+    exit 2
+  fi
+  case "$kind" in
+    cut) CUT_SKILLS+=("$skill") ;;
+    demoted) DEMOTED_SKILLS+=("$skill") ;;
+    merged) MERGED_SKILLS+=("$skill") ;;
+    *) echo "AUDIT ERROR: unknown retired-skill kind '$kind' on registry line $registry_line" >&2; exit 2 ;;
+  esac
+  ALL_RETIRED+=("$skill")
+  registry_rows=$((registry_rows + 1))
+done <"$REGISTRY"
+
+[[ "$registry_rows" -gt 0 ]] || {
+  echo "AUDIT ERROR: retired-skill registry has no rows" >&2
+  exit 2
+}
 
 # Validate skill names contain no regex metacharacters before building the
 # pattern. A malformed entry should error loudly, not silently match
