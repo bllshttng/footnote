@@ -10602,8 +10602,7 @@ async fn attach_and_run(
             let tx = conn_tx.clone();
             let gen = view.conn_gen;
             tokio::spawn(async move {
-                let outcome = crate::connections_view::load_all().await;
-                let _ = tx.send((gen, outcome));
+                crate::connections_view::load_all(tx, gen).await;
             });
         }
         // x-84d7: run a wanted single-flight mutation off the UI loop. The modal's
