@@ -363,13 +363,6 @@ def select_autonomous_route(
         now=now,
         repo_root=Path(node_cwd) if node_cwd else None,
     )
-    held = _admission_deferral(
-        provider_id,
-        priority=priority,
-        node_cwd=node_cwd,
-        verb=admission_verb,
-        difficulty=admission_difficulty,
-    )
     window = sig.state.value
     if sig.cutover and not pinned:
         dest = _select_destination(node_cwd, sig.provider_id)
@@ -410,6 +403,15 @@ def select_autonomous_route(
             retry_at=sig.resets_at,
             window=window,
         )
+    # The admission preview (x-1afa) is the last word, so it is also the last
+    # thing computed: only the unknown-proceed and stay paths consult it.
+    held = _admission_deferral(
+        provider_id,
+        priority=priority,
+        node_cwd=node_cwd,
+        verb=admission_verb,
+        difficulty=admission_difficulty,
+    )
     if sig.state is HeadroomState.UNKNOWN:
         if held is not None:
             return held

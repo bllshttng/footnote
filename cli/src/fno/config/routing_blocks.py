@@ -54,11 +54,16 @@ class RoutingAdmissionBlock(BaseModel):
     @field_validator("demand_pct", "reserve_pct", mode="before")
     @classmethod
     def _coerce_tables(cls, v: object) -> object:
-        """A non-table, or a row that is not itself a table, degrades to an
-        empty table; leaf values stay raw for the owner to validate."""
+        """A non-table, or a row that is not itself a table, must not raise
+        at load and must not vanish: a dropped row is re-shaped into a table
+        the owner's difficulty vocabulary refuses, so an armed typo still
+        answers invalid_policy. Leaf values stay raw for the owner."""
         if not isinstance(v, dict):
             return {}
-        return {name: row for name, row in v.items() if isinstance(row, dict)}
+        return {
+            name: row if isinstance(row, dict) else {"__not_a_table__": row}
+            for name, row in v.items()
+        }
 
 
 def resolve_admission_policy(settings: object = None) -> RoutingAdmissionBlock | None:
