@@ -834,11 +834,9 @@ def _run_tick(
 
     acted = 0
     skipped = 0
-    # The merge-scan receipt (the completed tick's positive proof the grant
-    # scan RAN): eligible = OPEN candidates whose durable verdict granted,
-    # attempted = executions handed to the merge phase. Integers, zero fine -
-    # a scan that saw nothing is still a scan that ran, which is the fact
-    # AC12-HP needs and a bare absence cannot prove.
+    # The merge-scan receipt: the completed tick's proof the grant scan RAN.
+    # attempted = executions handed to the merge phase; a scan that saw
+    # nothing is still a scan that ran (AC12-HP).
     merge_scan_eligible = 0
     merge_scan_attempted = 0
     execute_queue: list[tuple[Any, str, dict[str, Any]]] = []

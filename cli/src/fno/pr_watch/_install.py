@@ -320,10 +320,8 @@ def bounce(
         uid = os.getuid()
     if run is None:
         run = _run_launchctl_timed
-    if defer_when_ticking:
-        pid = _tick_in_flight()
-        if pid is not None:
-            return (f"tick in flight (pid {pid}); bounce deferred", 0)
+    if defer_when_ticking and (pid := _tick_in_flight()) is not None:
+        return (f"tick in flight (pid {pid}); bounce deferred", 0)
     domain = f"gui/{uid}"
     target = f"{domain}/{label}"
 
