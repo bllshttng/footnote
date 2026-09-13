@@ -15,12 +15,17 @@ if [[ "${1:-} ${2:-}" == "state path" && -n "${FNO_TEST_SPACE:-}" ]]; then
 fi
 
 _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+_self="${BASH_SOURCE[0]:-$0}"
 _oldifs="$IFS"
 IFS=':'
 for _d in $PATH; do
   IFS="$_oldifs"
   [[ "$_d" == "$_self_dir" ]] && continue
-  [[ -x "$_d/fno-agents" ]] && exec "$_d/fno-agents" "$@"
+  [[ -x "$_d/fno-agents" ]] || continue
+  # -ef catches a relative PATH entry that resolves to this same file, where
+  # exec would re-enter the stub forever.
+  [[ "$_d/fno-agents" -ef "$_self" ]] && continue
+  exec "$_d/fno-agents" "$@"
 done
 IFS="$_oldifs"
 exit 1
