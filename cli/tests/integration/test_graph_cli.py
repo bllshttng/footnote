@@ -2976,9 +2976,45 @@ def test_update_dispatch_verb_with_argument_refused(tmp_graph):
     r2 = _invoke("backlog", "update", nid, "--dispatch-verb",
                  f"/fno:blueprint {nid}")
     assert r2.exit_code == 2, r2.output
-    assert "unknown dispatch verb" in r2.output
+    assert "not one bare" in r2.output
     assert "accepted:" in r2.output
     assert _read_graph(tmp_graph)[0].get("dispatch_verb") is None
+
+
+def test_update_dispatch_verb_dollar_prefix_refused(tmp_graph):
+    """'$fno:' passes the name mint but the dispatch resolver canonicalizes
+    only '/fno:', so the value would still fail at drain. Refused here."""
+    r = _invoke("backlog", "add", "Dollar node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("backlog", "update", nid, "--dispatch-verb", "$fno:think")
+    assert r2.exit_code == 2, r2.output
+    assert "canonicalizes only '/fno:'" in r2.output
+    assert _read_graph(tmp_graph)[0].get("dispatch_verb") is None
+
+
+def test_update_dispatch_verb_configured_allowlist_verb_writes(tmp_graph):
+    """A verb outside the static name table but inside the configured
+    allowlist writes, with a warning naming the drain's name-mint gap."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    settings = SimpleNamespace(
+        dispatch=SimpleNamespace(
+            allowed_verbs=["/target", "/marketing"], verb_registry=None
+        )
+    )
+    r = _invoke("backlog", "add", "Configured verb node")
+    nid = json.loads(r.output)["id"]
+    with patch("fno.config.load_settings", return_value=settings):
+        r2 = _invoke("backlog", "update", nid, "--dispatch-verb", "/marketing")
+    assert r2.exit_code == 0, r2.output
+    assert "resolves only in" in r2.output
+    assert _read_graph(tmp_graph)[0]["dispatch_verb"] == "/marketing"
+    with patch("fno.config.load_settings", return_value=settings):
+        r3 = _invoke("backlog", "update", nid, "--dispatch-verb",
+                     "/marketing extra")
+    assert r3.exit_code == 2, r3.output
+    assert _read_graph(tmp_graph)[0]["dispatch_verb"] == "/marketing"
 
 
 def test_update_dispatch_verb_unknown_word_refused(tmp_graph):
@@ -2986,7 +3022,7 @@ def test_update_dispatch_verb_unknown_word_refused(tmp_graph):
     nid = json.loads(r.output)["id"]
     r2 = _invoke("backlog", "update", nid, "--dispatch-verb", "/fno:fix-now")
     assert r2.exit_code == 2, r2.output
-    assert "accepted:" in r2.output
+    assert "accepted here:" in r2.output
     assert _read_graph(tmp_graph)[0].get("dispatch_verb") is None
 
 
