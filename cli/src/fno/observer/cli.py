@@ -486,11 +486,9 @@ def _judge_via_rust(argv: list[str]) -> Optional[dict]:
     try:
         result = subprocess.run([str(binary), "judge", *argv], capture_output=True, text=True, timeout=3600)
         return json.loads(result.stdout)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        typer.echo(f"judge fault: {exc}", err=True)
-        return None
-    except ValueError:
-        typer.echo(f"judge fault: bad output (stdout={result.stdout[:200]!r} stderr={result.stderr[:200]!r})", err=True)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        detail = f"bad output (stdout={result.stdout[:200]!r} stderr={result.stderr[:200]!r})" if isinstance(exc, ValueError) else str(exc)
+        typer.echo(f"judge fault: {detail}", err=True)
         return None
 
 
