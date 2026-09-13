@@ -8737,7 +8737,7 @@ def cmd_advance(
 
     from contextlib import nullcontext
 
-    from fno.backlog.advance import run_advance_epic
+    from fno.backlog.advance import run_advance_epic, run_advance_loose
     from fno.backlog.single_flight import advance_flight_scope
 
     # --epic routes to the epic-advance path; it is a distinct trigger from the
@@ -8776,8 +8776,6 @@ def cmd_advance(
             )
         return
     if loose:
-        from fno.backlog.advance import run_advance_loose
-
         run_advance_loose(project, closed=closed, max_dispatch=max_dispatch,
                           json_out=json_out, verbose=verbose, model=model,
                           provider=provider)
