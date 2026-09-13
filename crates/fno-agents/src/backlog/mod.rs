@@ -11,6 +11,7 @@ pub mod comments;
 pub mod encounters;
 pub mod model;
 pub mod node_state;
+pub mod note_cli;
 pub mod nodes;
 pub mod note_history;
 pub mod pull_requests;

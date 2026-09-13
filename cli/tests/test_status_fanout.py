@@ -821,9 +821,13 @@ def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     assert res.exit_code == 0
     import json as _json
     payload = _json.loads(res.stdout)
-    assert payload["id"] == "x-9" and payload["note"]["text"] == "shipped wave 1"
-    assert payload["note"]["source_session_id"] == session_id
-    assert payload["note"]["source_harness"] == "codex"
+    assert payload["id"] == "x-9" and payload["text"] == "shipped wave 1"
+    assert payload["routed"] == "state" and payload["revision"] == 1
+    node = _json.loads(tmp_graph.read_text())["entries"][0]
+    state = node["current_state"]
+    assert state["body"] == "shipped wave 1"
+    assert state["source_session_id"] == session_id
+    assert state["source_harness"] is None
 
 
 def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph):
@@ -855,21 +859,24 @@ def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph
 
     node = _json.loads(tmp_graph.read_text())["entries"][0]
     assert node["details"] == "original rationale"
+    # The new note REPLACES current state; the legacy feed is untouched until
+    # the explicit migration (x-920a): never grown, never truncated.
+    assert node["current_state"]["body"] == "second finding"
     assert [note["text"] for note in node["progress_notes"]] == [
         "first finding",
-        "second finding",
     ]
 
 
 def test_backlog_progress_adapter_task_done_stamps_node_and_plan(tmp_path, monkeypatch):
     from fno import status_fanout as sf
-    import fno.graph.store as gs
 
     calls = []
     plan_doc = tmp_path / "plan.md"
     plan_doc.write_text("---\ntitle: t\n---\n\n# Plan\n")
-    monkeypatch.setattr(gs, "append_progress_note",
-                        lambda path, nid, note: (calls.append((nid, note)) or (True, str(plan_doc))))
+    monkeypatch.setattr(sf, "_machine_note",
+                        lambda path, nid, kind, text: calls.append((nid, text)) or {"routed": "history", "node_id": nid})
+    monkeypatch.setattr("fno.graph.api.node",
+                        lambda nid: type("R", (), {"plan_path": str(plan_doc)})())
     ev = _ev("2026-07-12T00:00:05Z", "task_done", **{"node": "x-9", "outcome": "SUCCESS"})
     status, _ = sf._dispatch_backlog_progress(
         StatusSinkConfig(name="b", type="backlog-progress"), ev, tmp_path)
@@ -882,9 +889,8 @@ def test_backlog_progress_adapter_task_done_stamps_node_and_plan(tmp_path, monke
 
 def test_backlog_progress_adapter_ignores_wrong_kind(tmp_path, monkeypatch):
     from fno import status_fanout as sf
-    import fno.graph.store as gs
 
-    monkeypatch.setattr(gs, "append_progress_note",
+    monkeypatch.setattr(sf, "_machine_note",
                         lambda *a: (_ for _ in ()).throw(AssertionError("should not be called")))
     ev = _ev("t", "task_started", **{"node": "x-9"})
     status, _ = sf._dispatch_backlog_progress(
@@ -1437,11 +1443,11 @@ def test_append_plan_progress_skips_silently_on_lock_timeout(tmp_path, monkeypat
 def test_backlog_progress_delivered_even_when_plan_lock_times_out(tmp_path, monkeypatch):
     import contextlib
     from fno import status_fanout as sf
-    import fno.graph.store as gs
 
     plan_doc = tmp_path / "plan.md"
     plan_doc.write_text("# Plan\n")
-    monkeypatch.setattr(gs, "append_progress_note", lambda path, nid, note: (True, str(plan_doc)))
+    monkeypatch.setattr(sf, "_machine_note",
+                        lambda path, nid, kind, text: {"routed": "history", "node_id": nid})
 
     @contextlib.contextmanager
     def timing_out(path, timeout=2.0):

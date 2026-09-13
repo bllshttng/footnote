@@ -554,6 +554,15 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
     }
+
+    // `backlog-note` (x-920a): the native note action. Daemon-free write; the
+    // Python `fno backlog note` bridge owns evidence checks, identity,
+    // archived refusal, crown candidates and the mail transport, this action
+    // owns the bounded-state policy, revision-checked replacement, history
+    // routing, and the nobody-bound pre-write refusal (exit 3).
+    if verb == "backlog-note" {
+        return fno_agents::backlog::note_cli::run_note(&args[1..]);
+    }
     // `court-orphans` (x-f0d2): the orphan-crown sweep for `fno agents court`,
     // daemon-free read; `==` dispatch like graph-get, and registered in
     // ALL_CLIENT_ACTIONS like every direct dispatch the ratchet counts.

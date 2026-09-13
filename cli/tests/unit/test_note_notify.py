@@ -636,23 +636,24 @@ def test_one_confirmed_delivery_among_failures_still_exits_zero(monkeypatch) -> 
 
 
 def _run(monkeypatch, argv: list[str], readers=None, refused=None, send=None):
-    """Run `fno backlog note` with resolution and the graph write stubbed.
+    """Run `fno backlog note` with resolution and the native write stubbed.
 
     `refused` short-circuits resolution; `readers` stands in for a resolved
-    binding. The append stub records the node id it was handed.
+    binding. The write stub records the node id it was handed.
     """
     from typer.testing import CliRunner
 
     from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
 
     monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
-    appended: list[str] = []
+    written: list[str] = []
 
-    def fake_append(path, node_id, note):
-        appended.append(node_id)
-        return True, None
+    def fake_write(node_id, text, *, quiet, session_id, graph_path):
+        written.append(node_id)
+        return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
 
-    monkeypatch.setattr("fno.graph.store.append_progress_note", fake_append)
+    monkeypatch.setattr(note_bridge, "_write_state", fake_write)
 
     def fake_readers(task_id, graph_path):
         if refused is not None:
@@ -662,7 +663,7 @@ def _run(monkeypatch, argv: list[str], readers=None, refused=None, send=None):
     monkeypatch.setattr(note_notify, "readers_before_append", fake_readers)
     if send is not None:
         monkeypatch.setattr(note_notify, "send_pointer", send)
-    return CliRunner().invoke(graph_cli.cli, argv), appended
+    return CliRunner().invoke(graph_cli.cli, argv), written
 
 
 def test_the_verb_delivers_by_default(monkeypatch) -> None:
@@ -684,10 +685,16 @@ def test_quiet_writes_the_note_and_resolves_nobody(monkeypatch) -> None:
     from typer.testing import CliRunner
 
     from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
 
     monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
     monkeypatch.setattr(
-        "fno.graph.store.append_progress_note", lambda *a, **k: (True, None)
+        note_bridge,
+        "_write_state",
+        lambda node_id, text, *, quiet, session_id, graph_path: (
+            0,
+            {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1},
+        ),
     )
 
     def no_resolve(task_id, graph_path):
@@ -708,9 +715,6 @@ def test_quiet_archived_node_uses_the_archive_refusal(monkeypatch) -> None:
     from fno.graph import cli as graph_cli
 
     monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
-    monkeypatch.setattr(
-        "fno.graph.store.append_progress_note", lambda *a, **k: (False, None)
-    )
     monkeypatch.setattr(
         "fno.graph._archive_lookup.archived_entry",
         lambda node_id: {"id": "x-3a64"} if node_id == "x-3a64" else None,
@@ -745,23 +749,24 @@ def test_a_refusal_writes_nothing_and_exits_three(monkeypatch) -> None:
 
 
 def test_an_unknown_node_refuses_before_the_append(tmp_path, monkeypatch) -> None:
-    """The real resolver against a real graph file: exit 1, nothing appended."""
+    """The real resolver against a real graph file: exit 1, nothing written."""
     from typer.testing import CliRunner
 
     from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
 
     graph = _graph(tmp_path, [{"id": "x-0d08"}])
     monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: graph)
-    appended: list[str] = []
+    written: list[str] = []
 
-    def fake_append(path, node_id, note):
-        appended.append(node_id)
-        return True, None
+    def fake_write(node_id, text, *, quiet, session_id, graph_path):
+        written.append(node_id)
+        return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
 
-    monkeypatch.setattr("fno.graph.store.append_progress_note", fake_append)
+    monkeypatch.setattr(note_bridge, "_write_state", fake_write)
     result = CliRunner().invoke(graph_cli.cli, ["note", "x-ffff", "the finding"])
     assert result.exit_code == 1
-    assert appended == []
+    assert written == []
     assert "no node resolves to 'x-ffff'" in result.stderr
 
 
