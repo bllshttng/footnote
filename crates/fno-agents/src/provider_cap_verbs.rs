@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::agents_config::provider_cap_config;
 use crate::paths::AgentsHome;
-use crate::provider_cap::{append_questions_row, read_persisted_snapshot};
+use crate::provider_cap::{append_questions_row, questions_path, read_persisted_snapshot};
 use crate::provider_cap::{
     epoch_to_rfc3339, lane_file_token, lanes_dir, now_epoch_secs, snapshot, CapSnapshot,
     PROVIDER_CAP_INTERVAL_S,
@@ -159,16 +159,19 @@ fn cap_decide(args: &[String]) -> i32 {
         eprintln!("provider-cap decide: cannot write {}: {e}", path.display());
         return 1;
     }
-    append_questions_row(&json!({
-        "ts": epoch_to_rfc3339(now_epoch_secs()),
-        "type": "operator_question_closed",
-        "source": "provider-cap",
-        "data": {
-            "question_id": format!("provider-cap:{lane}"),
-            "answer": verdict,
-            "closed_by": "provider-cap decide",
-        },
-    }));
+    append_questions_row(
+        &questions_path(&home),
+        &json!({
+            "ts": epoch_to_rfc3339(now_epoch_secs()),
+            "type": "operator_question_closed",
+            "source": "provider-cap",
+            "data": {
+                "question_id": format!("provider-cap:{lane}"),
+                "answer": verdict,
+                "closed_by": "provider-cap decide",
+            },
+        }),
+    );
     println!("recorded: {} -> {verdict}", path.display());
     0
 }
@@ -223,16 +226,37 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome, config_cwd: PathBuf
     std::thread::spawn(move || {
         let cfg = provider_cap_config(&config_cwd);
         let now = now_epoch_secs();
-        let (skip, lanes_open) = match snapshot(&home, &config_cwd, now, &cfg) {
+        let (skip, detail) = match snapshot(&home, &config_cwd, now, &cfg) {
             Ok(snap) => {
                 crate::provider_cap::persist_snapshot(&home, &snap);
                 if cfg.enabled {
-                    ("ok", open_lane_count(&snap))
+                    let d = run_armed(
+                        &home,
+                        &crate::provider_cap::CapScan {
+                            registry: home.registry_json(),
+                            projects_dir: crate::claude_drive::claude_projects_dir(),
+                            runtime_state: crate::provider_cap::runtime_state_path(),
+                            settings_candidates: crate::provider_cap::settings_candidates(
+                                &config_cwd,
+                            ),
+                            compaction_home: home.root().to_path_buf(),
+                        },
+                        &snap,
+                        &cfg,
+                        now,
+                    );
+                    (None, d)
                 } else {
-                    ("provider_cap_off", open_lane_count(&snap))
+                    (
+                        Some("provider_cap_off"),
+                        format!("open_lanes={}", open_lane_count(&snap)),
+                    )
                 }
             }
-            Err(_reason) => ("snapshot_failed", 0usize),
+            Err(reason) => (
+                Some("snapshot_failed"),
+                format!("snapshot failed: {reason}"),
+            ),
         };
         let journal = crate::loop_runtime::Journal::new_raw(
             home.events_jsonl(),
@@ -243,8 +267,8 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome, config_cwd: PathBuf
             "provider_cap",
             crate::tick_ledger::SCHED_DAEMON,
             0,
-            if skip == "ok" { None } else { Some(skip) },
-            Some(&format!("open_lanes={lanes_open}")),
+            skip.as_deref(),
+            Some(&detail),
             PROVIDER_CAP_INTERVAL_S,
         );
         flag.store(false, Ordering::SeqCst);
@@ -253,4 +277,158 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome, config_cwd: PathBuf
 
 fn open_lane_count(snap: &CapSnapshot) -> usize {
     snap.open_lanes().len()
+}
+
+// ---------------------------------------------------------------------------
+// Real-world deps for the armed path (the daemon shells out to fno).
+// ---------------------------------------------------------------------------
+
+fn run_fno(args: &[&str], cwd: Option<&std::path::Path>, timeout: std::time::Duration) -> bool {
+    use std::process::{Command, Stdio};
+    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+    let mut cmd = Command::new(&fno);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match cmd.spawn() {
+        Err(_) => false,
+        Ok(mut child) => {
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return status.success(),
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Ok(None) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return false;
+                    }
+                    Err(_) => return false,
+                }
+            }
+        }
+    }
+}
+
+/// The armed actor's world: fno verbs with bounded waits. A step that cannot
+/// prove its effect returns false/Err and the journal records `unknown`.
+fn real_deps() -> crate::provider_cap::LeaveDeps {
+    use crate::provider_cap::LeaveDeps;
+    LeaveDeps {
+        refresh_usage: Box::new(|| {
+            run_fno(
+                &["config", "accounts", "usage", "--refresh"],
+                None,
+                std::time::Duration::from_secs(90),
+            )
+        }),
+        spawn: Box::new(|member, flags, handoff_path| {
+            use std::process::{Command, Stdio};
+            let fno =
+                std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+            let cwd = member
+                .cwd
+                .clone()
+                .ok_or_else(|| "no cwd on the registry row".to_string())?;
+            let node = member.node.clone().unwrap_or_default();
+            let verb = if member.harness == "codex" {
+                "$fno:target"
+            } else {
+                "/fno:target"
+            };
+            let prompt = if node.is_empty() {
+                format!(
+                    "Read the handoff doc at {} and continue its work.",
+                    handoff_path.display()
+                )
+            } else {
+                format!(
+                    "{verb} {node}. The handoff doc at {} names the resume point; read it first.",
+                    handoff_path.display()
+                )
+            };
+            let short = member
+                .session_id
+                .as_deref()
+                .unwrap_or("cap")
+                .get(0..8)
+                .unwrap_or("cap")
+                .to_string();
+            let name = format!("pc-cap-{short}");
+            let mut cmd = Command::new(&fno);
+            cmd.current_dir(std::path::Path::new(&cwd));
+            cmd.args(["agents", "spawn", "--name", &name]);
+            cmd.args(flags.iter().map(|s| s.as_str()));
+            cmd.arg(&prompt);
+            let out = cmd
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|e| format!("spawn exec failed: {e}"))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "spawn refused: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                ));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout)
+                .chars()
+                .take(64)
+                .collect())
+        }),
+        confirm: Box::new(|sid| {
+            run_fno(
+                &["agents", "truth", sid],
+                None,
+                std::time::Duration::from_secs(60),
+            )
+        }),
+        stop: Box::new(|member| {
+            let who = member
+                .session_id
+                .clone()
+                .unwrap_or_else(|| member.name.clone());
+            if run_fno(
+                &["agents", "stop", &who],
+                None,
+                std::time::Duration::from_secs(60),
+            ) {
+                Ok(())
+            } else {
+                Err(format!("stop {} failed", member.name))
+            }
+        }),
+    }
+}
+
+/// Extend the armed branch: run the leave ladder per open lane. Returns the
+/// tick detail.
+fn run_armed(
+    home: &crate::paths::AgentsHome,
+    scan: &crate::provider_cap::CapScan,
+    snap: &CapSnapshot,
+    cfg: &crate::agents_config::ProviderCapConfig,
+    now: i64,
+) -> String {
+    let deps = real_deps();
+    let mut parts: Vec<String> = Vec::new();
+    for lane in snap.open_lanes() {
+        let answer = crate::provider_cap::read_decision(home, &lane.lane);
+        let outcome =
+            crate::provider_cap::run_leave_lane(home, scan, lane, answer.as_ref(), cfg, now, &deps);
+        parts.push(format!("{}: {outcome}", lane.lane));
+    }
+    if parts.is_empty() {
+        "ok: no open lanes".to_string()
+    } else {
+        parts.join(" | ")
+    }
 }
