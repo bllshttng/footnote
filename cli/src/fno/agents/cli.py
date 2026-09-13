@@ -2051,9 +2051,9 @@ def cmd_spawn(
         if launch_account_label:
             prov_env["FNO_ACCOUNT"] = launch_account_label
 
-    # A spawn into an undeclared FOREIGN repo pins `never` for the child; only
-    # an explicit --cwd can name a foreign target. An explicit ambient override
-    # rides the same overlay, else the pane wrapper strips what the operator set.
+    # An undeclared FOREIGN target (explicit --cwd only) pins `never`; an
+    # explicit ambient override rides the same overlay, else the pane wrapper
+    # strips what the operator set.
     from fno.worktree_paths import UNDECLARED_REPO_RECEIPT, undeclared_dispatch_pin
 
     _pin = (

@@ -598,10 +598,9 @@ def policy(
 ) -> None:
     """Print the resolved worktree policy for <repo>. Read-only.
 
-    Line 1 is the policy (never|harness-native|external); later lines carry
-    `base=` (non-never), `source=`, and a `requested=/degraded=true` clause in
-    `ensure`'s vocabulary. Shares the SAME resolver `ensure` uses. A parse
-    error / out-of-enum value exits 1 with the reason on stderr.
+    Line 1 is the policy word; later lines: base= (non-never), source=, and a
+    requested=/degraded=true clause. Same resolver `ensure` uses; a parse
+    error exits 1 with the reason on stderr.
     """
     from fno.worktree_paths import resolve_worktree_policy
 

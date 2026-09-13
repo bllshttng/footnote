@@ -290,7 +290,7 @@ def resolve_worktree_policy(
     """Resolve the worktree policy for ``repo_root`` under ``harness``.
 
     Precedence: ``FNO_WORKTREE_POLICY`` (how a dispatcher pins an undeclared
-    target's policy for its child) > per-project
+    target's child) > per-project
     ``work.workspaces.<slug>.projects[].worktree`` > global ``worktree.policy`` >
     built-in ``harness-native``. A config file that exists but fails to parse
     RAISES (fail closed); an absent key is not an error. ``harness-native``
