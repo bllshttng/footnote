@@ -51,6 +51,8 @@ def _verb_refusal(value: str) -> tuple[Optional[str], Optional[str]]:
         verb_code_for(value)
     except AgentNameError:
         static_ok = False
+    if static_ok:
+        return None, None
     allowed: list[str] = []
     registry: dict = {}
     try:
@@ -66,9 +68,7 @@ def _verb_refusal(value: str) -> tuple[Optional[str], Optional[str]]:
     except Exception:  # noqa: BLE001 - unreadable config leaves the static set
         allowed, registry = [], {}
     chosen = "/" + value[len("/fno:"):] if value.startswith("/fno:") else value
-    if static_ok or chosen in allowed or chosen in registry:
-        if static_ok:
-            return None, None
+    if chosen in allowed or chosen in registry:
         return None, (
             f"warning: dispatch verb {value!r} resolves only in "
             "config.dispatch.allowed_verbs/verb_registry; the drain's "
