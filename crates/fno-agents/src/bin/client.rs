@@ -25,6 +25,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "--emit-schema",
     "adopt",
     "announce",
+    "canonical-check",
     "ask",
     "attach",
     "authorized-merge",
@@ -477,6 +478,13 @@ async fn run(args: Vec<String>) -> i32 {
     // auto-routed `fno agents` surface.
     if verb == "publish-review" {
         return fno_agents::publish_review::run_publish_review(&args[1..]);
+    }
+
+    // `canonical-check` (x-a150): the canonical-sync divergence read. Direct
+    // dispatch; no daemon RPC. The Python post-merge sync sends one JSON
+    // payload and reads the answer back; binary-first like `publish-review`.
+    if verb == "canonical-check" {
+        return fno_agents::canonical_check::run_canonical_check(&args[1..]);
     }
 
     // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
