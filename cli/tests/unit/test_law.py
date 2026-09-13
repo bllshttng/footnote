@@ -20,6 +20,26 @@ LAW_RECORDED_EXIT = 0
 LAW_REFUSED_EXIT = 3
 
 
+@pytest.fixture(autouse=True)
+def quiet_sweep(request, monkeypatch):
+    """law set's rule-time sweep is best-effort stderr side work over the
+    machine-wide question store; the suite keeps it silent except in the
+    tests that pin its contract (x-cf6a)."""
+    from fno import law as law_mod
+
+    request.node._real_sweep = law_mod._sweep_open_questions
+    monkeypatch.setattr(law_mod, "_sweep_open_questions", lambda *a, **k: None)
+
+
+@pytest.fixture
+def real_sweep(request, monkeypatch):
+    """Re-arm the real sweep for the contract tests."""
+    from fno import law as law_mod
+
+    monkeypatch.setattr(law_mod, "_sweep_open_questions", request.node._real_sweep)
+
+
+
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
@@ -796,3 +816,105 @@ def test_body_with_no_code_fact_records_with_no_reads_row(
     assert calls[0]["text"] == (
         "Merges belong to the operator\nThe operator owns durable policy."
     )
+
+
+# ── the rule-time sweep: a new law names the open questions it may answer ─────
+
+
+class TestLawSetSweep:
+    """`law set` names open questions the new law may answer (x-cf6a). The
+    sweep is best-effort stderr side work: stdout stays exactly the `d-` id
+    and the exit stays 0, pass or fail - exit 1 is reserved for a failed
+    index write."""
+
+    def test_sweep_lines_hit_stderr_and_stdout_stays_the_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_sweep
+    ) -> None:
+        index = _isolate(tmp_path, monkeypatch)
+        _as_chat_session(monkeypatch)
+        questions = tmp_path / "questions.jsonl"
+        questions.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-09-12T17:16:00Z",
+                    "type": "operator_question",
+                    "data": {
+                        "question_id": "q-470f40d2",
+                        "question": "raise the allowance for pr-1847?",
+                        "subject": "pr-1847-budget-exception",
+                        "asker": "2cf809f6",
+                        "session_id": "sess-9f2c",
+                    },
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setattr("fno.paths.questions_jsonl", lambda: questions)
+
+        def fake_verb(verb, payload, *a, **k):
+            assert verb == "law-match"
+            assert payload["mode"] == "law"
+            assert payload["law"]["subject"] == "file-budget"
+            assert payload["questions"][0]["id"] == "q-470f40d2"
+            return {
+                "ok": True,
+                "candidates": [{"question_id": "q-470f40d2"}],
+                "total": 1,
+                "lines": [
+                    'law: d-1a2b3c4d may answer open q-470f40d2 (asker 2cf809f6): '
+                    '"raise the allowance for pr-1847?"'
+                ],
+            }
+
+        monkeypatch.setattr("fno.rust_binary.verb_call", fake_verb)
+
+        result = _run(
+            [
+                "set",
+                "file-budget",
+                "The allowance is never raised.",
+                "--rationale",
+                "The operator owns the budget.",
+            ]
+        )
+
+        assert result.exit_code == 0, result.output
+        decision_id = result.stdout.strip()
+        assert decision_id.startswith("d-")
+        assert "may answer open q-470f40d2" in result.stderr
+        rows = [
+            json.loads(line) for line in index.read_text().splitlines() if line.strip()
+        ]
+        assert rows[0]["data"]["decision_id"] == decision_id
+
+    def test_a_failed_sweep_keeps_exit_0_and_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_sweep
+    ) -> None:
+        index = _isolate(tmp_path, monkeypatch)
+        _as_chat_session(monkeypatch)
+        questions = tmp_path / "questions.jsonl"
+        questions.write_text("")
+        monkeypatch.setattr("fno.paths.questions_jsonl", lambda: questions)
+
+        def broken(*a, **k):
+            raise RuntimeError("matcher exploded")
+
+        monkeypatch.setattr("fno.rust_binary.verb_call", broken)
+
+        result = _run(
+            [
+                "set",
+                "file-budget",
+                "The allowance is never raised.",
+                "--rationale",
+                "The operator owns the budget.",
+            ]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert result.stdout.strip().startswith("d-")
+        assert "open-question sweep failed" in result.stderr
+        rows = [
+            json.loads(line) for line in index.read_text().splitlines() if line.strip()
+        ]
+        assert len(rows) == 1, "the law itself is recorded"

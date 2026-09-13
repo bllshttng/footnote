@@ -42,6 +42,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "drive",
     "drive-authority",
     "evidence-gate",
+    "law-match",
     "finalize",
     "fleet-incident",
     "graph-get",
@@ -241,6 +242,14 @@ async fn run(args: Vec<String>) -> i32 {
     // added.
     if matches!(verb, "evidence-gate") {
         return fno_agents::evidence::run_evidence_gate(&args[1..]);
+    }
+
+    // `law-match` is the hidden binary-direct transport for the question-to-law
+    // matcher (x-cf6a). Same `matches!` treatment as `evidence-gate`: it stays
+    // out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard, so no
+    // advertised fno verb is added.
+    if matches!(verb, "law-match") {
+        return fno_agents::law_match::run_law_match(&args[1..]);
     }
 
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the

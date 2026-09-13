@@ -109,7 +109,6 @@ pub mod gemini_ask;
 mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
-
 pub mod graph_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
@@ -121,6 +120,7 @@ pub mod king_board;
 pub mod king_history;
 pub mod king_ledger;
 pub mod king_termination;
+pub mod law_match;
 pub mod liveness_sweep;
 pub mod logs;
 pub mod logs_client;

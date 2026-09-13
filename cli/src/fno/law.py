@@ -57,6 +57,39 @@ def validate_durable_law(
 law_app = typer.Typer(help="Record operator law in one call.")
 
 
+def _sweep_open_questions(subject: str, decision: str, decision_id: str) -> None:
+    """Best-effort rule-time join (x-cf6a): name the open questions the new
+    law may answer. The matcher runs in the crate (`law-match`); the
+    open-question fold stays in `read_open_questions`. A candidate is only a
+    surface, never a verdict - three per-PR budget grants point the other way
+    from the general law - so each line carries the mail command for the
+    recording session to judge and send. It never raises and never touches
+    stdout or the exit code: the law is already recorded here, and exit 1 is
+    reserved for a failed index write.
+    """
+    try:
+        from fno.outstanding.core import read_open_questions
+        from fno.rust_binary import verb_call
+
+        questions = read_open_questions(Path.cwd(), liveness_budget_seconds=0)
+        answer = verb_call(
+            "law-match",
+            {
+                "mode": "law",
+                "law": {
+                    "decision_id": decision_id,
+                    "subject": subject,
+                    "decision": decision,
+                },
+                "questions": [q.as_dict() for q in questions],
+            },
+        )
+        for line in answer.get("lines") or []:
+            typer.echo(line, err=True)
+    except Exception as exc:  # noqa: BLE001 - the law is already recorded
+        typer.echo(f"law: open-question sweep failed ({exc}); the law is recorded", err=True)
+
+
 @law_app.callback()
 def _law_callback() -> None:
     """Hold `set` as a named subcommand on BOTH mounts.
@@ -155,3 +188,4 @@ def record_command(
         )
         raise typer.Exit(1) from exc
     typer.echo(result["decision_id"])
+    _sweep_open_questions(subject, decision, result["decision_id"])
