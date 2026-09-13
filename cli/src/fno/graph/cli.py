@@ -8795,20 +8795,16 @@ def cmd_advance(
         if not project:
             typer.echo("advance: --loose requires --project", err=True)
             raise typer.Exit(code=2)
-        from fno.backlog.advance import advance_project_loose, echo_advance_receipt
+        from fno.backlog.advance import run_advance_loose
 
-        try:
-            loose_result = advance_project_loose(
-                project,
-                max_dispatch=max_dispatch,
-                verbose=verbose,
-                model=model,
-                provider=provider,
-            )
-        except Exception as exc:  # noqa: BLE001 - the drain itself is non-fatal per-child
-            typer.echo(f"advance --loose: unexpected error (non-fatal): {exc}", err=True)
-            raise typer.Exit(code=0)
-        echo_advance_receipt(loose_result, kind="loose", json_out=json_out)
+        run_advance_loose(
+            project,
+            max_dispatch=max_dispatch,
+            json_out=json_out,
+            verbose=verbose,
+            model=model,
+            provider=provider,
+        )
         return
     if stop or max_dispatch is not None or continuation:
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)

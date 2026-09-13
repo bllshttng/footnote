@@ -4552,6 +4552,32 @@ def echo_advance_receipt(result: AdvanceEpicResult, *, kind: str, json_out: bool
                 typer.echo(f"{kind} {result.epic_id}: {r.node_id}: {note}")
 
 
+def run_advance_loose(
+    project: str,
+    *,
+    max_dispatch: Optional[int],
+    json_out: bool,
+    verbose: bool,
+    model: Optional[str],
+    provider: Optional[str],
+) -> None:
+    """Run the loose-drain and render its receipt (x-e221 rung-1)."""
+    import typer
+
+    try:
+        loose_result = advance_project_loose(
+            project,
+            max_dispatch=max_dispatch,
+            verbose=verbose,
+            model=model,
+            provider=provider,
+        )
+    except Exception as exc:  # noqa: BLE001 - the drain itself is non-fatal per-child
+        typer.echo(f"advance --loose: unexpected error (non-fatal): {exc}", err=True)
+        raise typer.Exit(code=0)
+    echo_advance_receipt(loose_result, kind="loose", json_out=json_out)
+
+
 def run_advance_epic(
     epic: str,
     *,

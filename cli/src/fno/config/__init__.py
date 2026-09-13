@@ -2175,13 +2175,7 @@ class ProcessAdmissionBlock(BaseModel):
         return cast(int, _coerce_positive_int(v, 400))
 
 
-
 def _coerce_positive_int(v: object, default: Optional[int]) -> Optional[int]:
-    """A malformed/non-positive int reads as `default`; never raises.
-
-    One body for the half-dozen field coercers that share the shape: a bool
-    is never a count, a decimal string parses, anything else is the default.
-    """
     if isinstance(v, bool):
         return default
     if isinstance(v, int) and v >= 1:
@@ -2261,11 +2255,7 @@ class AgentsBlock(SweepKeys):
     # hard_max_load_per_cpu is the absolute backstop, read on the 15-minute
     # load; max_load_per_cpu is deprecated and ignored (x-7783 LD2).
     max_live: int = 3
-    # Per-territory team cap (x-e221): the max LIVE workers whose node is
-    # contained in ONE crown scope. max_live stays the machine ceiling every
-    # territory competes under; this is the team size. Rows that work no node
-    # (kings, blueprinters, ad-hoc panes) never count against it.
-    max_live_per_territory: int = 4
+    max_live_per_territory: int = 4  # x-e221 team cap; contract in the registry
     provider_limits: dict[str, ProviderBudget] = Field(
         default_factory=lambda: {
             k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
@@ -2327,7 +2317,7 @@ class AgentsBlock(SweepKeys):
     @field_validator("max_live_per_territory", mode="before")
     @classmethod
     def _coerce_max_live_per_territory(cls, v: object) -> object:
-        """Drop a non-positive / non-int cap to the default (4); never raise."""
+        """Drop a non-positive / non-int cap to the default (4)."""
         return _coerce_positive_int(v, 4)
 
     @field_validator("pane_group_max", mode="before")
