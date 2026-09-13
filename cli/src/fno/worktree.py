@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from fno._subprocess_util import run_bounded
+from fno.cargo_build_dir import remove_build_dir_for_worktree
 
 # 120s bounds the hook well below the 10+ minute cleanup-leg stalls on record.
 _SETUP_HOOK_TIMEOUT_S = 120
@@ -389,16 +390,7 @@ class WorktreeManager:
         if worktree.path.exists():
             # Reclaim the cargo build hash dir while the manifest can still
             # answer; best-effort, the sweep reaps what resolution misses.
-            # The helper ships with the plugin, not the managed project.
-            from fno.paths import resolve_plugin_script
-
-            reclaim_script = resolve_plugin_script("scripts/lib/cargo-build-dir.sh")
-            if reclaim_script.exists():
-                subprocess.run(
-                    ["bash", str(reclaim_script), "remove-for", str(worktree.path)],
-                    cwd=self.repo_root,
-                    capture_output=True,
-                )
+            remove_build_dir_for_worktree(worktree.path)
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree.path)],
                 cwd=self.repo_root,

@@ -11,6 +11,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from fno.cargo_build_dir import remove_build_dir_for_worktree
 from fno.worktree_paths import (
     _validate_component,
     legacy_worktree_path,
@@ -219,18 +220,8 @@ def remove_worktree(
         wt_path = legacy
 
     # Reclaim the cargo build hash dir while the manifest can still answer;
-    # best-effort, the sweep reaps what resolution misses. The helper ships
-    # with the plugin, not the managed project.
-    from fno.paths import resolve_plugin_script
-
-    reclaim_script = resolve_plugin_script("scripts/lib/cargo-build-dir.sh")
-    if reclaim_script.exists():
-        subprocess.run(
-            ["bash", str(reclaim_script), "remove-for", str(wt_path)],
-            cwd=str(repo_root),
-            capture_output=True,
-            check=False,
-        )
+    # best-effort, the sweep reaps what resolution misses.
+    remove_build_dir_for_worktree(wt_path)
 
     result = subprocess.run(
         ["git", "worktree", "remove", "--force", str(wt_path)],
