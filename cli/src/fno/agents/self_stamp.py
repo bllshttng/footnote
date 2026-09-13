@@ -82,9 +82,7 @@ def identity_ambiguity_message(identity) -> str:
         else ""
     )
     rejection = identity.rejected[0] if identity.rejected else None
-    # An owned_by_live_row rejection is a different ambiguity than mixed
-    # families (x-a409): "multiple markers" sends the operator hunting for
-    # inherited env that is not there.
+    # owned_by_live_row is a different ambiguity than mixed families (x-a409).
     if rejection:
         opening = (
             "cannot decide which session is 'self': id "
