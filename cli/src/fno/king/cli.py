@@ -564,32 +564,6 @@ def history_cmd(
     raise typer.Exit(code)
 
 
-def checkin_cmd(
-    scope: str = typer.Option(
-        "", "--scope", help="Crown scope to check in. Default: this session's own crown."
-    ),
-    as_json: bool = typer.Option(False, "--json", "-J", help="Emit the whole payload as one object."),
-    no_emit: bool = typer.Option(
-        False, "--no-emit", help="Print and diff without appending the journal row."
-    ),
-) -> None:
-    """Run the reign check-in body: gather, print, diff, journal.
-
-    One verb runs what a king used to hand-assemble from six to eight calls.
-    The printed numbers and the stored ``reign_checkin`` row come from one
-    dict; a failed reader gets its own line and the beat continues. It never
-    decides: no spawn, no reap, no lever.
-    """
-    from fno.king.checkin import run_checkin
-    from fno.king.history import HistoryUnreadable, resolve_scope
-
-    try:
-        crown = resolve_scope(scope)
-    except HistoryUnreadable as exc:
-        _refuse(f"king: {exc}")
-    run_checkin(crown, emit=not no_emit, as_json=as_json)
-
-
 def ledger_cmd(
     out: Optional[Path] = typer.Option(
         None, "--out", help="Write the page here instead of <state_dir>/reign.html."
@@ -831,7 +805,6 @@ agents_king_app.command("shape")(shape_cmd)
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
 # Here only, like the faq typer: the retired bare `fno king` menu stays capped.
 agents_king_app.command("history")(history_cmd)
-agents_king_app.command("checkin")(checkin_cmd)
 agents_king_app.command("ledger")(ledger_cmd)
 agents_king_app.add_typer(faq_app, name="faq")
 
