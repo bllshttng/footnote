@@ -25,9 +25,7 @@ def apply(node: dict, dispatch_verb: Optional[str], dispatch_brief: Optional[str
         from fno.agents.naming import AgentNameError, accepted_verb_words, verb_code_for
 
         verb_val = None if dispatch_verb.lower() == "null" else dispatch_verb
-        if verb_val is None:
-            node["dispatch_verb"] = None
-        else:
+        if verb_val is not None:
             try:
                 verb_code_for(verb_val)
             except AgentNameError as exc:
@@ -40,7 +38,7 @@ def apply(node: dict, dispatch_verb: Optional[str], dispatch_brief: Optional[str
                     err=True,
                 )
                 raise typer.Exit(code=2) from exc
-            node["dispatch_verb"] = verb_val
+        node["dispatch_verb"] = verb_val
     if dispatch_brief is not None:
         brief_val = None if dispatch_brief.lower() == "null" else dispatch_brief
         node["dispatch_brief"] = brief_val
