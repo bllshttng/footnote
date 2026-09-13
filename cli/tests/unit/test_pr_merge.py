@@ -321,7 +321,7 @@ def enabled(monkeypatch, tmp_path):
     # recovery, so the probe answers never-recovered (tests about it override).
     monkeypatch.setattr(
         "fno.pr._status.rerun_recovery",
-        lambda pr, cwd=None: {"recovered": False, "failed": []},
+        lambda pr, cwd=None, sha=None: {"recovered": False, "failed": []},
     )
     # The graph_json hermeticity pin this fixture used to carry is closed at
     # the reader now: the autouse _hermetic_merge_hold_gate fixture in
@@ -456,7 +456,7 @@ def test_fence_crash_failopen_emits_gate_escape(enabled, monkeypatch, capsys, tm
 def _flake_recovered(monkeypatch, failed=None):
     monkeypatch.setattr(
         "fno.pr._status.rerun_recovery",
-        lambda pr, cwd=None: {"recovered": True, "failed": failed or ["smoke-pytest (7)"]},
+        lambda pr, cwd=None, sha=None: {"recovered": True, "failed": failed or ["smoke-pytest (7)"]},
     )
 
 

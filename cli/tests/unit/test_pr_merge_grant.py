@@ -414,7 +414,7 @@ def _stub_merge_world(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         "fno.pr._status.rerun_recovery",
-        lambda pr, cwd=None: {"recovered": False, "failed": []},
+        lambda pr, cwd=None, sha=None: {"recovered": False, "failed": []},
     )
 
 

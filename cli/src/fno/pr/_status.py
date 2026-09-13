@@ -258,24 +258,25 @@ def _recovery_from_run_rows(run_rows, attempts_of, failed_jobs_of) -> dict:
     return {"recovered": bool(failed), "failed": failed}
 
 
-def rerun_recovery(pr_number, cwd: Optional[str] = None) -> dict:
+def rerun_recovery(pr_number, cwd: Optional[str] = None, sha: Optional[str] = None) -> dict:
     """Rerun-recovery fact for a PR head: ``{recovered: bool, failed: [names]}``.
 
     `verdict_for` reads only the latest rollup, so a failure recovered by a
     re-run is indistinguishable from never-failed - the silent path that
     merged a shard-ordering flake and reded main. ANY read error fails open:
-    a fact beside the verdict, never a second red.
+    a fact beside the verdict, never a second red. `sha` skips the PR-info
+    read when the caller already holds the head.
     """
     try:
         from fno.pr._proc import run
         from fno.pr._rest import _slug_or_reason, fetch_pr_info_rest
 
         slug, _why = _slug_or_reason(cwd)
-        info, _reason = (
-            fetch_pr_info_rest(str(pr_number), cwd=cwd, repo=slug) if slug else (None, "")
-        )
-        sha = str((info or {}).get("head_sha") or "").strip()
-        if not sha:
+        sha = str(sha or "").strip()
+        if not sha and slug:
+            info, _reason = fetch_pr_info_rest(str(pr_number), cwd=cwd, repo=slug)
+            sha = str((info or {}).get("head_sha") or "").strip()
+        if not sha or not slug:
             return dict(_NO_RECOVERY)
 
         def _get(path: str):
@@ -1066,7 +1067,11 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             coverage_status_repost = "reposted" if posted else f"repost failed: {note}"
     owner_guidance = _review_owner_guidance(coverage, activity.worktree)
     # Rerun recovery, probed on every green read of a live PR (fail-open).
-    rerun = rerun_recovery(pr, cwd) if verdict == "green" and not is_terminal else None
+    rerun = (
+        rerun_recovery(pr, cwd, sha=pr_json.get("headRefOid"))
+        if verdict == "green" and not is_terminal
+        else None
+    )
     rerun_fields = (
         {
             "rerun_recovered": bool(rerun.get("recovered")),

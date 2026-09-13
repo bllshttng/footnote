@@ -1997,6 +1997,23 @@ def run_merge(
         _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
 
+    # (2b) The flake probe. Rerun-recovery reads workflow-run history at a
+    # head - facts IMMUTABLE once the owner pins that head - so the read runs
+    # out here, before the serialized merge lock: network reads inside the
+    # lock stretch the window every queued merge waits on. The hold/journal
+    # decision itself stays in _do_merge, ahead of the coverage stamp.
+    flake = None
+    if auto_merge.require_checks_pass:
+        try:
+            from fno.pr._status import rerun_recovery
+
+            flake = rerun_recovery(pr_number, repo)
+        except Exception as exc:  # noqa: BLE001 - the probe must not wedge a merge
+            sys.stderr.write(
+                f"pr-merge: rerun-recovery probe unavailable ({exc}); "
+                "merging without the flake hold\n"
+            )
+
     # (2a-pre) Terminal exemption, the same one the authorized-merge owner
     # takes on a MERGED or CLOSED PR: this gate protects what WOULD merge, and
     # a merged or closed PR has no would-merge left. Without it, retrying
@@ -2202,6 +2219,7 @@ def run_merge(
             release_lock=release_now,
             timeout_s=timeout_s,
             accept_flake=accept_flake,
+            flake=flake,
         )
 
 
@@ -2315,6 +2333,7 @@ def _do_merge(
     release_lock: Optional[Callable[[], None]] = None,
     timeout_s: float = 300.0,
     accept_flake: bool = False,
+    flake: Optional[dict] = None,
 ) -> int:
     """Steps (3)-(4): authorize through the one owner, then run the effect.
 
@@ -2343,19 +2362,9 @@ def _do_merge(
     # The flake hold: a rerun-recovered green is not a clean green. The checks
     # verdict reads only the latest rollup, so a CI failure recovered by a
     # re-run authorizes like never-failed - the path that merged a known
-    # shard-ordering flake and reded main with it. Sits before the coverage
+    # shard-ordering flake and reded main with it. The probe ran before the
+    # lock (run_merge 2b); this is only the decision. Sits before the coverage
     # stamp: a head this gate holds must not green for the web button.
-    flake = None
-    if auto_merge.require_checks_pass:
-        try:
-            from fno.pr._status import rerun_recovery
-
-            flake = rerun_recovery(pr_number, repo)
-        except Exception as exc:  # noqa: BLE001 - the probe must not wedge a merge
-            sys.stderr.write(
-                f"pr-merge: rerun-recovery probe unavailable ({exc}); "
-                "merging without the flake hold\n"
-            )
     if flake is not None and flake.get("recovered"):
         failed = ", ".join(flake.get("failed") or []) or "unknown checks"
         if not accept_flake:

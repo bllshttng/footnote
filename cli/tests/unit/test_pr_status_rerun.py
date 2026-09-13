@@ -153,7 +153,9 @@ def _run_status(monkeypatch, capsys, rollup, rerun="__unpatched__"):
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     if rerun != "__unpatched__":
-        monkeypatch.setattr(_status, "rerun_recovery", lambda pr, cwd=None: rerun)
+        monkeypatch.setattr(
+            _status, "rerun_recovery", lambda pr, cwd=None, sha=None: rerun
+        )
     code = _status.run_status("42")
     cap = capsys.readouterr()
     return code, json.loads(cap.out), cap.err
