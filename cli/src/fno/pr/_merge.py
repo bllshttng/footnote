@@ -1562,10 +1562,9 @@ def _merge_lock() -> Iterator[tuple[_MergeLockState, Optional[Callable[[], None]
     polls for up to ``_MERGE_LOCK_WAIT_S`` (a merge holds it for seconds), then
     yields ``held``. A claims-layer error yields ``unavailable`` and the merge
     proceeds unserialized: the lock is coordination, GitHub stays the merge
-    authority, and our own tooling failing must never block a merge.
-
-    ``release_now`` (None unless acquired) releases our holder early; the
-    finally release is the same idempotent call, so both firing is safe.
+    authority, and our own tooling failing must never block a merge. Yields
+    ``(state, release_now)``; the early fire and the finally release are the
+    same idempotent call, so both firing is safe.
     """
     state: Literal["acquired", "held", "unavailable"] = "acquired"
     key = holder = release = None

@@ -191,10 +191,8 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> tuple[threading.Event, 
     exits when the budget trips or an opted-in parent dies. os._exit is safe:
     graph writes commit server-side and reconcile is idempotent."""
     def _budget_s() -> float:
-        try:
-            return float(os.environ.get("FNO_FLIGHT_BUDGET_S") or _FLIGHT_BUDGET_DEFAULT_S)
-        except ValueError:
-            return float(_FLIGHT_BUDGET_DEFAULT_S)
+        raw = os.environ.get("FNO_FLIGHT_BUDGET_S") or ""
+        return float(raw) if raw.replace(".", "", 1).isdigit() else _FLIGHT_BUDGET_DEFAULT_S
 
     stop = threading.Event()
     root = claims_root_for(flight.key) or Path.home()
@@ -231,8 +229,8 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> tuple[threading.Event, 
                 )
             flight.release()
             if os.getpgrp() == os.getpid():
-                # We lead our group (start_new_session spawners), so the kill
-                # takes the awaited subprocess subtree with us, not our parent.
+                # group leader (start_new_session spawners): the kill takes
+                # the awaited subtree with us, never our parent
                 with contextlib.suppress(OSError):
                     os.killpg(os.getpid(), signal.SIGKILL)
             os._exit(124)
