@@ -69,7 +69,12 @@ fn ac8_originals_and_positions_survive_verbatim() {
     std::fs::write(&empty, "[]").unwrap();
     let empty_manifest = empty.display().to_string();
     let (code, _) = run_notes(&[
-        "migrate", "--apply", "--manifest", &empty_manifest, "--graph", &g,
+        "migrate",
+        "--apply",
+        "--manifest",
+        &empty_manifest,
+        "--graph",
+        &g,
     ]);
     assert_eq!(code, 0, "terminal verbatim migration succeeds");
     // Hot row: no notes, marker set.
@@ -126,9 +131,7 @@ fn ac9_stale_and_oversized_and_missing_manifest_entries_refuse() {
     std::fs::write(&manifest_path, &manifest).unwrap();
     let mp = manifest_path.display().to_string();
     // Preview: nonzero, unresolved named, NO data change.
-    let (code, out) = run_notes(&[
-        "migrate", "--manifest", &mp, "--graph", &g, "--json",
-    ]);
+    let (code, out) = run_notes(&["migrate", "--manifest", &mp, "--graph", &g, "--json"]);
     assert_ne!(code, 0, "preview with an unresolved row exits nonzero");
     assert!(out.contains("unresolved") || out.contains("\"unresolved\""));
     let before = std::fs::read_to_string(&graph).unwrap();
@@ -176,12 +179,22 @@ fn ac10_rerun_is_idempotent_and_receipt_is_positive() {
     std::fs::write(&empty, "[]").unwrap();
     let empty_manifest = empty.display().to_string();
     let (code1, out1) = run_notes(&[
-        "migrate", "--apply", "--manifest", &empty_manifest, "--graph", &g,
+        "migrate",
+        "--apply",
+        "--manifest",
+        &empty_manifest,
+        "--graph",
+        &g,
     ]);
     assert_eq!(code1, 0);
     // Re-run: the row reads unchanged, history stays at two records.
     let (code2, out2) = run_notes(&[
-        "migrate", "--apply", "--manifest", &empty_manifest, "--graph", &g,
+        "migrate",
+        "--apply",
+        "--manifest",
+        &empty_manifest,
+        "--graph",
+        &g,
     ]);
     assert_eq!(code2, 0);
     assert!(out1.contains("digested_nodes=1") || out1.contains("\"digested_nodes\":1"));
