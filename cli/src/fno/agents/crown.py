@@ -694,17 +694,24 @@ def arm_crowned_missions(scope: Optional[str]) -> Optional[list[str]]:
             _emit,
             _set_mission_active,
         )
+        from fno.graph.cli import _container_ids
 
         # ONE graph parse serves every member: a graph this rung could not
         # read answers None, and the per-call fallback keeps that machine
         # working one member at a time.
         by_id = _graph_index()
         entry_of = _graph_entry if by_id is None else by_id.get
+        containers = _container_ids(list(by_id.values())) if by_id else set()
         for member in split_scope(scope):
             entry = entry_of(member) or {}
             if entry.get("type") != "epic":
                 continue
             if entry.get("status") in ("done", "superseded"):
+                continue
+            if member not in containers:
+                # advance_epic refuses a childless epic as not-a-container and
+                # leaves the flag standing, which the drain then polls forever.
+                # The dispatch lever arms it once children exist.
                 continue
             if _set_mission_active(member, True):
                 _emit(

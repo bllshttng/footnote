@@ -2043,7 +2043,10 @@ def test_a_spawn_grant_over_an_unflagged_epic_arms_its_mission(
     _seed_crown_graph(
         monkeypatch,
         tmp_path,
-        [{"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"}],
+        [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"},
+            {"id": "c-1", "type": "task", "parent": "e-1"},
+        ],
     )
 
     journal_spawn_crown(
@@ -2066,7 +2069,10 @@ def test_a_declined_spawn_arms_nothing(tmp_path: Path, monkeypatch) -> None:
     _seed_crown_graph(
         monkeypatch,
         tmp_path,
-        [{"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"}],
+        [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"},
+            {"id": "c-1", "type": "task", "parent": "e-1"},
+        ],
     )
 
     journal_spawn_crown(
@@ -2111,7 +2117,9 @@ def test_a_two_epic_scope_arms_both(tmp_path: Path, monkeypatch) -> None:
         tmp_path,
         [
             {"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"},
+            {"id": "c-1", "type": "task", "parent": "e-1"},
             {"id": "e-2", "type": "epic", "project": "beta", "status": "in_progress"},
+            {"id": "c-2", "type": "task", "parent": "e-2"},
         ],
     )
 
@@ -2155,7 +2163,10 @@ def test_a_graph_fault_leaves_the_crown_committed(
     _seed_crown_graph(
         monkeypatch,
         tmp_path,
-        [{"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"}],
+        [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"},
+            {"id": "c-1", "type": "task", "parent": "e-1"},
+        ],
     )
 
     # The spawn leg returns normally even though the arming write raised.
@@ -2186,7 +2197,8 @@ def test_recrowning_an_armed_epic_emits_nothing(
                 "project": "alpha",
                 "status": "in_progress",
                 "mission_active": True,
-            }
+            },
+            {"id": "c-1", "type": "task", "parent": "e-1"},
         ],
     )
 
@@ -2194,4 +2206,25 @@ def test_recrowning_an_armed_epic_emits_nothing(
         "granted", [], name="w", level=2, scope="e-1", grantor="human"
     )
 
+    assert _mission_events() == []
+
+
+def test_a_childless_epic_is_not_armed(tmp_path: Path, monkeypatch) -> None:
+    """advance_epic refuses a childless epic as not-a-container and leaves the
+    flag standing, which the drain would poll forever; arming waits for
+    children, where the dispatch lever takes over."""
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [{"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"}],
+    )
+
+    journal_spawn_crown(
+        "granted", [], name="w", level=2, scope="e-1", grantor="human"
+    )
+
+    assert "mission_active" not in _graph_entries()[0]
     assert _mission_events() == []
