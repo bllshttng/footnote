@@ -89,7 +89,7 @@ def _sweep(
 
 def _plant_hash(base: Path, tag: str, size: int = 4096) -> Path:
     """A realistic build-dir hash dir: sharded two deep, CACHEDIR.TAG on top."""
-    hash_dir = base / "bd" / "ef" / f"bac4721f2d16ec{tag}"
+    hash_dir = base / "bd" / f"bac4721f2d16ec{tag}"
     (hash_dir / "debug" / "deps").mkdir(parents=True)
     (hash_dir / "CACHEDIR.TAG").write_text(CACHEDIR_TAG)
     payload = hash_dir / "debug" / "deps" / "probe-0123456789abcdef"
