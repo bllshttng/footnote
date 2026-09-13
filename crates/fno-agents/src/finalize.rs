@@ -3245,7 +3245,6 @@ mod tests {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .status()
             .unwrap();
-        let before = head_of(&wt);
         std::fs::write(wt.join("in_flight.txt"), "950 insertions worth").unwrap();
         std::fs::write(wt.join("new_untracked.txt"), "never staged").unwrap();
 
@@ -3283,7 +3282,7 @@ mod tests {
         let before = head_of(d);
         std::fs::write(d.join("err.tmp"), "").unwrap();
 
-        let rescue = commit_wip_if_dirty(d, "DonePRGreen", "sess-1").unwrap();
+        commit_wip_if_dirty(d, "DonePRGreen", "sess-1").unwrap();
 
         assert_eq!(head_of(d), before, "canonical main must not move");
         assert!(

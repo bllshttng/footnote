@@ -548,7 +548,7 @@ pub fn classify(params: &Value) -> Result<Value, String> {
     let mut node_ids: Vec<String> = Vec::new();
     let (entries, rows): (Vec<Value>, Vec<Value>) = match project {
         Some(project) => {
-            let of = |v: &Value, key: &str| -> bool {
+            let _of = |v: &Value, key: &str| -> bool {
                 v.get(key)
                     .and_then(Value::as_str)
                     .map(|p| p == project)

@@ -4614,6 +4614,7 @@ mod tests {
     #[path = "control_roundtrip_tests.rs"]
     mod control_roundtrip_tests;
 
+    #[test]
     fn proto_session_name_cannot_escape_mux_dir() {
         assert!(socket_path("../evil").is_err());
         assert!(socket_path("").is_err());

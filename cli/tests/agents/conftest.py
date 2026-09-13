@@ -121,6 +121,37 @@ def _isolate_spawn_uuid_capture(monkeypatch):
     monkeypatch.setattr(_claude_session_registry, "seed_unverified_reason", lambda *a, **k: None)
 
 
+FAKE_CHILD_PID = 4242
+
+
+@pytest.fixture(autouse=True)
+def _pin_fake_child_pid_probe(monkeypatch):
+    """Keep FakeRunner's fixture child pid reading as gone on any host.
+
+    ``FakeRunner`` (test_spawn_pane.py) reports ``child_pid: 4242``, and
+    ``_reap_spawned_pane`` guards the pane kill with
+    ``spawn_gate._process_start_time`` on that pid - a real read of the host
+    process table. When an unrelated live process holds pid 4242 (pids recycle
+    constantly on a busy linux runner), the before and after reads match and
+    the reap reports the worker survived teardown, failing tests that have
+    nothing to do with that host. Pin the one fixture pid to gone and delegate
+    every other pid to the real probe; a test that exercises the probe itself
+    patches it per-test and wins (monkeypatch order: test wins). The constant
+    and this docstring are the cross-reference that keeps FakeRunner's pid
+    and FAKE_CHILD_PID the same number.
+    """
+    from fno.agents import spawn_gate
+
+    real = spawn_gate._process_start_time
+    monkeypatch.setattr(
+        spawn_gate,
+        "_process_start_time",
+        lambda pid, *args, **kwargs: (
+            None if pid == FAKE_CHILD_PID else real(pid, *args, **kwargs)
+        ),
+    )
+
+
 # The provider-exec guard lives in the ROOT cli/tests/conftest.py
 # (_block_live_provider_exec) so every cli test is covered, not just this
 # directory. x-ec81: the agents-only copy left 36 test files outside

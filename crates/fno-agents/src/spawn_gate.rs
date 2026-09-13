@@ -1200,7 +1200,10 @@ pub(crate) struct AdmissionPayload {
     capacity_cores: f64,
     #[serde(default)]
     ceiling: f64,
+    // read only through serde: kept so the admission payload still parses
+    // when the decider sends the gap the old verdict shape carried.
     #[serde(default)]
+    #[allow(dead_code)]
     gap: Option<String>,
     #[serde(default)]
     load_15m: Option<f64>,
@@ -1261,6 +1264,7 @@ pub struct FootprintCausePayload {
     /// Kept only so an older admission-less payload still parses; the verdict
     /// comes from `admission` now, never from the gap's presence.
     #[serde(default)]
+    #[allow(dead_code)] // read only through serde: older-payload parse tolerance
     attribution_gap: Option<String>,
     /// The Claude Code background daemon's idle pre-warm pool, for the
     /// `fno agents status` machine line.
@@ -1271,8 +1275,10 @@ pub struct FootprintCausePayload {
     /// 1-min load average, for the status line only. It decides nothing
     /// anywhere (x-7783 LD1).
     #[serde(default)]
+    #[allow(dead_code)] // read only through serde: display context, decides nothing
     load_1m: Option<f64>,
     #[serde(default)]
+    #[allow(dead_code)] // read only through serde: context on the payload, unused by the gate
     cpu_capacity_cores: f64,
     /// The `_emit_failure` shape: when footprint cannot measure at all it
     /// still answers, carrying this key and exit 4. Its words travel into
@@ -1333,6 +1339,7 @@ pub struct MachinePressurePayload {
     #[serde(default)]
     pub(crate) band: f64,
     #[serde(default)]
+    #[allow(dead_code)] // read only through serde: machine sizing context, no verdict reads it
     pub(crate) machine_cores: Option<f64>,
     #[serde(default)]
     pub(crate) capacity_cores: f64,

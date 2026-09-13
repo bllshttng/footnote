@@ -76,7 +76,7 @@ pub struct ReapReceipt {
     /// retirement was decided on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment: Option<serde_json::Value>,
-    /// Set when the retention window expired the EXPENDABLE detail (ledger
+    /// Set when the retention window expired the expendable detail (ledger
     /// enrichment, per-effect rows) but the identity-critical core was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details_expired_at: Option<String>,
@@ -101,12 +101,6 @@ pub struct EffectRecord {
     pub detail: Option<String>,
     pub at: String,
 }
-
-/// Which receipt fields the retention window may expire. The identity core
-/// (who, native locator, resume tokens) is NEVER on this list: the mapping
-/// this store exists to preserve must stay recoverable for as long as the
-/// native session itself is (AC2-HP).
-const EXPENDABLE_FIELDS: &[&str] = &["ledger", "effects", "log_path"];
 
 /// Load one receipt from disk. All v2 fields default, so a v1 file reads
 /// with them absent rather than invented.

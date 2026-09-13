@@ -872,6 +872,9 @@ fn advance_member_args(member: &DrainMember) -> Vec<String> {
 /// `walker:` respect, `max_lanes` cap, claim dedup), so this never forks it. A
 /// non-zero exit or unparseable receipt is a transient skip (Continue) - a truly
 /// gone mission is caught by the loop's re-resolve, not guessed at here.
+// rustfmt::skip keeps the `backlog advance` seam literal multi-line; the
+// autonomous-dispatch census greps that exact shape (test_autonomous_dispatch_census).
+#[rustfmt::skip]
 fn dispatch_member(
     cfg: &DrainConfig,
     breaker: &mut CircuitBreaker,
@@ -915,7 +918,8 @@ fn dispatch_member(
                 // The `backlog advance` argv literal at this indentation is the
                 // seam marker the autonomous-dispatch census greps. Keep the
                 // elements multi-line; `--json` stays last.
-                "backlog", "advance",
+                "backlog",
+                "advance",
             ])
             .args(target_args.clone())
             .args(["--source", "ab"])

@@ -113,8 +113,8 @@ fn members_of(
 fn crown_section(
     crown: &Value,
     titles: &BTreeMap<String, &Value>,
-    entries: &[Value],
-    projects: &Result<HashMap<String, String>, String>,
+    _entries: &[Value],
+    _projects: &Result<HashMap<String, String>, String>,
     members: Option<&BTreeSet<String>>,
 ) -> String {
     let level = match crown.get("level").and_then(|l| l.as_i64()) {
@@ -199,7 +199,7 @@ fn crown_section(
 /// Epics in no crown's territory: absent from every fold, so the page names
 /// them instead of letting their absence read as zero.
 fn uncrowned_section(
-    crowns: &[Value],
+    _crowns: &[Value],
     compiled: &[Option<BTreeSet<String>>],
     entries: &[Value],
 ) -> String {

@@ -2945,7 +2945,6 @@ fn run_node_route(rest: &[String]) -> i32 {
     if !pairs.is_empty() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
-        let now = fno_agents::daemon::now_epoch_secs();
         let mut store = fno_agents::gc_inventory::HarnessStoreIndex::default();
         for pair in &pairs {
             let Some((harness, sid)) = pair.split_once(':') else {

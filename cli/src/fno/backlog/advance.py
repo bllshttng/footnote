@@ -4553,7 +4553,7 @@ def echo_advance_receipt(result: AdvanceEpicResult, *, kind: str, json_out: bool
 
 
 def run_advance_loose(
-    project: str,
+    project: Optional[str],
     *,
     closed: Optional[str],
     max_dispatch: Optional[int],

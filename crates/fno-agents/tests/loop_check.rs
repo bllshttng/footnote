@@ -12,7 +12,7 @@
 use fno_agents::loopcheck::run_loop_check;
 #[path = "space_paths.rs"]
 mod space_paths;
-use space_paths::{project_events, project_ledger};
+use space_paths::project_events;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -1021,8 +1021,8 @@ fn ac3_hp_budget_flat_key_trips_cost() {
     let settings_path = cwd.join(".fno/config.toml");
     fs::write(&settings_path, "budget_cap = 0.01\n").unwrap();
 
-    // Ledger with cost > 0.01 for this session
-    let ledger_path = project_ledger(&cwd);
+    let ledger_path = fno_agents::paths::ledger_path(&cwd);
+    std::fs::create_dir_all(ledger_path.parent().unwrap()).unwrap();
     let ledger = serde_json::json!([
         {"session_id": "sess-budget", "cost_usd": 0.05, "tokens": 1000}
     ]);

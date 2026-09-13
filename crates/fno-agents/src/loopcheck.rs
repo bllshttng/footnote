@@ -10647,9 +10647,8 @@ fn run_bounded(
 mod read_bounds;
 
 pub(crate) use read_bounds::{
-    clamp_to_fire_budget, clamp_to_fire_deadline, stopgate_drain_reserve_ms,
-    stopgate_drain_timeout, stopgate_read_timeout, stopgate_stamp_fire, STOPGATE_BOUND_FLOOR,
-    STOPGATE_FIRE_BUDGET,
+    clamp_to_fire_deadline, stopgate_drain_reserve_ms, stopgate_drain_timeout,
+    stopgate_read_timeout, stopgate_stamp_fire, STOPGATE_BOUND_FLOOR, STOPGATE_FIRE_BUDGET,
 };
 
 /// How an external stop-gate read failed. `TimedOut` is its own kind so a
@@ -12514,6 +12513,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
 
 #[cfg(test)]
 mod tests {
+    use super::read_bounds::clamp_to_fire_budget;
     use super::*;
 
     // ── plan fidelity stop gate (x-cbab) ──────────────────────────────────────
