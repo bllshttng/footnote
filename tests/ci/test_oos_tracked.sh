@@ -68,5 +68,31 @@ run 0 'OOS heading at EOF (empty array)' $'## What\nstuff\n## Out of scope'
 # (config.backlog.id_prefix allows a letter-led 1-7 alnum token, e.g. proj1-)
 run 0 'configured-prefix node ref' $'## Out of scope\nbackend split - tracked as proj1-1234abcd'
 
+# --- PLAN_CARVEOUTS=forbidden: any exclusion item refuses --------------------
+# run_forbidden <expected_exit> <label> <body> [plan_carveouts]
+run_forbidden() {
+  local want="$1" label="$2" body="$3" mode="${4:-forbidden}" got
+  PR_BODY="$body" PLAN_CARVEOUTS="$mode" bash "$GATE" >/dev/null 2>&1; got=$?
+  if [[ "$got" -eq "$want" ]]; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL: %s\n  want exit %s, got %s\n' "$label" "$want" "$got"
+  fi
+}
+
+run_forbidden 1 'forbidden: tracked bullet refuses' $'## Out of scope\n- Tier-3 flags - x-b6e2'
+run_forbidden 1 'forbidden: section waiver does not exempt' $'## Out of scope\noos-ok: covered\n- item'
+run_forbidden 0 'forbidden: no exclusion heading passes' $'## What\nsome change'
+run_forbidden 0 'allowed: tracked bullet passes' $'## Out of scope\n- Tier-3 flags - x-b6e2' allowed
+
+SPECIMEN=$'## Explicitly not in this PR\n- a - x-7649\n- b - x-63be\n- c - x-ea5b\n- d - x-65b5\n- e - x-d2ba'
+err="$(PR_BODY="$SPECIMEN" PLAN_CARVEOUTS=forbidden bash "$GATE" 2>&1 >/dev/null)"
+if printf '%s' "$err" | grep -F 'plan forbids carve-outs; this PR declares 5 exclusion item(s)' >/dev/null; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1)); printf 'FAIL: forbidden stderr names 5 items\n  got: %s\n' "$err"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
