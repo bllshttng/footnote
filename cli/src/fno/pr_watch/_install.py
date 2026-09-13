@@ -773,6 +773,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                         "completed_at": ev.get("ts"),
                         "eligible": scan.get("eligible"),
                         "attempted": scan.get("attempted"),
+                        "scanned": scan.get("scanned"),
                     }
                 completed = _valid_completed_tick(
                     ev.get("ts"), ev.get("data"), chunks_by_receipt
