@@ -324,28 +324,19 @@ def _identity_json(record: ProviderRecord, got) -> dict:
     from fno.adapters.providers.binding import MATCHED, MISMATCH
 
     if got is None:
-        reason = (
-            "unsupported-harness" if record.harness != "claude"
-            else "api-key-route" if record.auth == "api_key"
-            else "no-observation"
-        )
-        return {
-            "status": "unknown", "account": None, "served_by": None,
-            "reason": reason, "observed_at": None,
-        }
+        reason = ("unsupported-harness" if record.harness != "claude"
+                  else "api-key-route" if record.auth == "api_key" else "no-observation")
+        return {"status": "unknown", "account": None, "served_by": None,
+                "reason": reason, "observed_at": None}
     if got.status == MATCHED:
         served_by = got.matched_record or got.requested_record
     elif got.status == MISMATCH:
         served_by = got.matched_record or got.observed_label or got.observed_principal
     else:
         served_by = None
-    return {
-        "status": got.status,
-        "account": got.requested_record,
-        "served_by": served_by,
-        "reason": got.reason,
-        "observed_at": got.observed_at or None,
-    }
+    return {"status": got.status, "account": got.requested_record,
+            "served_by": served_by, "reason": got.reason,
+            "observed_at": got.observed_at or None}
 
 
 def _fmt_resets_in(resets_at: float | None, now: float) -> str:
