@@ -1811,6 +1811,20 @@ def init(
         typer.echo(_denom_refusal, err=True)
         raise typer.Exit(code=2)
 
+    # A DECLARED required binding revalidates natively before the claim;
+    # undeclared = no gate, so no binary is needed to decline one.
+    if (os.environ.get("FNO_TASK_CONTEXT_FILE") or "").strip():
+        from fno.rust_binary import VerbUnavailable, verb_call
+
+        try:
+            gate = verb_call("task-context-gate", {"node": str((_dispatch_node or {}).get("id") or ""), "root": str(Path.cwd())})
+        except VerbUnavailable as exc:
+            gate = {"ok": False, "reason": "context_native_verifier_unavailable", "detail": str(exc)}
+        if not gate.get("ok"):
+            detail = f" ({gate.get('detail')})" if gate.get("detail") else ""
+            typer.echo(f"fno do target init: task-context gate refused: {gate.get('reason')}{detail}", err=True)
+            raise typer.Exit(code=2)
+
     # First-bind the graph pointer (x-f8b1 change 2), the reverse leg of the
     # x-39c0 backfill above: init --plan-path wrote only the manifest, so the
     # graph never learned the plan exists (x-7649). Sits after every refusal

@@ -108,6 +108,12 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "status",
     "stop",
     "subscribe",
+    "task-context-gate",
+    "task-context-payload",
+    "task-context-prepare",
+    "task-context-revalidate",
+    "task-context-show",
+    "task-context-stage",
     "trace",
     "verify-evidence",
     "version",
@@ -232,6 +238,33 @@ async fn run(args: Vec<String>) -> i32 {
     // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard.
     if matches!(verb, "component-verdict") {
         return fno_agents::component_update::run_component_verdict(&args[1..]);
+    }
+
+    // `task-context-prepare`/`-gate`/`-stage`/`-show`/`-revalidate`/`-payload`
+    // are the INTERNAL machine verbs behind the task-context execution binding
+    // (x-59b0): the doors (target init, resume receipt validate/show, spawn
+    // payload adapter) shell them so every enforced decision (validation,
+    // digest, stage monotonicity, live-source revalidation, declared-gate env
+    // semantics, bounded payload render) is native. stdin-JSON like
+    // evidence-gate, so the routable-verb parity sets never see them.
+    if matches!(verb, "task-context-prepare") {
+        return fno_agents::task_context::run_prepare(&args[1..]);
+    }
+    if matches!(
+        verb,
+        "task-context-gate"
+            | "task-context-stage"
+            | "task-context-show"
+            | "task-context-revalidate"
+            | "task-context-payload"
+    ) {
+        return match verb {
+            "task-context-gate" => fno_agents::task_context::run_gate(&args[1..]),
+            "task-context-stage" => fno_agents::task_context::run_stage(&args[1..]),
+            "task-context-show" => fno_agents::task_context::run_show(&args[1..]),
+            "task-context-payload" => fno_agents::task_context::run_payload(&args[1..]),
+            _ => fno_agents::task_context::run_revalidate(&args[1..]),
+        };
     }
 
     // `evidence-gate` is the hidden binary-direct transport for the ruling and
