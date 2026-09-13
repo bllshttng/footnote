@@ -8,7 +8,6 @@
 // away at every site.
 #![allow(clippy::doc_lazy_continuation)]
 
-use std::collections::HashMap;
 pub mod agents_view;
 pub mod backlog_view;
 pub mod bootstrap;
