@@ -178,6 +178,7 @@ Priority is bounded to four values, so two agents disagreeing about a node produ
 | Action | Command | Effect |
 |--------|---------|--------|
 | Pause a node | `fno backlog defer <id> --reason "..."` | leaves the board; `status: deferred` |
+| Retract a false row | `fno backlog retract <id> -R "the false premise"` | defers + stamps `deferred_kind: retracted` in one act; the blueprint consolidation gate halts on the stamp |
 | Resume it | `fno backlog undefer <id>` | returns to `ready`/`idea` |
 | Replace with a newer node | `fno backlog supersede <new> --replaces <old> --cause "..." --surface <path>` | old's status reads `superseded` from the edge alone; a merged PR touching every `--surface` stamps the record's `verified_at` |
 | Mark complete | `fno backlog done <id>` | closes only on a MERGED PR; sets `completed_at`, unblocks dependents |
@@ -208,13 +209,14 @@ An epic closed on its own evidence is left alone and named, because reopening it
 
 ## Deferred kinds
 
-A deferral is two facts wearing one status. One is an expiry: a hygiene sweep aged it out, nobody ruled. One is a decision: a human said no, not now, or wait-for-X. `deferred_kind` separates the two. The difference is load-bearing: a wont-do child never holds its epic open, while an expired one is just drift.
+A deferral is two facts wearing one status. One is an expiry: a hygiene sweep aged it out, nobody ruled. One is a decision: a human said no, not now, or wait-for-X. `deferred_kind` separates the two. The difference is load-bearing: a wont-do or retracted child never holds its epic open, while an expired one is just drift.
 
 | Kind | Means |
 |------|-------|
 | `expired` | aged out by machinery, no human judgment |
 | `blocked` | waiting on a named thing |
 | `wont_do` | an operator or author ruled against it |
+| `retracted` | the row was filed on a false premise; stamped only by `fno backlog retract`, and the blueprint consolidation gate halts on it |
 | `superseded` | the work moved elsewhere |
 | `later` | real intent, not now |
 | `contingent` | fires only if a named condition fires |
