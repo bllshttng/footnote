@@ -243,7 +243,7 @@ def macro_command(
     since: str = typer.Option("30d", "--since", help="Time window: Nd, Nh, Nm, Ns, or ISO-8601."),
     topic: Optional[str] = typer.Option(None, "--topic", help="Drill into TYPE:LABEL."),
     window: int = typer.Option(20, "--window", min=1, help="Events to inspect before each pattern."),
-    include_all: bool = typer.Option(False, "--all", help="Include healthy labels and noise event types."),
+    include_all: bool = typer.Option(False, "--all", "-A", help="Include healthy labels and noise event types."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit one structured result."),
     events: Optional[list[Path]] = typer.Option(None, "--events", help="Event journal path (repeatable)."),
 ) -> None:
