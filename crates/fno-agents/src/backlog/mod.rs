@@ -7,6 +7,7 @@
 //! rows in one transaction.
 
 pub mod api;
+pub mod commands;
 pub mod comments;
 pub mod encounters;
 pub mod model;

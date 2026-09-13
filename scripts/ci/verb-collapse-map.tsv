@@ -152,17 +152,17 @@ annotate resolve	T1	annotate resolve	5
 approvals decide	T1	approvals decide	2
 approvals ls	T1	approvals ls	2
 approvals show	T1	approvals show	3
-backlog add	T1	backlog add	3
-backlog contain	T1	backlog contain	3
-backlog advance	KEEP	backlog advance	43	deliberate readability slack for a high-traffic distinct operation
-backlog album	T1	backlog album	0
+backlog add	T1	backlog add node	3
+backlog contain	T1	backlog link contain	3
+backlog advance	KEEP	backlog admin advance	43	deliberate readability slack for a high-traffic distinct operation
+backlog album	T1	backlog board album	0
 backlog annotate add	T1	backlog annotate add	7	
 backlog annotate list	T1	backlog annotate list	0	
 backlog annotate resolve	T1	backlog annotate resolve	5	
-backlog archive	T1	backlog archive	2
-backlog archive-dedupe-ids	T1	backlog archive-dedupe-ids	0
-backlog bases	T1	backlog bases	0
-backlog backfill-deferred-kind	T1	backlog backfill-deferred-kind	1
+backlog archive	T1	backlog admin archive	2
+backlog archive-dedupe-ids	T1	backlog admin archive-dedupe-ids	0
+backlog bases	T1	backlog board bases	0
+backlog backfill-deferred-kind	T1	backlog admin backfill-deferred-kind	1
 backlog batch join	T1	backlog batch join	1
 backlog batch metrics	T1	backlog batch metrics	0
 backlog batch open	T1	backlog batch open	1
@@ -170,7 +170,7 @@ backlog batch prepare	T1	backlog batch prepare	1
 backlog batch ship	T1	backlog batch ship	3
 backlog batch ship-closeable	T1	backlog batch ship-closeable	1
 backlog batch status	T1	backlog batch status	1
-backlog board	T1	backlog board	0
+backlog board	T1	backlog board summary	0
 backlog capture add	T1	backlog capture add	6
 backlog capture archive	T1	backlog capture archive	1
 backlog capture capture-pass	T1	backlog capture capture-pass	1
@@ -185,61 +185,61 @@ backlog carveout list	T1	backlog carveout list	2
 backlog carveout resolve	T1	backlog carveout resolve	1	
 backlog carveout update	T1	backlog carveout update	1	
 backlog collisions check	T1	backlog collisions check	11
-backlog cost	T1	backlog cost	1
-backlog decide	T1	backlog decide	13
-backlog decide-reindex	T1	backlog decide-reindex	5
-backlog decide-retract	T1	backlog decide-retract	0
-backlog decisions	T1	backlog decisions	16
-backlog decompose	T1	backlog decompose	8
-backlog defer	T1	backlog defer	14
-backlog demand	T1	backlog demand	0
-backlog dispatch-lanes	T1	backlog dispatch-lanes	1
-backlog discover	T1	backlog discover	0
-backlog done	KEEP	backlog done	42	deliberate readability slack for a high-traffic distinct operation
-backlog encounter	T1	backlog encounter	0
+backlog cost	T1	backlog board cost	1
+backlog decide	T1	backlog admin decide	13
+backlog decide-reindex	T1	backlog admin decide-reindex	5
+backlog decide-retract	T1	backlog admin decide-retract	0
+backlog decisions	T1	backlog admin decisions	16
+backlog decompose	T1	backlog link decompose	8
+backlog defer	T1	backlog move defer	14
+backlog demand	T1	backlog board demand	0
+backlog dispatch-lanes	T1	backlog admin dispatch-lanes	1
+backlog discover	T1	backlog triage discover	0
+backlog done	KEEP	backlog move done	42	deliberate readability slack for a high-traffic distinct operation
+backlog encounter	T1	backlog triage encounter	0
 backlog epic status	T1	backlog epic status	7
-backlog find	T1	backlog find	23
-backlog get	KEEP	backlog get	87	deliberate readability slack for a high-traffic distinct operation
-backlog groom	T1	backlog groom	20
-backlog idea	T1	backlog idea	34
-backlog intake	T1	backlog intake	32
-backlog join	T1	backlog join	1
-backlog lane-fill	T1	backlog lane-fill	2
-backlog lanes	T1	backlog lanes	2
-backlog maintain	T1	backlog maintain	7
-backlog migrate-difficulty	T1	backlog migrate-difficulty	0
-backlog migrate-priorities	T1	backlog migrate-priorities	0
-backlog migrate-updated-at	T1	backlog migrate-updated-at	0
-backlog new	T1	backlog new	38
-backlog next	KEEP	backlog next	54	deliberate readability slack for a high-traffic distinct operation
-backlog note	T1	backlog note	1
-backlog pick	T1	backlog pick	2
-backlog project-root	T1	backlog project-root	6
-backlog provenance	T1	backlog provenance	7
-backlog queue	T1	backlog queue	1
-backlog queued	KEEP	backlog queued	1	ruled KEEP: read-back half of the live backlog queue path
-backlog rank	T1	backlog rank	20
-backlog ready	T1	backlog ready	21
-backlog reconcile	KEEP	backlog reconcile	44	deliberate readability slack for a high-traffic distinct operation
-backlog reconcile-findings	T1	backlog reconcile-findings	0
+backlog find	T1	backlog find text	23
+backlog get	KEEP	backlog get node	87	deliberate readability slack for a high-traffic distinct operation
+backlog groom	T1	backlog triage groom	20
+backlog idea	T1	backlog add idea	34
+backlog intake	T1	backlog add plan	32
+backlog join	T1	backlog admin join	1
+backlog lane-fill	T1	backlog admin lane-fill	2
+backlog lanes	T1	backlog list lanes	2
+backlog maintain	T1	backlog admin maintain	7
+backlog migrate-difficulty	T1	backlog admin migrate-difficulty	0
+backlog migrate-priorities	T1	backlog admin migrate-priorities	0
+backlog migrate-updated-at	T1	backlog admin migrate-updated-at	0
+backlog new	T1	backlog add scoped	38
+backlog next	KEEP	backlog list next	54	deliberate readability slack for a high-traffic distinct operation
+backlog note	T1	backlog note state	1
+backlog pick	T1	backlog triage pick	2
+backlog project-root	T1	backlog get project-root	6
+backlog provenance	T1	backlog get provenance	7
+backlog queue	T1	backlog move queue	1
+backlog queued	KEEP	backlog list queued	1	ruled KEEP: read-back half of the live backlog queue path
+backlog rank	T1	backlog update rank	20
+backlog ready	T1	backlog list ready	21
+backlog reconcile	KEEP	backlog admin reconcile	44	deliberate readability slack for a high-traffic distinct operation
+backlog reconcile-findings	T1	backlog admin reconcile-findings	0
 backlog relatedness build	T1	backlog relatedness build	0
 backlog relatedness get	T1	backlog relatedness get	0
-backlog remove	T1	backlog remove	7
-backlog render-views	T1	backlog render-views	5
-backlog reopen	T1	backlog reopen	3
-backlog reprioritize	T1	backlog reprioritize	1
-backlog retract	T1	backlog retract	3
+backlog remove	T1	backlog admin remove	7
+backlog render-views	T1	backlog admin render-views	5
+backlog reopen	T1	backlog move reopen	3
+backlog reprioritize	T1	backlog update priority	1
+backlog retract	T1	backlog move retract	3
 backlog retro drain-postmortems	T1	backlog retro drain-postmortems	1	
 backlog retro run	T1	backlog retro run	16	
 backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7	
-backlog roadmap	T1	backlog roadmap	1
-backlog stuck-epics	T1	backlog stuck-epics	1
+backlog roadmap	T1	backlog board roadmap	1
+backlog stuck-epics	T1	backlog list stuck-epics	1
 backlog session add	T1	backlog session add	4
 backlog session close	T1	backlog session close	3
 backlog session open	T1	backlog session open	1
 backlog session reap-open	T1	backlog session reap-open	3
-backlog status	T1	backlog status	1
-backlog supersede	T1	backlog supersede	10
+backlog status	T1	backlog get status	1
+backlog supersede	T1	backlog link supersede	10
 backlog task list	T1	backlog task list	0
 backlog task update	T1	backlog task update	2
 backlog triage apply	T1	backlog triage apply	3
@@ -251,16 +251,16 @@ backlog triage propose	T1	backlog triage propose	1
 backlog triage rank	T1	backlog triage rank	2
 backlog triage trend	T1	backlog triage trend	2
 backlog triage validate	T1	backlog triage validate	1
-backlog unarchive	T1	backlog unarchive	2
-backlog unclaim	T1	backlog unclaim	8
-backlog requeue	T1	backlog requeue	3
-backlog undefer	T1	backlog undefer	14
-backlog undispatched	T1	backlog undispatched	0
-backlog unqueue	T1	backlog unqueue	0
-backlog unsupersede	T1	backlog unsupersede	0
-backlog update	KEEP	backlog update	92	deliberate readability slack for a high-traffic distinct operation
-backlog view	T1	backlog view	3
-backlog worked	T1	backlog worked	2
+backlog unarchive	T1	backlog admin unarchive	2
+backlog unclaim	T1	backlog move unclaim	8
+backlog requeue	T1	backlog move requeue	3
+backlog undefer	T1	backlog move undefer	14
+backlog undispatched	T1	backlog list undispatched	0
+backlog unqueue	T1	backlog move unqueue	0
+backlog unsupersede	T1	backlog link unsupersede	0
+backlog update	KEEP	backlog update node	92	deliberate readability slack for a high-traffic distinct operation
+backlog view	T1	backlog board open	3
+backlog worked	T1	backlog list worked	2
 bundle check	T1	bundle check	11
 bundle lint	T1	bundle lint	2
 carveout add	T1	carveout add	27
@@ -619,5 +619,5 @@ agents king shape	T1	agents king shape	5
 do review invocations	T1	do review invocations	3	
 do review post-dispositions	T1	do review post-dispositions	1	
 doctor graph export	T1	doctor graph export	0
-backlog version	T1	backlog version	19	
+backlog version	T1	backlog get version	19	
 agents prove-it-verdicts	T1	agents prove-it-verdicts	1	

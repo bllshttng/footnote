@@ -223,6 +223,7 @@ fn history_dedupe_is_idempotent() {
             "h-1",
             fno_agents::backlog::note_history::REASON_STATE_REPLACED,
             Some(7),
+            None,
             &original,
             None,
             None,
