@@ -1,11 +1,10 @@
 """The Claude tier aliases and the tier_models config validation.
 
 One list, restated nowhere: ``model_routing`` derives ``MODEL_ENV_KEYS``
-(and the scrub floor through it) from ``TIER_ALIASES``, and the config
-layer validates ``ModelProvider.tier_models`` keys against it, so a new
-tier lands everywhere at once. This module is import-only data and lives
-in the config layer; runtime importing it is the legal direction (the
-reverse edge is what check-company-boundaries refuses).
+from ``TIER_ALIASES`` and the config layer validates
+``ModelProvider.tier_models`` keys against it. Runtime importing this
+module is the legal direction; the reverse edge is what
+check-company-boundaries refuses.
 """
 from typing import Optional
 
