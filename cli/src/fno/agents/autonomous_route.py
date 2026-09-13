@@ -326,7 +326,7 @@ def _admission_deferral(
         receipt = rs.preview_admission(record, verb=verb, difficulty=difficulty, consume_reserve=(priority or "").strip().lower() == "p0", policy=policy)
     except Exception:  # noqa: BLE001 - a preview must never block dispatch
         return None
-    if receipt["status"] not in rs.ADMISSION_REFUSAL_STATUSES:
+    if not receipt.get("refusal"):
         return None
     return AutonomousRoute("defer", f"admission:{receipt['status']}", source_record=provider_id, retry_at=receipt["retry_at"])
 

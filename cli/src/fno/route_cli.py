@@ -449,16 +449,17 @@ def admission_cmd(
     )
     for record in load_providers().records:
         # The receipt carries the pool and the pool's load; the row never
-        # re-probes the identity or re-reads the state doc.
+        # re-probes the identity or re-reads the state doc. .get, because a
+        # missing binary degrades to a short answer that still renders.
         receipt = rs.preview_admission(record, verb=verb, difficulty=difficulty, policy=policy)
         line = (
-            f"  {record.id}: {receipt['status']} pool={receipt['pool']} "
-            f"remaining={receipt['remaining_admission_pct']}% "
-            f"outstanding={round(receipt['outstanding_pct'] or 0.0, 2)}% "
-            f"inflight={receipt['inflight'] or 0}/{policy.max_inflight_per_pool if policy else 3} "
-            f"demand={receipt['demand_applied']}% reserve={receipt['reserve_applied']}%"
+            f"  {record.id}: {receipt.get('status')} pool={receipt.get('pool')} "
+            f"remaining={receipt.get('remaining_admission_pct')}% "
+            f"outstanding={round(receipt.get('outstanding_pct') or 0.0, 2)}% "
+            f"inflight={receipt.get('inflight') or 0}/{policy.max_inflight_per_pool if policy else 3} "
+            f"demand={receipt.get('demand_applied')}% reserve={receipt.get('reserve_applied')}%"
         )
-        if receipt["reason"]:
+        if receipt.get("reason"):
             line += f" ({receipt['reason']})"
         typer.echo(line)
 

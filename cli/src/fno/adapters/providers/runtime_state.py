@@ -286,7 +286,7 @@ def _fold_one_legacy_file(target: Path, legacy: Path) -> None:
                 ),
                 # A fold never costs a live worker's reservation: keep the
                 # target's block (the legacy file predates reservations).
-                reservations=_reservations(dst, now),
+                reservations=dst.get("reservations") or {},
             ),
         )
 
@@ -356,27 +356,12 @@ def _serialize_state(
         },
         "windows_opened": state.windows_opened,
         # Opt-in admission reservations (x-1afa) ride this document OPAQUELY:
-        # the Rust admission owner owns the block and its math; every writer
-        # here only re-persists it (dropping expired rows) so an unrelated
-        # health write never eats a live worker's reservation.
+        # the Rust admission owner owns the block, its math, and its expiry
+        # filter; every writer here only re-persists it verbatim so an
+        # unrelated health write never eats a live worker's reservation.
         "reservations": reservations or {},
     }
     return json.dumps(payload, indent=2, sort_keys=True)
-
-
-def _reservations(raw: dict[str, Any], now: float) -> dict[str, dict[str, Any]]:
-    """The unexpired admission rows, verbatim. One corrupt record never costs
-    the file; the Rust owner filters the same way before any decision."""
-    block = raw.get("reservations")
-    if not isinstance(block, dict):
-        return {}
-    return {
-        rid: record
-        for rid, record in block.items()
-        if isinstance(rid, str)
-        and isinstance(record, dict)
-        and float(record.get("expires_at") or 0.0) > now
-    }
 
 
 WINDOW_LABEL = "window"
@@ -516,7 +501,7 @@ def mark_window_warned(
                 usage=_parse_usage_payload(raw),
                 windows_opened=windows_opened,
                 schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
-            ), reservations=_reservations(raw, now)))
+            ), reservations=raw.get("reservations") or {}))
             return True
     except filelock.Timeout:
         logger.warning(
@@ -560,7 +545,7 @@ def stamp_window_open(
                 usage=_parse_usage_payload(raw),
                 windows_opened=windows_opened,
                 schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
-            ), reservations=_reservations(raw, now)))
+            ), reservations=raw.get("reservations") or {}))
             return True
     except filelock.Timeout:
         logger.warning(
@@ -1090,7 +1075,7 @@ def update_provider_health(
                 windows_opened=windows_opened,
                 schema_version=schema_version,
             )
-            _write_state_atomic(state_path, _serialize_state(new_state, reservations=_reservations(raw or {}, now)))
+            _write_state_atomic(state_path, _serialize_state(new_state, reservations=(raw or {}).get("reservations") or {}))
             return new_health
     except filelock.Timeout:
         # AC2.7-ERR: log warning, skip write, return last-known-good.
@@ -1151,7 +1136,7 @@ def reset_provider_health(
                 windows_opened=windows_opened,
                 schema_version=schema_version,
             )
-            _write_state_atomic(state_path, _serialize_state(new_state, reservations=_reservations(raw, now)))
+            _write_state_atomic(state_path, _serialize_state(new_state, reservations=raw.get("reservations")))
     except filelock.Timeout:
         logger.warning(
             "runtime_state: lock contention on reset for provider %r; "
@@ -1283,7 +1268,7 @@ def write_usage_snapshot(
                 windows_opened=windows_opened,
                 schema_version=schema_version,
             )
-            _write_state_atomic(state_path, _serialize_state(new_state, reservations=_reservations(raw, now)))
+            _write_state_atomic(state_path, _serialize_state(new_state, reservations=raw.get("reservations")))
     except filelock.Timeout:
         logger.warning(
             "runtime_state: lock contention on usage write for %r; skipping "
@@ -1896,7 +1881,7 @@ def advance_cursor(
                 windows_opened=windows_opened,
                 schema_version=schema_version,
             )
-            _write_state_atomic(state_path, _serialize_state(new_state, reservations=_reservations(raw, now)))
+            _write_state_atomic(state_path, _serialize_state(new_state, reservations=raw.get("reservations")))
             return new_cursor
     except filelock.Timeout:
         logger.warning(
@@ -1919,31 +1904,14 @@ def advance_cursor(
 
 # --- shared-account capacity admission (x-1afa): thin call sites into the
 # Rust owner, crates/fno-agents/src/admission.rs, which owns the math, the
-# policy-table validation, and the disk under the same `.update.lock` every
-# writer here holds. ---
+# policy-table validation, the refusal classification (the receipt's
+# `refusal` flag), and the disk under the same `.update.lock` every writer
+# here holds. Every verb answer carries every display key, so callers read
+# the answer dict directly. ---
 ADMITTED, RESERVED_CAPACITY, STALE_OBSERVATION, UNKNOWN_IDENTITY, EXHAUSTED, INFLIGHT_CAP, INVALID_POLICY = (
     "admitted", "reserved_capacity", "stale_observation", "unknown_identity",
     "exhausted", "inflight_cap", "invalid_policy",
 )
-# Statuses that hold a launch even for a priority exception; stale evidence
-# deliberately defers to the lane's own on_unknown policy.
-ADMISSION_REFUSAL_STATUSES = frozenset(
-    {RESERVED_CAPACITY, EXHAUSTED, INFLIGHT_CAP, UNKNOWN_IDENTITY, INVALID_POLICY}
-)
-
-_ADMISSION_FIELDS = (
-    "status", "pool", "reservation_id", "binding_window",
-    "remaining_admission_pct", "retry_at", "reason", "evidence_age_s",
-    "demand_applied", "reserve_applied", "outstanding_pct", "inflight", "units",
-)
-
-
-def _admission_receipt(raw: dict[str, Any]) -> dict[str, Any]:
-    """The verb answer with every display field defaulted."""
-    answer: dict[str, Any] = dict.fromkeys(_ADMISSION_FIELDS)
-    answer["units"] = "subscription-percent"
-    answer.update((k, v) for k, v in raw.items() if k in answer)
-    return answer
 
 
 def _admission_run(
@@ -1993,11 +1961,16 @@ def _admission_run(
     try:
         from fno.rust_binary import VerbUnavailable, verb_call
 
-        return _admission_receipt(verb_call("admission", payload, VerbUnavailable))
+        return verb_call("admission", payload, VerbUnavailable)
     except VerbUnavailable as exc:
-        return _admission_receipt(
-            {"status": STALE_OBSERVATION, "reason": f"admission unavailable: {exc}"}
-        )
+        # Degrade open WITHOUT reserving: the caller keeps its prior verdict.
+        # Every other answer carries the owner's full key set.
+        return {
+            "status": STALE_OBSERVATION,
+            "refusal": False,
+            "reason": f"admission unavailable: {exc}",
+            "units": "subscription-percent",
+        }
 
 
 def preview_admission(record: Any, **kw: Any) -> dict[str, Any]:

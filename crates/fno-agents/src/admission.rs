@@ -272,6 +272,12 @@ impl Receipt {
     fn to_json(self) -> Value {
         json!({
             "status": self.status,
+            // The owner classifies the verdict: a launch seam never
+            // re-spells the refusal vocabulary to make its own decision.
+            "refusal": matches!(
+                self.status,
+                "reserved_capacity" | "exhausted" | "inflight_cap" | "unknown_identity" | "invalid_policy"
+            ),
             "pool": self.pool,
             "reservation_id": self.reservation_id,
             "binding_window": self.binding_window,

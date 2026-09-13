@@ -1176,7 +1176,7 @@ def _reserve_account_budget(
     except Exception as exc:  # noqa: BLE001 - a reservation fault admits unreserved
         _warn(f"spawn-gate: admission unavailable ({exc}); admitting unreserved")
         return None
-    if receipt["status"] not in rs.ADMISSION_REFUSAL_STATUSES:
+    if not receipt.get("refusal"):
         return receipt
     _warn(
         f"spawn-gate: account admission refused ({receipt['status']}) on "
