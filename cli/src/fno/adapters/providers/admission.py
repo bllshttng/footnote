@@ -1,11 +1,7 @@
 """Shared-account capacity admission: the Python side of the seam.
 
-Python resolves everything that needs the operator's machine - the budget
-identity (the proven principal, a Keychain read), the policy from config,
-the state path, the probe TTL - and sends the ``fno-agents admission`` verb
-one JSON payload. The math and the disk live in Rust
-(``crates/fno-agents/src/admission.rs``); this module is the transport plus
-the identity resolver, never a second decider.
+The identity resolver (a Keychain read) and the transport. The math and the
+disk live in ``crates/fno-agents/src/admission.rs``.
 """
 from __future__ import annotations
 
@@ -197,6 +193,49 @@ def _read_state(repo_root: Path | None) -> dict[str, Any]:
         return {}
 
 
+def _run(
+    mode: str,
+    record: Any,
+    *,
+    dispatch_id: str | None,
+    verb: str,
+    difficulty: str,
+    demand_pct: float | None,
+    by_id: Optional[dict[str, Any]],
+    ttl_seconds: float | None,
+    consume_reserve: bool,
+    policy: Any | None,
+    now: float | None,
+    repo_root: Path | None,
+) -> AdmissionReceipt:
+    if now is None:
+        now = time.time()
+    policy = _enabled_policy(policy)
+    pool, identity_error = resolve_pool(record, by_id=by_id, now=now)
+    payload = _payload(
+        mode,
+        record=record,
+        pool=pool,
+        identity_error=identity_error,
+        policy=policy,
+        dispatch_id=dispatch_id,
+        verb=verb,
+        difficulty=difficulty,
+        demand_pct=demand_pct,
+        consume_reserve=consume_reserve,
+        ttl_seconds=ttl_seconds,
+        now=now,
+        state_path=None if mode == "preview" else rs._resolve_state_path(repo_root),
+        state=None if mode != "preview" else _read_state(repo_root),
+    )
+    try:
+        return AdmissionReceipt.from_json(_call(payload))
+    except AdmissionUnavailable as exc:
+        # A missing Rust leg degrades open WITHOUT reserving: the caller
+        # keeps whatever verdict the lane policy already had.
+        return AdmissionReceipt(STALE_OBSERVATION, reason=f"admission unavailable: {exc}")
+
+
 def preview_admission(
     record: Any,
     *,
@@ -210,35 +249,12 @@ def preview_admission(
     now: float | None = None,
     repo_root: Path | None = None,
 ) -> AdmissionReceipt:
-    """The pure read half. Never writes, never reserves: the same decide the
-    reserve path runs, over a state document read without the lock."""
-    if now is None:
-        now = time.time()
-    policy = _enabled_policy(policy)
-    pool, identity_error = resolve_pool(record, by_id=by_id, now=now)
-    payload = _payload(
-        "preview",
-        record=record,
-        pool=pool,
-        identity_error=identity_error,
-        policy=policy,
-        verb=verb,
-        difficulty=difficulty,
-        demand_pct=demand_pct,
-        consume_reserve=consume_reserve,
-        ttl_seconds=ttl_seconds,
-        now=now,
-        state=_read_state(repo_root),
+    """The pure read half. Never writes, never reserves."""
+    return _run(
+        "preview", record, dispatch_id=None, verb=verb, difficulty=difficulty,
+        demand_pct=demand_pct, by_id=by_id, ttl_seconds=ttl_seconds,
+        consume_reserve=consume_reserve, policy=policy, now=now, repo_root=repo_root,
     )
-    try:
-        return AdmissionReceipt.from_json(_call(payload))
-    except AdmissionUnavailable as exc:
-        # A missing Rust leg degrades open WITHOUT reserving: the caller
-        # keeps whatever verdict the lane policy already had.
-        return AdmissionReceipt(
-            STALE_OBSERVATION,
-            reason=f"admission unavailable: {exc}",
-        )
 
 
 def reserve_admission(
@@ -256,30 +272,14 @@ def reserve_admission(
     repo_root: Path | None = None,
 ) -> AdmissionReceipt:
     """Preview + persist under the one lock. Idempotent per dispatch id and
-    record: a re-request by the same dispatch returns its held reservation.
-    Two different dispatches never share a token."""
+    record; two different dispatches never share a token."""
     if not dispatch_id or not dispatch_id.strip():
         raise ValueError("reserve_admission: dispatch_id must be non-empty")
-    if now is None:
-        now = time.time()
-    policy = _enabled_policy(policy)
-    pool, identity_error = resolve_pool(record, by_id=by_id, now=now)
-    payload = _payload(
-        "reserve",
-        record=record,
-        pool=pool,
-        identity_error=identity_error,
-        policy=policy,
-        dispatch_id=dispatch_id,
-        verb=verb,
-        difficulty=difficulty,
-        demand_pct=demand_pct,
-        consume_reserve=consume_reserve,
-        ttl_seconds=ttl_seconds,
-        now=now,
-        state_path=rs._resolve_state_path(repo_root),
+    return _run(
+        "reserve", record, dispatch_id=dispatch_id, verb=verb, difficulty=difficulty,
+        demand_pct=demand_pct, by_id=by_id, ttl_seconds=ttl_seconds,
+        consume_reserve=consume_reserve, policy=policy, now=now, repo_root=repo_root,
     )
-    return AdmissionReceipt.from_json(_call(payload))
 
 
 def _mutate(
