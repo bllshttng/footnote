@@ -1,8 +1,10 @@
-"""fno agents worker blueprint - signal that LLM work is needed.
+"""The ``fno worker blueprint`` dispatch action: the CLI does NOT write
+feature code itself - it emits a structured action the skill layer turns into
+an Agent tool call, then the session resumes via
+``fno agents workspace register-worker``.
 
-The CLI does NOT write feature code. It emits a dispatch action so the
-skill layer can invoke the appropriate Agent tool, then resume via
-`fno agents workspace register-worker`.
+The territory feed is native Rust (crates/fno-agents/src/territory.rs): the
+supervisor reads ideas, spawns the standing worker, and mails delivery itself.
 """
 from __future__ import annotations
 

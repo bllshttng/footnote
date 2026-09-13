@@ -58,7 +58,7 @@ EXIT_FLEET_STOP_UNAVAILABLE = 83
 # Rust gate only (crates/fno-agents/src/spawn_gate.rs): the lane declares
 # nothing about how it stands toward the fno state root.
 EXIT_STATE_ROOT_UNGRANTED = 84
-EXIT_GATE_UNAVAILABLE = 86
+EXIT_GATE_UNAVAILABLE = 87
 
 
 #: The refusal reasons a caller may outlast by retrying (spawn --wait). Owned
@@ -419,6 +419,9 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
             claim_alive = True
         else:
             claim_alive = False
+        # The row's own name dedups its slot claim below (a revived row does
+        # not pay twice for the claim that spawned it).
+        live_registry_names.add(row.name)
         # A live fno row is fno work: it holds a slot regardless of the display
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
@@ -426,7 +429,6 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
         # x-5283: a crowned row divides the cap and pays no per-king tax.
         if row.crown_level is None:
             out.worker_rows.setdefault(row.spawned_by_session, []).append(row.name)
-        live_registry_names.add(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
             # Already shown as its roster row in the display union. That roster

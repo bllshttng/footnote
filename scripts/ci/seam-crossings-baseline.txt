@@ -47,7 +47,7 @@ crossing	crates/fno-agents/src/scrape.rs	334	let bin = fno_bin();
 crossing	crates/fno-agents/src/scratch.rs	1300	let out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/spawn_gate_lanes.rs	95	Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/spawn_gate_lanes.rs	123	let mut cmd = Command::new(crate::scrape::fno_bin());
-crossing	crates/fno-agents/src/spawn_gate.rs	484	let _ = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/spawn_gate.rs	739	let _ = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/truth_probe.rs	88	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/truth_probe.rs	633	let mut command = std::process::Command::new("fno");
 crossing	crates/fno/src/backlog_view.rs	142	let mut command = crate::process_admission::std_command(crate::server::fno_bin());

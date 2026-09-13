@@ -4239,7 +4239,7 @@ event_types:
           description: "Unix epoch seconds when the refused dispatch may be retried: the provider's window reset on a quota-deferred skip (x-5d3e), or the gate's queue reset on an exit-78 skip (x-c6fe)."
         exit_code:
           type: integer
-          description: "The spawn-gate exit code behind a machine-scoped skip (x-c6fe): 75-80 with capacity-refused, 81 and 86 with gate-unavailable, 84 with state-root-ungranted, 85 with sandbox-unreachable."
+          description: "The spawn-gate exit code behind a machine-scoped skip (x-c6fe): 75-80 with capacity-refused, 81 and 87 with gate-unavailable, 84 with state-root-ungranted, 85 with sandbox-unreachable."
         kind:
           type: string
           enum: [reconcile]
@@ -4257,7 +4257,7 @@ event_types:
     consumers: [operator]
 
   - name: advance_failed
-    description: "Emitted by `fno backlog advance` when the worker spawn failed after the dispatch reservation was acquired. A spawn-gate refusal (exit 75-86) or a sandbox-probe refusal (exit 85) is NOT this event: it is machine-scoped and lands as advance_skipped{capacity-refused|gate-unavailable|sandbox-unreachable|state-root-ungranted} (x-c6fe), so counting advance_failed rows counts node faults only. advance releases the node's dispatch reservation and the host op (reconcile/post-merge) still completes; the next SessionStart reconcile retries (AC2-FR). Surfaced loudly in the next reconcile reminder."
+    description: "Emitted by `fno backlog advance` when the worker spawn failed after the dispatch reservation was acquired. A spawn-gate refusal (exit 75-87) or a sandbox-probe refusal (exit 85) is NOT this event: it is machine-scoped and lands as advance_skipped{capacity-refused|gate-unavailable|sandbox-unreachable|state-root-ungranted} (x-c6fe), so counting advance_failed rows counts node faults only. advance releases the node's dispatch reservation and the host op (reconcile/post-merge) still completes; the next SessionStart reconcile retries (AC2-FR). Surfaced loudly in the next reconcile reminder."
     sources: [backlog]
     data:
       required: [node_id, error]

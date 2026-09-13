@@ -6,6 +6,7 @@ lives in setup/doctor.py.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import json
 import os
 from pathlib import Path
 from importlib import import_module
@@ -241,7 +242,6 @@ def _repo_has_fno_activity(repo_root: Path, project_id: Optional[str]) -> bool:
     False (dormant) on any unreadable state - a false negative degrades to
     today's silent behavior; a false positive is the nag we are removing.
     """
-    import json
 
     # 1. In-flight target session (cheapest: a stat). An imminent merge counts.
     try:
@@ -960,56 +960,49 @@ def _report_harness_overlays() -> None:
 
 
 @app.command("active-backlog")
-def active_backlog_cmd(
-    json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit a JSON receipt of the drain reading for the daemon."
-    ),
-) -> None:
-    """Resolve which projects the active-backlog daemon should drain.
+def active_backlog_cmd() -> None:
+    """Print the active-backlog drain reading. Full contract:
+    docs/architecture/coordination.md#per-territory-team-cap
 
-    Reads config.active_backlog + the workspace project->path map and prints the
-    enabled drain targets (project, cwd, interval, failure_limit, mission). The
-    daemon shells this on entering Serving to discover its targets. Read-only and
-    best-effort: a malformed config yields an empty list, never an error. An
-    empty list names which zero hit (x-338c): a disabled drain says so instead
-    of blaming the missions.
+    JSON readers call the binary door directly:
+    fno-agents active-backlog-receipt
     """
-    import json as _json
+    from fno.rust_binary import call_binary_json
 
-    from fno.active_backlog import drain_reading_as_dict
-
-    reading = drain_reading_as_dict()
+    error, reading = call_binary_json("active-backlog-receipt")
+    if error is not None:
+        typer.echo(f"active-backlog: {error}", err=True)
+        raise typer.Exit(code=1)
+    if isinstance(reading, list):
+        # A pre-338c binary prints a bare target list.
+        reading = {"targets": reading, "missions": len(reading), "skip_reason": None}
     targets = reading["targets"]
-    if json_out:
-        typer.echo(_json.dumps(reading))
-        return
     if not targets:
         reason = reading["skip_reason"] or "no_missions"
         if reason == "no_missions":
-            typer.echo("active-backlog: no active missions to drain")
+            typer.echo("active-backlog: no territories to drain")
             return
         causes = {
             "drain_disabled": "the drain is disabled: config.active_backlog.enabled",
-            "config_unreadable": "config unreadable; the drain cannot read its own switch",
             "bad_interval": "invalid interval: config.active_backlog.interval",
             "project_disabled": (
-                "the most common mission drop is a disabled project: "
+                "the most common drop is a disabled project: "
                 "config.active_backlog.enabled"
             ),
             "no_workspace_path": (
-                "the most common mission drop is a missing workspace path"
+                "the most common drop is a missing workspace path"
             ),
         }
         typer.echo(
-            f"active-backlog: {reading['missions']} active missions, 0 drain targets "
+            f"active-backlog: {reading['missions']} drainable territories, 0 targets "
             f"({causes.get(reason, reason)})"
         )
         return
-    for t in targets:
-        mission = f" mission={t['mission']}" if t["mission"] else ""
+    for tg in targets:
+        mission = f" mission={tg['mission']}" if tg.get("mission") else ""
         typer.echo(
-            f"{t['project']}\t{t['cwd']}\tinterval={t['interval_seconds']}s\t"
-            f"failure_limit={t['failure_limit']}{mission}"
+            f"{tg['scope']}\t{tg['cwd']}\tinterval={tg['interval_seconds']}s\t"
+            f"failure_limit={tg['failure_limit']}{mission}"
         )
 
 
@@ -1099,7 +1092,6 @@ def get_cmd(
     a value the merge discarded, is stderr-only. ``--json`` carries both
     streams' facts as one object.
     """
-    import json
     import os
     import sys
 
@@ -1582,7 +1574,6 @@ def history(
     ),
 ) -> None:
     """Read config-write receipts from the global and project journals."""
-    import json
 
     from fno.paths import event_journals
 

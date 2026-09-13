@@ -29,7 +29,8 @@ One table is shared by both trees. It lives in `cli/src/fno/agents/spawn_gate.py
 - 82 and 83, the fleet incident pair, byte-parity
 - 84 state root ungranted. Permanent until a human grants.
 - 85 the Python sandbox probe
-- 86 gate unavailable. The gate verb is missing, failed, or timed out. Fail closed: never admit on an unreadable gate.
+- 86 the per-territory team cap. The one permanent, non-queueable machine refusal with its own number, so a caller never retries it as capacity; the territory attribution being unreadable refuses with this number too.
+- 87 gate unavailable. The gate verb is missing, failed, or timed out. Fail closed: never admit on an unreadable gate.
 
 ## Refusal events stay Python-emitted
 

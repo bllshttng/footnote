@@ -2172,18 +2172,21 @@ class ProcessAdmissionBlock(BaseModel):
     @classmethod
     def _coerce_max_processes(cls, v: object) -> int:
         """Invalid values keep the measured process-unit default; never disable."""
-        if isinstance(v, bool):
-            return 400
-        if isinstance(v, int) and v >= 1:
-            return v
-        if isinstance(v, str):
-            try:
-                parsed = int(v.strip())
-            except ValueError:
-                return 400
-            return parsed if parsed >= 1 else 400
-        return 400
+        return cast(int, _coerce_positive_int(v, 400))
 
+
+def _coerce_positive_int(v: object, default: Optional[int]) -> Optional[int]:
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, int) and v >= 1:
+        return v
+    if isinstance(v, str):
+        try:
+            n = int(v.strip())
+        except ValueError:
+            return default
+        return n if n >= 1 else default
+    return default
 
 
 def _finite_or(value: object, default: float) -> float:
@@ -2252,6 +2255,7 @@ class AgentsBlock(SweepKeys):
     # hard_max_load_per_cpu is the absolute backstop, read on the 15-minute
     # load; max_load_per_cpu is deprecated and ignored (x-7783 LD2).
     max_live: int = 3
+    max_live_per_territory: int = 4  # x-e221 team cap; contract in the registry
     provider_limits: dict[str, ProviderBudget] = Field(
         default_factory=lambda: {
             k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
@@ -2308,17 +2312,13 @@ class AgentsBlock(SweepKeys):
     @classmethod
     def _coerce_max_live(cls, v: object) -> object:
         """Drop a non-positive / non-int max_live to the default (3); never raise."""
-        if isinstance(v, bool):
-            return 3
-        if isinstance(v, int) and v >= 1:
-            return v
-        if isinstance(v, str):
-            try:
-                n = int(v.strip())
-            except ValueError:
-                return 3
-            return n if n >= 1 else 3
-        return 3
+        return _coerce_positive_int(v, 3)
+
+    @field_validator("max_live_per_territory", mode="before")
+    @classmethod
+    def _coerce_max_live_per_territory(cls, v: object) -> object:
+        """Drop a non-positive / non-int cap to the default (4)."""
+        return _coerce_positive_int(v, 4)
 
     @field_validator("pane_group_max", mode="before")
     @classmethod
