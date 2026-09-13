@@ -539,13 +539,16 @@ fn run_request(
             home,
             entry,
             ledger,
-            false,
+            crate::gc_sweep::RetireMode::Apply,
+            // The observation spares only a rehearsal a mutation; apply
+            // reads the stop gate from the stop itself.
+            crate::gc_sweep::StopObservation::Unproven,
             false,
             &stop,
             seams.surface_removal,
             &mut receipts,
         ) {
-            Ok(()) => {
+            Ok(crate::gc_sweep::StagedRetirement::Retired) => {
                 to_retire.insert(
                     entry.name.clone(),
                     crate::gc_sweep::RetireOrder {
@@ -566,6 +569,11 @@ fn run_request(
                     },
                 );
             }
+            // apply cannot produce Unverified; if a future path ever
+            // does, the row is kept and named, never retired on it.
+            Ok(crate::gc_sweep::StagedRetirement::Unverified(_)) => {
+                held_rows.push(format!("{}:dry_run_unverified", entry.name));
+            }
             Err(refusal) => held_rows.push(format!(
                 "{name}:{reason}",
                 name = entry.name,
@@ -575,6 +583,10 @@ fn run_request(
                         "native_removal_unconfirmed",
                     crate::gc_sweep::RetireRefusal::NoReceipt(_) => "no_receipt",
                     crate::gc_sweep::RetireRefusal::GraphObligation(_) => "open_do_row",
+                    // Both unreachable in apply mode; the match is
+                    // exhaustive so a future mode leak cannot retire a row.
+                    crate::gc_sweep::RetireRefusal::StopUnproven(_) => "stop_unproven",
+                    crate::gc_sweep::RetireRefusal::GraphUnreadable => "graph_unreadable",
                 }
             )),
         }

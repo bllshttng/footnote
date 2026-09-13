@@ -86,18 +86,24 @@ def candidates(
     title: str,
     details: str,
     *,
-    limit: int = 20,
+    limit: int | None = 20,
     entries: list[dict[str, Any]] | None = None,
     graph_path: Path | None = None,
     exclude_id: str | None = None,
     token_cache: dict[str, frozenset[str]] | None = None,
     domain: str = "code",
+    floor: float | None = None,
+    fts_enabled: bool = True,
 ) -> CandidateResults:
     """Union FTS5 and relatedness recall, ranked by relatedness score.
 
+    ``limit=None`` returns every row above the relatedness lane's floor: the
+    floor is the threshold, and a cap is a second one that re-hides exactly
+    the low-score family the fts lane exists to recover.
+
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
-    if limit < 1:
+    if limit is not None and limit < 1:
         return CandidateResults()
     path = graph_path or _graph_path()
     pool = entries if entries is not None else _entries_for(path)
@@ -117,15 +123,22 @@ def candidates(
     fts_ids: list[str] = []
     degraded = False
     warning: str | None = None
-    try:
-        fts_ids = [node_id for node_id in fts.search(
-            " ".join(part for part in (title, details) if part), path, limit=None
-        ) if node_id in by_id]
-    except fts.SearchUnavailableError as exc:
+    if not fts_enabled:
         degraded = True
-        warning = str(exc)
+        warning = (
+            "graph entries were injected without the graph file; "
+            "the fts lane is unavailable"
+        )
+    else:
+        try:
+            fts_ids = [node_id for node_id in fts.search(
+                " ".join(part for part in (title, details) if part), path, limit=None
+            ) if node_id in by_id]
+        except (fts.SearchUnavailableError, FileNotFoundError) as exc:
+            degraded = True
+            warning = str(exc)
 
-    related_kwargs: dict[str, Any] = {"k": None}
+    related_kwargs: dict[str, Any] = {"k": None, "floor": floor}
     if token_cache is not None:
         related_kwargs["token_cache"] = token_cache
     related_rows = relatedness.similar_nodes(incoming, pool, **related_kwargs)
@@ -187,6 +200,21 @@ def positive_control(
 
 
 _PATH_RE = re.compile(r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+")
+_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_QUOTED_SPAN_RE = re.compile(r"(?<![A-Za-z0-9])(['\"])[^'\"\n]*\1(?![A-Za-z0-9])")
+
+
+def filing_paths(text: str) -> set[str]:
+    """Paths an incoming filing names, quoted log excerpts and fences removed.
+
+    A path inside a quoted span is something the filer read, not surface they
+    touch.  Backticks stay: that is how a filer names a real surface.
+    ``_file_evidence`` keeps reading ``_PATH_RE`` directly - a recorded node's
+    own quoted paths are still evidence there.
+    """
+    cleaned = _FENCE_RE.sub(" ", text or "")
+    cleaned = _QUOTED_SPAN_RE.sub(" ", cleaned)
+    return set(_PATH_RE.findall(cleaned))
 
 
 def _file_evidence(node: dict[str, Any]) -> list[str]:

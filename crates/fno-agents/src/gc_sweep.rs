@@ -142,6 +142,13 @@ pub struct GcSummary {
     /// promise rows a real run then refuses (2026-09-08: dry promised nine,
     /// real retired zero).
     pub needs_live_stop: Vec<(String, String)>,
+    /// `(id, gate)`: DRY RUN only. The row cleared every read-only
+    /// gate, but a remaining retirement gate (the active-surface removal)
+    /// can only be answered by applying it, so the rehearsal names the gate
+    /// instead of implying it passed. Never counted as retired; kept
+    /// outside `holds` - an effect a dry run deliberately skips is not an
+    /// aged operator-release request.
+    pub dry_run_unverified: Vec<(String, String)>,
     /// `(id, reason)`: a retirement held because no resumable receipt could
     /// be staged. Unknown never removes - a removal the operator cannot undo
     /// needs at least the record of how to come back.
@@ -248,6 +255,7 @@ impl GcSummary {
             + self.kept_unprobed.len()
             + self.kept_no_receipt.len()
             + self.kept_receipts.len()
+            + self.dry_run_unverified.len()
     }
 
     /// Stamp every hold's escalation flag against the configured threshold
@@ -411,6 +419,51 @@ pub(crate) enum RetireRefusal {
     /// effect fires, because a held session whose process was already
     /// stopped is not held at all - it is dead (the codex P1 on PR 1637).
     GraphObligation(String),
+    /// The graph obligation re-read could not answer. Never a retirement on
+    /// a failed read; the sweep files the row under `kept_graph_unreadable`.
+    GraphUnreadable,
+    /// DRY RUN only: no positive stop evidence backs the row, so the
+    /// rehearsal cannot evaluate the stop gate at all. The sweep files it
+    /// under `needs_live_stop`.
+    StopUnproven(String),
+}
+
+/// Which run [`stage_session_retirement`] answers for. Apply fires
+/// the effect seams and demands each confirmation; DryRun runs no effect and
+/// names every gate it could not evaluate instead of implying it passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetireMode {
+    /// The real run: effects fire, refusals hold the row for retry.
+    Apply,
+    /// The rehearsal: read-only gates only, effects never invoked.
+    DryRun,
+}
+
+/// The stop gate as the caller read it before staging:
+/// `run_with_release` folds its read-only evidence - harness death state, a
+/// gone pid, a stop-family release - into one answer, so the rehearsal can
+/// satisfy the gate without mutating anything. Apply never reads this: its
+/// stop answers for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopObservation {
+    /// Positive read-only evidence: the real run's stop will confirm.
+    Proven,
+    /// No read-only evidence. Apply learns by running the stop; a dry run
+    /// refuses with [`RetireRefusal::StopUnproven`].
+    Unproven,
+}
+
+/// What staging decided for one would-retire row. Apply answers
+/// `Retired` only after every gate confirmed; the rehearsal answers
+/// `Unverified` naming the gate it could not evaluate - the row must never
+/// read as retired on that answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StagedRetirement {
+    /// Every gate confirmed; the receipt is persisted and the row may drop.
+    Retired,
+    /// The receipt is staged, no effect ran, and the named gate stays
+    /// unevaluated. Dry run only; apply never produces it.
+    Unverified(String),
 }
 
 /// What one commit actually wrote. `retired_names` is the removal truth: a
@@ -1818,9 +1871,15 @@ pub(crate) fn run_with_release(
         // satisfies only the stop_on_death seam, and the pane stop never
         // consults that seam, so the real pane stop refuses under one and
         // the dry run must predict that.
+        let mut pane_stop_proven = false;
         if dry_run && e.substrate.as_deref() == Some("pane") {
             match crate::pane_stop::precheck_pane_stop(e) {
-                crate::pane_stop::PanePrecheck::AlreadyStopped(_) => {}
+                // Already stopped is positive read-only stop evidence: the
+                // observation carries it, so staging advances the row to
+                // the next gate instead of holding it as unproven.
+                crate::pane_stop::PanePrecheck::AlreadyStopped(_) => {
+                    pane_stop_proven = true;
+                }
                 crate::pane_stop::PanePrecheck::NeedsKill => {
                     let detail = "pane pid is running; a dry run does not promise a kill \
                                   it cannot prove"
@@ -1883,62 +1942,101 @@ pub(crate) fn run_with_release(
         // x-2774: the session-shaped release that let an OPEN-work row
         // retire. The obligation re-checks (stage and commit) yield to it.
         let released = row.session_released();
-        if let Err(refusal) = stage_session_retirement(
+        // The stop gate's read-only answer, folded here where the evidence
+        // lives: harness death state, a stop-family release, or the pane
+        // precheck's already-stopped. Staging decides with it, and the
+        // rehearsal never has to fire the stop to learn what this already
+        // knows.
+        let stop_observation = if death.is_some() || release_stop || pane_stop_proven {
+            StopObservation::Proven
+        } else {
+            StopObservation::Unproven
+        };
+        let staged = match stage_session_retirement(
             home,
             e,
             ledger.as_deref(),
-            dry_run,
+            if dry_run {
+                RetireMode::DryRun
+            } else {
+                RetireMode::Apply
+            },
+            stop_observation,
             released,
             &stop_on_death,
             surface_removal,
             &mut receipts,
         ) {
-            match refusal {
-                RetireRefusal::StopRefused(reason) => {
-                    // A claude row with no death evidence names the missing
-                    // evidence, not just the unconfirmed stop: the refusal
-                    // says what would have satisfied it.
-                    let reason = if death.is_none() && e.harness_name() == "claude" {
-                        "no death evidence (no terminal roster state, no dead pid) and the \
+            Ok(staged) => staged,
+            Err(refusal) => {
+                match refusal {
+                    RetireRefusal::StopRefused(reason) => {
+                        // A claude row with no death evidence names the missing
+                        // evidence, not just the unconfirmed stop: the refusal
+                        // says what would have satisfied it.
+                        let reason = if death.is_none() && e.harness_name() == "claude" {
+                            "no death evidence (no terminal roster state, no dead pid) and the \
                          stop did not confirm; row kept for retry"
-                            .into()
-                    } else {
-                        reason
-                    };
-                    summary.stop_refused.push((id.clone(), reason.clone()));
-                    summary.holds.push(Hold {
-                        id,
-                        reason: "stop refused",
-                        detail: reason,
-                        age_s: hold_age_s,
-                        age_basis: hold_age_basis,
-                        escalated: false,
-                    });
+                                .into()
+                        } else {
+                            reason
+                        };
+                        summary.stop_refused.push((id.clone(), reason.clone()));
+                        summary.holds.push(Hold {
+                            id,
+                            reason: "stop refused",
+                            detail: reason,
+                            age_s: hold_age_s,
+                            age_basis: hold_age_basis,
+                            escalated: false,
+                        });
+                    }
+                    RetireRefusal::NativeRemoval(reason) => {
+                        summary.stop_refused.push((id.clone(), reason.clone()));
+                        summary.holds.push(Hold {
+                            id,
+                            reason: "stop refused",
+                            detail: reason,
+                            age_s: hold_age_s,
+                            age_basis: hold_age_basis,
+                            escalated: false,
+                        });
+                    }
+                    RetireRefusal::NoReceipt(reason) => summary.kept_no_receipt.push((id, reason)),
+                    RetireRefusal::GraphObligation(node) => {
+                        summary.kept_open_do_row.push((id.clone(), node.clone()));
+                        summary.holds.push(Hold {
+                            id,
+                            reason: KeepReason::OpenDoRow { node: node.clone() }.as_str(),
+                            detail: settle_blocker_detail(graph, &node),
+                            age_s: hold_age_s,
+                            age_basis: hold_age_basis,
+                            escalated: false,
+                        });
+                    }
+                    // the rehearsal's unevaluatable stop lands where the
+                    // prechecks land - held, named, never promised.
+                    RetireRefusal::StopUnproven(reason) => {
+                        summary.needs_live_stop.push((id.clone(), reason.clone()));
+                        summary.holds.push(Hold {
+                            id,
+                            reason: "needs live stop",
+                            detail: reason,
+                            age_s: hold_age_s,
+                            age_basis: hold_age_basis,
+                            escalated: false,
+                        });
+                    }
+                    RetireRefusal::GraphUnreadable => summary.kept_graph_unreadable.push(id),
                 }
-                RetireRefusal::NativeRemoval(reason) => {
-                    summary.stop_refused.push((id.clone(), reason.clone()));
-                    summary.holds.push(Hold {
-                        id,
-                        reason: "stop refused",
-                        detail: reason,
-                        age_s: hold_age_s,
-                        age_basis: hold_age_basis,
-                        escalated: false,
-                    });
-                }
-                RetireRefusal::NoReceipt(reason) => summary.kept_no_receipt.push((id, reason)),
-                RetireRefusal::GraphObligation(node) => {
-                    summary.kept_open_do_row.push((id.clone(), node.clone()));
-                    summary.holds.push(Hold {
-                        id,
-                        reason: KeepReason::OpenDoRow { node: node.clone() }.as_str(),
-                        detail: settle_blocker_detail(graph, &node),
-                        age_s: hold_age_s,
-                        age_basis: hold_age_basis,
-                        escalated: false,
-                    });
-                }
+                continue;
             }
+        };
+        // a dry-run row whose remaining gate needs a mutation is
+        // named where it stands - never planted in to_retire, so neither
+        // retired nor pruned can count it.
+        if let StagedRetirement::Unverified(gate) = staged {
+            summary.dry_run_unverified.push((id, gate));
             continue;
         }
         // The tree probes run only now, on a row already retiring: steady
@@ -2148,18 +2246,22 @@ pub(crate) fn run_with_release(
 /// carries the effect that refused.
 /// DRY-RUN stops nothing and applies nothing - a rehearsal that killed the
 /// worker it rehearsed retiring would be the destructive run wearing a dry
-/// flag - but it still stages the receipt, so the rehearsal reports the same
-/// holds the real run would.
+/// flag - and it evaluates the read-only gates with the real run:
+/// the graph obligation is re-read in both modes, and every gate a mutation
+/// would answer is named - [`StagedRetirement::Unverified`] or
+/// [`RetireRefusal::StopUnproven`] - instead of implied passed. Silence
+/// about a skipped gate reads identical to a gate that passed.
 pub(crate) fn stage_session_retirement(
     home: &AgentsHome,
     e: &state::RegistryEntry,
     ledger_rows: Option<&[Value]>,
-    dry_run: bool,
+    mode: RetireMode,
+    stop_observation: StopObservation,
     session_released: bool,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
-) -> Result<(), RetireRefusal> {
+) -> Result<StagedRetirement, RetireRefusal> {
     let ledger = ledger_rows
         .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
     // The obligation re-check runs HERE, before any effect: an open do row
@@ -2177,18 +2279,24 @@ pub(crate) fn stage_session_retirement(
     // closing it. Holding the row here would re-hold every released row one
     // gate later, on the very obligation the release just resolved. The
     // grace and freshness gates still protect a genuinely live session.
-    if !dry_run && !session_released {
-        if let Some(graph) = read_graph_entries(home) {
-            let sid = e
-                .harness_session_id
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase();
-            if let Some(nodes) = graph.open_do.get(&sid) {
-                if let Some(node) = nodes.first().cloned() {
-                    return Err(RetireRefusal::GraphObligation(node));
-                }
+    if !session_released {
+        // the re-read runs in BOTH modes - a rehearsal that skips it
+        // promises retirements the real run refuses on the very row the
+        // obligation names. An unreadable read is its own refusal, never a
+        // silent no-obligation.
+        let graph = match read_graph_entries(home) {
+            Some(graph) => graph,
+            None => return Err(RetireRefusal::GraphUnreadable),
+        };
+        let sid = e
+            .harness_session_id
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if let Some(nodes) = graph.open_do.get(&sid) {
+            if let Some(node) = nodes.first().cloned() {
+                return Err(RetireRefusal::GraphObligation(node));
             }
         }
     }
@@ -2199,9 +2307,26 @@ pub(crate) fn stage_session_retirement(
         Ok(receipt) => receipt,
         Err(reason) => return Err(RetireRefusal::NoReceipt(reason)),
     };
-    if dry_run {
-        receipts.insert(e.name.clone(), receipt);
-        return Ok(());
+    if mode == RetireMode::DryRun {
+        // the rehearsal never fires an effect, and it does not
+        // report a row as retiring while a mutation-only gate stands
+        // unevaluated between it and a real retirement. The stop gate the
+        // caller already read answers here; the active-surface removal can
+        // only be known by applying it, so the row lands in the sweep's
+        // dry_run_unverified bucket - named, never in retired.
+        return match stop_observation {
+            StopObservation::Unproven => Err(RetireRefusal::StopUnproven(
+                "no positive stop evidence; a dry run does not promise a stop \
+                 it cannot prove"
+                    .into(),
+            )),
+            StopObservation::Proven => {
+                receipts.insert(e.name.clone(), receipt);
+                Ok(StagedRetirement::Unverified(
+                    "active-surface removal was not evaluated".into(),
+                ))
+            }
+        };
     }
     if let Err(err) = write_reap_receipt(home, &receipt) {
         return Err(RetireRefusal::NoReceipt(format!(
@@ -2264,7 +2389,7 @@ pub(crate) fn stage_session_retirement(
     receipt.effects.push(resume_evidence_effect(&receipt));
     let _ = write_reap_receipt(home, &receipt);
     receipts.insert(e.name.clone(), receipt);
-    Ok(())
+    Ok(StagedRetirement::Retired)
 }
 
 /// The resume-evidence op, measured off the staged receipt: the resume

@@ -80,7 +80,10 @@ function synthesizeTranscript(entries: unknown[]): string {
 }
 
 export default function (pi: {
-  on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void>) => void
+  on: (
+    event: string,
+    handler: (event: unknown, ctx: unknown) => Promise<unknown> | void,
+  ) => void
   sendUserMessage: (
     content: string,
     options?: { deliverAs?: string; triggerTurn?: boolean },
@@ -90,6 +93,39 @@ export default function (pi: {
   // once. One boolean: the turn lifecycle + loop-check's NoProgress backstop
   // already bound a stuck session; this just prevents concurrent fires.
   let busy = false
+
+  // Fleet announcements at the pre-turn boundary.
+  // `before_agent_start` fires after a prompt and before the agent loop, and
+  // its returned `message` is injected into the session and sent to the LLM -
+  // the one pi event that delivers text at a real boundary. One announcement
+  // is one bus line; the per-session cursor on the reader side makes this
+  // print once and stay silent after. Fail-open: no binary, no output, or a
+  // failed read injects nothing.
+  pi.on("before_agent_start", async (_event, _ctx) => {
+    try {
+      const sessionKey = process.env.FNO_AGENT_SESSION_ID || `pi:${process.cwd()}`
+      const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+      const out = await new Promise<string>((resolve) => {
+        execFile(
+          bin,
+          ["announce", "read", "--session-id", sessionKey, "--harness", "pi", "--boundary", "prompt"],
+          { cwd: process.cwd(), timeout: 2000, maxBuffer: 1024 * 1024 },
+          (err, stdout) => resolve(err ? "" : String(stdout)),
+        )
+      })
+      const text = out.trim()
+      if (!text) return
+      return {
+        message: {
+          customType: "fno-announce",
+          content: [{ type: "text", text }],
+          display: true,
+        },
+      }
+    } catch {
+      return
+    }
+  })
 
   pi.on("agent_settled", async (_event, ctx) => {
     // Spawn binding first: the keeper sets FNO_AGENT_SESSION_ID only on a

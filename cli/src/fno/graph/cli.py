@@ -932,7 +932,7 @@ def _append_creation_encounter(path: Path, node_id: str, evidence: str) -> None:
                 word_cap=load_settings().style.word_cap.encounter,
             )
             if violations:
-                raise ValueError(style.format_violations(violations))
+                raise ValueError(style.format_violations(violations, surface="encounter"))
 
         try:
             identity = resolve_self_identity()
@@ -1424,11 +1424,10 @@ def _fold_candidates(
     # A live plan surface is an independent fold signal when the filing names
     # one of the same files. The claim holder comes from the lockfile, not the
     # graph snapshot's stale locked_by field.
-    import re
     from pathlib import Path
     from fno.graph.collision import parse_files_to_modify
 
-    incoming_files = set(re.findall(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", details or ""))
+    incoming_files = discovery.filing_paths(details or "")
     if incoming_files:
         known = {item["id"] for item in out}
         for node in entries:
@@ -2916,7 +2915,7 @@ def cmd_encounter(
         cap = load_settings().style.word_cap.encounter
         violations = style.check(evidence, surface="encounter", word_cap=cap)
         if violations:
-            typer.echo(style.format_violations(violations), err=True)
+            typer.echo(style.format_violations(violations, surface="encounter"), err=True)
             raise typer.Exit(code=4)
 
     record: dict[str, object] = {
