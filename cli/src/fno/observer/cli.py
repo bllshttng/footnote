@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import typer
-import yaml
 
 from fno.loops import loop_level
 from fno.observer import fold
@@ -499,7 +498,7 @@ def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[
         has_five = False
     if not has_five:
         return "gap", 0
-    argv = ["--plan", pp] + (["--node", item["graph_node_id"]] if item.get("graph_node_id") else [])
+    argv = ["--plan", str(pp)] + (["--node", str(item["graph_node_id"])] if item.get("graph_node_id") else [])
     out = _judge_via_rust(argv)
     if out is None:
         return "judged", 0
