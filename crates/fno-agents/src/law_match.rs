@@ -52,12 +52,14 @@ struct AskRequest {
 #[derive(Deserialize, Serialize)]
 struct LawRow {
     decision_id: String,
+    // Option, not String+default: Python rows carry null for a missing
+    // decision body or ts, and serde's `default` covers absent keys only.
     #[serde(default)]
-    subject: String,
+    subject: Option<String>,
     #[serde(default)]
-    decision: String,
+    decision: Option<String>,
     #[serde(default)]
-    ts: String,
+    ts: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -155,7 +157,7 @@ fn exact_tier(req: &AskRequest) -> Vec<ExactHit> {
         .collect();
     let mut hits: Vec<ExactHit> = Vec::new();
     for law in &req.laws {
-        let key = law.subject.trim();
+        let key = law.subject.as_deref().unwrap_or("").trim();
         if key.is_empty() {
             continue;
         }
@@ -191,7 +193,7 @@ fn nearby_tier(req: &AskRequest, exact: &[ExactHit]) -> Vec<NearbyHit> {
     let subject_tokens = tokens(subject);
     let mut nearby: Vec<NearbyHit> = Vec::new();
     for law in &req.laws {
-        let shared: Vec<String> = tokens(&law.subject)
+        let shared: Vec<String> = tokens(law.subject.as_deref().unwrap_or(""))
             .intersection(&subject_tokens)
             .cloned()
             .collect();
@@ -200,8 +202,8 @@ fn nearby_tier(req: &AskRequest, exact: &[ExactHit]) -> Vec<NearbyHit> {
         }
         nearby.push(NearbyHit {
             decision_id: law.decision_id.clone(),
-            subject: law.subject.clone(),
-            decision: law.decision.clone(),
+            subject: law.subject.clone().unwrap_or_default(),
+            decision: law.decision.clone().unwrap_or_default(),
             shared,
         });
     }
@@ -220,7 +222,7 @@ fn nearby_tier(req: &AskRequest, exact: &[ExactHit]) -> Vec<NearbyHit> {
 fn b_ts<'a>(laws: &'a [LawRow], id: &str) -> &'a str {
     laws.iter()
         .find(|l| l.decision_id == id)
-        .map(|l| l.ts.as_str())
+        .and_then(|l| l.ts.as_deref())
         .unwrap_or("")
 }
 
@@ -266,7 +268,7 @@ fn ask_answer(req: &AskRequest) -> AskAnswer {
 /// a law subject with two or more parts is in the question words). Order is
 /// shared-token count, then newest question.
 fn law_answer(req: &LawRequest) -> LawAnswer {
-    let law_tokens = tokens(&req.law.subject);
+    let law_tokens = tokens(req.law.subject.as_deref().unwrap_or(""));
     let mut cands: Vec<(usize, &OpenQuestion, Vec<String>)> = Vec::new();
     for q in &req.questions {
         let q_subject = q.subject.as_deref().unwrap_or("");
@@ -281,7 +283,7 @@ fn law_answer(req: &LawRequest) -> LawAnswer {
                 .split(|c: char| !c.is_ascii_alphanumeric())
                 .filter(|t| !t.is_empty())
                 .collect();
-            let law_subject_lower = req.law.subject.to_lowercase();
+            let law_subject_lower = req.law.subject.as_deref().unwrap_or("").to_lowercase();
             let parts: Vec<&str> = law_subject_lower.split('-').collect();
             is_candidate = parts.len() >= 2 && parts.iter().all(|p| words.contains(p));
         }
@@ -390,9 +392,9 @@ mod tests {
     fn law(id: &str, subject: &str, decision: &str, ts: &str) -> LawRow {
         LawRow {
             decision_id: id.to_owned(),
-            subject: subject.to_owned(),
-            decision: decision.to_owned(),
-            ts: ts.to_owned(),
+            subject: Some(subject.to_owned()),
+            decision: Some(decision.to_owned()),
+            ts: Some(ts.to_owned()),
         }
     }
 
