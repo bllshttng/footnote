@@ -11,10 +11,10 @@ def apply(node: dict, dispatch_verb: Optional[str], dispatch_brief: Optional[str
     """Store the overrides. The verb is checked with the drain's own name-mint
     predicate (``verb_code_for``), so a verb carrying an argument, or an
     unknown word, is refused here instead of failing three drains later under
-    the auto-defer rule (x-a57a). The refusal raises and aborts
-    locked_mutate_graph before any write lands. The brief additionally warns
-    at write: the author is present here and absent at spawn, so surface the
-    size now, in the spawn path's wording.
+    the auto-defer rule. The refusal raises and aborts locked_mutate_graph
+    before any write lands. The brief additionally warns at write: the author
+    is present here and absent at spawn, so surface the size now, in the
+    spawn path's wording.
 
     Returns the warning text instead of printing it: the caller runs inside
     locked_mutate_graph, which re-runs the mutator on contention, so a print

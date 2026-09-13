@@ -2969,7 +2969,7 @@ def test_update_dispatch_verb_null_clears(tmp_graph):
 
 
 def test_update_dispatch_verb_with_argument_refused(tmp_graph):
-    """x-a57a: a verb carrying an argument wrote fine and only failed at the
+    """A verb carrying an argument wrote fine and only failed at the
     name mint three drains later, after the auto-defer. Refused at write."""
     r = _invoke("backlog", "add", "Argument node")
     nid = json.loads(r.output)["id"]
