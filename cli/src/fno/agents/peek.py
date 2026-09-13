@@ -736,28 +736,33 @@ def _lookup_registry_row_exact(handle: str):
     """Return the registry row whose stored name or session id matches ``handle``.
 
     This diagnostic runs only after transcript and mux resolution both miss.
-    It deliberately does not resolve aliases or prefixes: the message must name
-    the exact requested row, and an unreadable registry contributes no
-    diagnosis. The session id is matched alongside the name because that is the
-    string ``fno agents adopt`` and ``fno agents peek``'s own miss text hand the
-    caller, and a row addressable by one spelling and not the other is the same
-    dead end by a shorter route.
+    It deliberately does not resolve name aliases: the message must name the
+    exact requested row, and an unreadable registry contributes no diagnosis.
+    The session id is matched alongside the name through the same handle tiers
+    every other reader uses (full uuid, canonical first-eight, legacy
+    last-eight): a row addressable by one spelling and not the other is the
+    same dead end by a shorter route, and x-f715 is exactly that dead end - a
+    short-id handle against a row that stores the full uuid. Two rows matching
+    one short handle is a guess this refuses to make, so it returns None and
+    the not-found path below speaks.
     """
     from fno.agents.registry import load_registry
+    from fno.harness_identity import session_handle_tier
 
     try:
         entries = load_registry()
     except Exception:  # noqa: BLE001 - the existing not-found path owns read failures
         return None
-    return next(
-        (
-            entry
-            for entry in entries
-            if getattr(entry, "name", None) == handle
-            or getattr(entry, "harness_session_id", None) == handle
-        ),
-        None,
-    )
+    matches = [
+        entry
+        for entry in entries
+        if getattr(entry, "name", None) == handle
+        or (
+            isinstance(getattr(entry, "harness_session_id", None), str)
+            and session_handle_tier(handle, entry.harness_session_id) is not None
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 class _RegistrySession:
@@ -825,24 +830,6 @@ def _row_as_session(row) -> Optional[_RegistrySession]:
         short_id=getattr(row, "short_id", None) or "",
         cwd=getattr(row, "cwd", None) or "",
     )
-
-
-def _reachable_session(handle: str, projects_root: Optional[Path]):
-    """Last rung before the refusal: the durable stores truth and mail send read.
-
-    Discovery is liveness-gated and the exact row match above takes only the
-    name and the full session id, so a quiet session addressed by its 8-hex
-    short id fell through both while roster, truth and mail all resolved it
-    (x-f715). A hit here carries no live-writer proof, so the caller marks it
-    like a row-derived session.
-    """
-    from fno.agents.discover import StoreReadError, resolve_reachable
-
-    try:
-        session, _suggestions = resolve_reachable(handle, projects_dir=projects_root)
-    except StoreReadError as exc:
-        return exc.resolved
-    return session
 
 
 def _adoptable_sessions(
@@ -1140,9 +1127,6 @@ def peek(
         # reader needs, so read the conversation rather than deny it exists.
         session = _row_as_session(row)
         row_derived = session is not None
-        if session is None:
-            session = _reachable_session(handle, projects_root)
-            row_derived = session is not None
 
     if session is None:
         # Name the instrument. Both reads above (the live-session resolver and

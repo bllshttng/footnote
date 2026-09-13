@@ -1504,9 +1504,9 @@ def test_peek_resolves_a_quiet_session_by_short_session_id(tmp_path, monkeypatch
 
 
 def test_peek_follow_on_a_reachable_session_does_not_tail(tmp_path, monkeypatch):
-    """A durable-store hit carries no live-writer proof, so --follow must not block.
+    """A row resolved by short id carries no live-writer proof; --follow must not block.
 
-    Same rung as the recovered-row guard: the tail is the whole answer, and
+    Same guard the recovered-row tests pin: the tail is the whole answer, and
     liveness stays truth's verdict.
     """
     session_id = "647b3a9c-6544-43fe-899e-704382f3d973"
