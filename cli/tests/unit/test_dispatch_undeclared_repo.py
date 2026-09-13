@@ -148,3 +148,36 @@ def test_rust_seam_silent_for_own_repo_and_ambient(tmp_path, monkeypatch):
         ["spawn", "--cwd", str(target), "do the thing"],
     )
     assert os.environ["FNO_WORKTREE_POLICY"] == "external"
+
+
+def test_spawn_carries_ambient_policy_override_on_the_pane(tmp_path, monkeypatch):
+    """An explicit ambient override rides the provenance overlay: the pane
+    wrapper's set-or-clear must preserve what the operator set."""
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.mux_spawn import MuxSpawnResult
+
+    captured: dict = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return MuxSpawnResult(
+            name=kwargs["name"], provider=kwargs["provider"], session="main",
+            pane_id=1, child_pid=None, session_uuid="u",
+        )
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_dispatch)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FNO_WORKTREE_POLICY", "external")
+    monkeypatch.setenv("FNO_REPO_ROOT", str(Path.cwd()))
+
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "peer", "--harness", "claude", "--substrate", "pane",
+         "--node", "x-84a8", "--slug", "s", "--plan", "p.md"],
+    )
+    assert res.exit_code == 0, res.output
+    assert captured["provenance"]["FNO_WORKTREE_POLICY"] == "external"
