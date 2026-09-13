@@ -61,7 +61,7 @@ These were measured by hand on 2026-08-15. Both are pinned by tests in `cli/test
 
 ## Lanes
 
-`fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply-all` adds the sandbox-blocked reap; it no longer reroutes. Cap moves belong to the provider-cap actor, so a capped row always reads `cap: owned by provider-cap` and stays put. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
+`fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply-all` adds the sandbox-blocked reap and no longer reroutes. Cap moves belong to the provider-cap actor, so a capped row always reads `cap: owned by provider-cap` and stays put. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
 
 `--only <verdict>` validates and renders its help from `VERDICTS`, the same live set the classifier returns; `unclaimed` is advertised from the same source, so adding a verdict cannot require a second hand-maintained list.
 
@@ -118,27 +118,15 @@ A bus-only row stays bus-only. Every row is eligible for `wake`, because a wake 
 
 ## Cadence
 
-`config.recovery.watchdog` rides the pr_watch tick. `enabled` says whether the lane runs at all and is false by default; `mode` says how far an enabled lane goes and is `report` or `wake`. A config written with the old flat string still parses: `off` becomes `enabled = false`, and any other word becomes `enabled = true` with that mode; a legacy `handoff` reads as inert (cross-provider moves belong to the provider-cap actor). `report` classifies and emits. `wake` also applies the wake lane. `config.autonomy.enabled` and `config.recovery.enabled` veto every mode. No tick value reroutes; no mode moves a capped session. Every completed sweep writes the exact provider-outage report to `~/.fno/watchdog-sweep.json`. An absent or unreadable provider instrument is stamped `unknown`, never as an empty measured breaker set.
+`config.recovery.watchdog` rides the pr_watch tick. `enabled` says whether the lane runs at all and is false by default. `mode` says how far an enabled lane goes and is `report` or `wake`. A config written with the old flat string still parses: `off` becomes `enabled = false`, and any other word becomes `enabled = true` with that mode. A legacy `handoff` reads as inert, because cross-provider moves belong to the provider-cap actor. `report` classifies and emits. `wake` also applies the wake lane. `config.autonomy.enabled` and `config.recovery.enabled` veto every mode. No tick value reroutes and no mode moves a capped session. Every completed sweep writes the exact provider-outage report to `~/.fno/watchdog-sweep.json`. An absent or unreadable provider instrument is stamped `unknown`, never as an empty measured breaker set.
 
 ## Provider-wide outages
 
-The provider-outage MEASUREMENT stays here. `measure_provider_outages` collects
-transcript and pane evidence and reports breaker state on every sweep and in
-`~/.fno/watchdog-sweep.json`. Durable raw assistant transcript records can vote.
-Projections, registry status, process liveness, task messages, and quoted user
-text cannot vote. Pane text votes only after a fresh atomic snapshot. Every vote
-joins machine-recorded harness, model-vendor provider, and account-record
-identity. A missing axis is count-bearing UNKNOWN. It cannot open a breaker.
+The provider-outage MEASUREMENT stays here. `measure_provider_outages` collects transcript and pane evidence and reports breaker state on every sweep and in `~/.fno/watchdog-sweep.json`. Durable raw assistant transcript records can vote. Projections, registry status, process liveness, task messages, and quoted user text cannot vote. Pane text votes only after a fresh atomic snapshot. Every vote joins machine-recorded harness, model-vendor provider, and account-record identity. A missing axis is count-bearing UNKNOWN. It cannot open a breaker.
 
-The ACTION half moved. Deciding, migrating, and bringing back sessions stranded
-by a provider usage cap is the provider-cap actor's job:
-[provider-cap.md](provider-cap.md). The watchdog never stops, moves, or
-respawns a row because of a quota refusal; its capped rows read
-`cap: owned by provider-cap` and stay put.
+The ACTION half moved. Deciding, migrating, and bringing back sessions stranded by a provider usage cap is the provider-cap actor's job: [provider-cap.md](provider-cap.md). The watchdog never stops, moves, or respawns a row because of a quota refusal. Its capped rows read `cap: owned by provider-cap` and stay put.
 
-Manual inspection remains `fno agents watchdog --json`. The base command is a
-dry run. `--apply` applies wake only. `--apply-all` adds the sandbox-blocked
-reap. Neither moves provider ownership. There is no watchdog handoff command.
+Manual inspection remains `fno agents watchdog --json`. The base command is a dry run. `--apply` applies wake only. `--apply-all` adds the sandbox-blocked reap. Neither moves provider ownership. There is no watchdog handoff command.
 
 ## The keeper lane
 
