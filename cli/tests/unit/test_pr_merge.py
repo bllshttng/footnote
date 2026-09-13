@@ -3026,20 +3026,25 @@ def test_lock_released_before_post_merge_reconcile(enabled, monkeypatch, tmp_pat
     assert seen.get("second_acquired"), "the lock must free before post-merge work runs"
 
 
-def test_early_release_never_touched_a_successors_lock(enabled, monkeypatch, tmp_path):
-    """AC2-ERR: the early release is holder-checked, so a second fire after a
-    successor took the lock releases nothing - and an empty or foreign lock
-    is silent, never an error."""
-    import os
-
+def test_early_release_frees_the_lock_for_a_successor(enabled, monkeypatch, tmp_path):
+    """AC2-ERR: after the early fire, a successor takes the lock, and the
+    with-block's finally release (the same holder-checked call) leaves the
+    successor's claim on disk untouched - the double-release is release_claim's
+    own documented silent-success contract."""
     from fno.claims.core import acquire_claim
+    from fno.claims.io import claim_path
 
-    acquire_claim(_lock_key(), f"pr-merge:{os.getpid()}", reason="this process holds it")
-    release = _merge._merge_lock_early_release()
-    release()
-    release()  # lock already gone: silent
-    acquire_claim(_lock_key(), "pr-merge:successor", reason="next merger")
-    release()  # our stale callable must not release the successor's lock
+    with _merge._merge_lock() as (state, release_now):
+        assert state == "acquired" and release_now is not None
+        release_now()
+        # the freed lock is takeable right now, before the merge verb returns
+        acquire_claim(_lock_key(), "pr-merge:successor", reason="next merger")
+    successor_file = claim_path(_lock_key(), root=None)
+    assert successor_file.exists(), "the finally release must not free the successor's claim"
+    from fno.claims.core import release_claim
+
+    release_claim(_lock_key(), "pr-merge:successor")
+    assert not successor_file.exists()
 
 
 def test_merge_lock_released_when_outcome_is_not_merged(enabled, monkeypatch, tmp_path):

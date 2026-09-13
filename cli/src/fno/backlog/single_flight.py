@@ -196,13 +196,6 @@ def reconcile_gate(*, dry_run: bool, node: Optional[str], json_out: bool, pr_num
             once()
 
 
-def _flight_budget_s() -> float:
-    try:
-        return float(os.environ.get(_BUDGET_ENV) or _FLIGHT_BUDGET_DEFAULT_S)
-    except ValueError:
-        return float(_FLIGHT_BUDGET_DEFAULT_S)
-
-
 def _arm_flight_watchdog(flight: "Flight", verb: str) -> tuple[threading.Event, Optional[IO[str]]]:
     """Bound a live holder (x-626f: every specimen was LIVE at 0.0 pct CPU,
     which no pid probe can call dead): a stack file SIGUSR1 can dump into,
@@ -210,6 +203,12 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> tuple[threading.Event, 
     trips or an opted-in parent dies. os._exit is safe: every graph write
     commits server-side under the keeper lock, and reconcile is idempotent.
     """
+    def _budget_s() -> float:
+        try:
+            return float(os.environ.get(_BUDGET_ENV) or _FLIGHT_BUDGET_DEFAULT_S)
+        except ValueError:
+            return float(_FLIGHT_BUDGET_DEFAULT_S)
+
     stop = threading.Event()
     root = claims_root_for(flight.key) or Path.home()
     stack_path = root / ".fno" / "flight" / f"stack-{os.getpid()}.txt"
@@ -222,7 +221,7 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> tuple[threading.Event, 
         if fh is not None:
             fh.close()
             fh = None
-    budget_s = _flight_budget_s()
+    budget_s = _budget_s()
     parent_raw = os.environ.get("FNO_DIE_WITH_PARENT", "")
     parent_pid = int(parent_raw) if parent_raw.isdigit() else None
     start = time.monotonic()
@@ -238,7 +237,7 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> tuple[threading.Event, 
                     faulthandler.dump_traceback(file=fh, all_threads=True)
                     fh.flush()
             with contextlib.suppress(Exception):
-                # suppress, never bare except: an orphan's stderr pipe may be closed
+                # suppress: an orphan's stderr pipe may be closed
                 sys.stderr.write(
                     f"backlog {verb}: {'parent-gone' if gone else f'budget {int(budget_s)}s'} "
                     f"after {int(elapsed)}s; flight {flight.key} released; stack at {stack_path}\n"

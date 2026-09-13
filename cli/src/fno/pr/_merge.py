@@ -1494,27 +1494,6 @@ def _run_post_merge_followups(
         )
 
 
-def _merge_lock_early_release() -> Callable[[], None]:
-    """Release the lock ``_merge_lock`` acquired in this process. Re-derives
-    the same key/holder; ``release_claim`` is silent on a gone or
-    successor-held lock, so the early fire and the ``finally`` compose.
-    """
-
-    def _release() -> None:
-        try:
-            from fno.claims.core import release_claim
-            from fno.paths import resolve_canonical_repo_root
-
-            release_claim(
-                f"merge:{resolve_canonical_repo_root()}",
-                f"pr-merge:{os.getpid()}",
-            )
-        except Exception:  # noqa: BLE001 - pid-liveness frees it anyway
-            pass
-
-    return _release
-
-
 def _finish_confirmed_merge(
     pr_number: int,
     strategy: str,
@@ -1571,8 +1550,8 @@ _MergeLockState = Literal["acquired", "held", "unavailable"]
 
 
 @contextmanager
-def _merge_lock() -> Iterator[_MergeLockState]:
-    """Serialize merges repo-wide; yield ``acquired`` | ``held`` | ``unavailable``.
+def _merge_lock() -> Iterator[tuple[_MergeLockState, Optional[Callable[[], None]]]]:
+    """Serialize merges repo-wide; yield ``(state, release_now)``.
 
     One ``merge:<canonical-root>`` claim per project (repo-local routing, so
     every worktree lane contends on the SAME lock - like ``walker:<root>``),
@@ -1581,6 +1560,9 @@ def _merge_lock() -> Iterator[_MergeLockState]:
     yields ``held``. A claims-layer error yields ``unavailable`` and the merge
     proceeds unserialized: the lock is coordination, GitHub stays the merge
     authority, and our own tooling failing must never block a merge.
+
+    ``release_now`` (None unless acquired) releases our holder early; the
+    finally release is the same idempotent call, so both firing is safe.
     """
     state: Literal["acquired", "held", "unavailable"] = "acquired"
     key = holder = release = None
@@ -1593,6 +1575,13 @@ def _merge_lock() -> Iterator[_MergeLockState]:
 
         key = f"merge:{resolve_canonical_repo_root()}"
         holder = f"pr-merge:{os.getpid()}"
+
+        def _release_now() -> None:
+            try:
+                release_claim(key, holder)
+            except Exception:  # noqa: BLE001 - pid-liveness frees it anyway
+                pass
+
         deadline = time.monotonic() + _MERGE_LOCK_WAIT_S
         while True:
             try:
@@ -1613,14 +1602,11 @@ def _merge_lock() -> Iterator[_MergeLockState]:
         sys.stderr.write(f"pr-merge: merge lock unavailable ({exc}); proceeding\n")
         state = "unavailable"
     try:
-        yield state
+        yield state, (_release_now if state == "acquired" else None)
     finally:
         if release is not None and state == "acquired":
             assert key is not None and holder is not None  # set together before release
-            try:
-                release(key, holder)
-            except Exception:  # noqa: BLE001 - pid-liveness frees it anyway
-                pass
+            release(key, holder)
 
 
 def _live_lane_count() -> int:
@@ -2120,7 +2106,7 @@ def run_merge(
     # between the freshness read and our merge is exactly the race the lock
     # exists to close. Sequential runs (no live lanes) skip the freshness hold
     # and see only an uncontended lock - behavior unchanged.
-    with _merge_lock() as lock:
+    with _merge_lock() as (lock, release_now):
         if lock == "held":
             _emit(
                 pr_number,
@@ -2197,7 +2183,7 @@ def run_merge(
             (state, refusal, covered_head, note),
             approved=posture_approved,
             auto_merge_source=posture_source,
-            release_lock=(_merge_lock_early_release() if lock == "acquired" else None),
+            release_lock=release_now,
         )
 
 
