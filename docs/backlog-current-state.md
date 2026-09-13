@@ -27,4 +27,4 @@ Re-running the same manifest is idempotent. Already-migrated rows count as `unch
 
 ## Compatibility
 
-The canonical command vocabulary (11 groups plus the `annotate` exception) is defined once in `crates/fno-agents/src/backlog/commands.rs` and mirrored in `scripts/ci/verb-collapse-map.tsv`. Legacy spellings keep working during the compatibility window. The final 11-group-only catalog lands after x-26bd and compatibility removal.
+The canonical command vocabulary (11 groups plus the `annotate` exception) is defined once in `crates/fno-agents/src/backlog/commands.rs` and mirrored in `scripts/ci/verb-collapse-map.tsv`. Legacy spellings keep working during the compatibility window. The final 11-group-only catalog lands after the note storage merge and compatibility removal.
