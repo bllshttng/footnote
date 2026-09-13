@@ -842,6 +842,26 @@ fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
     }
 }
 
+/// One drain member's `backlog advance` arguments. Epic members converge as
+/// `--epic <id> --continuation`; project members drain as
+/// `--loose --project <id>` (never retire - a loose territory has no mission
+/// lifecycle, x-e221, and the CLI takes no positional beside those flags).
+fn advance_member_args(member: &DrainMember) -> Vec<String> {
+    if member.epic {
+        vec![
+            "--epic".to_string(),
+            member.id.clone(),
+            "--continuation".to_string(),
+        ]
+    } else {
+        vec![
+            "--loose".to_string(),
+            "--project".to_string(),
+            member.id.clone(),
+        ]
+    }
+}
+
 /// Dispatch ONE territory member by shelling K1's converge core, recording each
 /// dispatched child in `pending` for later reconcile. Epic members run
 /// `advance --epic <id> --continuation` (Retire on deactivated/all-done);
@@ -884,27 +904,21 @@ fn dispatch_member(
         );
         return (MissionDispatch::Continue, DispatchFacts::default());
     }
-    let (mode, extra): (&str, &[&str]) = if member.epic {
-        // --continuation: never reactivate the mission and retire an inactive
-        // one, so an operator `--stop` between drain ticks is not undone.
-        ("--epic", &["--continuation"])
-    } else {
-        ("--loose", &[])
-    };
+    // Epic members converge as `advance --epic <id> --continuation`; loose
+    // members drain as `advance --loose --project <project>` (the CLI takes no
+    // positional beside those flags). --continuation never reactivates the
+    // mission, so an operator `--stop` between drain ticks is not undone.
+    let target_args = advance_member_args(member);
     let out = match retry_etxtbsy(|| {
         fno_cmd(&cfg.fno_bin)
             .args([
                 // The `backlog advance` argv literal at this indentation is the
                 // seam marker the autonomous-dispatch census greps. Keep the
                 // elements multi-line; `--json` stays last.
-                "backlog",
-                "advance",
-                mode,
-                member.id.as_str(),
-                "--source",
-                "ab",
+                "backlog", "advance",
             ])
-            .args(extra)
+            .args(target_args.clone())
+            .args(["--source", "ab"])
             .arg("--json")
             .current_dir(&cfg.cwd)
             .output()
@@ -2067,6 +2081,37 @@ async fn mission_drain_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loose_member_argv_names_the_project_door() {
+        // The CLI takes no positional beside --loose/--project; the daemon's
+        // loose dispatch must name the project through --project or the
+        // command is a usage error and the rung-1 territory never drains.
+        let member = DrainMember {
+            id: "readyrule".to_string(),
+            epic: false,
+        };
+        assert_eq!(
+            advance_member_args(&member),
+            vec![
+                "--loose".to_string(),
+                "--project".to_string(),
+                "readyrule".to_string()
+            ]
+        );
+        let epic = DrainMember {
+            id: "x-e".to_string(),
+            epic: true,
+        };
+        assert_eq!(
+            advance_member_args(&epic),
+            vec![
+                "--epic".to_string(),
+                "x-e".to_string(),
+                "--continuation".to_string()
+            ]
+        );
+    }
 
     #[test]
     fn status_fanout_targets_parse_from_json() {

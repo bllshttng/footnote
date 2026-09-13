@@ -174,7 +174,8 @@ echo "== 1. resolver =="
 RESOLVER=$( (cd "$FIXTURE" && fno_py config active-backlog --json) ) || fail "resolver verb"
 echo "$RESOLVER" | python3 -c '
 import json, sys
-targets = json.load(sys.stdin)
+reading = json.load(sys.stdin)
+targets = reading["targets"]
 assert isinstance(targets, list) and len(targets) == 1, targets
 t = targets[0]
 assert t["scope"] == "fno", t
