@@ -3063,11 +3063,18 @@ def test_reconcile_child_is_bounded_and_parent_bound(enabled, monkeypatch, tmp_p
     import os
 
     captured = []
-    inner = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    inner = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        toplevel=str(tmp_path),
+        # a resolvable github url: the repo slug from it scopes the reconcile
+        view_url="https://github.com/owner/repo/pull/42",
+    )
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"entries": []}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+    # read_graph runs through the keeper; the unit stub reads the file instead
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda *a, **k: [])
 
     def fake(cmd, **kwargs):
         if "reconcile" in cmd:
@@ -3093,8 +3100,13 @@ def test_reconcile_timeout_reports_and_keeps_merge_exit(enabled, monkeypatch, tm
     graph.write_text(json.dumps({"entries": []}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda *a, **k: [])
 
-    inner = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    inner = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        toplevel=str(tmp_path),
+        view_url="https://github.com/owner/repo/pull/42",
+    )
 
     def fake(cmd, **kwargs):
         if "reconcile" in cmd:
@@ -3103,7 +3115,8 @@ def test_reconcile_timeout_reports_and_keeps_merge_exit(enabled, monkeypatch, tm
 
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
-    err = capsys.readouterr().err
-    assert "timed out after 120s" in err
-    assert "#42" in err
-    assert _last_json(capsys)["outcome"] == "merged"
+    # one readouterr: a second read returns only the post-consumption capture
+    cap = capsys.readouterr()
+    assert "timed out after 120s" in cap.err
+    assert "#42" in cap.err
+    assert json.loads(cap.out.strip().splitlines()[-1])["outcome"] == "merged"

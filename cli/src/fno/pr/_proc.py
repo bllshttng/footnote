@@ -95,4 +95,13 @@ def run(
             pass
         proc.communicate()
         raise
+    except BaseException:
+        # subprocess.run killed the child on any escape (KeyboardInterrupt
+        # included); keep that contract, or an interrupted caller orphans a
+        # live child holding its pipes.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        raise
     return Result(returncode=proc.returncode, stdout=stdout or "", stderr=stderr or "")
