@@ -353,10 +353,8 @@ fn refuse_with(
     out.insert("reason".into(), json!(reason));
     out.insert("message".into(), json!(message));
     if let Some(obj) = extra.as_object_mut() {
-        let moved: Vec<(String, Value)> = obj
-            .iter_mut()
-            .map(|(k, v)| (k.clone(), v.take()))
-            .collect();
+        let moved: Vec<(String, Value)> =
+            obj.iter_mut().map(|(k, v)| (k.clone(), v.take())).collect();
         for (k, v) in moved {
             out.insert(k, v);
         }
@@ -414,7 +412,10 @@ fn make_rows(
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "uncapped".into())),
             );
-            row.insert("verdict".into(), json!(if full { "refuse" } else { "pass" }));
+            row.insert(
+                "verdict".into(),
+                json!(if full { "refuse" } else { "pass" }),
+            );
             row.insert(
                 "key".into(),
                 json!(format!("agents.provider_limits.{provider}.lanes")),
@@ -464,7 +465,10 @@ fn cpu_share_row(payload: &spawn_gate::AdmissionPayload) -> Value {
         json!(if unreadable {
             "unreadable".to_string()
         } else {
-            format!("{:.2}/{:.2} cores", payload.fleet_cores, payload.capacity_cores)
+            format!(
+                "{:.2}/{:.2} cores",
+                payload.fleet_cores, payload.capacity_cores
+            )
         }),
     );
     row.insert(
@@ -502,13 +506,15 @@ fn load_backstop_row(payload: &spawn_gate::AdmissionPayload) -> Value {
     );
     row.insert(
         "verdict".into(),
-        json!(if payload.axis == "load_15m" && payload.verdict == "refuse" {
-            "refuse"
-        } else if payload.load_15m.is_some() {
-            "pass"
-        } else {
-            "skipped: load unreadable"
-        }),
+        json!(
+            if payload.axis == "load_15m" && payload.verdict == "refuse" {
+                "refuse"
+            } else if payload.load_15m.is_some() {
+                "pass"
+            } else {
+                "skipped: load unreadable"
+            }
+        ),
     );
     row.insert("key".into(), json!("agents.hard_max_load_per_cpu"));
     Value::Object(row)
@@ -550,7 +556,10 @@ fn lanes_answer(
 ) -> Result<Value, spawn_gate_lanes::LaneFault> {
     let mut providers: Vec<String> = Vec::new();
     if let Some(table) = agents_config::config_lookup(config_cwd, &["agents", "provider_limits"])
-        .and_then(|t| t.as_table().map(|t| t.keys().cloned().collect::<Vec<String>>()))
+        .and_then(|t| {
+            t.as_table()
+                .map(|t| t.keys().cloned().collect::<Vec<String>>())
+        })
     {
         providers.extend(table);
     } else {
@@ -581,19 +590,13 @@ fn lanes_answer(
         match spawn_gate_lanes::provider_live_count(registry_path, &provider, warnings) {
             Ok((live, counted)) => {
                 let mut lane = Map::new();
-                lane.insert(
-                    "cap".into(),
-                    json!(cap),
-                );
+                lane.insert("cap".into(), json!(cap));
                 lane.insert("live".into(), json!(live));
                 lane.insert("counted".into(), json!(counted));
                 lanes.insert(provider, Value::Object(lane));
             }
             Err(error) => {
-                return Err(spawn_gate_lanes::LaneFault {
-                    provider,
-                    error,
-                });
+                return Err(spawn_gate_lanes::LaneFault { provider, error });
             }
         }
     }
