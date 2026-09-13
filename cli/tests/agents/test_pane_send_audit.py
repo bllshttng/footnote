@@ -88,6 +88,7 @@ def test_documented_query_names_who_dispatched(tmp_path):
     (`source`) and what was sent (`payload`).
     """
     import json
+    import shutil
     import subprocess
 
     rows = [
@@ -141,10 +142,14 @@ def test_documented_query_names_who_dispatched(tmp_path):
     # The documented query, with the doc's placeholder swapped for the staged
     # journal and a real worker name for <worker-name-or-id>. The env prefix
     # rides along because rg honors RIPGREP_CONFIG_PATH, and this machine has
-    # one; without it the row comes back wearing ansi colors and the parse dies.
+    # one; without it the row comes back wearing ansi colors and the parse
+    # dies. CI runners have no rg, so grep -F stands in for it: same two-stage
+    # fixed-string query, same pipe.
+    search = shutil.which("rg") or ""
+    first = f"RIPGREP_CONFIG_PATH= {search}" if search else "grep -F"
+    second = f"RIPGREP_CONFIG_PATH= rg" if search else "grep -F"
     proc = subprocess.run(
-        f"RIPGREP_CONFIG_PATH= rg '\"lane\":\"pane-send\"' {events}"
-        " | RIPGREP_CONFIG_PATH= rg worker-under-test",
+        f"{first} '\"lane\":\"pane-send\"' {events} | {second} worker-under-test",
         shell=True,
         capture_output=True,
         text=True,
