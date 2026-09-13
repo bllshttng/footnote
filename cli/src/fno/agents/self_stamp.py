@@ -31,12 +31,9 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
     ) -> Optional[str]:
         from fno.agents.registry import row_owning_session_id
 
-        # own_pair is the canonical pair claims.self_identity completed from
-        # the spawn stamp plus the same family's marker (None when it could
-        # not). The registry applies the agreement check: a row matching the
-        # pair on both halves is this worker's own and never contention, a
-        # pair of None keeps this detector self-blind exactly where nothing
-        # proves self.
+        # own_pair is the pair claims.self_identity completed (None when it
+        # could not); the registry's agreement check keeps this detector
+        # self-blind exactly where nothing proves self.
         return row_owning_session_id(session_id, self_binding=own_pair)
 
     # Same injection seam as collide: claims cannot import agents (x-a409).
@@ -50,14 +47,10 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
 def identity_ambiguity_message(identity) -> str:
     """Render the single refusal sentence for an unproven mixed environment.
 
-    The strip lines are the self-rescue: the session cannot prove which
-    harness it is (that is the ambiguity), but the operator knows, and
-    stripping the foreign family's markers - every one the scrub knows about,
-    not just the two the resolver consults - restores self-resolution. Built
-    from :func:`fno.harness_identity.ambient_identity_strip_flags`, which reads
-    the same list the scrub reads, so the text cannot drift from behavior
-    (x-b57a: a poisoned claude session stripped two codex names and nothing
-    changed; all seven restored it).
+    The strip lines are the self-rescue: stripping the foreign family's
+    markers restores self-resolution. Built from
+    :func:`fno.harness_identity.ambient_identity_strip_flags`, which reads the
+    same list the scrub reads, so the text cannot drift from behavior (x-b57a).
     """
     from fno.harness_identity import ambient_identity_strip_flags
 

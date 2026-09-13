@@ -1274,19 +1274,11 @@ def resolve_owned_identity_cmd() -> None:
     on the manifest; precedence alone launders an inherited marker into
     ownership, so it calls this verb instead. Returns the proven (or
     collision-surviving) identity plus any collision detected, as ``KEY=value``
-    lines on stdout. The caller parses what it needs and treats a stale ``fno``
-    without this verb (Click exit 2) as 'unavailable', falling back to today's
-    precedence rather than bricking init.
+    lines on stdout; the caller treats a stale ``fno`` without this verb as
+    'unavailable' rather than bricking init.
 
     Resolution routes through :func:`fno.claims.self_identity.resolve_self_identity`,
-    the one owned-identity implementation every caller shares (x-0992). The
-    verb's former private proof policy and its own_binding construction - both
-    gated on a COMPLETE canonical stamp, which a pane-spawned worker never
-    carries - lived here and refused every such worker by its own registry row;
-    they are deleted, not forked behind a flag. The prover is still process-tree
-    truth and the collider is still the cause-agnostic backstop; the own-row
-    suppression now lives where the canonical pair is completed, in
-    claims.self_identity.
+    the one owned-identity implementation every caller shares (x-0992).
 
     Read-only; writes no state. Always exits 0 - it is a resolver, not a gate.
     """
