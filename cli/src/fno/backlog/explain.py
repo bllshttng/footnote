@@ -591,12 +591,13 @@ def render_report(report: dict) -> str:
             if asked.get("status") == "in_review":
                 # The PR is the work: no status change is wanted, the driver
                 # adopts the open PR through target init (worktree ensure
-                # continues origin/feature/<node>).
+                # continues origin/feature/<node>). Both command spellings:
+                # codex reserves / for harness commands.
                 out.append(
                     f"ASKED  {asked['id']}: never a candidate (in_review: its open PR is "
-                    f"the work; dispatch /fno:target {asked['id']}, whose init adopts the "
-                    "PR on feature/<node>; undriven ones list under undriven_pr on "
-                    "fno inbox board)"
+                    f"the work; dispatch /fno:target {asked['id']} (codex: $fno:target "
+                    f"{asked['id']}), whose init adopts the PR on feature/<node>; "
+                    "undriven ones list under undriven_pr on fno inbox board)"
                 )
             else:
                 out.append(

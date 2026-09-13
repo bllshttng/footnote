@@ -226,6 +226,40 @@ def test_ac1_hp_an_open_ship_row_alone_never_occupies(monkeypatch):
     assert live_worked_node_ids() == {}
 
 
+def test_a_closed_do_row_is_not_reopened_by_the_ship_link(monkeypatch):
+    """A session whose do row closed is finished with THIS node; the open
+    PR-link ship row must not resurrect it through the closed-session fold
+    when the registry still names the node."""
+    entry = {
+        "id": "x-reopen1",
+        "status": "in_review",
+        "sessions": [
+            {
+                "phase": "do",
+                "harness": "claude",
+                "session_id": "session-1",
+                "started_at": "2026-09-09T00:00:00Z",
+                "ended_at": "2026-09-10T00:00:00Z",
+            },
+            {
+                "phase": "ship",
+                "harness": "claude",
+                "session_id": "session-1",
+                "started_at": "2026-09-10T00:01:00Z",
+            },
+        ],
+    }
+    reading = RosterReading(
+        True, 1,
+        {"x-reopen1": [{"name": "t-finished-worker", "state": "working",
+                        "cwd": "/worktrees/x-reopen1", "row_id": "session-1"}]},
+    )
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [entry])
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+
+    assert live_worked_node_ids(strict=True) == {}
+
+
 def test_ac1_err_an_open_do_row_beside_the_ship_row_still_occupies(monkeypatch):
     entry = _ship_entry("x-e221")
     entry["sessions"].append(
