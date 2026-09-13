@@ -7,7 +7,7 @@
 # (AC2); a pass shape, an uncrowned row, and an unreadable registry all allow,
 # the unreadable case with a line on stderr (AC3); a Task limb of the court
 # allows via its payload agent_id or its subagents/ transcript, anything else
-# fail-closes (x-d5d7). The registry row, reign manifest, knob and plans dir
+# fail-closes. The registry row, reign manifest, knob and plans dir
 # are stubbed per case; no real fno state.
 
 set -uo pipefail
@@ -269,7 +269,7 @@ OUT="$(run_guard "$(bash_payload "fno backlog session close x-1 --launch '/fno:t
 # Its payload carries the parent's session_id, so sections 2-4 see the crown,
 # plus a non-empty agent_id, the per-call subagent marker; the transcript path
 # names the parent transcript for king and limb alike, so the on-disk
-# subagents/ layout is only the second signature (x-d5d7).
+# subagents/ layout is only the second signature.
 SUBTRANS="$TMP/transcripts/$SID/subagents/agent-x.jsonl"
 OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$SUBTRANS")")"; RC=$?
 ERR="$(cat "$TMP/stderr.txt")"
@@ -277,7 +277,7 @@ ERR="$(cat "$TMP/stderr.txt")"
   && pass "limb: subagent transcript Write allowed, stderr names the limb" \
   || fail "limb allow rc=$RC out=$OUT err=$ERR"
 
-# The live x-d5d7 shape: the payload's transcript_path names the PARENT main
+# The live incident shape: the payload's transcript_path names the PARENT main
 # transcript (measured: it is never the limb's subagents file), and only the
 # agent_id marks the call as subagent-borne. This blocked a real limb on
 # 2026-09-13; it must allow.

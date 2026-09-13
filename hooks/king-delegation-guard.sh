@@ -26,7 +26,7 @@
 # session id (so sections 2-4 see the crown) plus a non-empty agent_id, the
 # harness's only per-call subagent marker. The transcript path does not
 # discriminate - it names the parent transcript for king and limb alike
-# (measured 2026-09-13, x-d5d7), so a transcript under the session id's
+# (measured 2026-09-13 on a live court), so a transcript under the session id's
 # subagents/ directory is kept only as a second signature for harnesses that
 # populate it. Any other shape fail-closes.
 #
@@ -238,7 +238,7 @@ sys.exit(0 if os.path.realpath(p) == os.path.realpath(h) else 1)
 #      the crown. The harness marks subagent-borne tool calls with a non-empty
 #      agent_id - the one per-call field that separates a limb from the king's
 #      own main thread. The transcript path cannot do that job: it names the
-#      parent transcript for both (measured 2026-09-13, x-d5d7), so the on-disk
+#      parent transcript for both (measured 2026-09-13 on a live court), so the on-disk
 #      subagents/ layout is only the second signature, for harnesses that
 #      populate it. A limb doing what its king told it to do is delegation
 #      working, not a king implementing. Any other shape (no agent_id, empty or
