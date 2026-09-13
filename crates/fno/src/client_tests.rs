@@ -191,7 +191,7 @@ async fn open_attach_place_excludes_mission_squad_from_placement_targets() {
     let mut view = two_pane_view();
     let mut layout = two_squad_layout(1);
     let mid = mission_meta(9, "mux-squad  1/1").id;
-    layout.squads.push(mission_meta(9, "mux-squad  1/1"));
+    layout.missions.push(mission_meta(9, "mux-squad  1/1"));
     view.set_layout(layout);
     let squads = view.attach_dst_squads();
     view.open_attach_place("job1".into(), Some(mid), squads);
@@ -632,6 +632,7 @@ pub(super) fn two_pane_view() -> View {
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
+            missions: Vec::new(),
         },
     );
     view.frames.insert(10, text_frame(29, 35, 'a'));
@@ -826,6 +827,7 @@ fn single_pane_tab_paints_no_focus_outline() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     let frame = view.compose();
     // The sideline still marks the active squad, so scope the check to the
@@ -892,6 +894,7 @@ fn four_pane_view() -> View {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     view
 }
@@ -1454,6 +1457,7 @@ fn stacked_view() -> View {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     view
 }
@@ -1649,6 +1653,7 @@ fn layout_change_ends_a_drag_whose_seam_is_gone() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     assert!(
         view.seam_drag.is_none(),
@@ -1698,6 +1703,7 @@ fn drag_ends_when_a_split_lands_between_its_panes() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     assert!(
         view.seam_drag.is_none(),
@@ -1735,6 +1741,7 @@ fn drag_survives_a_layout_push_that_keeps_its_pair() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     assert!(view.seam_drag.is_some(), "the drag survives its own resize");
     assert!(view.notice.is_none(), "a normal resize is not an error");
@@ -2163,6 +2170,7 @@ fn seam_at_refuses_an_ambiguous_crossing() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     // Outer (1+14, 28+35) = (15, 63) is the crossing: both axes resolve.
     assert_eq!(view.seam_at(15, 63), None);
@@ -2205,6 +2213,7 @@ fn three_pane_view() -> View {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     view
 }
@@ -2558,6 +2567,7 @@ fn layout_push_clears_stale_hover_row() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     assert_eq!(view.hover_row, None);
 }
@@ -2598,6 +2608,7 @@ fn chrome_hit_card_opens_confirm_with_node() {
         }],
         backlog_lanes: vec![(crate::backlog_view::UNLANED.into(), 1)],
         backlog_stale: false,
+        missions: Vec::new(),
     });
     view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
                                  // display_rows (x-0090, no tab rows): [footnote squad, + new workspace,
@@ -2656,6 +2667,7 @@ fn chrome_hit_non_ready_card_is_notice_not_confirm() {
         ],
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
                                  // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
@@ -2718,6 +2730,7 @@ fn chrome_hit_inflight_card_routes_pane_then_attach_then_hint() {
         ],
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
                                  // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
@@ -2838,6 +2851,7 @@ fn two_squad_layout(active_squad: u64) -> LayoutView {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     }
 }
 
@@ -2905,24 +2919,6 @@ fn set_layout_prunes_dead_squad_ids_from_expanded() {
         "dead id pruned"
     );
     assert!(view.squad_view(2) == SectionView::Expanded);
-}
-
-// A synthetic mission squad has no `active_squad` moment to ride in on (it
-// is never selectable server-side), so `section_view` gives every mission
-// the Expanded-tier default directly (x-c5ee) - else its grouped workers
-// stay invisible with no way to reveal them (codex review of x-1a47 change
-// 2/3, P1-a). No seed: the default is computed live.
-#[test]
-fn new_mission_squad_defaults_expanded() {
-    let mut view = two_pane_view();
-    let mut layout = two_squad_layout(1);
-    let mid = mission_meta(1, "mux-squad  1/2").id;
-    layout.squads.push(mission_meta(1, "mux-squad  1/2"));
-    view.set_layout(layout);
-    assert!(
-        view.squad_view(mid) == SectionView::Expanded,
-        "a mission defaults expanded via section_view"
-    );
 }
 
 // (x-c5ee) A section-view agent: only the fields the majority check reads
@@ -3490,27 +3486,6 @@ fn idle_fold_row_action_toggles_idle() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// A manual collapse of a mission squad must survive later ticks the same
-// way a real squad's does - insert-only, not force-reopened.
-#[test]
-fn manual_collapse_of_mission_squad_persists_across_ticks() {
-    let mission_layout = |active| {
-        let mut l = two_squad_layout(active);
-        l.squads.push(mission_meta(7, "mux-squad  0/3"));
-        l
-    };
-    let mid = mission_meta(7, "mux-squad  0/3").id;
-    let mut view = two_pane_view();
-    view.set_layout(mission_layout(1));
-    view.cycle_squad(mid);
-    assert!(view.squad_view(mid) == SectionView::Collapsed);
-    view.set_layout(mission_layout(1));
-    assert!(
-        view.squad_view(mid) == SectionView::Collapsed,
-        "an already-known mission must not re-seed on every tick"
-    );
-}
-
 // A mission squad can never hold an agent (its id is a high-bit sentinel
 // nothing is assigned), so it renders as a progress line under the
 // `~ missions` band rather than a workspace section an operator would expect
@@ -3520,14 +3495,15 @@ fn manual_collapse_of_mission_squad_persists_across_ticks() {
 fn mission_renders_under_the_missions_band_not_as_a_workspace() {
     let mut view = two_pane_view();
     let mut layout = two_squad_layout(1);
-    layout.squads.push(mission_meta(3, "mux-squad  2/2"));
+    layout.missions.push(mission_meta(3, "mux-squad  2/2"));
     view.set_layout(layout);
     let rows = view.display_rows();
-    assert!(
-        !rows
-            .iter()
-            .any(|r| matches!(r, DisplayRow::Sel(row) if is_mission_squad(row.squad))),
-        "a mission must not render as a workspace section"
+    assert_eq!(
+        rows.iter()
+            .filter(|r| matches!(r, DisplayRow::Sel(_)))
+            .count(),
+        2,
+        "only the two real workspaces render as sections"
     );
     let band = rows
         .iter()
@@ -3554,7 +3530,7 @@ fn section_toggles_hide_the_missions_and_backlog_bands() {
     // rather than collapsing it each session.
     let mut view = two_pane_view();
     let mut layout = two_squad_layout(1);
-    layout.squads.push(mission_meta(3, "epic  0/4"));
+    layout.missions.push(mission_meta(3, "epic  0/4"));
     layout.backlog = vec![bcard("x-rdy", CardState::Ready)];
     layout.backlog_lanes = vec![("ready".into(), 1)];
     view.set_layout(layout);
@@ -3923,13 +3899,11 @@ fn persisted_state_survives_the_real_attach_path() {
     std::fs::create_dir_all(&dir).unwrap();
     crate::view_store::set_test_path(&dir);
 
-    let mid = crate::proto::MISSION_SQUAD_BASE | 3;
     let mut saved = HashMap::new();
     saved.insert(
         SectionKey::Squad("/code/footnote".into()),
         SectionView::Collapsed,
     );
-    saved.insert(SectionKey::Mission(mid), SectionView::Collapsed);
     crate::view_store::save(&saved);
 
     // Exactly what `attach_and_run` builds: no squads, active_squad 0.
@@ -3947,11 +3921,12 @@ fn persisted_state_survives_the_real_attach_path() {
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
+            missions: Vec::new(),
         },
     );
     // The server's first real push.
     view.set_layout(LayoutView {
-        squads: vec![meta(1, "footnote", 2, 1), mission_meta(3, "epic  0/4")],
+        squads: vec![meta(1, "footnote", 2, 1)],
         active_squad: 1,
         panes: Vec::new(),
         focus: 0,
@@ -3961,17 +3936,13 @@ fn persisted_state_survives_the_real_attach_path() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: vec![mission_meta(3, "epic  0/4")],
     });
 
     assert_eq!(
         view.squad_view(1),
         SectionView::Collapsed,
         "a persisted collapse must survive attach, not be re-seeded expanded"
-    );
-    assert_eq!(
-        view.squad_view(mid),
-        SectionView::Collapsed,
-        "the same for a mission header, which seeds on first appearance"
     );
 
     crate::view_store::clear_test_path();
@@ -4030,6 +4001,7 @@ fn later_activation_still_expands_a_collapsed_squad() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     assert_eq!(
         view.squad_view(2),
@@ -4043,12 +4015,11 @@ fn later_activation_still_expands_a_collapsed_squad() {
 #[test]
 fn section_key_matches_resolver() {
     let mut plain = meta(1, "footnote", 1, 0);
-    let mission = mission_meta(9, "epic  1/2");
     let mut cwdless = meta(2, "nameonly", 1, 0);
     cwdless.canonical_cwd = String::new();
     plain.canonical_cwd = "/code/footnote".into();
 
-    for s in [&plain, &mission, &cwdless] {
+    for s in [&plain, &cwdless] {
         assert!(
             squad_matches(s, &section_key(s)),
             "squad_matches must accept its own section_key: {:?}",
@@ -4056,55 +4027,9 @@ fn section_key_matches_resolver() {
         );
     }
     // ...and reject a foreign one.
-    assert!(!squad_matches(&plain, &section_key(&mission)));
-    assert!(!squad_matches(&mission, &section_key(&plain)));
+    assert!(!squad_matches(&plain, &section_key(&cwdless)));
+    assert!(!squad_matches(&cwdless, &section_key(&plain)));
     assert!(!squad_matches(&plain, &SectionKey::Elsewhere));
-}
-
-// The regression the name key would have caused: a mission header's NAME
-// carries its live done/total counters, so keying on it meant an expanded
-// mission silently collapsed the moment one of its nodes finished.
-#[test]
-fn mission_section_state_survives_a_progress_tick() {
-    let mut view = two_pane_view();
-    let mid = crate::proto::MISSION_SQUAD_BASE | 7;
-    let panes = view.layout.panes.clone();
-    let layout = |name: &str| LayoutView {
-        squads: vec![meta(1, "footnote", 2, 1), mission_meta(7, name)],
-        active_squad: 1,
-        panes: panes.clone(),
-        focus: 10,
-        area: (28, 72),
-        agents: vec![],
-        focus_node: None,
-        backlog: Vec::new(),
-        backlog_lanes: Vec::new(),
-        backlog_stale: false,
-    };
-    view.set_layout(layout("epic  1/5"));
-    assert_eq!(
-        view.squad_view(mid),
-        SectionView::Expanded,
-        "a new mission seeds expanded"
-    );
-
-    // A worker finishes: same mission, same stable id, brand-new NAME.
-    view.set_layout(layout("epic  2/5"));
-    assert_eq!(
-        view.squad_view(mid),
-        SectionView::Expanded,
-        "progress must not collapse the mission out from under the operator"
-    );
-
-    // And a deliberate collapse still survives the next tick.
-    view.cycle_squad(mid);
-    assert_eq!(view.squad_view(mid), SectionView::Collapsed);
-    view.set_layout(layout("epic  3/5"));
-    assert_eq!(
-        view.squad_view(mid),
-        SectionView::Collapsed,
-        "the operator's choice outlives the rename"
-    );
 }
 
 // Two squads whose DERIVED labels collide (display_names disambiguates only
@@ -4129,6 +4054,7 @@ fn same_named_squads_keep_separate_view_state() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     view.set_squad_view(1, SectionView::Expanded);
     view.set_squad_view(2, SectionView::Collapsed);
@@ -4297,6 +4223,7 @@ fn client_compose_zero_tab_active_squad() {
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
+            missions: Vec::new(),
         },
     );
     let text = frame_text(&view.compose());
@@ -7019,7 +6946,7 @@ async fn a_long_press_on_an_inert_row_says_so_instead_of_nothing() {
     // neither synthetic, so without this there is no `Sub` row and the test
     // asserts nothing. An earlier version guarded on the row's existence and
     // returned - a green test measuring nothing.
-    v.layout.squads.push(mission_meta(7, "epic  1/2"));
+    v.layout.missions.push(mission_meta(7, "epic  1/2"));
     let sub = v
         .display_rows()
         .iter()
@@ -9149,6 +9076,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
     let frame = view.compose();
@@ -9281,6 +9209,7 @@ fn squad_header_rollup_counts_in_every_view_state() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     let lines: Vec<String> = frame_text(&view.compose())
         .lines()
@@ -9385,6 +9314,7 @@ fn headers_demoted_and_focused_row_wears_the_band() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
     let mut cells = vec![Cell::default(); rows * cols];
@@ -9462,6 +9392,7 @@ fn tab_badge_marks_only_rows_on_other_tabs() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
     let mut cells = vec![Cell::default(); rows * cols];
@@ -9513,6 +9444,7 @@ fn focus_change_scrolls_the_band_into_view() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     };
     // Focus on the top agent row's pane: it already fits, so no scroll.
     view.set_layout(layout(100, agents.clone()));
@@ -9567,6 +9499,7 @@ fn focus_reveal_never_scrolls_an_open_selector_off_screen() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     };
     view.set_layout(layout(100, agents.clone()));
     // Park the selector on the top agent row (display index 1) and pin the view.
@@ -9817,6 +9750,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
     let frame = view.compose();
@@ -9983,6 +9917,7 @@ fn client_compose_ignores_stale_frames_and_clips_overflow() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     assert!(view.frames.contains_key(&10));
     assert!(
@@ -10018,6 +9953,7 @@ fn client_compose_letterboxes_beyond_the_clamped_area() {
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
+            missions: Vec::new(),
         },
     );
     view.frames.insert(10, text_frame(20, 50, 'a'));
@@ -10270,6 +10206,7 @@ fn client_selector_rows_reanchor_on_catalog_shrink() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     // Display rows are now [notes squad (auto-expanded, no agents),
     // + new workspace] (x-0090: no tab rows): the cursor clamps to the last
@@ -10876,6 +10813,7 @@ fn blank_spacers_separate_groups_only_when_multi_squad() {
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
+            missions: Vec::new(),
         },
     );
     assert!(
@@ -11866,6 +11804,7 @@ fn display_rows_footer_keeps_empty_session_actionable() {
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
+            missions: Vec::new(),
         },
     );
     assert_eq!(v.display_rows().len(), 1, "footer only");
@@ -12074,7 +12013,7 @@ async fn both_attach_picker_entry_paths_build_the_same_candidate_list() {
     // the only difference between them is which door gets opened.
     let widen = |v: &mut View| {
         widen_to_squads(v, 14);
-        v.layout.squads.push(mission_meta(5, "epic  0/4"));
+        v.layout.missions.push(mission_meta(5, "epic  0/4"));
     };
     let mut click = unified_rows_view();
     widen(&mut click);
@@ -12095,10 +12034,6 @@ async fn both_attach_picker_entry_paths_build_the_same_candidate_list() {
         .expect("keyboard opens the picker");
     assert_eq!(a.squads, b.squads, "one list, two doors");
     assert_eq!(a.squads.len(), 14, "and it is the uncapped one");
-    assert!(
-        !a.squads.iter().any(|&id| is_mission_squad(id)),
-        "with the mission sentinel excluded on both"
-    );
 }
 
 #[tokio::test]
@@ -13353,6 +13288,7 @@ fn nav_cursor_re_clamps_on_layout_shrink() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     let n = v.nav_rows().len();
     assert!(n < last + 1, "catalog shrank");
@@ -15611,6 +15547,7 @@ fn needs_reanchor_keeps_cursor_and_stays_open_when_empty() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     };
     // "b" drops -> its identity is gone, so the cursor clamps to the new last.
     let l1 = with(&v, vec![blocked_row("a", 1, None)]);
@@ -16305,6 +16242,7 @@ fn set_layout_follows_the_reordered_squad() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     assert_eq!(v.selector, Some(2), "cursor follows squad 1 to its new row");
 }
@@ -16388,6 +16326,7 @@ async fn selector_m_opens_move_picker_on_a_squad_row() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     v.selector = Some(0);
     selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
@@ -16395,23 +16334,19 @@ async fn selector_m_opens_move_picker_on_a_squad_row() {
 }
 
 #[tokio::test]
-async fn selector_m_picker_excludes_mission_squads() {
-    // A mission id resolves to no server-side squad, so MoveTab into one is
-    // refused; the tab-move destination list must exclude mission sentinels
-    // (the other destination sites already do).
+async fn selector_m_picker_lists_only_real_workspaces() {
+    // A mission rides its own lane and never reaches `squads`, so the tab-move
+    // destination list is real workspaces by construction. An active mission
+    // present alongside them changes nothing about what the picker offers.
     let mut v = two_pane_view(); // squads 1 (footnote) + 2 (notes)
-    v.layout.squads.push(mission_meta(5, "epic  0/4"));
+    v.layout.missions.push(mission_meta(5, "epic  0/4"));
     v.selector = Some(0); // squad 1
     selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
     let dsts = v
         .move_pick
         .expect("picker opens with squad 2 available")
         .squads;
-    assert!(
-        !dsts.iter().any(|&id| is_mission_squad(id)),
-        "no mission sentinel in the destinations"
-    );
-    assert!(dsts.contains(&2), "the other real workspace is listed");
+    assert_eq!(dsts, vec![2], "only the other real workspace is listed");
 }
 
 #[tokio::test]
@@ -16485,6 +16420,7 @@ fn row_menu_pane_row_omits_move_to_workspace_with_one_squad() {
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
+        missions: Vec::new(),
     });
     let idx = agent_row_at(&v, |a| a.name == "only");
     assert!(v.open_row_menu(idx, Anchor::Center));
@@ -17845,6 +17781,7 @@ fn shot_view(term: (u16, u16), squads: Vec<SquadMeta>, agents: Vec<AgentRow>) ->
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
+            missions: Vec::new(),
         },
     );
     view.frames

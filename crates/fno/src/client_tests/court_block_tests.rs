@@ -21,6 +21,7 @@ fn the_court_block_shrinks_the_sideline_and_yields_when_too_short() {
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
+            missions: Vec::new(),
         },
     );
     assert!(view.court.take_want());
