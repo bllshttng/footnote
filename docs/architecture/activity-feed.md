@@ -8,7 +8,7 @@ Several stores hold one timeline and nothing joined them. The feed is one projec
 
 | Store | Holds | Contributes |
 |---|---|---|
-| `~/.fno/questions.jsonl` | `operator_question`, `operator_question_closed`, `operator_decision` rows | `question_asked`, `question_closed`, `decision_recorded` |
+| `~/.fno/questions.jsonl` | `operator_question`, `operator_question_closed`, `operator_decision`, `day_boundary` rows | `question_asked`, `question_closed`, `decision_recorded`, `day_boundary` |
 | `~/.fno/graph.json` | node lifecycle as fields: `created_at`, `sessions[].started_at`, a ship-phase row beside `pr_number`, `completed_at` | `node_created`, `node_started`, `pr_created`, `node_ended` |
 | `~/.fno/agents/reap-receipts/` | one durable receipt per removed registry row, each carrying the verbatim resume line | `session_reaped` |
 | `~/.fno/events.jsonl` | telemetry (72% ticks) | nothing - deliberately not read |
@@ -33,6 +33,17 @@ The lifecycle kinds derive from the graph at query time, so the graph stays the 
 | `pr_created` | a ship-phase row with `started_at` on a node carrying `pr_number` (ref: PR number) |
 | `node_ended` | a node's `completed_at`, session id from its newest do/ship row |
 | `session_reaped` | a reap receipt, `detail` carrying its verbatim resume line |
+| `day_boundary` | a persisted morning or end-of-day readback (ref: boundary id) |
+
+## Day boundaries
+
+`fno inbox day start` and `fno inbox day end` fold the existing project journal, question lifecycle, graph completion records, decision retractions, review retractions, and reign check-ins. The native fold returns JSON or a short text readback. The inbox adapter persists one bounded `day_boundary` row in the project journal first. It then writes the row to `~/.fno/questions.jsonl` for durable cross-rotation recall.
+
+The permanent question index stores the boundary reference because the project journal rotates at 8 MiB and keeps only one rotated file. The index is recall and provenance, not a second source of question truth. Open questions still come from the existing lifecycle fold, and a failed index append names the boundary id after the project append.
+
+Each boundary uses a half-open interval `[from, to)`. The first boundary starts at local midnight. Later boundaries start at the newest saved cutoff. Repeated `start` or `end` on the same local day returns the saved boundary and does not append a duplicate or advance attention. Up to five question ids are featured. Three come from the shared queue order. The rest are questions that have not appeared in an earlier saved boundary.
+
+An unreadable question store exits 1 and prints no zero-open line. A missing question store is a successful, explicitly incomplete read. The first line says `open questions: unknown` and the receipt names the missing path. A saved boundary is historical evidence. It does not replace current queue or merge authority.
 
 ## An actor is not a session
 
