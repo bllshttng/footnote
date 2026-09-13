@@ -14,16 +14,13 @@
 # notice. A convention nothing checks is a convention that decays.
 #
 # SCOPE, stated because a partial instrument that looks complete is worse than
-# an absent one. This covers the PYTHON gate only. `crates/fno-agents/src/
-# spawn_gate.rs` is a second live gate (called from bin/client.rs for the
-# daemon-client bg/headless arms) and it still refuses silently on the RAM
-# floor, the load ceiling and max_live. It is not covered here, and the fix is
-# blocked on a real prerequisite rather than on effort: Python's emit target is
-# `paths.state_dir()/events.jsonl`, which is CONFIG-RESOLVED
-# (cli/src/fno/paths.py:557), and Rust has no equivalent resolver. A Rust emit
-# that guessed the path would write where nothing reads - a silent instrument,
-# which is the failure this whole change exists to remove. Epic x-6f9f (path
-# consolidation) owns that resolver.
+# an absent one. This covers the PYTHON side of the one spawn gate
+# (x-6089): spawn_gate.py now holds exactly one refusal CONSTRUCTION site
+# (inside _refuse) plus the transport's call into it - the gate's axes
+# themselves live in crates/fno-agents/src/spawn_gate.rs and answer the
+# Python transport as data, so a spawn that enters Python still emits its
+# refusal through this seam, and a native (bg/headless) spawn emits nothing
+# (x-ab75 owns a Rust emit).
 #
 # Exit 0 when every Python refusal routes through the seam; exit 1 naming file
 # and line otherwise.
@@ -61,4 +58,4 @@ if [[ $fail -ne 0 ]]; then
   exit 1
 fi
 
-echo "check-gate-refusals-emit: ok (every GateRefused construction routes through _refuse; the Rust gate is out of scope, see this script's header)"
+echo "check-gate-refusals-emit: ok (every GateRefused construction routes through _refuse; the transport is the only Python-side refusal source, see this script's header)"

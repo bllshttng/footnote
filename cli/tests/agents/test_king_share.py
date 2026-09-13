@@ -182,47 +182,6 @@ def test_unattributed_rows_name_one_bucket_and_divide_nothing(monkeypatch):
     assert reading["held"] == 1
 
 
-def test_king_at_share_refuses_under_cap(monkeypatch, capsys):
-    """The commons specimen: fleet under cap, one king holds its full share,
-    its next spawn refuses while other kings still have room."""
-    alive = os.getpid()
-    # 5 crowns; cap 30 so share = 6. KING_A holds exactly 6 worker rows, the
-    # fleet holds 6+5+5+4+4 = 24 < 30: under cap, at share.
-    held = [6, 5, 5, 4, 4]
-    rows = _crowned_rows([KING_A, KING_B, KING_C, KING_D, KING_E], alive)
-    for i, n in enumerate(held):
-        king = [KING_A, KING_B, KING_C, KING_D, KING_E][i]
-        for j in range(n):
-            rows.append(_row(f"w{i}-{j}", alive, spawned_by=king))
-    c = _census(monkeypatch, rows)
-    assert c.slot_count == 29
-
-    def fake_settings():
-        class _A:
-            max_live = 30
-            min_free_gb = 0.0
-            max_load_per_cpu = 0.0
-            provider_limits = {"zai": 5}
-
-        class _S:
-            agents = _A()
-
-        return _S()
-
-    monkeypatch.setattr("fno.config.load_settings", fake_settings)
-    monkeypatch.setattr(spawn_gate, "census", lambda socket_map=None: c)
-    monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
-        lambda: type("I", (), {"session_id": KING_A, "harness": "claude"})(),
-    )
-    with pytest.raises(SystemExit) as exc:
-        spawn_gate.run_gate("w-new", "bg", no_wait=True)
-    assert exc.value.code == spawn_gate.EXIT_KING_SHARE == 80
-    err = capsys.readouterr().err
-    assert "aaaaaaaa" in err and "share 6" in err and "across 5 kings" in err
-    assert "waiting cannot help" in err
-
-
 def test_uncrowned_caller_is_refused_but_never_divides(monkeypatch, capsys):
     """AC8-EDGE: a caller with no crown is still share-checked, and its rows
     do not shrink the share - the divisor stays at the crown count (4), so
@@ -270,38 +229,6 @@ def test_unreadable_registry_yields_unknown_and_enforces_nothing(monkeypatch):
     assert reading["unattributed"] is None
     # No refusal fires: unknown is not a violation.
     spawn_gate._check_king_share(c, 30, caller_session=KING_A)
-
-
-def test_cap_refusal_wins_over_share_verdict(monkeypatch):
-    """Ordering: the fleet cap sits BEFORE the share check in run_gate, so a
-    full fleet explains itself as full, never as a share refusal (the two
-    caps must not race to explain themselves). cap=3, three live rows all
-    KING_A: the king is also at its share, but the cap fires first."""
-    alive = os.getpid()
-    rows = [_row(f"w{i}", alive, spawned_by=KING_A) for i in range(3)]
-    c = _census(monkeypatch, rows)
-    monkeypatch.setattr(spawn_gate, "census", lambda socket_map=None: c)
-
-    def fake_settings():
-        class _A:
-            max_live = 3
-            min_free_gb = 0.0
-            max_load_per_cpu = 0.0
-            provider_limits = {"zai": 5}
-
-        class _S:
-            agents = _A()
-
-        return _S()
-
-    monkeypatch.setattr("fno.config.load_settings", fake_settings)
-    monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
-        lambda: type("I", (), {"session_id": KING_A, "harness": "claude"})(),
-    )
-    with pytest.raises(SystemExit) as exc:
-        spawn_gate.run_gate("w-new", "bg", no_wait=True)
-    assert exc.value.code == spawn_gate.EXIT_NO_WAIT
 
 
 def test_one_reading_feeds_the_gate_and_the_lanes_census(monkeypatch):
@@ -367,3 +294,8 @@ def test_refusal_prints_the_unattributed_bucket(monkeypatch, capsys):
         "3 live row(s) name nobody and sit in the unattributed bucket "
         "(ghost0, ghost1, ghost2)" in err
     )
+
+# The gate-side king share, schema and fleet-load cases decided inside the
+# ONE Rust gate now (crates/fno-agents/src/spawn_gate.rs and
+# spawn_gate_lanes.rs tests). The transport contract lives in
+# tests/agents/test_spawn_gate.py::TestTransport.

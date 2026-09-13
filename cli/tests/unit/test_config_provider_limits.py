@@ -95,47 +95,6 @@ def test_provider_limits_table_reads_both_spellings():
     assert provider_limits_table(SimpleNamespace()) == {}
 
 
-def test_gate_reads_provider_limits_not_the_legacy_leaf(monkeypatch, capsys):
-    """AC3-HP: the spawn gate applies the provider_limits cap exactly as
-    max_lanes was applied before the rename. Proven on the provider-cap
-    terminal: a zai-routed spawn reaches the cap read (and its refusal) only
-    through provider_limits."""
-    from fno.agents import spawn_gate
-    from fno.config import ProviderBudget
-
-    def fake_run_gate_settings():
-        class _A:
-            max_live = 3
-            min_free_gb = 0.0
-            max_load_per_cpu = 0.0
-            provider_limits = {"zai": ProviderBudget(lanes=5, subagents=1)}
-
-            def __getattr__(self, name):  # any legacy reader must miss loudly
-                raise AttributeError(name)
-
-        class _S:
-            agents = _A()
-
-        return _S()
-
-    monkeypatch.setattr("fno.config.load_settings", fake_run_gate_settings)
-    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
-    # A measured count at the cap forces the provider-cap refusal - the arm
-    # that read provider_limits (cap 5 for zai) on the way in. The mutex is
-    # patched held-and-released so the refusal measures the cap, never a
-    # contended gate.
-    monkeypatch.setattr(
-        spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
-    )
-    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda _provider: 5)
-    with pytest.raises(SystemExit) as exc:
-        spawn_gate.run_gate("w", "bg", route_provider="zai")
-    assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
-    refused = capsys.readouterr().err
-    assert "provider zai, cap 5" in refused
-    assert "current count 5" in refused
-
-
 def test_no_second_agents_leaf_named_max_lanes():
     """AC4-EDGE: after this change, every surviving `max_lanes` leaf belongs to
     `parallel.max_lanes` (the epic-advance cap, LD2) or the legacy alias."""
@@ -143,3 +102,6 @@ def test_no_second_agents_leaf_named_max_lanes():
 
     agents_fields = {f for f in AgentsBlock.model_fields if f.endswith("max_lanes")}
     assert agents_fields == set(), f"agents.* grew a second max_lanes leaf: {agents_fields}"
+
+# The gate's own provider_limits read moved into the ONE Rust gate
+# (spawn_gate_lanes::provider_lanes_cap); its cases live there.
