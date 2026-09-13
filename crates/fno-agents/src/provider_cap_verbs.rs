@@ -172,6 +172,9 @@ fn cap_decide(args: &[String]) -> i32 {
             },
         }),
     );
+    // The answer consumes the open question: drop the marker so a later
+    // strand on the same lane can ask fresh instead of being suppressed.
+    let _ = std::fs::remove_file(dir.join(format!("question-{}.json", lane_file_token(lane))));
     println!("recorded: {} -> {verdict}", path.display());
     0
 }

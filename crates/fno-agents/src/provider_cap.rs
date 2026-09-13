@@ -193,10 +193,15 @@ pub fn capped_tail(transcript: &Path) -> TailReading {
     };
     let size = meta.len();
     let start = size.saturating_sub(TAIL_BYTES);
+    // Read from one byte earlier so the window's first byte can be checked
+    // against the newline that precedes it: a seek landing exactly on a line
+    // boundary must NOT drop that complete line, or an older 429 could read
+    // as the newest assistant entry.
+    let read_from = start.saturating_sub(1);
     use std::io::{Read, Seek, SeekFrom};
     let bytes = match std::fs::File::open(transcript).and_then(|mut f| {
-        f.seek(SeekFrom::Start(start))?;
-        let mut buf = Vec::with_capacity((size - start) as usize);
+        f.seek(SeekFrom::Start(read_from))?;
+        let mut buf = Vec::with_capacity((size - read_from) as usize);
         f.read_to_end(&mut buf)?;
         Ok(buf)
     }) {
@@ -205,8 +210,9 @@ pub fn capped_tail(transcript: &Path) -> TailReading {
     };
     let text = String::from_utf8_lossy(&bytes);
     let mut lines: Vec<&str> = text.lines().collect();
-    // The seek may land mid-JSONL line; the fragment cannot parse, so drop it.
-    if start > 0 && !lines.is_empty() {
+    // Drop the one guaranteed-partial fragment (the line containing read_from)
+    // only when the window did not begin on a line boundary.
+    if read_from > 0 && bytes.first() != Some(&b'\n') {
         lines.remove(0);
     }
     for line in lines.iter().rev() {
