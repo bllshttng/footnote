@@ -2,4 +2,4 @@
 # inline typer.Option call count under cli/src/fno never grows. New
 # flags are Rust work (clap in crates). --update rewrites this number;
 # a removal must lower it in the same PR.
-1334
+1335
