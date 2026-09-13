@@ -1,4 +1,4 @@
-"""The advisory five-question blueprint judge (x-9983).
+"""The advisory five-question blueprint judge.
 
 One isolated model call per question (fold.JUDGE_DIMENSIONS); every fault
 path (timeout, nonzero exit, unparseable reply, ``unknown``) returns None,
@@ -57,13 +57,18 @@ def _gather_context(dimension: str, plan_text: str) -> str:
             return r.stdout[:4000] if r.returncode == 0 else ""
         syms = list(dict.fromkeys(re.findall(r"`([\w./-]{4,60})`", plan_text)))[:12]
         chunks = []
-        for sym in syms:
+        if syms:
+            # One scan for the whole symbol set: a per-symbol loop is N full
+            # tree walks before the model call even starts.
             h = subprocess.run(
-                ["rg", "-l", "-F", sym, "--glob", "!.claude/**", "--glob", "!graphify-out/**", "."],
-                capture_output=True, text=True, timeout=20,
+                ["rg", "-l", "-F", *[e for s in syms for e in ("-e", s)],
+                 "--glob", "!.claude/**", "--glob", "!graphify-out/**", "."],
+                capture_output=True, text=True, timeout=60,
             )
             if h.returncode == 0:
-                chunks.append(f"{sym}: {', '.join(h.stdout.split()[:8])}")
+                files = [ln.strip() for ln in h.stdout.splitlines() if ln.strip()][:12]
+                if files:
+                    chunks.append(f"symbols {', '.join(syms)} appear in: {', '.join(files)}")
         try:
             from fno.paths import resolve_repo_root
 

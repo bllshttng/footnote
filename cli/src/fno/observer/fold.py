@@ -167,11 +167,11 @@ BLUEPRINT_DIMENSIONS = ("collision_free", "shipped_outcome")
 JUDGE_DIMENSIONS = ("persona", "surface_fit", "uncovered_case", "deletable", "duplication")
 
 # The failure-modes heading and file-ownership copies that lived here were
-# deleted 2026-09-12 (x-9983): the heading refusal was retired from
-# mutate_doc.py on 2026-08-12, leaving this copy grading a dead rule (160 of
-# 163 plans "failing"), and the collision copy diverged from the validator's
-# check. collision_free now imports the validator's own parallel-surface
-# check instead of forking it.
+# deleted 2026-09-12: the heading refusal was retired from mutate_doc.py on
+# 2026-08-12, leaving this copy grading a dead rule (160 of 163 plans
+# "failing"), and the collision copy diverged from the validator's check.
+# collision_free now imports the validator's own parallel-surface check
+# instead of forking it.
 
 
 def _surface_collisions(plan_text: str) -> Optional[list[str]]:

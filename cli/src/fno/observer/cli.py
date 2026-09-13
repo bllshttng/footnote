@@ -415,6 +415,20 @@ def sweep(
         scored_count=scored_count,
     )
     summary["cost_usd"] = 0.0  # sweep is a read-only fold
+    if judge_n > 0 and skill == "blueprint":
+        # The N newest corpus items (the window is chronological) get the model
+        # judge BEFORE run_complete closes the run, so a consumer reading the
+        # run's findings never sees a false zero on the judge dimensions. A
+        # judge fault must not lose the code run's record, hence the guard.
+        # Deliberately NOT wired into the session-start hook: an autonomous
+        # spawner needs its own registry row and a config.autonomy gate.
+        try:
+            for item in items[-judge_n:]:
+                _judge_one_item(item, _node_text(by_id.get(item.get("graph_node_id")) or {}), run_id, events_paths)
+            typer.echo(f"  judge: offered the model judge to {min(judge_n, len(items))} window plan(s)")
+        except Exception as exc:
+            typer.echo(f"judge fault (code scoring unaffected): {exc}", err=True)
+
     if not _emit_run_complete(summary, events_paths):
         typer.echo(
             "error: could not write the canonical skill_eval_run_complete event; "
@@ -423,15 +437,6 @@ def sweep(
         )
         raise typer.Exit(5)
     digest = _write_digest(summary, skill, mode="sweep")
-
-    if judge_n > 0 and skill == "blueprint":
-        # x-9983: the N newest corpus items (the window is chronological) get
-        # the model judge after the code scoring; findings join the same run.
-        # Deliberately NOT wired into the session-start hook: an autonomous
-        # spawner needs its own registry row and a config.autonomy gate.
-        for item in items[-judge_n:]:
-            _judge_one_item(item, _node_text(by_id.get(item.get("graph_node_id")) or {}), run_id, events_paths)
-        typer.echo(f"  judge: offered the model judge to {min(judge_n, len(items))} window plan(s)")
 
     state = "ok" if scored_count == len(items) else "partial"
     if json_out:
@@ -457,7 +462,7 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# the advisory five-question judge (x-9983)
+# the advisory five-question judge
 # --------------------------------------------------------------------------- #
 
 
@@ -518,7 +523,9 @@ def _run_judge(text: str, node_text: str, item: dict, run_id: str, events_paths:
         typer.echo(f"  {dimension}: {verdict} - {reason[:160]}")
         _emit_finding(
             run_id=run_id, item=item, dimension=dimension, verdict=verdict,
-            evidence=reason, cost_usd=0.0, skill_ref=None, events_paths=events_paths,
+            # cost-untracked: the headless spawn exposes no spend at this layer,
+            # and 0.0 here means untracked (the sweep's convention), not free.
+            evidence=f"cost-untracked; {reason}", cost_usd=0.0, skill_ref=None, events_paths=events_paths,
         )
     return fails
 
@@ -531,7 +538,7 @@ def judge_cmd(
     split: str = typer.Option("dev", "--split", help="Calibration split (dev|test)."),
     force: bool = typer.Option(False, "--force", help="Judge even at level=report."),
 ) -> None:
-    """Advisory five-question judge (x-9983): never blocks; a judge error is never a fail."""
+    """Advisory five-question judge: never blocks; a judge error is never a fail."""
     if labels is not None:
         rows = [r for r in (yaml.safe_load(labels.read_text(encoding="utf-8")) or []) if r.get("split", "dev") == split]
         base = labels.parent
