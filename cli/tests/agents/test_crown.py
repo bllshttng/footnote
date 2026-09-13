@@ -621,6 +621,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "vacated_scope": None,
         "vacated_level": None,
         "stranded_subordinates": [],
+        "missions_armed": [],
         "king_loop_armed": True,
         "reign_delivery": "msg-t delivered (hosted)",
     }
@@ -1989,3 +1990,208 @@ def test_send_reign_verb_reports_subprocess_failure(monkeypatch) -> None:
     monkeypatch.setattr(real_subprocess, "run", lambda *a, **k: _Proc())
     verdict = crown_mod._send_reign_verb("worker", "/fno:reign alpha")
     assert verdict == "not delivered (rc=16: resolve failed: no such agent)"
+
+
+# --- a crown grant arms the epic's mission (x-14c0) --------------------------
+#
+# Operator rule 2026-09-09: every epic with an owner is a mission. The drain
+# keys one loop per epic with mission_active=true, so a crown that left the
+# flag unset ruled a territory no drain loop could see.
+
+
+def _seed_crown_graph(monkeypatch, tmp_path: Path, epics: list[dict]) -> None:
+    # Pin the events journal into the tmp root: use_tmpdir redirects
+    # state_dir but not project_events_json, and an unpinned journal is
+    # shared by every test in the process.
+    monkeypatch.setenv(
+        "FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl")
+    )
+    from fno.paths import graph_json
+
+    graph_path = graph_json()
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    graph_path.write_text(json.dumps({"entries": epics}), encoding="utf-8")
+
+
+def _graph_entries() -> list[dict]:
+    from fno.paths import graph_json
+
+    return json.loads(graph_json().read_text(encoding="utf-8"))["entries"]
+
+
+def _mission_events() -> list[dict]:
+    """The journal's mission_activated rows (the pinned journal also carries
+    agent_* rows from the crown telemetry, which share the tmp root)."""
+    from fno.paths import project_events_json
+
+    path = project_events_json()
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("type") == "mission_activated"
+    ]
+
+
+def test_a_spawn_grant_over_an_unflagged_epic_arms_its_mission(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [{"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"}],
+    )
+
+    journal_spawn_crown(
+        "granted", [], name="w", level=2, scope="e-1", grantor="human"
+    )
+
+    entry = _graph_entries()[0]
+    assert entry["mission_active"] is True
+    events = [
+        e for e in _mission_events() if e.get("type") == "mission_activated"
+    ]
+    assert len(events) == 1
+    assert events[0]["data"] == {"epic_id": "e-1", "source": "crown"}
+
+
+def test_a_declined_spawn_arms_nothing(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [{"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"}],
+    )
+
+    journal_spawn_crown(
+        "declined", [], name="w", level=2, scope="e-1", grantor="human"
+    )
+
+    assert "mission_active" not in _graph_entries()[0]
+    assert _mission_events() == []
+
+
+def test_a_project_scope_and_a_done_epic_arm_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "done"},
+            {"id": "p-1", "type": "project", "status": "in_progress"},
+        ],
+    )
+
+    journal_spawn_crown(
+        "granted", [], name="w", level=1, scope="e-1,p-1,alpha", grantor="human"
+    )
+
+    by_id = {e["id"]: e for e in _graph_entries()}
+    assert "mission_active" not in by_id["e-1"]
+    assert "mission_active" not in by_id["p-1"]
+    assert _mission_events() == []
+
+
+def test_a_two_epic_scope_arms_both(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"},
+            {"id": "e-2", "type": "epic", "project": "beta", "status": "in_progress"},
+        ],
+    )
+
+    journal_spawn_crown(
+        "granted", [], name="w", level=2, scope="e-2,e-1", grantor="human"
+    )
+
+    by_id = {e["id"]: e for e in _graph_entries()}
+    assert by_id["e-1"]["mission_active"] is True
+    assert by_id["e-2"]["mission_active"] is True
+    armed = {
+        e["data"]["epic_id"]
+        for e in _mission_events()
+        if e.get("type") == "mission_activated"
+    }
+    assert armed == {"e-1", "e-2"}
+
+
+def test_a_graph_fault_leaves_the_crown_committed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.backlog.advance as advance_mod
+    from fno.agents.crown import journal_spawn_crown, promote_existing_session
+    from fno.agents.registry import load_registry
+
+    def _raisers(epic_id, active):
+        raise RuntimeError("graph write refused")
+
+    monkeypatch.setattr(advance_mod, "_set_mission_active", _raisers)
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                status="idle",
+            )
+        ],
+    )
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [{"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress"}],
+    )
+
+    # The spawn leg returns normally even though the arming write raised.
+    journal_spawn_crown(
+        "granted", [], name="w", level=2, scope="e-1", grantor="human"
+    )
+
+    receipt = promote_existing_session("worker", ["e-1"])
+    assert receipt["missions_armed"] is None
+    # The crown row still stands.
+    row = next(r for r in load_registry() if r.name == "worker")
+    assert (row.crown_level, row.crown_scope) == (2, "e-1")
+
+
+def test_recrowning_an_armed_epic_emits_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.crown import journal_spawn_crown
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    _seed_crown_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "id": "e-1",
+                "type": "epic",
+                "project": "alpha",
+                "status": "in_progress",
+                "mission_active": True,
+            }
+        ],
+    )
+
+    journal_spawn_crown(
+        "granted", [], name="w", level=2, scope="e-1", grantor="human"
+    )
+
+    assert _mission_events() == []

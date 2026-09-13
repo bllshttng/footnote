@@ -683,6 +683,43 @@ def settle_spawn_crown(
     return rows, outcome, vacated
 
 
+def arm_crowned_missions(scope: Optional[str]) -> Optional[list[str]]:
+    """Set mission_active on every open epic in a crowned scope. Operator rule:
+    an epic with an owner is a mission, or no drain loop can see its children.
+    Returns the epic ids newly armed, or None when the graph write failed."""
+    armed: list[str] = []
+    try:
+        from fno.backlog.advance import (
+            EVENT_MISSION_ACTIVATED,
+            _emit,
+            _set_mission_active,
+        )
+
+        for member in split_scope(scope):
+            entry = _graph_entry(member) or {}
+            if entry.get("type") != "epic":
+                continue
+            if entry.get("status") in ("done", "superseded"):
+                continue
+            if _set_mission_active(member, True):
+                _emit(
+                    EVENT_MISSION_ACTIVATED,
+                    {"epic_id": member, "source": "crown"},
+                    None,
+                )
+                armed.append(member)
+    except Exception as exc:  # noqa: BLE001 - the crown already committed
+        import sys
+
+        print(
+            f"crown: WARNING: mission arming failed for scope {scope!r} ({exc}); "
+            "arm it with: fno backlog advance --epic <id>",
+            file=sys.stderr,
+        )
+        return None
+    return armed
+
+
 def journal_spawn_crown(outcome: Optional[str], vacated: list, *, name, level, scope, grantor) -> None:
     """Journal one committed spawn write: a vacate line per cleared holder plus
     the grant line. A declined launch moved no crown and writes nothing."""
@@ -699,6 +736,7 @@ def journal_spawn_crown(outcome: Optional[str], vacated: list, *, name, level, s
             "agent_crowned", name=name, level=level, scope=scope, grantor=grantor,
             vacated_scope=None, vacated_level=None, stranded_subordinates=[],
         )
+        arm_crowned_missions(scope)
 
 
 def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
@@ -1102,6 +1140,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # a post-release re-read could see a concurrent grant over the
     # just-freed scope and mislabel that heir as stranded.
     rows_after = update_registry(_stamp)
+    receipt["missions_armed"] = arm_crowned_missions(scope)
     if receipt.get("vacated_scope") and not _same_territory(
         receipt["vacated_scope"], scope
     ):
