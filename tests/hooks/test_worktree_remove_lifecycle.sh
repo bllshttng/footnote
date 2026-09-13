@@ -1373,6 +1373,163 @@ fi
 kill "$HOLD" 2>/dev/null
 rm -rf "$S" "$STUB"
 
+echo "== 9. disposable deletes + build-hash-dir removal at worktree teardown =="
+
+# A trash-alias stand-in: bare rm on a wrapped host relocates instead of
+# unlinking, so the stub records the call and deletes NOTHING. A green
+# assertion needs the hash dir gone AND this log empty - either alone is
+# vacuous (a sweep that deletes nothing passes the log check; a trashed
+# delete passes the gone-check for the wrong reason).
+new_rm_stub() {
+    local bin="$1" log="$2"
+    mkdir -p "$bin"
+    : > "$log"
+    cat > "$bin/rm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+exit 0
+EOF
+    chmod +x "$bin/rm"
+}
+
+# A cargo stand-in that answers one canned build_directory, or fails on
+# demand: no real cargo manifest is needed to exercise resolution.
+new_cargo_stub() {
+    local bin="$1" dir="$2"
+    mkdir -p "$bin"
+    if [[ "$dir" == "FAIL" ]]; then
+        cat > "$bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+    else
+        cat > "$bin/cargo" <<EOF
+#!/usr/bin/env bash
+printf '{"build_directory":"%s"}\n' "$dir"
+EOF
+    fi
+    chmod +x "$bin/cargo"
+}
+
+new_hash_dir() {
+    local dir="$1"
+    mkdir -p "$dir"
+    printf 'Signature: 87496387e5a84b3bb5c64e56a51a4e63\n' > "$dir/CACHEDIR.TAG"
+    printf 'artifact' > "$dir/blob"
+}
+
+# 9a. AC1-HP: the sweep's build-base delete unlinks; no bare rm ran.
+S=$(new_sandbox)
+STUB=$(mktemp -d -t srm-sweep.XXXXXX)
+RM_LOG="$STUB/rm.log"
+new_rm_stub "$STUB/bin" "$RM_LOG"
+mkdir -p "$S/base/ab/c001"
+new_hash_dir "$S/base/ab/c001"
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" bash "$LIFECYCLE" cleanup --cargo-targets --apply --cap-bytes 1 --target-max-age 0 2>&1)
+if [[ ! -d "$S/base/ab/c001" ]] && echo "$out" | grep -q 'cargo-target reaped'; then
+    pass "sweep unlinked the build-base hash dir (AC1)"
+else
+    fail "AC1 sweep unlink" "gone=$([[ -d "$S/base/ab/c001" ]] && echo n || echo y) out=[$out]"
+fi
+if [[ ! -s "$RM_LOG" ]]; then
+    pass "sweep delete never resolved through bare rm (AC1)"
+else
+    fail "AC1 stub-rm never ran" "log=[$(cat "$RM_LOG")]"
+fi
+rm -rf "$S" "$STUB"
+
+# Shared fixture for the removal-lane tests: a sandbox worktree whose
+# workspace resolves to a planted hash dir under a managed base.
+new_removal_fixture() {
+    S=$(new_sandbox)
+    git -C "$S" worktree add -q "$S/wt" >/dev/null 2>&1
+    mkdir -p "$S/wt/crates/x" "$S/base/ab/c002"
+    : > "$S/wt/crates/x/Cargo.toml"
+    # Untracked content makes the tree dirty and every removal refuses;
+    # record the workspace so the tree stays clean.
+    ( cd "$S/wt" && git -c user.email=t@t -c user.name=t add crates \
+        && git -c user.email=t@t -c user.name=t commit -qm crates ) >/dev/null 2>&1
+    new_hash_dir "$S/base/ab/c002"
+    STUB=$(mktemp -d -t srm-lane.XXXXXX)
+    RM_LOG="$STUB/rm.log"
+    new_rm_stub "$STUB/bin" "$RM_LOG"
+    new_cargo_stub "$STUB/bin" "$S/base/ab/c002"
+}
+
+# 9b. AC2-HP: the WorktreeRemove hook reclaims the hash dir, then removes.
+new_removal_fixture
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+    bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
+rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" && ! -d "$S/base/ab/c002" ]]; then
+    pass "hook removed worktree and reclaimed its hash dir (AC2)"
+else
+    fail "AC2 hook" "rc=$rc wt=$([[ -d "$S/wt" ]] && echo y || echo n) hash=$([[ -d "$S/base/ab/c002" ]] && echo y || echo n) out=[$out]"
+fi
+[[ ! -s "$RM_LOG" ]] && pass "hook delete never resolved through bare rm (AC2)" || fail "AC2 stub-rm" "log=[$(cat "$RM_LOG")]"
+rm -rf "$S" "$STUB"
+
+# 9c. AC2b-HP: the archive lane reclaims the hash dir too.
+new_removal_fixture
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+    bash "$ARCHIVE" "$S/wt" --yes 2>&1)
+rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" && ! -d "$S/base/ab/c002" ]]; then
+    pass "archive removed worktree and reclaimed its hash dir (AC2b)"
+else
+    fail "AC2b archive" "rc=$rc wt=$([[ -d "$S/wt" ]] && echo y || echo n) hash=$([[ -d "$S/base/ab/c002" ]] && echo y || echo n) out=[$out]"
+fi
+rm -rf "$S" "$STUB"
+
+# 9d. AC2-EDGE: a resolution OUTSIDE the managed base is never ours to
+# delete, even tagged; the worktree still goes.
+S=$(new_sandbox)
+git -C "$S" worktree add -q "$S/wt" >/dev/null 2>&1
+mkdir -p "$S/wt/crates/x" "$S/outside/c003"
+: > "$S/wt/crates/x/Cargo.toml"
+( cd "$S/wt" && git -c user.email=t@t -c user.name=t add crates \
+    && git -c user.email=t@t -c user.name=t commit -qm crates ) >/dev/null 2>&1
+new_hash_dir "$S/outside/c003"
+STUB=$(mktemp -d -t srm-edge.XXXXXX)
+new_cargo_stub "$STUB/bin" "$S/outside/c003"
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+    bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
+rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" && -d "$S/outside/c003" ]]; then
+    pass "out-of-base resolution kept, worktree still removed (AC2-EDGE)"
+else
+    fail "AC2-EDGE out-of-base" "rc=$rc wt=$([[ -d "$S/wt" ]] && echo y || echo n) hash=$([[ -d "$S/outside/c003" ]] && echo y || echo n) out=[$out]"
+fi
+rm -rf "$S" "$STUB"
+
+# 9e. AC2-EDGE: cargo failing to answer is best-effort - removal proceeds,
+# the unresolved dir stays for the sweep.
+S=$(new_sandbox)
+git -C "$S" worktree add -q "$S/wt" >/dev/null 2>&1
+mkdir -p "$S/wt/crates/x" "$S/base/ab/c004"
+: > "$S/wt/crates/x/Cargo.toml"
+( cd "$S/wt" && git -c user.email=t@t -c user.name=t add crates \
+    && git -c user.email=t@t -c user.name=t commit -qm crates ) >/dev/null 2>&1
+new_hash_dir "$S/base/ab/c004"
+STUB=$(mktemp -d -t srm-fail.XXXXXX)
+new_cargo_stub "$STUB/bin" "FAIL"
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+    bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
+rc=$?
+if [[ $rc -eq 0 && ! -d "$S/wt" && -d "$S/base/ab/c004" ]]; then
+    pass "unreadable resolution degrades to the sweep (AC2-EDGE)"
+else
+    fail "AC2-EDGE best-effort" "rc=$rc wt=$([[ -d "$S/wt" ]] && echo y || echo n) hash=$([[ -d "$S/base/ab/c004" ]] && echo y || echo n) out=[$out]"
+fi
+rm -rf "$S" "$STUB"
+
+# 9f. AC3: the guard passes with the third lane allowlisted and zero hits.
+if bash "$REPO_ROOT/scripts/ci/check-disposable-rm.sh" >/dev/null 2>&1; then
+    pass "disposable-rm gate green with the lifecycle lib guarded (AC3)"
+else
+    fail "AC3 gate" "check-disposable-rm.sh failed with the new allowlist entry"
+fi
+
 echo ""
 echo "worktree lifecycle: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

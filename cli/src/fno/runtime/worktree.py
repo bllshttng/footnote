@@ -11,6 +11,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from fno.cargo_build_dir import remove_build_dir_for_worktree
 from fno.worktree_paths import (
     _validate_component,
     legacy_worktree_path,
@@ -217,6 +218,10 @@ def remove_worktree(
         wt_path = canonical_slug
     else:
         wt_path = legacy
+
+    # Reclaim the cargo build hash dir while the manifest can still answer;
+    # best-effort, the sweep reaps what resolution misses.
+    remove_build_dir_for_worktree(wt_path)
 
     result = subprocess.run(
         ["git", "worktree", "remove", "--force", str(wt_path)],

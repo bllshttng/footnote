@@ -278,9 +278,6 @@ FIELD_META: dict[str, Meta] = {
     "style.word_cap.encounter": Meta(
         "advanced", "Masked-word cap for the evidence on a `fno backlog encounter` vote (default 80). Over-length evidence is refused, never truncated.",
     ),
-    "style.pair_budget_words": Meta(
-        "advanced", "Rolling per-pair mail word budget inside the 10-minute window (default 80). Raise it alongside style.word_cap.mail: a higher per-message cap that leaves this at 80 refuses the very message the cap now permits.",
-    ),
     # --- config.preflight.* ---
     "preflight.required": Meta(
         "advanced", "Require a full local preflight receipt before opening a PR. Default false: CI is the merge gate and preflight is an opt-in rehearsal.",

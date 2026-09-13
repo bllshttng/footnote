@@ -154,23 +154,13 @@ def test_default_pane_body_violating_style_refuses_before_envelope(stubbed_trans
     assert "</fno_mail>" not in result.output, "a refused body must not render"
 
 
-def test_style_exception_flag_lets_the_body_through_and_charges_it(
+def test_style_exception_flag_lets_the_body_through_without_a_ledger(
     stubbed_transport, monkeypatch
 ):
-    """LD3: the exception permits the overage but still records the count, and
-    the ledger identity matches the envelope (LD2). The ledger key carries the
-    FULL session ids, both ends: an eight-hex handle collides for codex
-    siblings spawned inside one ~65s clock bucket."""
-    captured: dict = {}
-    import fno.mail.budget as budget_mod
+    """LD3: the exception permits the overage, and an ordinary pane send
+    charges no rolling ledger - the envelope id is minted here alone."""
+    from fno import paths
 
-    real_reserve = budget_mod.reserve
-
-    def _capture(**kwargs):
-        captured.update(kwargs)
-        return real_reserve(**kwargs)
-
-    monkeypatch.setattr("fno.mail.budget.reserve", _capture)
     body = (
         "the refusal says use --raw for a bare submit keystroke and the next "
         "command rejects that form because the arity guard still demands a "
@@ -179,17 +169,9 @@ def test_style_exception_flag_lets_the_body_through_and_charges_it(
     result = _prepare(body, "--style-exception", "quoted operator text")
     assert result.exit_code == 0, result.output
     assert "</fno_mail>" in result.output
-    # The envelope's identity is the ledger's identity: one id, one pair.
     envelope_id = re.search(r'id="([^"]+)"', result.output)
     assert envelope_id, result.output
-    assert captured["msg_id"] == envelope_id.group(1)
-    assert captured["sender"] == "sender-2222"
-    assert captured["recipient"] == "recip-1111"
-    # The KEY is the full ids; the display pair and the envelope stay handles.
-    assert captured["sender_key"] == "99999999-8888-7777-6666-555544443333"
-    assert captured["recipient_key"] == "11111111-2222-3333-4444-555566667777"
-    assert captured["enforce"] is False
-    assert captured["words"] > 0
+    assert not (paths.bus_dir() / "word-budget").exists()
 
 
 def test_identity_capture_pins_the_gate_not_a_re_resolve(stubbed_transport, monkeypatch):

@@ -16,7 +16,7 @@ One global append-only log is the system of record. The per-recipient markdown t
 | :--- | :--- | :--- |
 | Registry (exists) | `~/.fno/agents/registry.json` | WHO: name, provider, session id, cwd, status. Sole addressing authority. |
 | Bus log (this work) | `<bus_dir>/messages.jsonl` (+ rotated `.N`) | WHAT WAS SAID: canonical, append-only, provider-neutral transcript. |
-| Pair budget ledger | `<bus_dir>/word-budget/<pair-digest>.json` | WHAT MAY BE SENT NOW: lock-protected reservations for one canonical sender-recipient pair, pruned after 10 minutes or reset by an inbound authored message. |
+| Control ledger | `<bus_dir>/word-budget/<pair-digest>.json` | WHAT MAY BE SENT NOW on the control lane: lock-protected reservations for one canonical sender-recipient pair's `control:` traffic, capped at 60 words, pruned after 10 minutes or reset by an inbound authored message. |
 | Cursors (this work) | `<bus_dir>/cursors/<name>.json` | Per-consumer read position, keyed by last-seen message-id. |
 | Markdown render (demoted) | `<recipient>/inbox/*.md` | Obsidian-visible render of the log; no authority. |
 
@@ -38,15 +38,15 @@ One JSON object per line (`fno.bus.log.Envelope`):
 
 A root message threads under its own id. A reply sets `in_reply_to`.
 
-### Rolling sender-recipient word budget
+### Control lane word ledger
 
-Before any outward send effect, `fno.mail.budget.reserve` charges the authored word count to one canonical sender-recipient pair. The fixed policy is 80 masked words over a rolling 10-minute window.
+Before any outward control send, `fno.mail.budget.reserve_control` charges the authored word count to one canonical sender-recipient pair. The fixed policy is 60 masked words over a rolling 10-minute window. An ordinary send writes no ledger row: rule 7 is its only word gate.
 
 An authored inbound `send`, `heads-up`, `question`, or `fyi` resets earlier reservations. Self-sends, migrations, withdrawals, and other non-authored rows do not reset them.
 
 A refused or proven failed send releases its reservation. An unconfirmed or post-delivery audit failure stays charged until reset or expiry.
 
-Pair files use a digest of the canonical addresses instead of an address-derived path. A sidecar lock serializes same-pair reservations. A temporary file and atomic replace persist the ledger before transport begins.
+Control files use a digest of the canonical addresses instead of an address-derived path. A sidecar lock serializes same-pair reservations. A temporary file and atomic replace persist the ledger before transport begins.
 
 Different pairs do not share a lock. A malformed or unreadable active ledger fails closed instead of resetting the count.
 

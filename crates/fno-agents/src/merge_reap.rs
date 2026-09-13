@@ -336,7 +336,35 @@ fn tree_unreachable_from_origin_main(worktree: &str) -> bool {
 /// Forced removal from inside the leaf (git allows it), then a prune in the
 /// canonical checkout. The branch is never deleted: `git worktree remove`
 /// does not touch refs, and the branch is the recovery path.
+/// The reclaim helper ships with the PLUGIN, not the managed project: a
+/// foreign project's repo root has no scripts/lib, and the ignored failure
+/// would let its hash dir orphan. Resolve through the persisted plugin-root
+/// pointer (${FNO_HOME:-$HOME/.fno}/plugin-root, written by fno.paths), and
+/// fall back to the repo root for a bare install.
+fn cargo_build_dir_script(repo_root: &str) -> std::path::PathBuf {
+    let home = std::env::var("FNO_HOME")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    if !home.is_empty() {
+        let pointer = std::path::Path::new(&home).join(".fno").join("plugin-root");
+        if let Ok(root) = std::fs::read_to_string(&pointer) {
+            let script = std::path::Path::new(root.trim()).join("scripts/lib/cargo-build-dir.sh");
+            if script.is_file() {
+                return script;
+            }
+        }
+    }
+    std::path::Path::new(repo_root).join("scripts/lib/cargo-build-dir.sh")
+}
+
 fn remove_tree(worktree: &str, repo_root: &str) -> bool {
+    // Reclaim the build hash dir while the workspace manifest can still
+    // answer; the shared bash lib owns the ownership checks, and
+    // the sweep reaps whatever an unreadable resolution leaves behind.
+    let _ = std::process::Command::new("bash")
+        .arg(cargo_build_dir_script(repo_root))
+        .args(["remove-for", worktree])
+        .status();
     let removed = std::process::Command::new("git")
         .current_dir(worktree)
         .args(["worktree", "remove", "--force", worktree])

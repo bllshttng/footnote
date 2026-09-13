@@ -2549,7 +2549,7 @@ pub const PANE_REFERENCE_USAGE: &str =
 /// around the character `1` is the nonsense the flag exists to avoid.
 pub const PANE_SEND_RAW_HELP: &str = "pane send wraps the text in an <fno_mail> envelope by \
 default, so a worker can tell a peer's message from its operator's, and refuses a pane showing \
-an option prompt. The enveloped body passes the same style and word-budget gates as mail; \
+an option prompt. The enveloped body passes the same style gate as mail; \
 --style-exception <reason> excepts one reasoned send. --raw types the bytes verbatim for \
 genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit. \
 Every send writes one audit row to ~/.fno/agents/events.jsonl naming the pane, the recipient and \

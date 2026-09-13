@@ -41,9 +41,9 @@ The crown walk goes outward and stops at the first scope with a live crown: the 
 
 The author is matched by identity, never by name shape: an address that names a registry row is the author when the row's ``harness_session_id`` matches the sender's under ``session_identity_key``; the bare ``endswith`` match stands only for role-prefixed holders that name no row. The author is named in the receipt but never mailed its own note.
 
-The body is a POINTER, never the note: the node id, the note's opening words, and the command to read it. A full body spends the 80-word rolling pair budget on the first send, and several notes share one 10-minute window.
+The body is a POINTER, never the note: the node id, the note's opening words, and the command to read it. A full body breaks rule 7's 80-word per-message cap on the first send.
 
-The delivery lives in the VERB, not in ``append_progress_note``. The status-fanout adapter writes its ``task_done`` / ``run_summary`` stamps through the store function, so machine progress lines never mail: one note per finished task would spend every pair budget on traffic no reader asked for. A fact somebody chose to record is the case that needs a reader.
+The delivery lives in the VERB, not in ``append_progress_note``. The status-fanout adapter writes its ``task_done`` / ``run_summary`` stamps through the store function, so machine progress lines never mail: one note per finished task is traffic no reader asked for. A fact somebody chose to record is the case that needs a reader.
 
 ``--quiet`` is the deliberate silent annotation. Delivery is the default because the two failure modes are not symmetric: a forgotten flag costs a redundant mail, where a forgotten mail costs the finding.
 

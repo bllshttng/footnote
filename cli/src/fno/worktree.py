@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from fno._subprocess_util import run_bounded
+from fno.cargo_build_dir import remove_build_dir_for_worktree
 
 # 120s bounds the hook well below the 10+ minute cleanup-leg stalls on record.
 _SETUP_HOOK_TIMEOUT_S = 120
@@ -387,6 +388,9 @@ class WorktreeManager:
         If the path is already gone, this is a no-op.
         """
         if worktree.path.exists():
+            # Reclaim the cargo build hash dir while the manifest can still
+            # answer; best-effort, the sweep reaps what resolution misses.
+            remove_build_dir_for_worktree(worktree.path)
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree.path)],
                 cwd=self.repo_root,

@@ -1253,20 +1253,6 @@ class StyleBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     word_cap: WordCapBlock = Field(default_factory=WordCapBlock)
-    # The rolling pair budget is a WINDOW instrument, not a per-text cap, so it
-    # is a sibling of word_cap rather than one of its surfaces. It moves WITH
-    # the per-message cap or it silently binds first: a project that raises
-    # word_cap.mail to 200 would still be refused at the 80-word window total,
-    # and the refusal would name a number the sender never set. That coupling is
-    # why the budget's cap became configurable at all.
-    pair_budget_words: int = 80
-
-    @field_validator("pair_budget_words")
-    @classmethod
-    def budget_is_positive(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("config.style.pair_budget_words must be >= 1")
-        return v
 
 
 class ReviewBlock(BaseModel):

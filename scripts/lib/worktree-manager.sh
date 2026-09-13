@@ -51,6 +51,14 @@ _WTM_SELF="${BASH_SOURCE[0]:-$0}"
 WTM_SCRIPT_DIR="$(cd "$(dirname "$_WTM_SELF")" && pwd)"
 WTM_PLUGIN_ROOT="$(cd "$WTM_SCRIPT_DIR/../.." && pwd)"
 
+# The build hash dir outlives git's removal; reclaim it while the manifest
+# can still answer. A partial deploy without the lib leaves the dir to the
+# sweep.
+if [[ -f "$WTM_SCRIPT_DIR/cargo-build-dir.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$WTM_SCRIPT_DIR/cargo-build-dir.sh"
+fi
+
 # Memoize the calling repo root. `setup` is a hot path for every cross-
 # project worker and every target worktree creation, and the verbs each call
 # `git rev-parse` for the same answer 2-3 times. One subprocess per script
@@ -620,6 +628,7 @@ _wtm_cmd_migrate() {
         if [[ $stale_count -gt 0 ]]; then
             for wt in "${stale[@]}"; do
                 _wtm_log "removing stale worktree: $wt"
+                declare -F cargo_build_dir_remove_for_wt >/dev/null 2>&1 && cargo_build_dir_remove_for_wt "$wt" || true
                 git -C "$repo_root" worktree remove --force "$wt" 2>/dev/null \
                     && removed=$((removed + 1)) \
                     || _wtm_log "failed to remove $wt (try git worktree prune)"
