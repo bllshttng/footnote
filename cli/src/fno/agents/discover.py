@@ -48,6 +48,7 @@ from fno.harness_identity import (
     session_handle_tier,
     session_identity_key,
 )
+from fno.time_budget import validate_timeout_budget
 
 
 def canonical_handle(session_id: str) -> str:
@@ -62,7 +63,7 @@ def canonical_handle(session_id: str) -> str:
     from fno.harness_identity import canonical_handle as _impl
 
     return _impl(session_id)
-from fno.time_budget import validate_timeout_budget
+
 
 # A real per-session registry file is named ``<pid>.json``. The strict guard
 # is load-bearing: a 7000+ entry sessions dir holds ``.sync-conflict-*.json``
