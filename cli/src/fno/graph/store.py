@@ -1173,19 +1173,17 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
             file=sys.stderr,
         )
 
-    is_canonical = _is_canonical(path)
     # Claim releases run AFTER the publish: root resolution and recovery
     # mutexes never belong inside the store's critical section.
     for release in outcome["closure_releases"]:
         release_node_claim_at_closure(release["id"], rung=release["rung"])
 
-    # Renders. The canonical board moved from under-the-lock to after-the-
-    # publish with the port: the keeper serializes publishes, and these
-    # projections are operator-chosen paths that must never hold (or wait
-    # on) the graph lock. Bytes are never partial (atomic replaces). The
-    # returned entries carry the overlaid statuses: what a caller receives
-    # must match what the render drew.
-    entries = _render_published_views(outcome["entries"], is_canonical, path)
+    # No render here. The canonical keeper's render trigger is the ONE render
+    # path: it debounces (2 s after the last write) and replays
+    # `fno backlog render-views`, covering Python writes, mux native ops, the
+    # daemon settle, and Rust mutations with one pass. An in-call render made
+    # every writer re-run the projections and made the native writers replay
+    # them a second time.
     # Wake the active-backlog drain daemon (x-c070): best-effort, never
     # wedges the mutation.
     try:
@@ -1194,7 +1192,7 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
         touch_nudge()
     except Exception:
         pass
-    return entries
+    return outcome["entries"]
 
 
 def render_canonical_views() -> None:
@@ -1214,10 +1212,10 @@ def render_canonical_views() -> None:
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
         pass
-    _render_published_views(entries, True, Path(graph))
+    render_view_projections(entries, True, Path(graph))
 
 
-def _render_published_views(entries: list[dict], is_canonical: bool, path: Path) -> list[dict]:
+def render_view_projections(entries: list[dict], is_canonical: bool, path: Path) -> list[dict]:
     """The view projections a landed publish owes: the readiness overlay,
     graph.md, and the canonical/configured board targets (or a sibling
     graph.html for test graphs). Returns the overlay-applied entries, so the

@@ -17,7 +17,7 @@ from typing import Generator
 import pytest
 
 from fno.rust_binary import find_dev_binary
-from fno.graph.store import locked_mutate_graph
+from fno.graph.store import locked_mutate_graph, render_canonical_views
 
 # Since the store port every mutation here rides the keeper, so the module
 # needs the compiled runtime and skips whole where the smoke harness deleted
@@ -115,6 +115,9 @@ def _mutate(graph: Path, entries: list[dict], new_title: str) -> None:
         graph,
         lambda nodes: nodes[0].__setitem__("title", new_title) or nodes,
     )
+    # The write no longer renders inline (task 8.3): the keeper trigger's
+    # pass is what renders, so the tests run it explicitly.
+    render_canonical_views()
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +354,7 @@ def test_configured_target_written_on_mutation(_isolate, tmp_path, monkeypatch, 
     assert 'id="stats"' in text
 
 
-def test_target_mtime_advances_within_mutation_call(_isolate, tmp_path, monkeypatch):
+def test_target_mtime_advances_with_each_view_pass(_isolate, tmp_path, monkeypatch):
     _write_config(
         f'[[backlog.render_targets]]\npath = "{_isolate["target"]}"\nproject = "fno"',
         tmp_path,
@@ -360,8 +363,10 @@ def test_target_mtime_advances_within_mutation_call(_isolate, tmp_path, monkeypa
     graph = _isolate["graph"]
     _write_graph(graph, [_entry("ab-mtime00", title="first title")])
     locked_mutate_graph(graph, lambda nodes: nodes)
+    render_canonical_views()
     before = _isolate["target"].stat().st_mtime_ns
     locked_mutate_graph(graph, lambda nodes: nodes)
+    render_canonical_views()
     after = _isolate["target"].stat().st_mtime_ns
     assert after > before
 
@@ -376,6 +381,7 @@ def test_leak_refusal_leaves_target_byte_identical(_isolate, tmp_path, monkeypat
     graph = _isolate["graph"]
     _write_graph(graph, [_entry("ab-leaky000", title="x-1234 leaks here")])
     locked_mutate_graph(graph, lambda nodes: nodes)
+    render_canonical_views()
     assert not target.exists()
     # Seed the target with prior bytes, then mutate again: the refusal must
     # leave those bytes untouched.
@@ -388,6 +394,7 @@ def test_leak_refusal_leaves_target_byte_identical(_isolate, tmp_path, monkeypat
         return nodes
 
     locked_mutate_graph(graph, mutator)
+    render_canonical_views()
 
     assert hashlib.sha256(target.read_bytes()).hexdigest() == digest_before
     err = capsys.readouterr().err
@@ -580,6 +587,7 @@ def test_gate_is_scoped_to_the_targets_own_render_set(_isolate, tmp_path, monkey
     graph = _isolate["graph"]
     _write_graph(graph, [done, open_node])
     locked_mutate_graph(graph, lambda nodes: nodes)
+    render_canonical_views()
 
     backlog_text = backlog_target.read_text(encoding="utf-8")
     assert "clean open work" in backlog_text
@@ -638,15 +646,14 @@ def test_an_explicit_row_for_the_canonical_board_wins_over_the_default(monkeypat
     assert targets[0].scope == "fno", "the operator's scope must survive"
 
 
-def test_the_canonical_board_is_current_when_the_mutation_returns(tmp_path, monkeypatch):
+def test_the_canonical_board_is_current_when_the_view_pass_returns(tmp_path, monkeypatch):
     """The board must never read older than the graph.json beside it.
 
-    store.py used to render the board inside the flock; since the port, the
-    keeper serializes publishes and the client renders after its publish
-    lands - the render can no longer interleave with another writer's, and
-    graph.json always lands first. The observable contract is the same from
-    the caller's side: when the mutation returns, the board exists and
-    carries THIS mutation's entry, never a previous one.
+    Since the render trigger owns the pass, the write only bumps the counter
+    and the view pass renders from a fresh read - the render can no longer
+    interleave with another writer's, and graph.json always lands first. The
+    observable contract from the caller's side: when the pass returns, the
+    board exists and carries THIS write's entry, never a previous one.
     """
     from fno.graph import _constants as gc
     from fno.graph import store
@@ -679,10 +686,11 @@ def test_the_canonical_board_is_current_when_the_mutation_returns(tmp_path, monk
         return entries
 
     store.locked_mutate_graph(graph, _add)
+    store.render_canonical_views()
 
-    assert board.exists(), "the canonical board was not rendered for the mutation"
+    assert board.exists(), "the canonical board was not rendered for the write"
     assert "UnderTheFlock" in board.read_text(), (
-        "the board predates this mutation: it read older than graph.json"
+        "the board predates this write: it read older than graph.json"
     )
 
 

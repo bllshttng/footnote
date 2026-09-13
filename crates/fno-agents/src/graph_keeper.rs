@@ -263,6 +263,13 @@ struct StoreState {
     file_opens: AtomicU64,
     snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
     gate_metrics: Mutex<GateMetrics>,
+    /// The instant of the last successful publish. The render trigger reads
+    /// it to debounce: the pass runs once the store has been quiet for the
+    /// settle window, never per write.
+    last_write: Mutex<Option<std::time::Instant>>,
+    /// True while the render trigger's subprocess runs, so overlapping 1 s
+    /// ticks never stack two passes.
+    render_in_flight: std::sync::atomic::AtomicBool,
     events: Option<PathBuf>,
     /// The (dev, ino) of the socket path at bind time: the seat's proof.
     /// Unlinks are guarded by it, and an idle keeper whose path was rebound
@@ -326,6 +333,14 @@ impl GateMetrics {
 }
 
 fn record_gate(state: &StoreState, wait: Duration, bytes_written: u64, attempt: u64) {
+    if bytes_written > 0 {
+        // A real publish landed: the render trigger's settle clock starts here.
+        let mut last = state
+            .last_write
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *last = Some(std::time::Instant::now());
+    }
     let mut metrics = state
         .gate_metrics
         .lock()
@@ -420,6 +435,134 @@ fn sample_parity(state: &StoreState, last_sampled: &mut Option<String>) {
 /// (`store.py:_client_for`) reads this number and keeps polling the
 /// incumbent instead of failing the spawn.
 pub const EXIT_SEAT_OWNED: i32 = 3;
+
+/// How long the store must stay quiet after the last write before the view
+/// pass runs: a burst of writes renders once, not once per write.
+const RENDER_SETTLE: Duration = Duration::from_secs(2);
+
+/// Whether the canonical view pass is owed right now: the store's version
+/// moved since the last render AND the write burst has settled. `None`
+/// last-write reads as settled (a keeper born after writes still owes the
+/// catch-up render). The settle is a parameter so tests skip the wait.
+fn render_due(state: &StoreState, current: &str, rendered: Option<&str>, settle: Duration) -> bool {
+    if rendered == Some(current) {
+        return false;
+    }
+    let last = state
+        .last_write
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    match last {
+        Some(t) => t.elapsed() >= settle,
+        None => true,
+    }
+}
+
+/// One tick of the render trigger: when a pass is owed and none runs, run
+/// the canonical view pass (the same `fno backlog render-views` a CLI write
+/// used to run in-call), stamp `rendered_version` on success, and journal
+/// `graph_render_failed` on failure. Never touches the write gate: a slow or
+/// failing render delays nothing, and the next settled tick retries.
+fn trigger_render(state: &StoreState) {
+    trigger_render_with(state, run_render_pass);
+}
+
+/// The injectable body of [`trigger_render`]: tests pass their own pass
+/// runner instead of the subprocess.
+fn trigger_render_with(state: &StoreState, run: impl FnOnce() -> Result<(), (i32, String)>) {
+    use std::sync::atomic::Ordering;
+    let Ok(current) = crate::backlog::version(&state.graph) else {
+        return; // no counter yet: nothing was ever written, nothing to render
+    };
+    let rendered = crate::backlog::rendered_version(&state.graph)
+        .ok()
+        .flatten();
+    if !render_due(state, &current, rendered.as_deref(), RENDER_SETTLE) {
+        return;
+    }
+    if state
+        .render_in_flight
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let outcome = run();
+    match &outcome {
+        Ok(()) => {
+            if let Err(error) = crate::backlog::set_rendered_version(&state.graph, &current) {
+                if let Some(events) = &state.events {
+                    let emitter = crate::events::EventEmitter::new(events, "daemon");
+                    let _ = emitter.emit(
+                        "graph_render_failed",
+                        &json!({
+                            "version": current,
+                            "exit": -1,
+                            "stderr_tail": format!("rendered_version stamp failed: {error}"),
+                        }),
+                    );
+                }
+            }
+        }
+        Err((exit, stderr_tail)) => {
+            if let Some(events) = &state.events {
+                let emitter = crate::events::EventEmitter::new(events, "daemon");
+                let _ = emitter.emit(
+                    "graph_render_failed",
+                    &json!({
+                        "version": current,
+                        "exit": exit,
+                        "stderr_tail": stderr_tail,
+                    }),
+                );
+            }
+        }
+    }
+    state.render_in_flight.store(false, Ordering::SeqCst);
+}
+
+/// Run the canonical view pass as a subprocess. The keeper is a Rust worker:
+/// the pass is Python-owned (config.toml targets, vault rendering), so it
+/// shells to the `fno` CLI the same way the mux's retired replay did.
+/// `Err` carries the exit code and the stderr tail for the failure event.
+fn run_render_pass() -> Result<(), (i32, String)> {
+    let bin = match std::env::var_os("FNO_BIN") {
+        Some(v) => PathBuf::from(v),
+        None => {
+            let path = match std::env::var_os("PATH") {
+                Some(p) => p,
+                None => return Err((-1, "PATH is unset; the view pass cannot run".into())),
+            };
+            match std::env::split_paths(&path)
+                .map(|dir| dir.join("fno"))
+                .find(|candidate| candidate.is_file())
+            {
+                Some(p) => p,
+                None => {
+                    return Err((-1, "no fno CLI on PATH; the view pass cannot run".into()));
+                }
+            }
+        }
+    };
+    let out = std::process::Command::new(bin)
+        .args(["backlog", "render-views"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| (-1, format!("spawn failed: {e}")))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let code = out.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Tail only, char-safe: the emitter caps payloads at 500 B, so the tail
+    // must leave room for the envelope fields.
+    let tail: String = {
+        let skip = stderr.chars().count().saturating_sub(300);
+        stderr.chars().skip(skip).collect()
+    };
+    Err((code, tail))
+}
 
 /// Seat-ladder pacing, mirroring daemon.rs's LOCK_ACQUIRE_* shape: a probe
 /// holds the seat lock for microseconds, an incumbent for life, and only
@@ -576,6 +719,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         file_opens: AtomicU64::new(0),
         snapshots: Mutex::new(std::collections::VecDeque::new()),
         gate_metrics: Mutex::new(GateMetrics::new()),
+        last_write: Mutex::new(None),
+        render_in_flight: std::sync::atomic::AtomicBool::new(false),
         events: cfg.events.clone(),
         sock_ino,
         startup_fp,
@@ -643,6 +788,25 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                         }),
                     );
                 }
+            });
+    }
+    if state.canonical {
+        // The ONE render path (task 8.3): a 1 s tick checks whether the
+        // store moved since the last render and the last write settled, and
+        // runs the canonical view pass once per burst. Canonical keepers
+        // only: test and temp stores never render (the historical
+        // non-canonical arm rendered a sibling graph.html, which no consumer
+        // of test graphs ever read).
+        let render_state = Arc::clone(&state);
+        let render_shutdown = Arc::clone(&shutdown);
+        let _ = std::thread::Builder::new()
+            .name("fno-store-render".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(1));
+                if render_shutdown.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                trigger_render(&render_state);
             });
     }
     let active_clients = Arc::new(AtomicU64::new(0));
@@ -3062,6 +3226,8 @@ mod tests {
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
+            last_write: Mutex::new(None),
+            render_in_flight: std::sync::atomic::AtomicBool::new(false),
             events: None,
             sock_ino: None,
             startup_fp: None,
@@ -3132,6 +3298,8 @@ mod tests {
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
+            last_write: Mutex::new(None),
+            render_in_flight: std::sync::atomic::AtomicBool::new(false),
             events: None,
             sock_ino: None,
             startup_fp: None,
@@ -3594,6 +3762,8 @@ mod tests {
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
+            last_write: Mutex::new(None),
+            render_in_flight: std::sync::atomic::AtomicBool::new(false),
             events: None,
             sock_ino: None,
             startup_fp: None,
@@ -3771,5 +3941,123 @@ mod tests {
         });
         let out = apply_op_for_tests(&mut entries, &req4).unwrap();
         assert_eq!(out["added"], json!(true));
+    }
+
+    fn render_trigger_state(graph: PathBuf, events: Option<PathBuf>) -> StoreState {
+        StoreState {
+            graph,
+            canonical: true,
+            lock_timeout: Duration::from_secs(2),
+            gate: RwLock::new(()),
+            cache: RwLock::new(None),
+            file_opens: AtomicU64::new(0),
+            snapshots: Mutex::new(std::collections::VecDeque::new()),
+            gate_metrics: Mutex::new(GateMetrics::new()),
+            last_write: Mutex::new(None),
+            render_in_flight: std::sync::atomic::AtomicBool::new(false),
+            events,
+            sock_ino: None,
+            startup_fp: None,
+        }
+    }
+
+    fn seed_render_store(graph: &Path) -> String {
+        graph_store::locked_mutate(
+            graph,
+            graph_store::MutateInput {
+                entries: vec![json!({
+                    "id": "x-rend", "title": "Render me", "slug": "x-rend",
+                    "type": "feature", "status": "idea", "priority": "p2",
+                    "created_at": "2026-09-11T00:00:00+00:00"
+                })],
+                canonical_path: None,
+                base_version: None,
+                plan_rungs: None,
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        crate::backlog::version(graph).unwrap()
+    }
+
+    /// The trigger's decision: a moved version renders once, a rendered
+    /// version renders never, and an unsettled write burst renders later.
+    #[test]
+    fn render_trigger_is_due_only_for_moved_unrendered_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let current = seed_render_store(&graph);
+        let state = render_trigger_state(graph.clone(), None);
+
+        assert!(
+            render_due(&state, &current, None, Duration::ZERO),
+            "a version with no rendered stamp is due once the burst settles"
+        );
+        assert!(
+            !render_due(&state, &current, Some(&current), Duration::ZERO),
+            "the rendered version never re-renders"
+        );
+        // A write 1 tick ago (record_gate stamps on publish) blocks the
+        // default settle.
+        *state.last_write.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::time::Instant::now());
+        assert!(
+            !render_due(&state, &current, None, RENDER_SETTLE),
+            "an unsettled burst waits"
+        );
+        // A state with NO stamp at all reads as settled: boot catch-up.
+        let fresh = render_trigger_state(graph.clone(), None);
+        assert!(render_due(&fresh, &current, None, RENDER_SETTLE));
+    }
+
+    /// The happy path: the pass runs, the marker stamps, and the next tick
+    /// is a no-op (positive marker: the stamp exists and the runner ran).
+    #[test]
+    fn render_trigger_runs_the_pass_and_stamps_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let current = seed_render_store(&graph);
+        let state = render_trigger_state(graph.clone(), None);
+        let runs = std::cell::Cell::new(0u32);
+        trigger_render_with(&state, || {
+            runs.set(runs.get() + 1);
+            Ok(())
+        });
+        assert_eq!(runs.get(), 1);
+        assert_eq!(
+            crate::backlog::rendered_version(&graph).unwrap(),
+            Some(current),
+            "the marker names the version the pass rendered"
+        );
+
+        // The stamped marker retires the debt: the next tick does not run.
+        let runs2 = std::cell::Cell::new(0u32);
+        trigger_render_with(&state, || {
+            runs2.set(runs2.get() + 1);
+            Ok(())
+        });
+        assert_eq!(runs2.get(), 0);
+    }
+
+    /// A failed pass journals `graph_render_failed` with the exit code and
+    /// the stderr tail, leaves the marker unstamped, and the next tick
+    /// retries the debt.
+    #[test]
+    fn render_trigger_journals_a_failed_pass_and_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let _current = seed_render_store(&graph);
+        let events_path = dir.path().join("events.jsonl");
+        let state = render_trigger_state(graph.clone(), Some(events_path.clone()));
+        trigger_render_with(&state, || Err((3, "boom".into())));
+        assert_eq!(
+            crate::backlog::rendered_version(&graph).unwrap(),
+            None,
+            "a failed pass never stamps"
+        );
+        let journal = std::fs::read_to_string(&events_path).unwrap();
+        assert!(journal.contains("graph_render_failed"), "{journal}");
+        assert!(journal.contains("boom"), "{journal}");
+        assert!(journal.contains("\"exit\":3"), "{journal}");
     }
 }

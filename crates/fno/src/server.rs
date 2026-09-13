@@ -2787,10 +2787,9 @@ fn first_line_or(s: &str, fallback: &str) -> String {
 /// the same bounded-lock, version-checked, atomically-published pipeline
 /// every other writer uses. The blocking socket work runs off the async core;
 /// failure names what went wrong so the footer carries the cause, not just
-/// that it did. The derived views (graph.md, board targets) are Python-owned,
-/// so a landed write detaches one `fno backlog render-views` replay - the
-/// same pass a CLI write runs post-publish - rather than leaving the mux
-/// write's render to the next CLI mutation.
+/// that it did. The derived views (graph.md, board targets) are the keeper
+/// render trigger's job: a landed native write bumps the store counter and
+/// the trigger replays the views once, like every other write.
 async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String {
     let label = verb.label();
     let graph = backlog_view::graph_path();
@@ -2804,30 +2803,10 @@ async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String
     })
     .await;
     match outcome {
-        Ok(Ok(notice)) => {
-            spawn_render_views_replay();
-            notice
-        }
+        Ok(Ok(notice)) => notice,
         Ok(Err(e)) => format!("{label} {node}: {e}"),
         Err(_) => format!("{label} {node}: unavailable"),
     }
-}
-
-/// Fire-and-forget the canonical view replay after a native write. The
-/// subprocess is best-effort: a failed or dropped replay only means the
-/// derived views refresh on the next write, never that the write is lost.
-/// Tokio reaps the child when it exits.
-fn spawn_render_views_replay() {
-    let mut command = crate::process_admission::tokio_command(fno_bin());
-    command
-        .args(["backlog", "render-views"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    tokio::spawn(async move {
-        let _ = command.output().await;
-    });
 }
 
 /// (x-9c5f) Shell `fno agents spawn --name <n> --resume <uuid> --substrate bg`

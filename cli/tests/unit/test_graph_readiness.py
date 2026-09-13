@@ -267,17 +267,18 @@ def test_recompute_statuses_never_round_trips_a_stale_blocked_reason():
     assert result[0]["blocked_reason"] is None
 
 
-def test_locked_mutate_graph_overlays_blocked_on_the_entries_it_hands_to_render(
-    tmp_path: Path,
-):
-    """recompute_statuses no longer derives `blocked`, so the entries passed
-    to render_graph_md/render_graph_html right after a mutation would show a
-    dependency-blocked sibling as `ready`/`idea` (its persisted status)
-    unless the overlay is re-applied before rendering. Exercise the real
-    write path end to end: a no-op mutation on a graph containing an
-    already-blocked sibling must return (and therefore render) `blocked`,
-    not the persisted `ready`.
+def test_view_pass_renders_blocked_not_the_persisted_status(tmp_path, monkeypatch):
+    """recompute_statuses no longer derives `blocked`, so the entries the
+    view pass renders would show a dependency-blocked sibling as its
+    persisted `ready`/`idea` unless the overlay is re-applied before
+    rendering. Exercise the real flow: a write on a graph containing an
+    already-blocked sibling, then the canonical view pass, renders
+    `blocked`, never the persisted `ready`.
     """
+    import fno.graph._constants as gc
+
+    from fno.graph.store import render_canonical_views
+
     p = _write(
         tmp_path,
         [
@@ -285,10 +286,20 @@ def test_locked_mutate_graph_overlays_blocked_on_the_entries_it_hands_to_render(
             _entry("ab-rrrrrrrr", blocked_by=["ab-qqqqqqqq"]),  # sibling being touched
         ],
     )
-    result = locked_mutate_graph(p, lambda entries: entries)
-    rows = {e["id"]: e for e in result}
-    assert rows["ab-rrrrrrrr"]["status"] == "blocked"
-    assert rows["ab-rrrrrrrr"]["blocked_reason"] == "blocked-by:ab-qqqqqqqq"
+    md = tmp_path / "graph.md"
+    monkeypatch.setattr("fno.paths.graph_json", lambda: p)
+    monkeypatch.setitem(vars(gc), "GRAPH_MD", md)
+    monkeypatch.setitem(vars(gc), "GRAPH_HTML", tmp_path / "graph.html")
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block", lambda *_a, **_k: {"render_targets": []}
+    )
+
+    locked_mutate_graph(p, lambda entries: entries)
+    render_canonical_views()
+
+    text = md.read_text(encoding="utf-8")
+    assert "ab-rrrrrrrr" in text
+    assert "blocked by: ab-qqqqqqqq" in text
 
 
 def test_board_renders_derived_blocked_status_outside_in_progress(tmp_path: Path):
