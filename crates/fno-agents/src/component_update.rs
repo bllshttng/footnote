@@ -11,7 +11,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub const PYTHON_TOOL: &str = "python-tool";

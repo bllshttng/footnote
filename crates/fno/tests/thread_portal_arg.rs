@@ -15,7 +15,7 @@ fn thread_portal_takes_an_index_or_new() {
     // USAGE); a junk value keeps the usage refusal. The flag naming a dead
     // server keeps the probe off any live mux.
     let dead = ["--server", "fno-portal-arg-test-dead"];
-    let mut run = |extra: &[&str]| {
+    let run = |extra: &[&str]| {
         let all: Vec<&str> = dead.iter().chain(extra.iter()).copied().collect();
         thread(&argv(&all), None)
     };

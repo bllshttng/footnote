@@ -138,7 +138,7 @@ fn load_registry_row(home: &AgentsHome, handle: &str) -> Option<state::RegistryE
 }
 
 /// Where a row sits when it has no hold, by scanning the dry run's buckets.
-fn row_bucket(home: &AgentsHome, cwd: &Path, grace_secs: i64, handle: &str) -> String {
+fn row_bucket(home: &AgentsHome, _cwd: &Path, grace_secs: i64, handle: &str) -> String {
     row_bucket_in(home, &crate::gc::gc_sweep_dry_run(home, grace_secs), handle)
 }
 

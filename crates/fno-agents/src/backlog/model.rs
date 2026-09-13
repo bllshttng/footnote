@@ -228,10 +228,6 @@ fn sub_opt_str(typed: &Map<String, Value>, key: &str) -> Option<String> {
     }
 }
 
-fn sub_opt_f64(typed: &Map<String, Value>, key: &str) -> Option<f64> {
-    typed.get(key).and_then(Value::as_f64)
-}
-
 fn sub_opt_i64(typed: &Map<String, Value>, key: &str) -> Option<i64> {
     typed.get(key).and_then(Value::as_i64)
 }

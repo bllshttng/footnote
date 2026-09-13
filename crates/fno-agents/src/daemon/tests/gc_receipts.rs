@@ -32,7 +32,7 @@ pub(super) fn quiet_transcript(
 /// batch seam, and the fixtures answer from the SAME staged transcript files
 /// the old stat read - the seam is what changed, not the fixture ages.
 pub(super) fn staged_ages(
-    transcripts: &(dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>),
+    transcripts: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
 ) -> impl Fn(&[&state::RegistryEntry]) -> std::collections::HashMap<String, Option<i64>> + '_ {
     move |entries| {
         entries
@@ -857,7 +857,7 @@ fn the_truth_batch_includes_unstamped_rows() {
         e
     };
     let bare = ask_row("bare", None); // no uuid: the harness session id is the handle
-    let mut handles = crate::daemon::row_truth_handles(&[stamped, unstamped]);
+    let mut handles = crate::row_truth::row_truth_handles(&[stamped, unstamped]);
     handles.sort();
     assert_eq!(
         handles,
@@ -867,7 +867,7 @@ fn the_truth_batch_includes_unstamped_rows() {
     // (present on every claude row; measured: null on 35 of 35) keys the
     // same reads. A row with NO identity at all is the only silent one.
     assert_eq!(
-        crate::daemon::row_truth_handles(&[bare]),
+        crate::row_truth::row_truth_handles(&[bare]),
         vec!["bare-sess".to_string()],
         "the session id carries the batch when the uuid is null"
     );
@@ -877,7 +877,7 @@ fn the_truth_batch_includes_unstamped_rows() {
         e
     };
     assert!(
-        crate::daemon::row_truth_handles(&[identity_less]).is_empty(),
+        crate::row_truth::row_truth_handles(&[identity_less]).is_empty(),
         "an empty candidate set spends nothing"
     );
 }
@@ -2991,7 +2991,7 @@ fn a_ctrl_r_rename_emits_once_and_never_touches_the_label() {
     let mut reg = state::Registry::default();
     reg.entries.push(row);
     let snapshot = reg.entries.clone();
-    apply_title_changes(&mut reg, &snapshot, &titles);
+    crate::row_truth::apply_title_changes(&mut reg, &snapshot, &titles);
     let stored = &reg.entries[0];
     assert_eq!(stored.harness_title.as_deref(), Some("renamed-by-ctrl-r"));
     assert_eq!(stored.name, "w1", "the label is never rewritten");
@@ -3890,9 +3890,8 @@ fn the_commit_gate_drops_an_order_whose_obligation_opened() {
         r.entries.push(e);
     })
     .unwrap();
-    let mut entry = &state::RegistryEntry::default();
     let entries = state::load_registry(&home.registry_json()).unwrap();
-    entry = entries.entries.first().unwrap();
+    let entry = entries.entries.first().unwrap();
     let mut receipt = crate::receipt::build_reap_receipt(entry, None).unwrap();
     receipt.effects = vec![crate::gc_native::stop_outcome_effect(true, None)];
     let mut receipts = std::collections::BTreeMap::new();

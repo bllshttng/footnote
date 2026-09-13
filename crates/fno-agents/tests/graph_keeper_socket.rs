@@ -20,7 +20,6 @@ const TAG_IDENTIFY_REPLY: u8 = 5;
 
 struct Keeper {
     child: Child,
-    sock: PathBuf,
 }
 
 impl Drop for Keeper {
@@ -53,10 +52,7 @@ fn spawn_keeper(tag: &str, graph: &Path, sock: &Path) -> Keeper {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn store keeper");
-    Keeper {
-        child,
-        sock: sock.to_path_buf(),
-    }
+    Keeper { child }
 }
 
 fn wait_for_socket(sock: &Path) {
@@ -435,7 +431,6 @@ fn a_keeper_whose_socket_was_rebound_by_another_exits_and_leaves_the_new_socket(
             .stderr(Stdio::from(std::fs::File::create(&a_stderr).unwrap()))
             .spawn()
             .expect("spawn keeper A"),
-        sock: sock.to_path_buf(),
     };
     wait_for_socket(&sock);
     use std::os::unix::fs::MetadataExt;

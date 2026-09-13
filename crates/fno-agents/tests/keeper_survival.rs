@@ -106,7 +106,7 @@ fn identify(sock: &PathBuf) -> serde_json::Value {
         let mut chunk = [0u8; 4096];
         match stream.read(&mut chunk) {
             Ok(0) | Err(_) => break,
-            Ok(n) => buf.extend_from_slice(&chunk),
+            Ok(_) => buf.extend_from_slice(&chunk),
         }
         // Skip to the IdentifyReply frame.
         let mut consumed = 0usize;
@@ -117,7 +117,7 @@ fn identify(sock: &PathBuf) -> serde_json::Value {
             match decoded {
                 fno_agents::pane_keeper::Decode::Frame(
                     fno_agents::pane_keeper::Frame::IdentifyReply(payload),
-                    used,
+                    _,
                 ) => {
                     return serde_json::from_slice(&payload).expect("identify reply is json");
                 }

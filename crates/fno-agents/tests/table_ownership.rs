@@ -55,11 +55,6 @@ fn contains_write(table: &str, line_lower: &str) -> bool {
     false
 }
 
-/// True when the lowercased line contains `table` as a whole word.
-fn contains_name(table: &str, line_lower: &str) -> bool {
-    contains_name_in_string(table, line_lower, false)
-}
-
 /// The contains_name walk with a string-literal gate: when `strings_only` is
 /// set, an occurrence counts only inside a double-quoted string literal on
 /// the line. Code identifiers (fn names, module paths, struct-field

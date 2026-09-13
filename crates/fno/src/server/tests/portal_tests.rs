@@ -991,7 +991,7 @@ fn thread_pane_ctl_new_portal_lands_in_its_own_tab_and_leaves_portal_0_alone() {
         ]
     };
     // Seed: portal 0 seats row A (its viewer is tab T's focus pane P).
-    let (tx, mut rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
     core.portal_ctl("deadbee1", 0, PanePlacement::default(), Some(agents()), tx);
     let _ = rx.blocking_recv().expect("seed reply");
     let a_seat = core.portals.get(&0).expect("portal 0 open").seat;

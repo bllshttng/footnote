@@ -145,7 +145,7 @@ pub fn render(summary: &RosterReapSummary, json_out: bool, dry_run: bool) -> Str
 /// The roster-side sweep. Every I/O seam is injected so a test stages the
 /// world; production wiring is [`roster_reap`].
 #[allow(clippy::too_many_arguments)]
-pub fn run(
+pub(crate) fn run(
     home: &crate::paths::AgentsHome,
     grace_secs: i64,
     scope: crate::agents_config::RosterScope,
@@ -155,7 +155,7 @@ pub fn run(
     read_graph: &dyn Fn() -> Option<GraphRead>,
     transcripts: &dyn Fn(&RegistryEntry) -> Option<Vec<PathBuf>>,
     age: &dyn Fn(&RegistryEntry) -> Option<i64>,
-    now: i64,
+    _now: i64,
     remove: &dyn Fn(&RegistryEntry) -> CascadeOutcome,
 ) -> RosterReapSummary {
     let mut summary = RosterReapSummary::default();

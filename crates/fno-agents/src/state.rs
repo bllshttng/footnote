@@ -26,35 +26,35 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Current registry schema version.
-///
-/// v4 (ab-a171ceb2) is a forward-compat bump for `host_mode`: v4 is
-/// structurally identical to v3 (host_mode is additive-optional and read
-/// version-independently via absent==exec coercion), but stamping v4 forces a
-/// pre-host_mode reader - which accepts only {1,2,3} and has no host_mode code
-/// - to REJECT the store rather than silently treat an interactive row as exec
-/// and orphan a live TUI during reconcile. Readers stay backward-compatible:
-/// the accepted-version set still spans 1..=4 (see ACCEPTED_SCHEMA_VERSIONS in
-/// client_verbs.rs and the Python load_registry range check).
-///
-/// v5 (inside-out E3.1, X2/X3) is the same kind of forward-compat bump for the
-/// additive `inside_leg` field: structurally identical to v4 (an absent
-/// `inside_leg` reads as `None`), but stamping v5 forces a pre-inside-leg reader
-/// to REJECT rather than silently DROP a stored inside-leg report on write-back
-/// (Rust serde has no `deny_unknown_fields`, so an old daemon would otherwise
-/// round-trip the field out of existence). Accepted set widens to 1..=5.
-///
-/// v6 (mux agent edge, 4a-G2) is the same kind of forward-compat bump for the
-/// additive `mux` ref: structurally identical to v5 (an absent `mux` reads as
-/// `None`), but stamping v6 forces a pre-mux reader to REJECT rather than
-/// silently drop the ref on write-back - losing it would orphan a live
-/// mux-hosted agent (badges, inject, and list all dispatch on the ref during
-/// the dual-run window). Accepted set widens to 1..=6.
-///
-/// v7 (screen-manifest fallback authority) is the same bump for the additive
-/// `screen_state` verdict: absent reads as `None`, but a pre-v7 writer would
-/// silently drop a stored verdict on write-back and blind the manifest rung
-/// of the badge lattice. Accepted set widens to 1..=7.
+// Current registry schema version.
+//
+// v4 (ab-a171ceb2) is a forward-compat bump for `host_mode`: v4 is
+// structurally identical to v3 (host_mode is additive-optional and read
+// version-independently via absent==exec coercion), but stamping v4 forces a
+// pre-host_mode reader - which accepts only {1,2,3} and has no host_mode code
+// - to REJECT the store rather than silently treat an interactive row as exec
+// and orphan a live TUI during reconcile. Readers stay backward-compatible:
+// the accepted-version set still spans 1..=4 (see ACCEPTED_SCHEMA_VERSIONS in
+// client_verbs.rs and the Python load_registry range check).
+//
+// v5 (inside-out E3.1, X2/X3) is the same kind of forward-compat bump for the
+// additive `inside_leg` field: structurally identical to v4 (an absent
+// `inside_leg` reads as `None`), but stamping v5 forces a pre-inside-leg reader
+// to REJECT rather than silently DROP a stored inside-leg report on write-back
+// (Rust serde has no `deny_unknown_fields`, so an old daemon would otherwise
+// round-trip the field out of existence). Accepted set widens to 1..=5.
+//
+// v6 (mux agent edge, 4a-G2) is the same kind of forward-compat bump for the
+// additive `mux` ref: structurally identical to v5 (an absent `mux` reads as
+// `None`), but stamping v6 forces a pre-mux reader to REJECT rather than
+// silently drop the ref on write-back - losing it would orphan a live
+// mux-hosted agent (badges, inject, and list all dispatch on the ref during
+// the dual-run window). Accepted set widens to 1..=6.
+//
+// v7 (screen-manifest fallback authority) is the same bump for the additive
+// `screen_state` verdict: absent reads as `None`, but a pre-v7 writer would
+// silently drop a stored verdict on write-back and blind the manifest rung
+// of the badge lattice. Accepted set widens to 1..=7.
 // v8 (x-ec59) is the canonical-identity bump for `harness` / `harness_session_id`
 // (mirrors Python's SCHEMA_VERSION): a pre-v8 reader rejects the store rather than
 // silently dropping the canonical fields on a read-modify-write.

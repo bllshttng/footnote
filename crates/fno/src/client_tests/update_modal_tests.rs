@@ -2,6 +2,7 @@
 //! over-budget client_tests.rs; each shrink is banked).
 
 use super::*;
+use crate::client::update_menu::{RunningRow, UpdateReadiness};
 
 /// x-f188 AC7-HP: two stale components and no update pending -> the menu
 /// shows the restart row and the modal names each component with what

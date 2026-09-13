@@ -8,6 +8,7 @@ use crate::mux_cli::{
     EXIT_CONTROL_UNANSWERED, EXIT_OK, EXIT_SUBMIT_UNCONFIRMED, EXIT_TARGET_DND,
     EXIT_TARGET_IDENTITY_MISMATCH,
 };
+#[cfg(test)]
 use crate::proto::{read_msg_sync, write_msg_sync, ClientMsg, ServerMsg};
 
 /// Serializes tests that point FNO_AGENTS_HOME at a scratch dir; cargo
@@ -87,7 +88,7 @@ impl PaneSendAudit {
         {
             data.insert("target_fno_id".into(), id.into());
         }
-        if let Some((name, harness, _)) = &registry {
+        if let Some((name, _harness, _)) = &registry {
             data.insert("target_name".into(), name.clone().into());
         }
         // The schema requires `harness` on every row; a pane with no registry

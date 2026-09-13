@@ -1,6 +1,10 @@
 //! Shared helpers for the review-coverage integration tests. A directory
 //! module, not a test target of its own.
 
+// Each tests/*.rs binary compiles this file separately and uses a subset of
+// the helpers, so rustc sees dead code in the binaries that skip an item.
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

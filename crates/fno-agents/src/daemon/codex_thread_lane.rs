@@ -10,7 +10,6 @@ use super::{
 };
 use crate::codex_thread_entry::build_codex_thread_entry;
 use crate::protocol::{ErrorCode, Request, Response};
-use crate::state;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;

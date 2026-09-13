@@ -6,7 +6,7 @@ use super::*;
 
 use super::gc_receipts::*;
 
-use crate::gc_sweep::{self, GcSummary, GraphRead};
+use crate::gc_sweep::{self, GcSummary};
 
 // ── x-2774: the reaper asks the session, not only the node ──────────────
 
