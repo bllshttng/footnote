@@ -38,7 +38,6 @@ pub(crate) fn run_codex_thread_delivery(
             return 16;
         }
     };
-    let text = text.clone();
     let session_id = session_id.to_string();
     let result = runtime.block_on(async {
         crate::codex_inject::deliver_via_codex_daemon(&session_id, &text).await
