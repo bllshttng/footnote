@@ -753,15 +753,14 @@ def _lookup_registry_row_exact(handle: str):
         entries = load_registry()
     except Exception:  # noqa: BLE001 - the existing not-found path owns read failures
         return None
-    matches = [
-        entry
-        for entry in entries
-        if getattr(entry, "name", None) == handle
-        or (
-            isinstance(getattr(entry, "harness_session_id", None), str)
-            and session_handle_tier(handle, entry.harness_session_id) is not None
-        )
-    ]
+    matches = []
+    for entry in entries:
+        if getattr(entry, "name", None) == handle:
+            matches.append(entry)
+            continue
+        sid = getattr(entry, "harness_session_id", None)
+        if isinstance(sid, str) and session_handle_tier(handle, sid) is not None:
+            matches.append(entry)
     return matches[0] if len(matches) == 1 else None
 
 
