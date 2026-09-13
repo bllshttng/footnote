@@ -74,10 +74,9 @@ def ensure_codex_daemon(
 def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     """Render ``K=V`` pairs as ONE ``-c shell_environment_policy.set={...}``.
 
-    A daemon-run tool inherits the daemon's env, not the TUI's, so worker
-    identity stops at the TUI without this. Measured 2026-09-13: repeated
-    `-c` leaves of one table do not merge on the daemon lane; one inline
-    table carries every pair atomically.
+    A daemon-run tool inherits the daemon's env, not the TUI's; measured
+    2026-09-13: repeated `-c` leaves of one table do not merge on the daemon
+    lane, so one inline table carries every pair.
     """
     table: dict[str, str] = {}
     for pair in pairs:
