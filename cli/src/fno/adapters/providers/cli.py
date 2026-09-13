@@ -128,6 +128,10 @@ def list_providers(
         r.id: [f["problem"] for f in findings if f.get("record") == r.id]
         for r in config.records
     }
+    # shared-identity rides the problems list so the modal's ` !<problem>`
+    # rendering shows it without a second field on the wire.
+    for rid in shared:
+        problems[rid].append("shared-identity")
 
     if json_output:
         import json as _json
@@ -174,7 +178,7 @@ def list_providers(
         if record.auth == "managed":
             line += f"  cred-snapshot={managed.snapshot_age_label(record.id)}"
         line += f"  {_usage_age_col(record.id, ttl=quota.probe_ttl_seconds)}"
-        cell = _identity_cell(record, identities.get(record.id), shared, problems[record.id])
+        cell = _identity_cell(record, identities.get(record.id), problems[record.id])
         line += f"  identity={cell}"
         typer.echo(line)
 
@@ -275,7 +279,7 @@ def _usage_age_col(record_id: str, *, ttl: Optional[int] = None) -> str:
     return f"usage={label}"
 
 
-def _identity_cell(record: ProviderRecord, got, shared_identity: set, problems: list) -> str:
+def _identity_cell(record: ProviderRecord, got, problems: list) -> str:
     """One compact identity token for a list row: matched names the row's own
     record, mismatch names who the credential really serves, anything unproven
     renders ``?<reason>`` and never names an account it did not prove."""
@@ -295,8 +299,6 @@ def _identity_cell(record: ProviderRecord, got, shared_identity: set, problems: 
         cell = "?ambiguous"
     else:
         cell = f"?{got.reason or 'unknown'}"
-    if record.id in shared_identity:
-        cell += " !shared-identity"
     return cell + "".join(f" !{p}" for p in problems)
 
 

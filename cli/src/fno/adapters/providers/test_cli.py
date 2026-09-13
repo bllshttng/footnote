@@ -2512,6 +2512,8 @@ class TestListIdentityColumn:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """AC1-EDGE: different credential roots observing one principal."""
+        import json as _json
+
         from fno.adapters.providers import managed
 
         dir_a = tmp_path / "cfg-a"
@@ -2545,6 +2547,14 @@ class TestListIdentityColumn:
 
         assert result.exit_code == 0, result.output
         assert result.output.count("!shared-identity") == 2
+
+        # The --identity JSON carries the same marker on both rows, so the
+        # modal renders it without recomputing roots.
+        result = _invoke(["list", "-J", "--identity"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        rows = {r["id"]: r for r in _json.loads(result.output)}
+        assert rows["scoped-a"]["problems"] == ["shared-identity"]
+        assert rows["scoped-b"]["problems"] == ["shared-identity"]
 
     def test_a_managed_pair_on_one_slot_never_flags_shared_identity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

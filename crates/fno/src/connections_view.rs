@@ -28,7 +28,7 @@ const READ_TIMEOUT: Duration = Duration::from_millis(1500);
 /// cache), and identity is enrichment that lands after the rows are visible.
 const IDENTITY_TIMEOUT: Duration = Duration::from_millis(5000);
 
-/// Longest account name cell before an ellipsis clamp (x-e9c3).
+/// Longest account name cell before an ellipsis clamp.
 const MAX_NAME_COL: usize = 18;
 
 /// One account record, as emitted by `fno config accounts list -J` (task 1.1).
@@ -64,7 +64,7 @@ pub struct Account {
 }
 
 /// Who the credential serving one account really belongs to, read from the
-/// same binding owner `usage` and `doctor` use (x-3fc6). Tokens match the
+/// same binding owner `usage` and `doctor` use. Tokens match the
 /// `list` surface: matched names the record, `!serves` names the real one.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Identity {
@@ -340,7 +340,7 @@ pub struct ConnectionsView {
     pub identity_phase: IdentityPhase,
 }
 
-/// The phase-2 identity read's lifecycle (x-3fc6).
+/// The phase-2 identity read's lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityPhase {
     /// Rows are on screen; the slower `--identity` read is still running.
@@ -1225,28 +1225,35 @@ impl ConnectionsView {
             IdentityPhase::Pending => "…".to_string(),
             IdentityPhase::Failed => "?".to_string(),
             IdentityPhase::Ready => {
-                let mut cell = match a.identity.as_ref().map(|i| i.status.as_str()) {
-                    Some("matched") => a
-                        .identity
-                        .as_ref()
-                        .and_then(|i| i.served_by.clone())
-                        .unwrap_or_else(|| "?".to_string()),
-                    Some("mismatch") => format!(
-                        "!serves {}",
-                        a.identity
+                // Rows with no slot binding to state (non-claude, api_key)
+                // read `-`, matching the list surface; their phase-2 verdict
+                // is a normal unknown, not a failure.
+                let mut cell = if a.harness != "claude" || a.auth == "api_key" {
+                    "-".to_string()
+                } else {
+                    match a.identity.as_ref().map(|i| i.status.as_str()) {
+                        Some("matched") => a
+                            .identity
                             .as_ref()
-                            .and_then(|i| i.served_by.as_deref())
-                            .unwrap_or("another-account")
-                    ),
-                    Some("ambiguous") => "?ambiguous".to_string(),
-                    Some(_) => format!(
-                        "?{}",
-                        a.identity
-                            .as_ref()
-                            .and_then(|i| i.reason.as_deref())
-                            .unwrap_or("unknown")
-                    ),
-                    None => "?".to_string(),
+                            .and_then(|i| i.served_by.clone())
+                            .unwrap_or_else(|| "?".to_string()),
+                        Some("mismatch") => format!(
+                            "!serves {}",
+                            a.identity
+                                .as_ref()
+                                .and_then(|i| i.served_by.as_deref())
+                                .unwrap_or("another-account")
+                        ),
+                        Some("ambiguous") => "?ambiguous".to_string(),
+                        Some(_) => format!(
+                            "?{}",
+                            a.identity
+                                .as_ref()
+                                .and_then(|i| i.reason.as_deref())
+                                .unwrap_or("unknown")
+                        ),
+                        None => "?".to_string(),
+                    }
                 };
                 for p in &a.problems {
                     cell.push_str(&format!(" !{p}"));
@@ -1392,7 +1399,7 @@ pub fn parse_combos(stdout: &[u8]) -> Option<Vec<ComboRow>> {
 /// modal with a named reason (AC2-ERR) - the CLI is the single source, so a
 /// partial render would be a silent lie.
 ///
-/// Two-phase (x-3fc6): phase 1 sends `Ok`/`Degraded` as soon as the two fast
+/// Two-phase: phase 1 sends `Ok`/`Degraded` as soon as the two fast
 /// reads fold; phase 2 then runs the slower `list -J --identity` under its own
 /// budget and sends `Identity`/`IdentityFailed`. A phase-2 result landing after
 /// a refresh or close is dropped by the client's gen check, and the modal stays
@@ -2212,7 +2219,7 @@ mod tests {
         assert_eq!(v.member_sel, 0); // reset
     }
 
-    // ── x-3fc6: identity readout (AC3) + aligned columns (AC4) ─────────────
+    // ── identity readout (AC3) + aligned columns (AC4) ──────────────────────
 
     /// `list -J --identity` rows: the identity object and problems list ride
     /// the same Account wire contract. Both spellings of the harness key stay
@@ -2277,6 +2284,10 @@ mod tests {
         let out = v.render().join("\n");
         assert!(out.contains("!serves ccr"));
         assert!(out.contains("!expired-credential"));
+        // The api_key row has nothing to state: it reads `-`, not `?reason`.
+        let glm_row = out.lines().find(|l| l.contains("glm")).expect("glm row");
+        assert!(glm_row.trim_end().ends_with('-'), "dash cell: {glm_row}");
+        assert!(!out.contains("?api-key-route"));
     }
 
     // AC3-ERR: a failed/late phase 2 renders every cell `?` and stays Ready.
