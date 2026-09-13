@@ -182,6 +182,7 @@ pub mod screen;
 pub(crate) mod served_liveness;
 pub mod session_names_fold;
 pub mod session_start_bytes;
+pub mod prove_it_verdicts;
 pub mod single_flight;
 pub mod spawn_axes;
 pub mod spawn_gate;

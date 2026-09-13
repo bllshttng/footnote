@@ -22,7 +22,7 @@ use std::path::PathBuf;
 /// Does not read `config.paths.graph_json` - a batch convenience read is not
 /// where a config-driven relocation belongs, and `--graph` covers a test or an
 /// operator override in the meantime.
-fn default_graph_path() -> PathBuf {
+pub(crate) fn default_graph_path() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_HOME") {
         return PathBuf::from(v).join("graph.json");
     }
@@ -38,7 +38,7 @@ fn default_graph_path() -> PathBuf {
 /// crate: fno-agents keeps `fno` a dev/test-only dependency (see this crate's
 /// Cargo.toml), so each side re-implements this one-line contract and a test
 /// pins it against the same resolution.
-fn external_backend_selected() -> bool {
+pub(crate) fn external_backend_selected() -> bool {
     match std::env::var("FNO_TRACKER_BACKEND") {
         Ok(v) => !v.trim().is_empty() && v.trim() != "graph",
         Err(_) => false,
