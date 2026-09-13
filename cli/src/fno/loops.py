@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
-import time
+import subprocess
 from typing import Optional
 
 import typer
-from pydantic import BaseModel, ConfigDict
 
 from fno import paths
 from fno.config import load_settings
@@ -42,88 +41,65 @@ def loop_level(name: str) -> str:
     return entry.level if entry is not None else "report"
 
 
-class PauseState(BaseModel):
-    """The ``loops-paused.json`` sentinel body."""
+def _rust_loops_call(action: str, args: list[str] | None = None) -> dict:
+    """Call the Rust owner of the global pause sentinel."""
+    from fno.rust_binary import resolve_binary
 
-    model_config = ConfigDict(extra="ignore")
-
-    who: str
-    paused_at: int  # epoch ms
-    expires_at: Optional[int] = None  # epoch ms; None = no TTL
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-def is_expired(state: PauseState, *, now: Optional[int] = None) -> bool:
-    if state.expires_at is None:
-        return False
-    return (now if now is not None else _now_ms()) >= state.expires_at
-
-
-class SentinelCorrupted(Exception):
-    """Raised by :func:`read_pause_state` when the sentinel exists but is unparseable."""
-
-
-def read_pause_state() -> Optional[PauseState]:
-    """Read the sentinel from disk in one pass (no check-then-read race), ignoring TTL expiry.
-
-    Returns None only when the sentinel is genuinely absent. Raises
-    :class:`SentinelCorrupted` (logged) when it exists but can't be parsed -
-    callers that must fail CLOSED on corruption (:func:`loops_paused`,
-    ``status``) catch that and treat it as paused.
-    """
-    p = paths.loops_paused_json()
+    binary = resolve_binary()
+    binary_name = str(binary) if binary is not None else "<missing>"
+    if binary is None:
+        raise RuntimeError(f"fno-agents binary {binary_name} is unavailable")
+    argv = [str(binary), "loops", action, *(args or []), "--json"]
     try:
-        raw = p.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        _LOG.warning("loops-paused sentinel at %s could not be read: %s", p, exc)
-        raise SentinelCorrupted(str(p)) from exc
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"fno-agents binary {binary_name} failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"fno-agents binary {binary_name} exited {proc.returncode}: "
+            f"{proc.stderr.strip()[:200]}"
+        )
     try:
-        return PauseState.model_validate(json.loads(raw))
+        payload = json.loads(proc.stdout)
     except ValueError as exc:
-        _LOG.warning("loops-paused sentinel at %s is unreadable: %s", p, exc)
-        raise SentinelCorrupted(str(p)) from exc
+        raise RuntimeError(f"fno-agents binary {binary_name} returned bad JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"fno-agents binary {binary_name} returned non-object JSON")
+    return payload
 
 
 def loops_paused() -> bool:
-    """True if the pause-all sentinel is in effect.
-
-    Every loop tick calls this first; paused = log one line and exit 0.
-    Fails CLOSED: a present-but-corrupted sentinel counts as paused (assume
-    the worst) rather than letting every loop silently resume - this
-    primitive exists to be a safety rail, not a best-effort convenience.
-    """
+    """Return the Rust owner's pause verdict, failing closed on any failure."""
     try:
-        state = read_pause_state()
-    except SentinelCorrupted:
+        payload = _rust_loops_call("paused")
+    except Exception as exc:  # noqa: BLE001 - safety switch must fail closed
+        _LOG.warning("loops-paused check failed closed: %s", exc)
         return True
-    return state is not None and not is_expired(state)
+    return payload.get("paused") is not False
 
 
-def pause_all(*, who: str, ttl_ms: Optional[int] = None) -> PauseState:
-    """Write the pause-all sentinel, replacing any prior one."""
-    state = PauseState(
-        who=who, paused_at=_now_ms(), expires_at=(_now_ms() + ttl_ms) if ttl_ms else None
-    )
-    p = paths.loops_paused_json()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(state.model_dump_json(), encoding="utf-8")
-    tmp.replace(p)
-    return state
+def pause_all(*, who: str, ttl_ms: Optional[int] = None) -> dict:
+    args = ["--who", who]
+    if ttl_ms is not None:
+        args += ["--ttl-ms", str(ttl_ms)]
+    return _rust_loops_call("pause-all", args)
 
 
 def resume_all() -> bool:
-    """Remove the pause-all sentinel. Returns True if one was present."""
-    try:
-        paths.loops_paused_json().unlink()
-    except FileNotFoundError:
-        return False
-    return True
+    return bool(_rust_loops_call("resume-all").get("resumed"))
+
+
+def refuse_if_paused(*, json_out: bool) -> None:
+    """Stop dispatch while paused, leaving explain/read paths available."""
+    if not loops_paused():
+        return
+    if json_out:
+        typer.echo(json.dumps({"skipped": "loops_paused"}))
+    else:
+        typer.echo("advance: loops paused (fno do loops resume-all to lift)")
+    raise typer.Exit(code=0)
 
 
 def _last_tick(name: str) -> Optional[str]:
@@ -183,8 +159,8 @@ def cmd_pause_all(
 ) -> None:
     """Pause every loop: each tick sees loops_paused()==True and exits 0."""
     state = pause_all(who=who, ttl_ms=_parse_ttl_ms(ttl))
-    expiry = f", expires {state.expires_at}" if state.expires_at else ""
-    typer.echo(f"paused by {state.who}{expiry}")
+    expiry = f", expires {state['expires_at']}" if state.get("expires_at") else ""
+    typer.echo(f"paused by {state.get('who', who)}{expiry}")
 
 
 @loops_app.command("resume-all")
@@ -197,19 +173,21 @@ def cmd_resume_all() -> None:
 @loops_app.command("status")
 def cmd_status() -> None:
     """Show the current pause-all sentinel, including an expired one."""
-    try:
-        state = read_pause_state()
-    except SentinelCorrupted as exc:
-        typer.echo(f"sentinel at {exc} is corrupted; failing closed (treated as paused) - investigate")
+    state = _rust_loops_call("status")
+    if state.get("state") == "corrupt":
+        typer.echo(
+            f"sentinel at {state.get('path', '<unknown>')} is corrupted; "
+            "failing closed (treated as paused) - investigate"
+        )
         return
-    if state is None:
+    if state.get("state") == "clear":
         typer.echo("not paused")
         return
-    if is_expired(state):
-        typer.echo(f"expired (was paused by {state.who} at {state.paused_at})")
+    if state.get("state") == "expired":
+        typer.echo(f"expired (was paused by {state['who']} at {state['paused_at']})")
         return
-    expiry = f", expires {state.expires_at}" if state.expires_at else ""
-    typer.echo(f"paused by {state.who} since {state.paused_at}{expiry}")
+    expiry = f", expires {state['expires_at']}" if state.get("expires_at") else ""
+    typer.echo(f"paused by {state.get('who', 'unknown')} since {state.get('paused_at', 'unknown')}{expiry}")
 
 
 @loops_app.command("ls")

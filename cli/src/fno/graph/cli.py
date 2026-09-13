@@ -24,6 +24,7 @@ from typing import Any, List, Literal, Optional, Union
 import typer
 
 from fno.control_plane import emit_tick, scheduler_from_env
+from fno.loops import refuse_if_paused
 from fno.tombstones import tombstone_group_cls
 from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
 # the external-backend verb classification: the sets live beside the data
@@ -8723,10 +8724,9 @@ def cmd_advance(
         typer.echo("advance: --explain-node / --explain-top require --explain", err=True)
         raise typer.Exit(code=2)
 
-    # Validate the dispatch pins before any spawn; the pin is resolved only when
-    # given so an absent pin lets the spawn path keep its per-node/default choice.
-    # This verb's `--provider` reaches a harness-axis resolver, so `flag=` keeps
-    # the refusal naming the flag the operator typed rather than the axis.
+    refuse_if_paused(json_out=json_out)
+    # Validate dispatch pins before spawn; absent pins keep per-node defaults.
+    # `--provider` names its flag in refusals rather than the resolved axis.
     try:
         model = reject_empty_model(model)
         provider = (

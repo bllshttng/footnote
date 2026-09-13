@@ -1,9 +1,4 @@
-"""Tests for the loops pause-all sentinel + level helper (x-ce71).
-
-Covers the plan's three ACs: pause/resume round-trip, expired-TTL reads as
-not-paused (status says "expired"), and an unconfigured loop name always
-resolves to level "report" without raising.
-"""
+"""Tests for the Rust-owned global pause sentinel adapter."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,13 +11,8 @@ runner = CliRunner()
 
 @pytest.fixture
 def isolated_home(tmp_path: Path, monkeypatch):
-    """Isolate the global ~/.fno sentinel + settings caches per test."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
-
-    from fno import config as config_mod
-    from fno import paths as paths_mod
-
     yield tmp_path
 
 
@@ -32,108 +22,112 @@ def test_loop_level_unconfigured_defaults_to_report(isolated_home):
     assert loop_level("nonexistent") == "report"
 
 
-def test_pause_then_loops_paused_is_true(isolated_home):
-    from fno.loops import loops_paused, pause_all
+def test_loops_paused_reads_rust_verdict(isolated_home, monkeypatch):
+    from fno import loops
 
-    pause_all(who="tester")
-    assert loops_paused() is True
+    calls = []
+    monkeypatch.setattr(
+        loops,
+        "_rust_loops_call",
+        lambda action, args=None: calls.append((action, args)) or {
+            "paused": True,
+            "state": "paused",
+            "who": "tester",
+        },
+    )
 
-
-def test_resume_then_loops_paused_is_false(isolated_home):
-    from fno.loops import loops_paused, pause_all, resume_all
-
-    pause_all(who="tester")
-    resume_all()
-    assert loops_paused() is False
-
-
-def test_resume_when_not_paused_reports_false(isolated_home):
-    from fno.loops import resume_all
-
-    assert resume_all() is False
+    assert loops.loops_paused() is True
+    assert calls == [("paused", None)]
 
 
-def test_expired_ttl_reads_as_not_paused(isolated_home):
-    from fno.loops import loops_paused, pause_all
+def test_resume_and_pause_use_rust_boundary(isolated_home, monkeypatch):
+    from fno import loops
 
-    pause_all(who="tester", ttl_ms=1)
-    import time
+    calls = []
 
-    time.sleep(0.01)
-    assert loops_paused() is False
+    def fake_call(action, args=None):
+        calls.append((action, args))
+        if action == "pause-all":
+            return {"paused": True, "state": "paused", "who": "tester", "expires_at": None}
+        return {"resumed": True, "state": "clear", "paused": False}
 
-
-def test_read_pause_state_raises_on_corruption(isolated_home):
-    from fno import paths
-    from fno.loops import SentinelCorrupted, read_pause_state
-
-    p = paths.loops_paused_json()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("not valid json{{{", encoding="utf-8")
-    with pytest.raises(SentinelCorrupted):
-        read_pause_state()
+    monkeypatch.setattr(loops, "_rust_loops_call", fake_call)
+    state = loops.pause_all(who="tester")
+    assert state["who"] == "tester"
+    assert loops.resume_all() is True
+    assert calls == [("pause-all", ["--who", "tester"]), ("resume-all", None)]
 
 
-def test_corrupted_sentinel_fails_closed(isolated_home):
-    """A present-but-unparseable sentinel must count as paused, not resumed.
+def test_expired_rust_verdict_is_not_paused(isolated_home, monkeypatch):
+    from fno import loops
 
-    This is a kill switch: the safe failure direction is fail-closed (assume
-    the worst) rather than silently letting every loop tick proceed as if
-    nothing were paused.
-    """
-    from fno import paths
-    from fno.loops import loops_paused
+    monkeypatch.setattr(
+        loops,
+        "_rust_loops_call",
+        lambda action, args=None: {
+            "paused": False,
+            "state": "expired",
+            "who": "tester",
+            "paused_at": 10,
+        },
+    )
+    assert loops.loops_paused() is False
 
-    p = paths.loops_paused_json()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("not valid json{{{", encoding="utf-8")
-    assert loops_paused() is True
+
+def test_bad_rust_result_fails_closed_and_names_binary(isolated_home, monkeypatch, caplog):
+    from fno import loops
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("fno-agents binary /tmp/fno-agents returned bad JSON")
+
+    monkeypatch.setattr(loops, "_rust_loops_call", fail)
+    assert loops.loops_paused() is True
+    assert "/tmp/fno-agents" in caplog.text
 
 
-def test_cli_status_reports_corrupted_sentinel(isolated_home):
-    from fno import paths
-    from fno.loops import loops_app
+def test_cli_status_reports_corrupt_state(isolated_home, monkeypatch):
+    from fno import loops
 
-    p = paths.loops_paused_json()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("not valid json{{{", encoding="utf-8")
-
-    result = runner.invoke(loops_app, ["status"])
+    monkeypatch.setattr(
+        loops,
+        "_rust_loops_call",
+        lambda action, args=None: {
+            "paused": True,
+            "state": "corrupt",
+            "path": "/tmp/loops-paused.json",
+        },
+    )
+    result = runner.invoke(loops.loops_app, ["status"])
     assert result.exit_code == 0, result.output
     assert "corrupted" in result.output
     assert "treated as paused" in result.output
 
 
-def test_status_reports_expired_for_stale_ttl(isolated_home):
-    from fno.loops import is_expired, pause_all, read_pause_state
+def test_cli_pause_status_resume_round_trip(isolated_home, monkeypatch):
+    from fno import loops
 
-    pause_all(who="tester", ttl_ms=1)
-    import time
+    state = {"paused": False, "state": "clear"}
 
-    time.sleep(0.01)
-    state = read_pause_state()
-    assert state is not None
-    assert is_expired(state) is True
+    def fake_call(action, args=None):
+        if action == "pause-all":
+            who = args[1]
+            state.update({"paused": True, "state": "paused", "who": who, "expires_at": None})
+            return state
+        if action == "status":
+            return state
+        state.update({"paused": False, "state": "clear", "resumed": True})
+        return state
 
-
-def test_cli_pause_status_resume_round_trip(isolated_home):
-    from fno.loops import loops_app
-
-    result = runner.invoke(loops_app, ["pause-all", "--who", "cli-tester"])
+    monkeypatch.setattr(loops, "_rust_loops_call", fake_call)
+    result = runner.invoke(loops.loops_app, ["pause-all", "--who", "cli-tester"])
     assert result.exit_code == 0, result.output
     assert "cli-tester" in result.output
-
-    result = runner.invoke(loops_app, ["status"])
+    result = runner.invoke(loops.loops_app, ["status"])
     assert result.exit_code == 0, result.output
     assert "cli-tester" in result.output
-
-    result = runner.invoke(loops_app, ["resume-all"])
+    result = runner.invoke(loops.loops_app, ["resume-all"])
     assert result.exit_code == 0, result.output
     assert "resumed" in result.output
-
-    result = runner.invoke(loops_app, ["status"])
-    assert result.exit_code == 0, result.output
-    assert "not paused" in result.output
 
 
 def test_cli_ls_with_no_loops_configured(isolated_home):
@@ -152,49 +146,31 @@ def test_cli_ls_lists_configured_loop_with_level(isolated_home, tmp_path, monkey
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
-    from fno import config as config_mod
-
-
     from fno.loops import loops_app
 
     result = runner.invoke(loops_app, ["ls"])
     assert result.exit_code == 0, result.output
     assert "my-loop" in result.output
     assert "assisted" in result.output
-    assert "never" in result.output  # no loop_tick events yet
+    assert "never" in result.output
 
 
 def test_last_tick_survives_null_data_event(isolated_home, tmp_path, monkeypatch):
-    """A ``loop_tick`` event with ``"data": null`` must not crash the lookup.
-
-    ``event.get("data", {})`` only supplies the {} default when the key is
-    absent - an explicit ``null`` value passes through as None and blows up
-    the next ``.get("name")`` call.
-    """
     import json as json_mod
 
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    from fno import paths as paths_mod
-
-
     events_path = tmp_path / ".fno" / "events.jsonl"
     events_path.parent.mkdir(parents=True, exist_ok=True)
     events_path.write_text(
         json_mod.dumps({"ts": "2026-01-01T00:00:00Z", "type": "loop_tick", "data": None}) + "\n",
         encoding="utf-8",
     )
-
     from fno.loops import _last_tick
 
     assert _last_tick("my-loop") is None
 
 
 def test_zero_ttl_rejected(isolated_home):
-    """codex peer review P3: --ttl 0m must not silently mean "no expiry".
-
-    ttl_ms=0 is falsy, so `pause_all`'s `if ttl_ms else None` would otherwise
-    read a zero TTL as "pause forever" instead of erroring.
-    """
     import typer
 
     from fno.loops import _parse_ttl_ms
@@ -203,23 +179,3 @@ def test_zero_ttl_rejected(isolated_home):
         _parse_ttl_ms("0m")
     with pytest.raises(typer.BadParameter):
         _parse_ttl_ms("0s")
-
-
-def test_loops_paused_json_ignores_custom_absolute_state_dir(isolated_home, tmp_path, monkeypatch):
-    """codex peer review P1: the sentinel must stay pinned to ~/.fno/ even
-    when config.state_dir is customized to a different absolute path -
-    otherwise two repos with different state_dir overrides would each get
-    their own "global" pause-all sentinel, defeating the whole point."""
-    custom_state_dir = tmp_path / "custom-state"
-    settings_file = tmp_path / "settings.yaml"
-    settings_file.write_text(
-        f"config:\n  state_dir: {custom_state_dir}\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-    from fno import paths as paths_mod
-
-
-    assert paths_mod.loops_paused_json() == tmp_path / ".fno" / "loops-paused.json"

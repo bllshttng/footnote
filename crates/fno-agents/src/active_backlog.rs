@@ -2007,6 +2007,23 @@ async fn mission_drain_loop(
         };
         let journal = journal_for(&cfg.cwd);
 
+        // Pause is checked before the converge gate and before the advance
+        // shell-out. Keep the resident loop observable without dispatching or
+        // mutating its breaker while the operator's hold is active.
+        if crate::loops_pause::is_paused() {
+            crate::tick_ledger::emit_tick(
+                &journal,
+                "active_backlog",
+                "daemon",
+                0,
+                Some("loops_paused"),
+                Some(&format!("mission={} loops paused", cfg.mission)),
+                cfg.interval_seconds.max(1),
+            );
+            wait_for_wake(interval, &shutdown, &mut last_nudge).await;
+            continue;
+        }
+
         // Take a converge slot before the tick shells `advance --epic`. A
         // mission that must wait SAYS so first and then waits its turn: a
         // skipped mission starves silently, and an unlogged wait reads as one.

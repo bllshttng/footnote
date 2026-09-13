@@ -69,6 +69,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "logs",
     "loop",
     "loop-check",
+    "loops",
     "mail-inject",
     "manifest-eval",
     "manifest-for-session",
@@ -423,6 +424,12 @@ async fn run(args: Vec<String>) -> i32 {
     // Direct dispatch; no daemon RPC.
     if verb == "loop-check" {
         return fno_agents::loopcheck::run_loop_check(&args[1..]);
+    }
+
+    // `loops`: daemon-free global pause sentinel owner. Direct dispatch keeps
+    // the safety switch usable when the daemon itself is unavailable.
+    if verb == "loops" {
+        return fno_agents::loops_pause::run_loops(&args[1..]);
     }
 
     // `state path` is the shell-hook surface for project-space path resolution

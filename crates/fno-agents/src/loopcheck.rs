@@ -8,9 +8,12 @@
 //! Module name starts with "loop" to match the LOC-ratchet glob `crates/fno-agents/src/loop*`.
 
 use crate::{
-    cancel_sentinel::check_cancel_sentinel, check_supersession::latest_per_name,
-    completion_output::allow_output, delivery_completion::pr_passes,
-    disposition_gate::disposition_blockers_on_chain, king_termination::read_king_board,
+    cancel_sentinel::check_cancel_sentinel,
+    check_supersession::latest_per_name,
+    completion_output::{allow_output, paused_output},
+    delivery_completion::pr_passes,
+    disposition_gate::disposition_blockers_on_chain,
+    king_termination::read_king_board,
 };
 // The integration tests reach the blocker predicates through loopcheck, the
 // facade they have always imported from; the predicates live in
@@ -8244,9 +8247,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             return (2, out.to_string());
         }
     };
-    // Publish the per-thread read bound, the fire's budget deadline, and the
-    // king drain's reserved slice before any read can fire. Zero (and absent)
-    // both mean "the production default".
+    // Publish the fire bound and the king drain reserve before any read.
     let reserve_ms = if parsed.driver == "king" {
         stopgate_drain_reserve_ms()
     } else {
@@ -8257,11 +8258,10 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         std::time::Instant::now() + STOPGATE_FIRE_BUDGET,
         reserve_ms,
     );
-
-    // The king asks a different question of a different manifest, so it routes
-    // BEFORE the target-shaped manifest read below. Branching inside that read
-    // would make every target conjunct reachable from a king fire, which is the
-    // shape that can never terminate cleanly.
+    if let Some(message) = crate::loops_pause::pause_message() {
+        return (0, paused_output(&parsed.driver, &message));
+    }
+    // The king uses a separate manifest and decision path.
     if parsed.driver == "king" {
         return king_decide(&parsed);
     }
