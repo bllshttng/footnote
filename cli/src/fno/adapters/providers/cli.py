@@ -101,8 +101,7 @@ def list_providers(
 
     The human listing always carries an identity column: the ``.active`` stamp
     says who PUT a credential in the slot, not who it serves, so the binding
-    verdict rides the row (``!serves <record>``, ``?<reason>``, plus doctor's
-    per-record problems as `` !<problem>``).
+    verdict and doctor's per-record problems ride the row.
     """
     config = _load()
 
@@ -319,8 +318,7 @@ def _shared_identity_ids(identities: dict) -> set:
 
 
 def _identity_json(record: ProviderRecord, got) -> dict:
-    """The ``identity`` object for ``list -J --identity``: the verdict the
-    human cell renders, with nulls where nothing was proved."""
+    """The identity object for ``list -J --identity``: the human cell's verdict, nulls where unproved."""
     from fno.adapters.providers.binding import MATCHED, MISMATCH
 
     if got is None:
