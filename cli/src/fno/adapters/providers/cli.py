@@ -128,8 +128,7 @@ def list_providers(
         r.id: [f["problem"] for f in findings if f.get("record") == r.id]
         for r in config.records
     }
-    # shared-identity rides the problems list so the modal's ` !<problem>`
-    # rendering shows it without a second field on the wire.
+    # shared-identity rides the problems list: one wire field, both surfaces.
     for rid in shared:
         problems[rid].append("shared-identity")
 
