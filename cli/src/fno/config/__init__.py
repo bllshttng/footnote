@@ -3428,14 +3428,11 @@ class ParallelBlock(BaseModel):
 class ModelProvider(BaseModel):
     """One secondary model provider for role-based routing (z.ai, DeepSeek, ...).
 
-    ``protocol`` is how a worker talks to it: a ``claude --bg`` worker speaks the
-    Anthropic Messages API, so only ``anthropic``-protocol providers are usable
-    for the claude lane (use the vendor's Anthropic-compatible endpoint, e.g.
-    ``https://api.z.ai/api/anthropic`` or ``https://api.deepseek.com/anthropic``,
-    NOT its OpenAI ``/v4`` path). The API key is read from the process env var
-    named by ``api_key_env`` (falling back to ``api_key_file``); it never lives
-    in settings.yaml. ``zai`` is built in by default; list a provider here to
-    override it or to add another (e.g. ``deepseek``).
+    Only ``anthropic``-protocol providers are usable for the claude lane (the
+    vendor's Anthropic-compatible endpoint, not its OpenAI ``/v4`` path); the
+    key comes from the env var named by ``api_key_env`` (falling back to
+    ``api_key_file``), never settings.yaml. ``zai`` is built in; list a
+    provider here to override it or to add another (e.g. ``deepseek``).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -3444,47 +3441,26 @@ class ModelProvider(BaseModel):
     base_url: str = ""
     api_key_env: str = ""
     api_key_file: Optional[str] = None
-    # Cheaper model for the background (haiku) tier so judgment-light background
-    # traffic runs cheap while opus/sonnet stay on the role model. Unset (None)
-    # keeps the role model on every tier. The built-in zai provider defaults it
-    # to glm-4.7; set it here to override or to give another provider a
-    # cheap background model.
+    # Cheaper model for the background (haiku) tier so judgment-light traffic
+    # runs cheap while opus/sonnet stay on the role model; unset keeps the role
+    # model there. The built-in zai provider defaults it to glm-4.7.
     haiku_model: Optional[str] = None
-    # Model per Claude tier ({opus = "glm-5.3[1m]"}), so /model in a routed
-    # worker offers a real choice instead of the spawn model written into every
-    # tier. Undeclared tiers keep the spawn model. Keys validate against the
-    # Claude tier aliases at load; a tier naming no model is refused. There is
-    # no inventory check that the provider SERVES the named model - a wrong id
-    # fails at the endpoint, same as a bad --model.
+    # Model per Claude tier ({opus = "glm-5.3[1m]"}) so /model in a routed
+    # worker offers a real choice; undeclared tiers keep the spawn model.
+    # Validation rules live beside TIER_ALIASES in model_routing.
     tier_models: Optional[dict[str, str]] = None
 
     @field_validator("tier_models")
     @classmethod
-    def _tier_models_keys_are_tier_aliases(cls, v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
-        """Refuse a key outside the Claude tier aliases at load, naming the bad
-        key and the legal set (a typo is a refusal, never a silently ignored
-        tier). Lazy import: fno.agents.model_routing owns TIER_ALIASES and
-        restating the alias list here would let a new tier land in one and not
-        the other."""
-        if not v:
-            return v
-        from fno.agents.model_routing import TIER_ALIASES
+    def _tier_models_keys_are_tier_aliases(
+        cls, v: Optional[dict[str, str]]
+    ) -> Optional[dict[str, str]]:
+        from fno.agents.model_routing import validate_tier_models
 
-        cleaned = {str(k).strip().lower(): str(m).strip() for k, m in v.items()}
-        bad = sorted(set(cleaned) - set(TIER_ALIASES))
-        if bad:
-            raise ValueError(
-                f"tier_models keys {bad} are not Claude tier aliases; "
-                f"legal keys: {', '.join(TIER_ALIASES)}"
-            )
-        empty = sorted(k for k, m in cleaned.items() if not m)
-        if empty:
-            raise ValueError(f"tier_models[{empty}] names no model")
-        return cleaned
-    # Codex/OpenAI-lane only (protocol == "openai"): the codex wire protocol for
-    # this provider's endpoint. Third-party OpenAI-compatible endpoints (e.g.
-    # z.ai's paas/v4) speak Chat Completions -> "chat"; leave unset to default
-    # to "chat" when routing a codex-lane spawn. Ignored on the anthropic lane.
+        return validate_tier_models(v)
+    # Codex/OpenAI-lane only (protocol == "openai"): the codex wire protocol
+    # for this provider's endpoint ("chat" for Chat Completions, the default;
+    # ignored on the anthropic lane).
     wire_api: Optional[str] = None
 
 
