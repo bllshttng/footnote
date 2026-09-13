@@ -4125,6 +4125,30 @@ class TestDurableGrantExecution:
         assert entry["merge_dispatched"] is True
         assert entry["retries"] == 0
 
+    def test_drain_skips_entry_already_merged_by_overlapping_tick(
+        self, tmp_path, monkeypatch
+    ):
+        """The tick lock is gone by merge-phase time, so an overlapping tick
+        may have merged the queued PR already; the fresh load under the
+        per-PR lock sees merge_dispatched and attempts nothing."""
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
+            obs_map={1: _make_obs(pr_number=1, state="OPEN")},
+        )
+        _arm_durable_grant(monkeypatch, tmp_path)
+        result = self._tick(tmp_path, deps, monkeypatch, 0)
+        from fno.pr_watch._state import WatermarkStore
+
+        store = WatermarkStore(path=tmp_path / "state.json")
+        entry = store.get("owner/repo#1")
+        entry["merge_dispatched"] = True
+        store.set("owner/repo#1", entry)
+        executed, skipped = self._drain(result, deps, monkeypatch, tmp_path)
+
+        assert (executed, skipped) == (0, 0)
+        assert self._merge_calls == []
+        assert not self._grant_events(deps, "reserved")
+
     def test_merge_cut_mid_call_spends_one_retry(self, tmp_path, monkeypatch):
         """AC1-HP (the outage shape): the merge call is cut by the
         phase alarm mid-call. The retry spent BEFORE the call survives, so

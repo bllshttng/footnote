@@ -1308,6 +1308,13 @@ def run_execute_queue(
             entry = store.get(key)
             if not isinstance(entry, dict):
                 continue
+            # A queued entry can go stale before this phase reaches it: the
+            # tick lock is released when the sweep returns, so an overlapping
+            # tick may have merged this PR in its own merge phase. The fresh
+            # load under the per-PR lock is what sees that; skip instead of
+            # attempting a second merge.
+            if entry.get("merge_dispatched"):
+                continue
             # Budget gate before anything mutates: under the floor the next
             # tick's sweep rebuilds the queue and its merge phase re-attempts.
             left = phase_seconds_left()
