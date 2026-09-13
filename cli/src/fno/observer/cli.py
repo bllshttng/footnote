@@ -592,9 +592,8 @@ def _gh_pr_list(repo: str, cutoff, now, gh_runner) -> "tuple[Optional[list[dict]
     gap for the whole repo, never a crash). ``truncated`` is True when the repo
     returned exactly the list limit (there may be more PRs - no silent
     truncation)."""
-    # `--state` is a SCALAR flag (open|closed|merged|all): repeating it is not a
-    # documented union, so use `--state all` and let the merged/closed timestamp
-    # filter below drop OPEN PRs (they carry neither mergedAt nor closedAt).
+    # `--state` is scalar (no repeated-flag union), so use `--state all` and
+    # let the merged/closed timestamp filter below drop OPEN PRs.
     args = [
         "pr", "list", "--repo", repo, "--state", "all",
         "--limit", str(_PR_LIST_LIMIT),
@@ -740,9 +739,7 @@ def _write_target_digest(summary: dict, coverage: dict, meta: dict, crosstab: di
 
     attributed = coverage["attributed"]
     no_pr = coverage["no_pr_attempts"]
-    # AC3-HP: the attempt->PR formula and the no_pr line render UNCONDITIONALLY,
-    # including at 0 (a conditional formula that only appears when no_pr>0 is the
-    # bypass; `no_pr_attempts: 0` printed explicitly is the proof it ran).
+    # AC3-HP: renders unconditionally, even at 0 - the explicit `no_pr_attempts: 0` is the proof this ran.
     denom = attributed + no_pr
     attempt_to_pr = _pct(attributed, denom) if denom else 0
     stop = coverage["no_pr_stop_cause"]
@@ -1059,9 +1056,7 @@ def _replay(
         typer.echo(f"already scored ({run_id}, {skill_ref or 'HEAD'}, {corpus_item}); skipping (AC2-FR).")
         raise typer.Exit(0)
 
-    # The recorded input: the design-doc/plan text the historical blueprint ran
-    # on (best-effort from disk). Absent -> a tool fault for this item, not a
-    # skill-quality verdict.
+    # The recorded plan text, best-effort from disk; absent is a tool fault, not a skill-quality verdict.
     plan_text = _read_plan_text(item, by_id.get(item.get("graph_node_id")), _default_gh)
     if not plan_text:
         _emit_finding(
