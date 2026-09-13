@@ -236,15 +236,10 @@ RUST_CLIENT_VERBS = frozenset(
         "graph-get",
         "bash-census",
         "session-start-bytes",
-        # The native note action (x-920a): dispatched directly in client.rs,
-        # never `fno agents` routing. `fno backlog note`'s bridge invokes the
-        # binary directly; this entry keeps the client.rs<->router parity
-        # test in sync.
+        # backlog-note + backlog-notes (the bounded-state change): direct
+        # client.rs dispatch, never `fno agents` routing; keeps the
+        # client.rs<->router parity test in sync.
         "backlog-note",
-        # Note-corpus inventory / digest migration / history readback
-        # (x-920a wave 3): dispatched directly in client.rs, never
-        # `fno agents` routing; the ship runbook drives it before the live
-        # apply.
         "backlog-notes",
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
         "court-orphans",
