@@ -1016,31 +1016,16 @@ pub fn session_end(
                 // close: fill ended_at on the raw session rows rather than
                 // skipping the settle forever (the sweep would re-list the
                 // same stale row every pass). The payload carries no typed
-                // node on this path.
-                let Some(list) = row.get_mut("sessions").and_then(Value::as_array_mut) else {
-                    return Ok(false);
-                };
-                let mut closed = false;
-                for record in list.iter_mut() {
-                    let Some(obj) = record.as_object_mut() else {
-                        continue;
-                    };
-                    if obj.get("session_id").and_then(Value::as_str) == Some(session_id)
-                        && obj.get("ended_at").and_then(Value::as_str).is_none()
-                        && matches_window(
-                            obj.get("phase").and_then(Value::as_str),
-                            obj.get("harness").and_then(Value::as_str),
-                        )
-                    {
-                        obj.insert(
-                            "ended_at".into(),
-                            Value::String(crate::graph_store::now_isoformat()),
-                        );
-                        obj.insert("ended_by".into(), Value::String(ended_by.to_string()));
-                        closed = true;
-                    }
-                }
-                return Ok(closed);
+                // node on this path. The sessions aggregate owns the raw
+                // row shape, so the fill composes through it.
+                return Ok(crate::backlog::sessions::fill_open_window_raw(
+                    row,
+                    session_id,
+                    phase,
+                    harness,
+                    &crate::graph_store::now_isoformat(),
+                    ended_by,
+                ));
             };
             let Some(list) = &mut parsed.sessions else {
                 return Ok(false);
