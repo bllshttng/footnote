@@ -256,15 +256,15 @@ def _graph_section(
     # domain-less probe cannot tell which candidates it would have matched.
     # The wider floor also widens how many candidates clear it, so a small k
     # lets higher-Jaccard rows evict the fts-only family the lane exists to
-    # recover (x-80bd's own seed is the live specimen: its fold-offer top id
-    # ranked past k=15). The floor is the one threshold; the seed lane takes
-    # no cap. The node lane keeps k=5: a resolved node's dedup verdict is a
-    # bounded question.
+    # recover (a filed idea's own fold-offer top id ranked past k=15 on the
+    # live graph). The floor is the one threshold; the seed lane takes no cap.
+    # The node lane keeps k=5: a resolved node's dedup verdict is a bounded
+    # question.
     floor = _MIN_SCORE if resolved else _MIN_SCORE - _DOMAIN_BONUS
     k = 5 if resolved else None
     # One scorer with the idea fold offer: discovery.candidates unions the fts
     # lane with the same relatedness lane, so the Consolidation Gate cannot
-    # see a different family than intake folds on (x-80bd). Probe tokens are
+    # see a different family than intake folds on. Probe tokens are
     # title+details, matching what the fold offer scores.
     probe_title = str(resolved.get("title") or "") if resolved else seed
     probe_details = str(resolved.get("details") or "") if resolved else seed

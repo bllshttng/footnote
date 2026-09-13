@@ -343,9 +343,9 @@ def epic_candidates(
 def lineage_ids(entry: Entry, by_id: dict[str, Entry]) -> set[str]:
     """Ancestor ids of ``entry`` following parent links inside ``by_id``.
 
-    Shared with readers that score through the same substrate but do not flag
-    a node's own lineage as a match (x-80bd: the think inspect duplicates
-    payload must not recommend superseding the node's own epic).
+    Shared with readers that score through the same substrate but must not
+    flag a node's own lineage as a match: the think inspect duplicates payload
+    would otherwise recommend superseding the node's own epic.
     """
     lineage: set[str] = set()
     cur = entry.get("parent")
