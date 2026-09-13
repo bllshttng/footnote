@@ -31,17 +31,20 @@ from fno.harness_identity import claude_transport_short_id
 
 # THE exit-code allocation table for the gate band across both trees (this
 # file and crates/fno-agents/src/spawn_gate.rs). A value >= 64 claims its
-# number once; cli/tests/unit/test_exit_code_allocation.py fails any
-# duplicate. The convention band stays outside the claim: small ints 0-5 and
-# 13-25 repeat per verb by design, and 124/127/137/143 mirror the standard
-# timeout/signal codes.
+# number once; the same NAME at the same number in both trees is byte-parity,
+# and cli/tests/unit/test_exit_code_allocation.py fails any duplicate. The
+# convention band stays outside the claim: small ints 0-5 and 13-25 repeat per
+# verb by design, and 124/127/137/143 mirror the standard timeout/signal codes.
 #   75-77, 79   capacity refusals, both gates (queue, no-wait, RAM, load)
-#   78          Python gate: provider cap. Rust never emits 78.
-#   80, 81      Python gate: king share, registry schema. Rust never emits these.
+#   78          provider cap; the quota lock and the lane faults keep it so
+#               exit-code consumers are unaffected
+#   80, 81      king share, registry schema
 #   82, 83      fleet incident stop pair, both gates (byte-parity)
-#   84          Rust gate only: state root ungranted (mirrored here so callers
-#               classify without reading Rust). Permanent until a human grants.
+#   84          state root ungranted. Permanent until a human grants.
 #   85          Python sandbox probe: sandbox unreachable.
+#   86          the spawn-gate transport could not get an answer at all (the
+#               gate verb missing, failed, or timed out); fail closed, never
+#               admit on an unreadable gate.
 #   90, 91      Rust fleet-incident check verb (fleet_incident.rs).
 EXIT_QUEUE_TIMEOUT = 75
 EXIT_NO_WAIT = 76
@@ -55,6 +58,7 @@ EXIT_FLEET_STOP_UNAVAILABLE = 83
 # Rust gate only (crates/fno-agents/src/spawn_gate.rs): the lane declares
 # nothing about how it stands toward the fno state root.
 EXIT_STATE_ROOT_UNGRANTED = 84
+EXIT_GATE_UNAVAILABLE = 86
 
 
 def _fleet_incident_gate() -> None:

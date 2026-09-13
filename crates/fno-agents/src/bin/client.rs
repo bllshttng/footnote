@@ -1163,7 +1163,12 @@ async fn run(args: Vec<String>) -> i32 {
             daemon_gate_flags,
         ) {
             Ok(guard) => Some(guard),
-            Err(code) => return code,
+            Err(refusal) => {
+                if let Some(receipt) = &refusal.receipt {
+                    println!("{receipt}");
+                }
+                return refusal.exit_code;
+            }
         }
     } else {
         None
@@ -1693,10 +1698,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             substrate
         };
         let roots = fno_agents::claude_ask::state_dirs_from_env();
-        if let Err(code) =
+        if let Err(refusal) =
             fno_agents::spawn_gate::state_root_grant_gate(provider, declared_substrate, &roots)
         {
-            return Some(code);
+            return Some(refusal.exit_code);
         }
     }
 
@@ -1934,7 +1939,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             flags,
         ) {
             Ok(g) => Some(g),
-            Err(code) => return Some(code),
+            Err(refusal) => {
+                if let Some(receipt) = &refusal.receipt {
+                    println!("{receipt}");
+                }
+                return Some(refusal.exit_code);
+            }
         }
     };
 

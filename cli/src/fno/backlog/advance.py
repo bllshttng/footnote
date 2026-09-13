@@ -255,15 +255,16 @@ class SpawnQueueRefused(SpawnError):
 
 
 #: spawn exit -> machine verdict. 75-80 are capacity conditions true for every caller equally;
-#: 81 is a registry no spawn can pass; 82 is a codex sandbox blocking a tool its lane needs.
-#: 84 is the Rust gate's state-root refusal: permanent, a human grants, never capacity.
-#: Constants are read off the module so a rename breaks loudly.
+#: 81 and 86 are registries/gates no spawn on this machine can pass; 82 and 83 are the fleet
+#: incident pair; 84 is the state-root refusal: permanent, a human grants, never capacity;
+#: 85 is the sandbox probe. Constants are read off the module so a rename breaks loudly.
 _GATE_REFUSAL_REASONS = {
     _spawn_gate.EXIT_QUEUE_TIMEOUT: "capacity-refused", _spawn_gate.EXIT_NO_WAIT: "capacity-refused",
     _spawn_gate.EXIT_RAM_REFUSED: "capacity-refused", _spawn_gate.EXIT_PROVIDER_CAP: "capacity-refused",
     _spawn_gate.EXIT_LOAD_REFUSED: "capacity-refused", _spawn_gate.EXIT_KING_SHARE: "capacity-refused",
     _spawn_gate.EXIT_REGISTRY_SCHEMA: "gate-unavailable",
     _spawn_gate.EXIT_STATE_ROOT_UNGRANTED: "state-root-ungranted",
+    _spawn_gate.EXIT_GATE_UNAVAILABLE: "gate-unavailable",
     EXIT_SANDBOX_UNREACHABLE: "sandbox-unreachable",
 }
 
