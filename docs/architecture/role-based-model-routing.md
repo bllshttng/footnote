@@ -313,7 +313,7 @@ The code side of the same defense: `incoherent_model_env` (`cli/src/fno/agents/m
 
 ## Scope and deferrals
 
-Wires native per-spawn routing for the claude lane (Anthropic-protocol providers) with the fail-safe fallback and the hard guard. `tier_models` is the declared per-tier model map (see the table above); `extra_env` remains the escape hatch for anything that is not a tier model (e.g. `API_TIMEOUT_MS`). Deferred: a codex/openai lane that consumes the same provider registry over the OpenAI-protocol endpoints. Also deferred: an external router for in-session subagent routing to a non-Anthropic provider. Also deferred: a config UI for editing roles (hand-edit is acceptable first). `consolidate` is already served out-of-repo by modelkit/memdream, which calls z.ai directly.
+Wires native per-spawn routing for the claude lane (Anthropic-protocol providers) with the fail-safe fallback and the hard guard. `tier_models` is the declared per-tier model map, shown in the table above. `extra_env` remains the escape hatch for anything that is not a tier model (e.g. `API_TIMEOUT_MS`). Deferred: a codex/openai lane that consumes the same provider registry over the OpenAI-protocol endpoints. Also deferred: an external router for in-session subagent routing to a non-Anthropic provider. Also deferred: a config UI for editing roles (hand-edit is acceptable first). `consolidate` is already served out-of-repo by modelkit/memdream, which calls z.ai directly.
 
 ## Sigma panel routes
 
