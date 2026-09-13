@@ -676,14 +676,14 @@ blasting.
 
 ## Five questions and the judge (2a-bis answers, step 3 judge call)
 
-Every plan answers five questions before designing, into a `## Five questions` section (schema: `quick-template.md`). Each answer is a named thing or the word `none`; `none` is a claim, judged like any other.
+Every plan answers five questions before designing, into a `## Five questions` section (schema: `quick-template.md`). Each answer is a named thing or the word `none`. The word `none` is a claim, judged like any other.
 
-1. **Persona**: who hits this, what do they do today instead, and what does it cost them per week? A named person (operator, crowned king, worker session, plugin user) and a present cost tied to a source the plan cites.
+1. **Persona**: who hits this, what do they do today instead, and what does it cost them per week? Name the person: operator, crowned king, worker session, or plugin user. Tie the cost to a source the plan cites.
 2. **Surface fit**: which existing verb, skill or config does this extend? Name it, or name the one you searched for and why it does not cover this.
 3. **Uncovered case**: which realistic input or state breaks the design as written? Two sessions at once, a moved index or branch, an empty or stale input the plan already relies on.
-4. **Deletable**: what could be deleted and the stated goal would still ship?
-5. **Duplication**: which existing module already implements this or could be extended so the feature falls out? Name a module and a relationship. Advice to consider consolidation is not an answer.
+4. **Deletable**: what can you delete and still ship the stated goal?
+5. **Duplication**: which existing module already implements this, or can be extended so the feature falls out? Name a module and a relationship. Advice to consider consolidation is not an answer.
 
-After step 3's validate-and-finalize, `fno doctor observer judge --plan "$PLAN_PATH" --node "$CLAIMS_ID"` grades the plan, one isolated model call per question. The call is advisory and level-gated: at `config.loops.blueprint_judge.level = "report"` (the default) it prints `skipped level=report` and spends nothing; at `assisted` (or with `--force`) it judges and prints each fail with its quoted reason. A plan with no `## Five questions` section prints `unanswered` and makes no model call - a coverage gap, not a fail.
+After step 3's validate-and-finalize, `fno doctor observer judge --plan "$PLAN_PATH" --node "$CLAIMS_ID"` grades the plan with one isolated model call per question. The call is advisory and level-gated. At `config.loops.blueprint_judge.level = "report"` (the default) it prints `skipped level=report` and spends nothing. At `assisted` (or with `--force`) it judges and prints each fail with its quoted reason. A plan with no `## Five questions` section prints `unanswered` and makes no model call. That is a coverage gap, not a fail.
 
-On a fail: revise the plan once, or write a one-line disposition under that question in `## Five questions`. Never loop, never block intake - the judge has not been calibrated against the operator's own judgment yet, so it informs a human decision instead of replacing one. The pass criteria live only in `evals/blueprint-judge/lenses.md`; never copy them into a skill or a plan.
+On a fail: revise the plan once, or write a one-line disposition under that question in `## Five questions`. Never loop, and never block intake. The judge has not been calibrated against the operator's own judgment yet. It informs a human decision instead of replacing one. The pass criteria live only in `evals/blueprint-judge/lenses.md`. Never copy them into a skill or a plan.
