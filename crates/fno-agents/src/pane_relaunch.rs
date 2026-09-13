@@ -115,8 +115,468 @@ pub(crate) fn mux_pane_run_argv(
 }
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::client_verbs::shlex_quote;
+use crate::pane_stop::{pane_list_via_fno, PaneSighting};
+use crate::scrape::mux_pane_read;
+
+// (crates/fno `EXIT_CONTROL_UNANSWERED`). Duplicated here rather than
+// imported: this crate does not depend on `fno`, and `fno mux pane run` is
+// invoked as a subprocess, not a library call.
+const MUX_CONTROL_UNANSWERED: i32 = 20;
+
+/// Map a failed `fno mux pane run` (the relauncher's subprocess) to its
+/// stderr message. Kept pure so the exit-code split is mechanically testable
+/// apart from the launch itself.
+pub(crate) fn mux_pane_run_failure_message(
+    verb: &str,
+    name: &str,
+    session: &str,
+    status: std::process::ExitStatus,
+) -> String {
+    if status.code() == Some(MUX_CONTROL_UNANSWERED) {
+        return format!(
+            "fno agents {verb}: the mux never answered the run for {name}; a pane \
+             MAY have started. Check `fno mux pane ls --session {session}` before \
+             retrying."
+        );
+    }
+    format!(
+        "fno agents {verb}: mux pane run for {name} exited {} (no pane started)",
+        status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string())
+    )
+}
+
+/// How long a relaunched pane gets to prove the worker stayed up (mirrors
+/// `_BINDING_WINDOW_S` in mux_spawn.py), and how often it is polled
+/// (`_BINDING_POLL_S`). Both fit inside `MUX_RESUME_CLAIM_TTL_MS` (120s) and
+/// the watchdog's 180s resume timeout.
+const PANE_PROOF_WINDOW: Duration = Duration::from_secs(8);
+const PANE_PROOF_POLL: Duration = Duration::from_millis(750);
+
+/// The verdict of one pane-launch proof. The asymmetry is load-bearing: a
+/// false `Died` tells the operator a live worker is dead; a false `Unproven`
+/// costs one retry. Ambiguity therefore never promotes to `Died`.
+#[derive(Debug)]
+pub(crate) enum PaneProof {
+    Live { child_pid: u32 },
+    Died { tail: String },
+    Unproven { tail: String, why: String },
+}
+
+/// The four reads a proof may make, injected so the ranking is testable with
+/// no mux and no wall clock. A `None` answer means "could not run" - evidence
+/// of nothing, never of death.
+pub(crate) struct PaneProbes<'a> {
+    /// `fno mux pane wait <id> --server <s> --timeout 0` exit code.
+    pub wait_exit: &'a dyn Fn() -> Option<i32>,
+    /// `pane ls --json`; `None` = unreadable.
+    pub listing: &'a dyn Fn() -> Option<Vec<PaneSighting>>,
+    /// `pane read <id> --json` text.
+    pub read_tail: &'a dyn Fn() -> Option<String>,
+    /// Whether a pid is alive.
+    pub pid_alive: &'a dyn Fn(u32) -> bool,
+}
+
+pub(crate) fn prove_pane_worker(
+    pane_id: u64,
+    window: Duration,
+    poll: Duration,
+    probes: &PaneProbes,
+    sleep: &dyn Fn(Duration),
+) -> PaneProof {
+    let started = Instant::now();
+    let mut tail = String::new();
+    loop {
+        // Every tick reads the tail first and keeps the newest NON-EMPTY read:
+        // a TUI that has not painted yet reads empty, and the mux drops a
+        // dead pane's buffer at reap, so the tail must be captured before
+        // that. Keep the last 20 lines - the receipt shows context, not
+        // scrollback.
+        if let Some(t) = (probes.read_tail)() {
+            if !t.trim().is_empty() {
+                tail = last_lines(&t, 20);
+            }
+        }
+        match (probes.wait_exit)() {
+            // EXIT_WAIT_EXITED: the pane's child is gone - death, observed
+            // directly.
+            Some(12) => return PaneProof::Died { tail },
+            // Settled-quiet and wait-timeout both say the pane survived
+            // the tick.
+            Some(0) | Some(11) => {}
+            // Anything else (error, unreachable server, probe refused) is not
+            // evidence; ask the listing.
+            _ => match (probes.listing)() {
+                // Absent from a NON-EMPTY listing is death. An empty or
+                // unreadable listing proves nothing - an unreachable session
+                // also answers empty - so it marks the tick unknown.
+                Some(listing) if !listing.is_empty() => {
+                    if !listing.iter().any(|p| p.pane_id == pane_id) {
+                        return PaneProof::Died { tail };
+                    }
+                }
+                _ => {}
+            },
+        }
+        // The first pass always made one full look, so a pane that was
+        // already dead reads Died above, never Unproven; the window only
+        // bounds how long a slow starter is waited for.
+        if started.elapsed() >= window {
+            break;
+        }
+        sleep(poll);
+    }
+    // Window over with no death seen: one final listing decides.
+    match (probes.listing)() {
+        Some(listing) if !listing.is_empty() => match listing.iter().find(|p| p.pane_id == pane_id)
+        {
+            Some(sighting) => match sighting.child_pid {
+                Some(pid) if (probes.pid_alive)(pid) => PaneProof::Live { child_pid: pid },
+                _ => PaneProof::Unproven {
+                    tail,
+                    why: format!("pane {pane_id} is listed but its child pid is missing or dead"),
+                },
+            },
+            None => PaneProof::Died { tail },
+        },
+        _ => PaneProof::Unproven {
+            tail,
+            why: "the mux did not answer".to_string(),
+        },
+    }
+}
+
+fn last_lines(text: &str, max: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(max);
+    lines[start..].join("\n")
+}
+
+/// The Died receipt: what the pane showed, then the attended escape hatch.
+fn pane_death_receipt(
+    verb: &str,
+    row_name: &str,
+    pane_id: u64,
+    window_secs: u64,
+    tail: &str,
+) -> String {
+    let shown = if tail.trim().is_empty() {
+        "(the pane exited before any output was captured)".to_string()
+    } else {
+        tail.to_string()
+    };
+    format!(
+        "fno agents {verb}: {row_name} relaunched on pane {pane_id}, but the worker exited \
+         within {window_secs}s. Last pane output:\n{shown}\nRun `fno agents {verb} {row_name} \
+         --print-command` and run it attended to read the full error."
+    )
+}
+
+/// Relaunch a worker on its mux pane and PROVE it stayed up before this verb
+/// claims success. `pane run` answers `PaneSpawned` the moment the PTY child
+/// starts, so its exit 0 proves a pane was created, never that the worker
+/// lived - the lie the 2026-09-13 specimen shipped. Both the resume and the
+/// recover pane arms launch through here.
+///
+/// Returns 0 only on a proof of life (with the row rebound to the new pane),
+/// 1 on a launch that never produced a pane, 16 on a death or an unproven
+/// launch (matching the two existing not-confirmed receipts on this verb).
+pub(crate) fn relaunch_on_pane(
+    verb: &str,
+    row_name: &str,
+    harness: &str,
+    session_id: &str,
+    cwd: &str,
+    session: &str,
+    pane_argv: &[String],
+    env: &[(String, String)],
+    expected_mux: Option<&crate::state::MuxRef>,
+    events: (&str, &str),
+    home: &crate::paths::AgentsHome,
+) -> i32 {
+    relaunch_on_pane_with(
+        PANE_PROOF_WINDOW,
+        PANE_PROOF_POLL,
+        verb,
+        row_name,
+        harness,
+        session_id,
+        cwd,
+        session,
+        pane_argv,
+        env,
+        expected_mux,
+        events,
+        home,
+    )
+}
+
+/// [`relaunch_on_pane`] with the proof window and poll injected, so tests run
+/// a zero window instead of waiting out the real one.
+pub(crate) fn relaunch_on_pane_with(
+    window: Duration,
+    poll: Duration,
+    verb: &str,
+    row_name: &str,
+    harness: &str,
+    session_id: &str,
+    cwd: &str,
+    session: &str,
+    pane_argv: &[String],
+    env: &[(String, String)],
+    expected_mux: Option<&crate::state::MuxRef>,
+    events: (&str, &str),
+    home: &crate::paths::AgentsHome,
+) -> i32 {
+    // Launch. stdin null so a pane run that reads stdin cannot stall against
+    // the caller's terminal; stdout piped (the pane id); stderr inherited.
+    let mut command = std::process::Command::new("fno");
+    command
+        .args(pane_argv)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = match command.output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("fno agents {verb}: failed to launch {row_name} on a mux pane: {e}");
+            return 1;
+        }
+    };
+    if !output.status.success() {
+        // A non-zero launch emits nothing: no pane, nothing happened.
+        eprintln!(
+            "{}",
+            mux_pane_run_failure_message(verb, row_name, session, output.status)
+        );
+        return 1;
+    }
+    let pane_id = pane_id_from_stdout(&String::from_utf8_lossy(&output.stdout));
+    let events_path = crate::client_verbs::trace_events_path(home);
+    let Some(pane_id) = pane_id else {
+        // A zero exit with no pane id on stdout: the launch cannot be tied to
+        // a pane, so the worker cannot be proven. Keep the claim (a pane may
+        // still exist); the TTL bounds the window a second writer waits.
+        append_launch_event(
+            &events_path,
+            events.1,
+            row_name,
+            harness,
+            session_id,
+            cwd,
+            None,
+            Some("unproven"),
+            Some("pane run printed no pane id"),
+        );
+        eprintln!(
+            "fno agents {verb}: launched for {row_name}, but could not prove the worker \
+             live: pane run printed no pane id. Check `fno mux pane ls --server {session}` \
+             before retrying."
+        );
+        return 16;
+    };
+
+    let probes = PaneProbes {
+        wait_exit: &|| pane_wait_exit(session, pane_id),
+        listing: &|| Some(pane_list_via_fno(Some(session))),
+        read_tail: &|| mux_pane_read(std::ffi::OsStr::new("fno"), session, pane_id),
+        pid_alive: &|pid| crate::daemon::process_start_time(pid).is_some(),
+    };
+    let proof = prove_pane_worker(pane_id, window, poll, &probes, &|d| std::thread::sleep(d));
+    match proof {
+        PaneProof::Live { child_pid } => {
+            let rebind = crate::state::update_registry(
+                &home.registry_json(),
+                |reg| -> Result<Option<u64>, String> {
+                    // Compare-and-set on the mux ref read BEFORE the launch,
+                    // the same guard the scrape sweep's WriteDisposition
+                    // applies: a concurrent re-home is never overwritten.
+                    let row = reg
+                        .entries
+                        .iter_mut()
+                        .find(|r| r.name == row_name)
+                        .ok_or_else(|| format!("row {row_name} is no longer in the registry"))?;
+                    if row.mux.as_ref() != expected_mux {
+                        return Err(format!(
+                            "the row now names pane {} while the relaunch ran",
+                            row.mux.as_ref().map(|m| m.pane_id).unwrap_or(0)
+                        ));
+                    }
+                    row.mux = Some(crate::state::MuxRef {
+                        session: session.to_string(),
+                        pane_id,
+                    });
+                    row.pid = Some(child_pid);
+                    row.pid_start_time = crate::daemon::process_start_time(child_pid);
+                    row.status = crate::AgentStatus::Live;
+                    Ok(expected_mux.map(|m| m.pane_id))
+                },
+            );
+            // The worker IS live either way, so the resume event is honest in
+            // both branches; only the rebind receipt differs.
+            append_launch_event(
+                &events_path,
+                events.0,
+                row_name,
+                harness,
+                session_id,
+                cwd,
+                Some(pane_id),
+                None,
+                None,
+            );
+            match rebind {
+                Ok(Ok(_)) => {
+                    println!(
+                        "fno agents {verb}: {row_name} is live on pane {pane_id} in mux \
+                         session {session} (pid {child_pid})"
+                    );
+                    0
+                }
+                Ok(Err(reason)) => {
+                    let old = expected_mux
+                        .map(|m| m.pane_id.to_string())
+                        .unwrap_or_else(|| "none".to_string());
+                    eprintln!(
+                        "fno agents {verb}: worker live on pane {pane_id}, but the row still \
+                         names pane {old}: {reason}"
+                    );
+                    16
+                }
+                Err(e) => {
+                    let old = expected_mux
+                        .map(|m| m.pane_id.to_string())
+                        .unwrap_or_else(|| "none".to_string());
+                    eprintln!(
+                        "fno agents {verb}: worker live on pane {pane_id}, but the row still \
+                         names pane {old}: {e}"
+                    );
+                    16
+                }
+            }
+        }
+        PaneProof::Died { tail } => {
+            // Leave the row untouched: it already names a dead pane, and the
+            // reconcile sweep owns liveness.
+            append_launch_event(
+                &events_path,
+                events.1,
+                row_name,
+                harness,
+                session_id,
+                cwd,
+                Some(pane_id),
+                Some("pane-exited"),
+                None,
+            );
+            // Release the session claim so a retry after the operator fixes
+            // the cause is not refused for the TTL window against a pane that
+            // no longer exists.
+            let _ = crate::claims::release(
+                &format!("session:{session_id}"),
+                &format!("resume:{}", std::process::id()),
+                None,
+                None,
+            );
+            eprintln!(
+                "{}",
+                pane_death_receipt(verb, row_name, pane_id, window.as_secs(), &tail)
+            );
+            16
+        }
+        PaneProof::Unproven { tail: _, why } => {
+            // Keep the claim: the pane may still be live and the TTL guards
+            // against a second writer.
+            append_launch_event(
+                &events_path,
+                events.1,
+                row_name,
+                harness,
+                session_id,
+                cwd,
+                Some(pane_id),
+                Some("unproven"),
+                Some(&why),
+            );
+            eprintln!(
+                "fno agents {verb}: launched pane {pane_id} for {row_name}, but could not \
+                 prove the worker live: {why}. Check `fno mux pane ls --server {session}` \
+                 before retrying."
+            );
+            16
+        }
+    }
+}
+
+fn append_launch_event(
+    events_path: &Path,
+    kind: &str,
+    row_name: &str,
+    harness: &str,
+    session_id: &str,
+    cwd: &str,
+    pane_id: Option<u64>,
+    reason: Option<&str>,
+    why: Option<&str>,
+) {
+    let mut fields: Vec<(&str, serde_json::Value)> = vec![
+        ("name", serde_json::Value::String(row_name.to_string())),
+        ("provider", serde_json::Value::String(harness.to_string())),
+        (
+            "session_id",
+            serde_json::Value::String(session_id.to_string()),
+        ),
+        ("cwd", serde_json::Value::String(cwd.to_string())),
+    ];
+    if let Some(id) = pane_id {
+        fields.push(("pane_id", serde_json::Value::from(id)));
+    }
+    if let Some(reason) = reason {
+        fields.push(("reason", serde_json::Value::String(reason.to_string())));
+    }
+    if let Some(why) = why {
+        fields.push(("why", serde_json::Value::String(why.to_string())));
+    }
+    crate::client_verbs::append_agents_event(events_path, kind, &fields);
+}
+
+/// Exit code of `fno mux pane wait <pane_id> --server <session> --timeout 0`;
+/// `None` when the wait could not run or died by signal - both mean "no
+/// evidence".
+fn pane_wait_exit(session: &str, pane_id: u64) -> Option<i32> {
+    std::process::Command::new("fno")
+        .args([
+            "mux",
+            "pane",
+            "wait",
+            &pane_id.to_string(),
+            "--server",
+            session,
+            "--timeout",
+            "0",
+        ])
+        .stdin(std::process::Stdio::null())
+        .status()
+        .ok()
+        .and_then(|s| s.code())
+}
+
+/// `pane run` prints exactly one bare u64 line on stdout (the pane id).
+fn pane_id_from_stdout(stdout: &str) -> Option<u64> {
+    let text = stdout.trim();
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return None;
+    }
+    text.parse::<u64>().ok()
+}
 
 /// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
 /// Returns `None` for an unsupported provider AND for an unreadable capability
@@ -279,7 +739,186 @@ pub fn run_resume_argv(rest: &[String]) -> i32 {
 }
 #[cfg(test)]
 mod tests {
-    use super::{mesh_identity_assignments, mux_pane_run_argv, pane_relaunch_target, worker_token};
+    use super::{
+        last_lines, mesh_identity_assignments, mux_pane_run_argv, pane_death_receipt,
+        pane_relaunch_target, prove_pane_worker, worker_token, PaneProbes, PaneProof,
+    };
+    use crate::pane_stop::PaneSighting;
+    use std::time::Duration;
+
+    /// Per-probe staged scripts: each probe keeps its OWN counter, so script
+    /// slot N is the Nth time that probe is read. The tail and wait read
+    /// once per tick; the listing only fires on a non-evidence wait result
+    /// and once at the window end. `None` = the probe could not run.
+    fn staged_probes(
+        tails: Vec<Option<String>>,
+        waits: Vec<Option<i32>>,
+        listings: Vec<Option<Vec<PaneSighting>>>,
+        pid_alive: bool,
+    ) -> PaneProbes<'static> {
+        let t_tick = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let w_tick = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let l_tick = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let leak = Box::leak(Box::new((tails, waits, listings)));
+        let (tails, waits, listings) = (&leak.0, &leak.1, &leak.2);
+        PaneProbes {
+            read_tail: Box::leak(Box::new(move || {
+                let mut t = t_tick.lock().unwrap();
+                let answer = tails.get(*t).and_then(|x| x.clone());
+                *t = t.saturating_add(1);
+                answer
+            })),
+            wait_exit: Box::leak(Box::new(move || {
+                let mut t = w_tick.lock().unwrap();
+                let answer = waits.get(*t).copied().flatten();
+                *t = t.saturating_add(1);
+                answer
+            })),
+            listing: Box::leak(Box::new(move || {
+                let mut t = l_tick.lock().unwrap();
+                let answer = listings.get(*t).and_then(|x| x.clone());
+                *t = t.saturating_add(1);
+                answer
+            })),
+            pid_alive: Box::leak(Box::new(move |_| pid_alive)),
+        }
+    }
+
+    fn sighting(pane_id: u64, child_pid: Option<u32>) -> PaneSighting {
+        PaneSighting {
+            session: "main".to_string(),
+            pane_id,
+            child_pid,
+        }
+    }
+
+    fn no_sleep(_: Duration) {}
+
+    // ---- prove_pane_worker (AC1-AC4) -----------------------------------
+
+    #[test]
+    fn prove_pane_worker_live_pane_with_live_child_is_live() {
+        // AC1-HP: the pane stays in a non-empty listing with a child pid the
+        // liveness probe accepts, so the window ends Live with that pid.
+        let probes = staged_probes(
+            vec![Some("codex 5.0".into()), Some(String::new())],
+            vec![Some(11)],
+            vec![Some(vec![sighting(4242, Some(7))])],
+            true,
+        );
+        let proof = prove_pane_worker(4242, Duration::ZERO, Duration::ZERO, &probes, &no_sleep);
+        match proof {
+            PaneProof::Live { child_pid } => assert_eq!(child_pid, 7),
+            other => panic!("expected Live, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prove_pane_worker_wait_exit_12_is_death_with_the_kept_tail() {
+        // AC2-ERR: the first tick keeps a non-empty tail read; the second
+        // tick's wait exit 12 (pane's child exited) is death, carrying the
+        // captured tail in the receipt.
+        let probes = staged_probes(
+            vec![
+                Some("Error: model provider not found".into()),
+                Some(String::new()),
+            ],
+            vec![Some(11), Some(12)],
+            vec![None, None],
+            false,
+        );
+        let proof = prove_pane_worker(
+            4242,
+            Duration::from_secs(30),
+            Duration::ZERO,
+            &probes,
+            &no_sleep,
+        );
+        match proof {
+            PaneProof::Died { tail } => {
+                assert!(tail.contains("model provider not found"), "{tail}")
+            }
+            other => panic!("expected Died, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prove_pane_worker_absent_from_nonempty_listing_on_first_pass_is_died() {
+        // AC3-ERR: one full look happens even at a zero window, and absence
+        // from a NON-EMPTY listing is death, never Unproven.
+        let probes = staged_probes(
+            vec![Some(String::new())],
+            vec![Some(1)],
+            vec![
+                Some(vec![sighting(7, Some(9))]),
+                Some(vec![sighting(7, Some(9))]),
+            ],
+            true,
+        );
+        let proof = prove_pane_worker(4242, Duration::ZERO, Duration::ZERO, &probes, &no_sleep);
+        assert!(matches!(proof, PaneProof::Died { .. }), "{proof:?}");
+    }
+
+    #[test]
+    fn prove_pane_worker_unreadable_everything_is_unproven_never_died() {
+        // AC4-EDGE: an empty/unreadable listing and an unrunnable wait prove
+        // nothing. Ambiguity never promotes to Died.
+        let probes = staged_probes(
+            vec![Some(String::new())],
+            vec![None],
+            vec![Some(Vec::new()), None],
+            true,
+        );
+        let proof = prove_pane_worker(4242, Duration::ZERO, Duration::ZERO, &probes, &no_sleep);
+        match proof {
+            PaneProof::Unproven { why, .. } => assert_eq!(why, "the mux did not answer"),
+            other => panic!("expected Unproven, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prove_pane_worker_listed_but_dead_child_is_unproven() {
+        // The final listing finds the pane but its child pid is gone: the
+        // honest answer is Unproven (a relaunch may be mid-handoff), never
+        // Live and never Died.
+        let probes = staged_probes(
+            vec![Some(String::new())],
+            vec![Some(11)],
+            vec![Some(vec![sighting(4242, Some(999_999))])],
+            false,
+        );
+        let proof = prove_pane_worker(4242, Duration::ZERO, Duration::ZERO, &probes, &no_sleep);
+        match proof {
+            PaneProof::Unproven { why, .. } => {
+                assert!(why.contains("child pid is missing or dead"), "{why}")
+            }
+            other => panic!("expected Unproven, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn last_lines_keeps_only_the_last_twenty_lines() {
+        let text = (0..25)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let kept = last_lines(&text, 20);
+        assert!(kept.starts_with("line5"));
+        assert!(kept.ends_with("line24"));
+        assert_eq!(kept.lines().count(), 20);
+    }
+
+    #[test]
+    fn pane_death_receipt_shows_the_tail_and_the_attended_escape() {
+        let with_tail = pane_death_receipt("resume", "w", 4242, 8, "boom: route missing");
+        assert!(with_tail.contains("boom: route missing"), "{with_tail}");
+        assert!(with_tail.contains("--print-command"), "{with_tail}");
+        let silent = pane_death_receipt("resume", "w", 4242, 8, "");
+        assert!(
+            silent.contains("exited before any output was captured"),
+            "{silent}"
+        );
+    }
 
     #[test]
     fn mux_pane_run_argv_fences_the_resumed_command() {

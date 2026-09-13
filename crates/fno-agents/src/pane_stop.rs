@@ -454,7 +454,7 @@ fn signal_pid(pid: u32, sig: i32) -> bool {
 /// for when the row carries no mux ref. A failed or unparseable ls answers
 /// an empty Vec - the caller treats a missing LISTING as no panes, and the
 /// escalation still reaches the pid directly.
-fn pane_list_via_fno(session: Option<&str>) -> Vec<PaneSighting> {
+pub(crate) fn pane_list_via_fno(session: Option<&str>) -> Vec<PaneSighting> {
     let sessions: Vec<String> = match session {
         Some(s) => vec![s.to_string()],
         None => mux_session_names(),
