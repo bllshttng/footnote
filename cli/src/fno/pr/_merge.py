@@ -1015,9 +1015,8 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
 
         from fno import _subprocess_util
 
-        # The merge's post-merge reconcile child: bounded above reconcile's
-        # own 240s close-probe budget, and parent-bound - FNO_DIE_WITH_PARENT
-        # makes the child's watchdog exit it when WE die (x-626f).
+        # Bounded above the 240s probe budget; parent-bound so a killed merge
+        # cannot orphan the child (x-626f).
         try:
             res = run(
                 [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile",

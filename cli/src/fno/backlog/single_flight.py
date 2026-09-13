@@ -30,8 +30,7 @@ from fno.rust_binary import resolve_binary
 # Twelve-minute reconcile runs are measured; 30 minutes bounds a lost holder.
 FLIGHT_TTL_MS = 30 * 60 * 1000
 
-# A live holder never outlives its own lease: the budget trips a minute
-# before the TTL so the release is always ours, never the expiry.
+# A live holder never outlives its own lease: the trip precedes the TTL.
 _FLIGHT_BUDGET_DEFAULT_S = FLIGHT_TTL_MS // 1000 - 60
 
 
@@ -189,8 +188,8 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
     """Bound a live holder (x-626f: LIVE at 0.0 pct CPU, invisible to a pid
     probe): a SIGUSR1 stack file plus a thread that releases the flight and
     exits when the budget trips or an opted-in parent dies. The thread stops
-    once the claim file is gone, so a normal release disarms it. os._exit is
-    safe: graph writes commit server-side and reconcile is idempotent."""
+    once the claim file is gone; os._exit is safe because graph writes commit
+    server-side and reconcile is idempotent."""
     root = claims_root_for(flight.key) or Path.home()
     stack_path = root / ".fno" / "flight" / f"stack-{os.getpid()}.txt"
     fh = None
@@ -216,11 +215,10 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
             if not gone and elapsed < budget_s:
                 time.sleep(1.0)
                 continue
-            if fh is not None:
-                with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):
+                if fh is not None:
                     faulthandler.dump_traceback(file=fh, all_threads=True)
                     fh.flush()
-            with contextlib.suppress(Exception):
                 sys.stderr.write(
                     f"backlog {verb}: {'parent-gone' if gone else f'budget {int(budget_s)}s'} "
                     f"after {int(elapsed)}s; flight {flight.key} released; stack at {stack_path}\n"

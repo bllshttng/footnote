@@ -404,8 +404,7 @@ class Ritual:
                 err=True,
             )
         try:
-            # Same bound the merge uses: above reconcile's 240s close-probe
-            # budget, never below it.
+            # Above reconcile's 240s close-probe budget, same as the merge.
             from fno.pr._merge import POST_MERGE_RECONCILE_TIMEOUT_S
 
             r = self._sh(argv, timeout=POST_MERGE_RECONCILE_TIMEOUT_S)
