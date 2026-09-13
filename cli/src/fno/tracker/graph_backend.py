@@ -13,7 +13,7 @@ import datetime as _dt
 from pathlib import Path
 
 from fno.graph.statuses import TERMINAL_RUNGS as _CLOSED_RUNGS
-from fno.graph.store import locked_mutate_graph, read_graph
+from fno.graph.store import commit_rows_via_store
 from fno.graph.types import _derive_status
 from fno.paths import graph_json
 
@@ -39,8 +39,16 @@ class GraphTracker:
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or graph_json()
 
+    def _rows(self) -> list[dict]:
+        from fno.graph import api as graph_api
+
+        return [
+            n.model_dump(by_alias=True)
+            for n in graph_api.nodes(include_archived=True, path=self._path).nodes
+        ]
+
     def read(self, id: str) -> TrackerNode:
-        for entry in read_graph(self._path):
+        for entry in self._rows():
             if entry.get("id") == id:
                 return self._project(entry)
         raise NodeNotFound(id)
@@ -54,7 +62,7 @@ class GraphTracker:
         # list_open alone.
         return [
             node
-            for node in (self._project_candidate(e) for e in read_graph(self._path))
+            for node in (self._project_candidate(e) for e in self._rows())
             if node.state is TrackerState.open
         ]
 
@@ -72,7 +80,7 @@ class GraphTracker:
                 raise NodeNotFound(id)
             return entries
 
-        locked_mutate_graph(self._path, _mark_done)
+        commit_rows_via_store(self._path, _mark_done)
 
     @staticmethod
     def _project(entry: dict) -> TrackerNode:

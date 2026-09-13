@@ -36,7 +36,7 @@ def graph(monkeypatch, tmp_path):
     """A one-node graph + a captured dispatch seam. Returns the capture dict."""
     entries = [{"id": "x-0a9c", "slug": "conv-think", "title": "conversational verb",
                 "source_session_id": "stored", "source_cwd": "/birth"}]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda p: entries)
+    monkeypatch.setattr("fno.graph.api.wire_rows", lambda path=None, **k: entries)
     monkeypatch.setattr("fno.graph.cli._graph_path", lambda: tmp_path / "graph.json")
     cap: dict = {}
 

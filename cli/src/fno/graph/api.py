@@ -108,9 +108,7 @@ def cmd_version() -> None:
 
 
 def wire_rows(*, path: Path = GRAPH_JSON) -> list[dict]:
-    """Every working-graph row as wire-shaped dicts, for folds that still
-    speak dicts (resolve_node, row inspectors). Absent store reads empty,
-    matching the old read_graph contract."""
+    """Wire-shaped rows for dict-speaking folds; absent store reads empty."""
     from fno.graph.store import StoreUnavailable
 
     try:

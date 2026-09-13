@@ -66,7 +66,8 @@ def read_entries(reader: str, *, strict: bool = False) -> list[dict]:
 
     if active_backend_name() != "graph":
         raise ExternalMetadataUnavailable(reader)
-    from fno.graph.store import read_graph, read_graph_strict
+    from fno.graph.api import wire_rows
+    from fno.graph.store import read_graph_strict
 
     path = _graph_store_path()
-    return read_graph_strict(path) if strict else read_graph(path)
+    return read_graph_strict(path) if strict else wire_rows(path=path)

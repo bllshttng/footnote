@@ -30,7 +30,17 @@ from fno.tracker.sidecar import Sidecar, load, save
 
 
 def _write_graph(path: Path, entries: list[dict]) -> Path:
-    path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    """Rows the way the store writes them: the typed api drops a row the
+    model cannot parse, so seeds carry the stamped fields."""
+    complete = []
+    for e in entries:
+        row = {"type": "feature", "priority": "p2", "status": "idea", **e}
+        row.setdefault("title", e.get("id", "node"))
+        row.setdefault("slug", e.get("id", "node"))
+        if row["status"] == "done" and not row.get("completed_at"):
+            row["completed_at"] = "2026-09-01T00:00:00Z"
+        complete.append(row)
+    path.write_text(json.dumps({"entries": complete}), encoding="utf-8")
     return path
 
 

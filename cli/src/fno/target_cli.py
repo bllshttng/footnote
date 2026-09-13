@@ -604,17 +604,11 @@ def _refuse_dispatch_hold(node: Optional[dict], entries: Optional[list] = None) 
         return
 
     if entries is None:
-        from fno.graph import api as graph_api
-        from fno.graph.store import StoreUnavailable
+        from fno.graph.api import wire_rows
         from fno.paths import graph_json
 
         try:
-            entries = [
-                n.model_dump(by_alias=True)
-                for n in graph_api.nodes(include_archived=True, path=graph_json()).nodes
-            ]
-        except StoreUnavailable:
-            entries = []  # no graph yet: nothing can hold dispatch
+            entries = wire_rows(path=graph_json())
         except Exception as exc:  # noqa: BLE001 - an unreadable hold world refuses
             typer.echo(
                 f"fno do target: dispatch-hold-invalid:{node.get('id', 'unknown')}: "
