@@ -73,7 +73,7 @@ The guard covers two role *names*. It does not cover the two things a reader rea
 | `roles` | _(built-in → `zai/glm-5.3`)_ | Role → `"provider/model"` (e.g. `tidy: "zai/glm-4.7"`; legacy comma `zai,glm-4.7` also accepted). |
 | `extra_env` | `{}` | Extra env merged into routed spawns (e.g. `API_TIMEOUT_MS`). Prefer `tier_models` for per-tier models; `extra_env` still wins as a hand pin. |
 
-`tier_models` maps a Claude tier to a model so `/model` in the running worker offers a real choice instead of the spawn model written into every tier:
+`tier_models` maps a Claude tier to a model. It makes `/model` in the running worker offer a real choice instead of the spawn model written into every tier:
 
 ```yaml
 config:
@@ -84,7 +84,7 @@ config:
           opus: "glm-5.3[1m]"   # keys: opus | sonnet | haiku | fable
 ```
 
-Undeclared tiers keep the spawn model; `tier_models.haiku` beats the provider's `haiku_model`; an `extra_env` pin beats both (but does not survive a resume, where declared tiers re-resolve against today's registry). A composed route whose five model keys hold one distinct value says so at spawn and names this key. There is no check that the provider serves the named model; a wrong id fails at the endpoint. A bare tier alias (`sonnet`) routed to a non-Anthropic endpoint is refused at compose time.
+Undeclared tiers keep the spawn model. `tier_models.haiku` beats the provider's `haiku_model`. An `extra_env` pin beats both. The pin does not survive a resume, where declared tiers re-resolve against today's registry. A composed route whose five model keys hold one distinct value says so at spawn and names this key. There is no check that the provider serves the named model. A wrong id fails at the endpoint. A bare tier alias (`sonnet`) routed to a non-Anthropic endpoint is refused at compose time.
 
 A worked example:
 
