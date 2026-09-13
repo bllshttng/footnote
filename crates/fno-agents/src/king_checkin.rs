@@ -430,21 +430,41 @@ fn r_capacity() -> Result<Value, String> {
     }
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("footprint payload did not parse: {e}"))?;
-    let footprint = payload
-        .get("capacity_verdict")
-        .cloned()
-        .unwrap_or(Value::Null);
     let (_, gate_out, gate_err) = fno_verb(&["agents", "gate-status"])?;
     let gate: Value = serde_json::from_str(gate_out.trim())
         .map_err(|e| format!("gate payload did not parse: {e}: {}", gate_err.trim()))?;
-    let gate_verdict = s_str(&gate, "verdict").unwrap_or("").to_string();
+    r_capacity_pair(&payload, &gate)
+}
+
+/// The pair from the two fetched payloads. The two instruments speak
+/// different dialects of the same axis: footprint answers in the cpu-axis
+/// vocabulary (admit/refuse), the gate probe in its whole-admission one
+/// (accepted/refused). Disagreement compares meanings, never spellings.
+fn r_capacity_pair(footprint_payload: &Value, gate_payload: &Value) -> Result<Value, String> {
+    let footprint = footprint_payload
+        .get("capacity_verdict")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let gate_verdict = s_str(gate_payload, "verdict").unwrap_or("").to_string();
     let fp_str = footprint.as_str().unwrap_or("").to_string();
-    return Ok(json!({
+    fn meaning(v: &str) -> &str {
+        match v {
+            "admit" | "accepted" => "admit",
+            "refuse" | "refused" => "refuse",
+            other => other,
+        }
+    }
+    Ok(json!({
         "footprint": footprint,
         "gate": gate_verdict,
-        "disagree": !gate_verdict.is_empty() && fp_str != gate_verdict,
-        "unparsed_lines": payload.get("unparsed_lines").and_then(|u| u.as_i64()).unwrap_or(0),
-    }));
+        "disagree": !gate_verdict.is_empty()
+            && !fp_str.is_empty()
+            && meaning(&fp_str) != meaning(&gate_verdict),
+        "unparsed_lines": footprint_payload
+            .get("unparsed_lines")
+            .and_then(|u| u.as_i64())
+            .unwrap_or(0),
+    }))
 }
 
 fn r_workers() -> Result<Value, String> {
@@ -483,7 +503,7 @@ fn r_workers() -> Result<Value, String> {
     }))
 }
 
-fn r_crown(ctx: &Ctx) -> Result<Value, String> {
+fn r_crown() -> Result<Value, String> {
     let (_, out, err) = fno_verb(&["agents", "court", "--json"])?;
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("court payload did not parse: {e}: {}", err.trim()))?;
@@ -513,7 +533,6 @@ fn r_crown(ctx: &Ctx) -> Result<Value, String> {
         "splits": summary.get("splits").cloned().unwrap_or(Value::Null),
         "disagreements": summary.get("disagreements").cloned().unwrap_or(Value::Null),
         "anomalies": anomalies,
-        "_scope_check": ctx.scope,
     }))
 }
 
@@ -623,7 +642,7 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     take("court", r_court(&beat.folded));
     take("capacity", r_capacity());
     take("workers", r_workers());
-    take("crown", r_crown(ctx));
+    take("crown", r_crown());
     take("drain", r_drain(ctx));
     take("main_ci", r_main_ci());
     readings
@@ -1059,7 +1078,7 @@ fn emit_row(ctx: &Ctx, data: &Map<String, Value>) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut file = std::fs::OpenOptions::new()
+    let written = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
@@ -1067,19 +1086,12 @@ fn emit_row(ctx: &Ctx, data: &Map<String, Value>) -> bool {
             writeln!(f, "{row}")?;
             f.flush()
         });
-    if file.is_err() {
-        file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut f| {
-                writeln!(f, "{row}")?;
-                f.flush()
-            });
-    }
-    match file {
+    match written {
         Ok(()) => true,
         Err(e) => {
+            // One write, one truth: a failed row is warned, never retried.
+            // A retry that re-appends after a partial write would journal
+            // the same beat twice, and the diff corpus cannot unsee that.
             eprintln!("king-checkin: WARNING: reign_checkin row not emitted: {e}");
             false
         }
@@ -1353,6 +1365,26 @@ mod tests {
             Reading::took("drain", json!(9)),
             Reading::took("main_ci", json!("green")),
         ]
+    }
+
+    #[test]
+    fn disagree_compares_meanings_not_spellings() {
+        let pair = |fp: &str, gate: &str| {
+            r_capacity_pair(
+                &json!({"capacity_verdict": fp, "unparsed_lines": 0}),
+                &json!({"verdict": gate}),
+            )
+            .unwrap()
+            .get("disagree")
+            .and_then(|d| d.as_bool())
+            .unwrap()
+        };
+        // The live healthy pair: footprint speaks cpu-axis, the gate speaks
+        // whole-admission; same meaning, so no DISAGREE.
+        assert!(!pair("admit", "accepted"));
+        assert!(!pair("refuse", "refused"));
+        assert!(pair("admit", "refused"));
+        assert!(pair("refuse", "accepted"));
     }
 
     #[test]
