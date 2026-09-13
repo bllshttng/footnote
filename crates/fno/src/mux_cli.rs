@@ -4368,10 +4368,13 @@ fn short_handle(session_id: &str) -> String {
 }
 
 fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
-    let path = proto::mux_dir().join(format!("web-{session}.json"));
     let hint = format!(
         "no web bridge for session {session}; start one with: fno mux serve --web --session {session}"
     );
+    let Some(path) = crate::web::web_state_path_for_session(session) else {
+        eprintln!("{verb}: {hint}");
+        return EXIT_ERROR;
+    };
     let Ok(raw) = std::fs::read_to_string(&path) else {
         eprintln!("{verb}: {hint}");
         return EXIT_ERROR;

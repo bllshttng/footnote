@@ -167,6 +167,12 @@ fn web_state_path(socket: &Path) -> Option<PathBuf> {
         .map(|p| p.join(format!("web-{session}.json")))
 }
 
+/// The state-file path from a session name; the one lookup for readers
+/// outside this module (`--stop` resolves the socket itself).
+pub(crate) fn web_state_path_for_session(session: &str) -> Option<PathBuf> {
+    web_state_path(&proto::socket_path(session).ok()?)
+}
+
 impl WebStateFile {
     fn write(socket: &Path, bind: &str, port: u16, token: &str) -> Option<Self> {
         let path = web_state_path(socket)?;
@@ -174,7 +180,7 @@ impl WebStateFile {
         // session on different ports, the later bind owns the file, and an
         // exiting OLDER bridge must not delete the newer one's state (codex P2).
         // `started` is the pid's start-time token, so `--stop` can tell the
-        // bridge it names from a process that later reused the pid (x-48a5).
+        // bridge it names from a process that later reused the pid.
         let body = serde_json::json!({
             "bind": bind,
             "port": port,
@@ -283,9 +289,17 @@ fn stop_web(session: &str, socket: &Path) -> i32 {
         eprintln!("fno mux serve --web: cannot signal pid {pid}: {e}");
         return 1;
     }
+    // The pid's start token at signal time; if it stops matching during the
+    // grace window, the bridge was reaped and the pid reused - the bridge is
+    // gone, and the newcomer must not inherit the escalation.
+    let signalled_start = proto::pid_start_time(pid as u32);
     let deadline = Instant::now() + WEB_STOP_GRACE;
     while Instant::now() < deadline {
-        if proto::pid_confirmed_dead(pid) || proto::pid_is_zombie(pid) {
+        let gone = proto::pid_confirmed_dead(pid)
+            || proto::pid_is_zombie(pid)
+            || signalled_start
+                .is_some_and(|s| proto::pid_start_time(pid as u32).is_none_or(|now| now != s));
+        if gone {
             println!("web bridge for session {session:?} stopped (pid {pid})");
             return 0;
         }
