@@ -169,3 +169,144 @@ def test_an_unpinned_read_names_the_binding_provider(monkeypatch):
 
     assert _binding_provider() == "openai"  # 0 remaining beats zai's 8
     assert _spawn_headroom() == 0
+
+
+# ---------------------------------------------------------------------------
+# Per-child lanes (x-fa3a): the budget + verdict the drain and explain share
+# ---------------------------------------------------------------------------
+
+
+def test_a_child_is_priced_by_its_own_lane_not_the_binding_provider(monkeypatch):
+    """x-fa3a AC1-HP: zai (the only configured cap) sits full, the fleet has
+    room, and the child's dispatch settles on uncapped anthropic: it passes."""
+    from fno.backlog import advance as adv
+
+    _wire(monkeypatch, max_live=30, slots=5, limits={"zai": 20}, live={"zai": 20})
+    monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: "anthropic")
+    budget = adv._spawn_budget()
+    assert (budget.fleet, budget.vendor_remaining) == (25, {"zai": 0})
+    assert adv._lane_cap_verdict({"id": "x-bp"}, budget, total=0) == (False, "anthropic", None)
+
+
+def test_a_full_lane_refuses_only_its_own_children(monkeypatch):
+    """x-fa3a AC2-ERR: zai full refuses a zai child by name while a later
+    anthropic child in the same pass still dispatches."""
+    from fno.backlog import advance as adv
+
+    _wire(monkeypatch, max_live=30, slots=0, limits={"zai": 20}, live={"zai": 20})
+    monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: child["vendor"])
+    budget = adv._spawn_budget()
+    assert adv._lane_cap_verdict({"id": "x-z", "vendor": "zai"}, budget, total=0) == (True, "zai", 0)
+    assert adv._lane_cap_verdict({"id": "x-a", "vendor": "anthropic"}, budget, total=0)[0] is False
+
+
+def test_an_unresolvable_lane_keeps_the_binding_provider_rule(monkeypatch):
+    """x-fa3a AC3-EDGE: a child whose lane cannot be resolved is bounded by
+    the most constrained CONFIGURED provider, exactly as before x-fa3a."""
+    from fno.backlog import advance as adv
+
+    _wire(monkeypatch, max_live=30, slots=0, limits={"zai": 20}, live={"zai": 20})
+    monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: None)
+    budget = adv._spawn_budget()
+    assert (budget.binding, budget.binding_remaining) == ("zai", 0)
+    assert adv._lane_cap_verdict({"id": "x-u"}, budget, total=0) == (True, None, 0)
+
+
+def test_one_free_lane_serves_the_first_child_on_it_only(monkeypatch):
+    """x-fa3a AC3-EDGE: with one zai lane free, the first zai child fills and
+    the next zai child drops with the lane named and no headroom left."""
+    from fno.backlog import advance as adv
+
+    _wire(monkeypatch, max_live=30, slots=0, limits={"zai": 20}, live={"zai": 19})
+    monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: "zai")
+    budget = adv._spawn_budget()
+    assert adv._lane_cap_verdict({"id": "x-1"}, budget, total=0)[0] is False
+    budget.dispatched_by_vendor["zai"] = 1
+    assert adv._lane_cap_verdict({"id": "x-2"}, budget, total=1) == (True, "zai", 0)
+
+
+class _ProfiledAgents:
+    def __init__(self, profiles=None, defaults=None):
+        self.profiles = profiles or {}
+        self.defaults = defaults
+
+
+def _wire_profiles(monkeypatch, profiles=None, defaults=None):
+    import fno.config as _config
+
+    monkeypatch.setattr(
+        _config, "load_settings",
+        lambda: _Settings(_ProfiledAgents(profiles, defaults)),
+    )
+
+
+def _record_vendor(monkeypatch):
+    """Stub resolve_lane_vendor at its module, recording (argv, harness)."""
+    from fno.agents import spawn_defaults
+    calls = []
+
+    def fake(argv, env=None, *, harness=None):
+        calls.append((list(argv), harness))
+        return f"vendor:{harness}:{argv[-1] if argv else 'bare'}"
+
+    monkeypatch.setattr(spawn_defaults, "resolve_lane_vendor", fake)
+    return calls
+
+
+def _boom(node):
+    raise RuntimeError("unanswerable")
+
+
+def test_child_lane_resolution_pin_then_grid_then_verb_profile(monkeypatch):
+    """x-fa3a: the helper mirrors the spawn seam - pin > grid pick (priced
+    through its route) > the verb profile's own lane."""
+    from fno.backlog import advance as adv
+
+    calls = _record_vendor(monkeypatch)
+    assert adv._child_lane_vendor({"id": "x"}, model=None, provider="claude") == "vendor:claude:bare"
+    assert calls == [([], "claude")]
+
+    calls.clear()
+    monkeypatch.setattr(adv, "_node_effective_verb", lambda node: "target")
+    monkeypatch.setattr(
+        adv, "_grid_lane_for",
+        lambda node, *, model, provider, verb: ("codex", "m", "openai/gpt", None, None),
+    )
+    got = adv._child_lane_vendor({"id": "x"}, model=None, provider=None)
+    assert got == "vendor:codex:openai/gpt"
+    assert calls == [(["fno", "--route", "openai/gpt"], "codex")]
+
+    calls.clear()
+    monkeypatch.setattr(
+        adv, "_grid_lane_for",
+        lambda node, *, model, provider, verb: (None, None, None, None, "grid=unarmed"),
+    )
+    monkeypatch.setattr(adv, "_node_effective_verb", lambda node: "blueprint")
+    _wire_profiles(
+        monkeypatch,
+        profiles={"blueprint": SimpleNamespace(route="", model="opus", provider="")},
+    )
+    assert adv._child_lane_vendor({"id": "x"}, model=None, provider=None) == "vendor:None:opus"
+    assert calls == [(["fno", "--model", "opus"], None)]
+
+
+def test_an_unresolvable_child_lane_returns_none(monkeypatch):
+    from fno.backlog import advance as adv
+
+    monkeypatch.setattr(adv, "_node_effective_verb", _boom)
+    assert adv._child_lane_vendor({"id": "x"}, model=None, provider=None) is None
+
+
+def test_a_profile_with_no_routing_names_no_lane(monkeypatch):
+    """Nothing the spawn would inherit names a lane, so the child keeps the
+    binding-provider rule instead of pricing against the caller's own env."""
+    from fno.backlog import advance as adv
+
+    _record_vendor(monkeypatch)
+    monkeypatch.setattr(adv, "_node_effective_verb", lambda node: None)
+    monkeypatch.setattr(
+        adv, "_grid_lane_for",
+        lambda node, *, model, provider, verb: (None, None, None, None, "grid=unarmed"),
+    )
+    _wire_profiles(monkeypatch)
+    assert adv._child_lane_vendor({"id": "x"}, model=None, provider=None) is None
