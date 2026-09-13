@@ -39,11 +39,13 @@ use crate::server::lifecycle_target;
 use crate::server::lifecycle_target::pane_table_host;
 
 pub(crate) use crate::mux_rows::{pid_from_sidecar, read_wire_version};
+use crate::pane_send_audit::{pane_send_is_control_only, PaneSendAudit};
 use crate::proto::{
     self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, LayoutScope,
     PanePlacement, PaneTarget, PlacementFallback, ServerMsg, SquadLayout, TabPaneOccupant, TabSel,
     WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
 };
+use crate::review_invocation::{append_review_invocation, review_invocation_command};
 use crate::tree::Dir;
 
 /// Bound every probe: a wedged server counts as alive-but-unqueryable, never
@@ -2426,6 +2428,12 @@ pub enum PaneCmd {
         /// hatch keeps one shape across every enveloped lane. A raw send
         /// never renders, so the flag beside `--raw` has no effect.
         style_exception: Option<String>,
+        /// (x-91ba) `--source <label>`: caller-declared provenance for the
+        /// audit row. The mail lane declares `mail`; absent, the row reads
+        /// `unattributed:<pid>`. Declared, never sniffed from the payload:
+        /// `--raw` carries both a wrapped mail body and an operator's
+        /// verbatim keystrokes, which no byte inspection can tell apart.
+        provenance: Option<String>,
     },
     Wait {
         pane: u64,
@@ -2543,7 +2551,10 @@ pub const PANE_SEND_RAW_HELP: &str = "pane send wraps the text in an <fno_mail> 
 default, so a worker can tell a peer's message from its operator's, and refuses a pane showing \
 an option prompt. The enveloped body passes the same style and word-budget gates as mail; \
 --style-exception <reason> excepts one reasoned send. --raw types the bytes verbatim for \
-genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit.";
+genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit. \
+Every send writes one audit row to ~/.fno/agents/events.jsonl naming the pane, the recipient and \
+the caller; --source <label> declares that provenance (the mail lane declares mail; a bare \
+invocation reads unattributed:<pid>).";
 
 /// `pane run --worker`'s one line, same posture as [`PANE_SEND_RAW_HELP`]: the
 /// flag records the pane as a squad member joined to the registry row by name,
@@ -2774,6 +2785,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut submit = false;
     let mut raw = false;
     let mut style_exception: Option<String> = None;
+    let mut provenance: Option<String> = None;
     let mut quiet_ms = None;
     let mut pattern = None;
     let mut timeout_s = None;
@@ -2820,6 +2832,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             "--style-exception" => {
                 style_exception = Some(flag_value(args, &mut i, "--style-exception")?)
             }
+            "--source" => provenance = Some(flag_value(args, &mut i, "--source")?),
             "--quiet-ms" => {
                 quiet_ms = Some(parse_u64(
                     &flag_value(args, &mut i, "--quiet-ms")?,
@@ -2862,6 +2875,9 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     // `--raw` check, which sits after only because bool is Copy.
     if style_exception.is_some() && verb != "send" {
         return Err("--style-exception pairs only with pane send".into());
+    }
+    if provenance.is_some() && verb != "send" {
+        return Err("--source pairs only with pane send".into());
     }
     let cmd = match verb {
         "ls" => PaneCmd::Ls { fno_id },
@@ -2915,6 +2931,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 raw,
                 expected_identity: fno_id,
                 style_exception,
+                provenance,
             }
         }
         "wait" => PaneCmd::Wait {
@@ -4682,7 +4699,7 @@ pub fn where_(args: &[OsString], env_session: Option<&str>) -> i32 {
 }
 
 /// Resolve `PaneCmd` -> a control verb + the read deadline, then run it.
-fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
+pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
     // (x-d865) `pane ls --fno-id` filters the listing client-side over the
     // reply's PaneInfo.fno_id, so capture the filter before `cmd` is consumed.
     let ls_fno_id = match &cmd {
@@ -4693,6 +4710,10 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
     // every other verb operates on an existing server. `pane ls` against no
     // server is "no panes" (exit 0); the rest are an error (nothing to act on).
     let mut review_command = None;
+    // (x-91ba) The pane-send audit row, staged where the exact bytes are
+    // known; emitted once the outcome (exit code) is known - inline on the
+    // submit path, in the shared tail on the paste path.
+    let mut pane_send_audit: Option<PaneSendAudit> = None;
     let (verb, read_timeout) = match cmd {
         // pane() intercepts the keeper read before dispatch; it needs no
         // server and this arm exists to keep the match total.
@@ -4754,6 +4775,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             raw,
             expected_identity,
             style_exception,
+            provenance,
         } => {
             let bytes = match source {
                 SendSource::Text(t) => t.into_bytes(),
@@ -4776,6 +4798,16 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             let bytes = if raw {
                 if bytes.len() > RAW_PANE_SEND_CAP_BYTES {
                     eprintln!("fno mux pane send: {}", paste_cap_refusal(bytes.len()));
+                    if !pane_send_is_control_only(&bytes) {
+                        PaneSendAudit::new(
+                            pane,
+                            expected_identity.as_deref(),
+                            &bytes,
+                            submit,
+                            provenance.as_deref(),
+                        )
+                        .emit(session, EXIT_ERROR);
+                    }
                     return EXIT_ERROR;
                 }
                 bytes
@@ -4784,10 +4816,33 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     Ok(b) => b,
                     Err(e) => {
                         eprintln!("fno mux pane send: {e}");
+                        if !pane_send_is_control_only(&bytes) {
+                            PaneSendAudit::new(
+                                pane,
+                                expected_identity.as_deref(),
+                                &bytes,
+                                submit,
+                                provenance.as_deref(),
+                            )
+                            .emit(session, EXIT_ERROR);
+                        }
                         return EXIT_ERROR;
                     }
                 }
             };
+            // (x-91ba) Stage the row here, where the exact typed bytes are
+            // known; the submit path emits inline below, the paste path in
+            // the shared tail once the reply's exit code is known. Submit-key
+            // sends are control bytes and stage nothing (AC5).
+            if !pane_send_is_control_only(&bytes) {
+                pane_send_audit = Some(PaneSendAudit::new(
+                    pane,
+                    expected_identity.as_deref(),
+                    &bytes,
+                    submit,
+                    provenance.as_deref(),
+                ));
+            }
             review_command = if raw {
                 review_invocation_command(&bytes)
             } else {
@@ -4803,6 +4858,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     expected_identity.as_deref(),
                     json,
                 );
+                if let Some(audit) = pane_send_audit.take() {
+                    audit.emit(session, code);
+                }
                 if review_command.is_some() {
                     let receipt = match code {
                         EXIT_OK => "submitted",
@@ -4894,6 +4952,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     return EXIT_OK;
                 }
                 eprintln!("fno mux pane: cannot reach session {session:?}: {e}");
+                if let Some(audit) = pane_send_audit.take() {
+                    audit.emit(session, EXIT_ERROR);
+                }
                 return EXIT_ERROR;
             }
         }
@@ -4929,6 +4990,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             EXIT_ERROR
         }
     };
+    if let Some(audit) = pane_send_audit.take() {
+        audit.emit(session, code);
+    }
     if review_command.is_some() {
         append_review_invocation(
             session,
@@ -5876,189 +5940,6 @@ fn pane_text(sock: &Path, session: &str, pane: u64) -> Result<String, ControlErr
     }
 }
 
-fn review_invocation_command(bytes: &[u8]) -> Option<(String, String)> {
-    let raw = std::str::from_utf8(bytes).ok()?.trim();
-    let mut parts = raw.splitn(2, char::is_whitespace);
-    let token = parts.next()?.strip_prefix('/')?;
-    let name = token.rsplit(':').next()?;
-    if !matches!(
-        name,
-        "code-review" | "review" | "review-changes" | "sigma-review"
-    ) {
-        return None;
-    }
-    Some((
-        format!("/{name}"),
-        parts.next().unwrap_or("").trim_start().to_string(),
-    ))
-}
-
-fn review_invocation_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("ri-{nanos:x}-{}", std::process::id())
-}
-
-fn review_events_path() -> PathBuf {
-    if let Ok(path) = std::env::var("FNO_EVENTS_PATH") {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut command = crate::process_admission::std_command("git");
-    command.args(["-C", &cwd.to_string_lossy(), "rev-parse", "--show-toplevel"]);
-    let probe = crate::process_admission::std_output(&mut command);
-    if let Err(error) = &probe {
-        // The spawn itself failed (admission refusal, missing git). Say so, or
-        // the fallback silently lands the journal where no reader looks.
-        eprintln!("fno mux: review-events git probe failed ({error}); events fall back to the current directory");
-    }
-    let root = probe
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|root| PathBuf::from(root.trim()))
-        .filter(|root| !root.as_os_str().is_empty())
-        .unwrap_or(cwd);
-    root.join(".fno/events.jsonl")
-}
-
-fn review_invocation_branch_and_head() -> (Option<String>, Option<String>) {
-    let git = |args: &[&str]| {
-        let mut command = crate::process_admission::std_command("git");
-        command.args(["rev-parse", "--verify"]).args(args);
-        let probe = crate::process_admission::std_output(&mut command);
-        if let Err(error) = &probe {
-            eprintln!(
-                "fno mux: review-evidence git probe failed ({error}); evidence fields will be null"
-            );
-        }
-        probe
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
-    let head = git(&["HEAD"]);
-    let mut command = crate::process_admission::std_command("git");
-    command.args(["rev-parse", "--abbrev-ref", "HEAD"]);
-    let branch = crate::process_admission::std_output(&mut command)
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty() && value != "HEAD");
-    (branch, head)
-}
-
-fn append_review_invocation(
-    session: &str,
-    command: Option<(String, String)>,
-    submitted: bool,
-    submit_confirmed: bool,
-    receipt: &str,
-) {
-    if std::env::var_os("FNO_REVIEW_INVOCATION_ID").is_some() {
-        return;
-    }
-    append_review_invocation_at(
-        &review_events_path(),
-        session,
-        command,
-        submitted,
-        submit_confirmed,
-        receipt,
-    );
-}
-
-fn append_review_invocation_at(
-    path: &Path,
-    session: &str,
-    command: Option<(String, String)>,
-    submitted: bool,
-    submit_confirmed: bool,
-    receipt: &str,
-) {
-    let Some((verb, args_raw)) = command else {
-        return;
-    };
-    let (branch, head_sha) = review_invocation_branch_and_head();
-    let invocation_id = review_invocation_id();
-    // `submitted` records whether this send carried a submit key at all. A
-    // plain text write is not a submit, so it must not claim one: the row is
-    // the transport fact an operator debugs a wedged review against.
-    let (submit_required, submit_key, submit_confirmed) = if submitted {
-        (true, "\\r", submit_confirmed)
-    } else {
-        (false, "none", false)
-    };
-    let data = serde_json::json!({
-        "invocation_id": invocation_id,
-        "stage": "sent",
-        "verb": verb,
-        "args_raw": args_raw,
-        "transport": "mux_pane_send_raw",
-        "initiator": "unknown",
-        "target_session_id": session,
-        "submit_required": submit_required,
-        "submit_key": submit_key,
-        "submit_confirmed": submit_confirmed,
-        "receipt": receipt,
-        "branch": branch,
-        "head_sha": head_sha,
-    });
-    let event = serde_json::json!({
-        "ts": review_invocation_timestamp(),
-        "type": "review_invocation",
-        "source": "daemon",
-        "data": data,
-    });
-    let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        writeln!(file, "{event}")
-    })();
-    let _ = result;
-}
-
-fn review_invocation_timestamp() -> String {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = (seconds / 86_400) as i64;
-    let remainder = seconds % 86_400;
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let month_part = (5 * doy + 2) / 153;
-    let day = doy - (153 * month_part + 2) / 5 + 1;
-    let month = if month_part < 10 {
-        month_part + 3
-    } else {
-        month_part - 9
-    };
-    let year = if month <= 2 { year + 1 } else { year };
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        remainder / 3_600,
-        (remainder % 3_600) / 60,
-        remainder % 60
-    )
-}
-
 fn send_pane_bytes(
     sock: &Path,
     session: &str,
@@ -6537,6 +6418,7 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane_send_audit::{FNO_AGENTS_HOME_GUARD, FNO_BIN_GUARD};
 
     // The paneless route-hint test lives in its own file; the parent is
     // shrink-only under the file-budget gate.
@@ -6716,6 +6598,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
     }
@@ -7657,6 +7540,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         assert_eq!(
@@ -7669,6 +7553,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         // --guarded opts the send into the server-side turn-taken interlock.
@@ -7684,6 +7569,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         assert_eq!(
@@ -7698,6 +7584,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         // --raw opts OUT of the envelope (node x-3a64). Default false is the
@@ -7715,6 +7602,7 @@ mod tests {
                 raw: true,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         assert_eq!(
@@ -7731,6 +7619,7 @@ mod tests {
                 raw: false,
                 expected_identity: Some("addressed".into()),
                 style_exception: None,
+                provenance: None,
             }
         );
         // The bare-submit keystroke the attribution refusal promises (x-3081):
@@ -7748,6 +7637,7 @@ mod tests {
                 raw: true,
                 expected_identity: None,
                 style_exception: None,
+                provenance: None,
             }
         );
         // Every other source-less form is still a usage error: `--raw` or
@@ -7785,6 +7675,7 @@ mod tests {
                 raw: false,
                 expected_identity: None,
                 style_exception: Some("quoted".into()),
+                provenance: None,
             }
         );
         // A valueless flag and a non-send verb are usage errors, mirroring
@@ -7803,6 +7694,17 @@ mod tests {
         // nonzero exit with no PaneSend reaching the socket, while the
         // byte-identical --raw payload never launches a renderer and arrives
         // verbatim. The received BYTES are asserted, not `raw: true`.
+        // (x-91ba) Serializes against the audit test: this test's dispatches
+        // write audit rows into the process-global agents events file, so the
+        // env is redirected to a scratch dir and never the operator's real
+        // journal.
+        let _agents = FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let agents_dir = std::env::temp_dir().join(format!("fno-agents-sendgates-{}", line!()));
+        let _ = std::fs::remove_dir_all(&agents_dir);
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &agents_dir);
         let sock = control_test_sock("send-gates");
         let _ = std::fs::remove_file(&sock);
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -7846,6 +7748,7 @@ mod tests {
             raw,
             expected_identity: None,
             style_exception: None,
+            provenance: None,
         };
 
         std::env::set_var("FNO_BIN", &script);
@@ -7880,6 +7783,9 @@ mod tests {
             ),
             other => panic!("expected PaneSend at the socket, got {other:?}"),
         }
+
+        std::env::remove_var("FNO_AGENTS_HOME");
+        let _ = std::fs::remove_dir_all(&agents_dir);
     }
 
     #[test]
@@ -7891,6 +7797,17 @@ mod tests {
         // size limit at all, an ungated prose channel. The cap refuses
         // in-process, before any control connection, while a small raw payload
         // in the same run still delivers.
+        // (x-91ba) Serializes against the audit test: this test's dispatches
+        // write audit rows into the process-global agents events file, so the
+        // env is redirected to a scratch dir and never the operator's real
+        // journal.
+        let _agents = FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let agents_dir = std::env::temp_dir().join(format!("fno-agents-rawcap-{}", line!()));
+        let _ = std::fs::remove_dir_all(&agents_dir);
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &agents_dir);
         let sock = control_test_sock("raw-cap");
         let _ = std::fs::remove_file(&sock);
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -7919,6 +7836,7 @@ mod tests {
             raw: true,
             expected_identity: None,
             style_exception: None,
+            provenance: None,
         };
 
         let over = dispatch("t", &sock, false, send_cmd(big));
@@ -7946,66 +7864,9 @@ mod tests {
             ),
             other => panic!("expected PaneSend at the socket, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn review_invocation_records_a_canonical_positive_receipt() {
-        let path = std::env::temp_dir().join(format!(
-            "fno-review-invocation-{}-{}.jsonl",
-            std::process::id(),
-            line!()
-        ));
-        let _ = std::fs::remove_file(&path);
-
-        let command = review_invocation_command(b"/review medium --comment");
-        let command_plain = command.clone();
-        assert_eq!(
-            command,
-            Some(("/review".to_string(), "medium --comment".to_string()))
-        );
-        append_review_invocation_at(
-            &path,
-            "mux-session",
-            command,
-            true,
-            false,
-            "text delivered, submission unconfirmed",
-        );
-
-        let line = std::fs::read_to_string(&path).unwrap();
-        let event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(event["type"], "review_invocation");
-        assert_eq!(event["source"], "daemon");
-        assert_eq!(event["data"]["stage"], "sent");
-        assert_eq!(event["data"]["transport"], "mux_pane_send_raw");
-        assert_eq!(
-            event["data"]["receipt"],
-            "text delivered, submission unconfirmed"
-        );
-        assert_eq!(event["data"]["submit_required"], true);
-        assert_eq!(event["data"]["submit_key"], "\\r");
-        assert_eq!(event["data"]["submit_confirmed"], false);
-        assert!(event["data"]["invocation_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("ri-"));
-        let _ = std::fs::remove_file(&path);
-
-        // A plain text write with no submit key must not claim one.
-        append_review_invocation_at(
-            &path,
-            "mux-session",
-            command_plain,
-            false,
-            false,
-            "text delivered, no submit requested",
-        );
-        let line = std::fs::read_to_string(&path).unwrap();
-        let event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(event["data"]["submit_required"], false);
-        assert_eq!(event["data"]["submit_key"], "none");
-        assert_eq!(event["data"]["submit_confirmed"], false);
-        let _ = std::fs::remove_file(path);
+        std::env::remove_var("FNO_AGENTS_HOME");
+        let _ = std::fs::remove_dir_all(&agents_dir);
     }
 
     #[test]
@@ -8486,13 +8347,6 @@ mod tests {
     /// A unique short-lived scratch socket path. No tempfile dep: pid + test
     /// name is unique enough for a test process (sun_path stays short - the
     /// limit is ~104 bytes on macOS).
-    /// Serializes any test that mutates the process-global FNO_BIN (today the
-    /// one renderer-gate test). Cargo runs this binary's tests on parallel
-    /// threads; a second mutator added without this guard would race the
-    /// first for the same env slot. A concurrent test that only READS
-    /// FNO_BIN during the window remains a theoretical exposure.
-    static FNO_BIN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn control_test_sock(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("fno-control-{}-{name}.sock", std::process::id()))
     }
