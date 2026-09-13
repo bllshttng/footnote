@@ -256,14 +256,16 @@ fn type_name(v: &Value) -> &'static str {
     }
 }
 
-/// True only when every account the link can land on is KNOWN exhausted.
-fn link_is_exhausted(
+/// The worst headroom verdict across the link's accounts. Callers that must
+/// treat UNKNOWN differently from exhausted (the provider-cap destination
+/// filter, x-7e05 trap 3) read this instead of the collapsed bool.
+fn worst_link_verdict(
     link: &Value,
     accounts: Option<&Value>,
     health: &Map<String, Value>,
     usage: &Map<String, Value>,
     now: f64,
-) -> bool {
+) -> Verdict {
     let get = |k: &str| {
         link.get(k)
             .and_then(Value::as_str)
@@ -287,10 +289,12 @@ fn link_is_exhausted(
             })
             .unwrap_or_default()
     };
+    // No accounts to read: nothing was measured.
     if ids.is_empty() {
-        return false;
+        return Verdict::Unknown;
     }
-    ids.iter().all(|pid| {
+    let mut worst = Verdict::Ok;
+    for pid in &ids {
         let h = health.get(pid).map(|v| Health {
             rate_limited_until: f64_of(v.get("rate_limited_until")),
             last_error_at: f64_of(v.get("last_error_at")),
@@ -311,10 +315,14 @@ fn link_is_exhausted(
                 })
                 .unwrap_or_default(),
         });
-        headroom(h.as_ref(), u.as_ref(), now) == Verdict::Exhausted
-    })
+        match headroom(h.as_ref(), u.as_ref(), now) {
+            Verdict::Exhausted => return Verdict::Exhausted,
+            Verdict::Unknown => worst = Verdict::Unknown,
+            _ => {}
+        }
+    }
+    worst
 }
-
 /// Answer `{eligible: [{index, id, flags}]}`: every chain position that was
 /// not already spent and is not known exhausted, with its walk-memory id and
 /// spawn flags minted here, preserving chain order. A malformed link answers
@@ -370,10 +378,14 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
         if spent.contains(&id) {
             continue;
         }
-        if link_is_exhausted(&link, accounts, &health, &usage, now) {
+        let verdict = worst_link_verdict(&link, accounts, &health, &usage, now);
+        if verdict == Verdict::Exhausted {
             continue;
         }
-        eligible.push(json!({"index": i, "id": id, "flags": flags}));
+        eligible.push(json!({
+            "index": i, "id": id, "flags": flags,
+            "verdict": format!("{verdict:?}").to_lowercase(),
+        }));
     }
     Ok(json!({ "eligible": eligible }))
 }

@@ -125,27 +125,72 @@ def test_map_covers_current_surface_once():
     # spawn seam's client invokes directly (hidden verb): 577 -> 578. The
     # harness-keyed-defaults branch allocates `agents spawn-overlay` and
     # `agents fallback-chain`, the two client verbs the spawn seam degrades
-    # open around (hidden verbs): 578 -> 580. Both branches grew the map in
-    # this window, and the count below is derived from the merged TSV, never
-    # taken from either side. This branch (x-e221) allocated `agents
-    # test-run`, the native test-suite process-group owner, and `backlog
-    # worked`, the one-read live-worker surface the ready gate and king board
-    # consume - rows main also allocated in the same window, counted once -
-    # then `agents blueprint-feed`, the native blueprinter feed door (x-e221);
-    # Main's window allocated, among others: authorized-merge, king faq
-    # add/list, distress-verdicts, court-fold, spawn-axes, workspace reap,
-    # graph export, merge-result-check + its pr view, gate-status, census,
-    # session open, king history + king-history, scratch sweep/report,
-    # incident + fleet-incident, mail team + mail team, config plugin +
-    # doctor reclaim (retiring setup codex-plugin), autonomy provenance,
-    # king ledger + reign-ledger, dispatch next (one stays as a hidden
-    # alias), publish-review pair, prove-it-verdicts, retract, announce,
-    # bash-census, ask, drive-authority, probe-run, verify-evidence, the
-    # deleted cargo-offload pair, king checkin + king-checkin, the
-    # task-context verbs with their retired resume-receipt rows, and
-    # canonical-check - each branch's full running ledger stays in its own
-    # git history.
-    assert len(mapped) == 617, (
+    # This branch (x-e221) allocated `agents test-run`, `backlog worked`,
+    # and `agents blueprint-feed`; the retired `config
+    # active-backlog-territories` row left the map in the same change.
+    # open around (hidden verbs): 578 -> 580. The one-authorized-merge branch
+    # allocates `agents authorized-merge`, the merge/arm decision every merge
+    # path asks through the single Python door (hidden verb): 580 -> 581.
+    # x-9e1e allocates `agents king faq add` and `agents king faq list`, the
+    # king FAQ recipe-becomes-verb: 581 -> 583. Counted from the merged file,
+    # not taken from either side: this branch independently allocates
+    # `agents distress-verdicts`, the king board's watchdog-verdict lookup
+    # (hidden verb): 583 -> 584. The court scope fold allocates
+    # `agents court-fold`, the native read `fno agents court -n` relays to
+    # (hidden verb): 584 -> 585. Upstream allocates `agents spawn-axes`, the
+    # spawn seam's axes round-trip (hidden verb): 585 -> 586, then allocates
+    # `agents workspace reap`: 586 -> 587. Upstream also allocates
+    # `agents test-run`, the native test-suite process-group owner, and
+    # `backlog worked`, the one-read live-worker surface the ready gate and
+    # king board consume (hidden verbs): counted from the merged file, 587 -> 589.
+    # Upstream adds `doctor graph export`: 589 -> 590. Counted from the
+    # merged file, not taken from either side: this branch independently
+    # allocates `do pr merge-result-check` + its `pr` view, the merge-result
+    # probe the authorized-merge arm calls (hidden guard verb, no external
+    # callers yet): 591 -> 593. This branch independently allocates
+    # `agents gate-status`, the stop hook's read-only spawn-gate capacity
+    # probe (hidden verb): 593 -> 594. This branch allocates `agents census`,
+    # the running-process build-drift census (hidden verb): 594 -> 595.
+    # `backlog session open`, the blueprint session claim holder (x-95dd),
+    # allocated 594 -> 595 on main in the same window: 595 -> 596. The
+    # reign-readback branch allocates `agents king history` and its
+    # help-injected `agents king-history` twin: counted from the merged
+    # file, 596 -> 598. x-caf8 allocates `doctor scratch sweep` +
+    # `doctor scratch report`, the scratch-shape sweep the daily eval-sweep
+    # ignition runs as stage five (its Rust-runtime leaf): 598 -> 600.
+    # x-77db allocates `agents incident` +
+    # `agents fleet-incident` (the breaker adapter and its native verb) and
+    # `agents mail team` + `mail team` (the fleet announcement fan-out):
+    # counted from the merged file, 600 -> 604. The build-dir ruling deleted
+    # the two retired `cargo-offload` rows (the verb moved caches cargo now
+    # writes outside the checkout): 604 -> 602. The
+    # one install verb for every harness allocates `config plugin` and
+    # `doctor reclaim` while retiring the `setup codex-plugin` row: counted
+    # from the merged file, 602 -> 603. `agents autonomy
+    # provenance`, the dispatch-source inventory read: 603 -> 604. This
+    # branch allocates `backlog version`, the typed API's counter read
+    # (hidden verb, 19 corpus callers): counted from the merged file,
+    # 604 -> 605. `agents king ledger` and `agents reign-ledger`, the reign
+    # ledger page and its native renderer: 605 -> 607. This branch allocated
+    # `do resume receipt context-prepare` and its `resume` view (607 -> 609),
+    # then retired both rows when the prepare transport moved into the native
+    # `task-context-prepare` verb's own `out` path: 609 -> 607. x-e53e renames
+    # `dispatch one` to `dispatch next` under both spellings (`one` stays as
+    # a hidden deprecated alias), allocating +2 rows: 607 -> 609. `do pr
+    # publish-review` and `pr publish-review`, the bot-identity backfill
+    # door and its forwarded spelling: 609 -> 611. Upstream allocates
+    # `agents prove-it-verdicts`, the terminal prove-it record reader
+    # (x-6d64): 611 -> 612. Upstream allocates `backlog retract`, the
+    # one-act defer + retracted-kind stamp the blueprint consolidation gate
+    # halts on: 612 -> 613. `agents announce`, the fleet-announcement
+    # writer/reader/status surface the binary dispatches directly: counted
+    # from the merged file, 613 -> 614. `agents king checkin`, the one verb
+    # that runs the reign check-in body and journals its row, plus its
+    # direct-dispatch alias `agents king-checkin` beside king-history's:
+    # 614 -> 616. `agents provider-cap`, the relay that reads and answers the
+    # provider-cap actor's questions: 616 -> 617. `agents compaction`, the
+    # hidden relay over the PreCompact stamp the hook writes: 617 -> 618.
+    assert len(mapped) == 619, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

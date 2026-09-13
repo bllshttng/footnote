@@ -3002,7 +3002,6 @@ class TestTickRecordsAndDeadline:
             watchdog, "measure_provider_outages", lambda rows, *, now_s: {"breakers": []}
         )
         monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
-        monkeypatch.setattr(watchdog, "supervise_provider_handoffs", lambda *a, **kw: [])
         monkeypatch.setattr(
             watchdog,
             "run_sweep",

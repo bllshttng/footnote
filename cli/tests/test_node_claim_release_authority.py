@@ -10,7 +10,7 @@ an exit handler that unlinks it).
 
 The target self-handoff shell must not release a ``node:<id>`` claim directly.
 It delegates archive plus exact-holder release to
-``fno.state.outage_handoff.prepare_manifest_and_release`` so shell and outage
+``fno.state.target_handoff.prepare_manifest_and_release`` so shell and target
 handoffs share one recoverable custody operation.
 
 A "node-release site" is a ``claim release`` invocation whose released KEY
@@ -351,11 +351,11 @@ def test_both_sanctioned_sites_detected():
 
 def test_target_handoff_delegates_node_release_to_python_prepare_owner():
     shell = (REPO_ROOT / "skills/target/scripts/handoff.sh").read_text(encoding="utf-8")
-    owner = (REPO_ROOT / "cli/src/fno/state/outage_handoff.py").read_text(
+    owner = (REPO_ROOT / "cli/src/fno/state/target_handoff.py").read_text(
         encoding="utf-8"
     )
 
-    assert "-m fno.state.outage_handoff prepare" in shell
+    assert "-m fno.state.target_handoff prepare" in shell
     assert _shell_node_release_lines(shell) == []
     assert "def prepare_manifest_and_release(" in owner
     assert "released = release_exact(claim_key, holder)" in owner

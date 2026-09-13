@@ -664,7 +664,7 @@ if [ -n "$_HANDOFF_REPO_ROOT" ] && [ -f "$_HANDOFF_REPO_ROOT/scripts/lib/fno-pyt
 fi
 _HANDOFF_PREPARE_LOG="$(mktemp "${TMPDIR:-/tmp}/fno-handoff-prepare.XXXXXX")"
 FNO_CLAIMS_ROOT="$HOME" PYTHONPATH="${_HANDOFF_PKG_SRC}${PYTHONPATH:+:${PYTHONPATH}}" \
-  "$_HANDOFF_PYTHON" -m fno.state.outage_handoff prepare \
+  "$_HANDOFF_PYTHON" -m fno.state.target_handoff prepare \
   --state "$STATE_FILE" \
   --archive "$ARCHIVED_STATE" \
   --claim-key "node:$NODE_ID" \

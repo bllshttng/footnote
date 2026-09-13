@@ -613,7 +613,7 @@ def test_failed_tick_exits_nonzero_without_killing_composed_legs(monkeypatch) ->
     assert isinstance(res.exception, SystemExit), repr(res.exception)
 
 
-def test_provider_supervisor_exception_is_nonfatal_and_runs_each_tick(
+def test_watchdog_sweep_exception_is_nonfatal_and_runs_each_tick(
     monkeypatch
 ) -> None:
     import typer
@@ -630,7 +630,7 @@ def test_provider_supervisor_exception_is_nonfatal_and_runs_each_tick(
         autonomy=SimpleNamespace(enabled=True),
         recovery=SimpleNamespace(
             enabled=True, watchdog=SimpleNamespace(
-                enabled=True, mode="handoff", mail_to="", reap=False),
+                enabled=True, mode="wake", mail_to="", reap=False),
         ),
         pr_watch=SimpleNamespace(
             enabled=True, interval_seconds=600, tick_timeout_seconds=500,
@@ -640,8 +640,8 @@ def test_provider_supervisor_exception_is_nonfatal_and_runs_each_tick(
     )
     monkeypatch.setattr(prcli, "load_settings", lambda: settings)
     # fleet_rows probes the live roster by exec'ing the real `claude`
-    # binary; the provider-exec guard blocks that, and the supervisor phase
-    # after it would never run. This test's subject is the leg order and the
+    # binary; the provider-exec guard blocks that, and the wake phase after
+    # it would never run. This test's subject is the leg order and the
     # non-fatal exception, not the roster.
     monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: ([], []))
     recovery_calls = []
@@ -658,13 +658,8 @@ def test_provider_supervisor_exception_is_nonfatal_and_runs_each_tick(
             "instrument": "measured", "breakers": [], "counts": {}, "refusals": [],
         },
     }
-    monkeypatch.setattr(watchdog, "run_sweep", lambda **_k: (payload, [
-        Row("row-1", "worker", "working", None, "/tmp")
-    ]))
-    monkeypatch.setattr(watchdog, "mail_gate", lambda *_a, **_k: (True, "", ""))
-    monkeypatch.setattr(watchdog, "write_sweep_file", lambda *_a, **_k: None)
-    monkeypatch.setattr(watchdog, "supervise_provider_handoffs", lambda *_a, **_k: (
-        order.append("supervisor") or (_ for _ in ()).throw(RuntimeError("boom"))
+    monkeypatch.setattr(watchdog, "run_sweep", lambda **_k: (
+        order.append("watchdog") or (_ for _ in ()).throw(RuntimeError("boom"))
     ))
     monkeypatch.setattr(
         "fno.pr_watch._dispatch.tick",
@@ -677,11 +672,10 @@ def test_provider_supervisor_exception_is_nonfatal_and_runs_each_tick(
     result = CliRunner().invoke(app, [])
 
     assert result.exit_code == 0, result.output
-    # x-c79d phase order: the PR legs (sweep) run first, the supervisor's
-    # watchdog phase follows on its own slice. The load-bearing half is the
-    # non-fatal exception below, not the ordering.
-    assert order == ["github", "supervisor"]
-    assert recovery_calls[0]["provider_failover"] is False
+    # x-c79d phase order: the PR legs (sweep) run first, the watchdog phase
+    # follows on its own slice. The load-bearing half is the non-fatal
+    # exception, not the ordering.
+    assert order == ["github", "watchdog"]
     assert order.count("github") == 1
 
 

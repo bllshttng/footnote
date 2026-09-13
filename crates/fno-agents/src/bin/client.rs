@@ -36,7 +36,9 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "claim",
     "codex-assign-project",
     "codex-loaded-threads",
+    "compaction",
     "component-verdict",
+    "provider-cap",
     "court-orphans",
     "court-fold",
     "detect",
@@ -436,6 +438,18 @@ async fn run(args: Vec<String>) -> i32 {
     // `test-run`, so the parity tests stay in sync.
     if verb == "fleet-incident" {
         return fno_agents::fleet_incident::run_fleet_incident(&args[1..]);
+    }
+
+    if verb == "compaction" {
+        return fno_agents::compaction::run_compaction(&args[1..]);
+    }
+
+    // `provider-cap`: the armed cap actor's read + decide verbs (x-7e05, see
+    // provider_cap.rs doc). Direct dispatch, no daemon RPC: a status read
+    // computes on demand when no fresh daemon snapshot exists, and a decision
+    // record must be writable when the daemon is the thing wedged.
+    if verb == "provider-cap" {
+        return fno_agents::provider_cap_verbs::run_provider_cap(&args[1..]);
     }
 
     // `announce`: fleet announcements (see announce.rs doc). Direct

@@ -301,7 +301,7 @@ def prepare_manifest_and_release(
 
 
 def _main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m fno.state.outage_handoff")
+    parser = argparse.ArgumentParser(prog="python -m fno.state.target_handoff")
     subparsers = parser.add_subparsers(dest="command", required=True)
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("--state", type=Path, required=True)

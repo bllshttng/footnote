@@ -596,18 +596,9 @@ def tick() -> None:
                             _fleet_refused += 1
                         _emit_event(event_type, data)
 
-                    # Local import: the watchdog package pulls the harness layer.
-                    from fno.agents.watchdog import handoff_armed as _wd_handoff
-
                     _fleet_candidates = run_recovery_sweep(
                         settings.recovery,
                         emit=emit_recovery,
-                        # Legacy failover stands down only for "handoff", where the
-                        # provider-outage supervisor owns the transaction instead.
-                        # "report" and "wake" still need it: neither mode arms the
-                        # supervisor, so gating this on "off" alone would silently
-                        # drop the old safety net the moment either is turned on.
-                        provider_failover=not _wd_handoff(settings),
                     )
                     _fleet_swept = True
                     typer.echo(f"recovery sweep: candidates={_fleet_candidates}")
@@ -749,25 +740,9 @@ def tick() -> None:
                         ),
                         provider_outages=provider_outages,
                     )
-                    try:
-                        handoffs = _wd.supervise_provider_handoffs(
-                            provider_outages, provider_rows,
-                            settings=settings, now_s=now,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - PR polling stays live
-                        handoffs = [{
-                            "phase": "refused",
-                            "reason": "provider_supervisor_exception",
-                            "detail": repr(exc)[:400],
-                            "count": 1,
-                        }]
-                    for handoff in handoffs:
-                        event = (
-                            "provider_handoff_refused"
-                            if handoff.get("phase") == "refused"
-                            else "provider_handoff_transition"
-                        )
-                        _wd.emit_event(event, handoff)
+                    # Provider-outage handoff supervision moved to the
+                    # provider-cap actor (x-7e05); measure_provider_outages
+                    # stays as report lines only.
 
                     # Internal recovery, wake mode only. Session verdicts drive
                     # nothing here in report mode, and their receipts stay

@@ -1,6 +1,6 @@
 # Fleet watchdog
 
-`fno agents watchdog` runs outside every session. Per fleet row it decides one of three things: wake it, reroute it, or leave it. It also reports friction it never acts on: contention and settled-PR polling. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet. Row retirement is NOT this module's question. When a row's work is done and its transcript is quiet, the Rust daemon's sweep retires it. `fno agents reap` runs that same sweep by hand.
+`fno agents watchdog` runs outside every session. Per fleet row it decides one of two things: wake it, or leave it. Moving a session for a provider usage cap is owned by the provider-cap actor (see [provider-cap.md](provider-cap.md)), not by this lane. It also reports friction it never acts on: contention and settled-PR polling. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet. Row retirement is NOT this module's question. When a row's work is done and its transcript is quiet, the Rust daemon's sweep retires it. `fno agents reap` runs that same sweep by hand.
 
 The STATUS word a roster surface renders is served activity, never liveness. `fno agents list` and `fno agents top` both use it. `writing` means the transcript moved inside ten minutes. `quiet` means it is older. `parked` means the tail closed a promise. `refused` means the last assistant turn is a provider refusal the error taxonomy classifies, and it wins over `writing`, `quiet` and `parked`. `orphaned` means a falsifier fired. `unknown` means no probe answered. The measured age rides beside the word. The old `live` token is gone. No decision keys on this word. Retirement reads the reverse join and the quiet grace. The lanes read their own probes.
 
@@ -32,7 +32,7 @@ Order is precedence. The top row wins.
 | `contended` | the row is itself a live occupant of a linked worktree holding another live occupant | `worktree <path> holds <n> live sessions, peers <ids>` |
 | `stale` | a wake-state row past the wake ceiling | `<state> <n>h old, past the 12h wake ceiling, needs a human` |
 | `spent` | a wake-state row past the wake ceiling whose evidence says finished work: its node reads done/superseded/deferred, or its own tail reads done | `node <id> <status>; quiet <n>h past the 12h wake ceiling; finished row, nothing to triage` |
-| `reroute` | state `blocked` and the transcript tail carries a 429 whose reset window has not opened | `429 resets <utc>, <n>m out` |
+| `leave (cap)` | state `blocked`, the transcript tail carries a 429 whose reset window has not opened; the row reads `cap: owned by provider-cap` | `429 resets <utc>, <n>m out; cap: owned by provider-cap` |
 | `wake` | any of `working`, `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
 | `leave` | everything else, including every healthy injectable row | `state <s>, last turn <n>m ago, no lane applies` |
 | `polling_settled` | a leave row whose tail asserts a PR `MERGED` or `CLOSED` and then issues two or more further PR-status reads, with the live state read confirming the PR terminal now | `<n> PR-status reads of #<pr> after the tail read it <state>` |
@@ -61,7 +61,7 @@ These were measured by hand on 2026-08-15. Both are pinned by tests in `cli/test
 
 ## Lanes
 
-`fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply-all` adds reroute, which stops and respawns a session. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
+`fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply-all` adds the sandbox-blocked reap and no longer reroutes. Cap moves belong to the provider-cap actor, so a capped row always reads `cap: owned by provider-cap` and stays put. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
 
 `--only <verdict>` validates and renders its help from `VERDICTS`, the same live set the classifier returns; `unclaimed` is advertised from the same source, so adding a verdict cannot require a second hand-maintained list.
 
@@ -70,7 +70,6 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | Verdict | Action |
 |---------|--------|
 | `wake` | `fno agents resume <id>`, then content confirmation in the transcript |
-| `reroute` | `fno.recovery._default_failover`: rotate the provider, stop first, then respawn in the same worktree. A bare redispatch would respawn onto the same capped account, so with no alternate armed the lane refuses and names the outcome rather than looping the fleet on the dead account |
 | `ghost` | report only |
 | `stale`, `spent`, `contended`, `polling_settled` | report only, at every apply level |
 | `silence` | drive only (`fno agents resume`, same mechanism as `wake`). Ending a row past a drive cap and handing the node back through `fno backlog advance` is a deferred follow-up, not this lane |
@@ -119,19 +118,15 @@ A bus-only row stays bus-only. Every row is eligible for `wake`, because a wake 
 
 ## Cadence
 
-`config.recovery.watchdog` rides the pr_watch tick. `enabled` says whether the lane runs at all and is false by default; `mode` says how far an enabled lane goes and is `report`, `wake`, or `handoff`. A config written with the old flat string still parses: `off` becomes `enabled = false`, and any other word becomes `enabled = true` with that mode. `report` classifies and emits. `wake` also applies the wake lane. `handoff` permits a positively proved cross-provider transaction. `config.autonomy.enabled` and `config.recovery.enabled` veto every mode. Neither `wake` nor manual `--apply-all` grants handoff authority. No tick value reroutes. Every completed sweep writes the exact provider-outage report to `~/.fno/watchdog-sweep.json`. An absent or unreadable provider instrument is stamped `unknown`, never as an empty measured breaker set.
+`config.recovery.watchdog` rides the pr_watch tick. `enabled` says whether the lane runs at all and is false by default. `mode` says how far an enabled lane goes and is `report` or `wake`. A config written with the old flat string still parses: `off` becomes `enabled = false`, and any other word becomes `enabled = true` with that mode. A legacy `handoff` reads as inert, because cross-provider moves belong to the provider-cap actor. `report` classifies and emits. `wake` also applies the wake lane. `config.autonomy.enabled` and `config.recovery.enabled` veto every mode. No tick value reroutes and no mode moves a capped session. Every completed sweep writes the exact provider-outage report to `~/.fno/watchdog-sweep.json`. An absent or unreadable provider instrument is stamped `unknown`, never as an empty measured breaker set.
 
-## Provider-wide outages and handoff
+## Provider-wide outages
 
-The provider supervisor runs once before GitHub PR polling on the existing tick. A stalled GitHub request cannot starve outage detection. No second daemon, timer, or GitHub poll exists. Durable raw assistant transcript records can vote. Projections, registry status, process liveness, task messages, and quoted user text cannot vote. Pane text votes only after a fresh atomic snapshot. Every vote joins machine-recorded harness, model-vendor provider, and account-record identity. A missing axis is count-bearing UNKNOWN. It cannot open a breaker or select a route.
+The provider-outage MEASUREMENT stays here. `measure_provider_outages` collects transcript and pane evidence and reports breaker state on every sweep and in `~/.fno/watchdog-sweep.json`. Durable raw assistant transcript records can vote. Projections, registry status, process liveness, task messages, and quoted user text cannot vote. Pane text votes only after a fresh atomic snapshot. Every vote joins machine-recorded harness, model-vendor provider, and account-record identity. A missing axis is count-bearing UNKNOWN. It cannot open a breaker.
 
-When a Fair Usage Policy 429 requires a request, it is a manual-restore signal even without a reset. It differs from the older reset-bearing temporary limit. Two distinct sessions on one provider and account open a breaker within 300 seconds. A persistent 529 needs three consecutive assistant errors spanning at least 120 seconds. Two persistent sessions must agree within 600 seconds. Successful assistant content resets the session sequence. Transcript evidence remains eligible for 600 seconds. Persisted pane and destination-health markers remain eligible for 120 seconds. Reset-bearing limits retain a 120-second close grace. UNKNOWN never means healthy.
+The ACTION half moved. Deciding, migrating, and bringing back sessions stranded by a provider usage cap is the provider-cap actor's job: [provider-cap.md](provider-cap.md). The watchdog never stops, moves, or respawns a row because of a quota refusal. Its capped rows read `cap: owned by provider-cap` and stay put.
 
-In `handoff` mode, the destination must carry explicit provider, account, and model identity. Its provider must differ from the broken provider. A neutral canary outside the node worktree must persist the exact `FNO_PROVIDER_HEALTH_OK` response. The canary stops before ownership changes. Candidate probing can continue before source death. After positive source death, the transaction never tries a second destination. The transaction serializes on `dispatch:<node>` and re-reads all source authority. It positively stops the exact pane or PID incarnation. It then archives the manifest and releases only the exact claim holder. One pane successor starts in the same worktree and branch. Commit requires positive executability, the exact successor claim, a fresh manifest, and unique ownership. Any post-death failure parks the node unclaimed and preserves its worktree and archive.
-
-Breaker transitions, terminal handoff transitions, and count-bearing refusals are schema-backed daemon events. When a transaction newly commits or parks, one daemon-authored node decision is recorded. Observations, canary proof, intermediate phases, refusals, contention, and terminal replay record no decision.
-
-Manual inspection remains `fno agents watchdog --json`. The base command is a dry run. `--apply` applies wake only. `--apply-all` applies wake and reroute. Neither can authorize a provider handoff. To enable installed-cadence migration, set `recovery.watchdog.enabled = true` and `recovery.watchdog.mode = "handoff"` and keep both master switches enabled. There is intentionally no manual handoff command. Migration tests must not run against a live node.
+Manual inspection remains `fno agents watchdog --json`. The base command is a dry run. `--apply` applies wake only. `--apply-all` adds the sandbox-blocked reap. Neither moves provider ownership. There is no watchdog handoff command.
 
 ## The keeper lane
 
