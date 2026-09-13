@@ -1261,15 +1261,15 @@ OWNERSHIP_LIVE_STATUSES = frozenset(
 def live_thread_row_for_cwd(
     cwd: str, registry_path: Optional[Path] = None
 ) -> Optional[tuple[str, str]]:
-    """The ``(harness, session_id)`` of the ONE live thread row holding ``cwd``.
+    """The ``(harness, session_id)`` of the ONE live codex row holding ``cwd``.
 
-    A codex thread worker owns no process: N threads share one daemon pid, so
-    the walk cannot name a thread's session id. The spawn record can - the
-    daemon writes the row before the worker's first turn, keyed by the cwd fno
-    named at spawn (one worktree per worker), so a sibling's lookup returns its
-    own row. Exactly one ownership-live ``substrate: thread`` row with a
-    non-empty harness and session id answers; zero and two-plus matches return
-    None, as does an unreadable or absent registry (raise nothing).
+    A codex worker's process walk lands on the shared daemon (thread workers
+    share its pid; a remote pane's tool shell runs under it), so the
+    spawn record - written before the worker's first turn, keyed by the cwd
+    fno named at spawn - is what names the session. Exactly one
+    ownership-live ``thread`` or ``pane`` row with a non-empty harness and
+    session id answers; zero and two-plus matches return None, as does an
+    unreadable or absent registry (raise nothing).
     """
     if not cwd:
         return None
@@ -1289,7 +1289,7 @@ def live_thread_row_for_cwd(
                 continue
             if row.get("status") not in OWNERSHIP_LIVE_STATUSES:
                 continue
-            if row.get("substrate") != "thread":
+            if row.get("substrate") not in ("thread", "pane"):
                 continue
             harness = row.get("harness")
             session_id = row.get("harness_session_id")
