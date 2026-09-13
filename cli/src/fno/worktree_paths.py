@@ -293,12 +293,11 @@ def resolve_worktree_policy(
     target's policy for its child) > per-project
     ``work.workspaces.<slug>.projects[].worktree`` > global ``worktree.policy`` >
     built-in ``harness-native``. A config file that exists but fails to parse
-    RAISES (fail closed); an absent key is not an error.
-    ``harness-native`` degrades to ``external`` when the harness has no
-    native mechanism (anything but claude), when ``paths.worktrees_base`` is
-    explicitly set (x-f96e: the key alone relocates; setting it AND
-    ``worktree.policy`` is no longer required), and under the deprecated
-    ``worktree.use_conductor_canonical``.
+    RAISES (fail closed); an absent key is not an error. ``harness-native``
+    degrades to ``external`` when the harness has no native mechanism (anything
+    but claude), when ``paths.worktrees_base`` is explicitly set (x-f96e: the
+    key alone relocates; setting it AND ``worktree.policy`` is no longer
+    required), and under the deprecated ``worktree.use_conductor_canonical``.
     """
     repo_root = repo_root.resolve()
     from fno.config_io import _deep_merge
@@ -421,8 +420,8 @@ def undeclared_dispatch_pin(
     the target repo; reached from elsewhere, that is the repo whose edits the
     child's hooks would block, so pin ``never`` rather than write config into
     somebody else's project. Declared repos, non-git targets, an ambient
-    ``FNO_WORKTREE_POLICY`` (source ``env``), and undecidable resolves keep the
-    ambient posture (the child's hooks refuse with the reason).
+    ``FNO_WORKTREE_POLICY`` (source ``env``), undecidable resolves keep the
+    ambient posture.
     """
     target = _repo_identity(target_cwd)
     caller = _repo_identity(caller_cwd)

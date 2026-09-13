@@ -755,7 +755,7 @@ def _export_worktree_policy_pin_at_seam(args: "Sequence[str]") -> None:
 
     Auto mode execs the Rust client before ``cmd_spawn`` runs; the exec'd
     binary is a same-env replacement, so exporting here reaches the child.
-    Only an explicit ``--cwd`` can name a foreign repo.
+    Only an explicit ``--cwd`` names a foreign repo.
     """
     try:
         if os.environ.get("FNO_WORKTREE_POLICY"):
