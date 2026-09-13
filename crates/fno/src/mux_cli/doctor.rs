@@ -130,7 +130,7 @@ pub(super) fn legacy_mux_root_check() -> Check {
     }
 }
 
-/// What the backlog board would be scoped to (x-20f1).
+/// What the backlog board would be scoped to.
 ///
 /// Resolves LIVE, the same way a client does at spawn, so this answers "what
 /// will a server started from here show". A server already running latched its

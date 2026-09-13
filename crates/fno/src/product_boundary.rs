@@ -237,7 +237,7 @@ pub(crate) fn digest_state_for(
     match (enabled, backend_present) {
         (false, _) => (
             DigestState::DisabledByConfig,
-            "obsidian.enabled=false: the digest is off by choice",
+            "config.mux.attach_digest=false: the digest is off by choice",
         ),
         (true, false) => (
             DigestState::BackendUnavailable,
@@ -247,21 +247,19 @@ pub(crate) fn digest_state_for(
     }
 }
 
-/// Observe the digest from the doctor's cwd, through the config owner
-/// (`digest_overlay::ObsidianCfg`) and the same runtime resolver as above.
+/// Observe the digest from the doctor's cwd, through the digest's own gate
+/// (`digest_overlay::attach_digest_enabled`, default ON) and the same runtime
+/// resolver as above.
 pub fn digest_observation(cwd: &Path) -> DigestObservation {
     digest_observation_at(
-        &crate::digest_overlay::ObsidianCfg::read(cwd),
+        crate::digest_overlay::attach_digest_enabled(cwd),
         crate::digest_overlay::now_secs(),
     )
 }
 
-pub(crate) fn digest_observation_at(
-    cfg: &crate::digest_overlay::ObsidianCfg,
-    now: u64,
-) -> DigestObservation {
+pub(crate) fn digest_observation_at(enabled: bool, now: u64) -> DigestObservation {
     let backend_present = resolve_runtime_bin().exists();
-    let (state, why) = digest_state_for(cfg.enabled, backend_present);
+    let (state, why) = digest_state_for(enabled, backend_present);
     DigestObservation {
         state,
         reason: why.to_string(),
@@ -345,8 +343,7 @@ mod tests {
         assert_eq!(agent_runtime_observation_at(4242).observed_at, 4242);
         assert_eq!(graph_worker_observation_at(4243).observed_at, 4243);
         assert_eq!(python_cli_observation_at(4244).observed_at, 4244);
-        let cfg = crate::digest_overlay::ObsidianCfg::default();
-        assert_eq!(digest_observation_at(&cfg, 4245).observed_at, 4245);
+        assert_eq!(digest_observation_at(true, 4245).observed_at, 4245);
     }
 
     #[test]
