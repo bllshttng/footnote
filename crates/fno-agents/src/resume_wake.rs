@@ -255,7 +255,8 @@ mod tests {
         // ClaudeHome is injected (not read off HOME) so the test is hermetic
         // against concurrent tests mutating HOME.
         let temp = tempfile::tempdir().unwrap();
-        let jobs = temp.path().join(".claude").join("jobs").join("abcd1234");
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
+        let jobs = claude_home.jobs_dir_for("abcd1234");
         std::fs::create_dir_all(&jobs).unwrap();
         let state = jobs.join("state.json");
         std::fs::write(
@@ -295,7 +296,7 @@ mod tests {
             "resume",
             "agent_resumed",
             &home,
-            crate::claude_ask::ClaudeHome::at(temp.path()),
+            claude_home.clone(),
             |handle| {
                 assert_eq!(handle, "sess-uuid");
                 Some("working".to_string())
@@ -309,7 +310,8 @@ mod tests {
     #[test]
     fn respawn_receipt_refuses_when_truth_never_reads_live() {
         let temp = tempfile::tempdir().unwrap();
-        let jobs = temp.path().join(".claude").join("jobs").join("abcd1234");
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
+        let jobs = claude_home.jobs_dir_for("abcd1234");
         std::fs::create_dir_all(&jobs).unwrap();
         let state = jobs.join("state.json");
         std::fs::write(
@@ -349,7 +351,7 @@ mod tests {
             "resume",
             "agent_resumed",
             &home,
-            crate::claude_ask::ClaudeHome::at(temp.path()),
+            claude_home,
             |_| Some("stalled".to_string()),
             |_| {}, // no-op sleep: the window must not cost wall clock in tests
         );
