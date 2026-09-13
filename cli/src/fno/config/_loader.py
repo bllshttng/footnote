@@ -12,8 +12,21 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+import click
+from pydantic import ValidationError
+
 if TYPE_CHECKING:
     from fno.config import SettingsModel
+
+
+class SettingsRefused(click.ClickException):
+    """A settings file carries a value the schema refuses; loading stops.
+
+    ``load_settings`` raises this instead of the raw pydantic
+    ``ValidationError`` (a ClickException renders clean: message on stderr,
+    exit 1, no traceback), and the message names the file, the key, the
+    offending value and the legal set (x-49db).
+    """
 
 
 def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
@@ -165,4 +178,10 @@ def _load_settings_at(key: _SettingsKey) -> "SettingsModel":
     importlib.import_module("fno.config_readback").warn_unknown_keys(raw, SettingsModel)
 
     raw = _revoke_unbacked_optouts(raw)
-    return SettingsModel.model_validate(raw)
+    try:
+        return SettingsModel.model_validate(raw)
+    except ValidationError as exc:
+        # importlib, same as warn_unknown_keys above: a static edge to
+        # config_readback is the mypy SCC the caller imports it to avoid.
+        describe = importlib.import_module("fno.config_readback").describe_config_failure
+        raise SettingsRefused(describe(exc, layers)) from exc
