@@ -46,6 +46,26 @@ def test_emit_tick_omits_null_skip_reason(tmp_path, monkeypatch):
     assert "detail" not in row["data"]
 
 
+def test_emit_tick_stores_a_long_failure_detail_whole(tmp_path, monkeypatch):
+    """A failure row's refusal survives whole. One 4000-char bound per row
+    keeps a pathological crash stderr from writing a giant journal row; no
+    200-char window that cut a refusal mid-flag and lost the cause."""
+    journal = tmp_path / "events.jsonl"
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(journal))
+
+    refusal = "fno agents spawn: refusing; strict routing refuses the harness default" + "x" * 2000
+    assert emit_tick("auto_continue", scheduler="session", interval_s=1800,
+                     skip_reason="spawn-failed", detail=refusal)
+
+    row = json.loads(journal.read_text().splitlines()[0])
+    assert row["data"]["detail"] == refusal
+
+    assert emit_tick("auto_continue", scheduler="session", interval_s=1800,
+                     skip_reason="spawn-failed", detail="y" * 5000)
+    capped = json.loads(journal.read_text().splitlines()[1])
+    assert len(capped["data"]["detail"]) == 4000
+
+
 def test_emit_tick_never_raises_on_a_dead_journal(tmp_path):
     # A path whose parent is a FILE: every write fails; the arm it observes
     # must not break.

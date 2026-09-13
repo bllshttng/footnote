@@ -37,7 +37,9 @@ def emit_tick(arm: str, *, scheduler: str, interval_s: int, acted: int = 0,
         if skip_reason is not None:
             data["skip_reason"] = skip_reason
         if detail is not None:
-            data["detail"] = detail[:200]
+            # One generous bound per row: a refusal sentence survives whole,
+            # a pathological crash stderr cannot write a giant journal row.
+            data["detail"] = detail[:4000]
         append_event(_build(EVENT_TYPE, "daemon", data), events_path)
         return True
     except Exception as exc:  # noqa: BLE001 - a readout row must never break its arm
