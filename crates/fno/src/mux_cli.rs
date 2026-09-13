@@ -4796,22 +4796,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             let bytes = if raw {
                 if bytes.len() > RAW_PANE_SEND_CAP_BYTES {
                     eprintln!("fno mux pane send: {}", paste_cap_refusal(bytes.len()));
-                    PaneSendAudit::new(
-                        pane,
-                        expected_identity.as_deref(),
-                        &bytes,
-                        submit,
-                        provenance.as_deref(),
-                    )
-                    .emit(session, EXIT_ERROR);
-                    return EXIT_ERROR;
-                }
-                bytes
-            } else {
-                match prepare_pane_bytes(session, pane, &bytes, style_exception.as_deref()) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        eprintln!("fno mux pane send: {e}");
+                    if !pane_send_is_control_only(&bytes) {
                         PaneSendAudit::new(
                             pane,
                             expected_identity.as_deref(),
@@ -4820,20 +4805,42 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                             provenance.as_deref(),
                         )
                         .emit(session, EXIT_ERROR);
+                    }
+                    return EXIT_ERROR;
+                }
+                bytes
+            } else {
+                match prepare_pane_bytes(session, pane, &bytes, style_exception.as_deref()) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("fno mux pane send: {e}");
+                        if !pane_send_is_control_only(&bytes) {
+                            PaneSendAudit::new(
+                                pane,
+                                expected_identity.as_deref(),
+                                &bytes,
+                                submit,
+                                provenance.as_deref(),
+                            )
+                            .emit(session, EXIT_ERROR);
+                        }
                         return EXIT_ERROR;
                     }
                 }
             };
             // (x-91ba) Stage the row here, where the exact typed bytes are
             // known; the submit path emits inline below, the paste path in
-            // the shared tail once the reply's exit code is known.
-            pane_send_audit = Some(PaneSendAudit::new(
-                pane,
-                expected_identity.as_deref(),
-                &bytes,
-                submit,
-                provenance.as_deref(),
-            ));
+            // the shared tail once the reply's exit code is known. Submit-key
+            // sends are control bytes and stage nothing (AC5).
+            if !pane_send_is_control_only(&bytes) {
+                pane_send_audit = Some(PaneSendAudit::new(
+                    pane,
+                    expected_identity.as_deref(),
+                    &bytes,
+                    submit,
+                    provenance.as_deref(),
+                ));
+            }
             review_command = if raw {
                 review_invocation_command(&bytes)
             } else {
@@ -6206,6 +6213,19 @@ impl PaneSendAudit {
             writeln!(file, "{event}")
         })();
     }
+}
+
+/// (x-91ba) A submit key is a control byte, not a dispatch: the CRs, Tabs and
+/// ESC sequences the mail lane issues one per submit key ride this same verb
+/// but write no row. A prompt write is never made only of these.
+fn pane_send_is_control_only(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    if bytes.first() == Some(&0x1b) {
+        return true; // an escape sequence (an arrow key, a bare Esc)
+    }
+    bytes.iter().all(|b| b.is_ascii_control())
 }
 
 /// The audit outcome vocabulary. Every pane-send exit code is representable,
@@ -8299,6 +8319,78 @@ mod tests {
         assert_eq!(data["payload_bytes"], body.len());
         assert_eq!(data["confirmed"], true);
         assert_eq!(data["outcome"], "delivered");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pane_send_audit_skips_submit_key_control_bytes() {
+        // (AC5) A carriage return is a control byte, not a dispatch: the mail
+        // lane's per-key CR/Tab/arrow sends ride this verb and must not each
+        // produce a row. The delivered leg proves the send itself still ran.
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        let agents_guard = FNO_AGENTS_HOME_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-audit-control-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = dir.join("events.jsonl");
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
+
+        let sock = control_test_sock("audit-control");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let connections = std::sync::Arc::new(AtomicU32::new(0));
+        let connections_srv = connections.clone();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            connections_srv.fetch_add(1, AtomicOrdering::SeqCst);
+            let _msg: ClientMsg = read_msg_sync(&mut s).unwrap();
+            write_msg_sync(&mut s, &ServerMsg::Ok).unwrap();
+        });
+
+        let code = dispatch(
+            "t",
+            &sock,
+            false,
+            PaneCmd::Send {
+                pane: 7,
+                source: SendSource::Text("\r".into()),
+                guarded: false,
+                submit: false,
+                raw: true,
+                expected_identity: None,
+                style_exception: None,
+                provenance: Some("mail:msg-abc123".into()),
+            },
+        );
+        server.join().unwrap();
+        assert_eq!(code, EXIT_OK, "the CR send itself still delivers");
+        assert_eq!(
+            connections.load(AtomicOrdering::SeqCst),
+            1,
+            "the CR send reached the socket"
+        );
+        // ESC + '[' + 'D' (a left-arrow) is control-only by the ESC-prefix
+        // rule, though '[' and 'D' are printable bytes.
+        assert!(pane_send_is_control_only(b"\x1b[D"));
+        assert!(pane_send_is_control_only(b"\t"));
+        assert!(!pane_send_is_control_only(b"1"));
+        assert!(!pane_send_is_control_only(b""));
+
+        let rows = read_audit_rows(&events, "pane-send");
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row["data"]["payload"] == "\r"
+                    || row["data"]["source"] == "mail:msg-abc123"),
+            "a submit-key send writes no dispatch row"
+        );
+
+        std::env::remove_var("FNO_AGENTS_HOME");
+        drop(agents_guard);
+        let _ = std::fs::remove_file(&sock);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

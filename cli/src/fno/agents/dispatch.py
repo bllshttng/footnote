@@ -5647,6 +5647,7 @@ def _mux_pane_send(
     review_invocation_id: Optional[str] = None,
     origin: Optional[str] = None,
     self_send: bool = False,
+    source_label: Optional[str] = None,
 ) -> bool | str:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
@@ -5823,50 +5824,11 @@ def _mux_pane_send(
             _record_failure("pre-submit")
             return False
 
-    # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
-    # the <cross-session-message> peer-follow-up container) leaves no agent-authored
-    # marker in the recipient transcript, so record it in the ledger. Both wrapped
-    # forms carry their own marker, so excluding only <fno_mail> would log every
-    # routine peer follow-up as a false raw-inject. The mux pane lane never reaches
-    # the Rust mail-inject binary, so this site is mandatory, not decorative.
-    # Emitted AFTER the send with the transport's own answer: an emit-before-send
-    # leaves a phantom record asserting an injection that a stalled pane or an
-    # absent `fno mux` never performed. Best-effort -- a write failure never
-    # breaks or fails the send.
-    audit_unwrapped = not text.lstrip().startswith(
-        ("<fno_mail", "<cross-session-message")
-    )
-
-    def _audit_raw_inject(confirmed: bool) -> None:
-        if not audit_unwrapped:
-            return
-        try:
-            from fno.events import agent_raw_inject, append_event
-
-            # Write the CANONICAL {type, source, data} envelope to the SAME log
-            # the Rust mail-inject binary uses (~/.fno/agents/events.jsonl). That
-            # file is canonical-shape only; the flat {kind, ...} emitter would put
-            # a second shape in one file and a consumer reading data.target_session
-            # (where schema.yaml says it lives) would silently miss every mux
-            # record -- the exact audit gap this event exists to close.
-            append_event(
-                agent_raw_inject(
-                    target_session=getattr(entry, "harness_session_id", "") or "",
-                    payload=text[:512],
-                    harness=getattr(entry, "harness", "") or "",
-                    lane="mux-pane",
-                    target_cwd=getattr(entry, "cwd", None),
-                    sender=sender,
-                    origin=origin,
-                    self_send=self_send,
-                    confirmed=confirmed,
-                    source="daemon",
-                ),
-                events.daemon_lifecycle_log(),
-                lock_timeout_seconds=2,
-            )
-        except Exception:
-            pass
+    # Audit floor (x-91ba): the row this pane write leaves is written by the
+    # Rust verb itself (`fno mux pane send`), one layer below, so it covers a
+    # direct caller too. This lane only DECLARES its provenance (--source) so
+    # the floor's row joins the bus record; it must not write a second row of
+    # its own, or every pane dispatch reads as two.
 
     fno_bin = os.environ.get("FNO_BIN") or "fno"
     pane = str(pane_id)
@@ -5990,6 +5952,10 @@ def _mux_pane_send(
         )
         if expected_fno_id:
             send_args.extend(["--fno-id", str(expected_fno_id)])
+        if source_label:
+            # The floor's audit row joins this dispatch to its bus record by
+            # the mail id; declared, never sniffed from the wrapped body.
+            send_args.extend(["--source", source_label])
         if guarded:
             send_args.append("--guarded")
         pasted = _run(send_args, stdin_text=text)
@@ -6119,11 +6085,9 @@ def _mux_pane_send(
         outcome: bool | str = sent
         if sent and review and (getattr(entry, "harness", "") or "") == "codex":
             outcome = _review_outcome()
-        _audit_raw_inject(outcome in {True, "started", "queued"})
         return outcome
 
     if not _verify_pane_occupant():
-        _audit_raw_inject(False)
         return False
 
     # Baseline BEFORE the paste (not after): the confirm below scans only lines
@@ -6220,7 +6184,6 @@ def _mux_pane_send(
                 _record_failure("unconfirmed")
         elif not sent:
             _record_failure(last_attempt_phase)
-        _audit_raw_inject(outcome in {True, "started", "queued"})
         return outcome
     finally:
         if claimed:
@@ -7247,6 +7210,7 @@ def _deliver_live(
                 gate=True,
                 sender=from_name or None,
                 failure_out=attempt_failure,
+                source_label=(f"mail:{mail.id}" if mail is not None else None),
             )
             if mux_delivered:
                 return True
