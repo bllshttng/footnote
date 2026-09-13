@@ -877,7 +877,7 @@ fn render_lines(
             }
             let hidden = rows.len().saturating_sub(MAX_COURT_ROWS);
             if hidden > 0 {
-                lines.push(format!("  ... {hidden} more not shown"));
+                lines.push(format!("  ... {hidden} more rows cut"));
             }
         }
     }
