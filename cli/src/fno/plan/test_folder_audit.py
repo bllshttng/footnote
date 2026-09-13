@@ -65,8 +65,6 @@ def test_unscannable_plans_root_returns_none(tmp_path: Path) -> None:
 
 
 def test_cli_folder_audit_unreadable_graph_exits_1(tmp_path: Path, monkeypatch) -> None:
-    from fno.graph import _constants
-
     bad_graph = tmp_path / "graph.json"
     bad_graph.write_text("{not valid json", encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: bad_graph)

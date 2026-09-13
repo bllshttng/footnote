@@ -1224,12 +1224,9 @@ def render_canonical_views() -> int:
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
         pass
-    # Canonical targets only for the configured store; a keeper hosting a
-    # sandbox graph renders its siblings, never the operator's board.
-    from fno.graph import _constants as _gc
-
-    canonical = graph == _gc.GRAPH_JSON
-    render_view_projections(entries, canonical, graph, failures=failures)
+    # Canonical BY CONTRACT: the caller resolves which store the pass serves,
+    # and the config-resolved graph's targets are the ones that refresh.
+    render_view_projections(entries, True, graph, failures=failures)
     return len(failures)
 
 
