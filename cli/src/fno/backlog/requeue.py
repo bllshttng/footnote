@@ -240,9 +240,16 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
             observed_model=truth.get("observed_model"),
         )
         if reach.verdict == REACHABLE:
+            from datetime import datetime, timezone
+
+            # reap-open is NOT named here: this worker reads reachable, so a
+            # death claim would be false. The owner's honest self-close is.
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             typer.echo(
                 f"requeue: {r.get('harness')}:{r.get('session_id')} reads {reach.render()}; "
-                "a reachable worker still owns the do window.",
+                "a reachable worker still owns the do window. If that session is "
+                f"yours and has stopped this node: fno backlog session add {node_id} "
+                f"--phase do --ended-at {now}",
                 err=True,
             )
             raise typer.Exit(code=3)

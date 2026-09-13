@@ -574,3 +574,50 @@ def test_held_arm_fresh_transcript_keeps_the_row_open(tmp_path, monkeypatch):
     assert rows[0]["session_id"] == _AB_SID_LIVE
     assert "ended_at" not in rows[0]
     assert entries[0]["status"] == "in_progress"
+
+
+def _in_review_world(tmp_path, monkeypatch, node_id="x-inrev001"):
+    """Hermetic graph with ONE in_review node carrying a PR link."""
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": []}\n')
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(gc, "GRAPH_JSON", g)
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
+    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
+    monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    import fno.graph.cli as gcli
+
+    monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda **k: set())
+    monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", lambda **k: {})
+
+    g.write_text(_json.dumps({"entries": [{
+        "id": node_id, "title": "conflicting pr", "priority": "p1",
+        "project": "fno", "domain": "code",
+        "status": "in_review", "pr_number": 1545,
+        "sessions": [],
+    }]}))
+    return g
+
+
+def test_ac4_hp_the_in_review_never_a_candidate_line_names_the_route(
+    tmp_path, monkeypatch
+):
+    """AC4-HP: an in_review node is driven through its open PR, so the ASKED
+    line names /fno:target and the undriven_pr board instead of dead-ending
+    on `not ready and not cold-dispatchable`."""
+    _in_review_world(tmp_path, monkeypatch)
+
+    from fno.cli import app
+
+    explain = _CliRunner().invoke(
+        app, ["backlog", "advance", "--explain", "--explain-node", "x-inrev001"],
+        catch_exceptions=False,
+    )
+    assert explain.exit_code == 0, explain.output
+    assert "never a candidate" in explain.output
+    assert "/fno:target x-inrev001" in explain.output
+    assert "undriven_pr" in explain.output
