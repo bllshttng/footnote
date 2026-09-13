@@ -51,9 +51,7 @@ def cmd_note(
     from fno.text_or_file import read_text_arg
 
     text = (read_text_arg(text, body_file, what="the note text") or "").strip()
-    if not text:
-        typer.echo("Error: note text is empty", err=True)
-        raise typer.Exit(code=1)
+    # An empty body refuses in the native action, which owns the message.
 
     # A contradicted citation refuses BEFORE the write; an unmeasured claim
     # only warns (this verb advises, never refuses a body).
