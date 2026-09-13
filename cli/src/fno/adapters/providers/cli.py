@@ -116,15 +116,12 @@ def list_providers(
     # DISARMED footer below all read the same config, never a parse per row.
     quota = load_quota_config()
 
-    # Binding reads only ever run for the human listing and --identity; bare
-    # `list -J` stays byte-compatible and does none.
+    # Binding reads only ever run for the human listing and --identity.
     needs_binding = identity or not json_output
-    identities: dict = {}
-    findings: list = []
-    shared: set = set()
+    identities, findings, shared = {}, [], set()
     if needs_binding:
-        findings = _doctor_findings()
         now = time_module.time()
+        findings = _doctor_findings()
         for record in config.records:
             identities[record.id] = _identity_for(record, config.by_id, now)
         shared = _shared_identity_ids(identities)
@@ -178,8 +175,7 @@ def list_providers(
         if record.auth == "managed":
             line += f"  cred-snapshot={managed.snapshot_age_label(record.id)}"
         line += f"  {_usage_age_col(record.id, ttl=quota.probe_ttl_seconds)}"
-        cell = _identity_cell(record, identities.get(record.id), shared)
-        cell += "".join(f" !{p}" for p in problems[record.id])
+        cell = _identity_cell(record, identities.get(record.id), shared, problems[record.id])
         line += f"  identity={cell}"
         typer.echo(line)
 
@@ -280,27 +276,21 @@ def _usage_age_col(record_id: str, *, ttl: Optional[int] = None) -> str:
     return f"usage={label}"
 
 
-def _identity_cell(record: ProviderRecord, got, shared_identity: set) -> str:
-    """One compact identity token for a list row, from the binding verdict.
-
-    matched names the row's own record; mismatch names who the credential
-    really serves. Anything unproven renders ``?<reason>`` and never names an
-    account it did not prove. A non-claude or api_key record has no slot
-    binding to state, so it renders ``-``.
-    """
+def _identity_cell(record: ProviderRecord, got, shared_identity: set, problems: list) -> str:
+    """One compact identity token for a list row: matched names the row's own
+    record, mismatch names who the credential really serves, anything unproven
+    renders ``?<reason>`` and never names an account it did not prove."""
     from fno.adapters.providers.binding import AMBIGUOUS, MATCHED, MISMATCH
 
     if record.harness != "claude" or record.auth == "api_key":
-        return "-"
-    if got is None:
-        return "?no-observation"
-    if got.status == MATCHED:
+        cell = "-"
+    elif got is None:
+        cell = "?no-observation"
+    elif got.status == MATCHED:
         cell = got.matched_record or got.requested_record or "?"
     elif got.status == MISMATCH:
-        served_by = (
-            got.matched_record or got.observed_label or got.observed_principal
-            or "another-account"
-        )
+        served_by = (got.matched_record or got.observed_label
+                     or got.observed_principal or "another-account")
         cell = f"!serves {served_by}"
     elif got.status == AMBIGUOUS:
         cell = "?ambiguous"
@@ -308,7 +298,7 @@ def _identity_cell(record: ProviderRecord, got, shared_identity: set) -> str:
         cell = f"?{got.reason or 'unknown'}"
     if record.id in shared_identity:
         cell += " !shared-identity"
-    return cell
+    return cell + "".join(f" !{p}" for p in problems)
 
 
 def _shared_identity_ids(identities: dict) -> set:
