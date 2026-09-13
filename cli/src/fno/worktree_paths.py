@@ -323,24 +323,24 @@ def resolve_worktree_policy(
 
     raw_policy: object = None
     source = "default"
-    # The env value flows into the SAME validation below: out-of-enum refuses.
+    entry = _match_project_entry(merged, repo_root, project_id)
+    entry_policy = entry.get("worktree") if entry is not None else None
+    if entry_policy is not None:
+        raw_policy = entry_policy
+        source = "per-project"
+    else:
+        wt = merged.get("worktree")
+        wt_policy = wt.get("policy") if isinstance(wt, dict) else None
+        if wt_policy is not None:
+            raw_policy = wt_policy
+            source = "global"
+    if raw_policy is None:
+        raw_policy = "harness-native"
+    # The env override sits above every config layer and flows into the SAME
+    # validation below: out-of-enum refuses exactly like a bad config value.
     env_policy = os.environ.get("FNO_WORKTREE_POLICY")
     if env_policy:
         raw_policy, source = env_policy, "env"
-    if raw_policy is None:
-        entry = _match_project_entry(merged, repo_root, project_id)
-        entry_policy = entry.get("worktree") if entry is not None else None
-        if entry_policy is not None:
-            raw_policy = entry_policy
-            source = "per-project"
-        else:
-            wt = merged.get("worktree")
-            wt_policy = wt.get("policy") if isinstance(wt, dict) else None
-            if wt_policy is not None:
-                raw_policy = wt_policy
-                source = "global"
-    if raw_policy is None:
-        raw_policy = "harness-native"
 
     if not isinstance(raw_policy, str) or raw_policy not in VALID_WORKTREE_POLICIES:
         raise WorktreePolicyError(
