@@ -87,15 +87,6 @@ def list_providers(
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit a JSON array of record rows (Connections UI)."
     ),
-    identity: bool = typer.Option(
-        False,
-        "--identity",
-        help=(
-            "Resolve and attach the proven account binding per record "
-            "(who the credential really serves). Costs one binding read "
-            "per claude record; without it -J does no binding work."
-        ),
-    ),
 ) -> None:
     """List all configured accounts, marking the active one with *.
 
@@ -115,8 +106,8 @@ def list_providers(
     # DISARMED footer below all read the same config, never a parse per row.
     quota = load_quota_config()
 
-    # Binding reads only ever run for the human listing and --identity.
-    needs_binding = identity or not json_output
+    # Binding reads run only for the human listing.
+    needs_binding = not json_output
     identities, findings, shared = {}, [], set()
     if needs_binding:
         now = time_module.time()
@@ -155,9 +146,6 @@ def list_providers(
                 "usage_ttl_seconds": usage_reading.ttl_seconds,
                 "usage_stale": usage_reading.stale,
             }
-            if needs_binding:
-                row["identity"] = _identity_json(record, identities.get(record.id))
-                row["problems"] = problems[record.id]
             rows.append(row)
         typer.echo(_json.dumps(rows))
         return
@@ -318,26 +306,6 @@ def _shared_identity_ids(identities: dict) -> set:
     }
 
 
-def _identity_json(record: ProviderRecord, got) -> dict:
-    """The identity object for ``list -J --identity``: the human cell's verdict, nulls where unproved."""
-    from fno.adapters.providers.binding import MATCHED, MISMATCH
-
-    if got is None:
-        reason = ("unsupported-harness" if record.harness != "claude"
-                  else "api-key-route" if record.auth == "api_key" else "no-observation")
-        return {"status": "unknown", "account": None, "served_by": None,
-                "reason": reason, "observed_at": None}
-    if got.status == MATCHED:
-        served_by = got.matched_record or got.requested_record
-    elif got.status == MISMATCH:
-        served_by = got.matched_record or got.observed_label or got.observed_principal
-    else:
-        served_by = None
-    return {"status": got.status, "account": got.requested_record,
-            "served_by": served_by, "reason": got.reason,
-            "observed_at": got.observed_at or None}
-
-
 def _fmt_resets_in(resets_at: float | None, now: float) -> str:
     """Render a reset epoch as a relative 'in 40m' / 'reset' string.
 
@@ -369,9 +337,9 @@ def _identity_for(record, by_id: dict, now: float):
 
     The usage surface calls it for a record that HAS an observation to
     attribute; ``list`` calls it for every claude record, which costs one
-    binding read per record (cached, and skipped entirely for plain
-    ``list -J``). Safe for a record with no observation: the owner answers a
-    typed unknown. None means a non-claude record or a read that raised.
+    binding read per record (cached; ``list -J`` does no binding work). Safe
+    for a record with no observation: the owner answers a typed unknown.
+    None means a non-claude record or a read that raised.
     """
     from fno.adapters.providers.binding import resolve_account_binding
 
