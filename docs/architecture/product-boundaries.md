@@ -70,8 +70,4 @@ a new shared decision needs one owner or an entry above.
 
 ## Verification
 
-`cargo test --manifest-path crates/fno/Cargo.toml product_boundary` covers the
-classifier. `bash tests/mux-workspace-standalone.sh` proves the standalone
-journey. `scripts/ci/check-product-boundaries.sh` gates the inventory: it
-checks the compile edge by name and refuses a new permanent mirrored
-implementation of a declared decision without a debt entry.
+`cargo test --manifest-path crates/fno/Cargo.toml product_boundary` covers the classifier. `bash tests/mux-workspace-standalone.sh` proves the standalone journey. `scripts/ci/check-product-boundaries.sh` gates the inventory: it checks the compile edge by name and refuses a new permanent mirrored implementation of a declared decision without a debt entry.
