@@ -147,9 +147,18 @@ fi
 # A doc path that is itself a symlink: resolve it, so the atomic rename below
 # replaces the real file and the link keeps pointing at the fresh content.
 # Renaming over the link would silently replace the link with a regular file.
-if [[ -L "$DOC_PATH" ]]; then
-  DOC_PATH="$(readlink -f "$DOC_PATH" 2>/dev/null || printf '%s' "$DOC_PATH")"
-fi
+# Plain readlink resolves one hop per call, which stays portable to hosts
+# whose readlink has no -f.
+for _hop in 1 2 3 4 5; do
+  [[ -L "$DOC_PATH" ]] || break
+  _link="$(readlink "$DOC_PATH" 2>/dev/null)" || break
+  [[ -n "$_link" ]] || break
+  case "$_link" in
+    /*) DOC_PATH="$_link" ;;
+    *) DOC_PATH="$(dirname "$DOC_PATH")/$_link" ;;
+  esac
+done
+unset _hop _link
 
 # ---------------------------------------------------------------------------
 # Gather mechanical facts. Each degrades to an empty/omitted value, never an

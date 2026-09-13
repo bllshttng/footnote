@@ -558,6 +558,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 12b. A symlinked doc resolves before the write: the link survives and the
+# target file gets the refresh (the rename replaces the target, not the link).
+# ---------------------------------------------------------------------------
+LINK_DOC="$TMP/link-target.md"
+LINK_PATH="$TMP/link-canon.md"
+ln -s "$LINK_DOC" "$LINK_PATH"
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$LINK_PATH\"}" >/dev/null 2>&1
+plant_sentinels "$LINK_DOC"
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$LINK_PATH\"}" >/dev/null 2>&1
+if [[ -L "$LINK_PATH" ]] && grep -q "SENTINEL_MERGE_7" "$LINK_DOC" \
+  && grep -q "refreshed" "$LINK_DOC"; then
+  pass "symlinked doc: link survives, target file refreshed"
+else
+  fail "symlinked doc: link replaced by a regular file or target not refreshed"
+fi
+
+# ---------------------------------------------------------------------------
 # 13. AC-CONCURRENT (x-7ec3): two refreshes firing at once both complete with
 # every session block intact. The old in-place write let the second refresh
 # read a partial doc and stamp placeholders over real judgment; with atomic
