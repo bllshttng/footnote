@@ -232,8 +232,10 @@ else
   _TMP4=$(mktemp -d)
   make_git_repo "$_TMP4"
   (
-    cd "$_TMP4" && \
-    TARGET_START=1 TARGET_INPUT="write-once-test" bash "$INIT_HOOK" 2>/dev/null
+    cd "$_TMP4" && install_stub "$_TMP4" && \
+    TARGET_START=1 TARGET_INPUT="write-once-test" \
+    PATH="$_TMP4/bin:$PATH" FNO_TEST_SPACE="$_TMP4/space" \
+    bash "$INIT_HOOK" 2>/dev/null
   ) || true
   MANIFEST4="$_TMP4/space/target-state.md"
   if [[ -f "$MANIFEST4" ]]; then
@@ -264,8 +266,10 @@ else
   _TMP5=$(mktemp -d)
   make_git_repo "$_TMP5"
   (
-    cd "$_TMP5" && \
-    TARGET_START=1 TARGET_INPUT="plan-path-fill-test" bash "$INIT_HOOK" 2>/dev/null
+    cd "$_TMP5" && install_stub "$_TMP5" && \
+    TARGET_START=1 TARGET_INPUT="plan-path-fill-test" \
+    PATH="$_TMP5/bin:$PATH" FNO_TEST_SPACE="$_TMP5/space" \
+    bash "$INIT_HOOK" 2>/dev/null
   ) || true
   MANIFEST5="$_TMP5/space/target-state.md"
   if [[ -f "$MANIFEST5" ]]; then
