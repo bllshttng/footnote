@@ -35,6 +35,32 @@ run_hook() {
     CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK"
 }
 
+# Replace the seeded placeholders with sentinel judgment (same shape as case 3).
+plant_sentinels() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s, n1 = re.subn(
+    r"_Merge order and the reason for it\.[^\n]*_",
+    "Merge #784 before #782.\nSENTINEL_MERGE_7",
+    s,
+)
+s, n2 = re.subn(
+    r"_Open decisions awaiting the operator\.[^\n]*_",
+    "dependency ordering question\nSENTINEL_DEC_7",
+    s,
+)
+assert n1 == 1 and n2 == 1, f"placeholders not found: merge={n1} decisions={n2}"
+open(p, "w").write(s)
+PY
+}
+
+md5_of() {
+  md5 -q "$1" 2>/dev/null || md5sum "$1" | cut -d' ' -f1
+}
+
 echo "== precompact-canon-doc.sh =="
 
 # ---------------------------------------------------------------------------
@@ -492,6 +518,127 @@ if [[ -f "$CANON_PATH_OUT" ]] \
   pass "crowned default doc keys on the crown scope at the --scope answer"
 else
   fail "crowned default doc missing or not scope-keyed"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. AC-KILL (x-7ec3): a hook killed at the write boundary leaves the doc
+# byte-identical. The old write was a plain `> "$DOC_PATH"`, which truncates
+# the doc on open, so a kill mid-assembly destroyed the session blocks on
+# disk (the 2026-09-13 crown-doc loss). The write now assembles into a temp
+# file and renames, so the kill can no longer land between "doc emptied" and
+# "doc written"; the fake mv below kills the hook at the exact moment the
+# assembly has finished and the rename is next.
+# ---------------------------------------------------------------------------
+KILL_BIN="$(mktemp -d -t canon-fake-mv-XXXXXX)"
+printf '#!/usr/bin/env bash\nkill -9 "$PPID"\n' > "$KILL_BIN/mv"
+chmod +x "$KILL_BIN/mv"
+
+KILL_DOC="$TMP/kill-canon.md"
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$KILL_DOC\"}" >/dev/null 2>&1
+plant_sentinels "$KILL_DOC"
+KILL_BEFORE="$(md5_of "$KILL_DOC")"
+# The subshell keeps bash's "Killed: 9" job notice out of the test output.
+( printf '{"trigger":"manual","custom_instructions":"%s"}' "$KILL_DOC" \
+  | env PATH="$KILL_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1 ) 2>/dev/null
+KILL_AFTER="$(md5_of "$KILL_DOC")"
+if [[ "$KILL_BEFORE" == "$KILL_AFTER" ]] \
+  && grep -q "SENTINEL_MERGE_7" "$KILL_DOC" \
+  && grep -q "SENTINEL_DEC_7" "$KILL_DOC" \
+  && grep -q "<!-- /fno:session -->" "$KILL_DOC"; then
+  pass "kill at the write boundary leaves the doc byte-identical"
+else
+  fail "killed write destroyed or mutated the doc (before=$KILL_BEFORE after=$KILL_AFTER)"
+fi
+# The doc stays usable: a normal re-fire after the kill still refreshes.
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$KILL_DOC\"}" >/dev/null 2>&1
+if grep -q "SENTINEL_MERGE_7" "$KILL_DOC" && grep -q "refreshed" "$KILL_DOC"; then
+  pass "doc survives a normal re-fire after the killed write"
+else
+  fail "post-kill re-fire lost judgment or did not refresh"
+fi
+
+# ---------------------------------------------------------------------------
+# 13. AC-CONCURRENT (x-7ec3): two refreshes firing at once both complete with
+# every session block intact. The old in-place write let the second refresh
+# read a partial doc and stamp placeholders over real judgment; with atomic
+# renames each refresh reads one complete doc and the last rename wins.
+# ---------------------------------------------------------------------------
+CONC_DOC="$TMP/concurrent-canon.md"
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$CONC_DOC\"}" >/dev/null 2>&1
+plant_sentinels "$CONC_DOC"
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$CONC_DOC\"}" >/dev/null 2>&1 &
+CONC_P1=$!
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$CONC_DOC\"}" >/dev/null 2>&1 &
+CONC_P2=$!
+wait "$CONC_P1" "$CONC_P2"
+CONC_MERGE="$(grep -c "SENTINEL_MERGE_7" "$CONC_DOC" 2>/dev/null)"
+CONC_DEC="$(grep -c "SENTINEL_DEC_7" "$CONC_DOC" 2>/dev/null)"
+CONC_CLOSE="$(grep -c "<!-- /fno:session -->" "$CONC_DOC" 2>/dev/null)"
+CONC_AUTO="$(grep -c "<!-- fno:auto -->" "$CONC_DOC" 2>/dev/null)"
+if [[ "$CONC_MERGE" == "1" && "$CONC_DEC" == "1" && "$CONC_CLOSE" == "2" && "$CONC_AUTO" == "1" ]] \
+  && grep -q "<!-- /fno:user -->" "$CONC_DOC"; then
+  pass "two refreshes at once: both session blocks survive, structure intact"
+else
+  fail "concurrent refreshes damaged the doc: merge=$CONC_MERGE dec=$CONC_DEC close=$CONC_CLOSE auto=$CONC_AUTO"
+fi
+
+# ---------------------------------------------------------------------------
+# 14. AC-GATE (x-7ec3): a capture that reads a live session block back as its
+# default refuses the write instead of stamping placeholders over judgment.
+# The fake awk returns nothing for its FIRST call (the merge-order capture)
+# and passes every later call through, so the capture defaults while the doc
+# still holds the block - the misread a refresh racing another writer
+# produces. Refusal leaves the doc untouched and still exits 0.
+# ---------------------------------------------------------------------------
+GATE_DOC="$TMP/gate-canon.md"
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$GATE_DOC\"}" >/dev/null 2>&1
+plant_sentinels "$GATE_DOC"
+GATE_BEFORE="$(md5_of "$GATE_DOC")"
+
+GATE_BIN="$(mktemp -d -t canon-fake-awk-XXXXXX)"
+GATE_AWK_STATE="$TMP/gate-awk.state"
+: > "$GATE_AWK_STATE"
+cat > "$GATE_BIN/awk" <<AWK
+#!/usr/bin/env bash
+if [[ ! -e "$GATE_AWK_STATE.called" ]]; then
+  touch "$GATE_AWK_STATE.called"
+  exit 0
+fi
+exec /usr/bin/awk "\$@"
+AWK
+chmod +x "$GATE_BIN/awk"
+trap 'rm -rf "$TMP" "$FAKE_BIN" "$PORTFOLIO_BIN" "$LIVENESS_BIN" "$KILL_BIN" "$GATE_BIN"' EXIT
+
+GATE_RC=0
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$GATE_DOC" \
+  | env PATH="$GATE_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1 || GATE_RC=$?
+GATE_AFTER="$(md5_of "$GATE_DOC")"
+if [[ "$GATE_RC" == "0" && "$GATE_BEFORE" == "$GATE_AFTER" ]] \
+  && grep -q "SENTINEL_MERGE_7" "$GATE_DOC" \
+  && grep -q "SENTINEL_DEC_7" "$GATE_DOC"; then
+  pass "misread capture refuses the write: doc untouched, exit 0"
+else
+  fail "gate did not hold: rc=$GATE_RC before=$GATE_BEFORE after=$GATE_AFTER"
+fi
+# Recovery: the next normal fire captures cleanly and writes again.
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$GATE_DOC\"}" >/dev/null 2>&1
+if grep -q "SENTINEL_MERGE_7" "$GATE_DOC" && grep -q "refreshed" "$GATE_DOC"; then
+  pass "gate refusal does not wedge later refreshes"
+else
+  fail "post-refusal re-fire lost judgment or did not refresh"
+fi
+# No false refusal: a doc whose blocks still hold the placeholders re-fires
+# normally (defaults round-trip instead of tripping the gate).
+PLACE_DOC="$TMP/place-canon.md"
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$PLACE_DOC\"}" >/dev/null 2>&1
+PLACE_RC=0
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$PLACE_DOC\"}" >/dev/null 2>&1 || PLACE_RC=$?
+if [[ "$PLACE_RC" == "0" ]] \
+  && [[ "$(grep -c "write here; the machine reads this every refresh" "$PLACE_DOC")" == "1" ]] \
+  && grep -q "## Identity (auto)" "$PLACE_DOC"; then
+  pass "placeholder-only doc re-fires without a false refusal"
+else
+  fail "placeholder doc refused or mis-shaped: rc=$PLACE_RC"
 fi
 
 echo
