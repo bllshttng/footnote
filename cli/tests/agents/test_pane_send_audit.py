@@ -76,3 +76,85 @@ def test_pane_send_without_a_declared_source_sends_no_label(monkeypatch):
 
     paste_args = next(c["argv"] for c in calls if "--stdin" in c["argv"])
     assert "--source" not in paste_args
+
+
+def test_documented_query_names_who_dispatched(tmp_path):
+    """The query the doc teaches answers "who told this worker to do that"
+    from the events journal alone (x-91ba AC4-HP).
+
+    A documented command nobody executes goes stale silently, so this stages a
+    journal and runs the documented command form against it: two rg stages,
+    the lane marker first, the worker second. The row must name who dispatched
+    (`source`) and what was sent (`payload`).
+    """
+    import json
+    import subprocess
+
+    rows = [
+        {
+            "ts": "2026-09-12T10:00:00Z",
+            "type": "agent_raw_inject",
+            "source": "daemon",
+            "data": {
+                "lane": "pane-send",
+                "target_session": "s1",
+                "target_pane": 3,
+                "target_name": "other-worker",
+                "source": "mail:msg-old",
+                "payload": "unrelated dispatch",
+            },
+        },
+        {
+            "ts": "2026-09-12T11:00:00Z",
+            "type": "agent_raw_inject",
+            "source": "daemon",
+            "data": {
+                "lane": "pane-send",
+                "target_session": "s2",
+                "target_pane": 7,
+                "target_name": "worker-under-test",
+                "target_fno_id": "sess-4242",
+                "harness": "codex",
+                "source": "mail:msg-beef",
+                "payload": "New work, take it now: run /fno:target x-11ec",
+                "outcome": "submitted",
+            },
+        },
+        {
+            "ts": "2026-09-12T12:00:00Z",
+            "type": "agent_raw_inject",
+            "source": "daemon",
+            "data": {
+                "lane": "control.sock",
+                "target_session": "sess-4242",
+                "payload": "injected by another lane",
+            },
+        },
+    ]
+    events = tmp_path / "events.jsonl"
+    # Compact separators: the real journal is serde_json's compact form, and
+    # the documented pattern matches it with no spaces.
+    events.write_text(
+        "\n".join(json.dumps(row, separators=(",", ":")) for row in rows) + "\n"
+    )
+
+    # The documented query, with the doc's placeholder swapped for the staged
+    # journal and a real worker name for <worker-name-or-id>. The env prefix
+    # rides along because rg honors RIPGREP_CONFIG_PATH, and this machine has
+    # one; without it the row comes back wearing ansi colors and the parse dies.
+    proc = subprocess.run(
+        f"RIPGREP_CONFIG_PATH= rg '\"lane\":\"pane-send\"' {events}"
+        " | RIPGREP_CONFIG_PATH= rg worker-under-test",
+        shell=True,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    hits = [
+        json.loads(line) for line in proc.stdout.splitlines() if line.strip()
+    ]
+    assert len(hits) == 1
+    hit = hits[0]["data"]
+    assert hit["source"] == "mail:msg-beef"
+    assert "x-11ec" in hit["payload"]
+    assert hit["target_fno_id"] == "sess-4242"
