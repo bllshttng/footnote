@@ -100,6 +100,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "scratch",
     "session-start-bytes",
     "spawn",
+    "spawn-gate",
     "spawn-overlay",
     "spawn-axes",
     "fallback-chain",
@@ -444,6 +445,13 @@ async fn run(args: Vec<String>) -> i32 {
     // send one JSON payload and read {status, candidate, chain} back.
     if verb == "route-slot" {
         return fno_agents::route_slot::run_route_slot(&args[1..]);
+    }
+
+    // `spawn-gate`: the ONE spawn gate (see spawn_gate_verb.rs doc). Direct
+    // dispatch; no daemon RPC. The Python transport sends one JSON payload
+    // and reads the admit (with the held claim keys) or the refusal back.
+    if verb == "spawn-gate" {
+        return fno_agents::spawn_gate_verb::run_spawn_gate(&args[1..]);
     }
 
     // `spawn-overlay`: the harness-keyed spawn-defaults resolver (see
