@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from cli.tests._init_space import install_state_path_stub
+from tests._init_space import install_state_path_stub
 
 _REPO_ROOT = Path(__file__).parent.parent.parent.parent
 _INIT_SCRIPT = _REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"

@@ -19,7 +19,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from cli.tests._init_space import install_state_path_stub
+from tests._init_space import install_state_path_stub
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _INIT_SCRIPT = _REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
