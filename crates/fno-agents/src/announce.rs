@@ -179,7 +179,8 @@ fn read_bus_segments(live: &Path) -> Vec<Value> {
 /// Exclusive flock on the Python sidecar lockfile (`messages.jsonl + .lock`),
 /// so the one-line writer serializes against every Python appender.
 struct BusLock {
-    file: File,
+    /// Held for the lock's lifetime; the flock dies with this handle.
+    _file: File,
 }
 
 impl BusLock {
@@ -198,7 +199,7 @@ impl BusLock {
         let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(BusLock { file }),
+                Ok(()) => return Ok(BusLock { _file: file }),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(format!(
@@ -950,7 +951,6 @@ pub(crate) fn run_announce_status(args: &[String], paths: &AnnouncePaths) -> i32
     }
 
     let rows = read_bus_segments(&paths.bus_live);
-    let now = chrono::Utc::now();
     let announcement = rows.iter().find(|m| {
         row_str(m, "kind") == Some(ANNOUNCE_KIND) && row_str(m, "id") == Some(id.as_str())
     });
@@ -1072,7 +1072,10 @@ pub(crate) fn run_announce_status(args: &[String], paths: &AnnouncePaths) -> i32
 // Verb entry
 // ---------------------------------------------------------------------------
 
-pub(crate) fn run_announce(args: &[String]) -> i32 {
+/// Verb entrypoint reached from `bin/client.rs`'s direct dispatch. `pub`, not
+/// `pub(crate)`: a package's bin target sees its own lib as an external crate,
+/// so `pub(crate)` here fails the publish tarball build.
+pub fn run_announce(args: &[String]) -> i32 {
     let Some(sub) = args.first() else {
         eprintln!(
             "usage: fno-agents announce <send|read|status> ...  (one announcement, one bus line)"
