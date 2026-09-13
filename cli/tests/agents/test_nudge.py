@@ -4,7 +4,7 @@ Covers AC3-HP (one-line nudge surfaced), AC3-FR (surfaced once, durable copy
 remains), AC3-EDGE (zero unread no-op; >1 unread surfaces oldest FIFO), and
 AC4-UI (a reply is attributed as such). The bus is seeded directly.
 
-The project broadcast leg is gone (x-8cfb): fleet announcements ride their own
+The project broadcast leg is gone: fleet announcements ride their own
 bus line and the `announce-cursors` store, never the nudge cursor.
 """
 from __future__ import annotations
@@ -132,7 +132,7 @@ def test_by_name_mail_surfaced_once(tmp_path, monkeypatch):
 
 
 def test_announce_line_is_never_a_nudge(tmp_path, monkeypatch):
-    # x-8cfb AC3-ISO: a fleet announcement rides to=fleet:<scope>; no session
+    # AC3-ISO: a fleet announcement rides to=fleet:<scope>; no session
     # handle ever equals it, so the nudge (and every addressed-mail reader)
     # cannot return it.
     use_tmpdir(monkeypatch, tmp_path)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hooks/inject-announce.sh -- fleet announcements at a hook boundary (x-8cfb).
+# hooks/inject-announce.sh -- fleet announcements at a hook boundary.
 #
 # One announcement is ONE kind=announce bus line; every session reads it
 # through its own per-session cursor, so this hook prints once per

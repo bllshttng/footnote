@@ -15,7 +15,7 @@
 //! is intentionally OUTSIDE the historical `loop*` control-plane glob so the
 //! delta stays minimal — `loopcheck.rs` only calls in.
 //!
-//! Fleet announcements (x-8cfb) ride the SAME boundary but read NATIVELY from
+//! Fleet announcements ride the SAME boundary but read NATIVELY from
 //! `announce.rs`: they have their own bus line and cursor, so the addressed-mail
 //! shell-out below stays untouched.
 //!
@@ -36,7 +36,7 @@ pub fn append_inbox_nudge(base: &str, cwd: &Path, session_id: &str) -> String {
     if std::env::var_os("FNO_NUDGE_DISABLED").is_some() {
         return base.to_string();
     }
-    // x-8cfb: the loop boundary is a delivery boundary for fleet
+    // The loop boundary is a delivery boundary for fleet
     // announcements. Native read (own cursor), fail-open.
     let mut out = String::from(base);
     if let Some(paths) = crate::announce::AnnouncePaths::from_env_opt() {

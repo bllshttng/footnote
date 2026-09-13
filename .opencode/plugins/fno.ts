@@ -17,7 +17,7 @@ import { execFile } from "node:child_process"
 import { readFileSync, readdirSync, existsSync } from "node:fs"
 import { join, basename } from "node:path"
 
-// x-8cfb: fleet announcements at the system-prompt boundary. One bus line,
+// Fleet announcements at the system-prompt boundary. One bus line,
 // one per-session cursor; a session that already read the id hears silence.
 // Fail-open: any error or missing binary injects nothing.
 async function injectAnnouncements(

@@ -1,5 +1,5 @@
-//! Fleet announcements: one bus line, every session reads by its own cursor
-//! (x-8cfb).
+//! Fleet announcements: one announcement is one bus line, and every session
+//! reads it by its own cursor.
 //!
 //! `mail team` used to fan out one `dispatch_send` per recipient (37 sends in
 //! 19 minutes at fleet size, no proof anyone read a copy). One announcement is
@@ -122,7 +122,7 @@ fn parse_iso(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|t| t.with_timezone(&chrono::Utc))
 }
 
-/// Parse a `--expires` duration: `45m` / `24h` / `7d` (bare number = hours).
+/// Parse a `--expires` duration: `45m` / `24h` / `7d`.
 fn parse_expires(raw: &str) -> Result<Duration, String> {
     let (num, unit) = raw.split_at(raw.len().saturating_sub(1));
     let mult = match unit {
@@ -331,7 +331,7 @@ fn resolve_audience(
 
 /// Does a registry cwd sit inside project `p`? Cheap path-prefix answer: the
 /// project's slug appears as a path segment of the checkout (e.g.
-/// `.../footnote`, `.../worktrees/footnote/x-8cfb`). Best-effort by design; the
+/// `.../footnote`, `.../worktrees/footnote/<branch>`). Best-effort by design; the
 /// audience is a snapshot, `announce status` reports what actually landed.
 fn cwd_contains_project(cwd: &str, project: &str) -> bool {
     Path::new(cwd)
@@ -1082,7 +1082,7 @@ pub(crate) fn run_announce_status(args: &[String], paths: &AnnouncePaths) -> i32
 pub(crate) fn run_announce(args: &[String]) -> i32 {
     let Some(sub) = args.first() else {
         eprintln!(
-            "usage: fno-agents announce <send|read|status> ...  (one announcement, one bus line - x-8cfb)"
+            "usage: fno-agents announce <send|read|status> ...  (one announcement, one bus line)"
         );
         return 2;
     };

@@ -108,7 +108,7 @@ def peek_nudge(session_id: str, cwd: str) -> Optional[str]:
     Drains the worker's ADDRESSED mail at the loop boundary: direct by-name
     mail to this worker (cv-d54ddd45). The project broadcast leg is gone: the
     fleet announcement rides its own bus line and cursor (`fno-agents announce
-    read`, x-8cfb), which the loop boundary calls natively. Side effect:
+    read`), which the loop boundary calls natively. Side effect:
     records the surfaced message id in the per-session cursor so it is not
     surfaced again (US3/AC3-FR). Fail-open: returns None on any error so the
     loop-check that shells out to us is never broken by inbox state.

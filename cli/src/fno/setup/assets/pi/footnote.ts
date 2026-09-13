@@ -94,7 +94,7 @@ export default function (pi: {
   // already bound a stuck session; this just prevents concurrent fires.
   let busy = false
 
-  // x-8cfb: fleet announcements at the pre-turn boundary.
+  // Fleet announcements at the pre-turn boundary.
   // `before_agent_start` fires after a prompt and before the agent loop, and
   // its returned `message` is injected into the session and sent to the LLM -
   // the one pi event that delivers text at a real boundary. One announcement

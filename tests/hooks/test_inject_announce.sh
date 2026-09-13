@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_inject_announce.sh
 #
-# Contract for the fleet-announcement boundary hook (x-8cfb): relays the
+# Contract for the fleet-announcement boundary hook: relays the
 # reader's render once, stays silent when the reader is silent (the real
 # reader's cursor makes the second boundary silent), fails open on a failing
 # or missing binary, parses the session id from the hook stdin JSON, and maps

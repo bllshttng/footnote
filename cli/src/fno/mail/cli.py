@@ -4340,7 +4340,7 @@ def cmd_team(
     urgent: bool = typer.Option(False, "--urgent", help="Mark the announcement urgent."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Send receipt as JSON."),
 ) -> None:
-    """Announce one body to a fleet scope as ONE bus line (x-8cfb).
+    """Announce one body to a fleet scope as ONE bus line.
 
     The bus line IS the announcement: every session reads it through its own
     cursor at its next hook boundary, so a send costs one write at any fleet

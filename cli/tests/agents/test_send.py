@@ -3171,7 +3171,7 @@ def test_lock_timeout_queue_keeps_a_bus_only_row_on_its_designed_lane(
 
 
 # ---------------------------------------------------------------------------
-# AC2: `mail team` is the one writer's shim (x-8cfb)
+# AC2: `mail team` is the one writer's shim
 # ---------------------------------------------------------------------------
 
 def _team_invoke(monkeypatch, args: list[str]):

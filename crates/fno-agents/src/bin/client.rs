@@ -390,7 +390,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::fleet_incident::run_fleet_incident(&args[1..]);
     }
 
-    // `announce`: fleet announcements (x-8cfb, see announce.rs doc). Direct
+    // `announce`: fleet announcements (see announce.rs doc). Direct
     // dispatch; no daemon RPC - a send is one locked bus append, a read is a
     // scan + cursor write, and both must work when the daemon is wedged.
     if verb == "announce" {
