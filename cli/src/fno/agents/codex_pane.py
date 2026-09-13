@@ -93,7 +93,7 @@ def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     return ["-c", f"shell_environment_policy.set={json.dumps(table)}"]
 
 
-_CODEX_DAEMON_PROBE_INTERVAL_S  # a websocket round trip; rate-limit it = 2.0
+_CODEX_DAEMON_PROBE_INTERVAL_S = 2.0  # a websocket round trip; rate-limit it
 
 
 def _codex_session_ids_loaded(
