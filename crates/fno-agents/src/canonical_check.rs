@@ -9,7 +9,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-use crate::daemon::output_with_timeout;
+use crate::bounded_cmd::output_with_timeout;
 
 const FETCH_TIMEOUT_SECS: u64 = 30;
 const PROBE_TIMEOUT_SECS: u64 = 10;
