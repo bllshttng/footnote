@@ -107,6 +107,25 @@ def test_join_outside_enum_refuses_naming_field():
     assert "manual, auto" in msg, msg
 
 
+def test_carveouts_absent_reads_none():
+    """Absence means allowed: every plan on disk omits the key, so the
+    fidelity gate must see no declaration and change nothing."""
+    assert PlanFrontmatter.model_validate(_fm()).carveouts is None
+
+
+def test_carveouts_forbidden_is_normalized():
+    m = PlanFrontmatter.model_validate(_fm(carveouts="Forbidden"))
+    assert m.carveouts == "forbidden"
+
+
+def test_carveouts_outside_enum_refuses_naming_field():
+    """AC3-ERR: a typo such as `forbiden` must not pass as allowed."""
+    with pytest.raises(ValidationError) as exc:
+        PlanFrontmatter.model_validate(_fm(carveouts="sometimes"))
+    msg = str(exc.value)
+    assert "carveouts must be one of: allowed, forbidden" in msg, msg
+
+
 def test_retired_orchestration_spelling_is_gone():
     """The rename landed while adoption was one plan, so no migration path
     exists and none is owed: the old key must not survive as a silent

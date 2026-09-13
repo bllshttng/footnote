@@ -257,7 +257,7 @@ def fidelity(
 
 
 def _render_fidelity(decision: dict) -> None:
-    out = sys.stdout.write
+    out = (sys.stderr if decision.get("refused") else sys.stdout).write
     if decision.get("refused"):
         out(f"REFUSED: {decision.get('reason', 'uncovered shortfall')}\n")
     else:

@@ -60,6 +60,7 @@ class TestBlueprintWriteAllowlist:
                 "consolidation",
                 "difficulty",
                 "join",
+                "carveouts",
             }
         )
 

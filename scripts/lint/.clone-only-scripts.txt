@@ -64,3 +64,9 @@ scripts/lint-flock-pattern.sh :: lint flock-pattern
 # meaningful in a clone.
 scripts/ci/check-retired-command-strings.sh :: lint retired-commands
 scripts/ci/check-preamble-budget.sh :: lint preamble-budget
+
+# fno do plan fidelity - a plan with `carveouts: forbidden` runs the PR body through
+# the one body parser. The probe verb refuses on its missing plan. The absent-script
+# refusal ("carve-out check unreadable") is proven by a unit test in
+# cli/tests/scoreboard/test_plan_fidelity.py.
+scripts/ci/check-oos-tracked.sh :: plan fidelity drift-probe.md
