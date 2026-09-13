@@ -233,12 +233,19 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
 }
 
 fn run_finalize(env: &Env, reason: &str) -> std::process::Output {
+    run_finalize_in(env, &env.cwd, reason)
+}
+
+/// Same env as `run_finalize`, but finalize's cwd is named by the caller
+/// (x-a150: the WIP-rescue tests target a linked worktree, not the fixture
+/// root).
+fn run_finalize_in(env: &Env, cwd: &Path, reason: &str) -> std::process::Output {
     Command::new(BIN)
         .arg("finalize")
         .arg("--state")
         .arg(&env.state)
         .arg("--cwd")
-        .arg(&env.cwd)
+        .arg(cwd)
         .arg("--reason")
         .arg(reason)
         .arg("--events")
@@ -265,7 +272,7 @@ fn run_finalize(env: &Env, reason: &str) -> std::process::Output {
             ),
         )
         .env("GH_CALLS_LOG", &env.gh_calls)
-        .current_dir(&env.cwd)
+        .current_dir(cwd)
         .output()
         .expect("run finalize")
 }
@@ -1912,6 +1919,9 @@ fn finalize_never_arms_auto_merge_on_a_non_green_terminal() {
 /// after `finalize` runs, not merely that some function returned a sha.
 #[test]
 fn finalize_wip_commits_a_dirty_worktree_at_any_terminal() {
+    // Runs in a LINKED worktree on a feature branch (x-a150): a bare `git
+    // init` dir is its own canonical checkout on the default branch, where a
+    // rescue must never move the branch (its own test below).
     let env = setup("S-wip", false);
     let git = |args: &[&str]| {
         Command::new("git")
@@ -1936,17 +1946,19 @@ fn finalize_wip_commits_a_dirty_worktree_at_any_terminal() {
     fs::write(env.cwd.join("committed.txt"), "base").unwrap();
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "base"]);
-    // Dirty the tree exactly like a killed worker would: a modification plus
-    // a brand-new untracked file.
-    fs::write(env.cwd.join("committed.txt"), "changed mid-flight").unwrap();
-    fs::write(env.cwd.join("in_flight.txt"), "950 insertions worth").unwrap();
+    let wt = env.cwd.join("wt");
+    git(&["worktree", "add", "-q", "-b", "feature/x", "wt"]);
+    // Dirty the worktree exactly like a killed worker would: a modification
+    // plus a brand-new untracked file.
+    fs::write(wt.join("committed.txt"), "changed mid-flight").unwrap();
+    fs::write(wt.join("in_flight.txt"), "950 insertions worth").unwrap();
 
-    let out = run_finalize(&env, "NoProgress");
+    let out = run_finalize_in(&env, &wt, "NoProgress");
     assert!(out.status.success(), "{out:?}");
 
     let status = Command::new("git")
         .args(["status", "--porcelain"])
-        .current_dir(&env.cwd)
+        .current_dir(&wt)
         .output()
         .unwrap();
     assert!(
@@ -1956,13 +1968,94 @@ fn finalize_wip_commits_a_dirty_worktree_at_any_terminal() {
     );
     let log = Command::new("git")
         .args(["log", "-1", "--format=%s"])
-        .current_dir(&env.cwd)
+        .current_dir(&wt)
         .output()
         .unwrap();
     let subject = String::from_utf8_lossy(&log.stdout);
     assert!(
         subject.contains("WIP") && subject.contains("NoProgress"),
         "{subject}"
+    );
+}
+
+#[test]
+fn finalize_rescues_a_canonical_default_branch_to_a_wip_branch() {
+    // x-a150: a session terminating at the canonical checkout (any plain
+    // `git init` dir is its own canonical) must not move the default branch;
+    // the work goes to a `wip/` branch and the tree stays untouched.
+    let env = setup("S-wipcanon", false);
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&env.cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap()
+    };
+    git(&["init", "-q", "."]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    fs::write(
+        env.cwd.join(".gitignore"),
+        ".fno/\ncalls.log\ngh-calls.log\n",
+    )
+    .unwrap();
+    fs::write(env.cwd.join("committed.txt"), "base").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let before = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&env.cwd)
+        .output()
+        .unwrap();
+    let before = String::from_utf8_lossy(&before.stdout).trim().to_string();
+    fs::write(env.cwd.join("committed.txt"), "changed mid-flight").unwrap();
+    fs::write(env.cwd.join("in_flight.txt"), "950 insertions worth").unwrap();
+
+    let out = run_finalize(&env, "NoProgress");
+    assert!(out.status.success(), "{out:?}");
+
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&env.cwd)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        before,
+        "the default branch must not move"
+    );
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&env.cwd)
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status.contains("in_flight.txt"),
+        "the working tree stays untouched: {status}"
+    );
+    let branches = Command::new("git")
+        .args(["branch", "--list", "wip/*"])
+        .current_dir(&env.cwd)
+        .output()
+        .unwrap();
+    let branches = String::from_utf8_lossy(&branches.stdout);
+    assert!(branches.contains("wip/"), "a wip branch exists: {branches}");
+    let name = branches
+        .lines()
+        .next()
+        .unwrap()
+        .trim()
+        .trim_start_matches("* ");
+    let stat = Command::new("git")
+        .args(["show", "--stat", name])
+        .current_dir(&env.cwd)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&stat.stdout).contains("in_flight.txt"),
+        "the wip branch holds the rescued work"
     );
 }
 
