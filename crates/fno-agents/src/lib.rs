@@ -155,6 +155,7 @@ pub mod paths;
 pub mod pi;
 pub mod plugin_install;
 pub mod protocol;
+pub mod prove_it_verdicts;
 pub mod provider;
 pub mod publish_review;
 pub mod readiness;

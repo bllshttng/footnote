@@ -31,15 +31,15 @@ Delivery takes exactly one path: a live transport or the durable queue. The bus 
 
 ## The `<fno_mail>` envelope
 
-The wire format is locked in Rust (`crates/fno-agents/src/claude_drive.rs`) and rendered once in Python (`cli/src/fno/mail/envelope.py`); `test_fno_mail_envelope.py` pins the Python renderer to the Rust bytes so the two never drift.
+The wire format is rendered once in Python. `cli/src/fno/mail/envelope.py` is the sole renderer. The Rust mirror in `claude_drive.rs` was deleted as dead code once the live inject path moved to the bracketed-paste transport. The Rust injection door only validates trailers against constants pinned to this Python source. `test_fno_mail_envelope.py` pins the renderer's own output contract.
 
 ```
-<fno_mail from="<short-sid>" harness="<harness>" model="<model>"[ node="<id>"][ to="<short-sid>"]>
+<fno_mail from="<short-sid>" id="<msg-id>"[ reply_to="<msg-id>"][ node="<id>"][ to="<short-sid>"][ from_session="<full-sid>"][ origin="<origin>"]>
 message text
 </fno_mail>
 ```
 
-`from` is the sender's short 8-hex sessionId. `harness_for_provider` maps the provider to the reply vocabulary. Claude becomes `claude-code`, while Codex and Gemini keep their names. A missing or blank sender harness renders as the explicit `unknown` marker, never a vendor name. Render-time code never infers a harness from the model or any other axis. The model is a separate axis and stays independently honest. `node` and `to` are optional.
+The first two attributes read as the compact mention `@from/id`. `from` is the sender's short 8-hex sessionId. `id` is the load-bearing field (`reply --to`, drain dedup, `reply_to` threading). Non-peer origins render `origin="..."` as the last attribute. An absent origin reads as peer on both the Python and Rust doors. `harness` and `model` render nowhere: nothing parses them, and the bus record keeps both for audit.
 
 The delivered turn records itself in the recipient transcript. The hosted audit row adds provider-neutral sender history without creating pending mail.
 
@@ -114,7 +114,7 @@ The crash window is closed for asleep recipients (W3).
 
 ## The relay variant
 
-The cross-session relay PTY hop (`cli/src/fno/relay/envelope.py`) frames provenance on the same `<fno_mail>` tag, but as the SINGLE-LINE, no-close transport variant: `<fno_mail from="..." harness="..."[ model="..."]> <one-line body>`. It cannot carry the paired multiline form because the PTY Enter submits on newline. It shares the tag name and `harness` vocabulary so `grep <fno_mail>` reconstructs relay hops too.
+The cross-session relay PTY hop (`cli/src/fno/relay/envelope.py`) frames provenance on the same `<fno_mail>` tag, but as the SINGLE-LINE, no-close transport variant: `<fno_mail from="..."> <one-line body>`. It cannot carry the paired multiline form because the PTY Enter submits on newline. It shares the tag name so `grep <fno_mail>` reconstructs relay hops too. The line is built by the same sole renderer as the paired form.
 
 ### Cross-harness hop (G4)
 

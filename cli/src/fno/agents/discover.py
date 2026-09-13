@@ -45,11 +45,25 @@ from fno.agents.reachability import (
     registry_falsifier,
 )
 from fno.harness_identity import (
-    canonical_handle,
     session_handle_tier,
     session_identity_key,
 )
 from fno.time_budget import validate_timeout_budget
+
+
+def canonical_handle(session_id: str) -> str:
+    """Lazy delegate to ``fno.harness_identity.canonical_handle``.
+
+    Imported per call, never bound at module import: a test monkeypatching
+    ``harness_identity.canonical_handle`` poisons every module that from-imported
+    the name while the patch was live, and monkeypatch's teardown only reverts
+    the attribute on ``fno.harness_identity`` -- the same regression
+    ``fno.mail.reply_resolve`` documented for ``resolve_harness_identity``.
+    """
+    from fno.harness_identity import canonical_handle as _impl
+
+    return _impl(session_id)
+
 
 # A real per-session registry file is named ``<pid>.json``. The strict guard
 # is load-bearing: a 7000+ entry sessions dir holds ``.sync-conflict-*.json``

@@ -17,7 +17,7 @@ use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use fno_agents::spawn_gate::machine_reading_notes;
-use fno_agents::usage::{verb_usage, CLIENT_VERB_USAGE};
+use fno_agents::usage::{verb_help, verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 
@@ -70,6 +70,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ping",
     "pr-heal",
     "probe-run",
+    "prove-it-verdicts",
     "test-run",
     "promote",
     "publish-review",
@@ -310,6 +311,12 @@ async fn run(args: Vec<String>) -> i32 {
     // stops at an `--argv`/`--` boundary so a `--help` inside a spawn/host argv
     // payload reaches the spawned command instead of being captured here.
     if is_help_request(&args[1..]) {
+        // A verb with a full help body owns its --help; the one-line table
+        // entry stays for the top-level list.
+        if let Some(body) = verb_help(verb) {
+            println!("{body}");
+            return 0;
+        }
         if let Some(usage) = verb_usage(verb) {
             println!("usage: fno-agents {usage}");
             return 0;
@@ -353,6 +360,13 @@ async fn run(args: Vec<String>) -> i32 {
     // `probe-run`: see its own doc in acceptance_evidence.rs. Direct dispatch.
     if verb == "probe-run" {
         return fno_agents::acceptance_evidence::run_probe_run(&args[1..]);
+    }
+
+    // `prove-it-verdicts`: the one reader for terminal prove-it records
+    // (x-6d64, see its own doc in prove_it_verdicts.rs). Direct dispatch; no
+    // daemon RPC - a verdict read walks the graph and plan artifacts files.
+    if verb == "prove-it-verdicts" {
+        return fno_agents::prove_it_verdicts::run_prove_it_verdicts(&args[1..]);
     }
 
     // `test-run`: the native process-group owner behind `fno doctor test`

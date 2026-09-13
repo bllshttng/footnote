@@ -40,8 +40,6 @@ from typing import Mapping, Optional
 ENV_SEED_B64 = "FNO_SEED_PROV_SEED_B64"
 ENV_FROM = "FNO_SEED_PROV_FROM"
 ENV_FROM_SESSION = "FNO_SEED_PROV_FROM_SESSION"
-ENV_HARNESS = "FNO_SEED_PROV_HARNESS"
-ENV_MODEL = "FNO_SEED_PROV_MODEL"
 ENV_NODE = "FNO_SEED_PROV_NODE"
 ENV_MSG_ID = "FNO_SEED_PROV_MSG_ID"
 
@@ -53,8 +51,6 @@ SEED_PROVENANCE_KEYS: tuple[str, ...] = (
     ENV_SEED_B64,
     ENV_FROM,
     ENV_FROM_SESSION,
-    ENV_HARNESS,
-    ENV_MODEL,
     ENV_NODE,
     ENV_MSG_ID,
 )
@@ -91,12 +87,10 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
     sidecar or none, and it has no stake in the work being launched.
     """
     from fno.agents.self_stamp import (
-        resolve_self_model,
         resolve_self_session_id,
         stamp_from,
     )
-    from fno.dispatch_flags import infer_invoking_harness
-    from fno.mail.envelope import contains_fno_mail_tag, harness_for_provider
+    from fno.mail.envelope import contains_fno_mail_tag
 
     # A seed carrying an envelope gets NO sidecar, and still launches.
     #
@@ -131,15 +125,10 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
 
     from fno.inbox.store import generate_msg_id
 
-    sender_harness = infer_invoking_harness()
     env = {
         ENV_SEED_B64: base64.b64encode(raw).decode("ascii"),
         ENV_FROM: stamp_from(None),
         ENV_FROM_SESSION: from_session,
-        ENV_HARNESS: (
-            harness_for_provider(sender_harness) if sender_harness else "cli"
-        ),
-        ENV_MODEL: resolve_self_model(),
         ENV_MSG_ID: generate_msg_id(),
     }
     if node:
@@ -187,8 +176,6 @@ def render_from_env(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
         return wrap_fno_mail(
             body,
             from_=(env.get(ENV_FROM) or "").strip() or "fno",
-            harness=(env.get(ENV_HARNESS) or "").strip() or "cli",
-            model=(env.get(ENV_MODEL) or "").strip() or "unknown",
             node=(env.get(ENV_NODE) or "").strip() or None,
             id=(env.get(ENV_MSG_ID) or "").strip() or None,
             from_session=from_session,

@@ -922,6 +922,15 @@ def _close_probe_runner_shellout(
     return (False, reason)
 
 
+def _verdict_reader_shellout(plan_path: str) -> "dict[str, Any]":
+    """Default ``verdict_reader``: one round-trip with ``fno-agents
+    prove-it-verdicts``; a ``VerbUnavailable`` degrades to a warning, the
+    same posture a plan read failure takes."""
+    from fno.rust_binary import verb_call
+
+    return verb_call("prove-it-verdicts", {})
+
+
 def resolve_promise_evidence(
     node: dict,
     *,
@@ -930,6 +939,7 @@ def resolve_promise_evidence(
     probe_runner: Optional[Callable[[str, Optional[str]], tuple[bool, str]]] = None,
     extra_refs: Optional[list[tuple[int, Optional[str]]]] = None,
     carveout_reader: Optional[Callable[[Optional[str]], "list[dict]"]] = None,
+    verdict_reader: Optional[Callable[[str], "dict[str, Any]"]] = None,
 ) -> PromiseVerdict:
     """Decide whether a node's plan promised work that has not all shipped.
 
@@ -1001,6 +1011,32 @@ def resolve_promise_evidence(
     expected = expected_raw if isinstance(expected_raw, int) else None
     node_id = node.get("id", "(unknown)")
     plan_display = node.get("plan_path", plan_path_clean)
+
+    # Condition E (x-6d64): an open prove-it FAIL on this node's own plan
+    # artifacts is claimed work whose outcome did not hold; it needs no
+    # declaration. A done node is never reopened; a failed reader is a warning.
+    if node_id:
+        try:
+            payload = (verdict_reader or _verdict_reader_shellout)(plan_path_clean)
+        except Exception as exc:  # noqa: BLE001 - a failed read must not block a close
+            return PromiseVerdict(
+                outcome="ok",
+                warning=f"prove-it verdict read failed ({exc}); gate skipped for this close",
+            )
+        fail_rows = [
+            r for r in (payload.get("rows") or [])
+            if isinstance(r, dict) and r.get("node") == node_id and r.get("open")
+        ]
+        if fail_rows:
+            row = fail_rows[0]
+            return PromiseVerdict(
+                outcome="promise_unmet",
+                reason=(
+                    f"{node_id}: prove-it FAIL on its own plan artifacts "
+                    f"({row.get('report')}): {row.get('claim')}. Fix and re-run prove-it, "
+                    f"rule with fno inbox decide, or close with --force --reason."
+                ),
+            )
 
     # The gate fires ONLY on an explicit declaration. A plan that declares
     # neither close_probes nor expected_url_count closes exactly as it does

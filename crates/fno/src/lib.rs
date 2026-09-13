@@ -32,6 +32,7 @@ pub mod pane_argv;
 pub mod pane_cwd;
 pub mod popup;
 pub mod process_admission;
+pub mod product_boundary;
 pub mod proto;
 pub mod proto_slot;
 pub mod pty;

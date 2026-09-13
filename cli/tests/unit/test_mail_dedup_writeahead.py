@@ -271,8 +271,6 @@ def test_live_recipient_hosted_writes_audit_only_outbox_row(
             wrap_fno_mail(
                 body,
                 from_=mail.from_,
-                harness=mail.harness,
-                model=mail.model,
                 node=mail.node,
                 to=mail.to,
                 id=mail.id,

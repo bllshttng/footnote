@@ -110,7 +110,8 @@ def test_json_rows_carry_the_staleness_facts(tmp_path, monkeypatch):
     assert rows[0]["file"] == "aa11.json"
     assert rows[0]["provider"] == "zai"
     assert rows[0]["haiku"] == "glm-4.5-air"
-    assert rows[0]["stale"] == "glm-4.5-air -> glm-4.7"
+    # x-f173: the marker names the tier that moved, not just the values.
+    assert rows[0]["stale"] == "haiku glm-4.5-air -> glm-4.7"
     assert rows[0]["referenced"] == "no"
 
 

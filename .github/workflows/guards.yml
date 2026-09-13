@@ -114,6 +114,19 @@ jobs:
           bash tests/ci/test_seam_crossings.sh
           (cd cli && uv run fno-py doctor lint seam-crossings)
 
+      # Flag + env-var registries (x-72fc): the flag surface is shrink-only
+      # (new flags are Rust/clap work), every env var read carries a doc row.
+      # Selftest first, so the checks are positive-controlled before trusted.
+      - name: Flag and env registry ratchets (selftest, then check)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check_flag_registry.py --selftest
+          python3 scripts/ci/check_flag_registry.py
+          python3 scripts/ci/check_env_registry.py --selftest
+          python3 scripts/ci/check_env_registry.py
+
   # PR-only: every member here originally triggered on `pull_request` alone
   # (no `push`), several because they read PR-only context (PR_BODY,
   # BASE_REF, PR_TITLE, PR_BASE_SHA/PR_HEAD_SHA) that does not exist on a push

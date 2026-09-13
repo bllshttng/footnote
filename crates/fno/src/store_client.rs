@@ -73,7 +73,7 @@ fn absolute_lexical(graph: &Path) -> PathBuf {
     abs
 }
 
-fn worker_binary() -> Option<PathBuf> {
+pub(crate) fn worker_binary() -> Option<PathBuf> {
     if let Ok(v) = std::env::var("FNO_AGENTS_WORKER") {
         let p = PathBuf::from(v);
         if p.is_file() {
@@ -95,16 +95,11 @@ fn worker_binary() -> Option<PathBuf> {
 }
 
 fn which_worker() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("fno-agents-worker"))
-        .find(|p| p.is_file())
+    crate::product_boundary::find_on_path("fno-agents-worker")
 }
 
 fn spawn_keeper(graph: &Path) -> Result<(), String> {
-    let binary = worker_binary().ok_or_else(|| {
-        "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)".to_string()
-    })?;
+    let binary = worker_binary().ok_or_else(crate::product_boundary::graph_worker_missing_error)?;
     let sock = store_socket_for(graph);
     let session = format!("mux-{}", std::process::id());
     std::process::Command::new(&binary)
@@ -121,7 +116,7 @@ fn spawn_keeper(graph: &Path) -> Result<(), String> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| format!("cannot spawn store keeper: {e}"))?;
+        .map_err(|e| crate::product_boundary::graph_worker_spawn_error(&binary, e))?;
     Ok(())
 }
 
