@@ -1223,42 +1223,15 @@ fn resolve_slot_walk(payload: &Value) -> Value {
     }
 
     chain.extend(prefix);
-    if lanes_arr.is_empty() {
-        // A lane-less verb grids instead: the model axis reads occupied there
-        // and the grid stands down; an explicit model pin never reaches the
-        // lanes here, so the grid's own occupied flag governs. Strict routing
-        // has no grid: an empty effective slot is the named refusal.
-        if strict_ctx.is_some() {
-            chain.push(json!(format!(
-                "slot=strict-refusal slot {rung_base} declares no lanes; strict routing refuses the harness default"
-            )));
-            return refused_decision(
-                chain,
-                "policy-no-declared-slot",
-                "the effective work-kind slot declares no lanes",
-            );
-        }
-        chain.push(json!(format!(
-            "slot {rung_base} has no lanes; grid over inventory"
-        )));
-        if payload
-            .get("model_occupied")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            chain.push(json!("grid=model-axis-occupied"));
-            return none(chain);
-        }
-        return grid_leg(&payload, &rung_base, &mut chain);
-    }
 
     // A typed model/vendor/route flag is an operator pin (operator authority)
     // and outranks the lanes under both grid and strict routing: it never
-    // borrows a lane's harness or capacity, and it returns before the strict
-    // membership walk and the operator_access filter inside it. Config
-    // defaults do NOT outrank lanes; only a typed flag does, because these
-    // value fields are argv-only facts (spawn_defaults.py never sets them
-    // from config injection).
+    // borrows a lane's harness or capacity. The check sits before the
+    // empty-slot refusal so a pin on a laneless verb lands instead of
+    // refusing - the refusal's "harness default" text would be false when a
+    // typed flag already occupies the axis. Config defaults do NOT outrank
+    // lanes; only a typed flag does, because these value fields are argv-only
+    // facts (spawn_defaults.py never sets them from config injection).
     let explicit_model_name = payload
         .get("explicit_model_value")
         .and_then(Value::as_str)
@@ -1285,6 +1258,36 @@ fn resolve_slot_walk(payload: &Value) -> Value {
             "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"
         ));
         return none(chain);
+    }
+
+    if lanes_arr.is_empty() {
+        // A lane-less verb grids instead. An explicit pin never reaches this
+        // branch (the operator-pin check above returns first), so the grid's
+        // own model-axis occupied flag governs. Strict routing has no grid:
+        // an empty effective slot is the named refusal, and the text names
+        // the slot's own table and the pin as the remedy.
+        if strict_ctx.is_some() {
+            chain.push(json!(format!(
+                "slot=strict-refusal slot {rung_base} declares no lanes; strict routing refuses the harness default; declare {rung_base}.lanes or type --model, -P or --route to pin"
+            )));
+            return refused_decision(
+                chain,
+                "policy-no-declared-slot",
+                "the effective work-kind slot declares no lanes",
+            );
+        }
+        chain.push(json!(format!(
+            "slot {rung_base} has no lanes; grid over inventory"
+        )));
+        if payload
+            .get("model_occupied")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            chain.push(json!("grid=model-axis-occupied"));
+            return none(chain);
+        }
+        return grid_leg(&payload, &rung_base, &mut chain);
     }
     chain.push(json!(format!(
         "slot {rung_base} lanes walked in declared order"
@@ -1358,119 +1361,6 @@ fn resolve_slot_walk(payload: &Value) -> Value {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-
-    // Strict: an explicit coordinate is a CONSTRAINT on the slot's membership,
-    // never a bypass. The walk keeps only the lanes naming that exact
-    // coordinate; a coordinate no row names is the named refusal.
-    let mut plan = plan;
-    if strict_ctx.is_some() {
-        let explicit_model_name = payload
-            .get("explicit_model_value")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let explicit_route_name = payload
-            .get("explicit_route_value")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let explicit_vendor_name = payload
-            .get("explicit_vendor_value")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        if let Some(v) = &explicit_vendor_name {
-            // The vendor pin bills whoever it names, so only a row whose
-            // route names that same vendor may satisfy it; a row with no
-            // vendor route is the native coordinate, never the pin's.
-            let vendor_of = |r: Option<&Value>| -> String {
-                r.map(|row| row_value(row, "route"))
-                    .unwrap_or_default()
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .split('/')
-                    .next()
-                    .unwrap_or("")
-                    .to_string()
-            };
-            let member = plan
-                .iter()
-                .any(|(_, rn)| vendor_of(rows.get(rn)).as_str() == v.as_str());
-            if !member {
-                chain.push(json!(format!(
-                    "slot=strict-refusal explicit vendor {v:?} is not in slot {rung_base}'s declared lanes"
-                )));
-                return refused_decision(
-                    chain,
-                    "policy-coordinate-not-in-slot",
-                    "the explicit vendor is not in the effective slot's declared lanes",
-                );
-            }
-        }
-        if let Some(m) = &explicit_model_name {
-            let member = plan.iter().any(|(_, rn)| {
-                rows.get(rn).map(|r| row_value(r, "model")).as_deref() == Some(m.as_str())
-            });
-            if !member {
-                chain.push(json!(format!(
-                    "slot=strict-refusal explicit model {m:?} is not in slot {rung_base}'s declared lanes"
-                )));
-                return refused_decision(
-                    chain,
-                    "policy-coordinate-not-in-slot",
-                    "the explicit model is not in the effective slot's declared lanes",
-                );
-            }
-        }
-        if let Some(rt) = &explicit_route_name {
-            let member = plan.iter().any(|(_, rn)| {
-                rows.get(rn).map(|r| row_value(r, "route")).as_deref() == Some(rt.as_str())
-            });
-            if !member {
-                chain.push(json!(format!(
-                    "slot=strict-refusal explicit route {rt:?} is not in slot {rung_base}'s declared lanes"
-                )));
-                return refused_decision(
-                    chain,
-                    "policy-coordinate-not-in-slot",
-                    "the explicit route is not in the effective slot's declared lanes",
-                );
-            }
-        }
-        if explicit_model_name.is_some()
-            || explicit_route_name.is_some()
-            || explicit_vendor_name.is_some()
-        {
-            let vendor_of = |r: Option<&Value>| -> String {
-                r.map(|row| row_value(row, "route"))
-                    .unwrap_or_default()
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .split('/')
-                    .next()
-                    .unwrap_or("")
-                    .to_string()
-            };
-            plan.retain(|(_, rn)| {
-                let r = rows.get(rn);
-                let model_ok = explicit_model_name
-                    .as_ref()
-                    .map(|m| r.map(|row| row_value(row, "model")).as_deref() == Some(m.as_str()));
-                let route_ok = explicit_route_name
-                    .as_ref()
-                    .map(|rt| r.map(|row| row_value(row, "route")).as_deref() == Some(rt.as_str()));
-                let vendor_ok = explicit_vendor_name
-                    .as_ref()
-                    .map(|v| vendor_of(r).as_str() == v.as_str());
-                model_ok.unwrap_or(true) && route_ok.unwrap_or(true) && vendor_ok.unwrap_or(true)
-            });
-        }
-    }
 
     let mut demoted: Vec<(usize, String, String, String, String)> = Vec::new();
     let mut identity_skips: Vec<String> = Vec::new();
@@ -3672,9 +3562,28 @@ mod tests {
         })));
         assert_eq!(out["status"], "none");
         assert_eq!(out["refusal"], "policy-no-declared-slot");
-        assert!(chain_of(&out)
+        let chain = chain_of(&out);
+        assert!(chain
             .iter()
             .any(|l| l.contains("strict routing refuses the harness default")));
+        assert!(chain.iter().any(|l| l.contains("type --model")));
+    }
+
+    #[test]
+    fn strict_operator_pin_outranks_a_slot_with_no_lanes() {
+        // A typed model on a verb no slot row declares is the operator's own
+        // pin: it lands instead of refusing, and the refusal text never fires.
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "work_verb": "reign",
+            "explicit_model_value": "gpt-6-astra",
+        })));
+        assert_eq!(out["status"], "none");
+        assert!(out["refusal"].is_null());
+        let chain = chain_of(&out);
+        assert!(chain
+            .iter()
+            .any(|l| l.contains("slot=operator-pin-override")));
+        assert!(!chain.iter().any(|l| l.contains("declares no lanes")));
     }
 
     #[test]
