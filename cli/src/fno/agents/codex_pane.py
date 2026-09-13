@@ -18,7 +18,6 @@ from fno.agents.dispatch import DispatchAskError
 
 _CODEX_DAEMON_START_TIMEOUT_S = 15  # `daemon start` no-ops when running.
 
-#: A dotted or quoted key is a table path in TOML, not one leaf.
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -94,8 +93,7 @@ def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     return ["-c", f"shell_environment_policy.set={json.dumps(table)}"]
 
 
-#: Rate-limit for the daemon oracle (a websocket round trip).
-_CODEX_DAEMON_PROBE_INTERVAL_S = 2.0
+_CODEX_DAEMON_PROBE_INTERVAL_S  # a websocket round trip; rate-limit it = 2.0
 
 
 def _codex_session_ids_loaded(
