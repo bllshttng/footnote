@@ -137,12 +137,7 @@ def _receipt(stdout: str) -> Optional[dict]:
 
 
 def _write_state(
-    node_id: str,
-    text: str,
-    *,
-    quiet: bool,
-    session_id: Optional[str],
-    graph_path,
+    node_id: str, text: str, *, quiet: bool, session_id: Optional[str], graph_path
 ) -> "tuple[int, Optional[dict]]":
     """One native `backlog-note` invocation. Returns `(exit, receipt)`; the
     receipt is parsed from the child's stdout when the exit is 0."""
@@ -152,18 +147,11 @@ def _write_state(
     if binary is None:
         typer.echo("Error: the fno-agents binary is required for `fno backlog note`", err=True)
         raise typer.Exit(code=1)
-    argv = [
-        str(binary),
-        "backlog-note",
-        "--graph",
-        str(graph_path),
-        "--stdin",
-        "--json",
-        "--node",
-        node_id,
-    ]
+    argv = [str(binary), "backlog-note", "--graph", str(graph_path), "--stdin",
+            "--json", "--node", node_id]
     if session_id:
-        argv.extend(["--self-session", session_id])
+        argv.append("--self-session")
+        argv.append(session_id)
     if quiet:
         argv.append("--quiet")
     proc = subprocess.run(argv, input=text, text=True, check=False, capture_output=True)
