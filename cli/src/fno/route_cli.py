@@ -421,6 +421,48 @@ def _echo_slots(slots: list[dict]) -> None:
             typer.echo(f"    {reason}")
 
 
+@route_app.command("admission")
+def admission_cmd(
+    # Positionals, not options: the Python flag surface is ratchet-frozen
+    # (scripts/ci/flag-baseline.txt); a new flag belongs in crates.
+    verb: str = typer.Argument("do", help="The work verb to price."),
+    difficulty: str = typer.Argument("high", help="The difficulty band to price."),
+) -> None:
+    """Preview shared-account capacity admission per declared record (x-1afa).
+
+    PURE READ: never reserves; the word ``preview`` marks every row as
+    distinct from an actual launch-seam receipt.
+    """
+    from fno.adapters.providers import runtime_state as rs
+    from fno.adapters.providers.loader import load_providers
+    from fno.config.routing_blocks import resolve_admission_policy
+
+    policy = resolve_admission_policy()
+    if policy is None:
+        typer.echo(
+            "admission: off (config.routing.admission.enabled is false); "
+            "rows below are the unarmed preview"
+        )
+    typer.echo(
+        f"admission: preview (no reservation consumed) verb={verb} "
+        f"difficulty={difficulty} units=subscription-percent"
+    )
+    for record in load_providers().records:
+        # The receipt carries the pool and the pool's load; the row never
+        # re-probes the identity or re-reads the state doc. .get, because a
+        # missing binary degrades to a short answer that still renders.
+        receipt = rs.preview_admission(record, verb=verb, difficulty=difficulty, policy=policy)
+        line = (
+            f"  {record.id}: {receipt.get('status')} pool={receipt.get('pool')} "
+            f"remaining={receipt.get('remaining_admission_pct')}% "
+            f"outstanding={round(receipt.get('outstanding_pct') or 0.0, 2)}% "
+            f"inflight={receipt.get('inflight') or 0}/{policy.max_inflight_per_pool if policy else 3} "
+            f"demand={receipt.get('demand_applied')}% reserve={receipt.get('reserve_applied')}%"
+        )
+        if receipt.get("reason"):
+            line += f" ({receipt['reason']})"
+        typer.echo(line)
+
 
 @route_app.command("env")
 def env_cmd(

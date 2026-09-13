@@ -400,6 +400,18 @@ enforce_inventory = false
 # The operator's access posture: local (attending), remote (only verified-native-view rows qualify), or unknown (the default; filters like remote, labeled unknown in receipts). Never inferred.
 operator_access = "unknown"
 
+[routing.admission]
+# Arms opt-in shared-account capacity reservations before a routing-lane launch. False (the default) reserves nothing and dispatch behaves exactly as before. Subscription-percent admission only: every value is a share of ONE quota window (0..100), never a dollar amount; API spend forecasting is unsupported.
+enabled = false
+# Concurrent reserved+committed dispatches allowed per quota pool, regardless of percentages. Default 3.
+max_inflight_per_pool = 3
+# How long one reservation survives without a proven worker. A live worker past its TTL is revalidated, never refunded. Default 900.
+reservation_ttl_seconds = 900
+# verb -> difficulty -> percent of the window this dispatch may consume. Difficulty keys: default|low|medium|high; lookups take the most specific row at or below the node's band and fall back to the default verb.
+demand_pct = {}
+# verb -> difficulty -> percent of the window held back for difficult work and reviews. A configured priority exception may consume it; known exhaustion is never configured away.
+reserve_pct = {}
+
 [sideline.colors]
 # Lane colors keyed by harness name (e.g. codex = "cyan"). The cascade's coarsest config key; see sideline.colors.route.
 harness = {}

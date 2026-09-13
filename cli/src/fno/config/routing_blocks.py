@@ -6,6 +6,79 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+class RoutingAdmissionBlock(BaseModel):
+    """Opt-in shared-account capacity reservations (config.routing.admission).
+
+    Subscription-percent only (0..100, never a dollar amount). Nothing here
+    raises at load; raw values travel and the admission owner refuses an
+    armed-but-tainted table (invalid_policy).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = False
+    max_inflight_per_pool: int = 3
+    reservation_ttl_seconds: int = 900
+    demand_pct: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    reserve_pct: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    @field_validator("max_inflight_per_pool", mode="before")
+    @classmethod
+    def _coerce_inflight(cls, v: object) -> object:
+        """A value pydantic would reject (fractional, bool, non-numeric)
+        degrades to the default; a whole int, including an invalid 0 or
+        negative, travels so the owner refuses it armed."""
+        return (
+            v
+            if isinstance(v, int) and not isinstance(v, bool)
+            else (
+                int(v)
+                if isinstance(v, float) and v.is_integer()
+                else 3
+            )
+        )
+
+    @field_validator("reservation_ttl_seconds", mode="before")
+    @classmethod
+    def _coerce_ttl(cls, v: object) -> object:
+        return (
+            v
+            if isinstance(v, int) and not isinstance(v, bool)
+            else (
+                int(v)
+                if isinstance(v, float) and v.is_integer()
+                else 900
+            )
+        )
+
+    @field_validator("demand_pct", "reserve_pct", mode="before")
+    @classmethod
+    def _coerce_tables(cls, v: object) -> object:
+        """A non-table, or a row that is not itself a table, must not raise
+        at load and must not vanish: a dropped row is re-shaped into a table
+        the owner's difficulty vocabulary refuses, so an armed typo still
+        answers invalid_policy. Leaf values stay raw for the owner."""
+        if not isinstance(v, dict):
+            return {}
+        return {
+            name: row if isinstance(row, dict) else {"__not_a_table__": row}
+            for name, row in v.items()
+        }
+
+
+def resolve_admission_policy(settings: object = None) -> RoutingAdmissionBlock | None:
+    """The armed admission block, or None when disarmed or unreadable."""
+    try:
+        if settings is None:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        block = settings.routing.admission  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - a broken read gates nothing
+        return None
+    return block if isinstance(block, RoutingAdmissionBlock) and block.enabled else None
+
+
 class RoutingBlock(BaseModel):
     """Config-first model routing inventory (nested under 'config.routing').
 
@@ -31,6 +104,8 @@ class RoutingBlock(BaseModel):
     # The operator's access posture: local, remote, or unknown (filters like
     # remote). Declared through config, never inferred.
     operator_access: str = "unknown"
+    # Opt-in shared-account capacity reservations (x-1afa).
+    admission: RoutingAdmissionBlock = Field(default_factory=RoutingAdmissionBlock)
 
     @field_validator("objective", mode="before")
     @classmethod
@@ -38,6 +113,8 @@ class RoutingBlock(BaseModel):
         """Only the three literals are honored; anything else degrades to the
         default. Same degrade-toward-safety stance as DispatchBlock: a typo can
         never select an objective the operator did not name."""
-        return v if v in ("cheapest-that-clears", "best-available", "prefer-harness") else (
-            "cheapest-that-clears"
+        return (
+            v
+            if v in ("cheapest-that-clears", "best-available", "prefer-harness")
+            else ("cheapest-that-clears")
         )

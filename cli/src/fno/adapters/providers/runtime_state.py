@@ -283,7 +283,10 @@ def _fold_one_legacy_file(target: Path, legacy: Path) -> None:
                     usage=usage,
                     windows_opened=windows_opened,
                     schema_version=int(dst.get("schema_version", SCHEMA_VERSION)),
-                )
+                ),
+                # A fold never costs a live worker's reservation: keep the
+                # target's block (the legacy file predates reservations).
+                reservations=dst.get("reservations") or {},
             ),
         )
 
@@ -337,7 +340,9 @@ def _compute_exponential_cooldown_ms(level: int) -> int:
     return min(raw, MAX_BACKOFF_MS)
 
 
-def _serialize_state(state: ProviderRuntimeState) -> str:
+def _serialize_state(
+    state: ProviderRuntimeState, reservations: dict[str, dict[str, Any]] | None = None
+) -> str:
     payload = {
         "schema_version": state.schema_version,
         "provider_health": {
@@ -350,6 +355,11 @@ def _serialize_state(state: ProviderRuntimeState) -> str:
             pid: dataclasses.asdict(s) for pid, s in state.usage.items()
         },
         "windows_opened": state.windows_opened,
+        # Opt-in admission reservations (x-1afa) ride this document OPAQUELY:
+        # the Rust admission owner owns the block, its math, and its expiry
+        # filter; every writer here only re-persists it verbatim so an
+        # unrelated health write never eats a live worker's reservation.
+        "reservations": reservations or {},
     }
     return json.dumps(payload, indent=2, sort_keys=True)
 
@@ -491,7 +501,7 @@ def mark_window_warned(
                 usage=_parse_usage_payload(raw),
                 windows_opened=windows_opened,
                 schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
-            )))
+            ), reservations=raw.get("reservations") or {}))
             return True
     except filelock.Timeout:
         logger.warning(
@@ -535,7 +545,7 @@ def stamp_window_open(
                 usage=_parse_usage_payload(raw),
                 windows_opened=windows_opened,
                 schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
-            )))
+            ), reservations=raw.get("reservations") or {}))
             return True
     except filelock.Timeout:
         logger.warning(
@@ -1065,7 +1075,7 @@ def update_provider_health(
                 windows_opened=windows_opened,
                 schema_version=schema_version,
             )
-            _write_state_atomic(state_path, _serialize_state(new_state))
+            _write_state_atomic(state_path, _serialize_state(new_state, reservations=(raw or {}).get("reservations") or {}))
             return new_health
     except filelock.Timeout:
         # AC2.7-ERR: log warning, skip write, return last-known-good.
@@ -1126,7 +1136,7 @@ def reset_provider_health(
                 windows_opened=windows_opened,
                 schema_version=schema_version,
             )
-            _write_state_atomic(state_path, _serialize_state(new_state))
+            _write_state_atomic(state_path, _serialize_state(new_state, reservations=raw.get("reservations")))
     except filelock.Timeout:
         logger.warning(
             "runtime_state: lock contention on reset for provider %r; "
@@ -1258,7 +1268,7 @@ def write_usage_snapshot(
                 windows_opened=windows_opened,
                 schema_version=schema_version,
             )
-            _write_state_atomic(state_path, _serialize_state(new_state))
+            _write_state_atomic(state_path, _serialize_state(new_state, reservations=raw.get("reservations")))
     except filelock.Timeout:
         logger.warning(
             "runtime_state: lock contention on usage write for %r; skipping "
@@ -1871,7 +1881,7 @@ def advance_cursor(
                 windows_opened=windows_opened,
                 schema_version=schema_version,
             )
-            _write_state_atomic(state_path, _serialize_state(new_state))
+            _write_state_atomic(state_path, _serialize_state(new_state, reservations=raw.get("reservations")))
             return new_cursor
     except filelock.Timeout:
         logger.warning(
@@ -1890,3 +1900,85 @@ def advance_cursor(
             combo_name=combo_name,
             now=now,
         )
+
+
+# --- shared-account capacity admission (x-1afa): thin call sites into the
+# Rust owner, crates/fno-agents/src/admission.rs, which owns the math, the
+# policy-table validation, the refusal classification (the receipt's
+# `refusal` flag), and the disk under the same `.update.lock` every writer
+# here holds. Every verb answer carries every display key, so callers read
+# the answer dict directly. ---
+ADMITTED, RESERVED_CAPACITY, STALE_OBSERVATION, UNKNOWN_IDENTITY, EXHAUSTED, INFLIGHT_CAP, INVALID_POLICY = (
+    "admitted", "reserved_capacity", "stale_observation", "unknown_identity",
+    "exhausted", "inflight_cap", "invalid_policy",
+)
+
+
+def _admission_run(
+    mode: str,
+    record: Any,
+    *,
+    dispatch_id: str | None = None,
+    verb: str = "do",
+    difficulty: str = "high",
+    demand_pct: float | None = None,
+    by_id: dict[str, Any] | None = None,
+    ttl_seconds: float | None = None,
+    consume_reserve: bool = False,
+    policy: Any = None,
+    now: float | None = None,
+    repo_root: Path | None = None,
+) -> dict[str, Any]:
+    """One admission decision through the Rust owner. A missing binary
+    degrades open without reserving; the caller keeps its prior verdict."""
+    if policy is None:
+        from fno.config.routing_blocks import RoutingAdmissionBlock, resolve_admission_policy
+
+        policy = resolve_admission_policy() or RoutingAdmissionBlock()
+    if now is None:
+        now = time.time()
+    from fno.adapters.providers.binding import resolve_pool
+
+    pool, identity_error = resolve_pool(record, by_id=by_id, now=now)
+    state_path = _resolve_state_path(repo_root)
+    payload: dict[str, Any] = {
+        "mode": mode,
+        "policy": policy.model_dump(),
+        "policy_unknown_fields": sorted(getattr(policy, "model_extra", None) or {}),
+        "provider_id": record.id,
+        "pool": pool,
+        "identity_error": identity_error,
+        "verb": verb,
+        "difficulty": difficulty,
+        "demand_pct": demand_pct,
+        "consume_reserve": consume_reserve,
+        "ttl_seconds": ttl_seconds,
+        "now": now,
+        "dispatch_id": dispatch_id,
+        "state_path": str(state_path),
+    }
+    try:
+        from fno.rust_binary import VerbUnavailable, verb_call
+
+        return verb_call("admission", payload, VerbUnavailable)
+    except VerbUnavailable as exc:
+        # Degrade open WITHOUT reserving: the caller keeps its prior verdict.
+        # Every other answer carries the owner's full key set.
+        return {
+            "status": STALE_OBSERVATION,
+            "refusal": False,
+            "reason": f"admission unavailable: {exc}",
+            "units": "subscription-percent",
+        }
+
+
+def preview_admission(record: Any, **kw: Any) -> dict[str, Any]:
+    """The pure read half: never writes, never reserves."""
+    return _admission_run("preview", record, **kw)
+
+
+def reserve_admission(record: Any, *, dispatch_id: str, **kw: Any) -> dict[str, Any]:
+    """Preview + persist under the one lock; idempotent per dispatch id."""
+    if not dispatch_id or not dispatch_id.strip():
+        raise ValueError("reserve_admission: dispatch_id must be non-empty")
+    return _admission_run("reserve", record, dispatch_id=dispatch_id, **kw)

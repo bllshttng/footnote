@@ -301,6 +301,36 @@ def _emit_quota_rotation_declined(
         pass
 
 
+def _admission_deferral(
+    provider_id: str,
+    *,
+    priority: Optional[str],
+    node_cwd: Optional[str],
+    verb: str,
+    difficulty: str,
+) -> Optional["AutonomousRoute"]:
+    """The opt-in shared-account read (x-1afa): a typed refusal defers;
+    ``p0`` may consume the protected reserve and still cannot bypass the
+    hard refusals. A pure preview that never consumes anything."""
+    try:
+        from fno.adapters.providers import runtime_state as rs
+        from fno.adapters.providers.loader import load_providers
+        from fno.config.routing_blocks import resolve_admission_policy
+
+        policy = resolve_admission_policy()
+        if policy is None:
+            return None
+        record = load_providers(repo_root=Path(node_cwd) if node_cwd else None).by_id.get(provider_id)
+        if record is None:
+            return None
+        receipt = rs.preview_admission(record, verb=verb, difficulty=difficulty, consume_reserve=(priority or "").strip().lower() == "p0", policy=policy)
+    except Exception:  # noqa: BLE001 - a preview must never block dispatch
+        return None
+    if not receipt.get("refusal"):
+        return None
+    return AutonomousRoute("defer", f"admission:{receipt['status']}", source_record=provider_id, retry_at=receipt["retry_at"])
+
+
 def select_autonomous_route(
     *,
     provider_id: str,
@@ -309,13 +339,17 @@ def select_autonomous_route(
     node_cwd: Optional[str] = None,
     now: Optional[float] = None,
     node_id: Optional[str] = None,
+    admission_verb: str = "do",
+    admission_difficulty: str = "high",
 ) -> AutonomousRoute:
     """Resolve one autonomous launch's route from one quota probe.
 
     ``pinned`` is any explicit harness / provider / account / model / node
     route pin: it forbids automatic replacement, never the existing defer.
     ``node_id`` is only for the ``quota_rotation_declined`` telemetry event -
-    it never changes the routing decision.
+    it never changes the routing decision. When the opt-in admission policy
+    is armed, a typed shared-account refusal defers with an
+    ``admission:<status>`` reason (x-1afa).
     """
     from fno.adapters.providers.runtime_state import (
         HeadroomState,
@@ -369,11 +403,24 @@ def select_autonomous_route(
             retry_at=sig.resets_at,
             window=window,
         )
+    # The admission preview (x-1afa) is the last word, so it is also the last
+    # thing computed: only the unknown-proceed and stay paths consult it.
+    held = _admission_deferral(
+        provider_id,
+        priority=priority,
+        node_cwd=node_cwd,
+        verb=admission_verb,
+        difficulty=admission_difficulty,
+    )
     if sig.state is HeadroomState.UNKNOWN:
+        if held is not None:
+            return held
         _emit_quota_rotation_declined(node_id, sig.provider_id, sig.reason)
         return AutonomousRoute(
             "unknown-proceed", sig.reason, source_record=sig.provider_id, window=window
         )
+    if held is not None:
+        return held
     return AutonomousRoute(
         "stay", sig.reason, source_record=sig.provider_id, window=window
     )

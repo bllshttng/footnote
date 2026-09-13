@@ -23,6 +23,7 @@ use std::io::IsTerminal;
 
 const ALL_CLIENT_ACTIONS: &[&str] = &[
     "--emit-schema",
+    "admission",
     "adopt",
     "announce",
     "ask",
@@ -427,6 +428,14 @@ async fn run(args: Vec<String>) -> i32 {
     // verb and finalize cannot answer "may this head merge?" differently.
     if verb == "authorized-merge" {
         return fno_agents::authorized_merge::run_authorized_merge(&args[1..]);
+    }
+
+    // `admission`: the shared-account capacity owner (see admission.rs doc).
+    // Direct dispatch; no daemon RPC. Python's admission client resolves the
+    // machine-side facts (identity, policy, state path) and sends one JSON
+    // payload; this verb decides and persists under the runtime-state lock.
+    if verb == "admission" {
+        return fno_agents::admission::run_admission(&args[1..]);
     }
 
     // `route-slot`: the delivery-slot resolver (see route_slot.rs doc). Direct

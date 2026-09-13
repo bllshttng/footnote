@@ -1,5 +1,6 @@
 current-leaf	tier	post-collapse-typing	refs	reason-if-not-T1
 agents adopt	T1	agents adopt	6
+agents admission	T1	agents admission	0
 agents announce	T1	agents announce	0
 agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
 agents attach	T1	agents attach	13
@@ -543,6 +544,7 @@ roles context	T1	roles context	2
 roles ls	T1	roles ls	1
 roles resolve	T1	roles resolve	2
 roles show	T1	roles show	2
+route admission	T1	route admission	0	
 route env	T1	route env	4
 route init	T1	route init	0	
 route inventory	T1	route inventory	0	

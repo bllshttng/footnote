@@ -3,6 +3,7 @@
 A path says where a credential belongs and a stamp says who put it there.
 Neither says who the credential presents as. See docs/provider-rotation.md.
 """
+
 from __future__ import annotations
 
 import time
@@ -185,3 +186,27 @@ def resolve_account_binding(
             return _at(UNKNOWN, reason="zero-match", **common)
         return _at(MATCHED, **common)
     return _at(MATCHED if want == observed else MISMATCH, **common)
+
+
+def resolve_pool(
+    record: ProviderRecord,
+    *,
+    by_id: dict[str, ProviderRecord] | None = None,
+    now: float | None = None,
+) -> tuple[str | None, str | None]:
+    """The budget identity a record launches under (x-1afa), with its proof.
+
+    A declared ``quota_pool`` wins. Canonical managed Claude uses its
+    observed principal (a Keychain proof, so this half stays Python); an
+    unprovable principal is a refusal, never an empty pool.
+    """
+    if record.quota_pool:
+        return f"declared:{record.quota_pool}", None
+    if record.auth == "api_key":
+        return f"api:{record.harness}/{record.id}", None
+    if record.harness == "claude":
+        binding = resolve_account_binding(record, by_id=by_id, now=now)
+        if binding.status == MATCHED and binding.observed_principal:
+            return f"principal:{binding.observed_principal}", None
+        return None, binding.receipt
+    return f"{record.harness}/{record.id}", None
