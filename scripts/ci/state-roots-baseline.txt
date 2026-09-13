@@ -103,4 +103,4 @@ A	crates/fno-agents/src/spawn_gate.rs	claims	unowned	call the resolver STATE_FIL
 A	crates/fno/src/agents_view.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/agents_view.rs	registry.json	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/backlog_view.rs	graph.json	unowned	call the resolver STATE_FILES names for this file.
-A	crates/fno/src/mux_cli.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
+A	crates/fno/src/review_invocation.rs	events.jsonl	x-1571	the mux client's ProjectJournalPath site, moved verbatim out of mux_cli.rs (x-91ba); x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
