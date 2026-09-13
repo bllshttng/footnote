@@ -78,7 +78,7 @@ The spawn receipt is one line of compact JSON carrying `name`, `short_id`, `harn
 
 There is no kill verb on either surface: not `fno agents kill`, not `fno-agents kill`. The reap sequence depends on the substrate.
 
-A pane worker, the default `--substrate pane`, is reaped with `fno mux pane kill <session>:<pane_id>`. The ref comes from the row's `mux` field in `fno agents list --json`. A mux row carries no transport short id, so `fno agents stop` cannot address it.
+A thread worker, the default where the harness seats one, is reaped with `fno agents stop <name>` followed by `fno agents rm <name>`.
 
 Killing the pane does not touch the registry row. A row that lingers after the pane is gone still goes through `fno agents rm`.
 

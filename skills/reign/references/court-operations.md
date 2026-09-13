@@ -4,7 +4,7 @@
 The operations manual for [court mode](../SKILL.md#court-mode-reign-over-the-wave).
 The skill carries the *contract* (what a court king owes its wave); this reference carries the *hands* (which verb does each job, what each lifecycle state means, and the copy-paste recipes).
 
-Court needs five pane-layer primitives: **place** a teammate near the king, **inject** a next-phase prompt into a live session, **sweep** at a boundary, **wait** on lifecycle, and **read** recent output.
+Court needs five worker primitives: **spawn** a teammate, **inject** a next-phase prompt into a live session, **sweep** at a boundary, **wait** on lifecycle, and **read** recent output.
 Sweep and wait are separate on purpose: sweeping is a nonblocking look at a teammate you are already awake to check, waiting is the only one of the five that will wake you.
 The verbs below are fno's own.
 In an environment whose pane layer is something other than fno mux, the crowning brief names that layer's equivalents; the *duties* are identical either way, and every ruling still lands in the graph via `fno backlog` verbs and every node is still claimed through `/fno:target`.
@@ -14,7 +14,7 @@ The pane layer owns placement, lifecycle, and I/O; fno stays the authority for i
 
 | Duty | Verb | Notes |
 |---|---|---|
-| **Place** a teammate near the king | `fno agents spawn --name <n> "<payload>" --substrate pane --at current --split <dir>` | `--at current` anchors to the CALLING pane (yours) via `FNO_PANE`, so focus races cannot redirect it; strict, so it refuses rather than minting a tab elsewhere, and the `--json` receipt names the committed anchor and tab. The teammate inherits your workspace. Use `--workspace <w> --split <dir>` only to place into a workspace you are not in - it targets that workspace's *focused* pane and races. Pane substrate only; `thread` and `headless` refuse both. |
+| **Spawn** a teammate | `fno agents spawn --name <n> "<payload>" --substrate thread --effort <e>` | A thread worker has no placement; the graph and mail carry the mission. |
 | **Inject** the next phase into a live session | `fno agents mail send <handle> "<ruling + /fno:verb>" --from-self` | A direct send to a live pane injects as a notification it acts on this turn. Receipt-gated - see delivery truth below. Auto-wrapped in the `<fno_mail>` envelope; a raw pane-layer prompt is not - see the envelope rule below. |
 | **Sweep** at a boundary (nonblocking) | `fno agents top` + `fno agents peek <handle>` | Push-first (the teammate's report mail); this is the backstop sweep, run at a named boundary while you are already awake, not on a repeating timer. `top` = who is alive; `peek` = is a quiet pane done/blocked/dead. Both return immediately and wake nobody. `fno-agents needs --json` is a separate loop-wedge signal, not pane completion. |
 | **Wait** on lifecycle (blocking) | ONE unreconciled teammate: `fno-agents wait --agent <name> --state done --timeout-ms <n>` · a fleet of them: `fno-agents subscribe` | The actual wake source, and the only duty here that is one. `wait` parses a single `--agent` and serves exactly one unreconciled teammate; with two or more in the wait set, arm one unfiltered `subscribe` instead - it streams registry state transitions and pane exits as NDJSON from EOF, so the first teammate to move wakes you whichever it is; on wake sweep, reconcile, re-arm. Launch each as its OWN harness-tracked task and never append `&` - a trailing `&` returns the call instantly, the harness marks it finished, and nothing is left waiting. Cover one wake per live teammate you have not yet reconciled - an expected report is not coverage, because the report is exactly what goes missing, but a reconciled row still reading `done` matches instantly and spins, so it leaves the set. Always `done`, never `idle`: `idle` is the default verdict (lapsed hook, unknown or absent screen state) so it can return instantly and spin the re-arm loop. No wake arm covers `blocked`: the inside-leg hook emits `working`/`done` only (`blocked` has no wired trigger), so a blocked teammate reaches you by its report mail or your sweep's `BlockedAnswerable` badge, never by this verb. On a hookless pane (gemini/opencode/agy) `done` is a death detector plus a timeout rather than a completion signal - bounded, which is the point. On timeout with the teammate still live, re-arm. |
@@ -35,12 +35,21 @@ Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king t
 
 ## Control surfaces
 
+Canonical implementation worker spawn. Laws d-b1a7afe2 (thread), d-20293d74 + d-94853e86 (glm), and d-fa1a58ee (one launcher). Still current? `fno backlog decisions retask-tier`; `fno backlog decisions spawn-substrate`.
+
+```bash
+# Blueprints do NOT use this line; law d-94853e86 runs them as native subagents on a non-glm model.
+fno agents spawn --name <node-name> "$payload" --harness claude --substrate thread \
+  --provider zai --model 'glm-5.3-flash[1m]' --effort xhigh \
+  --permission-mode bypassPermissions --cwd <checkout> 2>&1
+```
+
 | Job | Verb |
 |---|---|
-| Spawn a teammate pane | `fno agents spawn --name <n> "<payload>" --substrate pane --at current --split <dir> --effort <e>` |
+| Spawn a teammate thread | `fno agents spawn --name <n> "<payload>" --substrate thread --effort <e>` |
 | Move a running pane into another workspace | `fno mux layout apply` rebinds a bound live pane into a target tab, PTY intact, but needs a full template (or a spec file) plus its whole slot set - see mux-layout-templates. No `fno mux pane` verb does it (`break` only detaches to a new tab in place). A coronation-time move, not a mid-wave shuffle |
 | Arm a wake before you stop | ONE unreconciled teammate: `fno-agents wait --agent <name> --state done --timeout-ms <n>` · a fleet: `fno-agents subscribe` unfiltered, armed once (harness-tracked either way; never `idle`, never `&`) |
-| Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate pane --workspace <w> --split <dir> --crown <scope>` (a king running a court belongs in its own mission workspace). Repeat `--crown`/`-k` for a portfolio; the rung is derived from what you name |
+| Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate thread --crown <scope>` (a king running a court belongs in its own mission workspace). Repeat `--crown`/`-k` for a portfolio; the rung is derived from what you name |
 | Crown an existing session in place | The target runs `fno agents register`; from another attended terminal run `fno agents crown <printed-handle> --scope <scope>`. A live king may run it too, but only over a scope its own crown strictly contains. It preserves the target's transcript and placement |
 | Hand your crown to a successor | Spawn the heir over your OWN scope with `--succeed`: without the explicit transfer flag the spawn is refused and you keep the crown. The vacate and stamp are one registry write. Return it with `fno agents crown --reclaim`; that uses `crown_grantor` and creates no session. The attended in-place verb is a re-scope, not succession: it moves a crown between two live rows (re-scope the incumbent first, then crown the heir) but never creates an heir at spawn |
 | Read your own crown | `fno whoami` (prints a `crown:` line when your row holds one) |
@@ -87,7 +96,7 @@ read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb i
 Take node x-b3a8 through /fno:think.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
-fno agents spawn --name node-x-b3a8 "$payload" --substrate pane --at current --split right --effort high
+See the canonical implementation worker spawn under [Control surfaces](#control-surfaces).
 ```
 
 `--at current` anchors the teammate to the king's own pane, so it lands in the king's workspace and tab with no focus race. The `<minion clause>` is the canonical block in [minion-clause.md](minion-clause.md), not something you compose here - that is the whole point of the template. Capture the teammate's mail handle from the spawn receipt's `short_id` (a claude pane now carries its 8-hex jobId there).
@@ -110,13 +119,10 @@ read -r -d '' payload <<'CLAUSE' || true
 Continue node x-b3a8 at /fno:blueprint. Prior /think artifact: <path>.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
-fno agents spawn --name node-x-b3a8-g2 "$payload" \
-  --substrate pane --at current --split down --effort high
-# ...only after the successor's session header prints, close the predecessor
-# PANE (a mux row -> fno mux pane kill, not fno agents stop). Its <session>:<pane_id>
-# ref is in the mux field of `fno agents list --json`:
-ref=$(fno agents list --json | jq -r '.agents[] | select(.name=="node-x-b3a8") | "\(.mux.session):\(.mux.pane_id)"')
-fno mux pane kill "$ref"
+fno agents spawn --name node-x-b3a8-g2 "$payload" --substrate thread --effort high
+# ...only after the successor's session header prints, close the predecessor.
+fno agents stop node-x-b3a8
+fno agents rm node-x-b3a8
 ```
 
 **Corpse check before respawn (no report, pane looks gone):**

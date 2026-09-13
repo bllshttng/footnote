@@ -118,6 +118,7 @@ A crowned king is not an operator, and `fno backlog decide` refuses every agent 
 ## The one dispatch exception
 
 This skill does not dispatch. The single exception: `fno agents status` shows the dispatching arm red, and the spawn is journaled `reign_dispatch_exception` naming the arm and the node BEFORE the spawn fires. A spawn without that row is a defect.
+The exception uses the canonical implementation worker line in `references/court-operations.md#control-surfaces`.
 
 ## Stop and park
 
