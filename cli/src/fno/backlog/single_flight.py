@@ -199,12 +199,8 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
         faulthandler.register(signal.SIGUSR1, file=fh, all_threads=True)
     except OSError:
         fh = None
-    budget_s: float = _FLIGHT_BUDGET_DEFAULT_S
-    _raw = os.environ.get("FNO_FLIGHT_BUDGET_S") or ""
-    if _raw.replace(".", "", 1).isdigit():
-        budget_s = float(_raw)
-    spawner = os.environ.get("FNO_DIE_WITH_PARENT", "")
-    parent_pid = int(spawner) if spawner.isdigit() else None
+    budget_s = float(r) if (r := os.environ.get("FNO_FLIGHT_BUDGET_S", "")).replace(".", "", 1).isdigit() else _FLIGHT_BUDGET_DEFAULT_S
+    parent_pid = int(p) if (p := os.environ.get("FNO_DIE_WITH_PARENT", "")).isdigit() else None
     start = time.monotonic()
     claim_file = claim_path(flight.key, root=claims_root_for(flight.key))
 
@@ -239,14 +235,12 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
 def _flight_scope(key: str, scope: str, verb: str, json_out: bool,
                   extra: Optional[dict]) -> Iterator[bool]:
     flight = acquire_flight(key, scope=scope)
-    watch_fh = None
+    watch_fh = _arm_flight_watchdog(flight, verb) if flight is not None and not flight.held else None
     try:
         if flight is not None and flight.held:
             _report_held(flight, verb, json_out=json_out, extra=extra)
             yield False
         else:
-            if flight is not None:
-                watch_fh = _arm_flight_watchdog(flight, verb)
             yield True
     finally:
         if watch_fh is not None:
