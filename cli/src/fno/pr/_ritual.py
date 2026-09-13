@@ -292,16 +292,9 @@ class Ritual:
     # -- seams -------------------------------------------------------------
 
     def _sh(self, argv: list[str], *, cwd: Optional[Path] = None,
-            timeout: float = _LEG_TIMEOUT_S,
-            env_prefix: Optional[list[str]] = None) -> Result:
-        """Shell an fno verb via the PATH-robust fno-py prefix.
-
-        ``env_prefix`` rides the same ``env(1)`` argv trick the archive leg
-        uses (the runner seam has no env parameter by design); the reconcile
-        leg passes FNO_DIE_WITH_PARENT so the child exits if this ritual is
-        killed mid-leg (x-626f)."""
-        prefix = ["env", *env_prefix] if env_prefix else []
-        return self.runner([*prefix, *fno_py_cmd(), *argv], cwd=str(cwd or self.canon), timeout=timeout)
+            timeout: float = _LEG_TIMEOUT_S) -> Result:
+        """Shell an fno verb via the PATH-robust fno-py prefix."""
+        return self.runner([*fno_py_cmd(), *argv], cwd=str(cwd or self.canon), timeout=timeout)
 
     def _gh(self, argv: list[str], *, timeout: float = 30.0) -> Result:
         return self.runner(["gh", *argv], cwd=str(self.canon or self.cwd), timeout=timeout)
@@ -415,11 +408,7 @@ class Ritual:
             # budget, never below it.
             from fno.backlog.single_flight import POST_MERGE_RECONCILE_TIMEOUT_S
 
-            r = self._sh(
-                argv,
-                env_prefix=[f"FNO_DIE_WITH_PARENT={os.getpid()}"],
-                timeout=POST_MERGE_RECONCILE_TIMEOUT_S,
-            )
+            r = self._sh(argv, timeout=POST_MERGE_RECONCILE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             self._emit("reconcile", _FAILED, "timeout")
             return

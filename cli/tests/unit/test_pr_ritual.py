@@ -1098,15 +1098,18 @@ def test_lane_project_reads_worktree_local_override(tmp_path, monkeypatch):
     assert r.ctx.lane_project == "fno-lane-node"
 
 
-def test_reconcile_leg_is_parent_bound(tmp_path):
-    """x-626f: the reconcile leg rides the env(1) prefix with
-    FNO_DIE_WITH_PARENT, so a killed ritual cannot orphan the child to init."""
-    import os
+def test_reconcile_leg_takes_the_probe_safe_bound(tmp_path):
+    """x-626f round-2: the ritual's reconcile leg runs at the merge's
+    300s bound (above reconcile's 240s close-probe budget), not the 120s
+    leg default."""
+    seen = {}
 
-    runner = FakeRunner()
-    r = _bare(tmp_path, runner)
+    class _ProbeRunner(FakeRunner):
+        def __call__(self, argv, *, cwd=None, timeout=None):
+            if "reconcile" in argv:
+                seen["timeout"] = timeout
+            return FakeRunner.__call__(self, argv, cwd=cwd, timeout=timeout)
+
+    r = _bare(tmp_path, _ProbeRunner())
     r.leg_stamp()
-    hits = [c for c in runner.calls if "reconcile" in c]
-    assert hits, "leg_stamp must run the reconcile leg"
-    assert hits[0][0] == "env"
-    assert f"FNO_DIE_WITH_PARENT={os.getpid()}" in hits[0]
+    assert seen["timeout"] == 300.0
