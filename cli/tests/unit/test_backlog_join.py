@@ -333,7 +333,7 @@ def test_missing_holder_worktree_refuses_exit_2(tmp_path, monkeypatch):
     entry_plan = tmp_path / "plan.md"
     entry_plan.write_text(PARALLEL_PLAN)
     monkeypatch.setattr(
-        "fno.graph.store.read_graph",
+        "fno.backlog.advance.api_nodes_wire",
         lambda *_a, **_k: [{"id": "x-8d1d", "plan_path": str(entry_plan)}],
     )
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")

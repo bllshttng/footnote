@@ -91,7 +91,15 @@ def routed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
-    g.write_text(json.dumps({"entries": entries}, indent=2) + "\n", encoding="utf-8")
+    """Rows the way the store writes them: the typed api drops a row the
+    model cannot parse, so seeds carry the stamped fields."""
+    complete = []
+    for e in entries:
+        row = {"type": "feature", "priority": "p2", "status": "idea", **e}
+        row.setdefault("title", e.get("id", "node"))
+        row.setdefault("slug", e.get("id", "node"))
+        complete.append(row)
+    g.write_text(json.dumps({"entries": complete}, indent=2) + "\n", encoding="utf-8")
 
 
 def _node(g: Path, node_id: str) -> dict:

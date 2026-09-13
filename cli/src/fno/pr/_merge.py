@@ -758,7 +758,7 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
     """Set merge_status on the graph node carrying this pr_number (best-effort)."""
     try:
         from fno.paths import graph_json
-        from fno.graph.store import locked_mutate_graph
+        from fno.graph.store import commit_rows_via_store
 
         from fno.graph._reconcile import repo_slug_from_url, resolve_current_repo_slug
         from fno.tracker import active_backend_name
@@ -805,7 +805,7 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
                     return entries
             return entries
 
-        locked_mutate_graph(path, _mut)
+        commit_rows_via_store(path, _mut)
     except (Exception, SystemExit):
         # Silent no-op on ANY failure (no graph, store error): the bash
         # `|| true`-guarded this, and it must never block the merge outcome.
@@ -985,9 +985,10 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
 
         matched_id = None
         if pr_url:
-            from fno.graph.store import locked_mutate_graph, read_graph
+            from fno.graph.api import wire_rows
+            from fno.graph.store import commit_rows_via_store
 
-            matched_id = _find_pr_node_id(read_graph(path), pr_number, pr_url)
+            matched_id = _find_pr_node_id(wire_rows(path=path), pr_number, pr_url)
             if matched_id:
                 def _backfill(entries: List[dict], _id=matched_id) -> List[dict]:
                     for e in entries:
@@ -999,7 +1000,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
                         break
                     return entries
 
-                locked_mutate_graph(path, _backfill)
+                commit_rows_via_store(path, _backfill)
 
         from fno.graph._reconcile import repo_slug_from_url, resolve_current_repo_slug
 

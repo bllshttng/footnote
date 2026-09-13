@@ -21,7 +21,7 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
     passed this gate and closed post-merge via ``bind_closure_claims``,
     which performs no hold check of its own (round-10 review fix).
     """
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
     from fno.paths import graph_json
     from fno.pr import _merge
     from fno.pr._merge import _find_pr_node_id
@@ -36,7 +36,7 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         return None
 
     try:
-        entries = read_graph(graph_json())
+        entries = wire_rows(path=graph_json())
     except Exception as exc:  # noqa: BLE001 - hold reads fail closed
         raise HoldLookupError(f"backlog graph is unreadable: {exc}") from exc
 
