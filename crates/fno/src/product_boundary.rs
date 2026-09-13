@@ -108,9 +108,12 @@ impl Observation {
 
 /// The single classified refusal for a requested graph operation when the
 /// worker binary is absent. store_client returns it verbatim, so the receipt
-/// names the component and the repair without a second classifier.
+/// names the component and the repair without a second classifier. The
+/// sentence is a plain literal on purpose: it is a recorded message-twin of
+/// the Python client's refusal (reachable-paths baseline) and must stay
+/// byte-identical to it.
 pub fn graph_worker_missing_error() -> String {
-    format!("{GRAPH_WORKER_BIN} not found (set FNO_AGENTS_WORKER or install the runtime)")
+    "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)".to_string()
 }
 
 /// The classified refusal when the worker binary exists but cannot spawn.
