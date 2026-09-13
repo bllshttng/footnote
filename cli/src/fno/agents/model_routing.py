@@ -68,6 +68,7 @@ from typing import (
 )
 
 from fno.env_file import read_var_from_env_file
+from fno.config._tiers import TIER_ALIASES
 
 if TYPE_CHECKING:
     from fno.config import ModelRoutingBlock, SettingsModel
@@ -335,13 +336,6 @@ def resolve_spawn_route(
 # either fails safe to the primary Anthropic model - no hardcoded tier.
 KNOWN_LANE_ROLES = ("build", "pr-create")
 
-#: Claude tier aliases: the names Claude Code resolves through
-#: ``ANTHROPIC_DEFAULT_<TIER>_MODEL``. ``fable`` is one of them and is a live
-#: alias here (``fno agents spawn --model fable``); omitting it left the fable
-#: tier of a routed worker resolving at Anthropic while every other tier ran on
-#: the secondary provider.
-TIER_ALIASES = ("opus", "sonnet", "haiku", "fable")
-
 # Every tier Claude Code may request internally. Setting all of them to the
 # routed model keeps the entire worker (incl. background haiku) on the secondary
 # provider, so zero Anthropic usage is recorded. Derived from TIER_ALIASES so a
@@ -373,28 +367,6 @@ def tier_models_for(provider: Mapping[str, object]) -> dict[str, str]:
             if key in TIER_ALIASES and value:
                 tiers[key] = value
     return tiers
-
-
-def validate_tier_models(v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
-    """Config-load validation for ``ModelProvider.tier_models``: a key outside
-    the Claude tier aliases, or a tier naming no model, is a load-time refusal
-    naming the bad key and the legal set. Lives beside TIER_ALIASES so the
-    alias list is restated nowhere; the config model imports it lazily (config
-    stays a leaf module). There is no check that the provider SERVES the named
-    model - a wrong id fails at the endpoint, same as a bad ``--model``."""
-    if not v:
-        return v
-    cleaned = {str(k).strip().lower(): str(m).strip() for k, m in v.items()}
-    bad = sorted(set(cleaned) - set(TIER_ALIASES))
-    if bad:
-        raise ValueError(
-            f"tier_models keys {bad} are not Claude tier aliases; "
-            f"legal keys: {', '.join(TIER_ALIASES)}"
-        )
-    empty = sorted(k for k, m in cleaned.items() if not m)
-    if empty:
-        raise ValueError(f"tier_models[{empty}] names no model")
-    return cleaned
 
 
 class TierRemapConflict(RouteCompositionError):
