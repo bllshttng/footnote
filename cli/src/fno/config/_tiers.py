@@ -1,17 +1,12 @@
 """The Claude tier aliases and the tier_models config validation.
 
-One list, restated nowhere: ``model_routing`` derives ``MODEL_ENV_KEYS``
-from ``TIER_ALIASES`` and the config layer validates
-``ModelProvider.tier_models`` keys against it. Runtime importing this
-module is the legal direction; the reverse edge is what
-check-company-boundaries refuses.
+One list, restated nowhere: runtime derives ``MODEL_ENV_KEYS`` from
+``TIER_ALIASES`` and the config layer validates ``tier_models`` keys
+against it. Runtime importing this module is the legal direction.
 """
 from typing import Optional
 
-#: The names Claude Code resolves through ``ANTHROPIC_DEFAULT_<TIER>_MODEL``.
-#: ``fable`` is a live alias (``fno agents spawn --model fable``); omitting it
-#: left the fable tier of a routed worker resolving at Anthropic while every
-#: other tier ran on the secondary provider.
+#: Names Claude Code resolves through ``ANTHROPIC_DEFAULT_<TIER>_MODEL``.
 TIER_ALIASES = ("opus", "sonnet", "haiku", "fable")
 
 

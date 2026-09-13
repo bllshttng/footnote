@@ -1035,8 +1035,7 @@ def _route_for_target(
         route[str(k)] = str(v)
     # Checked after extra_env so a hand pin that already differentiates the
     # tiers silences it. Four identical /model rows read as "the config did
-    # not take" when the truth was "the config took and there is only one
-    # value" (x-f173); the config key is the one lever that fixes it.
+    # not take" (x-f173); this names the one lever that fixes it.
     tier_values = {route[k] for k in MODEL_ENV_KEYS}
     if len(tier_values) == 1:
         _emit(
