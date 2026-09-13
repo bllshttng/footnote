@@ -278,10 +278,11 @@ class GateRefusal:
 
 def _gate_refusal_detail(stderr: str) -> str:
     """The refusal sentence: the LAST ``spawn-gate:`` or ``sandbox-probe:`` line
-    (the gate warns before its verdict); stderr head as fallback."""
+    (the gate warns before its verdict); the whole stderr as fallback. No head
+    window: a capped head cut a refusal mid-flag and the cause was lost."""
     lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
     gate_lines = [ln for ln in lines if ln.startswith(("spawn-gate:", "sandbox-probe:"))]
-    return gate_lines[-1] if gate_lines else (stderr or "").strip()[:200]
+    return gate_lines[-1] if gate_lines else (stderr or "").strip()
 
 
 def gate_refusal(exc: BaseException) -> Optional[GateRefusal]:
@@ -3166,10 +3167,12 @@ def advance(
     armed, rank = _auto_continue_resolve(project_root)
 
     def _tick(acted: int, skip_reason: Optional[str], detail: str = "") -> None:
-        """One auto-continue arm row: what this advance did, or why not."""
+        """One auto-continue arm row: what this advance did, or why not. The
+        detail passes through uncapped: the emitter bounds one row, and a
+        failure row must carry the whole refusal."""
         emit_tick("auto_continue", scheduler=scheduler_from_env(), interval_s=1800,
                   acted=acted, skip_reason=skip_reason,
-                  detail=(f"closed={closed_node_id or '-'} {detail}")[:200] or None)
+                  detail=(f"closed={closed_node_id or '-'} {detail}") or None)
 
     def skip(
         reason: str,
@@ -3196,7 +3199,7 @@ def advance(
         _emit(EVENT_SKIPPED, data, ev_path)
         tick_detail = f"node={node_id or '-'} reason={reason}"
         if detail:
-            tick_detail += f" detail={detail[:120]}"
+            tick_detail += f" detail={detail}"
         _tick(0, reason, tick_detail)
         return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason,
                              node_id=node_id, detail=detail, exit_code=exit_code)
@@ -3206,8 +3209,7 @@ def advance(
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         _emit(EVENT_FAILED, data, ev_path)
-        # Tail this too: the error ends at the refusal, so must the window.
-        _tick(0, "spawn-failed", f"node={node_id} error={error[-140:]}")
+        _tick(0, "spawn-failed", f"node={node_id} error={error}")
         return AdvanceResult(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )

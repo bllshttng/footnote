@@ -591,11 +591,24 @@ def test_spawn_failure_records_the_refusal_not_a_clipped_head(iso, monkeypatch):
     failed_ticks = [t for t in ticks if t["data"].get("skip_reason") == "spawn-failed"]
     assert failed_ticks
     detail = failed_ticks[-1]["data"].get("detail") or ""
-    # The composed tick row keeps 200 chars total; the error is tail-truncated
-    # to match, so the window ENDS at the refusal instead of opening on the
-    # advisory. 140 chars of the error's tail survive the prefix budgets.
-    assert refusal[-140:] in detail
-    assert "refusing to spawn" in detail
+    # No window: the tick row carries the whole error. A tail window the size
+    # of the refusal lands mid-sentence when the stderr is longer (x-782e:
+    # `error=` read empty-looking) and a head window cut mid-flag, so both the
+    # exit context and the full refusal must survive.
+    assert "exited 79" in detail
+    assert refusal in detail
+
+
+def test_gate_refusal_detail_fallback_keeps_stderr_over_200():
+    """No spawn-gate: line on stderr -> the detail is the WHOLE stderr. The
+    200-char head fallback cut the 2026-09-08 x-7aa8 refusal mid-flag at
+    --mo and left the cause unrecoverable from the status surface."""
+    stderr = (
+        "fno agents spawn: applied model=opus (agents.profiles.blueprint.model)\n"
+        + "x" * 260
+        + "\nfno agents spawn: refusing; no worker launched"
+    )
+    assert adv._gate_refusal_detail(stderr) == stderr
 
 
 def test_spawn_already_running_releases_and_skips(iso, monkeypatch):
