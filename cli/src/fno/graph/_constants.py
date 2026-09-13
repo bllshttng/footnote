@@ -366,6 +366,7 @@ DEFERRED_KINDS: tuple[str, ...] = (
     "expired",  # aged out by machinery, no human judgment (maintain drain, stale-quarantine)
     "blocked",  # waiting on a named thing
     "wont_do",  # an operator/author ruled against it
+    "retracted",  # filed on a false premise; stamped only by `fno backlog retract`, halt signal for the blueprint consolidation gate
     "superseded",  # the work moved elsewhere (also its own status; kind only on deferred rows)
     "later",  # real intent, not now
     "contingent",  # fires only if a named condition fires

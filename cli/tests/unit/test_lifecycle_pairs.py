@@ -54,6 +54,8 @@ class Pair:
 LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     # -- status transitions --
     Pair("backlog", "defer", "undefer"),
+    # retract is defer with the kind forced; the same park, the same inverse
+    Pair("backlog", "retract", "undefer"),
     Pair("backlog", "queue", "unqueue"),
     Pair("backlog", "supersede", "unsupersede"),
     Pair("backlog", "done", "reopen"),
@@ -116,7 +118,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "migrate-priorities", "migrate-updated-at", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
         "rank", "ready", "reconcile", "reconcile-findings", "requeue", "retro",
-        "relatedness", "remove", "render-views", "reopen", "reprioritize", "roadmap",
+        "relatedness", "remove", "render-views", "reopen", "reprioritize", "retract", "roadmap",
         "session", "status", "stuck-epics", "supersede", "task", "triage",
         "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede", "update",
         "version", "view", "worked",

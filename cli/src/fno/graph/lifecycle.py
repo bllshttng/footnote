@@ -1,16 +1,18 @@
-"""Node-lifecycle reversal verbs: undefer and unsupersede.
+"""Node-lifecycle verbs: defer, retract, undefer, and unsupersede.
 
 Extracted from graph/cli.py under the file-budget ratchet: the verbs a
-session calls to reverse a park or a supersession live here, registered into
-the backlog app by :func:`register_lifecycle_commands`. The helpers they
-share with the rest of the backlog surface are injected at registration, so
-this module never imports graph.cli (the cycle would be unimportable).
+session calls to make or reverse a park or a supersession live here,
+registered into the backlog app by :func:`register_lifecycle_commands`. The
+helpers they share with the rest of the backlog surface are injected at
+registration, so this module never imports graph.cli (the cycle would be
+unimportable).
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 import typer
 
@@ -22,6 +24,102 @@ def register_lifecycle_commands(
     graph_path: Callable[[], Path],
     project_plans_from_graph: Callable[..., None],
 ) -> None:
+    @cli.command(
+        "defer",
+        epilog="Paired verb: `fno backlog undefer <id>...` reverses this (hidden; run its own --help).",
+    )
+    def cmd_defer(
+        task_ids: List[str] = typer.Argument(
+            ...,
+            help="Feature IDs (ab-XXXXXXXX). Multiple via space and/or comma: 'ab-X,ab-Y ab-Z'.",
+        ),
+        reason: str = typer.Option(
+            ...,
+            "--reason",
+            "-R",
+            help="Why these nodes are being deferred (applies to all). Free text, surfaced in triage.",
+        ),
+        kind: Optional[str] = typer.Option(
+            None,
+            "--kind",
+            "-K",
+            help=(
+                "Classify the deferral (expired|blocked|wont_do|retracted|superseded|later|"
+                "contingent|carveout|internal_only|junk). Omitted: stamped only when "
+                "the reason exactly matches a known machine-stamped string."
+            ),
+        ),
+    ) -> None:
+        """Mark one or more backlog nodes as deferred. Sets ``deferred_at`` + ``deferred_reason``.
+
+        Atomic across the batch: if any ID is unknown, none are deferred.
+        Same reason applies to every ID in the batch.
+        """
+        from fno.graph._constants import (
+            DEFERRED_KINDS,
+            classify_deferred_reason,
+        )
+        from fno.graph.store import locked_mutate_graph
+        from fno.graph._intake import _find_node, _find_dependents
+
+        if kind is not None and kind not in DEFERRED_KINDS:
+            typer.echo(
+                f"Error: --kind must be one of {', '.join(DEFERRED_KINDS)}, got '{kind}'",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        ids = expand_valid_ids(task_ids)
+
+        # Strip and validate the reason at the CLI boundary so direct invocation
+        # cannot land an empty-reason deferral. The triage validator already
+        # rejects blank reasons; matching that contract here keeps both write
+        # paths producing identically-shaped graph state.
+        cleaned_reason = reason.strip()
+        if not cleaned_reason:
+            typer.echo("Error: --reason cannot be blank", err=True)
+            raise typer.Exit(code=1)
+
+        def mutator(entries):
+            # Resolve every id and abort naming ALL missing ones before mutating,
+            # mirroring cmd_queue's all-or-nothing batch atomicity.
+            require_nodes(entries, ids)
+            now = datetime.now(timezone.utc).isoformat()
+            for tid in ids:
+                node = _find_node(entries, tid)
+                dependents = _find_dependents(entries, tid)
+                if dependents:
+                    typer.echo(
+                        f"WARN: Deferring {tid} blocks: {', '.join(dependents)}",
+                        err=True,
+                    )
+                node["locked_by"] = None
+                node["locked_at"] = None
+                # Clear completed_at PER NODE, inside the loop. The precedence
+                # ladder is `done > deferred`, so hoisting this clear out of the
+                # loop (or skipping it for the batch) makes deferring a done node
+                # a silent no-op: completed_at would keep status pinned to done.
+                # Symmetric with cmd_done, which clears deferred_at on the reverse
+                # transition.
+                node["completed_at"] = None
+                node["deferred_at"] = now
+                node["deferred_reason"] = cleaned_reason
+                # Explicit --kind wins; else classify ONLY by exact match against
+                # the machine-stamped table (the maintain drain self-classifies
+                # with no flag). No match leaves the kind unset - an honest
+                # unknown, never a guess from prose. Sparse: no kind means no key
+                # (popped so a re-deferral of a previously stamped node clears it).
+                resolved_kind = kind or classify_deferred_reason(cleaned_reason)
+                if resolved_kind:
+                    node["deferred_kind"] = resolved_kind
+                else:
+                    node.pop("deferred_kind", None)
+            return entries
+
+        locked_mutate_graph(graph_path(), mutator)
+        for tid in ids:
+            typer.echo(f'Deferred {tid}: "{cleaned_reason}"')
+        project_plans_from_graph(ids)
     @cli.command("undefer", hidden=True)
     def cmd_undefer(
         task_ids: List[str] = typer.Argument(
@@ -98,6 +196,33 @@ def register_lifecycle_commands(
                 typer.echo(f"warning: {tid} was not deferred", err=True)
             typer.echo(f"Undeferred {tid}")
         project_plans_from_graph(ids)
+
+    @cli.command(
+        "retract",
+        hidden=True,  # the advertised surface caps at 12; the lifecycle table in docs/backlog-usage.md is its discovery surface
+        epilog="Reversal: `fno backlog undefer <id>...` (hidden; run its own --help).",
+    )
+    def cmd_retract(
+        task_ids: List[str] = typer.Argument(
+            ...,
+            help="Feature IDs (ab-XXXXXXXX). Multiple via comma: 'ab-X,ab-Y'.",
+        ),
+        reason: str = typer.Argument(
+            ...,
+            help="The false premise this row was filed on (applies to all). Surfaced by `fno backlog undefer` and the think-inspect receipt.",
+        ),
+    ) -> None:
+        """Retract one or more backlog nodes: defer + stamp ``deferred_kind: retracted``.
+
+        Usage: ``fno backlog retract <ids> "<the false premise>"``. One act
+        for a row filed on a false premise. The deferral removes it from every
+        dispatch reader, and the retracted kind is the halt signal the
+        blueprint consolidation gate reads, so planning against it stops too.
+        Forwards to ``cmd_defer`` with the kind forced; batch atomicity and
+        the blank-reason refusal are inherited. The reason rides a positional,
+        not a flag: the Python flag surface is shrink-only (x-72fc).
+        """
+        cmd_defer(task_ids=task_ids, reason=reason, kind="retracted")
 
     @cli.command("unsupersede", hidden=True)
     def cmd_unsupersede(
