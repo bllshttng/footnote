@@ -564,24 +564,17 @@ def history_cmd(
     raise typer.Exit(code)
 
 
-def checkin_cmd(
-    scope: str = typer.Option(
-        "", "--scope", help="Crown scope to check in. Default: this session's own crown."
-    ),
-    as_json: bool = typer.Option(False, "--json", "-J", help="Emit the whole payload as one object."),
-    no_emit: bool = typer.Option(
-        False, "--no-emit", help="Print and diff without appending the journal row."
-    ),
-) -> None:
+def checkin_cmd(ctx: typer.Context) -> None:
     """Run the reign check-in body: gather, print, diff, journal.
 
-    One verb runs what a king used to hand-assemble from six to eight calls.
-    The gather, print, diff and row write live in the native ``king-checkin``
-    verb, which reuses the court fold and the history scan in process; this
-    shell resolves the caller's crown and the paths Python owns. The printed
-    numbers and the stored row come from one dict; a failed reader gets its
-    own line and the beat continues. It never decides: no spawn, no reap, no
-    lever.
+    Flags pass through to the native beat: [--scope <scope>] [--no-emit]
+    [--json]. One verb runs what a king used to hand-assemble from six to
+    eight calls. The gather, print, diff and row write live in the native
+    ``king-checkin`` verb, which reuses the court fold and the history scan
+    in process; this shell resolves the caller's crown and the paths Python
+    owns. The printed numbers and the stored row come from one dict; a
+    failed reader gets its own line and the beat continues. It never
+    decides: no spawn, no reap, no lever.
     """
     import subprocess
 
@@ -596,8 +589,14 @@ def checkin_cmd(
     )
     from fno.rust_binary import resolve_binary
 
+    passed = list(ctx.args)
+    explicit_scope = ""
+    for i, token in enumerate(passed):
+        if token == "--scope" and i + 1 < len(passed):
+            explicit_scope = passed[i + 1]
+            break
     try:
-        crown = resolve_scope(scope)
+        crown = resolve_scope(explicit_scope)
     except HistoryUnreadable as exc:
         _refuse(f"king: {exc}")
     binary = resolve_binary()
@@ -610,6 +609,7 @@ def checkin_cmd(
     argv = [
         str(binary),
         "king-checkin",
+        *passed,
         "--scope",
         crown,
         "--graph",
@@ -636,10 +636,18 @@ def checkin_cmd(
         state = None
     if state is not None:
         argv += ["--board-state", str(state)]
-    if no_emit:
-        argv.append("--no-emit")
-    if as_json:
-        argv.append("--json")
+    level = None
+    try:
+        from fno.agents.registry import load_registry
+
+        for row in load_registry():
+            if getattr(row, "crown_scope", None) == crown and getattr(row, "crown_level", None) is not None:
+                level = row.crown_level
+                break
+    except Exception:  # noqa: BLE001 - a levelless crown degrades the fold, not the beat
+        level = None
+    if level is not None:
+        argv += ["--level", str(level)]
     proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     if proc.stdout:
         typer.echo(proc.stdout.rstrip("\n"))
@@ -902,7 +910,10 @@ agents_king_app.command("shape")(shape_cmd)
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
 # Here only, like the faq typer: the retired bare `fno king` menu stays capped.
 agents_king_app.command("history")(history_cmd)
-agents_king_app.command("checkin")(checkin_cmd)
+agents_king_app.command(
+    "checkin",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)(checkin_cmd)
 agents_king_app.command("ledger")(ledger_cmd)
 agents_king_app.add_typer(faq_app, name="faq")
 

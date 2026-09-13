@@ -110,6 +110,10 @@ impl Reading {
 /// Paths and knobs the relay resolves Python-side; the readers read them.
 struct Ctx {
     scope: String,
+    /// The crown scope's level (epic or project), resolved Python-side from
+    /// the registry row that holds the crown; the fold refuses a levelless
+    /// crown, because compile_forced branches on it.
+    level: Option<i64>,
     events_paths: Vec<PathBuf>,
     graph: PathBuf,
     cwd: PathBuf,
@@ -305,7 +309,7 @@ fn fetch_board(ctx: &Ctx) -> Result<Value, String> {
 }
 
 fn fetch_fold(ctx: &Ctx) -> Result<Value, String> {
-    let crowns = vec![json!({"scope": ctx.scope})];
+    let crowns = vec![json!({"scope": ctx.scope, "level": ctx.level})];
     let payload = court_fold(&ctx.graph, &ctx.cwd, None, &crowns, "json")
         .map_err(|e| format!("scope fold unreadable: {e}"))?;
     let mine = payload
@@ -1109,6 +1113,7 @@ fn emit_row(ctx: &Ctx, data: &Map<String, Value>) -> bool {
 pub fn run_king_checkin(args: &[String]) -> i32 {
     let mut ctx = Ctx {
         scope: String::new(),
+        level: None,
         events_paths: Vec::new(),
         graph: PathBuf::new(),
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -1133,6 +1138,9 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             i += 2;
         } else if flag("--cwd") {
             ctx.cwd = PathBuf::from(&args[i + 1]);
+            i += 2;
+        } else if flag("--level") {
+            ctx.level = args[i + 1].parse::<i64>().ok();
             i += 2;
         } else if flag("--handoffs-dir") {
             ctx.handoffs_dir = PathBuf::from(&args[i + 1]);
@@ -1463,6 +1471,7 @@ mod tests {
         let path = journal(dir.path(), &[prev_row()]);
         let ctx = Ctx {
             scope: "x-a792".into(),
+            level: Some(1),
             events_paths: vec![path],
             graph: PathBuf::from("nope.json"),
             cwd: dir.path().to_path_buf(),
