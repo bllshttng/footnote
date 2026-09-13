@@ -3679,8 +3679,7 @@ def dispatch_spawn_pane(
     )
     if provider == "codex" and argv and argv[0] == provider:
         # Identity rides as config-set leaves (x-a095); passthrough-checked
-        # like the route splice below. The argv[0] guard keeps the splice on
-        # the provider's own form.
+        # like the route splice. The argv[0] guard keeps it on codex's form.
         from fno.agents.codex_pane import codex_shell_env_args
 
         env_config_args = codex_shell_env_args(mesh_pairs)

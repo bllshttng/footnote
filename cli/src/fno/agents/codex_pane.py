@@ -92,8 +92,7 @@ def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     return args
 
 
-#: Rate-limit for the daemon oracle (a websocket round trip) vs the
-#: binding loop's own ``_BINDING_POLL_S`` tick.
+#: Rate-limit for the daemon oracle (a websocket round trip).
 _CODEX_DAEMON_PROBE_INTERVAL_S = 2.0
 
 
