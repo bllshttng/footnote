@@ -933,9 +933,8 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .collect();
     if inputs.pr_nodes.is_ok() && inputs.claims.is_ok() {
         for node in &inputs.pr_nodes.rows() {
-            if !KING_PRIORITIES.contains(&s_str(node, "priority").unwrap_or("")) {
-                continue;
-            }
+            // No priority filter: a PR is finished work at any band, so a p2
+            // node's open PR is as driverless as a p1's.
             if s_str(node, "id").is_some_and(|id| contained_ids.contains(id)) {
                 continue;
             }

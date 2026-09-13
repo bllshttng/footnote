@@ -1057,6 +1057,33 @@ mod tests {
     }
 
     #[test]
+    fn undriven_pr_names_a_p2_pr_node_at_any_priority() {
+        // A PR is finished work at any band: the p2 in_review node bound to an
+        // open PR, holding no claim, unlisted by the worked feed and unnamed by
+        // the roster, belongs in undriven_pr with its pr_number.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.pr_nodes = ok_read(json!([{
+            "id": "x-pr2",
+            "priority": "p2",
+            "status": "in_review",
+            "title": "p2 work",
+            "pr_number": 1895,
+        }]));
+        let board = build_board(&inputs);
+        let queue = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|queue| queue["name"] == "undriven_pr")
+            .unwrap();
+        assert_eq!(queue["status"], "ok");
+        let rows = queue["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "x-pr2");
+        assert_eq!(rows[0]["pr_number"], 1895);
+    }
+
+    #[test]
     fn unplanned_note_names_the_batch_and_undispatched_names_the_target() {
         // x-c1c7: a rule without a number is advice nobody applies; the
         // queue a king dispatches from names the verb, never the blueprint.

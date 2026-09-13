@@ -101,8 +101,13 @@ pub(crate) fn read_claimed_nodes(
             continue;
         }
         nodes.push(node.clone());
+        // A PR-bound node's holder gets probed at any priority: without the
+        // PR leg a p2 claim holder never reaches the batch and reads
+        // unmeasured forever, which undriven_pr cannot resolve.
         let priority = s_str(node, "priority").unwrap_or("");
-        if KING_PRIORITIES.contains(&priority) && seen_holders.insert(holder.clone()) {
+        if (KING_PRIORITIES.contains(&priority) || node_has_pr(node))
+            && seen_holders.insert(holder.clone())
+        {
             holders.push(holder.clone());
         }
     }
@@ -628,6 +633,21 @@ mod tests {
                 "spawn-handover:worker-b".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn read_claimed_nodes_probes_a_p2_pr_nodes_holder() {
+        // The claim holder of a PR-bound p2 node reaches the probe batch: the
+        // priority filter belongs to the king's dispatch queues, never to a
+        // liveness answer.
+        let claims = crate::king_board::SourceRead::ok(json!([
+            {"key": "node:x-pr2", "state": "live", "holder": "claude:w1"},
+        ]));
+        let entries = vec![json!({"id": "x-pr2", "priority": "p2", "pr_number": 1906})];
+        let (nodes, holders, warnings) = read_claimed_nodes(&claims, Some(&entries));
+        assert!(nodes.is_ok());
+        assert_eq!(holders, vec!["claude:w1".to_string()]);
+        assert!(warnings.is_empty());
     }
 
     #[test]
