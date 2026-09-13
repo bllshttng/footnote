@@ -30,7 +30,7 @@ def ensure_codex_daemon(
 
     The command is the create form's ``pre_exec`` through
     ``capabilities("codex")``, never hardcoded. A failure raises before any
-    pane exists, so no TUI mints a thread the daemon cannot serve.
+    pane exists.
     """
     from fno.agents.harness_map import capabilities
 
@@ -74,9 +74,9 @@ def ensure_codex_daemon(
 def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     """Render ``K=V`` pairs as ONE ``-c shell_environment_policy.set={...}``.
 
-    A daemon-run tool inherits the daemon's env, not the TUI's; measured
-    2026-09-13: repeated `-c` leaves of one table do not merge on the daemon
-    lane, so one inline table carries every pair.
+    A daemon-run tool inherits the daemon's env, not the TUI's; repeated
+    `-c` leaves of one table do not merge on the daemon lane (measured
+    2026-09-13), so one inline table carries every pair.
     """
     table: dict[str, str] = {}
     for pair in pairs:
