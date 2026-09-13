@@ -253,22 +253,14 @@ def validate_cmd(
 
     # A receipt that carries a binding revalidates it natively BEFORE the
     # authority checks; identity expectations ride only when named. The native
-    # gate verb carries the declared semantics (refusals ride `context_`-named
-    # with the full native answer as `detail`); this door maps them to exits.
+    # gate verb owns the declared semantics; this door maps refusals to exits.
     context_answer: Optional[dict] = None
     if receipt.task_context is not None:
         from fno.rust_binary import VerbUnavailable, verb_call
 
-        expect = {
-            "node": node,
-            **({"attempt": attempt} if attempt else {}),
-            **({"session": session} if session_id else {}),
-        }
+        expect = {"node": node, **({"attempt": attempt} if attempt else {}), **({"session": session} if session_id else {})}
         try:
-            answer = verb_call(
-                "task-context-gate",
-                {"node": node, "root": str(wt), "binding": receipt.task_context, "expect": expect},
-            )
+            answer = verb_call("task-context-gate", {"node": node, "root": str(wt), "binding": receipt.task_context, "expect": expect})
         except VerbUnavailable as exc:
             typer.echo(json.dumps({"ok": False, "reason": "context_native_verifier_unavailable", "error": str(exc)}))
             raise typer.Exit(code=3)

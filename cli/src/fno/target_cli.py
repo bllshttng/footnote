@@ -1815,15 +1815,11 @@ def init(
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
-        gate = verb_call(
-            "task-context-gate",
-            {"node": str((_dispatch_node or {}).get("id") or ""), "root": str(Path.cwd())},
-        )
+        gate = verb_call("task-context-gate", {"node": str((_dispatch_node or {}).get("id") or ""), "root": str(Path.cwd())})
     except VerbUnavailable as exc:
-        typer.echo(f"fno do target init: task-context gate unavailable: {exc}", err=True)
-        raise typer.Exit(code=2)
+        gate = {"ok": False, "reason": "context_native_verifier_unavailable", "detail": str(exc)}
     if not gate.get("ok"):
-        detail = f" ({gate.get('detail', '')})" if gate.get("detail") else ""
+        detail = f" ({gate.get('detail')})" if gate.get("detail") else ""
         typer.echo(f"fno do target init: task-context gate refused: {gate.get('reason')}{detail}", err=True)
         raise typer.Exit(code=2)
 
