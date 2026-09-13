@@ -121,6 +121,28 @@ class Capture:
 
 
 @dataclass(frozen=True)
+class VerdictRow:
+    """One open prove-it FAIL verdict (x-6d64): claimed outcome did not hold."""
+
+    node: str
+    report: str
+    verdict: str
+    claim: str
+    status: Optional[str] = None
+    mtime: Optional[str] = None
+
+    def as_dict(self) -> "dict[str, Any]":
+        return {
+            "node": self.node,
+            "report": self.report,
+            "verdict": self.verdict,
+            "claim": self.claim,
+            "status": self.status,
+            "mtime": self.mtime,
+        }
+
+
+@dataclass(frozen=True)
 class Outstanding:
     carveout_total: int
     carveout_by_kind: "dict[str, int]"
@@ -131,6 +153,10 @@ class Outstanding:
     capture_row_total: int = 0
     lane: "list[LaneItem]" = field(default_factory=list)
     lane_parked: int = 0
+    #: Open prove-it FAIL verdicts from the plan artifacts walk, plus the
+    #: reader's failure: a failed read is surfaced, never folded into a zero.
+    verdicts: "list[VerdictRow]" = field(default_factory=list)
+    verdicts_error: Optional[str] = None
     #: The one project-scoped leg names its root; the machine-wide legs name
     #: their stores, so a zero in any stream is diagnosable instead of
     #: silently meaning either "clean" or "read from the wrong place".
@@ -139,7 +165,12 @@ class Outstanding:
     @property
     def empty(self) -> bool:
         return (
-            self.carveout_total == 0 and not self.questions and not self.captures and not self.lane
+            self.carveout_total == 0
+            and not self.questions
+            and not self.captures
+            and not self.lane
+            and not self.verdicts
+            and self.verdicts_error is None
         )
 
     def as_dict(self) -> "dict[str, Any]":
@@ -176,6 +207,11 @@ class Outstanding:
                 "total": len(self.lane),
                 "parked": self.lane_parked,
                 "items": [{"text": i.text, "line": i.line} for i in self.lane],
+            },
+            "verdicts": {
+                "total": len(self.verdicts),
+                "error": self.verdicts_error,
+                "items": [v.as_dict() for v in self.verdicts],
             },
         }
 
@@ -738,6 +774,7 @@ def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:
     lane_read = lane if lane is not None else read_lane()
     if lane_read.error:
         raise OutstandingError(lane_read.error)
+    verdicts, verdicts_error = _read_open_verdicts()
     return Outstanding(
         carveout_total=len(rows),
         carveout_by_kind=by_kind,
@@ -748,8 +785,40 @@ def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:
         capture_row_total=capture_row_total,
         lane=open_items(lane_read),
         lane_parked=len(parked_items(lane_read)),
+        verdicts=verdicts,
+        verdicts_error=verdicts_error,
         carveout_root=str(Path(root)),
     )
+
+
+def _read_open_verdicts() -> "tuple[list[VerdictRow], Optional[str]]":
+    """Open prove-it FAIL rows from the Rust reader, or the reason it could not.
+
+    A failed verb call does NOT raise ``OutstandingError``: that would blank
+    the questions leg, which reads stores the verdict reader never touches.
+    The failure renders as its own line instead.
+    """
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        payload = verb_call("prove-it-verdicts", {})
+    except (VerbUnavailable, OSError, ValueError) as exc:
+        return [], str(exc)
+    rows = []
+    for row in payload.get("rows") or []:
+        if not row.get("open"):
+            continue
+        rows.append(
+            VerdictRow(
+                node=str(row.get("node") or ""),
+                report=str(row.get("report") or ""),
+                verdict=str(row.get("verdict") or "FAIL"),
+                claim=str(row.get("claim") or ""),
+                status=row.get("status"),
+                mtime=row.get("mtime"),
+            )
+        )
+    return rows, None
 
 
 def _age_days(ts: str) -> Optional[int]:
@@ -911,6 +980,26 @@ def render(
             lines.append(
                 "  Rows are trimmed to one line; read a full question with: fno inbox outstanding -J"
             )
+        lines.append("")
+
+    if outstanding.verdicts:
+        lines.append(
+            f"{_plural(len(outstanding.verdicts), 'prove-it FAIL verdict')} with no ruling."
+        )
+        for v in outstanding.verdicts[:RENDER_CAP]:
+            claim = v.claim.split("\n", 1)[0].strip()
+            if len(claim) > 100:
+                claim = claim[:99] + "…"
+            where = f" ({v.status})" if v.status else ""
+            lines.append(f"  {v.node}{where}: {claim}")
+            lines.append(f"    Read: {v.report}")
+        lines.append(
+            "  Rule with: fno inbox decide <node> naming the report, or re-run /fno:review prove-it."
+        )
+        lines.append("")
+
+    if outstanding.verdicts_error:
+        lines.append(f"prove-it verdicts could not be read ({outstanding.verdicts_error}).")
         lines.append("")
 
     if outstanding.captures:

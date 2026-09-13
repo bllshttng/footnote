@@ -251,6 +251,29 @@ pub(crate) fn filter_unanswered_by_mail(
         .collect()
 }
 
+/// One row per node whose plan artifacts hold an open prove-it FAIL
+/// (x-6d64): the verdict that used to route nowhere.
+fn verdict_rows_from(outstanding: &Value) -> Vec<Value> {
+    outstanding
+        .get("verdicts")
+        .and_then(|v| v.get("items"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|r| {
+                    json!({
+                        "node": r.get("node"),
+                        "verdict": r.get("verdict"),
+                        "report": r.get("report"),
+                        "claim": r.get("claim"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Board construction: the thirteen queues
 // ---------------------------------------------------------------------------
@@ -1033,6 +1056,20 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         capture_rows.push(json!({"elided_projects": elided}));
     }
 
+    // One row per node whose plan artifacts hold an open prove-it FAIL
+    // (x-6d64): the verdict that used to route nowhere. An ok read with no
+    // verdicts key at all is a STALE Python leg, not a clean one -- the key is
+    // unconditionally emitted since the leg shipped, so its absence must not
+    // read as "zero FAILs".
+    let verdict_rows = verdict_rows_from(&Value::Object(outstanding.clone()));
+    if inputs.outstanding.is_ok() && outstanding.get("verdicts").is_none() {
+        warnings.push(
+            "the outstanding read carries no verdicts leg; the installed fno Python is \
+             older than this binary (fno doctor update)"
+                .to_string(),
+        );
+    }
+
     // `fno agents needs` emits operator questions in the same list; the queue
     // above already carries them, so this one drops the kind.
     let needs_rows: Vec<Value> = inputs
@@ -1285,6 +1322,16 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             Some(as_int(capture_stream.get("total").unwrap_or(&Value::Null))),
         ),
         queue(
+            "failed_verdict",
+            SRC_QUESTIONS.to_string(),
+            &inputs.outstanding,
+            verdict_rows,
+            true,
+            "a merged or open node's plan artifacts hold a prove-it FAIL with no ruling; rule with fno inbox decide <node> naming the report, or re-run /fno:review prove-it".to_string(),
+            "fno inbox outstanding",
+            None,
+        ),
+        queue(
             "unreachable_worker",
             SRC_NEEDS.to_string(),
             &inputs.needs,
@@ -1395,6 +1442,38 @@ mod tests {
         let body = queue_json(&q);
         assert_eq!(body["count"], Value::Null);
         assert!(body["error"].as_str().unwrap().contains("exit 1"));
+    }
+
+    #[test]
+    fn an_open_prove_it_fail_becomes_a_failed_verdict_queue_row() {
+        let outstanding = json!({
+            "verdicts": {"total": 1, "error": null, "items": [{
+                "node": "x-70e1",
+                "report": "/plans/a.md.artifacts/coverage/REPORT.md",
+                "verdict": "FAIL",
+                "claim": "the probe rejects incomplete evidence",
+                "status": "done",
+                "mtime": "2026-09-08T20:56:56Z",
+            }]}
+        });
+        let rows = verdict_rows_from(&outstanding);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["node"], "x-70e1");
+        let q = queue(
+            "failed_verdict",
+            "src".to_string(),
+            &SourceRead::ok(outstanding),
+            rows,
+            true,
+            String::new(),
+            "fno inbox outstanding",
+            None,
+        );
+        assert_eq!(q.count, 1);
+        assert_eq!(queue_json(&q)["count"], 1);
+        // No open rows, no queue row: silence is the steady state.
+        assert!(verdict_rows_from(&json!({})).is_empty());
+        assert!(verdict_rows_from(&json!({"verdicts": {"items": []}})).is_empty());
     }
 
     #[test]
