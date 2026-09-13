@@ -1,6 +1,8 @@
 //! Config/path resolution and crown-scope compilation (king/lane.py, projects/resolve.py).
 use super::s_str;
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 

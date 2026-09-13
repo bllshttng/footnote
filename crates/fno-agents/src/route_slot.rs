@@ -60,23 +60,6 @@ fn row_value<'a>(row: &'a Value, key: &str) -> String {
         .to_string()
 }
 
-/// One walk target: the config-path rung plus the row name it resolves to.
-fn plan_entry(rung_base: &str, index: usize, raw: &Value) -> Option<(String, String)> {
-    let rung = format!("{rung_base}.lanes[{index}]");
-    match raw {
-        Value::String(name) => {
-            let name = name.trim();
-            if name.is_empty() {
-                None
-            } else {
-                Some((rung, name.to_string()))
-            }
-        }
-        Value::Object(_) => Some((rung.clone(), rung)),
-        _ => None,
-    }
-}
-
 /// Fold the raw lane list to `(plan, rows, fields_by_rung)` against the
 /// declared rows; a fault returns its config-terminal line.
 #[allow(clippy::type_complexity)]
@@ -418,7 +401,7 @@ fn order_candidates(mut rows: Vec<InvRow>, objective: &str, prefer_harness: &str
 /// The no-lanes fallthrough: difficulty and priority join the declared
 /// inventory under a live capacity snapshot. Receipts are the Python
 /// resolver's, verbatim.
-fn grid_leg(payload: &Value, rung_base: &str, chain: &mut Vec<Value>) -> Value {
+fn grid_leg(payload: &Value, _rung_base: &str, chain: &mut Vec<Value>) -> Value {
     let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
     let node = payload.get("node").cloned().unwrap_or(Value::Null);
     let band_raw = node

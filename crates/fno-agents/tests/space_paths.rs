@@ -7,9 +7,3 @@ pub fn project_events(cwd: &std::path::Path) -> std::path::PathBuf {
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     path
 }
-
-pub fn project_ledger(cwd: &std::path::Path) -> std::path::PathBuf {
-    let path = fno_agents::paths::ledger_path(cwd);
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    path
-}

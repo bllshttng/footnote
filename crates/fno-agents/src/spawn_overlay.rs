@@ -90,8 +90,21 @@ pub fn run_spawn_overlay(args: &[String]) -> i32 {
     }
 }
 
-fn bad(msg: &str) -> io::Error {
-    io::Error::other(String::from(msg))
+#[cfg(test)]
+trait MergeValue {
+    fn merge(self, other: &Value) -> Value;
+}
+
+#[cfg(test)]
+impl MergeValue for Value {
+    fn merge(mut self, other: &Value) -> Value {
+        if let (Some(base), Some(extra)) = (self.as_object_mut(), other.as_object()) {
+            for (k, v) in extra {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+        self
+    }
 }
 
 pub fn resolve(payload: Value) -> Result<Value, String> {
@@ -289,7 +302,7 @@ fn resolve_overlay(payload: &Value) -> Result<Value, String> {
         }));
     }
 
-    let mut effective = effective_for(harness);
+    let effective = effective_for(harness);
 
     // ONE bundle: lane args > profile harness overlay args > defaults harness
     // overlay args. Never concatenated; the boundary the caller's argv already
@@ -1008,17 +1021,3 @@ mod tests {
     }
 }
 
-trait MergeValue {
-    fn merge(self, other: &Value) -> Value;
-}
-
-impl MergeValue for Value {
-    fn merge(mut self, other: &Value) -> Value {
-        if let (Some(base), Some(extra)) = (self.as_object_mut(), other.as_object()) {
-            for (k, v) in extra {
-                base.insert(k.clone(), v.clone());
-            }
-        }
-        self
-    }
-}

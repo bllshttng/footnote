@@ -10646,10 +10646,11 @@ fn run_bounded(
 
 mod read_bounds;
 
+#[cfg(test)]
+use read_bounds::clamp_to_fire_budget;
 pub(crate) use read_bounds::{
-    clamp_to_fire_budget, clamp_to_fire_deadline, stopgate_drain_reserve_ms,
-    stopgate_drain_timeout, stopgate_read_timeout, stopgate_stamp_fire, STOPGATE_BOUND_FLOOR,
-    STOPGATE_FIRE_BUDGET,
+    clamp_to_fire_deadline, stopgate_drain_reserve_ms, stopgate_drain_timeout,
+    stopgate_read_timeout, stopgate_stamp_fire, STOPGATE_BOUND_FLOOR, STOPGATE_FIRE_BUDGET,
 };
 
 /// How an external stop-gate read failed. `TimedOut` is its own kind so a

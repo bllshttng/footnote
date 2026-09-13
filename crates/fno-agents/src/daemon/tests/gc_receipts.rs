@@ -32,7 +32,7 @@ pub(super) fn quiet_transcript(
 /// batch seam, and the fixtures answer from the SAME staged transcript files
 /// the old stat read - the seam is what changed, not the fixture ages.
 pub(super) fn staged_ages(
-    transcripts: &(dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>),
+    transcripts: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
 ) -> impl Fn(&[&state::RegistryEntry]) -> std::collections::HashMap<String, Option<i64>> + '_ {
     move |entries| {
         entries
@@ -3890,9 +3890,8 @@ fn the_commit_gate_drops_an_order_whose_obligation_opened() {
         r.entries.push(e);
     })
     .unwrap();
-    let mut entry = &state::RegistryEntry::default();
     let entries = state::load_registry(&home.registry_json()).unwrap();
-    entry = entries.entries.first().unwrap();
+    let entry = entries.entries.first().unwrap();
     let mut receipt = crate::receipt::build_reap_receipt(entry, None).unwrap();
     receipt.effects = vec![crate::gc_native::stop_outcome_effect(true, None)];
     let mut receipts = std::collections::BTreeMap::new();

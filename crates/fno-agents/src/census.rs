@@ -180,7 +180,7 @@ fn keeper_rows() -> Vec<Value> {
         let sock = argv
             .windows(2)
             .find(|w| w[0] == "--sock")
-            .map(|w| PathBuf::from(w[1].clone()));
+            .map(|w| PathBuf::from(w[1]));
         let session = argv
             .windows(2)
             .find(|w| w[0] == "--session")

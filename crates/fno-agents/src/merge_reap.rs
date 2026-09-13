@@ -73,6 +73,7 @@ pub(crate) struct MergeCleanupRequest {
 /// finish a request; a held request stays pending and is re-read every pass.
 /// One journal read per call; the reaper pass calls the `_all` variant once
 /// and partitions in memory, so N roots cost one read, not N.
+#[cfg(test)]
 pub(crate) fn pending_merge_cleanup_requests(
     home: &AgentsHome,
     repo: &str,
@@ -1466,7 +1467,7 @@ mod tests {
             tree_holds: &|_wt| true,
             take_tree: &|_wt, _root| true,
         };
-        let (acted, held) = run_request(
+        let (acted, _held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1778,7 +1779,7 @@ mod tests {
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_registry(&home, &[claude_row("t-1-writing-glm", false)]);
         let states = merged_states();
-        let mut request = settled_request("/no-such-worktree");
+        let request = settled_request("/no-such-worktree");
         let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let stop_calls = std::rc::Rc::clone(&calls);
         let seams = RequestSeams {

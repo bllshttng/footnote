@@ -1174,7 +1174,7 @@ pub fn provenance_verdict(
     // the join's own multi-row read (every node the session names must be
     // done); only a NoProvenance route re-derives work from the resolved
     // node's stored status.
-    let mut route = node_route::resolve(e, sid, graph, transcripts);
+    let route = node_route::resolve(e, sid, graph, transcripts);
     if route.conflict.is_some() {
         work = WorkState::NoProvenance;
     } else if !matches!(route.source, Some(node_route::NodeSource::Sessions)) {
@@ -1436,7 +1436,6 @@ pub(crate) fn run_with_release(
                 Some((name, created)) => {
                     created.as_str() == e.created_at.as_str() && name.as_str() < e.name.as_str()
                 }
-                Some((_, _)) => false,
             };
             if take {
                 live_peer.insert(node.clone(), (e.name.clone(), e.created_at.clone()));

@@ -102,12 +102,6 @@ pub struct EffectRecord {
     pub at: String,
 }
 
-/// Which receipt fields the retention window may expire. The identity core
-/// (who, native locator, resume tokens) is NEVER on this list: the mapping
-/// this store exists to preserve must stay recoverable for as long as the
-/// native session itself is (AC2-HP).
-const EXPENDABLE_FIELDS: &[&str] = &["ledger", "effects", "log_path"];
-
 /// Load one receipt from disk. All v2 fields default, so a v1 file reads
 /// with them absent rather than invented.
 pub fn read_reap_receipt(path: &std::path::Path) -> std::io::Result<ReapReceipt> {

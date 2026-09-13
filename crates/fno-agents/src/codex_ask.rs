@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use crate::claude_ask::emit_event;
 use crate::paths::AgentsHome;
 use crate::provider::normalize_codex_command;
-use crate::state::{find_keyed_mut, load_registry, update_registry, Lineage, RegistryEntry};
+use crate::state::{find_keyed_mut, load_registry, update_registry, Lineage};
 use crate::AgentStatus;
 
 // ===========================================================================

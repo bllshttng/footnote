@@ -5,7 +5,8 @@ use crate::claims::{
     common_event_data, emit_audit_event, encode_key, is_same_machine, list_in_result, now_ms,
     probe_pid, read_claim_file, ClaimRecord, PidProbe, ReadError,
 };
-use serde_json::{Map, Value};
+use serde_json::Value;
+
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -161,7 +162,7 @@ pub fn release_for_stopped_session(
         let kept_observed = match rec.pid {
             // No pid to probe: the holder identity itself is the release proof.
             None => None,
-            Some(pid) if !is_same_machine(&rec.host, rec.machine_id.as_deref()) => {
+            Some(_pid) if !is_same_machine(&rec.host, rec.machine_id.as_deref()) => {
                 Some(format!("off-host {}", rec.host))
             }
             Some(pid) => match probe_pid(pid) {

@@ -11,13 +11,17 @@
 //! Wave 6. The handlers here are deliberately the minimum that makes the daemon
 //! a working supervisor end-to-end.
 
-use crate::client_verbs::RowLiveness;
 use crate::events::EventEmitter;
+// Test-only consumers (daemon's own cfg(test) modules and src/daemon/tests/*)
+// reach these through `use super::*`, so the imports stay scoped to test builds.
+#[cfg(test)]
+use crate::client_verbs::RowLiveness;
+#[cfg(test)]
+use crate::codex_thread_entry::build_codex_thread_entry;
 // The receipt builders moved to `receipt.rs` (x-a879) so the write choke
 // point (`state::update_registry`) can stage the same recovery record for a
 // row removed through ANY door; re-exported so the reap path's references
 // are unchanged.
-use crate::codex_thread_entry::build_codex_thread_entry;
 pub use crate::gc::{gc_sweep, gc_sweep_dry_run};
 use crate::identity::canonical_handle;
 use crate::paths::{self, AgentsHome};
@@ -854,7 +858,7 @@ pub fn worktree_sweep(
     swept
 }
 
-pub(crate) use crate::gc_inventory::{index_tree, HarnessStoreIndex};
+pub(crate) use crate::gc_inventory::index_tree;
 // x-1b90: the pane kill and its absence vocabulary moved to pane_stop.rs
 // with the stop helper that now shares them.
 pub(crate) use crate::pane_stop::{mux_pane_is_absent, run_mux_pane_kill};
@@ -1372,9 +1376,11 @@ use crate::liveness_sweep;
 pub(crate) use crate::liveness_sweep::{
     apply_reconcile_change, plan_reconcile, ReconcileChange, ReconcileOutcome, SweepMode,
 };
+#[cfg(test)]
+pub(crate) use crate::row_truth::{apply_title_changes, row_truth_handles};
 pub(crate) use crate::row_truth::{
-    apply_title_changes, batched_row_probes, fold_positive_death, row_truth_handle,
-    row_truth_handles, served_fresh_liveness, served_liveness_basis, title_changes,
+    batched_row_probes, fold_positive_death, row_truth_handle, served_fresh_liveness,
+    served_liveness_basis, title_changes,
 };
 
 pub fn now_epoch_secs() -> i64 {
@@ -2548,7 +2554,7 @@ const PENDING_INSIDE_LEG_CAP: usize = 64;
 /// touch the driver; see `crates/fno-agents/src/codex_thread.rs`.
 type CodexThreadHandle = Arc<crate::codex_thread::CodexThreadActor>;
 
-use crate::codex_thread::{InterruptOutcome, TurnReceipt};
+use crate::codex_thread::InterruptOutcome;
 
 mod codex_thread_lane;
 mod thread_row_status;
@@ -8750,7 +8756,6 @@ mod tests {
     mod store_socket_sweep_tests;
     use super::blocking_bound::directory_bytes_within;
     use super::*;
-    use std::io::Write;
 
     /// The e2e restart-storm test only exercises `state_error_code` when the
     /// scheduler happens to race a task into shutdown-cancellation, so its

@@ -564,7 +564,7 @@ fn run_captured(bin: &str, args: &[&str], cwd: &Path, timeout: Duration) -> Opti
     let mut stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut text = String::new();
-        use std::io::Read;
+        
         let _ = std::io::Read::read_to_string(&mut stdout, &mut text);
         text
     });
