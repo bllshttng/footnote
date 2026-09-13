@@ -93,7 +93,7 @@ Four facts free an open-node row anyway (`gc.rs:106-112`):
 - The node sits parked at `deferred` or `idea` (`gc.rs:128`).
 - The node recorded merge status reads `merged`.
 
-Each released row falls to the same quiet gate a done node takes, so the transcript still decides. A planner row never takes these four releases, and it never keeps under open work while it carries assignments: its own reason names the planning lane (`gc.rs:287-310`).
+Each released row falls to the same quiet gate a done node takes, so the transcript still decides. A planner row never takes these four releases. It never keeps under open work while it carries assignments: its own reason names the planning lane (`gc.rs:287-310`).
 
 ### open do row on done node
 
