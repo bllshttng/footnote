@@ -8,6 +8,12 @@
 #   worktree-lifecycle.sh archive <name>            # Keep branch, remove directory
 set -uo pipefail
 
+# Sanctioned disposable delete (docs/architecture/disposable-deletes.md):
+# unlink through the default PATH; /bin/rm as the shadowed-PATH fallback. A
+# bare rm on a trash-aliased host MOVES the bytes to Trash and reclaims
+# nothing, which inverts every delete below.
+_srm() { command -p rm "$@" 2>/dev/null || /bin/rm "$@"; }
+
 # The one "is removing this worktree safe?" answer, shared with
 # archive-worktree.sh and the Rust row-GC probe. Absent (partial deploy) it
 # degrades to the old block-on-any-dirt rule, never to permission.
@@ -76,6 +82,14 @@ if [[ -f "${_WT_LIFECYCLE_DIR}/events-lock.sh" ]]; then
     source "${_WT_LIFECYCLE_DIR}/events-lock.sh"
 else
     _event_process_identity() { :; }
+fi
+
+# The build hash dir outlives git's removal; reclaim it while the manifest
+# can still answer. A partial deploy without the lib leaves the dir to the
+# sweep.
+if [[ -f "${_WT_LIFECYCLE_DIR}/cargo-build-dir.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/cargo-build-dir.sh"
 fi
 
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
@@ -727,7 +741,7 @@ _cargo_target_cleanup() {
                 protected=$((protected + 1))
                 continue
             fi
-            rm -rf -- "$target"
+            _srm -rf -- "$target"
             if [[ ! -e "$target" ]]; then
                 printf 'cargo-target reaped bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
                 reaped=$((reaped + 1))
@@ -769,8 +783,8 @@ _cargo_target_cleanup() {
                 printf 'cargo-target kept bytes=%s reason=link-target-not-owned path=%s\n' "$bytes" "$target"
                 continue
             fi
-            rm -rf -- "$resolved"
-            rm -f -- "$target"
+            _srm -rf -- "$resolved"
+            _srm -f -- "$target"
             if [[ ! -e "$resolved" && ! -L "$target" ]]; then
                 printf 'cargo-target reaped bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
                 reaped=$((reaped + 1))
@@ -779,7 +793,7 @@ _cargo_target_cleanup() {
                 printf 'cargo-target kept bytes=%s reason=delete-failed path=%s\n' "$bytes" "$target"
             fi
         else
-            rm -rf -- "$target"
+            _srm -rf -- "$target"
             if [[ ! -e "$target" ]]; then
                 printf 'cargo-target reaped bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
                 reaped=$((reaped + 1))
@@ -931,13 +945,13 @@ _acquire_sweep_lock() {
             # pre-cleaned, so mv always renames rather than nesting into a
             # leftover of a killed earlier steal.
             _WT_STALE="$_WT_SWEEP_LOCK.stale.$$.$RANDOM"
-            rm -rf "$_WT_STALE" 2>/dev/null || true
+            _srm -rf "$_WT_STALE" 2>/dev/null || true
             mv "$_WT_SWEEP_LOCK" "$_WT_STALE" 2>/dev/null || true
             if [[ -d "$_WT_STALE" ]]; then
                 _moved_stamp="$(cat "$_WT_STALE/pid" 2>/dev/null || true)"
                 if [[ -n "$_moved_stamp" && "$_moved_stamp" == "$_held_stamp" ]] \
                     && ! _wt_holder_live "$_moved_stamp"; then
-                    rm -rf "$_WT_STALE"
+                    _srm -rf "$_WT_STALE"
                 elif [[ ! -e "$_WT_SWEEP_LOCK" ]]; then
                     # Not what we observed and nobody has claimed the path
                     # since: put it back untouched.
@@ -958,14 +972,14 @@ _acquire_sweep_lock() {
                     # existing dir); lifting our copy back out leaves the
                     # holder's own trap able to rmdir later.
                     if [[ -d "$_WT_SWEEP_LOCK/${_WT_STALE##*/}" ]]; then
-                        rm -rf "$_WT_SWEEP_LOCK/${_WT_STALE##*/}"
+                        _srm -rf "$_WT_SWEEP_LOCK/${_WT_STALE##*/}"
                     fi
                 elif [[ -z "$_moved_stamp" ]] || ! _wt_holder_live "$_moved_stamp"; then
                     # The path was re-taken before the restore, so the
                     # moved copy is unreachable debris; reap it only when
                     # its own stamp is absent or dead - never while it
                     # names a live claim.
-                    rm -rf "$_WT_STALE"
+                    _srm -rf "$_WT_STALE"
                 fi
                 # A live-stamp copy with no free path stays where it is;
                 # the sibling sweep at the next acquisition reaps it once
@@ -999,7 +1013,7 @@ _acquire_sweep_lock() {
                 rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
             elif [[ -n "$_WT_SWEEP_STARTED" ]] \
                 && [[ -n "$(find "$_WT_SWEEP_LOCK" -maxdepth 0 ! -newer "$_WT_SWEEP_STARTED" 2>/dev/null)" ]]; then
-                rm -rf "$_WT_SWEEP_LOCK"
+                _srm -rf "$_WT_SWEEP_LOCK"
             fi
         fi
         sleep 0.2
@@ -1017,13 +1031,13 @@ _acquire_sweep_lock() {
         [[ -d "$_wt_stale" ]] || continue
         _stale_stamp="$(cat "$_wt_stale/pid" 2>/dev/null || true)"
         if [[ -z "$_stale_stamp" ]] || ! _wt_holder_live "$_stale_stamp"; then
-            rm -rf "$_wt_stale"
+            _srm -rf "$_wt_stale"
         fi
     done
     # Birth certificates from sweeps that died between creating the file and
     # arming a trap: the certificate is read only inside a live sweep's retry
     # loop (about a second), so one older than five minutes has no reader.
-    find "$_GIT_COMMON_DIR" -maxdepth 1 -name '.fno-wt-sweep-started.*' -mmin +5 -exec rm -f {} + 2>/dev/null || true
+    find "$_GIT_COMMON_DIR" -maxdepth 1 -name '.fno-wt-sweep-started.*' -mmin +5 -delete 2>/dev/null || true
     printf '%s\n' "$_WT_SELF_STAMP" > "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
     # Only tear down the lock if it still names us - a lock reclaimed
     # from a dead holder, or freshly acquired, must never be removed out
@@ -1390,6 +1404,7 @@ case "${1:-status}" in
                     echo "  WOULD REMOVE: $wt ($AGE_DAYS days old, branch: $BRANCH)"
                     WOULD=$((WOULD + 1))
                 else
+                    declare -F cargo_build_dir_remove_for_wt >/dev/null 2>&1 && cargo_build_dir_remove_for_wt "$wt" || true
                     if git worktree remove --force "$wt" 2>/dev/null; then
                         echo "  REMOVED: $wt (branch $BRANCH preserved)"
                         REMOVED=$((REMOVED + 1))
