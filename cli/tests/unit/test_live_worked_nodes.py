@@ -217,7 +217,7 @@ def _ship_entry(node_id: str, *, status: str = "in_review") -> dict:
 
 def test_ac1_hp_an_open_ship_row_alone_never_occupies(monkeypatch):
     """The PR-link stamp opens a ship row and no terminal closes it, so the
-    row carries the linker's liveness, never the node's occupancy (x-e221)."""
+    row carries the linker's liveness, never the node's occupancy."""
     monkeypatch.setattr(
         "fno.graph.store.read_graph_strict", lambda *_a, **_kw: [_ship_entry("x-e221")]
     )
