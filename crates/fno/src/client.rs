@@ -10130,20 +10130,17 @@ fn pad_cols(s: &str, w: usize) -> String {
     out
 }
 
-/// Truncate `s` to `max` chars, ending an actual cut with an ellipsis.
-pub(crate) fn ellipsize(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let cut: String = s.chars().take(max - 1).collect();
-    format!("{cut}…")
-}
-
 pub(crate) fn pad_to(s: &str, w: usize) -> String {
-    let mut out = ellipsize(s, w);
-    let count = out.chars().count();
-    out.push_str(&" ".repeat(w - count));
-    out
+    let count = s.chars().count();
+    if count > w {
+        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    } else {
+        let mut t = s.to_string();
+        t.push_str(&" ".repeat(w - count));
+        t
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1111,16 +1111,22 @@ impl ConnectionsView {
         }
         // One width per column, shared by the header and every row, so the
         // body reads as a table. A column with no values still gets its
-        // header's width (AC4-EDGE). Names clamp at MAX_NAME_COL (AC4-HP).
+        // header's width (AC4-EDGE). Name cells render through client::pad_to,
+        // which truncates with an ellipsis at the column cap (AC4-HP).
+        let name_w = |id: &str| id.chars().count().min(MAX_NAME_COL);
+        let w_name = self
+            .accounts
+            .iter()
+            .map(|a| name_w(&a.id))
+            .chain(self.pending.iter().map(|p| name_w(&p.id)))
+            .max()
+            .unwrap_or(0)
+            .max("ACCOUNT".len());
         let names: Vec<String> = self
             .accounts
             .iter()
-            .map(|a| crate::client::ellipsize(&a.id, MAX_NAME_COL))
-            .chain(
-                self.pending
-                    .iter()
-                    .map(|p| crate::client::ellipsize(&p.id, MAX_NAME_COL)),
-            )
+            .map(|a| a.id.clone())
+            .chain(self.pending.iter().map(|p| p.id.clone()))
             .collect();
         let clis: Vec<String> = self
             .accounts
@@ -1148,7 +1154,6 @@ impl ConnectionsView {
                 .unwrap_or(0)
                 .max(label.chars().count())
         };
-        let w_name = w("ACCOUNT", &names);
         let w_cli = w("CLI", &clis);
         let w_auth = w("AUTH", &auths);
         let w_head = w("HEADROOM", &headrooms);
@@ -1183,7 +1188,7 @@ impl ConnectionsView {
             };
             out.push(format!(
                 "{cursor}{badge}{spawn} {name:<wname$}  {cli:<wcli$}  {auth:<wauth$}  {head:<whead$}  {snap:<wsnap$}  {ident}",
-                name = names[i],
+                name = crate::client::pad_to(&names[i], w_name),
                 wname = w_name,
                 cli = a.harness,
                 wcli = w_cli,
@@ -1203,7 +1208,7 @@ impl ConnectionsView {
             let cursor = if idx == self.acct_sel { ">" } else { " " };
             out.push(format!(
                 "{cursor}   {name:<wname$}  {cli:<wcli$}  …login pending  (r: register)",
-                name = names[self.accounts.len() + j],
+                name = crate::client::pad_to(&names[self.accounts.len() + j], w_name),
                 wname = w_name,
                 cli = clis[self.accounts.len() + j],
                 wcli = w_cli,
