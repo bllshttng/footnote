@@ -751,7 +751,10 @@ def compare_and_rebind(
     one still refuses as a concurrent writer, so the move never yanks a running
     owner.
 
-    Omitting it preserves the holder, which is every pre-existing caller.
+    Omitting it preserves the holder, which is every pre-existing caller. A
+    handover also records the prior record's session id under
+    ``metadata['dispatched_by_session']`` so the session that dispatched the
+    work stays auditable after the successor's session replaces it.
 
     Returns ``(claim, mode)`` where mode is ``"rebind"`` (a dead prior PID was
     rebound), ``"idempotent"`` (a live same-PID lease refresh), or ``"handover"``
@@ -857,7 +860,17 @@ def compare_and_rebind(
         # the rename or not at all. Applying them to a refused handover let a
         # caller rewrite another holder's fields while leaving the holder alone.
         effective_new_reason = new_reason if handover_allowed else None
-        effective_new_metadata = new_metadata if handover_allowed else None
+        effective_new_metadata = None
+        if handover_allowed:
+            # The takeover rewrites session_id to the worker, which erases the
+            # only record of who dispatched the node. Carry the dispatcher's
+            # session in metadata so the audit survives; an explicit caller
+            # key wins.
+            merged = dict(existing.metadata or {})
+            merged.update(new_metadata or {})
+            if existing.session_id:
+                merged.setdefault("dispatched_by_session", existing.session_id)
+            effective_new_metadata = merged
         # A handover with no PINNED harness resolves one from the ambient
         # markers, exactly as `_make_claim` does on the ordinary acquire path.
         # Preserving the spawner's tag instead left a claude worker under a
