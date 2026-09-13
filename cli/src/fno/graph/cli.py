@@ -8361,14 +8361,6 @@ def _canonical_post_close(
 # that happen to touch the same field.
 
 
-def _archived_entry(node_id: str) -> Optional[dict]:
-    """The archive lookup, kept as a name for reopen's call sites; the
-    question owns the module now (fno.graph._archive_lookup)."""
-    from fno.graph._archive_lookup import archived_entry
-
-    return archived_entry(node_id)
-
-
 def _evidence_pr_number(evidence, refs: list) -> Optional[int]:
     """The PR number that produced ``evidence``'s outcome, not merely the first ref.
 
@@ -8467,7 +8459,9 @@ def cmd_reopen(
     entries = read_graph(_graph_path())
     node = _find_node(entries, task_id)
     if not node:
-        archived = _archived_entry(task_id)
+        from fno.graph._archive_lookup import archived_entry
+
+        archived = archived_entry(task_id)
         if archived is not None:
             when = archived.get("completed_at") or archived.get("updated") or "unknown"
             typer.echo(
@@ -8749,11 +8743,8 @@ def cmd_advance(
     # --epic routes to the epic-advance path; it is a distinct trigger from the
     # merge-advance --closed path (they never combine on one call).
     if epic is not None:
-        if closed is not None:
-            typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
-            raise typer.Exit(code=2)
-        if loose:
-            typer.echo("advance: --loose and --epic are mutually exclusive", err=True)
+        if closed is not None or loose:
+            typer.echo("advance: --epic is mutually exclusive with --closed/--loose", err=True)
             raise typer.Exit(code=2)
         # One in flight per mission (x-ef2c); the key uses the CANONICAL id so
         # both spellings of an epic are one scope. --stop is a control action
@@ -8785,16 +8776,11 @@ def cmd_advance(
             )
         return
     if loose:
-        if closed is not None:
-            typer.echo("advance: --loose and --closed are mutually exclusive", err=True)
-            raise typer.Exit(code=2)
-        if not project:
-            typer.echo("advance: --loose requires --project", err=True)
-            raise typer.Exit(code=2)
         from fno.backlog.advance import run_advance_loose
 
-        run_advance_loose(project, max_dispatch=max_dispatch, json_out=json_out,
-                          verbose=verbose, model=model, provider=provider)
+        run_advance_loose(project, closed=closed, max_dispatch=max_dispatch,
+                          json_out=json_out, verbose=verbose, model=model,
+                          provider=provider)
         return
     if stop or max_dispatch is not None or continuation:
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)

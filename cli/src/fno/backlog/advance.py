@@ -4555,6 +4555,7 @@ def echo_advance_receipt(result: AdvanceEpicResult, *, kind: str, json_out: bool
 def run_advance_loose(
     project: str,
     *,
+    closed: Optional[str],
     max_dispatch: Optional[int],
     json_out: bool,
     verbose: bool,
@@ -4564,6 +4565,12 @@ def run_advance_loose(
     """Run the loose-drain and render its receipt (x-e221 rung-1)."""
     import typer
 
+    if closed is not None:
+        typer.echo("advance: --loose and --closed are mutually exclusive", err=True)
+        raise typer.Exit(code=2)
+    if not project:
+        typer.echo("advance: --loose requires --project", err=True)
+        raise typer.Exit(code=2)
     try:
         loose_result = advance_project_loose(
             project,
