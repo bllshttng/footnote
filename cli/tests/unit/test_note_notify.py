@@ -490,6 +490,21 @@ def test_an_unknown_node_refuses_with_the_verb_text(tmp_path) -> None:
     assert got.exit_code == 1
 
 
+def test_an_archived_node_refuses_with_the_archive_remedy(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "fno.graph._archive_lookup.archived_entry",
+        lambda node_id: {"id": "x-3a64"} if node_id == "x-3a64" else None,
+    )
+    got = readers_before_append("x-3a64", _graph(tmp_path, [{"id": "x-0d08"}]))
+    assert isinstance(got, Refused)
+    assert got.message == (
+        "Error: node x-3a64 is archived; run `fno backlog unarchive x-3a64`"
+        " to restore it before updating."
+    )
+    assert "no node resolves" not in got.message
+    assert got.exit_code == 1
+
+
 def test_the_exact_slug_resolves_like_the_write_path(tmp_path, monkeypatch) -> None:
     """The store's by-id write path accepts the exact slug; so must the read."""
     _free(monkeypatch)
@@ -685,6 +700,29 @@ def test_quiet_writes_the_note_and_resolves_nobody(monkeypatch) -> None:
     assert result.exit_code == 0
     assert "noted x-0d08: the finding" in result.stdout
     assert "notif" not in result.stdout
+
+
+def test_quiet_archived_node_uses_the_archive_refusal(monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as graph_cli
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    monkeypatch.setattr(
+        "fno.graph.store.append_progress_note", lambda *a, **k: (False, None)
+    )
+    monkeypatch.setattr(
+        "fno.graph._archive_lookup.archived_entry",
+        lambda node_id: {"id": "x-3a64"} if node_id == "x-3a64" else None,
+    )
+
+    result = CliRunner().invoke(
+        graph_cli.cli, ["note", "x-3a64", "the finding", "--quiet"]
+    )
+    assert result.exit_code == 1
+    assert "Error: node x-3a64 is archived" in result.stderr
+    assert "fno backlog unarchive x-3a64" in result.stderr
+    assert "no node resolves" not in result.stderr
 
 
 def test_a_refusal_writes_nothing_and_exits_three(monkeypatch) -> None:
