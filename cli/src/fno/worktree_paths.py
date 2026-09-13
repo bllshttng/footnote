@@ -396,14 +396,12 @@ def _repo_identity(path: Path) -> Optional[tuple[Path, Path]]:
     outs = proc.stdout.split()
     top = Path(outs[0]).resolve()
     common = Path(outs[1])
-    if not common.is_absolute():
-        common = top / common
+    common = common if common.is_absolute() else top / common
     return top, common.resolve()
 
 
 UNDECLARED_REPO_RECEIPT = (
-    "worktree=never (undeclared repo; declare work."
-    "workspaces.<slug>.projects[].worktree to change it)"
+    "worktree=never (undeclared repo; declare work.workspaces.<slug>.projects[].worktree)"
 )
 
 
@@ -416,8 +414,7 @@ def undeclared_dispatch_pin(
     repo is not foreign. ``source == "default"`` means nothing anywhere named
     the target repo; reached from elsewhere, that is the repo whose edits the
     child's hooks would block, so pin ``never`` rather than write config into
-    somebody else's project. Declared repos, non-git targets, an ambient
-    override, undecidable resolves keep the ambient posture.
+    somebody else's project. Everything else keeps the ambient posture.
     """
     target = _repo_identity(target_cwd)
     caller = _repo_identity(caller_cwd)

@@ -1433,8 +1433,8 @@ def route_to_rust(
         )
         raise SystemExit(BIN_NOT_FOUND_EXIT)
     if env_pin:
-        # Merged immediately before the exec: the replacement process inherits
-        # it, and a stubbed _exec (tests) never exports anything.
+        # Immediately before the exec: the replacement inherits it; a stubbed
+        # _exec (tests) never exports anything.
         os.environ.update(env_pin)
     argv = [str(binary), *args]
     try:
