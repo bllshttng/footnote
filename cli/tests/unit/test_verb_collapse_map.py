@@ -175,8 +175,10 @@ def test_map_covers_current_surface_once():
     # halts on: 612 -> 613. `agents announce`, the fleet-announcement
     # writer/reader/status surface the binary dispatches directly: counted
     # from the merged file, 613 -> 614. `route admission`, the shared-account
-    # capacity preview: 614 -> 615. Counted from the merged file.
-    assert len(mapped) == 615, (
+    # capacity preview: 614 -> 615. `agents admission`, the owner verb the
+    # router exposes beside announce and fallback-chain: 615 -> 616. Counted
+    # from the merged file.
+    assert len(mapped) == 616, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
