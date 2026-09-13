@@ -40,9 +40,11 @@ class GraphTracker:
         self._path = path or graph_json()
 
     def _rows(self) -> list[dict]:
-        from fno.graph import api as graph_api
+        # The total fold: a minimal row the typed model cannot represent must
+        # still reach the projection, never vanish from a candidate list.
+        from fno.graph.api import wire_rows
 
-        return [n.model_dump(by_alias=True) for n in graph_api.nodes(include_archived=True, path=self._path).nodes]
+        return wire_rows(path=self._path)
 
     def read(self, id: str) -> TrackerNode:
         for entry in self._rows():
