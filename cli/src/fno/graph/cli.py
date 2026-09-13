@@ -1424,11 +1424,10 @@ def _fold_candidates(
     # A live plan surface is an independent fold signal when the filing names
     # one of the same files. The claim holder comes from the lockfile, not the
     # graph snapshot's stale locked_by field.
-    import re
     from pathlib import Path
     from fno.graph.collision import parse_files_to_modify
 
-    incoming_files = set(re.findall(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", details or ""))
+    incoming_files = discovery.filing_paths(details or "")
     if incoming_files:
         known = {item["id"] for item in out}
         for node in entries:
