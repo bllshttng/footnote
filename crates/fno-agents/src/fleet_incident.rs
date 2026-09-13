@@ -34,7 +34,9 @@ use std::path::{Path, PathBuf};
 pub const STATE_VERSION: u32 = 1;
 
 /// Exit codes for the `check` verdict verb, distinct from every dispatch and
-/// gate code in use (2, 13-15, 18, 75-79, 124, 127).
+/// gate code in use - see the allocation table in
+/// `cli/src/fno/agents/spawn_gate.py` (gate band 75-77, 79, 82-84), plus the
+/// convention codes 2, 13-15, 18, 124, 127.
 pub const EXIT_CHECK_STOPPED: i32 = 90;
 pub const EXIT_CHECK_UNAVAILABLE: i32 = 91;
 
