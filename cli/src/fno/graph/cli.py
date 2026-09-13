@@ -3097,7 +3097,7 @@ def cmd_update(
     dispatch_verb: Optional[str] = typer.Option(
         None,
         "--dispatch-verb",
-        help="Verb a dispatcher launches this node with (US3), e.g. /think. Validated against config.dispatch.allowed_verbs or config.dispatch.verb_registry at dispatch, not here. Pass 'null' to clear (revert to the /target --no-merge default).",
+        help="Verb a dispatcher launches this node with (US3), e.g. /think. Refused at write when it is not one bare verb word; the config.dispatch allowlist still applies at dispatch. Pass 'null' to clear (revert to the /target --no-merge default).",
     ),
     dispatch_brief: Optional[str] = typer.Option(
         None,
@@ -8803,7 +8803,7 @@ def cmd_advance(
             try:
                 report = build_lane_fill_report(
                     epic=epic, project=project, node_id=explain_node, top=explain_top,
-                    max_dispatch=max_dispatch,
+                    max_dispatch=max_dispatch, provider=provider, model=model,
                 )
             except Exception as exc:  # noqa: BLE001 - never a partial verdict
                 typer.echo(f"advance --explain --epic: {exc}", err=True)

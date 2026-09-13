@@ -973,10 +973,11 @@ def _validate_cli_deps(cli_deps: list[str], entries: list[dict]) -> None:
 # -- Ledger lookup --
 
 def _lookup_ledger_entry(plan_path: str) -> dict | None:
-    if not LEDGER_JSON.exists():
+    ledger = LEDGER_JSON
+    if ledger is None or not ledger.exists():
         return None
     try:
-        data = json.loads(LEDGER_JSON.read_text())
+        data = json.loads(ledger.read_text())
     except (json.JSONDecodeError, OSError) as e:
         print(
             f"Warning: could not read {LEDGER_JSON}: {e} - "

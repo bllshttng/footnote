@@ -2597,8 +2597,9 @@ fn commit_wip_if_dirty(cwd: &Path, reason: &str) -> Option<String> {
 // ── unanswered-question filing (x-32f3 HALF TWO) ────────────────────────────
 
 /// Positive-marker detector for an operator-directed question left in a
-/// worker's last message: matches the phrase, never an absence (AGENTS.md
-/// pitfalls corpus: "assert a positive marker, never an absence"). Narrow and
+/// worker's last message: matches the phrase, never an absence
+/// (scripts/lib/assert-absent.sh: 'assert a positive marker, never an
+/// absence'). Narrow and
 /// specimen-derived over "any text with a question mark" - a false positive
 /// costs a redundant outstanding row, a false negative loses the question,
 /// and the second failure mode is the one this fix exists for.

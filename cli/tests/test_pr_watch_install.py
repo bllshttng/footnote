@@ -655,6 +655,30 @@ def test_tick_watermarks_single_pass(tmp_path):
     assert spy.reads == 1
 
 
+def test_saturated_phases_reach_the_status_bits(tmp_path):
+    """The saturated marker survives the watermark pass and reads as one
+    status bit; a tick with nothing saturated carries no bit."""
+    from fno.pr_watch._install import _tick_watermarks, tick_end_bits
+
+    events_file = tmp_path / "events.jsonl"
+    _write_tick_events(
+        events_file, tick_ts="2026-08-17T06:12:01Z", attempt_ts="2026-08-17T06:12:00Z",
+        end={"outcome": "timeout", "duration_s": 479.4, "phase": "sweep",
+             "sweep_failures": 0, "why": "deadline_exceeded",
+             "saturated": ["sweep", "king_wake"]},
+    )
+
+    marks = _tick_watermarks(events_file)
+
+    assert marks["last_end"]["saturated"] == ["sweep", "king_wake"]
+    bits = tick_end_bits(marks["last_end"])
+    assert "saturated: sweep, king_wake" in bits, bits
+    assert not [b for b in tick_end_bits(
+        {"outcome": "ok", "duration_s": 1.0, "phase": "catchup", "sweep_failures": 0}
+    ) if b.startswith("saturated")]
+    assert tick_end_bits({"saturated": []}) == []
+
+
 def test_status_reads_the_event_log_once(tmp_home, tmp_launch_agents, capsys, monkeypatch):
     """AC11-EDGE at the status boundary: the verdict reuses the marks already
     read; a second scan would double the read count."""

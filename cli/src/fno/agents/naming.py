@@ -59,6 +59,10 @@ def dispatch_sources():
 def dispatch_verbs():
     return _codes()[1]
 
+def accepted_verb_words():
+    """The work-verb words the name mint resolves (naming-codes.yaml)."""
+    return sorted(_codes()[2])
+
 def provenance_rows():
     return _codes()[3]
 

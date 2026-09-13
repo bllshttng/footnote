@@ -68,6 +68,7 @@ from typing import (
 )
 
 from fno.env_file import read_var_from_env_file
+from fno.config._tiers import TIER_ALIASES
 
 if TYPE_CHECKING:
     from fno.config import ModelRoutingBlock, SettingsModel
@@ -335,13 +336,6 @@ def resolve_spawn_route(
 # either fails safe to the primary Anthropic model - no hardcoded tier.
 KNOWN_LANE_ROLES = ("build", "pr-create")
 
-#: Claude tier aliases: the names Claude Code resolves through
-#: ``ANTHROPIC_DEFAULT_<TIER>_MODEL``. ``fable`` is one of them and is a live
-#: alias here (``fno agents spawn --model fable``); omitting it left the fable
-#: tier of a routed worker resolving at Anthropic while every other tier ran on
-#: the secondary provider.
-TIER_ALIASES = ("opus", "sonnet", "haiku", "fable")
-
 # Every tier Claude Code may request internally. Setting all of them to the
 # routed model keeps the entire worker (incl. background haiku) on the secondary
 # provider, so zero Anthropic usage is recorded. Derived from TIER_ALIASES so a
@@ -350,6 +344,29 @@ MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
     *(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL" for alias in TIER_ALIASES),
 )
+
+
+def tier_models_for(provider: Mapping[str, object]) -> dict[str, str]:
+    """The provider's effective per-tier model map (alias -> model id).
+
+    ``haiku_model`` folds in as the haiku entry and an explicit
+    ``tier_models`` entry wins over it, so ``tier_models.haiku`` and
+    ``haiku_model`` set together resolve deterministically, not by dict
+    order. Empty for a provider that declares nothing: every tier then
+    rides the spawn model.
+    """
+    tiers: dict[str, str] = {}
+    haiku_model = provider.get("haiku_model")
+    if haiku_model:
+        tiers["haiku"] = str(haiku_model)
+    declared = provider.get("tier_models")
+    if isinstance(declared, Mapping):
+        for alias, tier_model in declared.items():
+            key = str(alias).strip().lower()
+            value = str(tier_model or "").strip()
+            if key in TIER_ALIASES and value:
+                tiers[key] = value
+    return tiers
 
 
 class TierRemapConflict(RouteCompositionError):
@@ -972,17 +989,39 @@ def _route_for_target(
         )
         return None
 
+    # A bare tier alias is resolved by Claude Code against the endpoint it is
+    # pointed at, and a third-party endpoint has no "sonnet": the spawn would
+    # print a live receipt and die on its first turn. is_anthropic_model draws
+    # the same alias line for the AMBIENT-env conflict; here the endpoint is
+    # known, so the check is local. Refuse, never coerce: picking a model on
+    # the operator's behalf is how a spawn ends up billing somewhere nobody
+    # chose.
+    if (
+        model.strip().lower() in TIER_ALIASES
+        and _base_url_host(base_url) not in ("", ANTHROPIC_API_HOST)
+    ):
+        _emit(
+            notice,
+            f"model-routing: refusing model {model!r} for provider {pname!r}: a bare "
+            "tier alias resolves against the endpoint the worker is pointed at, and "
+            f"{base_url} is not Anthropic's; name a model id this provider serves",
+        )
+        return None
+
     route = {"ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_AUTH_TOKEN": key}
+    # The blanket fill is load-bearing: an undeclared tier must be PRESENT and
+    # set to the spawn model, never absent, or Claude Code resolves that tier
+    # against its own default and a routed worker asks a third-party endpoint
+    # for an Anthropic model.
     for k in MODEL_ENV_KEYS:
         route[k] = model
-    # Item 1: route the background (haiku) tier to the provider's cheaper
-    # haiku_model (zai -> glm-4.7). Still the SAME secondary provider
-    # (base_url + token), so the whole worker stays off Anthropic; only the
-    # background model is cheaper. A provider with no haiku_model keeps the role
-    # model on the haiku tier (no regression, never an empty/invalid id).
-    haiku_model = provider.get("haiku_model")
-    if haiku_model:
-        route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = haiku_model
+    # Item 1: layer the provider's per-tier map over the blanket fill,
+    # generalized from the haiku_model special case (zai -> glm-4.7). Still the
+    # SAME secondary provider (base_url + token), so the whole worker stays off
+    # Anthropic; only the named tiers move. A provider with no tier map and no
+    # haiku_model composes exactly as before (never an empty/invalid id).
+    for alias, tier_model in tier_models_for(provider).items():
+        route[f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"] = tier_model
     # Item 2: a [1m]-routed worker gets an auto-compact backstop. The [1m]
     # variant selects the 1M context; this threshold (capped at the model
     # window, and precedence over /autocompact/--autocompact/setting) is the
@@ -994,6 +1033,17 @@ def _route_for_target(
     # operator can differentiate tiers or tune the routed worker.
     for k, v in (getattr(block, "extra_env", None) or {}).items():
         route[str(k)] = str(v)
+    # Checked after extra_env so a hand pin that already differentiates the
+    # tiers silences it. Four identical /model rows read as "the config did
+    # not take" (x-f173); this names the one lever that fixes it.
+    tier_values = {route[k] for k in MODEL_ENV_KEYS}
+    if len(tier_values) == 1:
+        _emit(
+            notice,
+            f"model-routing: every tier resolves to {next(iter(tier_values))}; /model "
+            "will offer no alternative; declare "
+            f"model_routing.providers.{pname}.tier_models to differentiate",
+        )
     return route
 
 
@@ -1360,24 +1410,25 @@ def refresh_provider_default_tiers(
     *,
     settings: "Optional[SettingsModel]" = None,
 ) -> tuple[dict[str, str], Optional[str]]:
-    """Re-resolve a recorded route's provider-DEFAULT tier key, or say why not.
+    """Re-resolve a recorded route's provider-DEFAULT tier keys, or say why not.
 
     A recorded route-settings file pins two kinds of value with the same
     authority: what the operator CHOSE (endpoint, token, model) and what the
     provider registry defaulted to at launch (the haiku tier, a background
-    model the operator never named). Replayed verbatim on resume, a moved
-    default keeps serving the old tier forever - glm-4.5-air left the z.ai
-    coding-plan supported set, and every resume off a file recorded before
-    the change failed background calls with model-not-found while the main
-    model stayed healthy (x-5cc5).
+    model the operator never named, plus every ``tier_models`` entry declared
+    in config). Replayed verbatim on resume, a moved default keeps serving the
+    old tier forever - glm-4.5-air left the z.ai coding-plan supported set, and
+    every resume off a file recorded before the change failed background calls
+    with model-not-found while the main model stayed healthy (x-5cc5).
 
     The operator's 2026-08-17 rule decides the split: the recorded file pins
     what the operator chose, not what the provider happened to default to
-    that week. So the haiku tier re-resolves against TODAY'S registry
-    (built-in defaults overlaid by config, the same map
-    :func:`effective_providers` renders), and every other key replays
+    that week. So every tier in the provider's effective tier map re-resolves
+    against TODAY'S registry (built-in defaults overlaid by config, the same
+    map :func:`effective_providers` renders), and every other key replays
     verbatim. An extra_env tier pin does not survive a resume - pin the
-    provider's ``haiku_model`` in config to make a tier durable.
+    provider's ``tier_models`` (or ``haiku_model``) in config to make a tier
+    durable.
 
     Returns ``(route, note)``: a copy of the route (the caller's mapping is
     never mutated) plus a disclosure note naming the provider, the old value
@@ -1397,14 +1448,19 @@ def refresh_provider_default_tiers(
             "replaying recorded tiers verbatim"
         )
     record = providers[pname]
-    todays = record.get("haiku_model")
-    recorded = refreshed.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
-    if not todays or not recorded or str(todays) == recorded:
+    moved: list[str] = []
+    for alias, todays in tier_models_for(record).items():
+        key = f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL"
+        recorded = refreshed.get(key)
+        if not todays or not recorded or str(todays) == recorded:
+            continue
+        refreshed[key] = str(todays)
+        moved.append(f"{alias} {recorded} -> {todays}")
+    if not moved:
         return refreshed, None
-    refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = str(todays)
     return refreshed, (
-        f"provider {pname} haiku tier default moved {recorded} -> {todays}; "
-        "tier re-resolved, operator-chosen keys replay verbatim"
+        f"provider {pname} tier default moved {', '.join(moved)}; "
+        "tiers re-resolved, operator-chosen keys replay verbatim"
     )
 
 

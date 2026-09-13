@@ -207,6 +207,14 @@ resolve-plan-executor.sh
 # hooks/megawalk-stop-hook.sh; tests source the lib directly. Pure sourcing
 # library; no standalone CLI of its own.
 
+# The zero-verdict helper (runs a control and a probe through ONE argv so a
+# zero needs a live control in the same tool and scope). Invoked via
+# `bash <path>` by the scripts/ci gates (check-no-internal-refs.sh,
+# check-no-stale-spec-refs.sh) and by tests/lib/test_assert_absent.sh; the
+# calling gates ARE the entry points, so an fno verb would be a third path
+# to the same scan. Standalone tool; no CLI of its own.
+assert-absent.sh
+
 # The shared "is removing this worktree safe?" answer. Sourced by
 # scripts/lib/worktree-lifecycle.sh and scripts/setup/archive-worktree.sh;
 # exposes wt_reapable. It is the bash ADAPTER for the wrapped entry point

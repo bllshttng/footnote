@@ -87,8 +87,22 @@ def list_providers(
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit a JSON array of record rows (Connections UI)."
     ),
+    identity: bool = typer.Option(
+        False,
+        "--identity",
+        help=(
+            "Resolve and attach the proven account binding per record "
+            "(who the credential really serves). Costs one binding read "
+            "per claude record; without it -J does no binding work."
+        ),
+    ),
 ) -> None:
-    """List all configured accounts, marking the active one with *."""
+    """List all configured accounts, marking the active one with *.
+
+    The human listing always carries an identity column: the ``.active`` stamp
+    says who PUT a credential in the slot, not who it serves, so the binding
+    verdict and doctor's per-record problems ride the row.
+    """
     config = _load()
 
     def _is_active(record: ProviderRecord) -> bool:
@@ -101,13 +115,30 @@ def list_providers(
     # DISARMED footer below all read the same config, never a parse per row.
     quota = load_quota_config()
 
+    # Binding reads only ever run for the human listing and --identity.
+    needs_binding = identity or not json_output
+    identities, findings, shared = {}, [], set()
+    if needs_binding:
+        now = time_module.time()
+        findings = _doctor_findings()
+        for record in config.records:
+            identities[record.id] = _identity_for(record, config.by_id, now)
+        shared = _shared_identity_ids(identities)
+    problems = {
+        r.id: [f["problem"] for f in findings if f.get("record") == r.id]
+        for r in config.records
+    }
+    # shared-identity rides the problems list: one wire field, both surfaces.
+    for rid in shared:
+        problems[rid].append("shared-identity")
+
     if json_output:
         import json as _json
 
         rows = []
         for record in config.records:
             usage_reading = _usage_age(record.id, ttl=quota.probe_ttl_seconds)
-            rows.append({
+            row = {
                 "id": record.id,
                 "name": record.name,
                 "harness": record.harness,
@@ -123,7 +154,11 @@ def list_providers(
                 "usage_age_s": usage_reading.age_seconds,
                 "usage_ttl_seconds": usage_reading.ttl_seconds,
                 "usage_stale": usage_reading.stale,
-            })
+            }
+            if needs_binding:
+                row["identity"] = _identity_json(record, identities.get(record.id))
+                row["problems"] = problems[record.id]
+            rows.append(row)
         typer.echo(_json.dumps(rows))
         return
 
@@ -142,6 +177,8 @@ def list_providers(
         if record.auth == "managed":
             line += f"  cred-snapshot={managed.snapshot_age_label(record.id)}"
         line += f"  {_usage_age_col(record.id, ttl=quota.probe_ttl_seconds)}"
+        cell = _identity_cell(record, identities.get(record.id), problems[record.id])
+        line += f"  identity={cell}"
         typer.echo(line)
 
     # Two flags, two sentences. Recommend `observe` first: it is the reversible
@@ -241,6 +278,66 @@ def _usage_age_col(record_id: str, *, ttl: Optional[int] = None) -> str:
     return f"usage={label}"
 
 
+def _identity_cell(record: ProviderRecord, got, problems: list) -> str:
+    """One compact identity token for a list row: matched names the row's own
+    record, mismatch names who the credential really serves, anything unproven
+    renders ``?<reason>`` and never names an account it did not prove."""
+    from fno.adapters.providers.binding import AMBIGUOUS, MATCHED, MISMATCH
+
+    if record.harness != "claude" or record.auth == "api_key":
+        cell = "-"
+    elif got is None:
+        cell = "?no-observation"
+    elif got.status == MATCHED:
+        cell = got.matched_record or got.requested_record or "?"
+    elif got.status == MISMATCH:
+        served_by = (got.matched_record or got.observed_label
+                     or got.observed_principal or "another-account")
+        cell = f"!serves {served_by}"
+    elif got.status == AMBIGUOUS:
+        cell = "?ambiguous"
+    else:
+        cell = f"?{got.reason or 'unknown'}"
+    return cell + "".join(f" !{p}" for p in problems)
+
+
+def _shared_identity_ids(identities: dict) -> set:
+    """Record ids whose observed principal is also observed through a
+    different credential root. Managed records share one slot root (their
+    ``credential_root`` is None), so a managed pair never trips this; two
+    scoped config dirs serving one principal do."""
+    by_principal: dict = {}
+    for got in identities.values():
+        if got is None or got.observed_principal is None:
+            continue
+        by_principal.setdefault(got.observed_principal, set()).add(got.credential_root)
+    return {
+        rid for rid, got in identities.items()
+        if got is not None and got.observed_principal is not None
+        and len(by_principal[got.observed_principal]) > 1
+    }
+
+
+def _identity_json(record: ProviderRecord, got) -> dict:
+    """The identity object for ``list -J --identity``: the human cell's verdict, nulls where unproved."""
+    from fno.adapters.providers.binding import MATCHED, MISMATCH
+
+    if got is None:
+        reason = ("unsupported-harness" if record.harness != "claude"
+                  else "api-key-route" if record.auth == "api_key" else "no-observation")
+        return {"status": "unknown", "account": None, "served_by": None,
+                "reason": reason, "observed_at": None}
+    if got.status == MATCHED:
+        served_by = got.matched_record or got.requested_record
+    elif got.status == MISMATCH:
+        served_by = got.matched_record or got.observed_label or got.observed_principal
+    else:
+        served_by = None
+    return {"status": got.status, "account": got.requested_record,
+            "served_by": served_by, "reason": got.reason,
+            "observed_at": got.observed_at or None}
+
+
 def _fmt_resets_in(resets_at: float | None, now: float) -> str:
     """Render a reset epoch as a relative 'in 40m' / 'reset' string.
 
@@ -270,8 +367,11 @@ _MANUAL_SWITCH = (
 def _identity_for(record, by_id: dict, now: float):
     """The effective-account verdict for one claude record, or None.
 
-    Called only for a record that HAS an observation to attribute: resolving it
-    for every configured record costs one profile call per record.
+    The usage surface calls it for a record that HAS an observation to
+    attribute; ``list`` calls it for every claude record, which costs one
+    binding read per record (cached, and skipped entirely for plain
+    ``list -J``). Safe for a record with no observation: the owner answers a
+    typed unknown. None means a non-claude record or a read that raised.
     """
     from fno.adapters.providers.binding import resolve_account_binding
 

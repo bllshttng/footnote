@@ -2549,6 +2549,9 @@ class TestTickRecordsAndDeadline:
         assert ends[-1].get("why") == "slice_starved"
         assert "sweep" in ends[-1].get("phase_s", {})
         assert "king_wake" in ends[-1].get("phase_s", {})
+        # Saturated = the phase spent its whole slice: the cut sweep did,
+        # king_wake finished early and reads as quiet, not saturated.
+        assert ends[-1].get("saturated") == ["sweep"]
 
     def test_a_cut_inside_a_step_names_the_step_in_the_row_detail(self, monkeypatch, tmp_path):
         """AC2-ERR: the alarm catching the pass mid-truth-read names

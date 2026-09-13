@@ -70,8 +70,11 @@ def _patch_map(monkeypatch, mapping: dict[str, str]):
 
 
 def _patch_headroom(monkeypatch, n: int):
-    """Width seam: the epic advance reads spawn-gate headroom, not config."""
-    monkeypatch.setattr(adv, "_spawn_headroom", lambda provider=None: n)
+    """Width seam: the epic advance reads the per-pass spawn budget (x-fa3a),
+    whose fleet bound is n and whose children carry no lane of their own."""
+    budget = adv._LaneBudget(fleet=n)
+    monkeypatch.setattr(adv, "_spawn_budget_or_degraded", lambda provider=None: budget)
+    monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: None)
 
 
 def _read_epic(epic_id="x-EPIC"):
@@ -206,6 +209,40 @@ def test_walker_in_own_repo_skips_the_child_with_null_receipt_error(iso, tmp_pat
 # ---------------------------------------------------------------------------
 # Happy path (AC1-HP)
 # ---------------------------------------------------------------------------
+
+
+def test_a_child_dispatches_on_its_own_lane_while_a_full_lane_holds_its_own(
+    iso, tmp_path, monkeypatch
+):
+    """x-fa3a AC1+AC2 through the real fan-out: with zai (the only configured
+    cap) full, a blueprint child settles on anthropic and dispatches; a
+    zai-routed sibling drops lane-cap naming zai, and the pass continues."""
+    _epic_graph(tmp_path, monkeypatch)
+    _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
+    budget = adv._LaneBudget(
+        fleet=8, vendor_remaining={"zai": 0}, binding="zai", binding_remaining=0
+    )
+    monkeypatch.setattr(adv, "_spawn_budget_or_degraded", lambda provider=None: budget)
+    monkeypatch.setattr(
+        adv, "_child_lane_vendor",
+        lambda child, **k: "anthropic" if child["id"] == "x-web" else "zai",
+    )
+    calls = _patch_spawn(monkeypatch)
+    monkeypatch.setattr(
+        adv, "_ready_leaf_children",
+        lambda e: _ready(("x-web", "web"), ("x-etl", "etl")),
+    )
+
+    res = adv.advance_epic("x-EPIC", events_path=iso)
+
+    assert set(res.dispatched) == {"x-web"}
+    assert {c["node"] for c in calls} == {"x-web"}
+    caps = [
+        e for e in _events(iso)
+        if e["type"] == "advance_skipped" and e["data"].get("reason") == "lane-cap"
+    ]
+    assert [e["data"]["node_id"] for e in caps] == ["x-etl"]
+    assert "lane=zai" in caps[0]["data"]["detail"]
 
 
 def test_fans_out_one_per_mapped_project(iso, tmp_path, monkeypatch):
@@ -592,7 +629,11 @@ def test_headroom_bounds_dispatches_this_pass(iso, tmp_path, monkeypatch):
     lane_caps = [e for e in _events(iso)
                  if e["type"] == "advance_skipped" and e["data"]["reason"] == "lane-cap"]
     assert len(lane_caps) == 1
-    assert "headroom=1" in lane_caps[0]["data"]["detail"]
+    # x-fa3a: the detail names the cap that fired - the fleet bound, since the
+    # lane-less world stub prices nothing - at the headroom LEFT after the
+    # first dispatch consumed the pass's one free lane.
+    assert "lane=fleet" in lane_caps[0]["data"]["detail"]
+    assert "headroom=0" in lane_caps[0]["data"]["detail"]
 
 
 def test_boot_window_reservation_no_longer_caps_a_sibling(iso, tmp_path, monkeypatch):

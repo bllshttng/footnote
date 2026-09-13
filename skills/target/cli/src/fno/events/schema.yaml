@@ -3159,7 +3159,7 @@ event_types:
           description: "Optional. One token for why nothing was done (no_crowned_target, watchdog_off, wake_disabled, disabled, gate:disabled, drain_disabled, config_unreadable, bad_interval, project_disabled, no_workspace_path, env_broken, lock_held, quota, never). Absent or null when the arm acted."
         detail:
           type: string
-          description: "Optional. Short human detail (mission ids, counts, per-arm fields like targets/ab_live)."
+          description: "Optional. Short human detail (mission ids, counts, per-arm fields like targets/ab_live). A failed run carries the whole refusal text, bounded at 4000 chars, so the cause is recoverable from the row alone."
         interval_s:
           type: integer
           description: "The cadence this arm runs on, in seconds; the readout reads stale past twice this. 0 marks an event-driven arm (stop_hook): staleness does not apply."

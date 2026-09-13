@@ -19,7 +19,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple, Optional
@@ -278,10 +278,11 @@ class GateRefusal:
 
 def _gate_refusal_detail(stderr: str) -> str:
     """The refusal sentence: the LAST ``spawn-gate:`` or ``sandbox-probe:`` line
-    (the gate warns before its verdict); stderr head as fallback."""
+    (the gate warns before its verdict); the whole stderr as fallback. No head
+    window: a capped head cut a refusal mid-flag and the cause was lost."""
     lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
     gate_lines = [ln for ln in lines if ln.startswith(("spawn-gate:", "sandbox-probe:"))]
-    return gate_lines[-1] if gate_lines else (stderr or "").strip()[:200]
+    return gate_lines[-1] if gate_lines else (stderr or "").strip()
 
 
 def gate_refusal(exc: BaseException) -> Optional[GateRefusal]:
@@ -3166,10 +3167,12 @@ def advance(
     armed, rank = _auto_continue_resolve(project_root)
 
     def _tick(acted: int, skip_reason: Optional[str], detail: str = "") -> None:
-        """One auto-continue arm row: what this advance did, or why not."""
+        """One auto-continue arm row: what this advance did, or why not. The
+        detail passes through uncapped: the emitter bounds one row, and a
+        failure row must carry the whole refusal."""
         emit_tick("auto_continue", scheduler=scheduler_from_env(), interval_s=1800,
                   acted=acted, skip_reason=skip_reason,
-                  detail=(f"closed={closed_node_id or '-'} {detail}")[:200] or None)
+                  detail=(f"closed={closed_node_id or '-'} {detail}") or None)
 
     def skip(
         reason: str,
@@ -3196,7 +3199,7 @@ def advance(
         _emit(EVENT_SKIPPED, data, ev_path)
         tick_detail = f"node={node_id or '-'} reason={reason}"
         if detail:
-            tick_detail += f" detail={detail[:120]}"
+            tick_detail += f" detail={detail}"
         _tick(0, reason, tick_detail)
         return AdvanceResult("skipped", EVENT_SKIPPED, reason=reason,
                              node_id=node_id, detail=detail, exit_code=exit_code)
@@ -3206,8 +3209,7 @@ def advance(
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         _emit(EVENT_FAILED, data, ev_path)
-        # Tail this too: the error ends at the refusal, so must the window.
-        _tick(0, "spawn-failed", f"node={node_id} error={error[-140:]}")
+        _tick(0, "spawn-failed", f"node={node_id} error={error}")
         return AdvanceResult(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )
@@ -3990,10 +3992,8 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
 def _binding_provider() -> Optional[str]:
     """The configured provider with the least lane headroom, or None.
 
-    The unpinned epic advance could route anywhere, so the most constrained
-    CONFIGURED provider is the one whose cap binds the next spawn. One walk,
-    shared by :func:`_spawn_headroom` (the width) and the explain surfaces
-    (the row that explains the width).
+    x-fa3a prices each child by its own lane, so this cap binds only an
+    unresolvable child (plus the scalar width and the explain's no-subject row).
     """
     from fno.agents import spawn_gate
     from fno.config import load_settings
@@ -4010,80 +4010,156 @@ def _binding_provider() -> Optional[str]:
     return binding
 
 
-def _spawn_headroom(provider: Optional[str] = None) -> int:
-    """Dispatch width from the spawn gate's own counters.
+@dataclass
+class _LaneBudget:
+    """One pass's spawn-gate counters, shared by the drain and the explain preview.
 
-    ``config.parallel.max_lanes`` once gated the epic advance here, but it was
-    a second concurrency authority beside the real one: a spawn is refused by
-    the spawn gate's ``max_live`` and per-provider ``lanes``, and those are the
-    caps that actually bind. The knob is retired (the deletion ruling stands;
-    the key stays parseable for one release with a deprecation line), and the
-    width now derives from the gate's own counters through the SAME functions
-    ``fno agents top`` and ``advance --explain`` read, so no surface can
-    disagree with the refusal that follows it:
-
-    - fleet: ``agents.max_live`` minus the live census slot count
-    - provider: ``lanes`` minus the live count for ``provider``; with no pin,
-      the most-constrained CONFIGURED provider bounds the next spawn, because
-      the grid may route it anywhere
-
-    The number is advisory width, not the refusal - the gate still refuses at
-    spawn time. Fleet or provider headroom at or below zero returns 0: the
-    fleet is full, and dispatching would only manufacture refusals. A failed
-    reading degrades to 1 (the conservative single lane the retired config
-    default carried) with a warning naming what could not be read.
+    x-fa3a: a child is bounded by the lane its own dispatch settles. Absent
+    from ``vendor_remaining`` = uncapped; ``binding`` keeps the old
+    most-constrained cap for a child whose lane cannot be resolved.
     """
+
+    fleet: int = 0
+    vendor_remaining: dict[str, int] = field(default_factory=dict)
+    binding: Optional[str] = None
+    binding_remaining: Optional[int] = None
+    dispatched_by_vendor: dict[str, int] = field(default_factory=dict)
+
+
+def _spawn_budget(provider: Optional[str] = None) -> _LaneBudget:
+    """One pass's width state from the gate's own counters, shared by the drain
+    and the ``--explain`` preview so both price children identically."""
+    from fno.agents import spawn_gate
+    from fno.config import load_settings
+
+    agents_cfg = load_settings().agents
+    fleet = int(agents_cfg.max_live) - spawn_gate.census().slot_count
+    limits = dict(agents_cfg.provider_limits)
+    pin_vendor: Optional[str] = None
+    if provider is not None:
+        from fno.agents.spawn_defaults import resolve_lane_vendor
+
+        vendor = resolve_lane_vendor([], harness=provider)
+        # Resolver silent: only a raw vendor pin scopes; else the configured caps bind.
+        pin_vendor = vendor or (provider if provider in limits else None)
+        scoped: dict = {pin_vendor: limits.get(pin_vendor)} if pin_vendor else limits
+    else:
+        scoped = limits
+    vendor_remaining: dict[str, int] = {}
+    for name, budget in scoped.items():
+        cap = spawn_gate.provider_lanes_cap(budget)
+        if cap is None:
+            continue  # an uncapped provider cannot bound the width
+        vendor_remaining[name] = cap - spawn_gate.provider_live_count(name)
+    # x-7783 AC10: a hold or undecidable CPU verdict queues/refuses every spawn.
+    from fno.agents.spawn_gate import _cpu_axis
+
+    admission = _cpu_axis()
+    if admission.verdict != "admit":
+        _LOG.warning("cpu axis %s, dispatch width 0: %s", admission.verdict, admission.reason)
+        fleet = 0
+    binding: Optional[str]
+    binding_remaining: Optional[int]
+    if pin_vendor is not None:
+        binding = pin_vendor
+        binding_remaining = vendor_remaining.get(pin_vendor)
+    else:
+        binding = _binding_provider()
+        binding_remaining = vendor_remaining.get(binding) if binding else None
+    return _LaneBudget(
+        fleet=fleet,
+        vendor_remaining=vendor_remaining,
+        binding=binding,
+        binding_remaining=binding_remaining,
+    )
+
+
+def _spawn_budget_or_degraded(provider: Optional[str] = None) -> _LaneBudget:
     try:
-        from fno.agents import spawn_gate
-        from fno.config import load_settings
-
-        agents_cfg = load_settings().agents
-        fleet_remaining = int(agents_cfg.max_live) - spawn_gate.census().slot_count
-        limits = dict(agents_cfg.provider_limits)
-        if provider is not None:
-            from fno.agents.spawn_defaults import resolve_lane_vendor
-
-            # The pin is a HARNESS (`--provider` resolves on the harness axis);
-            # provider_limits is keyed by VENDOR. Map through the shipped
-            # resolver and fall back to the raw pin, which may already be a
-            # vendor. A harness pin read against this vendor-keyed table
-            # directly would miss (`codex` is not a key) and silently drop the
-            # one cap that binds.
-            pin_vendor = resolve_lane_vendor([], harness=provider) or provider
-            budgets = {pin_vendor: limits.get(pin_vendor)}
-        else:
-            binding = _binding_provider()
-            budgets = {} if binding is None else {binding: limits.get(binding)}
-        provider_remaining: Optional[int] = None
-        for name, budget in budgets.items():
-            cap = spawn_gate.provider_lanes_cap(budget)
-            if cap is None:
-                continue  # an uncapped provider cannot bound the width
-            remaining = cap - spawn_gate.provider_live_count(name)
-            if provider_remaining is None or remaining < provider_remaining:
-                provider_remaining = remaining
-        bound = [fleet_remaining]
-        if provider_remaining is not None:
-            bound.append(provider_remaining)
-        # x-7783 AC10: the CPU axis bounds the width too. A hold or
-        # undecidable verdict means the gate would queue or refuse every
-        # spawn this width dispatches, so the drain must not manufacture N
-        # queued spawns behind it. One sample, through the same seam the
-        # gate and the explain rows read.
-        from fno.agents.spawn_gate import _cpu_axis
-
-        admission = _cpu_axis()
-        if admission.verdict != "admit":
-            _LOG.warning(
-                "cpu axis %s, dispatch width 0: %s",
-                admission.verdict,
-                admission.reason,
-            )
-            return 0
-        return max(0, min(bound))
+        return _spawn_budget(provider)
     except Exception as exc:  # noqa: BLE001 - degrade to the conservative lane, loudly
         _LOG.warning("spawn headroom unreadable, degrading to 1 lane: %s", exc)
-        return 1
+        return _LaneBudget(fleet=1)
+
+
+def _child_lane_vendor(
+    child: dict, *, model: Optional[str], provider: Optional[str]
+) -> Optional[str]:
+    """The VENDOR whose lane cap prices this child, or None when unresolvable.
+
+    x-fa3a: the child's own dispatch settles its lane. Order mirrors the spawn
+    seam - harness pin (pass flag, else the node's provider field) > grid pick
+    > the verb's profile fallback; None keeps the binding-provider cap.
+    """
+    try:
+        from fno.agents.spawn_defaults import resolve_lane_vendor
+        from fno.config import load_settings
+
+        pin = (provider or "").strip() or (child.get("provider") or "").strip() or None
+        if pin:
+            vendor = resolve_lane_vendor([], harness=pin)
+            if vendor is not None or pin in dict(load_settings().agents.provider_limits):
+                return vendor or pin
+            return None  # no vendor opinion: the binding cap prices this child
+        verb = _node_effective_verb(child)
+        harness, _m, route, _a, _why = _grid_lane_for(
+            child, model=model, provider=None, verb=verb
+        )
+        if harness:
+            argv = ["fno"] + (["--route", route] if route else [])
+            return resolve_lane_vendor(argv, harness=harness)
+        # The grid declined; the spawn falls back to agents.profiles.<verb>.
+        agents_cfg = load_settings().agents
+        profile = (getattr(agents_cfg, "profiles", {}) or {}).get(
+            (verb or "target").strip().lstrip("/")
+        ) or getattr(agents_cfg, "defaults", None)
+        route = (getattr(profile, "route", "") or "").strip() or None
+        prof_model = model or (getattr(profile, "model", "") or "").strip() or None
+        prof_harness = (getattr(profile, "provider", "") or "").strip() or None
+        if route is None and prof_model is None and prof_harness is None:
+            return None  # nothing the spawn would inherit names a lane
+        argv = ["fno"] + (["--route", route] if route else [])
+        argv += ["--model", prof_model] if prof_model else []
+        return resolve_lane_vendor(argv, harness=prof_harness)
+    except Exception:  # noqa: BLE001 - an unresolvable lane falls back to the binding cap
+        return None
+
+
+def _lane_cap_verdict(
+    child: dict,
+    budget: _LaneBudget,
+    *,
+    total: int,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> tuple[bool, Optional[str], Optional[int]]:
+    """``(refused, lane, headroom)`` for one child: the ONE classifier the drain
+    and the ``--explain`` preview share, so they cannot disagree. ``headroom``
+    is set only when ``refused``; ``lane`` None = unpriced (fleet or binding cap).
+    """
+    if total >= budget.fleet:
+        return True, None, budget.fleet - total  # fleet-full: the lane is moot
+    lane = _child_lane_vendor(child, model=model, provider=provider)
+    if lane is not None:
+        remaining = budget.vendor_remaining.get(lane)
+        if remaining is None:
+            return False, lane, None  # an uncapped lane cannot refuse
+        used = budget.dispatched_by_vendor.get(lane, 0)
+        return used >= remaining, lane, remaining - used
+    if budget.binding_remaining is not None and total >= budget.binding_remaining:
+        return True, None, budget.binding_remaining - total
+    return False, None, None
+
+
+def _spawn_headroom(provider: Optional[str] = None) -> int:
+    """The scalar width the pre-x-fa3a surfaces read: min(fleet, the one binding
+    cap). The drain prices children per lane instead; a failed read degrades to 1.
+    """
+    budget = _spawn_budget_or_degraded(provider)
+    bound = [budget.fleet]
+    if budget.binding_remaining is not None:
+        bound.append(budget.binding_remaining)
+    return max(0, min(bound))
 
 
 def _set_mission_active(epic_id: str, active: bool) -> bool:
@@ -4245,13 +4321,10 @@ def advance_epic(
             child_results=(AdvanceResult("skipped", EVENT_SKIPPED, reason="children-error"),),
         )
 
-    # Width: spawn-gate headroom (fleet + provider). Live workers already
-    # consumed their capacity inside the read (the census and provider counts
-    # subtract them), so the bound here is how many MORE spawns this pass may
-    # make - not a per-project threshold. A --provider pin reads that
-    # provider's lanes; unpinned, the most constrained configured provider
-    # bounds it. An overall --max caps total dispatches this run.
-    max_lanes = _spawn_headroom(provider)
+    # Width: per-child lanes from the spawn gate's own counters (x-fa3a). The
+    # bound is how many MORE spawns this pass may make; each child is priced
+    # by the lane its own dispatch settles, unresolvable lanes by the binding cap.
+    budget = _spawn_budget_or_degraded(provider)
 
     results: list[AdvanceResult] = []
     dispatched: list[str] = []
@@ -4283,15 +4356,19 @@ def advance_epic(
         if not root:
             results.append(_converge_skip_unmapped(child, proj, canon, ev_path, rank=rank))
             continue
-        # Spawn-gate headroom exhausted this pass (0 = the fleet or the
-        # binding provider is already full). The remaining ready children wait
-        # for a drain / re-run; the gate itself still refuses at spawn time if
-        # the world changed since the read.
-        if total >= max_lanes:
+        # Spawn-gate capacity exhausted for THIS child's lane. The remaining
+        # ready children wait for a drain / re-run; the gate itself still
+        # refuses at spawn time if the world changed since the read.
+        refused, lane, headroom = _lane_cap_verdict(
+            child, budget, total=total, model=model, provider=provider
+        )
+        if refused:
+            lane_label = lane or ("fleet" if total >= budget.fleet else f"binding:{budget.binding}")
             _emit(
                 EVENT_SKIPPED,
                 {"reason": "lane-cap", "node_id": child["id"], "mission": canon,
-                 "detail": f"{proj}: headroom={max_lanes} (spawn gate)", "rank": rank},
+                 "detail": f"{proj}: lane={lane_label} headroom={headroom} (spawn gate)",
+                 "rank": rank},
                 ev_path,
             )
             results.append(
@@ -4307,6 +4384,8 @@ def advance_epic(
         if res.decision == "dispatched":
             dispatched.append(res.node_id or child["id"])
             total += 1
+            if lane is not None:
+                budget.dispatched_by_vendor[lane] = budget.dispatched_by_vendor.get(lane, 0) + 1
         if res.decision == "skipped" and res.exit_code not in (None, _spawn_gate.EXIT_PROVIDER_CAP):
             # A global refusal (load, RAM, queue, registry) ends the pass: the
             # condition is identical for every remaining child. A 78 skip is

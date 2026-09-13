@@ -106,7 +106,9 @@ def _emit_tick_row(arm: str, *, interval_s: int, acted: int = 0,
     if skip_reason is not None:
         data["skip_reason"] = skip_reason
     if detail is not None:
-        data["detail"] = detail[:200]
+        # Same bound as fno.control_plane.emit_tick: a refusal survives whole,
+        # a pathological stderr cannot write a giant journal row.
+        data["detail"] = detail[:4000]
     _emit_event("control_plane_tick", data)
 
 
@@ -1289,6 +1291,10 @@ def tick() -> None:
             end_data["cut"] = list(cut)
         if phase_s:
             end_data["phase_s"] = dict(phase_s)
+        # Saturated = the alarm fired while the body ran, so the phase spent
+        # its whole slice. A phase cut before its body ran spent zero: cut
+        # names it, but it was starved, not saturated.
+        end_data["saturated"] = [name for name in cut if phase_s.get(name, 0.0) > 0.0]
         if result is not None:
             end_data["sweep_failures"] = getattr(result, "sweep_failures", 0)
             if getattr(result, "quota_skip", False):

@@ -617,13 +617,13 @@ FIELD_META: dict[str, Meta] = {
         question="Route auxiliary coordination work to a secondary model provider (production stays on Anthropic)?",
     ),
     "model_routing.providers": Meta(
-        "never", "Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, wire_api}); 'zai' is built in."
+        "never", "Secondary providers (name -> {protocol, base_url, api_key_env, api_key_file, haiku_model, tier_models, wire_api}); 'zai' is built in. tier_models maps a Claude tier to a model ({opus = \"glm-5.3[1m]\"}); keys are opus|sonnet|haiku|fable and undeclared tiers keep the spawn model."
     ),
     "model_routing.roles": Meta(
         "never", "Per-role target map (role -> 'provider/model', e.g. tidy: 'zai/glm-4.7'; legacy 'provider,model' comma form also accepted); manage via `fno config route set/unset`. The opt-in 'build' lane routes delivery spawns (/target bg)."
     ),
     "model_routing.extra_env": Meta(
-        "never", "Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides)."
+        "never", "Extra env merged into routed spawns (e.g. API_TIMEOUT_MS). Prefer tier_models for per-tier models; extra_env still wins as a hand pin."
     ),
     # --- config.status_sinks / config.status_fanout (x-2057) ---
     "status_sinks": Meta(

@@ -34,7 +34,7 @@ def archived_entry(node_id: str) -> Optional[dict[str, Any]]:
         # The constant at call time, not a captured path: test fixtures pin
         # GRAPH_ARCHIVE_JSON per test.
         path = GRAPH_ARCHIVE_JSON
-        if not path.exists():
+        if path is None or not path.exists():
             return None
         # `_find_node`, not an exact compare: it is what resolved the id against
         # the working graph, so an abbreviated id resolves the same way here.

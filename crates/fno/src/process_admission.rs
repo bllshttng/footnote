@@ -1083,6 +1083,15 @@ fn c_name(bytes: &[libc::c_char]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// True when a /proc read error means the pid exited between the directory
+/// listing and this read: gone capacity, not a failed measurement. Mirrors
+/// the macOS arm's ESRCH rule in snapshot_macos; on Linux the stat read can
+/// fail with ESRCH, not just NotFound.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn pid_gone(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
+}
+
 #[cfg(target_os = "linux")]
 fn snapshot_linux() -> Result<Vec<ProcessRow>, String> {
     let mut rows = Vec::new();
@@ -1100,7 +1109,9 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, String> {
             .map_err(|e| format!("invalid /proc pid {pid_text}: {e}"))?;
         let stat = match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            // A pid that exits between the listing and the read is gone
+            // capacity, not a failed measurement (the macOS arm's rule).
+            Err(error) if pid_gone(&error) => continue,
             Err(error) => {
                 return Err(format!(
                     "process snapshot row unavailable for pid={pid}: {error}"
@@ -1133,6 +1144,16 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ESRCH means the pid exited between the listing and the read, so the
+    /// census skips it like NotFound. EACCES is a real measurement failure
+    /// and still refuses.
+    #[test]
+    fn pid_gone_admits_only_vanished_pids() {
+        assert!(pid_gone(&io::Error::from_raw_os_error(libc::ESRCH)));
+        assert!(pid_gone(&io::Error::from_raw_os_error(libc::ENOENT)));
+        assert!(!pid_gone(&io::Error::from_raw_os_error(libc::EACCES)));
+    }
 
     /// The namespace is a process-global env var, so two of these tests
     /// running in parallel would each resolve the other's ledger path. The

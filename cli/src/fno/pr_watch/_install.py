@@ -604,7 +604,8 @@ _RECENT_ENDS_KEEP = 16
 
 def tick_end_bits(end: dict) -> list[str]:
     """The parenthesised detail bits after a tick outcome: duration, sweep
-    failures, and the phase name only when the tick broke (timeout or error).
+    failures, the phase name only when the tick broke (timeout or error), and
+    the phases that spent their whole slice.
     Shared by `fno do pr watch status` and the pr_watch_merge arm row, so the
     arm row names the phase only when the tick broke."""
     bits: list[str] = []
@@ -614,6 +615,9 @@ def tick_end_bits(end: dict) -> list[str]:
         bits.append(f"{end['sweep_failures']} sweep failures")
     if end.get("why"):
         bits.append(_WHY_PHRASES.get(end["why"], end["why"]))
+    saturated = end.get("saturated")
+    if isinstance(saturated, list) and saturated:
+        bits.append("saturated: " + ", ".join(str(s) for s in saturated))
     if end.get("phase") and end.get("outcome") in _BROKEN_OUTCOMES:
         bits.append(f"phase: {end['phase']}")
     return bits
@@ -790,6 +794,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                     "phase": data.get("phase"),
                     "duration_s": data.get("duration_s"),
                     "sweep_failures": data.get("sweep_failures"),
+                    "saturated": data.get("saturated"),
                 }
                 recent = marks["recent_ends"]
                 recent.append(marks["last_end"])
