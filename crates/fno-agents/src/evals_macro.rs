@@ -1,5 +1,5 @@
-//! `evals-macro`: the failure-pattern leaderboard over the events journals
-//! (x-f33e), the native port of the Python `fno.evals.macro` fold.
+//! `evals-macro`: the failure-pattern leaderboard over the events journals,
+//! the native port of the Python `fno.evals.macro` fold.
 //!
 //! Same split as `king-history`: Python owns identity and paths - the
 //! `fno doctor evals macro` shell resolves `paths.event_journals()` and
@@ -215,57 +215,34 @@ fn strict_utc_ts(value: &Value) -> Option<DateTime<Utc>> {
     Some(DateTime::from_naive_utc_and_offset(ndt, Utc))
 }
 
-/// The loose `--since` parser: ISO-8601 (naive reads as UTC) or a bare date,
-/// mirroring the Python `datetime.fromisoformat` acceptance the trace verb
-/// already matches.
-fn parse_loose_ts(raw: &str) -> Option<DateTime<Utc>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let s = trimmed.replace('Z', "+00:00");
-    if let Ok(dt) = DateTime::parse_from_rfc3339(&s) {
-        return Some(dt.with_timezone(&Utc));
-    }
-    for fmt in ["%Y-%m-%dT%H:%M:%S%.f%:z", "%Y-%m-%dT%H:%M:%S%:z"] {
-        if let Ok(dt) = DateTime::parse_from_str(&s, fmt) {
-            return Some(dt.with_timezone(&Utc));
-        }
-    }
-    for fmt in [
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-    ] {
-        if let Ok(ndt) = NaiveDateTime::parse_from_str(&s, fmt) {
-            return Some(DateTime::from_naive_utc_and_offset(ndt, Utc));
-        }
-    }
-    if let Ok(d) = NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
-        let ndt = d.and_hms_opt(0, 0, 0)?;
-        return Some(DateTime::from_naive_utc_and_offset(ndt, Utc));
-    }
-    None
-}
+/// The loose `--since` stamp parser: ISO-8601 (naive reads as UTC) or a bare
+/// date, mirroring the Python `datetime.fromisoformat` acceptance. One
+/// implementation, shared with the trace verb's matcher.
+use crate::client_verbs::parse_iso8601 as parse_loose_ts;
 
 /// `--since`: a `Nd`/`Nh`/`Nm`/`Ns` duration back from now, else a loose ISO
 /// stamp. A refusal names the offending value like the Python shell did.
+/// The duration arm splits on CHARS: a byte-index slice would panic on a
+/// non-ASCII final character.
 fn parse_since(raw: &str) -> Result<DateTime<Utc>, String> {
     let t = raw.trim().to_lowercase();
-    let digits = &t[..t.len().saturating_sub(1)];
-    if t.len() >= 2
-        && !digits.is_empty()
-        && digits.bytes().all(|b| b.is_ascii_digit())
-        && matches!(t.as_bytes()[t.len() - 1], b's' | b'm' | b'h' | b'd')
-    {
-        let amount: i64 = digits.parse().unwrap_or(0);
-        let dur = match t.as_bytes()[t.len() - 1] {
-            b's' => chrono::Duration::seconds(amount),
-            b'm' => chrono::Duration::minutes(amount),
-            b'h' => chrono::Duration::hours(amount),
-            _ => chrono::Duration::days(amount),
-        };
-        return Ok(Utc::now() - dur);
+    let mut chars = t.chars();
+    let unit = chars.next_back();
+    let digits = chars.as_str();
+    if let Some(unit) = unit {
+        if !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && matches!(unit, 's' | 'm' | 'h' | 'd')
+        {
+            let amount: i64 = digits.parse().unwrap_or(0);
+            let dur = match unit {
+                's' => chrono::Duration::seconds(amount),
+                'm' => chrono::Duration::minutes(amount),
+                'h' => chrono::Duration::hours(amount),
+                _ => chrono::Duration::days(amount),
+            };
+            return Ok(Utc::now() - dur);
+        }
     }
     parse_loose_ts(raw)
         .ok_or_else(|| format!("--since must be ISO-8601 or a duration such as 7d: {raw:?}"))
@@ -1344,5 +1321,14 @@ mod tests {
             board[0].0, "termination:Budget",
             "termination: rows lead on a full tie"
         );
+    }
+
+    #[test]
+    fn since_with_a_non_ascii_unit_is_a_refusal_not_a_panic() {
+        // The duration arm splits on chars: a byte-index slice used to panic
+        // here (byte index N is not a char boundary).
+        assert!(parse_since("7é").is_err());
+        assert!(parse_since("3日").is_err());
+        assert!(parse_since("7d").is_ok());
     }
 }

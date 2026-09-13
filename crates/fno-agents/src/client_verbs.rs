@@ -297,7 +297,7 @@ pub(crate) fn trace_events_path(home: &AgentsHome) -> PathBuf {
 /// Parse an ISO8601 timestamp into a UTC instant, mirroring Python's
 /// `_parse_iso8601`: a trailing `Z` becomes `+00:00`, naive timestamps are
 /// assumed UTC. Returns `None` on unparseable input (the caller degrades open).
-fn parse_iso8601(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn parse_iso8601(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
     let raw = s.trim();
     let raw = match raw.strip_suffix('Z') {
