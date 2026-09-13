@@ -753,14 +753,17 @@ def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
     except Exception:
         pass  # ponytail: a grant we cannot compute must never block the spawn
 
-def _export_worktree_policy_pin_at_seam(args: "Sequence[str]") -> None:
-    """Pin an undeclared foreign target's policy for the Rust route.
+def _worktree_policy_pin_at_seam(args: "Sequence[str]") -> dict:
+    """The worktree-policy pin for the Rust route, or ``{}``.
 
-    Auto mode execs the Rust client before ``cmd_spawn`` runs; the binary is
-    a same-env replacement, so exporting here reaches the child."""
+    Auto mode execs the Rust client before ``cmd_spawn`` runs; the caller hands
+    the pin to :func:`route_to_rust`, which merges it into the environment
+    immediately before the exec so nothing that survives the call sees it.
+    Only an explicit ``--cwd`` can name a foreign repo."""
+
     try:
         if os.environ.get("FNO_WORKTREE_POLICY"):
-            return
+            return {}
         from pathlib import Path
 
         from fno.agents.spawn_defaults import _flag_value
@@ -768,14 +771,14 @@ def _export_worktree_policy_pin_at_seam(args: "Sequence[str]") -> None:
 
         cwd = _flag_value(list(args), "--cwd", "-c")
         if not cwd:
-            return
+            return {}
         harness = _flag_value(list(args), "--harness", "-H") or None
         pin = undeclared_dispatch_pin(Path(cwd), Path(os.getcwd()), harness)
         if pin:
-            os.environ.update(pin)
             print(UNDECLARED_REPO_RECEIPT, file=sys.stderr)
+        return pin
     except Exception:
-        pass  # ponytail: a pin we cannot compute must never block the spawn
+        return {}  # ponytail: a pin we cannot compute must never block the spawn
 
 def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` targeting the ``pane`` substrate (4a-G2).
@@ -1385,6 +1388,7 @@ def route_to_rust(
     args: Sequence[str],
     *,
     binary: Optional[Path] = None,
+    env_pin: Optional[dict] = None,
     _exec: Callable[..., None] = os.execv,
     _resolve: Callable[[], Optional[Path]] = rust_binary.resolve_binary,
     _stderr: Optional[IO[str]] = None,
@@ -1428,6 +1432,10 @@ def route_to_rust(
             file=err,
         )
         raise SystemExit(BIN_NOT_FOUND_EXIT)
+    if env_pin:
+        # Merged immediately before the exec: the replacement process inherits
+        # it, and a stubbed _exec (tests) never exports anything.
+        os.environ.update(env_pin)
     argv = [str(binary), *args]
     try:
         _exec(str(binary), argv)
@@ -1614,16 +1622,16 @@ def make_agents_group_cls() -> type:
                 )
                 if mode == "rust" and not py_spawn:
                     _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
-                    _export_worktree_policy_pin_at_seam(args)
+                    _pin = _worktree_policy_pin_at_seam(args)
                     _scrub_ambient_identity_at_exec(verb)
-                    route_to_rust(_with_seam_marker(list(args), verb))  # execs; does not return
+                    route_to_rust(_with_seam_marker(list(args), verb), env_pin=_pin or None)  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     binary = rust_binary.resolve_installed_binary()
                     if binary is not None:
                         _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
-                        _export_worktree_policy_pin_at_seam(args)
+                        _pin = _worktree_policy_pin_at_seam(args)
                         _scrub_ambient_identity_at_exec(verb)
-                        route_to_rust(_with_seam_marker(list(args), verb), binary=binary)  # execs
+                        route_to_rust(_with_seam_marker(list(args), verb), binary=binary, env_pin=_pin or None)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
             return super().make_context(info_name, args, parent=parent, **extra)

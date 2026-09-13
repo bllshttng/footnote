@@ -108,46 +108,74 @@ def test_pane_wrapper_sets_and_clears_the_pin():
     assert adhoc[i - 1] == "-u"
 
 
-def test_rust_seam_exports_pin_for_foreign_cwd(tmp_path, monkeypatch, capsys):
-    """The Rust route execs before cmd_spawn, so the seam exports the pin for
-    an explicit foreign --cwd; the exec'd binary's env carries it."""
-    from fno.agents.rust_runtime import _export_worktree_policy_pin_at_seam
+def test_rust_seam_returns_pin_for_foreign_cwd(tmp_path, monkeypatch, capsys):
+    """The Rust route execs before cmd_spawn, so the seam computes the pin for
+    an explicit foreign --cwd and route_to_rust merges it into the exec env."""
+    from fno.agents.rust_runtime import _worktree_policy_pin_at_seam
 
     caller = _make_repo(tmp_path / "caller")
     target = _make_repo(tmp_path / "target")
     monkeypatch.chdir(caller)
-    # Tracked setenv: the seam mutates os.environ directly, so monkeypatch must
-    # know the key to restore the pre-test state at teardown.
-    monkeypatch.setenv("FNO_WORKTREE_POLICY", "")
-    _export_worktree_policy_pin_at_seam(
+    monkeypatch.delenv("FNO_WORKTREE_POLICY", raising=False)
+    pin = _worktree_policy_pin_at_seam(
         ["spawn", "--cwd", str(target), "do the thing"],
     )
     import os
 
-    assert os.environ["FNO_WORKTREE_POLICY"] == "never"
+    assert pin == {"FNO_WORKTREE_POLICY": "never"}
+    assert "FNO_WORKTREE_POLICY" not in os.environ  # compute only; exec exports
     assert "undeclared repo" in capsys.readouterr().err
 
 
 def test_rust_seam_silent_for_own_repo_and_ambient(tmp_path, monkeypatch):
-    """Own-repo targets and an already-set override export nothing."""
-    from fno.agents.rust_runtime import _export_worktree_policy_pin_at_seam
+    """Own-repo targets and an already-set override produce no pin."""
+    from fno.agents.rust_runtime import _worktree_policy_pin_at_seam
 
     caller = _make_repo(tmp_path / "caller")
     monkeypatch.chdir(caller)
     monkeypatch.delenv("FNO_WORKTREE_POLICY", raising=False)
-    _export_worktree_policy_pin_at_seam(
+    assert _worktree_policy_pin_at_seam(
         ["spawn", "--cwd", str(caller), "do the thing"],
-    )
-    import os
-
-    assert "FNO_WORKTREE_POLICY" not in os.environ
+    ) == {}
 
     target = _make_repo(tmp_path / "target")
     monkeypatch.setenv("FNO_WORKTREE_POLICY", "external")
-    _export_worktree_policy_pin_at_seam(
+    assert _worktree_policy_pin_at_seam(
         ["spawn", "--cwd", str(target), "do the thing"],
-    )
-    assert os.environ["FNO_WORKTREE_POLICY"] == "external"
+    ) == {}
+
+
+def test_route_to_rust_exports_the_pin_at_exec(tmp_path, monkeypatch):
+    """route_to_rust merges the pin into the environment immediately before
+    the exec, so the replacement process inherits it."""
+    import os
+
+    from fno.agents import rust_runtime
+
+    monkeypatch.chdir(tmp_path)
+    # Tracked setenv: route_to_rust mutates os.environ before the exec, so
+    # monkeypatch must know the key to restore the pre-test state.
+    monkeypatch.setenv("FNO_WORKTREE_POLICY", "")
+    execed: dict = {}
+
+    def fake_exec(binary, argv):
+        execed["argv"] = argv
+        raise SystemExit(0)  # stand-in for the process replacement
+
+    binary = tmp_path / "fake-fno-agents"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    try:
+        rust_runtime.route_to_rust(
+            ["spawn", "x"],
+            binary=binary,
+            env_pin={"FNO_WORKTREE_POLICY": "never"},
+            _exec=fake_exec,
+        )
+    except SystemExit:
+        pass
+    assert os.environ["FNO_WORKTREE_POLICY"] == "never"
+    assert execed["argv"][0] == str(binary)
 
 
 def test_spawn_carries_ambient_policy_override_on_the_pane(tmp_path, monkeypatch):
