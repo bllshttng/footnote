@@ -166,7 +166,6 @@ fn ac10_rerun_is_idempotent_and_receipt_is_positive() {
         {"ts": "T1", "text": "a"},
         {"ts": "T2", "text": "b"},
     ]);
-    let hash = notes_hash_hex(&notes);
     write_graph(
         &graph,
         &[json!({

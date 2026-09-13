@@ -30,7 +30,7 @@ fn read_graph(path: &PathBuf) -> serde_json::Value {
 }
 
 /// Run the binary entry point with the body on stdin.
-fn note(graph: &std::path::Path, args: &[&str], body: &str) -> i32 {
+fn note(_graph: &std::path::Path, args: &[&str], body: &str) -> i32 {
     use std::io::Write;
     let mut child = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args(std::iter::once("backlog-note").chain(args.iter().copied()))

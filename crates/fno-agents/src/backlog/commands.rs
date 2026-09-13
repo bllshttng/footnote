@@ -6,7 +6,6 @@
 //! the single source both the compatibility help and any future dispatcher
 //! must read - no second handwritten mapping in help or completion.
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 
 /// One canonical group: its purpose line and the action vocabulary, where
 /// each action names the legacy first-level command it dispatches to (the
@@ -221,6 +220,7 @@ pub fn catalog_json() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn every_legacy_name_maps_exactly_once() {

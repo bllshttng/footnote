@@ -527,8 +527,7 @@ fn build_candidate(
                     }),
                 );
             }
-            if let (Some(entry), Some(details)) = (entry, entry.and_then(|e| e.details.as_deref()))
-            {
+            if let Some(details) = entry.and_then(|e| e.details.as_deref()) {
                 obj.insert("details".into(), json!(details));
             }
             if verbatim {
