@@ -167,11 +167,8 @@ RUST_CLIENT_VERBS = frozenset(
         # build_request (no daemon RPC); this entry keeps the client.rs<->router
         # parity test in sync.
         "probe-run",
-        # Terminal prove-it record reader (x-6d64): walks every node's
-        # `<plan>.artifacts/` for the `fno-prove-it:` terminal line and emits
-        # one row per node verdict. Dispatched directly in client.rs before
-        # build_request (no daemon RPC); this entry keeps the client.rs<->router
-        # parity test in sync.
+        # Terminal prove-it record reader (x-6d64): direct dispatch in
+        # client.rs; this entry keeps the client.rs<->router parity test in sync.
         "prove-it-verdicts",
         # Native test-run process-group owner (x-d10f): admits under the
         # `test:suite` claim, spawns the suite leader in its own session, and

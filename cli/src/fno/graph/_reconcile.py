@@ -1015,12 +1015,9 @@ def resolve_promise_evidence(
     plan_display = node.get("plan_path", plan_path_clean)
 
     # Condition E (x-6d64): an open prove-it FAIL on this node's own plan
-    # artifacts is declared work whose claimed outcome did not hold, so the
-    # close holds until the work is fixed and re-proven (a newer PASS record)
-    # or a king rules on the report. Only guards closes: a done node is never
-    # reopened, and a failed reader degrades to a warning, never a silent pass.
-    # Needs no declaration - the artifacts sidecar hangs off plan_path itself -
-    # but an unreadable plan already failed open above with that warning.
+    # artifacts is claimed work whose outcome did not hold. Needs no
+    # declaration - the artifacts sidecar hangs off plan_path itself. A done
+    # node is never reopened; a failed reader is a warning, never a silent pass.
     if node_id:
         try:
             payload = (verdict_reader or _verdict_reader_shellout)(plan_path_clean)

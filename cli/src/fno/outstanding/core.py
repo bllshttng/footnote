@@ -130,9 +130,6 @@ class VerdictRow(NamedTuple):
     status: Optional[str] = None
     mtime: Optional[str] = None
 
-    def as_dict(self) -> "dict[str, Any]":
-        return self._asdict()
-
 
 @dataclass(frozen=True)
 class Outstanding:
@@ -156,14 +153,8 @@ class Outstanding:
 
     @property
     def empty(self) -> bool:
-        return (
-            self.carveout_total == 0
-            and not self.questions
-            and not self.captures
-            and not self.lane
-            and not self.verdicts
-            and self.verdicts_error is None
-        )
+        clean = not (self.carveout_total or self.questions or self.captures or self.lane or self.verdicts)
+        return clean and self.verdicts_error is None
 
     def as_dict(self) -> "dict[str, Any]":
         by_project: "dict[str, int]" = {}
@@ -203,7 +194,7 @@ class Outstanding:
             "verdicts": {
                 "total": len(self.verdicts),
                 "error": self.verdicts_error,
-                "items": [v.as_dict() for v in self.verdicts],
+                "items": [v._asdict() for v in self.verdicts],
             },
         }
 
@@ -784,12 +775,9 @@ def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:
 
 
 def _read_open_verdicts() -> "tuple[list[VerdictRow], Optional[str]]":
-    """Open prove-it FAIL rows from the Rust reader, or the reason it could not.
-
-    A failed verb call does NOT raise ``OutstandingError``: that would blank
-    the questions leg, which reads stores the verdict reader never touches.
-    The failure renders as its own line instead.
-    """
+    """Open prove-it FAIL rows from the Rust reader, or why it could not be
+    read. A failed call does NOT raise ``OutstandingError``: that would blank
+    the questions leg, which reads stores the verdict reader never touches."""
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
@@ -973,9 +961,7 @@ def render(
         lines.append("")
 
     if outstanding.verdicts:
-        lines.append(
-            f"{_plural(len(outstanding.verdicts), 'prove-it FAIL verdict')} with no ruling."
-        )
+        lines.append(f"{_plural(len(outstanding.verdicts), 'prove-it FAIL verdict')} with no ruling.")
         for v in outstanding.verdicts[:RENDER_CAP]:
             claim = v.claim.split("\n", 1)[0].strip()
             if len(claim) > 100:
@@ -983,9 +969,7 @@ def render(
             where = f" ({v.status})" if v.status else ""
             lines.append(f"  {v.node}{where}: {claim}")
             lines.append(f"    Read: {v.report}")
-        lines.append(
-            "  Rule with: fno inbox decide <node> naming the report, or re-run /fno:review prove-it."
-        )
+        lines.append("  Rule with: fno inbox decide <node> naming the report, or re-run /fno:review prove-it.")
         lines.append("")
 
     if outstanding.verdicts_error:
