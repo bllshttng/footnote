@@ -37,9 +37,8 @@ def cmd_note(
 ) -> None:
     """Record progress on a node by REPLACING its current state.
 
-    The exact prior state lands in permanent history. Nobody bound refuses
-    BEFORE the write: exit 3, nothing written. No send confirmed: exit 4,
-    note written. ``--quiet`` writes it anyway.
+    The prior state lands in permanent history. Nobody bound refuses BEFORE
+    the write: exit 3. No send confirmed: exit 4. ``--quiet`` writes anyway.
     """
     from fno.decide import (
         UnmeasuredClaimError,
@@ -99,8 +98,8 @@ def cmd_note(
         reads=read_rows,
     )
     if code != 0:
-        # 1 = budget/history refusal, 3 = a stale revision conflict. The
-        # child printed the reason on stderr.
+        # 1 = budget refusal, 3 = a stale revision conflict; the child
+        # printed the reason on stderr.
         raise typer.Exit(code=code)
 
     if claims:
