@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use common::{
     connect_with_retry, screen_has_line, sidecar_pid_field, spawn_server, ClientHarness,
-    FakeClient, Scratch,
+    FakeClient, Scratch, ServerProc,
 };
 use fno::proto::{
     read_msg_sync, write_msg_sync, Cell, ClientMsg, ControlVerb, Frame, ProtoError, ServerMsg,
@@ -345,25 +345,65 @@ fn persistence_two_cold_clients_converge_on_one_server() {
     assert!(owner > 0);
 }
 
+/// A `--server` starter whose stderr appends to main.log, so the loser's
+/// `a server is already running` line lands where one_owner and the
+/// positive-marker assert read it. common::spawn_server pins stderr to
+/// null, which is right for its callers and starves this one.
+fn spawn_starter(scratch: &Scratch, envs: &[(&str, &str)]) -> std::process::Child {
+    let mut cmd = scratch.command();
+    cmd.args(["--server"]).arg(scratch.main_sock());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(scratch.0.join("main.log"))
+        .unwrap();
+    cmd.stderr(log);
+    cmd.spawn().unwrap()
+}
+
 #[test]
 fn persistence_late_loser_is_not_a_second_owner() {
     let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     // The CI shape (8 of 1,261 stress trials): a slow client forks its server
     // AFTER the other client already attached, so the old one-sample argv
     // count reads the losing starter as a second server while it waits out
-    // its 10s startup deadline. FNO_TEST_MARKER_HOLD_MS parks only the loser
-    // (after its marker create fails AlreadyExists), for 3s - the
-    // deterministic version of that window.
+    // its 10s startup deadline. Both servers are spawned by the test, back
+    // to back, with FNO_TEST_MARKER_HOLD_MS parking only the loser (after
+    // its marker create fails AlreadyExists). Two client forks cannot
+    // promise a contender: a client that reaches a live socket never spawns
+    // one, so under client scheduling the loser count could read zero. The
+    // client attaches only after the socket exists, so exactly two starters
+    // ever exist and the loser is deterministic.
     let scratch = Scratch::new("lateloser");
-    let envs = [("FNO_TEST_MARKER_HOLD_MS", "3000")];
-    let mut a = ClientHarness::spawn_with(&scratch, &envs);
-    let mut b = ClientHarness::spawn_with(&scratch, &envs);
+    // The pane shell + prompt ride the SERVER's env on this path (the
+    // client-side spawn would inherit them from the harness), so pin them
+    // here exactly like spawn_full does.
+    let envs = [
+        ("FNO_TEST_MARKER_HOLD_MS", "3000"),
+        ("SHELL", "/bin/sh"),
+        ("PS1", "$ "),
+    ];
+    let _s1 = ServerProc(spawn_starter(&scratch, &envs));
+    let _s2 = ServerProc(spawn_starter(&scratch, &envs));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !scratch.main_sock().exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the bind winner never created main.sock"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut a = ClientHarness::spawn(&scratch);
     a.wait_prompt(15);
-    b.wait_screen(15, |s| !s.trim().is_empty());
 
     a.type_bytes(b"echo shared-pane-proof\r");
     a.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
-    b.wait_screen(15, |s| screen_has_line(s, "shared-pane-proof"));
 
     let owner = one_owner(&scratch, LOSER_EXIT_BOUND)
         .unwrap_or_else(|e| panic!("exactly one server must own the session: {e}"));
@@ -378,6 +418,10 @@ fn persistence_late_loser_is_not_a_second_owner() {
         "exactly one loser must have converged; main.log:\n{log}"
     );
     assert!(owner > 0);
+    // Clear the stale socket before the drops: the ServerProc kills land
+    // without a live listener, and Scratch::drop then skips its dead
+    // kill-server attempt and removes the directory.
+    let _ = std::fs::remove_file(scratch.main_sock());
 }
 
 #[test]
