@@ -1025,15 +1025,21 @@ def test_crowning_an_adopted_row_never_makes_it_the_grantors_worker(
     uncrowned = [worker, load_registry()[-1]]
     write_registry(uncrowned)
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: uncrowned)
-    before = spawn_gate.share_reading(spawn_gate.census(), 30, grantor)
-    assert before["held"] == 1
+
+    # The grantor's `held` now reads from the gate probe's share block; the
+    # worker-row buckets it sums are the census's, read directly here.
+    def _held() -> int:
+        return len(spawn_gate.census().worker_rows.get(grantor, []))
+
+    before = _held()
+    assert before == 1
 
     # The crown itself (the verb's field write): the adopted row becomes a
     # king; its spawner stays null and nobody's held moves.
     uncrowned[-1].crown_level = 1
     write_registry(uncrowned)
-    after = spawn_gate.share_reading(spawn_gate.census(), 30, grantor)
-    assert after["held"] == 1
+    after = _held()
+    assert after == 1
     assert adopted in spawn_gate.census().crowned_sessions
 
 

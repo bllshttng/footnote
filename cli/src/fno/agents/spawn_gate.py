@@ -776,76 +776,6 @@ def _refuse(
     raise refusal
 
 
-def _refuse_provider_cap(
-    provider: str,
-    cap: int,
-    current: int,
-) -> NoReturn:
-    """The measured-count refusal. `current` is REQUIRED: a provider_cap
-    receipt that cannot state the count it measured is blaming a cap it
-    never read (2026-09-09: `reason: provider_cap, cap: 10, count: null`
-    fired while zai held 9 of 10, because the mutex was busy)."""
-    _warn(
-        f"spawn-gate: provider {provider}, cap {cap}, current count "
-        f"{current}; refusing; no worker launched"
-    )
-    receipt = {
-        "status": "refused",
-        "reason": "provider_cap",
-        "provider": provider,
-        "cap": cap,
-        "count": current,
-        "current_count": current,
-    }
-    _refuse(EXIT_PROVIDER_CAP, receipt)
-
-
-def _refuse_gate_fault(
-    provider: Optional[str],
-    error: BaseException,
-    *,
-    reason: str = "gate_mutex_unavailable",
-) -> NoReturn:
-    """The claims-layer fault refusal: the gate could not serialize the
-    decision, so no count was measured and no cap may be named. The reason
-    names the claim site that faulted (the gate mutex, a worker lane
-    reservation), never a cap. Keeps EXIT_PROVIDER_CAP so exit-code
-    consumers are unaffected."""
-    _warn(
-        f"spawn-gate: provider {provider}, {reason.replace('_', ' ')} ({error}); "
-        "refusing; no worker launched"
-    )
-    receipt: dict[str, object] = {
-        "status": "refused",
-        "reason": reason,
-        "provider": provider,
-        "error": str(error),
-    }
-    _refuse(EXIT_PROVIDER_CAP, receipt)
-
-
-def _refuse_quota_lock(account: str, resets_at: Optional[float]) -> NoReturn:
-    """A vendor quota window on the caller-named account. NOT machine
-    busy-ness, so --force does not buy past it. Keeps EXIT_PROVIDER_CAP
-    for exit-code consumers, like _refuse_gate_fault."""
-    from datetime import datetime, timezone
-
-    when = (
-        datetime.fromtimestamp(resets_at, tz=timezone.utc).isoformat()
-        if resets_at else "unknown (no reset was readable)"
-    )
-    _warn(
-        f"spawn-gate: account {account} is rate-limited until {when}; "
-        "refusing; no worker launched"
-    )
-    _refuse(EXIT_PROVIDER_CAP, {
-        "status": "refused",
-        "reason": "provider_quota_lock",
-        "account": account,
-        "resets_at": resets_at,
-    })
-
-
 def _emit_gate_event(kind: str, **data: Any) -> None:
     """Best-effort agents-log event. Never raises, never blocks a spawn."""
     try:
@@ -854,89 +784,6 @@ def _emit_gate_event(kind: str, **data: Any) -> None:
         events.emit(kind, **data)
     except Exception:  # noqa: BLE001 - telemetry never changes a gate outcome
         pass
-
-
-def _check_registry_schema() -> None:
-    """Refuse a spawn into a fleet whose shared registry this fno cannot write.
-
-    The 2026-08-28 story and the edge contract live in
-    docs/architecture/spawn-gate.md. Unreadable file skips (a spawn is not the
-    place to adjudicate a torn registry); schema ahead refuses with both
-    integers, the file, and the repair verb. Emission stays best-effort.
-    """
-    from fno.agents.registry import (
-        SCHEMA_VERSION,
-        _read_raw_registry,
-        _registry_path,
-    )
-
-    try:
-        target = _registry_path(None)
-        raw = _read_raw_registry(target)
-    except Exception as exc:  # noqa: BLE001 - resolving the path needs settings,
-        # and an unreadable config is not a fleet condition: no spawn is blocked
-        # because a path could not be resolved (the module contract that global
-        # guards fail OPEN on read errors).
-        #
-        # The skip leaves a trace, but NOT on stderr. `_check_ram_floor` and
-        # `_cpu_axis` warn on their equivalent skips, and this one
-        # cannot: the gate's own `test_under_cap_passes_silently` pins an empty
-        # stderr on the pass path, and this branch fires there. A silent skip is
-        # still unobservable, so it emits instead - the same aggregation argument
-        # the refusal below already makes, applied to the absence of a check.
-        _emit_gate_event("registry_schema_check_skipped", reason=repr(exc))
-        return
-    if raw is None:
-        return
-    on_disk = raw.get("schema_version")
-    if not isinstance(on_disk, int) or on_disk <= SCHEMA_VERSION:
-        return
-    _warn(
-        f"spawn-gate: the shared agent registry at {target} is "
-        f"schema_version={on_disk}, ahead of the schema_version={SCHEMA_VERSION} "
-        "this fno understands, so this worker could neither claim its node nor "
-        "stamp its mail; refusing to spawn. Upgrade this fno (fno doctor "
-        f"update), or repair the file (fno agents registry-repair --to "
-        f"{SCHEMA_VERSION} --apply)."
-    )
-    # This branch used to emit its own `registry_schema_ahead` beside the
-    # refusal: a bespoke answer to the general problem `_refuse` now solves for
-    # every branch. It had one producer and no consumer, and two events for one
-    # moment drift apart. The general event carries strictly more (the spawn
-    # name and the exit code), and `reason == "registry_schema"` still isolates
-    # this case for anyone querying only for it.
-    _refuse(
-        EXIT_REGISTRY_SCHEMA,
-        {
-            "status": "refused",
-            "reason": "registry_schema",
-            "registry_path": str(target),
-            "on_disk": on_disk,
-            "understood": SCHEMA_VERSION,
-        },
-    )
-
-
-def _check_ram_floor(floor_gb: float) -> None:
-    """Refuse (never queue) below the floor; <= 0 disables; unreadable skips."""
-    if floor_gb <= 0:
-        return
-    avail = available_ram_gb()
-    if avail is None:
-        _warn("spawn-gate: could not read available RAM; skipping the floor check")
-        return
-    if avail < floor_gb:
-        _warn(
-            f"spawn-gate: available RAM {avail:.1f}GB is below the min_free_gb "
-            f"floor {floor_gb:.1f}GB; refusing to spawn (--force to bypass)"
-        )
-        receipt = {
-            "status": "refused",
-            "reason": "ram_floor",
-            "available_gb": avail,
-            "min_free_gb": floor_gb,
-        }
-        _refuse(EXIT_RAM_REFUSED, receipt)
 
 
 #: `(None, "error")` is a real reading ("unreadable"), so the "not supplied"
@@ -1220,6 +1067,19 @@ def probe_capacity(only: Optional[list[str]] = None) -> dict:
     except Exception as exc:  # noqa: BLE001 - an unanswered gate is unknown
         return {"verdict": "unknown", "reason": "gate_unavailable", "error": str(exc)}
 
+
+
+# ---------------------------------------------------------------------------
+# Layer 3: background QoS
+# ---------------------------------------------------------------------------
+
+def _qos_enabled() -> bool:
+    try:
+        from fno.config import load_settings
+
+        return load_settings().agents.worker_qos != "off"
+    except Exception:
+        return True
 
 
 def qos_wrap(argv: list[str]) -> list[str]:
