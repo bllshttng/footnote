@@ -120,6 +120,8 @@ def cmd_note(
     else:
         typer.echo(f"noted {receipt.get('node_id') or task_id}: {text}")
     warn_if_note_is_long(text)
+    # Terminal-routed notes delivered too: the write went to history, but the
+    # bound readers are still the people to tell.
     if not isinstance(readers, NoteReaders):
         return
     raise typer.Exit(code=deliver(readers, text, json_output=json_output))

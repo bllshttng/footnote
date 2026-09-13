@@ -201,11 +201,9 @@ fn run_machine(
         return 1;
     }
     let rev = node_state::current_revision(graph, node_id).unwrap_or(0);
-    let reason = if parsed.wave {
-        note_history::REASON_TERMINAL_EVACUATED
-    } else {
-        note_history::REASON_MACHINE_RECORD
-    };
+    // Both machine kinds are progress records; a wave additionally sets the
+    // refresh marker below.
+    let reason = note_history::REASON_MACHINE_RECORD;
     if let Err(e) = note_history::append(
         graph,
         node_id,

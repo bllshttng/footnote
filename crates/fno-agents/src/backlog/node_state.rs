@@ -243,6 +243,21 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
     let session = input.source_session_id.clone();
     let harness = input.source_harness.clone();
     let journaled_flag = std::sync::atomic::AtomicBool::new(false);
+    // The sibling fields the candidate carries from the outside-the-lock
+    // read: if another writer changed them meanwhile, publishing the stale
+    // candidate would clobber them, so the hook refuses instead. Snapshots
+    // come from the RAW file (the hook sees raw rows too); the defaulted
+    // read synthesizes status for rows that lack one, which would read as a
+    // phantom change.
+    let raw_rows = match graph_store::read_raw(graph)? {
+        graph_store::RawRead::Entries(v) => v,
+        _ => Vec::new(),
+    };
+    let raw_row = raw_rows
+        .iter()
+        .find(|r| graph_store::entry_id(r) == Some(node_id));
+    let snapshot_details: Option<Value> = raw_row.and_then(|r| r.get("details")).cloned();
+    let snapshot_status: Option<Value> = raw_row.and_then(|r| r.get("status")).cloned();
 
     // Under the publication lock: re-verify the row revision against the raw
     // snapshot, journal the exact pre-image, then allow publication. Any
@@ -259,6 +274,14 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
             return Err(StoreError::Invalid(format!(
                 "state-conflict: current revision {current} != submitted {expected}"
             )));
+        }
+        if row.get("details") != snapshot_details.as_ref()
+            || row.get("status") != snapshot_status.as_ref()
+        {
+            return Err(StoreError::Invalid(
+                "state-conflict: the node changed while this write was in flight; re-read and resubmit"
+                    .to_string(),
+            ));
         }
         if let Some(pre_state) = row.get(STATE_KEY) {
             note_history::append(
