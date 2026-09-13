@@ -8,8 +8,11 @@ from fno.agents.harness_map import _BRIEF_MAX_BYTES
 
 
 def apply(node: dict, dispatch_verb: Optional[str], dispatch_brief: Optional[str]) -> Optional[str]:
-    """Store the overrides permissively; the resolver stays the trust boundary
-    (allowlist + hard 8 KB cap at dispatch time). The brief additionally warns
+    """Store the overrides. The verb is checked with the drain's own name-mint
+    predicate (``verb_code_for``), so a verb carrying an argument, or an
+    unknown word, is refused here instead of failing three drains later under
+    the auto-defer rule (x-a57a). The refusal raises and aborts
+    locked_mutate_graph before any write lands. The brief additionally warns
     at write: the author is present here and absent at spawn, so surface the
     size now, in the spawn path's wording.
 
@@ -19,7 +22,25 @@ def apply(node: dict, dispatch_verb: Optional[str], dispatch_brief: Optional[str
     caller echoes it once, after the lock succeeds and the write lands.
     """
     if dispatch_verb is not None:
-        node["dispatch_verb"] = None if dispatch_verb.lower() == "null" else dispatch_verb
+        from fno.agents.naming import AgentNameError, accepted_verb_words, verb_code_for
+
+        verb_val = None if dispatch_verb.lower() == "null" else dispatch_verb
+        if verb_val is None:
+            node["dispatch_verb"] = None
+        else:
+            try:
+                verb_code_for(verb_val)
+            except AgentNameError as exc:
+                accepted = ", ".join(accepted_verb_words())
+                typer.echo(
+                    f"Error: --dispatch-verb {dispatch_verb!r} refused at write: "
+                    f"{exc}. The field takes one bare verb word; a verb with an "
+                    "argument would fail every drain at name mint. accepted: "
+                    f"{accepted} (bare, '/fno:'- or '$fno:'-prefixed)",
+                    err=True,
+                )
+                raise typer.Exit(code=2) from exc
+            node["dispatch_verb"] = verb_val
     if dispatch_brief is not None:
         brief_val = None if dispatch_brief.lower() == "null" else dispatch_brief
         node["dispatch_brief"] = brief_val

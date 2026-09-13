@@ -2968,6 +2968,36 @@ def test_update_dispatch_verb_null_clears(tmp_graph):
     assert _read_graph(tmp_graph)[0]["dispatch_verb"] is None
 
 
+def test_update_dispatch_verb_with_argument_refused(tmp_graph):
+    """x-a57a: a verb carrying an argument wrote fine and only failed at the
+    name mint three drains later, after the auto-defer. Refused at write."""
+    r = _invoke("backlog", "add", "Argument node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("backlog", "update", nid, "--dispatch-verb",
+                 f"/fno:blueprint {nid}")
+    assert r2.exit_code == 2, r2.output
+    assert "unknown dispatch verb" in r2.output
+    assert "accepted:" in r2.output
+    assert _read_graph(tmp_graph)[0].get("dispatch_verb") is None
+
+
+def test_update_dispatch_verb_unknown_word_refused(tmp_graph):
+    r = _invoke("backlog", "add", "Unknown verb node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("backlog", "update", nid, "--dispatch-verb", "/fno:fix-now")
+    assert r2.exit_code == 2, r2.output
+    assert "accepted:" in r2.output
+    assert _read_graph(tmp_graph)[0].get("dispatch_verb") is None
+
+
+def test_update_dispatch_verb_bare_qualified_still_writes(tmp_graph):
+    r = _invoke("backlog", "add", "Bare node")
+    nid = json.loads(r.output)["id"]
+    r2 = _invoke("backlog", "update", nid, "--dispatch-verb", "/fno:blueprint")
+    assert r2.exit_code == 0, r2.output
+    assert _read_graph(tmp_graph)[0]["dispatch_verb"] == "/fno:blueprint"
+
+
 def test_dispatch_fields_default_absent(tmp_graph):
     """A node with no dispatch overrides carries null verb/brief (built-in path)."""
     r = _invoke("backlog", "add", "Plain node")
