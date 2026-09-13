@@ -116,7 +116,9 @@ def test_rust_seam_exports_pin_for_foreign_cwd(tmp_path, monkeypatch, capsys):
     caller = _make_repo(tmp_path / "caller")
     target = _make_repo(tmp_path / "target")
     monkeypatch.chdir(caller)
-    monkeypatch.delenv("FNO_WORKTREE_POLICY", raising=False)
+    # Tracked setenv: the seam mutates os.environ directly, so monkeypatch must
+    # know the key to restore the pre-test state at teardown.
+    monkeypatch.setenv("FNO_WORKTREE_POLICY", "")
     _export_worktree_policy_pin_at_seam(
         ["spawn", "--cwd", str(target), "do the thing"],
     )

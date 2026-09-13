@@ -420,8 +420,7 @@ def undeclared_dispatch_pin(
     the target repo; reached from elsewhere, that is the repo whose edits the
     child's hooks would block, so pin ``never`` rather than write config into
     somebody else's project. Declared repos, non-git targets, an ambient
-    ``FNO_WORKTREE_POLICY`` (source ``env``), undecidable resolves keep the
-    ambient posture.
+    override (source ``env``), undecidable resolves keep the ambient posture.
     """
     target = _repo_identity(target_cwd)
     caller = _repo_identity(caller_cwd)
