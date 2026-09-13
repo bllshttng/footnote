@@ -1315,6 +1315,7 @@ def _dashboard_html(
     context_entries: list[dict] | None = None,
     projection: str = "backlog",
     flow: dict | None = None,
+    label: str = "fno",
 ) -> str:
     rows = _dashboard_rows(
         entries, local=local, vault=vault, context_entries=context_entries
@@ -1351,7 +1352,9 @@ def _dashboard_html(
     # way. A local board is written by the auto-render hook on every mutation;
     # a published one is a snapshot taken when it was published.
     if local:
-        scope_note = "live \u00b7 re-rendered on every graph mutation"
+        # Every local render path overlays the shipped archive, so naming only
+        # "live" under-claims the corpus a reader is looking at.
+        scope_note = "live + shipped archive \u00b7 re-rendered on every graph mutation"
         opens_note = "Opens on the live board. "
         # Description, blockers and the plan link are added under `if local:`
         # in _dashboard_rows. Promising them on a public board sends a reader
@@ -1403,7 +1406,7 @@ def _dashboard_html(
         f"<title>{html.escape(title)}</title>{fonts}"
         f"<style>{_DASHBOARD_CSS}</style></head>"
         f'<body data-local="{str(local).lower()}"><div class="wrap">'
-        f'<header><div class="eyebrow">fno \u00b7 generated <span>{generated}</span>'
+        f'<header><div class="eyebrow">{html.escape(label)} \u00b7 generated <span>{generated}</span>'
         f' \u00b7 <span>{html.escape(scope_note)}</span></div>'
         f"<h1>{html.escape(title)}</h1>"
         '<p class="lede">Every open node, plus recently closed work for context. '
@@ -1463,6 +1466,15 @@ def render_graph_html(
     all_projects: bool = False,
 ) -> None:
     """Render the canonical full-detail dashboard for the local surface."""
+    # The title names the scope so two boards reading different corpora never
+    # share one: the whole-graph board is not "fno Backlog", it is every
+    # project. An unscoped caller (the plain `view` default) keeps fno.
+    if all_projects:
+        title, label = "All Projects Backlog", "all projects"
+    elif project:
+        title, label = f"{project} Backlog", project
+    else:
+        title, label = "fno Backlog", "fno"
     all_entries = [entry for entry in entries if isinstance(entry, dict)]
     scoped = (
         all_entries
@@ -1476,7 +1488,8 @@ def render_graph_html(
     vault = _load_obsidian_vault()
     content = _dashboard_html(
         scoped,
-        title="fno Backlog",
+        title=title,
+        label=label,
         local=True,
         vault=vault,
         context_entries=all_entries,
