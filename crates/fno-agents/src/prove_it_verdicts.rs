@@ -338,6 +338,21 @@ fn derive_live_rulings(text: &str) -> Vec<Value> {
         if etype != "operator_decision" && etype != "decision_retracted" {
             continue;
         }
+        // The Python reader marks an envelope whose required data field is
+        // empty as damaged (discarded), not as a live or retiring row.
+        let required = if etype == "operator_decision" {
+            "decision_id"
+        } else {
+            "target_decision_id"
+        };
+        if data
+            .get(required)
+            .and_then(Value::as_str)
+            .map(str::is_empty)
+            .unwrap_or(true)
+        {
+            continue;
+        }
         let mut flat = Value::Object(data.clone());
         let obj = flat.as_object_mut().expect("just built");
         obj.insert("_event_type".to_string(), json!(etype));
