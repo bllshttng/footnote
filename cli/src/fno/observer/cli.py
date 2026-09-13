@@ -32,8 +32,9 @@ import typer
 import yaml
 
 from fno.loops import loop_level
-from fno.observer import fold, judge
+from fno.observer import fold
 from fno.plan._doc import load_plan_text
+from fno.rust_binary import resolve_binary
 
 observer_app = typer.Typer(
     name="observer",
@@ -342,21 +343,36 @@ def _mint_run_id(skill_id: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-@observer_app.command("sweep")
+@observer_app.command(
+    "sweep",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
 def sweep(
+    ctx: typer.Context,
     skill: str = typer.Option(..., "--skill", help="blueprint | review | target"),
     since: int = typer.Option(28, "--since", help="Window in days (default 28)."),
     repo: Optional[str] = typer.Option(None, "--repo", help="target only: pin one repo (owner/name); default = the graph's distinct PR repos."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the run summary as JSON."),
-    judge_n: int = typer.Option(0, "--judge", help="blueprint only: judge the N newest window plans after code scoring."),
 ) -> None:
     """Retrospective read-only sweep: score a recorded corpus and emit events.
+
+    ``--judge N`` (blueprint only: judge the N newest window plans after code
+    scoring) is fno-agents' flag (node x-72fc); read out of raw argv below
+    rather than declared as a typer.Option.
 
     States on stdout: ``ok`` (run_complete emitted), ``insufficient`` (<10
     attributable items, no run_complete), ``partial`` (a coverage gap is
     present). Never exits 0 silently with no state word (the one anti-silent
     rule for this harness).
     """
+    judge_n = 0
+    if "--judge" in ctx.args:
+        i = ctx.args.index("--judge")
+        try:
+            judge_n = int(ctx.args[i + 1])
+        except (IndexError, ValueError):
+            raise typer.BadParameter("--judge needs an integer")
+
     if skill not in ("blueprint", "review", "target"):
         raise typer.BadParameter("--skill must be blueprint, review, or target")
     if since < 1:
@@ -424,7 +440,7 @@ def sweep(
         # spawner needs its own registry row and a config.autonomy gate.
         try:
             for item in items[-judge_n:]:
-                _judge_one_item(item, _node_text(by_id.get(item.get("graph_node_id")) or {}), run_id, events_paths)
+                _judge_one_item(item, run_id, events_paths)
             typer.echo(f"  judge: offered the model judge to {min(judge_n, len(items))} window plan(s)")
         except Exception as exc:
             typer.echo(f"judge fault (code scoring unaffected): {exc}", err=True)
@@ -462,15 +478,11 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# the advisory five-question judge
+# the advisory five-question judge: grading lives in fno-agents
+# (crates/fno-agents/src/blueprint_judge.rs, node x-9983's flag-registry
+# port); this side keeps only what needs the plan-parsing/config/events infra
+# it already had (has_section, loop_level, _emit_finding).
 # --------------------------------------------------------------------------- #
-
-
-def _judge_spawn() -> "Callable[[str, str], tuple[int, str, str]]":
-    """judge.judge_plan's spawn seam: _default_spawn bound to cwd/timeout/model."""
-    return lambda name, prompt: _default_spawn(
-        name, prompt, cwd=Path.cwd(), timeout=600, model=judge.JUDGE_MODEL
-    )
 
 
 def _plan_text_of(path: Path) -> Optional[str]:
@@ -487,35 +499,44 @@ def _has_five_questions(text: str) -> bool:
         return False
 
 
-def _node_text(n: dict) -> str:
-    return "\n".join(filter(None, [str(n.get("title") or ""), str(n.get("details") or "")]))
+def _judge_via_rust(argv: list[str]) -> Optional[dict]:
+    """One ``fno-agents judge`` round-trip: JSON out, ``None`` on any fault
+    (a coverage gap, never a fabricated verdict)."""
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
+        return None
+    try:
+        result = subprocess.run(
+            [str(binary), "judge", *argv], capture_output=True, text=True, timeout=3600
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        typer.echo(f"judge fault: {exc}", err=True)
+        return None
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        typer.echo(f"judge fault: bad output: {result.stdout[:200]}", err=True)
+        return None
 
 
-def _node_text_of(node_id: Optional[str]) -> str:
-    if not node_id:
-        return ""
-    from fno import paths as _paths
-    from fno.scoreboard.fold import read_graph_nodes
-
-    n = {x.get("id"): x for x in read_graph_nodes(_paths.graph_json())}.get(node_id) or {}
-    return _node_text(n)
-
-
-def _judge_one_item(item: dict, node_text: str, run_id: str, events_paths: list[Path]) -> tuple[str, int]:
-    """Read the item's plan, skip coverage gaps, judge it into run_id.
-    Returns ("judged", fail_count) or ("gap", 0) - a gap is coverage, never a fail."""
+def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[str, int]:
+    """Read the item's plan, skip coverage gaps, judge it into run_id via
+    fno-agents. Returns ("judged", fail_count) or ("gap", 0) - a gap is
+    coverage, never a fail."""
     pp = item.get("plan_path")
     text = _plan_text_of(Path(pp)) if pp else None
     if not text or not _has_five_questions(text):
         return "gap", 0
-    return "judged", _run_judge(text, node_text, item, run_id, events_paths)
-
-
-def _run_judge(text: str, node_text: str, item: dict, run_id: str, events_paths: list[Path]) -> int:
-    """Grade all five lenses sequentially into run_id; returns fails printed."""
+    argv = ["--plan", pp]
+    if item.get("graph_node_id"):
+        argv += ["--node", item["graph_node_id"]]
+    out = _judge_via_rust(argv)
+    if out is None:
+        return "judged", 0
     fails = 0
-    for dimension in judge.JUDGE_DIMENSIONS:
-        verdict, reason = judge.judge_plan(text, node_text, dimension, spawn=_judge_spawn())
+    for row in out.get("rows", []):
+        dimension, verdict, reason = row["dimension"], row.get("verdict"), row.get("reason", "")
         if verdict is None:
             typer.echo(f"  {dimension}: unanswered ({reason[:120]})")
             continue
@@ -527,43 +548,49 @@ def _run_judge(text: str, node_text: str, item: dict, run_id: str, events_paths:
             # and 0.0 here means untracked (the sweep's convention), not free.
             evidence=f"cost-untracked; {reason}", cost_usd=0.0, skill_ref=None, events_paths=events_paths,
         )
-    return fails
+    return "judged", fails
 
 
-@observer_app.command("judge")
-def judge_cmd(
-    plan: Optional[Path] = typer.Option(None, "--plan", help="The plan doc to judge."),
-    node: Optional[str] = typer.Option(None, "--node", help="Graph node id for title/details context."),
-    labels: Optional[Path] = typer.Option(None, "--labels", help="labels.yaml: run calibration instead."),
-    split: str = typer.Option("dev", "--split", help="Calibration split (dev|test)."),
-    force: bool = typer.Option(False, "--force", "-F", help="Judge even at level=report."),
-) -> None:
-    """Advisory five-question judge: never blocks; a judge error is never a fail."""
-    if labels is not None:
-        rows = [r for r in (yaml.safe_load(labels.read_text(encoding="utf-8")) or []) if r.get("split", "dev") == split]
-        base = labels.parent
-        texts = {r["plan"]: (_plan_text_of(base / r["plan"]) or "") for r in rows}
-        out = judge.tally(rows, plan_text=texts, spawn=_judge_spawn())
-        for dim, s in out["dimensions"].items():
+@observer_app.command(
+    "judge",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def judge_cmd(ctx: typer.Context) -> None:
+    """Advisory five-question judge: never blocks; a judge error is never a fail.
+
+    Every flag (--plan/--node/--labels/--split/--force) is fno-agents' (Rust
+    owns the flag surface per node x-72fc); this wrapper forwards raw argv
+    rather than declaring its own typer.Option for them.
+    """
+    args = ctx.args
+    force = "--force" in args or "-F" in args
+    if "--labels" in args:
+        out = _judge_via_rust(args)
+        if out is None:
+            raise typer.Exit(1)
+        for dim, s in out.get("dimensions", {}).items():
             typer.echo(f"{dim}: n={s['n']} tp_rate={s['tp_rate']} tn_rate={s['tn_rate']}")
-        for d in out["disagreements"]:
+        for d in out.get("disagreements", []):
             typer.echo(f"{d['plan']}  {d['dimension']}  label={d['label']}  judge={d['judge']}  {d['reason'][:120]}")
-        if out["controls_wrong"]:
+        if out.get("controls_wrong"):
             typer.echo(f"controls wrong: {out['controls_wrong']}")
             raise typer.Exit(1)
         return
+    plan = args[args.index("--plan") + 1] if "--plan" in args else None
     if plan is None:
         raise typer.BadParameter("give --plan or --labels")
     if not force and loop_level("blueprint_judge") == "report":
         typer.echo("skipped level=report")
         return
-    if not plan.exists():
-        typer.echo(f"unanswered: no plan at {plan}")
+    plan_path = Path(plan)
+    if not plan_path.exists():
+        typer.echo(f"unanswered: no plan at {plan_path}")
         raise typer.Exit(1)
-    typer.echo(f"judging {plan} ({node or 'no node'})")
+    node = args[args.index("--node") + 1] if "--node" in args else None
+    typer.echo(f"judging {plan_path} ({node or 'no node'})")
     status, fails = _judge_one_item(
-        {"session_id": None, "graph_node_id": node, "plan_path": str(plan)},
-        _node_text_of(node), _mint_run_id("fno:blueprint"), _events_paths(),
+        {"skill_id": "fno:blueprint", "session_id": None, "graph_node_id": node, "plan_path": str(plan_path)},
+        _mint_run_id("fno:blueprint"), _events_paths(),
     )
     if status == "gap":
         typer.echo("unanswered: plan carries no ## Five questions section; no judge call")
@@ -957,7 +984,7 @@ def _default_spawn(
 ) -> "tuple[int, str, str]":
     """Sanctioned headless spawn (never a bare ``claude -p``). fable-tier for
     /blueprint per the loops-roadmap routing table (Locked Decision 6); the
-    blueprint judge passes its own tier (judge.JUDGE_MODEL)."""
+    blueprint judge's own spawn lives in fno-agents (blueprint_judge.rs)."""
     try:
         p = subprocess.run(
             [

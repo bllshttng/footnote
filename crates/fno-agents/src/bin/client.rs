@@ -476,6 +476,13 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
     }
+    // `judge` (x-9983): the blueprint judge's grading half (lens prompts,
+    // model spawn, verdict parsing). Daemon-free like graph-get; the Python
+    // `fno doctor observer judge` / `sweep --judge` wrappers shell HERE and
+    // own event emission (fno.events single-sourced there).
+    if verb == "judge" {
+        return fno_agents::blueprint_judge::run_judge(&args[1..]);
+    }
     // `court-orphans` (x-f0d2): the orphan-crown sweep for `fno agents court`,
     // daemon-free read; `==` dispatch like graph-get, and registered in
     // ALL_CLIENT_ACTIONS like every direct dispatch the ratchet counts.
