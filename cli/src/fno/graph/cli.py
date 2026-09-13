@@ -932,9 +932,7 @@ def _append_creation_encounter(path: Path, node_id: str, evidence: str) -> None:
                 word_cap=load_settings().style.word_cap.encounter,
             )
             if violations:
-                raise ValueError(
-                    style.format_violations(violations, surface="encounter")
-                )
+                raise ValueError(style.format_violations(violations, surface="encounter"))
 
         try:
             identity = resolve_self_identity()
@@ -2918,9 +2916,7 @@ def cmd_encounter(
         cap = load_settings().style.word_cap.encounter
         violations = style.check(evidence, surface="encounter", word_cap=cap)
         if violations:
-            typer.echo(
-                style.format_violations(violations, surface="encounter"), err=True
-            )
+            typer.echo(style.format_violations(violations, surface="encounter"), err=True)
             raise typer.Exit(code=4)
 
     record: dict[str, object] = {
