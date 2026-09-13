@@ -205,7 +205,8 @@ def test_spawn_carries_ambient_policy_override_on_the_pane(tmp_path, monkeypatch
     res = CliRunner().invoke(
         agents_cli.agents_app,
         ["spawn", "peer", "--harness", "claude", "--substrate", "pane",
-         "--node", "x-84a8", "--slug", "s", "--plan", "p.md"],
+         "--node", "x-84a8", "--slug", "s", "--plan", "p.md",
+         "--session-phase", "do"],
     )
     assert res.exit_code == 0, res.output
     assert captured["provenance"]["FNO_WORKTREE_POLICY"] == "external"

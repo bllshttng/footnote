@@ -20,6 +20,11 @@ class DispatchVerbDescriptor:
     takes_node_id: bool = True
     # What a completion proves, weakest last.
     asserts: Literal["pr", "doc", "invocation"] = "invocation"
+    # The sessions-row phase stamped for a worker dispatched on this verb.
+    # Shipped verbs infer theirs from the spawn_phase table; an outside verb
+    # is unknown to that table, so it declares its phase here. Absent, a
+    # --node spawn is refused rather than launched unbound (x-007c).
+    session_phase: Optional[str] = None
 
 
 #: The built-in dispatch verbs (harness_map mirrors this tuple; cycle-free).

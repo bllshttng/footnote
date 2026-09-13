@@ -2079,15 +2079,12 @@ def cmd_spawn(
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # x-4342: the sessions row a node-bearing spawn opens. An explicit
-    # --session-phase is the operator's label and wins; empty infers from the
-    # work's own shape - a /target-family message names a do worker (whose
-    # claim-acquire stamp duplicate-fills the same row), a review verb names
-    # the reviewer, a blueprint or think verb names the planner. Arbitrary
-    # prose is a label this code cannot guess and never defaults to review: a
-    # review row is a retirement blocker for life, so an unlabeled task keeps
-    # no row rather than a lying one. Fail-closed on an unknown explicit
-    # value, like the guards above, before anything spawns.
+    # x-4342: the sessions row a node-bearing spawn opens. Explicit
+    # --session-phase wins; empty infers from the verb table
+    # (spawn_phase.toml). A --node spawn the table cannot label is refused
+    # fail-closed, like the guards above, before anything spawns: silently
+    # launching a worker nothing can bind to the node does not survive
+    # (x-007c).
     from fno.graph.types import SESSION_PHASES
 
     if session_phase:
@@ -2103,6 +2100,15 @@ def cmd_spawn(
         from fno.agents.spawn_phase import infer_phase
 
         stamp_phase = infer_phase(message)
+        if node is not None and not stamp_phase:
+            print(
+                f"refusing --node {node}: the message verb names no session "
+                f"phase, so no worker would be bound to the node. Pass "
+                f"--session-phase <one of {sorted(SESSION_PHASES)}>. "
+                "No worker launched.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
     # A resume may restore a recorded route inside dispatch_spawn. Resolve its
     # separately stored provider axis before admission so the gate judges the
     # destination the revived worker will actually use.
