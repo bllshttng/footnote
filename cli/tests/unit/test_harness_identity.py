@@ -712,19 +712,40 @@ def test_owned_lone_foreign_marker_is_not_stamped_when_prover_contradicts():
 
 
 def test_owned_distinct_ids_in_one_proven_family_degrade():
-    """Two markers of the proven harness with DISTINCT ids (CODEX_THREAD_ID +
-    CODEX_SESSION_ID, both codex, different values) cannot be told apart: proof
-    is harness-level, not id-level. The resolver degrades rather than pick by
-    precedence, which could stamp an inherited same-family stranger id."""
+    """Two markers of the proven harness with DISTINCT ids cannot be told
+    apart: proof is harness-level, not id-level. The resolver degrades rather
+    than pick by precedence, which could stamp an inherited same-family
+    stranger id. The markers are CLAUDE's pair, not codex's: x-a409 measured
+    that codex sets CODEX_SESSION_ID to the root session and CODEX_THREAD_ID
+    per thread, so a proven codex family now resolves to the thread id - the
+    degrade law holds for families with no such per-thread marker."""
     env = {
-        "CODEX_THREAD_ID": "thread",
-        "CODEX_SESSION_ID": "session",
-        "CLAUDE_CODE_SESSION_ID": "claude-mine",
+        "CLAUDE_CODE_SESSION_ID": "mine-new",
+        "CLAUDE_SESSION_ID": "mine-old",
+        "CODEX_THREAD_ID": "foreign-thread",
     }
-    owned = resolve_owned_identity(env, prove=lambda harness, sid: harness == "codex")
+    owned = resolve_owned_identity(env, prove=lambda harness, sid: harness == "claude")
     assert owned.disposition == "ambiguous"
     assert owned.session_id is None
-    assert owned.harness == "codex"  # proven harness kept; only the id degrades
+    assert owned.harness == "claude"  # proven harness kept; only the id degrades
+
+
+def test_owned_proven_codex_family_prefers_thread_id_across_families():
+    """The same preference when a foreign family rides along: the thread id
+    still names this process, and the multi-family shape reads `proven`."""
+    root = "019cc081-de0d-7283-97cc-751c46742a07"
+    thread = "019cc082-1111-7283-97cc-751c46742a08"
+    env = {
+        "CODEX_SESSION_ID": root,
+        "CODEX_THREAD_ID": thread,
+        "CLAUDE_CODE_SESSION_ID": "inherited-claude",
+    }
+    owned = resolve_owned_identity(env, prove=lambda harness, _sid: harness == "codex")
+    assert (owned.session_id, owned.harness, owned.disposition) == (
+        thread,
+        "codex",
+        "proven",
+    )
 
 
 def test_sync_harness_aliases_unknown_suppresses_legacy_backfill():
@@ -1412,3 +1433,59 @@ def test_owned_collides_once_per_distinct_id_for_same_value_dups():
         "single",
     )
     assert calls == [("codex", "same-1")]
+
+
+# ---- codex thread-id preference (x-a409 AC3/AC4) ----------------------------
+
+
+def test_owned_proven_codex_family_prefers_the_thread_id():
+    """Variant E (x-a409 AC3-HP): a codex child thread carries CODEX_SESSION_ID
+    (the root session) and CODEX_THREAD_ID (this thread), differing. When the
+    process tree proves codex, the thread id names this process and resolves."""
+    root = "019cc081-de0d-7283-97cc-751c46742a07"
+    thread = "019cc082-1111-7283-97cc-751c46742a08"
+    env = {"CODEX_SESSION_ID": root, "CODEX_THREAD_ID": thread}
+    owned = resolve_owned_identity(env, prove=lambda harness, _sid: harness == "codex")
+    assert (owned.session_id, owned.harness, owned.disposition) == (
+        thread,
+        "codex",
+        "single",
+    )
+
+
+def test_owned_codex_family_conflict_without_proof_stays_ambiguous():
+    """Variant E with no prover (x-a409 AC4-ERR): the x-0992 same-family
+    degrade is unchanged - without proof either id could be the stranger's."""
+    root = "019cc081-de0d-7283-97cc-751c46742a07"
+    thread = "019cc082-1111-7283-97cc-751c46742a08"
+    env = {"CODEX_SESSION_ID": root, "CODEX_THREAD_ID": thread}
+    owned = resolve_owned_identity(env)
+    assert (owned.session_id, owned.harness, owned.disposition) == (None, None, "ambiguous")
+
+
+def test_owned_name_only_stamp_over_codex_conflict_settles_by_proof():
+    """Variant F (x-a409 AC3-HP, stamped): a name_only stamp over a same-family
+    conflict used to refuse unconditionally at the canonical branch; with a
+    prover it falls through to the marker loop, which settles by proof."""
+    root = "019cc081-de0d-7283-97cc-751c46742a07"
+    thread = "019cc082-1111-7283-97cc-751c46742a08"
+    env = {
+        "FNO_HARNESS_NAME": "codex",
+        "CODEX_SESSION_ID": root,
+        "CODEX_THREAD_ID": thread,
+    }
+    owned = resolve_owned_identity(env, prove=lambda harness, _sid: harness == "codex")
+    assert (owned.session_id, owned.harness, owned.disposition) == (
+        thread,
+        "codex",
+        "single",
+    )
+
+
+def test_owned_name_only_stamp_without_id_or_prover_still_refuses():
+    """The canonical branch keeps its refusal when nothing can settle the
+    missing id: no prover, no markers to eliminate."""
+    env = {"FNO_HARNESS_NAME": "codex"}
+    owned = resolve_owned_identity(env, prove=lambda harness, _sid: harness == "codex")
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
