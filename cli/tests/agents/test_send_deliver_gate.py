@@ -1893,6 +1893,80 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     assert ' session="' not in framed
 
 
+def test_relay_continuation_into_crowned_session_carries_its_crown(monkeypatch) -> None:
+    # AC4-HP (x-3dcc via x-d7cf): the recipient-side relay ctx wraps B's replies,
+    # which are injected into A, so its to_session is A's session and A reads its
+    # own live crown on every continuation hop, not only the first message.
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _MailCtx, _run_relay_loop
+
+    calls: list = []
+
+    def _rpc(method, params, **kw):
+        calls.append(params)
+        return {
+            "delivered": True,
+            "identity_verified": True,
+            "reply": "",  # ends the loop after this hop
+        }
+
+    monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
+    monkeypatch.setattr(
+        envelope,
+        "crown_at",
+        lambda _path, session: "L1 fno" if session == "session-alice" else None,
+    )
+
+    ctxs = {
+        "alice": _MailCtx(
+            from_="aaaa1111", model="unknown", to="bbbb2222",
+            from_session="session-alice", to_session="session-bob",
+        ),
+        "bob": _MailCtx(
+            from_="bbbb2222", model="unknown", to="aaaa1111",
+            from_session="session-bob", to_session="session-alice",
+        ),
+    }
+    # seed = bob's reply; the first continuation drives alice with it, so the
+    # hop body is wrapped as BOB and crowned for ALICE's reading.
+    _run_relay_loop(
+        "bob",
+        "alice",
+        "bob says hi",
+        ceiling=3,
+        mail_ctxs=ctxs,
+        recipient_identities=_sb_identities("alice", "bob"),
+    )
+    body = calls[0]["body"]
+    assert body.startswith('<fno_mail from="bbbb2222"'), body
+    assert "-- your crown: L1 fno" in body, body
+
+
+def test_relay_continuation_with_unresolved_session_renders_no_crown_line(
+    monkeypatch,
+) -> None:
+    # AC4-ERR (x-3dcc): a peer whose session id never resolved gets a raw
+    # envelope, never "none right now" -- that line is a positive claim about a
+    # reader whose address nobody measured.
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _MailCtx, _wrap_relay_body
+
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
+
+    ctx = _MailCtx(
+        from_="bbbb2222", model="unknown", to="aaaa1111",
+        from_session=None, to_session=None,
+    )
+    wrapped = _wrap_relay_body("bob says hi", ctx)
+    assert wrapped.startswith('<fno_mail from="bbbb2222"'), wrapped
+    assert "your crown" not in wrapped, wrapped
+
+
 # ---------------------------------------------------------------------------
 # node x-1f23: the autonomous relay continuations carry <fno_mail>, not just
 # the seed (codex P2). Chat (no mail ctxs) stays raw.
@@ -1915,8 +1989,8 @@ def test_relay_loop_wraps_continuations_with_mail_ctxs(monkeypatch) -> None:
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
 
     ctxs = {
-        "alice": _MailCtx(from_="aaaa1111", harness="claude-code", model="unknown", to="bbbb2222"),
-        "bob": _MailCtx(from_="bbbb2222", harness="claude-code", model="unknown", to="aaaa1111"),
+        "alice": _MailCtx(from_="aaaa1111", model="unknown", to="bbbb2222"),
+        "bob": _MailCtx(from_="bbbb2222", model="unknown", to="aaaa1111"),
     }
     # seed = bob's reply; first continuation drives alice with bob's turn, so the
     # hop body is wrapped as BOB (the peer who just spoke).
@@ -1968,29 +2042,17 @@ def test_mail_context_uses_canonical_sender_handle(monkeypatch) -> None:
     assert context.from_ == "019fb417"
 
 
-def test_mail_context_null_provider_renders_harness_unknown_not_claude(monkeypatch) -> None:
-    # AC1-HP: the measured failure - provider_from=None alongside a
-    # codex model rendered harness="claude-code", aiming claude's verb spelling
-    # and resume form at a codex session. A null harness now renders the
-    # explicit unknown marker, and the model axis survives independently.
+def test_mail_context_model_resolves_regardless_of_provider_axis(monkeypatch) -> None:
+    # x-d7cf: the envelope no longer renders harness, so the ctx keeps only the
+    # model axis. The model resolves from the sender's own transcript whether or
+    # not a provider is provable (the old harness-axis pins retired with the
+    # attribute; harness_for_provider keeps its own tests in
+    # test_fno_mail_envelope.py for the bus-record and relay roundtrip readers).
     from fno.agents.dispatch import _build_mail_ctx
 
     monkeypatch.setattr("fno.agents.self_stamp.resolve_self_model", lambda: "gpt-5.6-luna")
-    context = _build_mail_ctx("sender-name", None, None)
-    assert context.harness == "unknown"
-    assert context.model == "gpt-5.6-luna"
-
-
-def test_mail_context_harness_follows_provider_axis_not_model(monkeypatch) -> None:
-    # AC1-ERR: negative control - changing ONLY provider_from changes
-    # only the harness. No model value supplies a harness (the axis-vocabulary
-    # rule: never infer one axis from another axis's value).
-    from fno.agents.dispatch import _build_mail_ctx
-
-    monkeypatch.setattr("fno.agents.self_stamp.resolve_self_model", lambda: "gpt-5.6-luna")
-    context = _build_mail_ctx("sender-name", None, "codex")
-    assert context.harness == "codex"
-    assert context.model == "gpt-5.6-luna"
+    assert _build_mail_ctx("sender-name", None, None).model == "gpt-5.6-luna"
+    assert _build_mail_ctx("sender-name", None, "codex").model == "gpt-5.6-luna"
 
 
 def test_first_hop_read_budget_covers_the_daemon_drive_ceiling() -> None:

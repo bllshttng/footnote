@@ -5124,12 +5124,11 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
     return wrap_fno_mail(
         cur,
         from_=ctx.from_,
-        harness=ctx.harness,
-        model=ctx.model,
         node=ctx.node,
         to=ctx.to,
         from_session=ctx.from_session,
         origin=ctx.origin,
+        to_session=ctx.to_session,
     )
 
 
@@ -7193,8 +7192,6 @@ def _deliver_live(
         wrapped = wrap_fno_mail(
             body,
             from_=mail.from_,
-            harness=mail.harness,
-            model=mail.model,
             node=mail.node,
             to=mail.to,
             id=mail.id,
@@ -7356,20 +7353,20 @@ def _deliver_live(
     # never reaches _deliver_live, unaffected).
     relay_ctxs = None
     if mail is not None:
-        from fno.mail.envelope import harness_for_provider
-
         relay_ctxs = {from_name: mail}
         # Only wrap the recipient's relay turns when it has a resolvable short id;
         # otherwise leave that side raw rather than emit <fno_mail from=""> (codex
         # peer P2). mail.to is the recipient short resolved in dispatch_send.
         if mail.to:
+            # x-3dcc: this ctx wraps B's replies, which are injected into A, so
+            # the recipient-crown line reads A's session (mail.from_session).
             relay_ctxs[entry.name] = _MailCtx(
                 from_=mail.to,
-                harness=harness_for_provider(entry.harness),
                 model="unknown",
                 to=mail.from_,
                 from_session=entry.harness_session_id or None,
                 origin="peer",
+                to_session=mail.from_session,
             )
     if _switchboard_exchange(
         entry.name,
@@ -7513,8 +7510,6 @@ def _queue_durable_fallback(
     durable_body = wrap_fno_mail(
         message,
         from_=mail_ctx.from_,
-        harness=mail_ctx.harness,
-        model=mail_ctx.model,
         node=mail_ctx.node,
         to=mail_ctx.to,
         id=mail_ctx.id,
@@ -7534,6 +7529,9 @@ def _queue_durable_fallback(
             provider_to=entry.harness,
             provider_from=provider_from,
             from_session=from_session,
+            # The envelope no longer renders the model (x-d7cf); the durable
+            # row carries it, matching what the live hosted path records.
+            from_model=mail_ctx.model,
             owner=owner or DurableOwner.WAKE_DAEMON.value,
             origin=mail_ctx.origin,
             # Count the raw body, not the wire wrapper: Rule 7 and the rolling
@@ -8080,8 +8078,6 @@ def dispatch_send(
                         hosted_body = wrap_fno_mail(
                             message,
                             from_=mail_ctx.from_,
-                            harness=mail_ctx.harness,
-                            model=mail_ctx.model,
                             node=mail_ctx.node,
                             to=mail_ctx.to,
                             id=mail_ctx.id,

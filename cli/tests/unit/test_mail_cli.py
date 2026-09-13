@@ -1167,7 +1167,7 @@ def test_us3_rostered_claude_hosted_short_circuits_durable(
     assert payload == []
 
 
-def test_ac3_hp_envelope_carries_real_from_and_model(
+def test_ac3_hp_envelope_carries_real_from_and_the_model_rides_the_bus(
     runner, mailbox, monkeypatch, tmp_path
 ):
     recipient_sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
@@ -1202,14 +1202,14 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
     assert 'from="abcd1234"' in body
-    assert 'model="claude-opus-4-8"' in body
-    # Pinned to the shared mapper, not spelled literally: the name lane once
-    # stamped a raw "claude" here while dispatch, the relay, and the Rust
-    # contract all said "claude-code", and no test noticed.
-    from fno.mail.envelope import harness_for_provider
+    # The compact envelope renders no model or harness attribute; the model
+    # survives in the bus record, where audit reads it.
+    assert 'model=' not in body
+    assert 'harness=' not in body
+    from fno.bus.log import iter_messages
 
-    assert f'harness="{harness_for_provider("claude")}"' in body
-    assert 'harness="claude-code"' in body
+    row = next(m for m in iter_messages() if 'from="abcd1234"' in m.body)
+    assert row.from_model == "claude-opus-4-8"
 
 
 # ---------------------------------------------------------------------------

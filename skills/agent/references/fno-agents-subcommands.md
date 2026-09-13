@@ -63,8 +63,8 @@ The `channel.*` daemon RPCs (`protocol.rs`, `daemon.rs`) are untouched, so rewir
 
 Agent-to-agent mail is a protocol, not a transport the caller reasons about. It has exactly two halves:
 
-- **Inbound is self-addressed.** A message lands as `<fno_mail from="H" harness="..." model="...">body`. `H` is the sender's canonical handle (the bare `<short8>`; harness and model ride as their own attributes), the ONE string its `mail drain-self` cursor also reads.
-- **Reply by handle.** Run `fno agents mail send H "..."`. Never inspect `harness`/`model` to pick a transport; the CLI resolves `H`. The outbound envelope auto-stamps the *invoking* session's own handle + real model (from its transcript store), so the reply is itself self-addressed.
+- **Inbound is self-addressed.** A message lands as `<fno_mail from="H" id="X">body`. `H` is the sender's canonical handle (the bare `<short8>`). `X` is the message id, the ONE string its `mail drain-self` cursor also reads.
+- **Reply by id.** Run `fno agents mail reply --to X "..."`. The CLI resolves the sender off the bus. The outbound envelope auto-stamps the *invoking* session's own handle and real model from its transcript store. The reply is itself self-addressed.
 
 **Resolution ladder** (`discover.resolve_or_suggest`, one scan serving match + suggestions):
 

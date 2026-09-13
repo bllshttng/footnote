@@ -228,7 +228,8 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     """A fresh send resolves the sender row through its mailbox address.
 
     The CLI passes the sender's canonical handle, not its registry label. The
-    envelope must still carry the spawn-recorded harness and full session id.
+    envelope must still carry the full session id (the harness rides the bus
+    record now, not the tag, x-d7cf).
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -284,7 +285,6 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     assert result.delivery == "hosted"
     assert len(captured) == 1
     envelope = captured[0]
-    assert f'harness="{wire_harness}"' in envelope
     assert f'from_session="{sender_session}"' in envelope
 
 
@@ -586,14 +586,14 @@ def test_dispatch_send_durable_fallback_preserves_sender_provenance(
 
     assert result.delivery == "durable"
     record = next(message for message in iter_messages() if message.id == result.msg_id)
-    assert f'harness="{wire_harness}"' in record.body
     assert f'from_session="{sender_session}"' in record.body
 
 
 def test_dispatch_send_keeps_unknown_for_unprovable_sender(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A fresh send without a registry proof keeps the explicit unknown floor."""
+    """A fresh send without a registry proof keeps the honest floors: the bare
+    name as `from`, and no reply address."""
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents import dispatch as dispatch_mod
@@ -624,7 +624,9 @@ def test_dispatch_send_keeps_unknown_for_unprovable_sender(
     assert result.delivery == "hosted"
     assert len(captured) == 1
     envelope = captured[0]
-    assert 'harness="unknown"' in envelope
+    # x-d7cf: the harness floor retired with the attribute; an unprovable
+    # sender shows the bare name and no reply address.
+    assert envelope.startswith('<fno_mail from="unregistered-sender" ')
     assert "from_session=" not in envelope
 
 

@@ -96,7 +96,7 @@ def _deliver(node: str, finding_id: str, text: str, excerpt: Optional[str]) -> s
     if excerpt:
         body += f"\n\n--- block ---\n{defang(excerpt)}"
     body += f"\n\n(resolve with: fno backlog annotate resolve {finding_id})"
-    frame = wrap_fno_mail(body, from_="annotate", harness="claude-code", model="operator", node=node)
+    frame = wrap_fno_mail(body, from_="annotate", node=node)
 
     try:
         from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex
