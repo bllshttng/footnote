@@ -29,7 +29,7 @@ fno mux web stop                # the default session
 fno mux web stop work           # the bridge that names session work
 ```
 
-Stop tries the gentle signal first and escalates only if the bridge hangs. It removes the marker file either way. A bridge that died some other way, such as a kill or a reboot, leaves the marker behind with its token. `fno mux web reap` finds every marker whose port refuses and removes those corpses. Both verbs print one receipt line, and `--json` prints rows instead.
+Stop sends a gentle signal first. If the bridge hangs, stop escalates to a harder signal. It removes the marker file either way. A bridge that died some other way, such as a kill or a reboot, leaves the marker behind with its token. `fno mux web reap` finds every marker whose port refuses and removes those corpses. Both verbs print one receipt line, and `--json` prints rows instead.
 
 ## Get the link for one agent
 
