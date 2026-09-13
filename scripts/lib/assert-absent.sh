@@ -97,6 +97,9 @@ probe_out=$(run_tool "$PROBE")
 probe_rc=$?
 [[ $probe_rc -le 1 ]] || refuse "tool error: probe run exited $probe_rc"
 probe_hits=$(count_lines "$probe_out")
+if [[ $probe_hits -eq 0 && $probe_rc -eq 0 ]]; then
+    refuse "silent probe: tool exited 0 with no output; a success with no rows is indistinguishable from lost output, not a verdict"
+fi
 if [[ $probe_hits -gt 0 ]]; then
     printf '%s\n' "$probe_out"
     exit 1

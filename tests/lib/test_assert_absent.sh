@@ -107,6 +107,17 @@ else
 fi
 assert_no_marker "AC5-EDGE/tool-error"
 
+# ---- AC6-EDGE: a silent probe success (rc 0, no output) is not an absence ----
+echo "AC6-EDGE: silent probe refuses"
+RC=$(run --control '/known-token/' --probe '/other-token-missing/' -- awk {} f.txt)
+if [[ $RC -eq 2 ]]; then pass "rc=2 on silent probe"; else fail "rc=$RC (expected 2)"; fi
+if grep -q 'silent probe' "$REPO/stderr"; then
+    pass "stderr names the silent probe"
+else
+    fail "stderr missing 'silent probe': $(cat "$REPO/stderr")"
+fi
+assert_no_marker "AC6-EDGE/silent-probe"
+
 # ---- summary ----
 TOTAL=$((PASS + FAIL))
 echo
