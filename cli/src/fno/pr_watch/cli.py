@@ -106,7 +106,9 @@ def _emit_tick_row(arm: str, *, interval_s: int, acted: int = 0,
     if skip_reason is not None:
         data["skip_reason"] = skip_reason
     if detail is not None:
-        data["detail"] = detail[:200]
+        # Same bound as fno.control_plane.emit_tick: a refusal survives whole,
+        # a pathological stderr cannot write a giant journal row.
+        data["detail"] = detail[:4000]
     _emit_event("control_plane_tick", data)
 
 
