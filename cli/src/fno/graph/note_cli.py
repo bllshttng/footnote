@@ -1,10 +1,8 @@
 """``fno backlog note``: the Rust note action's public bridge (x-920a).
 
-The native ``backlog-note`` action owns the bounded-state policy, the
-revision-checked replacement, the combined-prose budget, and history routing
-(machine, wave, terminal). This bridge keeps the shipped recipient walk
-(`note_notify`), evidence checks, self identity, the archived refusal, and
-the mail transport - each still owned by exactly one implementation.
+The native action owns state policy, history routing, and the budget; this
+bridge keeps the recipient walk, evidence checks, identity, archived
+refusal, and mail transport - each owned by exactly one implementation.
 """
 from __future__ import annotations
 
@@ -40,10 +38,9 @@ def cmd_note(
 ) -> None:
     """Record progress on a node by REPLACING its current state.
 
-    The exact prior state lands in permanent history. Nobody bound (or
-    unreadable bindings) refuses BEFORE the write: exit 3, nothing written.
-    No send confirmed: exit 4, note written. ``--quiet`` writes it anyway.
-    Contract: docs/architecture/backlog-graph-verb-contracts.md.
+    The exact prior state lands in permanent history. Nobody bound refuses
+    BEFORE the write: exit 3, nothing written. No send confirmed: exit 4,
+    note written. ``--quiet`` writes it anyway.
     """
     from fno.decide import (
         UnmeasuredClaimError,
