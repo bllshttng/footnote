@@ -161,7 +161,7 @@ def resolve_self_identity(
             canonical.harness.strip().lower(),
             session_identity_key(canonical.session_id),
         )
-    elif witnessed_value:
+    elif witnessed_value and true_harness:
         own_pair = (true_harness, session_identity_key(witnessed_value))
 
     return _fill_spawn_record(
