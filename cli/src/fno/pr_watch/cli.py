@@ -343,6 +343,7 @@ _RECOVERY_ROOT_FLOOR_S = 3.0
 _PHASE_CAP_S: dict[str, float] = {
     "settings": 60,
     "sweep": 150,
+    "merge": 150,
     "king_wake": 100,
     "notify_watch": 30,
     "heal": 30,
@@ -1083,6 +1084,27 @@ def tick() -> None:
                            ("disabled", "lock_held", "quota_skip", "error", "timeout") else None,
                            detail=f"outcome={outcome}" + (f" ({', '.join(bits)})" if bits else ""))
 
+        def _phase_merge(_slice_s: float) -> None:
+            nonlocal result
+            set_tick_phase("merge")
+            if result is None or not getattr(result, "execute_queue", None):
+                return
+            from fno.pr_watch._dispatch import run_execute_queue
+
+            executed, skipped = run_execute_queue(
+                result,
+                emit=_emit_event,
+                notify=lambda message, **_kw: _notify_parked(message),
+                max_retries=cfg.retries,
+                claim=ClaimAdapter(),
+                now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            cfg_interval = int(getattr(cfg, "interval_seconds", 600)) if cfg is not None else 600
+            _emit_tick_row("pr_watch_merge", interval_s=cfg_interval,
+                           acted=executed,
+                           detail=f"outcome=merge_phase (executed={executed}, skipped={skipped})")
+            typer.echo(f"pr-watch merge phase: executed={executed} skipped={skipped}")
+
 
         # Stranded-worktree recovery, same arming gate as the fleet
         # watchdog above: this is a second read of the same "is recovery
@@ -1250,6 +1272,11 @@ def tick() -> None:
         # a proven-stale canonical through its SessionStart hook.
         sweep_started = True
         _run_phase("sweep", _phase_sweep, on_end=_sweep_ended)
+        # The durable-grant merge attempts drain here , not inside the
+        # sweep: a ~120s merge call inside the 150s sweep slice hit the alarm
+        # before the receipt and the same PR headed every later tick. Its own
+        # slice right after the scan keeps the fleet tail cut first.
+        _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")
         _run_phase("heal", _phase_heal)

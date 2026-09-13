@@ -172,14 +172,15 @@ def _obs() -> PrObservation:
 
 def _run_tick(tmp_path: Path, store_path: Path) -> list[dict]:
     events: list[dict] = []
-    tick(
+    emit = lambda kind, data: events.append({"type": kind, "data": data})
+    result = tick(
         graph_path=tmp_path / "graph.json",
         store_path=store_path,
         discover_fn=lambda entries: [_candidate(tmp_path)],
         read_pr_state_fn=lambda cand, *, reviewers, runner=None, timeout_s=30.0: _obs(),
         read_tracked_states_fn=lambda keys: ({k: "OPEN" for k in keys}, 0),
         fire_skill_fn=lambda *a, **k: None,
-        emit=lambda kind, data: events.append({"type": kind, "data": data}),
+        emit=emit,
         reviewers_for=lambda repo_dir: [],
         claim=_NullTickClaim(),
         notify=lambda *a, **k: None,
@@ -188,6 +189,16 @@ def _run_tick(tmp_path: Path, store_path: Path) -> list[dict]:
         max_retries=3,
         graphql_remaining_fn=lambda: (4800, None),
     )
+    # the sweep queues durable-grant executions; the merge phase
+    # drains them. The journey runs both halves of the tick.
+    if result is not None and result.execute_queue:
+        from fno.pr_watch._dispatch import run_execute_queue
+
+        run_execute_queue(
+            result, store_path=store_path, emit=emit,
+            notify=lambda *a, **k: None, max_retries=3,
+            claim=_NullTickClaim(), now_iso=NOW,
+        )
     return events
 
 
