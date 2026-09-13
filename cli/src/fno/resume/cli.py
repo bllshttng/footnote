@@ -213,29 +213,6 @@ def _holder_of(status: dict) -> Optional[str]:
     return holder if isinstance(holder, str) and holder else None
 
 
-@receipt_app.command("context-prepare")
-def context_prepare_cmd(
-    input_file: str = typer.Option(..., "--input", help="Binding request JSON file"),
-    out: Optional[str] = typer.Option(None, "--out", help="Write the bound binding JSON here"),
-) -> None:
-    """Prepare a task-context execution binding (native verdict, thin transport)."""
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    req = json.loads(Path(input_file).read_text(encoding="utf-8"))
-    try:
-        answer = verb_call("task-context-prepare", {"binding": req})
-    except VerbUnavailable as exc:
-        typer.echo(json.dumps({"ok": False, "reason": "native_verifier_unavailable", "error": str(exc)}))
-        raise typer.Exit(code=3)
-    typer.echo(json.dumps(answer))
-    if not answer.get("ok"):
-        raise typer.Exit(code=1)
-    if out:
-        bound = {**answer["binding"], "binding_digest": answer["binding_digest"]}
-        Path(out).parent.mkdir(parents=True, exist_ok=True)
-        Path(out).write_text(json.dumps(bound, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
 @receipt_app.command("validate")
 def validate_cmd(
     node: str = typer.Option(..., "--node", help="Backlog node id to revalidate"),
@@ -275,10 +252,12 @@ def validate_cmd(
     wt = Path(worktree) if worktree else Path(receipt.worktree)
 
     # A receipt that carries a binding revalidates it natively BEFORE the
-    # authority checks; identity expectations ride only when named.
+    # authority checks; identity expectations ride only when named. The native
+    # gate verb carries the declared semantics (refusals ride `context_`-named
+    # with the full native answer as `detail`); this door maps them to exits.
     context_answer: Optional[dict] = None
     if receipt.task_context is not None:
-        from fno.target_context_gate import TaskContextGateRefused, gate_declared_task_context
+        from fno.rust_binary import VerbUnavailable, verb_call
 
         expect = {
             "node": node,
@@ -286,12 +265,17 @@ def validate_cmd(
             **({"session": session} if session_id else {}),
         }
         try:
-            context_answer = gate_declared_task_context(node, str(wt), binding=receipt.task_context, expect=expect)
-        except TaskContextGateRefused as exc:
-            unavailable = exc.reason == "context_native_verifier_unavailable"
-            extra = {"error": exc.detail} if unavailable else {"binding": json.loads(exc.detail)}
-            typer.echo(json.dumps({"ok": False, "reason": exc.reason, "node": node, **extra}))
-            raise typer.Exit(code=3 if unavailable else 1)
+            answer = verb_call(
+                "task-context-gate",
+                {"node": node, "root": str(wt), "binding": receipt.task_context, "expect": expect},
+            )
+        except VerbUnavailable as exc:
+            typer.echo(json.dumps({"ok": False, "reason": "context_native_verifier_unavailable", "error": str(exc)}))
+            raise typer.Exit(code=3)
+        if not answer.get("ok"):
+            typer.echo(json.dumps({"ok": False, "reason": answer.get("reason"), "node": node, "binding": json.loads(answer.get("detail") or "{}")}))
+            raise typer.Exit(code=1)
+        context_answer = answer.get("answer")
 
     live_head, live_branch = _git_head_and_branch(wt) if wt.exists() else ("", "")
     croot = Path(claims_root).expanduser() if claims_root else None

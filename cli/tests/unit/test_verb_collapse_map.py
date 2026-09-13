@@ -164,14 +164,14 @@ def test_map_covers_current_surface_once():
     # branch allocates `backlog version`, the typed API's counter read
     # (hidden verb, 19 corpus callers): counted from the merged file,
     # 604 -> 605. `agents king ledger` and `agents reign-ledger`, the reign
-    # ledger page and its native renderer: 605 -> 607. This branch allocates
-    # `do resume receipt context-prepare` and its `resume` view, the declared
-    # task-context binding preparer (thin CLI over the native verifier):
-    # counted from the merged file, 607 -> 609. x-e53e renames
+    # ledger page and its native renderer: 605 -> 607. This branch allocated
+    # `do resume receipt context-prepare` and its `resume` view (607 -> 609),
+    # then retired both rows when the prepare transport moved into the native
+    # `task-context-prepare` verb's own `out` path: 609 -> 607. x-e53e renames
     # `dispatch one` to `dispatch next` under both spellings (`one` stays as
-    # a hidden deprecated alias), allocating +2 rows: 609 -> 611. `do pr
+    # a hidden deprecated alias), allocating +2 rows: 607 -> 609. `do pr
     # publish-review` and `pr publish-review`, the bot-identity backfill
-    # door and its forwarded spelling: 611 -> 613. Upstream allocates
+    # door and its forwarded spelling: 609 -> 611. Upstream allocates
     # `agents prove-it-verdicts`, the terminal prove-it record reader
     # (x-6d64): 613 -> 614. This branch allocates `backlog retract`, the
     # one-act defer + retracted-kind stamp the blueprint consolidation gate

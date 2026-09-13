@@ -13,8 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.rust_binary import find_dev_binary
-from fno.target_context_gate import TaskContextGateRefused, gate_declared_task_context
+from fno.rust_binary import find_dev_binary, verb_call
 
 requires_rust = pytest.mark.skipif(
     find_dev_binary() is None,
@@ -52,8 +51,6 @@ def _binding_request(tmp_path: Path, body: str = "plan bytes\n") -> dict:
 
 
 def _write_bound_binding(tmp_path: Path, binding_file: Path) -> dict:
-    from fno.rust_binary import verb_call
-
     request = _binding_request(tmp_path)
     answer = verb_call("task-context-prepare", {"binding": request})
     assert answer["ok"] is True, answer
@@ -63,32 +60,40 @@ def _write_bound_binding(tmp_path: Path, binding_file: Path) -> dict:
     return bound
 
 
+def _gate(node: str, root: str, env: dict | None = None) -> dict:
+    request = {"node": node, "root": root}
+    if env is not None:
+        request["env"] = env
+    return verb_call("task-context-gate", request)
+
+
 # ── the init gate ──────────────────────────────────────────────────────────
 
 
+@requires_rust
 def test_no_declared_binding_is_no_gate(tmp_path):
     # Ordinary behavior: an undeclared binding never gates init.
-    assert gate_declared_task_context("x-59b0", str(tmp_path), env={}) is None
+    verdict = _gate("x-59b0", str(tmp_path), env={})
+    assert verdict["ok"] is True
+    assert verdict["declared"] is False
 
 
+@requires_rust
 def test_declared_but_unreadable_binding_refuses_by_name(tmp_path):
     missing = tmp_path / "gone.json"
-    with pytest.raises(TaskContextGateRefused) as exc:
-        gate_declared_task_context(
-            "x-59b0", str(tmp_path), env={"FNO_TASK_CONTEXT_FILE": str(missing)}
-        )
-    assert exc.value.reason == "context_binding_unreadable"
+    verdict = _gate("x-59b0", str(tmp_path), env={"FNO_TASK_CONTEXT_FILE": str(missing)})
+    assert verdict["ok"] is False
+    assert verdict["reason"] == "context_binding_unreadable"
 
 
 @requires_rust
 def test_gate_ok_when_required_sources_unchanged(tmp_path):
     binding_file = tmp_path / "task-context-x-59b0.json"
     _write_bound_binding(tmp_path, binding_file)
-    answer = gate_declared_task_context(
-        "x-59b0", str(tmp_path), env={"FNO_TASK_CONTEXT_FILE": str(binding_file)}
-    )
-    assert answer is not None and answer["ok"] is True
-    assert answer["checked_sources"] == 1
+    verdict = _gate("x-59b0", str(tmp_path), env={"FNO_TASK_CONTEXT_FILE": str(binding_file)})
+    assert verdict["ok"] is True and verdict["declared"] is True
+    assert verdict["answer"]["ok"] is True
+    assert verdict["answer"]["checked_sources"] == 1
 
 
 @requires_rust
@@ -96,22 +101,18 @@ def test_gate_refuses_when_required_source_changed(tmp_path):
     binding_file = tmp_path / "task-context-x-59b0.json"
     _write_bound_binding(tmp_path, binding_file)
     (tmp_path / "PLAN.md").write_text("CHANGED bytes\n", encoding="utf-8")
-    with pytest.raises(TaskContextGateRefused) as exc:
-        gate_declared_task_context(
-            "x-59b0", str(tmp_path), env={"FNO_TASK_CONTEXT_FILE": str(binding_file)}
-        )
-    assert exc.value.reason == "context_stale_source"
+    verdict = _gate("x-59b0", str(tmp_path), env={"FNO_TASK_CONTEXT_FILE": str(binding_file)})
+    assert verdict["ok"] is False
+    assert verdict["reason"] == "context_stale_source"
 
 
 @requires_rust
 def test_gate_refuses_wrong_node(tmp_path):
     binding_file = tmp_path / "task-context-x-59b0.json"
     _write_bound_binding(tmp_path, binding_file)
-    with pytest.raises(TaskContextGateRefused) as exc:
-        gate_declared_task_context(
-            "x-other", str(tmp_path), env={"FNO_TASK_CONTEXT_FILE": str(binding_file)}
-        )
-    assert exc.value.reason == "context_wrong_node"
+    verdict = _gate("x-other", str(tmp_path), env={"FNO_TASK_CONTEXT_FILE": str(binding_file)})
+    assert verdict["ok"] is False
+    assert verdict["reason"] == "context_wrong_node"
 
 
 @requires_rust
@@ -122,10 +123,8 @@ def test_gate_ignores_implementation_head_moves(tmp_path):
     _write_bound_binding(tmp_path, binding_file)
     code = tmp_path / "impl.py"
     code.write_text("def moved(): ...\n", encoding="utf-8")
-    answer = gate_declared_task_context(
-        "x-59b0", str(tmp_path), env={"FNO_TASK_CONTEXT_FILE": str(binding_file)}
-    )
-    assert answer is not None and answer["ok"] is True
+    verdict = _gate("x-59b0", str(tmp_path), env={"FNO_TASK_CONTEXT_FILE": str(binding_file)})
+    assert verdict["ok"] is True and verdict["answer"]["ok"] is True
     assert code.exists()
 
 

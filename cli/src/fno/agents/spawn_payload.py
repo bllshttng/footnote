@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 
 BREVITY_MARKER = "<fno_relay_compression>"
 BREVITY_END_MARKER = "</fno_relay_compression>"
@@ -17,9 +15,6 @@ BREVITY_INSTRUCTION = (
 )
 BREVITY_BLOCK = f"{BREVITY_MARKER}\n{BREVITY_INSTRUCTION}\n{BREVITY_END_MARKER}"
 
-# The spawner arms the current attempt's bound binding here; both substrates prepare identically.
-TASK_CONTEXT_ENV = "FNO_TASK_CONTEXT_FILE"
-
 TASK_CONTEXT_TAG = "<task-context "
 
 
@@ -32,19 +27,19 @@ def enrich_spawn_payload(message: str) -> str:
 
 def prepare_spawn_payload(message: str) -> tuple[str, dict]:
     """ONE payload entry for both launch substrates: brevity guidance once,
-    then the natively rendered task-context pointer once (missing binary = no
-    block; the render is native, never re-implemented here)."""
+    then the natively rendered task-context pointer once. The render reads the
+    declared binding from the environment natively; a missing binary or an
+    undeclared/corrupt file means no block - absent, never fabricated."""
     payload = enrich_spawn_payload(message)
     measures: dict = {"task_context": False, "payload_bytes": len(payload.encode("utf-8"))}
-    path = (os.environ.get(TASK_CONTEXT_ENV) or "").strip()
-    if path:
+    if TASK_CONTEXT_TAG not in payload:
         from fno.rust_binary import VerbUnavailable, verb_call
 
         try:
-            block = verb_call("task-context-payload", {"path": path}).get("block")
+            block = verb_call("task-context-payload", {}).get("block")
         except VerbUnavailable:
             block = None
-        if block and TASK_CONTEXT_TAG not in payload:
+        if block:
             payload = f"{payload}\n\n{block}"
             measures = {"task_context": True, "payload_bytes": len(payload.encode("utf-8"))}
     return payload, measures

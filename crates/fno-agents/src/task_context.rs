@@ -23,6 +23,10 @@ pub const BINDING_VERSION: u32 = 1;
 /// The opening tag of the bounded pointer block a spawn payload carries.
 pub const TASK_CONTEXT_TAG_OPEN: &str = "<task-context ";
 
+/// The env var a caller declares the required binding through: the init gate,
+/// the payload render, and the tests' explicit env maps all key on it.
+pub const TASK_CONTEXT_ENV: &str = "FNO_TASK_CONTEXT_FILE";
+
 pub const STAGE_PREPARED: &str = "prepared";
 pub const STAGE_SUBMITTED: &str = "submitted";
 pub const STAGE_OBSERVED: &str = "observed";
@@ -293,35 +297,65 @@ fn run_stdin_verb(args: &[String], usage: &str, f: impl FnOnce(Value)) -> i32 {
 }
 
 /// `task-context-prepare`: validate the binding the caller assembled and stamp
-/// its digest. Pure: the caller owns where the bound file lands (the existing
-/// plan/session artifact root).
+/// its digest. An optional `out` path writes the bound file (the binding plus
+/// its stamped digest) straight to the artifact slot, so the retired Python
+/// leaf's only added behavior is the verb's own.
 pub fn run_prepare(args: &[String]) -> i32 {
     run_stdin_verb(
         args,
-        "task-context-prepare  (one JSON request on stdin: binding)",
-        |req| {
-            let parsed: BindResult<TaskContextBinding> = req
-                .get("binding")
-                .ok_or_else(|| "malformed_binding: missing binding".to_string())
-                .and_then(|b| {
-                    serde_json::from_value(b.clone()).map_err(|e| format!("malformed_binding: {e}"))
-                });
-            match parsed.and_then(|b| {
-                b.validate()?;
-                let digest = b.digest()?;
-                Ok((b, digest))
-            }) {
-                Ok((binding, digest)) => {
-                    let value = serde_json::to_value(&binding).unwrap_or(Value::Null);
-                    println!(
-                        "{}",
-                        serde_json::json!({"ok": true, "binding": value, "binding_digest": digest, "stage": binding.stage.as_str()})
-                    );
-                }
-                Err(reason) => print_refusal(&reason),
-            }
-        },
+        "task-context-prepare  (one JSON request on stdin: binding, out?)",
+        |req| println!("{}", prepare_request(&req)),
     )
+}
+
+/// The prepare verdict table, shared by the binary verb and the unit tests.
+pub fn prepare_request(req: &Value) -> Value {
+    let parsed: BindResult<(TaskContextBinding, String)> = req
+        .get("binding")
+        .ok_or_else(|| "malformed_binding: missing binding".to_string())
+        .and_then(|b| {
+            serde_json::from_value::<TaskContextBinding>(b.clone())
+                .map_err(|e| format!("malformed_binding: {e}"))
+        })
+        .and_then(|b| {
+            b.validate()?;
+            let digest = b.digest()?;
+            Ok((b, digest))
+        });
+    match parsed {
+        Ok((binding, digest)) => {
+            let value = serde_json::to_value(&binding).unwrap_or(Value::Null);
+            if let Some(out) = req
+                .get("out")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                if let Err(e) = write_bound_file(&value, &digest, Path::new(out)) {
+                    return serde_json::json!({"ok": false, "reason": format!("out_write_failed: {e}")});
+                }
+            }
+            serde_json::json!({"ok": true, "binding": value, "binding_digest": digest, "stage": binding.stage.as_str()})
+        }
+        Err(reason) => serde_json::json!({"ok": false, "reason": reason}),
+    }
+}
+
+/// Write the bound binding (the caller's binding plus its stamped digest) to
+/// the named path. Pretty two-space JSON; key order carries no meaning, the
+/// digest is computed over the canonical form, never the file bytes.
+fn write_bound_file(binding: &Value, digest: &str, out: &Path) -> std::io::Result<()> {
+    let mut bound = binding.clone();
+    if let Value::Object(map) = &mut bound {
+        map.insert(
+            "binding_digest".to_string(),
+            Value::String(digest.to_string()),
+        );
+    }
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_string_pretty(&bound).unwrap_or_default();
+    std::fs::write(out, format!("{body}\n"))
 }
 
 /// `task-context-stage`: advance the observation stage on an existing bound
@@ -423,18 +457,24 @@ pub fn payload_block(binding: &Value) -> Option<String> {
 }
 
 /// `task-context-payload`: the payload-side render for the launch substrates.
-/// Takes the binding path (not the bytes) so Python only ever transports a
-/// path; a missing or corrupt file yields block:null (no block rides), which
-/// is the absent case, never a fabricated pointer.
+/// Takes the binding path (not the bytes) so callers only ever transport a
+/// path; with no `path` in the request it reads the declared env var. A
+/// missing or corrupt file yields block:null (no block rides), which is the
+/// absent case, never a fabricated pointer.
 pub fn run_payload(args: &[String]) -> i32 {
     run_stdin_verb(
         args,
-        "task-context-payload  (one JSON request on stdin: path)",
+        "task-context-payload  (one JSON request on stdin: path? - defaults to $FNO_TASK_CONTEXT_FILE)",
         |req| {
-            let answer = req
+            let path = req
                 .get("path")
                 .and_then(Value::as_str)
-                .map(std::fs::read_to_string)
+                .map(str::to_string)
+                .or_else(|| std::env::var(TASK_CONTEXT_ENV).ok())
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty());
+            let answer = path
+                .map(|p| std::fs::read_to_string(&p))
                 .and_then(|raw| raw.ok())
                 .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
                 .map(|v| {
@@ -550,6 +590,101 @@ pub fn revalidate_request(req: &Value) -> Value {
     match verdict {
         Ok(v) => v,
         Err(reason) => serde_json::json!({"ok": false, "reason": reason}),
+    }
+}
+
+/// `task-context-gate`: the DECLARED required-binding gate, the verb the
+/// retired Python `target_context_gate` module only transported. With no
+/// `binding` in the request it loads the declared env path (the request's
+/// `env` map, else the process environment); nothing declared is an absent
+/// gate, never a refusal. The node rides expect always, so a gate that knows
+/// only its node still checks it. Refusals carry the `context_` prefix with
+/// the full native answer as `detail`, the shape every door maps to its own
+/// output.
+pub fn run_gate(args: &[String]) -> i32 {
+    run_stdin_verb(
+        args,
+        "task-context-gate  (one JSON request on stdin: node, root, binding?, expect?, env?)",
+        |req| println!("{}", gate_request(&req)),
+    )
+}
+
+/// The declared-gate verdict table, shared by the binary verb and the unit
+/// tests.
+pub fn gate_request(req: &Value) -> Value {
+    let node = req
+        .get("node")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut expect = req
+        .get("expect")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    if let Value::Object(map) = &mut expect {
+        map.entry("node").or_insert(Value::String(node));
+    }
+    let declared: Result<Option<Value>, (String, String)> = (|| {
+        if let Some(b) = req.get("binding") {
+            return Ok(Some(b.clone()));
+        }
+        let path = match req.get("env") {
+            Some(Value::Object(map)) => map
+                .get(TASK_CONTEXT_ENV)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            _ => std::env::var(TASK_CONTEXT_ENV)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        };
+        if path.is_empty() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| ("context_binding_unreadable".to_string(), e.to_string()))?;
+        let value: Value = serde_json::from_str(&raw)
+            .map_err(|e| ("context_binding_unreadable".to_string(), e.to_string()))?;
+        if !value.is_object() {
+            return Err((
+                "context_binding_unreadable".to_string(),
+                "binding file is not a JSON object".to_string(),
+            ));
+        }
+        Ok(Some(value))
+    })();
+    match declared {
+        Err((reason, detail)) => {
+            serde_json::json!({"ok": false, "reason": reason, "detail": detail})
+        }
+        Ok(None) => serde_json::json!({"ok": true, "declared": false}),
+        Err(reason) => serde_json::json!({"ok": false, "reason": reason}),
+        Ok(None) => serde_json::json!({"ok": true, "declared": false}),
+        Ok(Some(binding)) => {
+            let inner = revalidate_request(&serde_json::json!({
+                "binding": binding,
+                "expect": expect,
+                "root": req.get("root").cloned().unwrap_or(Value::Null),
+            }));
+            if inner.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                serde_json::json!({"ok": true, "declared": true, "answer": inner})
+            } else {
+                let reason = inner
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("refused")
+                    .to_string();
+                let base = reason.split(':').next().unwrap_or("refused").to_string();
+                let prefixed = if base.starts_with("context_") {
+                    base
+                } else {
+                    format!("context_{base}")
+                };
+                serde_json::json!({"ok": false, "reason": prefixed, "detail": inner.to_string()})
+            }
+        }
     }
 }
 
@@ -860,5 +995,81 @@ mod tests {
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
             .and_then(|v| payload_block(&v));
         serde_json::json!({"ok": true, "block": block})
+    }
+
+    #[test]
+    fn gate_absent_when_nothing_declared() {
+        let verdict = gate_request(&json!({"node": "x-59b0", "root": "/wt", "env": {}}));
+        assert_eq!(verdict["ok"], json!(true));
+        assert_eq!(verdict["declared"], json!(false));
+    }
+
+    #[test]
+    fn gate_names_unreadable_by_context_prefix() {
+        let verdict = gate_request(&json!({
+            "node": "x-59b0",
+            "root": "/wt",
+            "env": {"FNO_TASK_CONTEXT_FILE": "/nonexistent/gone.json"},
+        }));
+        assert_eq!(verdict["ok"], json!(false));
+        assert_eq!(verdict["reason"], json!("context_binding_unreadable"));
+    }
+
+    #[test]
+    fn gate_absorbs_revalidate_refusals_with_the_context_prefix() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path().to_string_lossy().to_string();
+        write_source(dir.path(), "docs/PLAN.md", "plan bytes\n");
+        let mut b = binding(vec![source("docs/PLAN.md", "plan bytes\n")]);
+        b.worktree = root.clone();
+        let binding_file = dir.path().join("task-context-x-59b0.json");
+        std::fs::write(
+            &binding_file,
+            serde_json::to_string(&bound_value(&b)).expect("serialize"),
+        )
+        .expect("write");
+        let gate_on = |node: &str| {
+            gate_request(&json!({
+                "node": node,
+                "root": root,
+                "env": {"FNO_TASK_CONTEXT_FILE": binding_file.to_string_lossy()},
+            }))
+        };
+        // Unchanged sources pass and carry the native answer.
+        let ok = gate_on("x-59b0");
+        assert_eq!(ok["ok"], json!(true));
+        assert_eq!(ok["declared"], json!(true));
+        assert_eq!(ok["answer"]["ok"], json!(true));
+        assert_eq!(ok["answer"]["checked_sources"], json!(1));
+        // A changed source refuses with the context_ prefix + full detail.
+        write_source(dir.path(), "docs/PLAN.md", "CHANGED bytes\n");
+        let stale = gate_on("x-59b0");
+        assert_eq!(stale["ok"], json!(false));
+        assert_eq!(stale["reason"], json!("context_stale_source"));
+        assert!(stale["detail"].as_str().unwrap().contains("stale_source"));
+        // A wrong node refuses by name; the detail carries the full answer.
+        let wrong = gate_on("x-other");
+        assert_eq!(wrong["reason"], json!("context_wrong_node"));
+    }
+
+    #[test]
+    fn prepare_writes_the_bound_file_to_out() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let b = binding(vec![source("PLAN.md", "plan bytes\n")]);
+        let mut b = serde_json::to_value(&b).expect("serialize");
+        b["worktree"] = json!(dir.path().to_string_lossy());
+        let out = dir.path().join("nested/slot.json");
+        let answer = prepare_request(&json!({"binding": b, "out": out.to_string_lossy()}));
+        assert_eq!(answer["ok"], json!(true), "{answer}");
+        let stored: Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).expect("the bound file exists"))
+                .expect("the bound file parses");
+        assert_eq!(
+            stored["binding_digest"], answer["binding_digest"],
+            "the file carries the stamped digest"
+        );
+        // The digest re-verifies over the file's own binding: what landed on
+        // disk is a loadable bound binding, not just a lookalike.
+        assert!(BoundBinding::load(&stored).is_ok());
     }
 }
