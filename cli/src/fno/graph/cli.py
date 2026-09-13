@@ -772,14 +772,13 @@ def _stamp_ship_on_pr_link(node_id: str) -> None:
 
     The PR link is ship's START (the PR is open, awaiting review/merge), so the
     row carries started_at only - no ended_at, since merge is recorded elsewhere
-    or not at all, and the roster renders the row 'in progress' rather than
-    guessing an end. Every shipped node passes through a PR-link site regardless
-    of which worker or skill opened the PR, so the
-    row records the implementer's identity, not the merger's. ``fno do pr
-    bind-created`` is the second such site and calls this too. Best-effort: an
-    unresolvable identity or a graph failure skips with a named stderr reason and
-    never fails the update. Idempotent: append_session_record collapses a
-    re-stamp of the same (phase, harness, session_id).
+    or not at all. The row records whoever ran the link - a crown or an ambient
+    session can be that - not the implementer or the merger, and no terminal
+    ever closes it, so readers must treat it as a link event, never occupancy.
+    ``fno do pr bind-created`` is the second such site and calls this too.
+    Best-effort: an unresolvable identity or a graph failure skips with a named
+    stderr reason and never fails the update. Idempotent: append_session_record
+    collapses a re-stamp of the same (phase, harness, session_id).
     """
     from datetime import datetime, timezone
 
@@ -3608,12 +3607,13 @@ def cmd_update(
         elif derived_pr_number is not None:
             node["pr_number"] = derived_pr_number
         # Ship provenance fires once on the unset->set transition. Every shipped
-        # node passes through this link regardless of which worker or skill
-        # opened the PR, so this is the choke point that records the implementer
-        # (not the merger). Detected inside the lock so two racing linkers see
-        # one transition; the stamp itself runs after the lock releases, because
-        # append_session_record takes its own lock and calling it here would
-        # deadlock. Best-effort + idempotent, never fails the update.
+        # node passes through this link, so this is the choke point that records
+        # whoever ran the link (a crown can be that). No terminal closes the
+        # row, so it is a link event, never occupancy. Detected inside the lock
+        # so two racing linkers see one transition; the stamp itself runs after
+        # the lock releases, because append_session_record takes its own lock
+        # and calling it here would deadlock. Best-effort + idempotent, never
+        # fails the update.
         if isinstance(node.get("pr_number"), int) and not isinstance(_pr_number_before, int):
             ship_stamp_node[0] = node["id"]
         if pr_url is not None:

@@ -200,6 +200,64 @@ def test_a_closed_blueprint_with_an_open_do_row_still_occupies(monkeypatch):
     assert live_worked_node_ids(strict=True) == {"x-edge": ["bp-worker"]}
 
 
+def _ship_entry(node_id: str, *, status: str = "in_review") -> dict:
+    return {
+        "id": node_id,
+        "status": status,
+        "sessions": [
+            {
+                "phase": "ship",
+                "harness": "claude",
+                "session_id": "session-1",
+                "started_at": "2026-09-07T00:26:05Z",
+            }
+        ],
+    }
+
+
+def test_ac1_hp_an_open_ship_row_alone_never_occupies(monkeypatch):
+    """The PR-link stamp opens a ship row and no terminal closes it, so the
+    row carries the linker's liveness, never the node's occupancy (x-e221)."""
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph_strict", lambda *_a, **_kw: [_ship_entry("x-e221")]
+    )
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: _reading("working"))
+
+    assert live_worked_node_ids() == {}
+
+
+def test_ac1_err_an_open_do_row_beside_the_ship_row_still_occupies(monkeypatch):
+    entry = _ship_entry("x-e221")
+    entry["sessions"].append(
+        {
+            "phase": "do",
+            "harness": "claude",
+            "session_id": "session-1",
+            "started_at": "2026-09-09T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda *_a, **_kw: [entry])
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: _reading("working"))
+
+    assert live_worked_node_ids() == {"x-e221": ["bp-worker"]}
+
+
+def test_ac1_edge_a_registry_worker_on_a_ship_row_node_still_reads_worked(monkeypatch):
+    """The registry fold attributes a real driver even when the only session
+    row is the unclosable ship row."""
+    reading = RosterReading(
+        True, 1,
+        {"x-e221": [{"name": "t-e221-driver", "state": "working",
+                     "cwd": "/worktrees/x-e221", "row_id": "row-9"}]},
+    )
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph_strict", lambda *_a, **_kw: [_ship_entry("x-e221")]
+    )
+    monkeypatch.setattr("fno.claims.roster.read_roster", lambda **_kw: reading)
+
+    assert live_worked_node_ids(strict=True) == {"x-e221": ["t-e221-driver"]}
+
+
 def test_read_roster_folds_unmeasurable_pairs(monkeypatch):
     """The producer's structured advisory line lands on the reading as node
     attribution, not as a blocking refusal."""
