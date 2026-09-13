@@ -1179,14 +1179,12 @@ def _run_tick(
             elif decision.kind == "execute":
                 # Queued, never run here: the merge phase owns the call (see
                 # run_execute_queue and the merge-phase doc).
-                grant = (
-                    grant_verdict.grant
-                    if grant_verdict is not None and isinstance(grant_verdict.grant, dict)
-                    else {}
-                )
+                grant = grant_verdict.grant if (
+                    grant_verdict is not None and isinstance(grant_verdict.grant, dict)
+                ) else {}
                 grant_fields = {
-                    k: grant.get(k) for k in ("source", "recorded_by", "recorded_at")
-                }
+                    k: grant.get(k) for k in ("source", "recorded_by", "recorded_at")}
+
                 execute_queue.append((cand, key, grant_fields))
                 merge_scan_attempted += 1
                 entry["last_polled_at"] = now_iso

@@ -277,10 +277,9 @@ def _tick_in_flight() -> Optional[int]:
     if not acquired:
         return None
     try:
-        young = (int(time.time() * 1000) - int(acquired)) < 600_000
+        if int(time.time() * 1000) - int(acquired) >= 600_000:
+            return None
     except (TypeError, ValueError):
-        return None
-    if not young:
         return None
     pid = info.get("pid")
     return pid if isinstance(pid, int) else 0
@@ -366,8 +365,7 @@ def heal_watcher(
 ) -> tuple[str, int]:
     """Resolve the plist path and bounce the watcher. Doctor's --fix entrypoint.
 
-    Returns ``(message, exit_code)``; nonzero when the plist is absent (nothing
-    to bounce) or a bounce step wedged.
+    Returns ``(message, exit_code)``; nonzero when the plist is absent or a bounce step wedged.
     """
     plist_path = launch_agents_dir / _PLIST_FILENAME
     if not plist_path.exists():
