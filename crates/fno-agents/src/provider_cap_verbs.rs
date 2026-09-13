@@ -99,14 +99,24 @@ fn render_text_snapshot(v: &Value) -> String {
             .and_then(Value::as_i64)
             .map(epoch_to_rfc3339)
             .unwrap_or_else(|| "unknown".to_string());
+        let reset_passed = lane
+            .get("reset_passed_epoch")
+            .and_then(Value::as_i64)
+            .map(epoch_to_rfc3339);
         let missing = lane
             .get("missing_reset_timezone")
             .and_then(Value::as_array)
             .map(|a| a.len())
             .unwrap_or(0);
         out.push_str(&format!(
-            "\n{} [{}] reset={} missing_tz={}",
-            lane_name, state, reset, missing
+            "\n{} [{}] reset={}{} missing_tz={}",
+            lane_name,
+            state,
+            reset,
+            reset_passed
+                .map(|r| format!(" reset_passed={r}"))
+                .unwrap_or_default(),
+            missing
         ));
         for m in lane
             .get("members")

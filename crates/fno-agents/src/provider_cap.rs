@@ -73,7 +73,12 @@ pub struct CapLane {
     pub lane: String,
     pub provider: String,
     pub account: String,
+    /// A quota lock still in the future; the leave ladder's trigger.
     pub reset_epoch: Option<i64>,
+    /// A quota lock at or before now. With no capped member newer than it,
+    /// the lane is `returning`: the strand is old, the return ladder owns it.
+    #[serde(default)]
+    pub reset_passed_epoch: Option<i64>,
     pub missing_reset_timezone: Vec<String>,
     pub state: String,
     pub members: Vec<CapMember>,
@@ -261,19 +266,9 @@ pub fn capped_tail(transcript: &Path) -> TailReading {
 // Reset + timezone audit
 // ---------------------------------------------------------------------------
 
-pub fn runtime_state_path() -> PathBuf {
-    if let Some(v) = std::env::var_os("FNO_RUNTIME_STATE_PATH") {
-        return PathBuf::from(v);
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".fno").join("runtime-state.json")
-}
-
 /// The quota lock the Python recovery sweep writes through record_quota_lock
 /// (the same file fallback_chain parses for rate_limited_until).
-fn health_reset_at(state_path: &std::path::Path, account: &str, now_f: f64) -> Option<i64> {
+fn health_reset_at(state_path: &std::path::Path, account: &str) -> Option<i64> {
     let raw = std::fs::read_to_string(state_path).ok()?;
     let v: Value = serde_json::from_str(&raw).ok()?;
     let rlu = v
@@ -281,7 +276,45 @@ fn health_reset_at(state_path: &std::path::Path, account: &str, now_f: f64) -> O
         .get(account)?
         .get("rate_limited_until")?
         .as_f64()?;
-    (rlu > now_f).then_some(rlu as i64)
+    Some(rlu as i64)
+}
+
+/// RFC3339 string to epoch seconds; None when unparseable.
+fn ts_epoch(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
+/// Pure core of the runtime-state resolution so tests never race process env.
+fn runtime_state_path_from(
+    env_path: Option<&std::ffi::OsStr>,
+    state_dir: Option<PathBuf>,
+    home: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    if let Some(v) = env_path {
+        return PathBuf::from(v);
+    }
+    if let Some(dir) = state_dir {
+        if dir.is_absolute() {
+            return dir.join("provider-runtime-state.json");
+        }
+    }
+    PathBuf::from(home.unwrap_or_else(|| std::ffi::OsStr::new(".")))
+        .join(".fno")
+        .join("provider-runtime-state.json")
+}
+
+/// Where the quota lock lives. Ports Python's `paths.runtime_state_json()`
+/// (paths.py:1108): `FNO_RUNTIME_STATE_PATH` when set; else the configured
+/// absolute `state_dir`; else `$HOME/.fno`. Before x-6412 this defaulted to
+/// `runtime-state.json`, a file nobody writes, so every reset read as unknown.
+pub fn runtime_state_path(cwd: &Path) -> PathBuf {
+    runtime_state_path_from(
+        std::env::var_os("FNO_RUNTIME_STATE_PATH").as_deref(),
+        crate::agents_config::state_dir(cwd),
+        std::env::var_os("HOME").as_deref(),
+    )
 }
 
 fn account_reset_timezones(candidates: &[PathBuf]) -> BTreeMap<String, String> {
@@ -340,7 +373,7 @@ pub fn default_scan(home: &AgentsHome, cwd: &Path) -> CapScan {
     CapScan {
         registry: home.registry_json(),
         projects_dir: crate::claude_drive::claude_projects_dir(),
-        runtime_state: runtime_state_path(),
+        runtime_state: runtime_state_path(cwd),
         settings_candidates: settings_candidates(cwd),
         compaction_home: home.root().to_path_buf(),
     }
@@ -422,9 +455,29 @@ pub fn snapshot_with(
     }
     let mut out: Vec<CapLane> = Vec::new();
     for ((provider, account), members) in lanes {
-        let reset = health_reset_at(&scan.runtime_state, &account, now_f);
-        let capped_n = members.iter().filter(|m| m.capped).count();
-        let state = if capped_n >= cfg.quorum as usize || (capped_n >= 1 && reset.is_some()) {
+        let reset_raw = health_reset_at(&scan.runtime_state, &account);
+        let reset_epoch = reset_raw.filter(|r| *r as f64 > now_f);
+        let reset_passed_epoch = reset_raw.filter(|r| *r as f64 <= now_f);
+        let capped: Vec<&CapMember> = members.iter().filter(|m| m.capped).collect();
+        let capped_n = capped.len();
+        // A capped member whose 429 is newer than the passed reset is a NEW
+        // strand, not a returning one; `newest_assistant` is RFC3339.
+        let new_strand_since = |r: i64| {
+            capped.iter().any(|m| {
+                m.newest_assistant
+                    .as_deref()
+                    .and_then(ts_epoch)
+                    .map(|t| t > r)
+                    == Some(true)
+            })
+        };
+        let state = if reset_epoch.is_none()
+            && reset_passed_epoch.is_some()
+            && capped_n >= 1
+            && !new_strand_since(reset_passed_epoch.unwrap())
+        {
+            "returning"
+        } else if capped_n >= cfg.quorum as usize || (capped_n >= 1 && reset_epoch.is_some()) {
             "open"
         } else {
             "closed"
@@ -438,7 +491,8 @@ pub fn snapshot_with(
             lane: format!("{provider}:{account}"),
             provider,
             account,
-            reset_epoch: reset,
+            reset_epoch,
+            reset_passed_epoch,
             missing_reset_timezone: missing,
             state: state.to_string(),
             members,
@@ -1334,6 +1388,7 @@ mod tests {
             provider: "zai".into(),
             account: "zai-main".into(),
             reset_epoch: reset,
+            reset_passed_epoch: None,
             missing_reset_timezone: vec![],
             state: "open".into(),
             members: vec![CapMember {
@@ -1500,5 +1555,161 @@ mod tests {
             confirmed_pos < stopped_pos,
             "spawn-confirmed before stopped"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 4 (x-6412): the reset reads the file Python writes, and a passed
+    // reset survives as `returning`.
+    // -----------------------------------------------------------------------
+
+    fn four29_line(ts: &str) -> String {
+        FOUR29_LINE.replace("2026-09-11T06:22:32.000Z", ts)
+    }
+
+    #[test]
+    fn ac4_path_default_scan_reads_the_file_python_writes() {
+        let root = std::env::temp_dir().join(format!("pc4p-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home_dir = root.join("home");
+        // Python's fallback path: $HOME/.fno/provider-runtime-state.json.
+        let state_path = home_dir.join(".fno").join("provider-runtime-state.json");
+        let projects = root.join("projects").join("-repo");
+        let registry = format!(
+            "[{}]",
+            [
+                four29_row(
+                    "glm-5.3-flash[1m]",
+                    "44444444-4444-4444-4444-444444444444",
+                    Some("zai-main")
+                ),
+                four29_row(
+                    "glm-5.3-flash[1m]",
+                    "22222222-2222-2222-2222-222222222222",
+                    Some("zai-main")
+                ),
+            ]
+            .join(",")
+        );
+        write(
+            &home_dir.join("registry.json"),
+            format!(r#"{{"schema_version":25,"agents":{registry}}}"#).as_str(),
+        );
+        for sid in [
+            "44444444-4444-4444-4444-444444444444",
+            "22222222-2222-2222-2222-222222222222",
+        ] {
+            write(
+                &projects.join(format!("{sid}.jsonl")),
+                &format!("{OK_LINE}\n{}\n", four29_line("2026-09-11T06:22:32.000Z")),
+            );
+        }
+        write(
+            &state_path,
+            r#"{"provider_health":{"zai-main":{"rate_limited_until":9999999999.0}}}"#,
+        );
+        // The pure resolution: env unset, the configured state_dir default
+        // ($HOME/.fno), HOME=$root/home -> the file Python writes.
+        let resolved = runtime_state_path_from(
+            None,
+            Some(home_dir.join(".fno")),
+            Some(std::ffi::OsStr::new(home_dir.to_str().unwrap())),
+        );
+        assert_eq!(resolved, state_path);
+        let snap = snapshot_with(
+            &scan(
+                home_dir.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                state_path,
+                home_dir,
+            ),
+            1_000_000_000,
+            &cfg(2),
+        )
+        .unwrap();
+        let lane = snap.lanes.iter().find(|l| l.provider == "zai").unwrap();
+        assert_eq!(lane.state, "open");
+        assert_eq!(lane.reset_epoch, Some(9_999_999_999));
+        assert_eq!(lane.reset_passed_epoch, None);
+    }
+
+    #[test]
+    fn ac4_passed_old_429s_read_returning_new_strand_reads_open() {
+        let root = std::env::temp_dir().join(format!("pc4r-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home_dir = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let state_path = root.join("provider-runtime-state.json");
+        let now = now_epoch_secs();
+        let passed_reset = now - 600;
+        // Two stranded members whose 429s are OLDER than the passed reset.
+        let registry = format!(
+            "[{},{}]",
+            four29_row(
+                "glm-5.3-flash[1m]",
+                "44444444-4444-4444-4444-444444444444",
+                Some("zai-main")
+            ),
+            four29_row(
+                "glm-5.3-flash[1m]",
+                "22222222-2222-2222-2222-222222222222",
+                Some("zai-main")
+            ),
+        );
+        write(
+            &home_dir.join("registry.json"),
+            format!(r#"{{"schema_version":25,"agents":{registry}}}"#).as_str(),
+        );
+        write(
+            &projects.join("44444444-4444-4444-4444-444444444444.jsonl"),
+            &format!("{OK_LINE}\n{}\n", four29_line("2026-09-11T06:22:32.000Z")),
+        );
+        write(
+            &projects.join("22222222-2222-2222-2222-222222222222.jsonl"),
+            &format!("{OK_LINE}\n{}\n", four29_line("2026-09-11T06:22:32.000Z")),
+        );
+        write(
+            &state_path,
+            format!(
+                r#"{{"provider_health":{{"zai-main":{{"rate_limited_until":{passed_reset}.0}}}}}}"#
+            )
+            .as_str(),
+        );
+        let snap = snapshot_with(
+            &scan(
+                home_dir.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                state_path.clone(),
+                home_dir.clone(),
+            ),
+            now,
+            &cfg(2),
+        )
+        .unwrap();
+        let lane = snap.lanes.iter().find(|l| l.provider == "zai").unwrap();
+        assert_eq!(lane.state, "returning");
+        assert_eq!(lane.reset_epoch, None);
+        assert_eq!(lane.reset_passed_epoch, Some(passed_reset));
+
+        // One member's 429 newer than the record: a NEW strand, so the lane
+        // falls back to the open/closed rule. Two capped members meet quorum.
+        let newer = four29_line("2026-09-13T23:59:59.000Z");
+        write(
+            &projects.join("22222222-2222-2222-2222-222222222222.jsonl"),
+            &format!("{OK_LINE}\n{newer}\n"),
+        );
+        let snap = snapshot_with(
+            &scan(
+                home_dir.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                state_path.clone(),
+                home_dir.clone(),
+            ),
+            now,
+            &cfg(2),
+        )
+        .unwrap();
+        let lane = snap.lanes.iter().find(|l| l.provider == "zai").unwrap();
+        assert_eq!(lane.state, "open");
+        assert_eq!(lane.reset_epoch, None);
     }
 }

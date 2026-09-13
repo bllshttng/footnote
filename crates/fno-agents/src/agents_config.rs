@@ -944,6 +944,10 @@ pub struct ProviderCapConfig {
     pub sleep_hours: String,
     pub sleep_timezone: String,
     pub canary_survive_minutes: u64,
+    /// `recovery.provider_outage_reset_grace_seconds` (default and floor 120):
+    /// how long after the reset the return ladder waits before resuming the
+    /// canary, so a lock stamped just before expiry is never trusted hot.
+    pub reset_grace_seconds: u64,
     /// Members on one lane with a fresh capped tail needed to open it, or one
     /// member plus the account's runtime-state quota lock.
     pub quorum: u32,
@@ -958,6 +962,7 @@ impl Default for ProviderCapConfig {
             sleep_hours: String::new(),
             sleep_timezone: String::new(),
             canary_survive_minutes: 15,
+            reset_grace_seconds: 120,
             quorum: 2,
         }
     }
@@ -998,6 +1003,14 @@ pub fn provider_cap_config(cwd: &Path) -> ProviderCapConfig {
             value("canary_survive_minutes"),
             defaults.canary_survive_minutes,
         ),
+        // The grace floor lives in Python (`ge=120`); mirror it here so a
+        // malformed or absent key can never arm a return sooner than Python
+        // would wait.
+        reset_grace_seconds: as_u64(
+            config_lookup(cwd, &["recovery", "provider_outage_reset_grace_seconds"]),
+            120,
+        )
+        .max(120),
         quorum: value("quorum")
             .and_then(|v| v.as_integer())
             .and_then(|i| u32::try_from(i).ok())
