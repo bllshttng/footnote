@@ -4001,6 +4001,12 @@ def dispatch_spawn_pane(
         # correlate against a fabricated empty baseline.
         codex_daemon_baseline_ids: Optional[set[str]] = None
         if provider == "codex":
+            # The create form asserts the daemon (--remote unix://); start it
+            # before the pane and before the baseline snapshot below, so the
+            # oracle reads a daemon that is already up.
+            from fno.agents.codex_pane import ensure_codex_daemon
+
+            ensure_codex_daemon(runner)
             codex_daemon_baseline_ids = _codex_session_ids_loaded(cwd)
         # Stamp the spawn clock immediately before the pane runs, not at function
         # entry. A sibling pane starting a same-cwd session during the lock-wait

@@ -155,6 +155,10 @@ class FakeRunner:
             if self.kill_returncode == 0 and self.kill_removes_pane:
                 self.ls_stdout = "[]"
             return result
+        if argv[:4] == ["codex", "app-server", "daemon", "start"]:
+            return subprocess.CompletedProcess(
+                argv, 0, '{"status":"alreadyRunning"}', ""
+            )
         raise AssertionError(f"unexpected fno invocation: {argv}")
 
 
@@ -324,6 +328,11 @@ def test_late_codex_identity_composes_across_every_peer_surface(
             str(rollout),
         ],
     )
+    # x-a095: this journey exercises the late-identity heal, not the daemon
+    # contract; the start command would otherwise exec a real provider binary.
+    from fno.agents import codex_pane
+
+    monkeypatch.setattr(codex_pane, "ensure_codex_daemon", lambda *_a, **_k: None)
     spawned = None
     try:
         spawned = mux_spawn.dispatch_spawn_pane(
@@ -927,6 +936,76 @@ def test_codex_daemon_ambiguity_still_reaps_rather_than_guessing(
     assert runner.kill_calls
 
 
+def test_ensure_codex_daemon_runs_the_form_declared_pre_exec() -> None:
+    """The daemon command is read from the capability toml, never hardcoded."""
+    from fno.agents import codex_pane
+
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((list(argv), kwargs.get("timeout")))
+        return subprocess.CompletedProcess(argv, 0, '{"status":"alreadyRunning"}', "")
+
+    codex_pane.ensure_codex_daemon(runner)
+    assert calls == [(["codex", "app-server", "daemon", "start"], 15)]
+
+
+def test_ensure_codex_daemon_failure_and_timeout_name_the_command() -> None:
+    from fno.agents import codex_pane
+    from fno.agents.dispatch import DispatchAskError
+
+    def failing(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "daemon start exploded")
+
+    with pytest.raises(DispatchAskError, match="daemon start exploded"):
+        codex_pane.ensure_codex_daemon(failing)
+
+    def hanging(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 15)
+
+    with pytest.raises(DispatchAskError, match="timed out"):
+        codex_pane.ensure_codex_daemon(hanging)
+
+
+def test_codex_pane_spawn_refused_when_daemon_start_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A dead daemon start refuses the spawn before any pane exists: the
+    create form asserts the daemon, so launching without one would mint the
+    private thread this lane exists to prevent."""
+    from fno.agents.dispatch import DispatchAskError
+
+    class DaemonStartFails(FakeRunner):
+        def __call__(self, argv, **kwargs):
+            if list(argv)[:4] == ["codex", "app-server", "daemon", "start"]:
+                self.calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 1, "", "daemon start exploded")
+            return super().__call__(argv, **kwargs)
+
+    runner = DaemonStartFails()
+    with pytest.raises(DispatchAskError, match="daemon start exploded"):
+        _spawn(
+            monkeypatch, tmp_path, provider=CODEX_HARNESS, runner=runner,
+            codex_binding=False,
+        )
+    assert not any(call[1:4] == ["mux", "pane", "run"] for call in runner.calls)
+
+
+def test_codex_trust_screen_refusal_fires_despite_hook_trust_bypass() -> None:
+    """`--remote` ignores a config trust override, so an untrusted cwd parks
+    on the project trust screen even under the bypass posture; the readiness
+    probe names it and never answers the security decision."""
+    from fno.agents.mux_spawn import _codex_trust_refusal
+
+    refusal = _codex_trust_refusal(
+        "? Do you trust the contents of this directory?",
+        cwd=Path("/w/proj"),
+        hook_trust_bypassed=True,
+    )
+    assert refusal is not None
+    assert refusal.startswith("Codex project trust required for /w/proj")
+
+
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     no_state_grant: None, tmp_path: Path, monkeypatch
 ) -> None:
@@ -1123,7 +1202,9 @@ def test_build_pane_argv_provider_forms(no_state_grant: None, tmp_path: Path) ->
     assert claude == ["claude", "--session-id", "uuid-1", "--", "task"]
 
     codex = build_pane_argv("codex", "task", tmp_path, False, None)
-    assert codex[:3] == ["codex", "-C", str(tmp_path)]
+    # x-a095: the create identity carries the daemon assertion, so the thread
+    # is minted in the shared app-server daemon, not in-process.
+    assert codex[:5] == ["codex", "--remote", "unix://", "-C", str(tmp_path)]
     assert "--sandbox" in codex and codex[-1] == "task"
     # The codex seed rides behind clap's own end-of-options fence.
     assert codex[-2] == "--"
