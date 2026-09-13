@@ -438,12 +438,8 @@ _WAKE_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
 
 
 def _graph_entries_for_wake() -> list:
-    """The wake's full-graph read, one real read per graph identity.
-
-    Identity-keyed like the drain cache: an unchanged graph is byte-identical,
-    so serving the memo is not staleness, and the tick stops re-paying the
-    keeper read the stop gate already stopped paying.
-    """
+    """The wake's full-graph read, one real read per graph identity: an
+    unchanged graph is byte-identical, so the memo is not staleness."""
     from fno.graph.store import read_graph
     from fno.king import drain_cache
     from fno.paths import graph_json

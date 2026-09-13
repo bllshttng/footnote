@@ -1,11 +1,7 @@
-"""Disk cache for `fno agents king drain`: one count per (scope, graph identity).
-
-The stop gate shells the drain on every fire; on an unchanged graph each fire
-re-paid the full keeper read only to count the same scope again, and under
-fleet load that read outruns the gate's own STOPGATE_READ_TIMEOUT (read_bounds.rs).
-Rows key on the graph file's stat identity, the keeper's own FileIdent fields,
-so a changed graph misses by construction. Every helper fails open - a cache
-that cannot be read or written must never add a failure mode to a verb whose
+"""Disk caches keyed on the graph file's stat identity (the keeper's own
+FileIdent fields): the drain's per-scope count, and shared helpers. A changed
+graph misses by construction, and every helper fails open - a cache that
+cannot be read or written must never add a failure mode to a verb whose
 contract is exit 1 on an unreadable graph.
 """
 
@@ -25,9 +21,8 @@ def cache_file() -> Path:
 def graph_ident(path: Path) -> "tuple | None":
     """Stat identity of the graph file, or None when it cannot be stat'd.
 
-    ctime rides along because a same-size same-mtime overwrite in place
-    moves neither, and only ctime catches it (the keeper's cache carries
-    the same field for the same reason).
+    ctime rides along: a same-size same-mtime overwrite moves neither, and
+    only ctime catches it (the keeper's cache carries it for the same reason).
     """
     try:
         st = Path(path).stat()
@@ -49,12 +44,8 @@ def load(scope: str, ident: tuple) -> "int | None":
 
 
 def store(scope: str, ident: tuple, undelivered: int) -> None:
-    """Best-effort write; a failed cache write is silently dropped.
-
-    Concurrent drains lose one row to the last rename, never to corruption:
-    each writer replaces atomically, and both computed from the same
-    identity, so either row is correct.
-    """
+    """Best-effort atomic write; concurrent drains lose a row to the last
+    rename, never to corruption, and a failed write is silently dropped."""
     try:
         path = cache_file()
         path.parent.mkdir(parents=True, exist_ok=True)

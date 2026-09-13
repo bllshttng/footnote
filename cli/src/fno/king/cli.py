@@ -759,11 +759,8 @@ def drain_cmd(
     )
 
     path = _graph_store_path()
-    # The cache rides only the default backend: an external selection raises
-    # below, and its data must never be answered from a graph-store row.
-    ident = (
-        drain_cache.graph_ident(path) if active_backend_name() == "graph" else None
-    )
+    # Cache rides only the default backend; an external one raises below.
+    ident = drain_cache.graph_ident(path) if active_backend_name() == "graph" else None
     if ident is not None:
         cached = drain_cache.load(scope, ident)
         if cached is not None and drain_cache.graph_ident(path) == ident:
@@ -784,9 +781,7 @@ def drain_cmd(
     ) as exc:
         typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
         raise typer.Exit(1) from exc
-    # Key the row on the post-read stat: the entries describe the file as of
-    # the keeper's read, so the row cannot outlive the bytes it was computed
-    # from beyond the one-hit race window the keeper's own cache carries.
+    # Post-read stat: the row cannot outlive the bytes it was computed from.
     post = drain_cache.graph_ident(path)
     if post is not None:
         drain_cache.store(scope, post, undelivered)
