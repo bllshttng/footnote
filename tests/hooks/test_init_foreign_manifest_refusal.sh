@@ -66,15 +66,15 @@ make_repo() {
   _ALL_TMPS+=("$_dir")
   (cd "$_dir" && git init -q && mkdir -p .fno) || fail "repo setup failed in $_dir"
   printf '# isolated\n' > "${_dir}/.fno/config.toml"
-  mkdir -p "${_dir}/home/.fno"
+  mkdir -p "${_dir}/home/.fno" "${_dir}/bin" "${_dir}/space"
   printf '# isolated global\n' > "${_dir}/home/.fno/config.toml"
+  # State-path stub: init resolves its manifest through the scenario space.
+  cp "${REPO_ROOT}/tests/helpers/fno-agents-state-path-stub.sh" "${_dir}/bin/fno-agents"
+  chmod 755 "${_dir}/bin/fno-agents"
 }
 
-manifest_path() { # $1 repo dir - the resolver init itself uses, with the same
-  # legacy fallback the init script uses when no binary resolves it
-  local p
-  p="$(cd "$1" && FNO_SPACES_DIR="$1/spaces" fno-agents state path target-state 2>/dev/null || true)"
-  printf '%s\n' "${p:-$1/.fno/target-state.md}"
+manifest_path() { # $1 repo dir - the same path the stub answers init with
+  printf '%s\n' "$1/space/target-state.md"
 }
 
 run_init() { # $1 repo dir, $2 stdout capture file, rest: K=V env for this run
@@ -82,7 +82,8 @@ run_init() { # $1 repo dir, $2 stdout capture file, rest: K=V env for this run
   shift 2
   (cd "$dir" && \
     HOME="$dir/home" \
-    FNO_SPACES_DIR="$dir/spaces" \
+    PATH="$dir/bin:$PATH" \
+    FNO_TEST_SPACE="$dir/space" \
     TARGET_START=1 \
     TARGET_INPUT="x-7040-foreign-manifest" \
     TARGET_LOCATION_OK="main-acknowledged" \

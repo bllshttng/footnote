@@ -26,7 +26,7 @@ trap 'rm -rf "$TMP_BASE"' EXIT
 make_repo() {
     local dir="$1"
     local branch="$2"
-    mkdir -p "$dir"
+    mkdir -p "$dir/bin" "$dir/space"
     (
         cd "$dir"
         git init -q -b "$branch" 2>/dev/null || { git init -q; git checkout -q -b "$branch"; }
@@ -35,6 +35,10 @@ make_repo() {
         echo "# test" > README.md
         git add README.md
         git commit -q -m "init"
+        # State-path stub: init's manifest and init lock live in the scenario
+        # space dir, where the lock scenarios below plant theirs.
+        cp "$REPO_ROOT/tests/helpers/fno-agents-state-path-stub.sh" bin/fno-agents
+        chmod 755 bin/fno-agents
     )
 }
 
@@ -44,7 +48,9 @@ run_init() {
     (
         cd "$cwd"
         unset TARGET_START TARGET_INPUT TARGET_PLAN_PATH TARGET_LOCATION_OK TARGET_SIZE
-        env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" "$@" bash "$INIT_SCRIPT" 2>&1
+        env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" FNO_TARGET_INIT_GATED=1 \
+            PATH="$cwd/bin:$PATH" FNO_TEST_SPACE="$cwd/space" \
+            "$@" bash "$INIT_SCRIPT" 2>&1
     )
     return $?
 }
@@ -63,7 +69,7 @@ if [[ $EC -eq 0 ]]; then
 else
     fail "AC1: expected exit 0, got $EC. Output: $OUT"
 fi
-if [[ ! -e "$T/.fno/.init.lock" ]]; then
+if [[ ! -e "$T/space/.init.lock" ]]; then
     pass "AC1: lock file removed by EXIT trap"
 else
     fail "AC1: lock file still present after init exit"
@@ -74,14 +80,14 @@ echo ""
 echo "--- AC2: live lock refuses second invocation ---"
 T="$TMP_BASE/ac2-live"
 make_repo "$T" "feature/x"
-mkdir -p "$T/.fno"
+mkdir -p "$T/space"
 # Plant a live lock: our own PID + our own lstart provenance. The
 # liveness check now also compares provenance, so writing JUST the PID
 # (the old format) would be classified as "stale" by the new code
 # because the recorded provenance ("") wouldn't match the live process's
 # actual lstart. We write the full two-line payload.
 LIVE_PROV=$(ps -p $$ -o lstart= 2>/dev/null | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')
-printf '%s\n%s\n' "$$" "$LIVE_PROV" > "$T/.fno/.init.lock"
+printf '%s\n%s\n' "$$" "$LIVE_PROV" > "$T/space/.init.lock"
 OUT=$(run_init "$T" 2>&1)
 EC=$?
 if [[ $EC -eq 75 ]]; then
@@ -94,20 +100,20 @@ if echo "$OUT" | grep -q "another init-target-state is running here"; then
 else
     fail "AC2: refusal message missing. Got: $OUT"
 fi
-if [[ ! -f "$T/.fno/target-state.md" ]]; then
+if [[ ! -f "$T/space/target-state.md" ]]; then
     pass "AC2: target-state.md NOT written when lock held"
 else
     fail "AC2: target-state.md written despite live lock"
 fi
 # Cleanup so the next test's tempdir teardown doesn't see leftover state
-rm -f "$T/.fno/.init.lock"
+rm -f "$T/space/.init.lock"
 
 # --- AC3: stale lock (dead PID) gets reclaimed and init proceeds ----------
 echo ""
 echo "--- AC3: stale lock reclaimed ---"
 T="$TMP_BASE/ac3-stale"
 make_repo "$T" "feature/x"
-mkdir -p "$T/.fno"
+mkdir -p "$T/space"
 # Find a PID that's guaranteed dead: pick a high number that exceeds the
 # kernel's PID_MAX cap on most systems (default macOS PID_MAX is 99999,
 # Linux default is 32768). We pick 999999 which is above both. If a real
@@ -120,7 +126,7 @@ if ps -p "$STALE_PID" >/dev/null 2>&1; then
 else
     # Two-line stale lock: dead PID + garbage provenance. The PID is
     # dead so liveness check fails regardless of provenance.
-    printf '%s\nold-fake-provenance\n' "$STALE_PID" > "$T/.fno/.init.lock"
+    printf '%s\nold-fake-provenance\n' "$STALE_PID" > "$T/space/.init.lock"
     OUT=$(run_init "$T" 2>&1)
     EC=$?
     if [[ $EC -eq 0 ]]; then
@@ -133,12 +139,12 @@ else
     else
         fail "AC3: reclaim message missing. Got: $OUT"
     fi
-    if [[ -f "$T/.fno/target-state.md" ]]; then
+    if [[ -f "$T/space/target-state.md" ]]; then
         pass "AC3: state file written after reclaim"
     else
         fail "AC3: state file missing after reclaim"
     fi
-    if [[ ! -e "$T/.fno/.init.lock" ]]; then
+    if [[ ! -e "$T/space/.init.lock" ]]; then
         pass "AC3: lock file removed after successful init"
     else
         fail "AC3: lock file still present after successful init"
@@ -150,13 +156,13 @@ echo ""
 echo "--- AC4: empty lock file is treated as stale ---"
 T="$TMP_BASE/ac4-empty"
 make_repo "$T" "feature/x"
-mkdir -p "$T/.fno"
+mkdir -p "$T/space"
 # An empty lock file (interrupted write, manual `touch`) shouldn't pin
 # the lock indefinitely. With the noclobber-file design this case is
 # narrower than it was under mkdir+pid because the PID is written in the
 # same atomic op as the create, so empty content only happens via
 # external intervention. We still treat it as stale and reclaim.
-: > "$T/.fno/.init.lock"
+: > "$T/space/.init.lock"
 OUT=$(run_init "$T" 2>&1)
 EC=$?
 if [[ $EC -eq 0 ]]; then
@@ -225,13 +231,13 @@ else
 fi
 # Lock must be cleaned up by trap. Pre-fix: lock would remain because
 # trap body failed to parse.
-if [[ ! -e "$T/.fno/.init.lock" ]]; then
+if [[ ! -e "$T/space/.init.lock" ]]; then
     pass "AC6: lock file removed on exit despite quote in path"
 else
     fail "AC6: lock file left behind — trap body failed to expand path correctly"
 fi
 # State file must exist (init completed normally).
-if [[ -f "$T/.fno/target-state.md" ]]; then
+if [[ -f "$T/space/target-state.md" ]]; then
     pass "AC6: state file created normally with quoted path"
 else
     fail "AC6: state file missing — init aborted before write"
@@ -268,8 +274,8 @@ echo ""
 echo "--- AC8b: broken-symlink lock recovers instead of aborting ---"
 T="$TMP_BASE/ac8b-broken-symlink"
 make_repo "$T" "feature/x"
-mkdir -p "$T/.fno"
-ln -s /this/path/does/not/exist "$T/.fno/.init.lock"
+mkdir -p "$T/space"
+ln -s /this/path/does/not/exist "$T/space/.init.lock"
 OUT=$(run_init "$T" 2>&1)
 EC=$?
 if [[ $EC -eq 0 ]]; then
@@ -277,7 +283,7 @@ if [[ $EC -eq 0 ]]; then
 else
     fail "AC8b: broken symlink lock caused abort (exit $EC) — sed substitution propagated set -e. Output: $OUT"
 fi
-if [[ -f "$T/.fno/target-state.md" ]]; then
+if [[ -f "$T/space/target-state.md" ]]; then
     pass "AC8b: state file written after recovery"
 else
     fail "AC8b: state file missing after reclaim"
@@ -305,11 +311,11 @@ echo ""
 echo "--- AC8: PID reuse detected via lstart mismatch ---"
 T="$TMP_BASE/ac8-pid-reuse"
 make_repo "$T" "feature/x"
-mkdir -p "$T/.fno"
+mkdir -p "$T/space"
 # Our PID is alive, but we plant a provenance that no process in the
 # system has — `Thu Jan 1 00:00:00 1970` is the epoch and won't match
 # any live process's actual start time on any reasonable machine.
-printf '%s\nThu Jan  1 00:00:00 1970\n' "$$" > "$T/.fno/.init.lock"
+printf '%s\nThu Jan  1 00:00:00 1970\n' "$$" > "$T/space/.init.lock"
 OUT=$(run_init "$T" 2>&1)
 EC=$?
 if [[ $EC -eq 0 ]]; then
@@ -322,7 +328,7 @@ if echo "$OUT" | grep -q "reclaimed stale init lock"; then
 else
     fail "AC8: reclaim message missing. Got: $OUT"
 fi
-if [[ -f "$T/.fno/target-state.md" ]]; then
+if [[ -f "$T/space/target-state.md" ]]; then
     pass "AC8: state file written after reclaim"
 else
     fail "AC8: state file missing after reclaim"

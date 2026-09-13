@@ -94,7 +94,7 @@ A	operator_question_closed	py=cli/src/fno/events/__init__.py|cli/src/fno/outstan
 A	postmortem_corrections_log	py=cli/src/fno/hermetic.py;rs=crates/fno-agents/src/finalize.rs	# protocol
 A	preassigned-or-session-start	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol
 A	permission_mode_requested	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol: receipt key both spawn builders emit byte-identically; it names intent, not outcome
-A	refused-newer-than-transcript	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon.rs	# protocol
+A	refused-newer-than-transcript	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon/list_rows.rs	# protocol
 A	registry read failed: {exc}	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/attach.rs	# msg-twin
 A	registry name must be 1-64 letters, numbers, underscores, or hyphens	py=cli/src/fno/agents/registry.py;rs=crates/fno-agents/src/state.rs	# msg-twin: the rename grammar refusal is the Python port's verbatim string
 A	review coverage waived for this head	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: the affirmative waiver value both gates demand on the single law row; review_coverage_paths.rs pins both carriers
@@ -113,7 +113,7 @@ A	spawn-gate: could not read available ram; skipping the floor check	py=cli/src/
 A	spawn-gate: forced past cap, ram floor, and load ceiling (--force)	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	spawn-gate: qos demotion of pid {pid} failed (non-fatal)	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	spawn-gate: worker slot claim {key} unavailable; proceeding uncounted	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
-A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon.rs	# protocol
+A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon/list_rows.rs	# protocol
 A	stopped: {name} ({short_id})	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/bin/client.rs	# msg-twin
 A	unsupported strategy has executable data	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	the child falls back to its account's own default.	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# msg-twin

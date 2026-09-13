@@ -73,6 +73,12 @@ setup_env() {
     TMP_DIR="$(mktemp -d)"
     HOME_DIR="${TMP_DIR}/home"
     mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno"
+    # State-path stub: a test that puts this bin first on PATH pins the hook's
+    # SPACE_DIR (manifest, counters, events) into the sandbox space dir instead
+    # of wherever an ambient real fno-agents resolves it.
+    mkdir -p "${TMP_DIR}/bin" "${TMP_DIR}/space"
+    cp "${REPO_ROOT}/tests/helpers/fno-agents-state-path-stub.sh" "${TMP_DIR}/bin/fno-agents"
+    chmod 755 "${TMP_DIR}/bin/fno-agents"
 
     TRANSCRIPT_FILE="${TMP_DIR}/${uuid}.jsonl"
     printf '{"role":"assistant","content":"hello"}\n' > "$TRANSCRIPT_FILE"
@@ -404,10 +410,16 @@ echo "boom" >&2
 exit 3
 STUB
 
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+    # Pin the hook's state resolution into the sandbox: manifest and counter
+    # live in the stub space dir, not wherever an ambient fno-agents points.
+    mv "${TMP_DIR}/.fno/target-state.md" "${TMP_DIR}/space/target-state.md"
 
-    counter="${TMP_DIR}/.fno/.loop-check-unavail-test-session-001"
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" \
+        "PATH=${TMP_DIR}/bin:$PATH" "FNO_TEST_SPACE=${TMP_DIR}/space" \
+        "FNO_AGENTS_BIN=${STUB}"
+
+    counter="${TMP_DIR}/space/.loop-check-unavail-test-session-001"
     t9_ok=true
     if [[ "$HOOK_RC" -ne 2 ]]; then
         fail "T9: expected exit 2, got $HOOK_RC"; t9_ok=false
@@ -459,8 +471,8 @@ log "T11: per-session counter isolation"
 {
     setup_env "bbbb-0011"
 
-    # A sibling session B already has a counter at 2 in the shared .fno.
-    sibling="${TMP_DIR}/.fno/.loop-check-unavail-sibling-session-B"
+    # A sibling session B already has a counter at 2 in the shared space.
+    sibling="${TMP_DIR}/space/.loop-check-unavail-sibling-session-B"
     printf '2' > "$sibling"
 
     STUB="${TMP_DIR}/fno-agents-stub"
@@ -469,10 +481,14 @@ log "T11: per-session counter isolation"
 exit 3
 STUB
 
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+    mv "${TMP_DIR}/.fno/target-state.md" "${TMP_DIR}/space/target-state.md"
 
-    mine="${TMP_DIR}/.fno/.loop-check-unavail-test-session-001"
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" \
+        "PATH=${TMP_DIR}/bin:$PATH" "FNO_TEST_SPACE=${TMP_DIR}/space" \
+        "FNO_AGENTS_BIN=${STUB}"
+
+    mine="${TMP_DIR}/space/.loop-check-unavail-test-session-001"
     t11_ok=true
     if [[ "$(tr -dc '0-9' < "$mine" 2>/dev/null)" != "1" ]]; then
         fail "T11: my counter should be 1; got: $(cat "$mine" 2>/dev/null)"; t11_ok=false
@@ -492,7 +508,7 @@ log "T12: clean decision self-heals the counter"
     setup_env "cccc-0012"
 
     # Counter is at 2 from prior broken fires.
-    counter="${TMP_DIR}/.fno/.loop-check-unavail-test-session-001"
+    counter="${TMP_DIR}/space/.loop-check-unavail-test-session-001"
     printf '2' > "$counter"
 
     STUB="${TMP_DIR}/fno-agents-stub"
@@ -502,8 +518,12 @@ printf '{"decision":"block","termination_reason":null,"message":"keep going","fi
 exit 0
 STUB
 
+    mv "${TMP_DIR}/.fno/target-state.md" "${TMP_DIR}/space/target-state.md"
+
     INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" \
+        "PATH=${TMP_DIR}/bin:$PATH" "FNO_TEST_SPACE=${TMP_DIR}/space" \
+        "FNO_AGENTS_BIN=${STUB}"
 
     t12_ok=true
     if [[ "$HOOK_RC" -ne 2 ]]; then
