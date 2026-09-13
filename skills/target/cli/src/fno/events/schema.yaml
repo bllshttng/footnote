@@ -2415,6 +2415,23 @@ event_types:
         reason:
           type: string
 
+  - name: merge_flake_accepted
+    retention: durable
+    description: "A merge the flake hold refused (a rerun-recovered green: an earlier CI attempt failed, the latest attempt passed) was accepted anyway via --accept-flake. The per-merge judgment the hold records; never a standing policy."
+    sources: [python, daemon]
+    data:
+      required: [pr, head, failed_checks]
+      properties:
+        pr:
+          type: integer
+        head:
+          type: string
+        failed_checks:
+          type: array
+          items: { type: string }
+        detail:
+          type: string
+
   - name: merge_reaper_stopped
     retention: durable
     description: "The merge reaper stopped a row's harness (claude stop, or the worker-socket stop) BEFORE removing the registry row. The order is load-bearing: a row dropped first orphans the session in its sideline. Pane rows emit no row here - their pane death is the stop."
