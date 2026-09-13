@@ -46,8 +46,9 @@ fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// One stored row's verdict: matched, rejected (with optional legacy
 /// evidence when one of its scope spellings names the requested crown).
 /// Shared by scope-stamped and NULL-scope result sets, so the canonical and
-/// legacy tests apply identically to both.
-fn classify(event: &Value, scope: &str) -> (bool, bool, Option<Value>) {
+/// legacy tests apply identically to both. A `None` scope matches every
+/// canonical row and attributes no legacy row.
+fn classify(event: &Value, scope: Option<&str>) -> (bool, bool, Option<Value>) {
     let Some(data) = event.get("data").and_then(|d| d.as_object()) else {
         // A reign_checkin without an object payload is legacy evidence
         // too; it names no scope, so it counts but attributes nowhere.
@@ -62,10 +63,11 @@ fn classify(event: &Value, scope: &str) -> (bool, bool, Option<Value>) {
     let row_scope = s_str(&data, "scope").unwrap_or("");
     let canonical = !row_scope.is_empty() && data.get("change").is_some() && aliases.is_empty();
     if canonical {
-        return (row_scope == scope, false, None);
+        return (scope.is_none_or(|wanted| row_scope == wanted), false, None);
     }
-    let names_this_crown =
-        row_scope == scope || aliases.iter().any(|k| s_str(&data, k) == Some(scope));
+    let names_this_crown = scope.is_some_and(|wanted| {
+        row_scope == wanted || aliases.iter().any(|k| s_str(&data, k) == Some(wanted))
+    });
     let legacy = names_this_crown.then(|| {
         let missing: Vec<&str> = ["scope", "change"]
             .iter()
@@ -80,9 +82,10 @@ fn classify(event: &Value, scope: &str) -> (bool, bool, Option<Value>) {
     (false, true, legacy)
 }
 
-/// The stored reign rows for one store: exact-scope rows, then NULL-scope
-/// rows (non-canonical scope spellings), each oldest first within its set.
-fn reign_rows(store: &Connection, scope: &str) -> Result<Vec<String>, String> {
+/// The stored reign rows for one store. With a scope: exact-scope rows,
+/// then NULL-scope rows (non-canonical scope spellings). With none: every
+/// reign row whatever its scope spelling. Oldest first within each set.
+fn reign_rows(store: &Connection, scope: Option<&str>) -> Result<Vec<String>, String> {
     let mut rows: Vec<String> = Vec::new();
     let read = |stmt: &mut rusqlite::Statement,
                 args: &[&dyn rusqlite::ToSql],
@@ -96,6 +99,13 @@ fn reign_rows(store: &Connection, scope: &str) -> Result<Vec<String>, String> {
         rows.extend(found);
         Ok(())
     };
+    let Some(scope) = scope else {
+        let mut all = store
+            .prepare("SELECT line FROM events WHERE type = ?1 ORDER BY ts_ms")
+            .map_err(|e| e.to_string())?;
+        read(&mut all, &[&REIGN_CHECKIN], &mut rows)?;
+        return Ok(rows);
+    };
     let mut scoped = store
         .prepare("SELECT line FROM events WHERE scope = ?1 AND type = ?2 ORDER BY ts_ms")
         .map_err(|e| e.to_string())?;
@@ -107,7 +117,7 @@ fn reign_rows(store: &Connection, scope: &str) -> Result<Vec<String>, String> {
     Ok(rows)
 }
 
-pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, String> {
+pub(crate) fn scan_scopes(events_paths: &[PathBuf], scope: Option<&str>) -> Result<Value, String> {
     // Generations and mirrors collapse here: one live journal, one store.
     let mut lives: Vec<PathBuf> = Vec::new();
     for path in events_paths {
@@ -204,6 +214,10 @@ pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, Strin
     payload["duplicates"] = json!(duplicates);
     payload["matched"] = json!(payload["events"].as_array().map(|a| a.len()).unwrap_or(0));
     Ok(payload)
+}
+
+pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, String> {
+    scan_scopes(events_paths, Some(scope))
 }
 
 fn render(payload: &Value) -> String {
@@ -1251,6 +1265,34 @@ mod verdict_tests {
         assert_eq!(r.block_cap.as_ref().unwrap().source, "default");
         assert_eq!(r.nudges, 1);
         assert_eq!(journals.len(), 1);
+    }
+
+    #[test]
+    fn scope_optional_scan_returns_all_canonical_scopes_and_rejections() {
+        let (_dir, path) = journal(&[
+            checkin(
+                "2026-09-10T08:00:00Z",
+                json!({"scope": "fno", "change": "fno change"}),
+            ),
+            checkin(
+                "2026-09-10T09:00:00Z",
+                json!({"scope": "x-a792", "change": "epic change"}),
+            ),
+            checkin(
+                "2026-09-10T10:00:00Z",
+                json!({"crown": "fno", "change": "legacy"}),
+            ),
+        ]);
+        let payload = scan_scopes(std::slice::from_ref(&path), None).unwrap();
+        assert_eq!(payload["matched"], json!(2));
+        assert_eq!(payload["rejected"], json!(1));
+        let scopes: Vec<&str> = payload["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|event| event["data"]["scope"].as_str())
+            .collect();
+        assert_eq!(scopes, ["x-a792", "fno"]);
     }
 
     #[test]
