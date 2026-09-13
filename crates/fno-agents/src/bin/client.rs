@@ -17,7 +17,7 @@ use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use fno_agents::spawn_gate::machine_reading_notes;
-use fno_agents::usage::{verb_usage, CLIENT_VERB_USAGE};
+use fno_agents::usage::{verb_help, verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 
@@ -309,6 +309,12 @@ async fn run(args: Vec<String>) -> i32 {
     // stops at an `--argv`/`--` boundary so a `--help` inside a spawn/host argv
     // payload reaches the spawned command instead of being captured here.
     if is_help_request(&args[1..]) {
+        // A verb with a full help body owns its --help; the one-line table
+        // entry stays for the top-level list.
+        if let Some(body) = verb_help(verb) {
+            println!("{body}");
+            return 0;
+        }
         if let Some(usage) = verb_usage(verb) {
             println!("usage: fno-agents {usage}");
             return 0;

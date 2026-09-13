@@ -11786,7 +11786,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             Some(e) => {
                 format!("board quiet but scope delivery is unreadable: {e}; blocking completion")
             }
-            None => format!("board quiet; {undelivered} scope nodes still undelivered"),
+            None => format!("board quiet; {undelivered} scope nodes still undelivered (drive each scope node to done or superseded to drain)"),
         };
         let shrank = undelivered != i64::MAX
             && history
