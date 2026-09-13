@@ -117,6 +117,7 @@ mod identity;
 pub mod interrupt_classify;
 pub mod kill_criteria;
 pub mod king_board;
+pub mod king_checkin;
 pub mod king_history;
 pub mod king_ledger;
 pub mod king_termination;

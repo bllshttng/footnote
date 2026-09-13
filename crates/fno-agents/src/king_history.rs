@@ -21,8 +21,8 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-const REIGN_CHECKIN: &str = "reign_checkin";
-const FORBIDDEN_ALIASES: [&str; 3] = ["crown", "crown_scope", "result"];
+pub(crate) const REIGN_CHECKIN: &str = "reign_checkin";
+pub(crate) const FORBIDDEN_ALIASES: [&str; 3] = ["crown", "crown_scope", "result"];
 
 fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
@@ -116,7 +116,7 @@ fn scan_one(events_path: &Path, scope: &str) -> Result<JournalScan, String> {
     Ok(out)
 }
 
-fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, String> {
+pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, String> {
     let mut payload = json!({
         "scope": scope,
         "journals": Vec::<Value>::new(),

@@ -564,6 +564,90 @@ def history_cmd(
     raise typer.Exit(code)
 
 
+def checkin_cmd(
+    scope: str = typer.Option(
+        "", "--scope", help="Crown scope to check in. Default: this session's own crown."
+    ),
+    as_json: bool = typer.Option(False, "--json", "-J", help="Emit the whole payload as one object."),
+    no_emit: bool = typer.Option(
+        False, "--no-emit", help="Print and diff without appending the journal row."
+    ),
+) -> None:
+    """Run the reign check-in body: gather, print, diff, journal.
+
+    One verb runs what a king used to hand-assemble from six to eight calls.
+    The gather, print, diff and row write live in the native ``king-checkin``
+    verb, which reuses the court fold and the history scan in process; this
+    shell resolves the caller's crown and the paths Python owns. The printed
+    numbers and the stored row come from one dict; a failed reader gets its
+    own line and the beat continues. It never decides: no spawn, no reap, no
+    lever.
+    """
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.king.history import HistoryUnreadable, resolve_scope
+    from fno.paths import (
+        event_journals,
+        graph_json,
+        handoffs_dir,
+        king_faqs_dir,
+        project_events_json,
+    )
+    from fno.rust_binary import resolve_binary
+
+    try:
+        crown = resolve_scope(scope)
+    except HistoryUnreadable as exc:
+        _refuse(f"king: {exc}")
+    binary = resolve_binary()
+    if binary is None:
+        _refuse(
+            "king: the fno-agents binary was not found, and the check-in beat "
+            "runs there. Reinstall fno, run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN."
+        )
+    argv = [
+        str(binary),
+        "king-checkin",
+        "--scope",
+        crown,
+        "--graph",
+        str(graph_json()),
+        "--handoffs-dir",
+        str(handoffs_dir()),
+        "--faqs-dir",
+        str(king_faqs_dir()),
+        "--emit-path",
+        str(project_events_json()),
+    ]
+    for path in event_journals():
+        argv += ["--events-path", str(path)]
+    state = None
+    try:
+        from fno.agents.crown import calling_agent_row
+        from fno.king.state import resolve_king_manifest_path
+
+        caller = calling_agent_row()
+        sid = getattr(caller, "harness_session_id", None) or getattr(caller, "cc_session_id", None) or ""
+        if sid:
+            state, _ = resolve_king_manifest_path(sid, getattr(caller, "harness", None))
+    except Exception:  # noqa: BLE001 - an unresolvable crown reads the fleet board
+        state = None
+    if state is not None:
+        argv += ["--board-state", str(state)]
+    if no_emit:
+        argv.append("--no-emit")
+    if as_json:
+        argv.append("--json")
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if proc.stdout:
+        typer.echo(proc.stdout.rstrip("\n"))
+    if proc.stderr:
+        typer.echo(proc.stderr.rstrip("\n"), err=True)
+    raise typer.Exit(code=propagate_returncode(proc.returncode))
+
+
 def ledger_cmd(
     out: Optional[Path] = typer.Option(
         None, "--out", help="Write the page here instead of <state_dir>/reign.html."
@@ -818,6 +902,7 @@ agents_king_app.command("shape")(shape_cmd)
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
 # Here only, like the faq typer: the retired bare `fno king` menu stays capped.
 agents_king_app.command("history")(history_cmd)
+agents_king_app.command("checkin")(checkin_cmd)
 agents_king_app.command("ledger")(ledger_cmd)
 agents_king_app.add_typer(faq_app, name="faq")
 
