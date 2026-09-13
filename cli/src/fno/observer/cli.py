@@ -355,10 +355,8 @@ def sweep(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the run summary as JSON."),
 ) -> None:
     """Retrospective read-only sweep: score a recorded corpus and emit events.
-
-    ``--judge N`` (blueprint only: judge the N newest window plans after code
-    scoring) is fno-agents' flag (node x-72fc); read out of raw argv below
-    rather than declared as a typer.Option.
+    ``--judge N`` (blueprint only) is fno-agents' flag (node x-72fc), read out
+    of raw argv below rather than declared as a typer.Option.
 
     States on stdout: ``ok`` (run_complete emitted), ``insufficient`` (<10
     attributable items, no run_complete), ``partial`` (a coverage gap is
@@ -432,12 +430,9 @@ def sweep(
     )
     summary["cost_usd"] = 0.0  # sweep is a read-only fold
     if judge_n > 0 and skill == "blueprint":
-        # The N newest corpus items (the window is chronological) get the model
-        # judge BEFORE run_complete closes the run, so a consumer reading the
-        # run's findings never sees a false zero on the judge dimensions. A
-        # judge fault must not lose the code run's record, hence the guard.
-        # Deliberately NOT wired into the session-start hook: an autonomous
-        # spawner needs its own registry row and a config.autonomy gate.
+        # Judge the N newest (chronological) items before run_complete closes
+        # the run, so findings never read a false zero on judge dimensions.
+        # A judge fault must not lose the code run's record, hence the guard.
         try:
             for item in items[-judge_n:]:
                 _judge_one_item(item, run_id, events_paths)
@@ -477,19 +472,8 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
     return f"session {sid} node {nid}: {dimension}={verdict}"
 
 
-# --------------------------------------------------------------------------- #
 # the advisory five-question judge: grading lives in fno-agents
-# (crates/fno-agents/src/blueprint_judge.rs, node x-9983's flag-registry
-# port); this side keeps only what needs the plan-parsing/config/events infra
-# it already had (has_section, loop_level, _emit_finding).
-# --------------------------------------------------------------------------- #
-
-
-def _plan_text_of(path: Path) -> Optional[str]:
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError:
-        return None
+# (crates/fno-agents/src/blueprint_judge.rs, x-9983's flag-registry port).
 
 
 def _has_five_questions(text: str) -> bool:
@@ -507,9 +491,7 @@ def _judge_via_rust(argv: list[str]) -> Optional[dict]:
         typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
         return None
     try:
-        result = subprocess.run(
-            [str(binary), "judge", *argv], capture_output=True, text=True, timeout=3600
-        )
+        result = subprocess.run([str(binary), "judge", *argv], capture_output=True, text=True, timeout=3600)
     except (OSError, subprocess.TimeoutExpired) as exc:
         typer.echo(f"judge fault: {exc}", err=True)
         return None
@@ -521,11 +503,13 @@ def _judge_via_rust(argv: list[str]) -> Optional[dict]:
 
 
 def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[str, int]:
-    """Read the item's plan, skip coverage gaps, judge it into run_id via
-    fno-agents. Returns ("judged", fail_count) or ("gap", 0) - a gap is
-    coverage, never a fail."""
+    """Read the item's plan, skip coverage gaps, judge it via fno-agents.
+    Returns ("judged", fail_count) or ("gap", 0) - a gap is coverage, never a fail."""
     pp = item.get("plan_path")
-    text = _plan_text_of(Path(pp)) if pp else None
+    try:
+        text = Path(pp).read_text(encoding="utf-8") if pp else None
+    except OSError:
+        text = None
     if not text or not _has_five_questions(text):
         return "gap", 0
     argv = ["--plan", pp]
@@ -557,11 +541,7 @@ def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[
 )
 def judge_cmd(ctx: typer.Context) -> None:
     """Advisory five-question judge: never blocks; a judge error is never a fail.
-
-    Every flag (--plan/--node/--labels/--split/--force) is fno-agents' (Rust
-    owns the flag surface per node x-72fc); this wrapper forwards raw argv
-    rather than declaring its own typer.Option for them.
-    """
+    Every flag is fno-agents' (node x-72fc); forwards raw argv, no typer.Option."""
     args = ctx.args
     force = "--force" in args or "-F" in args
     if "--labels" in args:
@@ -979,9 +959,7 @@ def _write_workdir_settings(workdir: Path) -> None:
     (fno_dir / ".path-migration-done").touch()
 
 
-def _default_spawn(
-    name: str, prompt: str, *, cwd: Path, timeout: int, model: str = "fable"
-) -> "tuple[int, str, str]":
+def _default_spawn(name: str, prompt: str, *, cwd: Path, timeout: int) -> "tuple[int, str, str]":
     """Sanctioned headless spawn (never a bare ``claude -p``). fable-tier for
     /blueprint per the loops-roadmap routing table (Locked Decision 6); the
     blueprint judge's own spawn lives in fno-agents (blueprint_judge.rs)."""
@@ -991,7 +969,7 @@ def _default_spawn(
                 "fno", "agents", "spawn", "--name", name, prompt,
                 "--harness", "claude",
                 "--substrate", "headless",
-                "--model", model,
+                "--model", "fable",
                 "--cwd", str(cwd),
                 "--timeout", str(timeout),
             ],
