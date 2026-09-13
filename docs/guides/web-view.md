@@ -20,6 +20,17 @@ The bridge also writes these values to `<mux dir>/web-<session>.json` at mode 06
 
 `--server` names the mux server, not an agent. It selects which socket the bridge attaches to. The old `--session` spelling still works and warns. To reach one agent, see the next section.
 
+## Stop it
+
+`fno mux web stop` ends the bridge for one session.
+
+```bash
+fno mux web stop                # the default session
+fno mux web stop work           # the bridge that names session work
+```
+
+Stop tries the gentle signal first and escalates only if the bridge hangs. It removes the marker file either way. A bridge that died some other way, such as a kill or a reboot, leaves the marker behind with its token. `fno mux web reap` finds every marker whose port refuses and removes those corpses. Both verbs print one receipt line, and `--json` prints rows instead.
+
 ## Get the link for one agent
 
 `fno mux view <selector> --url` prints the browser URL for the pane that hosts one agent. The URL carries `?pane=<id>`, so the page paints that agent first.
