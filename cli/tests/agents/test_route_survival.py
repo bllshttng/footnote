@@ -869,6 +869,7 @@ def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch)
     carries --settings there). The woken attach runs under the recorded
     account namespace with the route restored into its env."""
     import fno.agents.account_env as account_env_mod
+    import fno.agents.watchdog as watchdog_mod
 
     class _Overlay:
         account_id = "makers"
@@ -906,6 +907,15 @@ def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch)
     def _wake(short_id, *, message, route_env, cwd, account_env=None):
         seen["route_env"] = route_env
         seen["account_env"] = account_env
+
+    # x-6ac3: exit 0 requires the transcript marker, so the wake lands only
+    # with the confirm stubbed positive (the test's subject is the env, not
+    # the receipt).
+    class _Facts:
+        last_event_epoch = 100.0
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: True)
 
     res = resume_logic(
         name="router",

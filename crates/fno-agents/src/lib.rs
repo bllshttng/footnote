@@ -171,6 +171,7 @@ pub mod registry_json;
 pub mod rename;
 pub mod resume_args;
 pub mod resume_receipt;
+pub mod resume_wake;
 pub mod review_freshness;
 pub mod review_summary;
 pub mod roster_progress;

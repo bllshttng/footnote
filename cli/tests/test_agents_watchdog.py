@@ -847,9 +847,12 @@ def test_sweep_reads_each_rows_transcript_under_that_rows_harness(monkeypatch, t
 
 
 def test_apply_wake_confirms_through_the_verdicts_harness(monkeypatch):
-    """The wake-landed proof re-reads the transcript under the verdict's own
-    harness, so a codex wake confirms at the codex store."""
-    v = Verdict("thread-9", "codex-worker", "blocked", WAKE, "silent", "resume", "codex")
+    """The claude wake-landed proof re-reads the transcript under the
+    verdict's own harness key, so a claude wake confirms at the claude
+    store. Codex rows take a different receipt (see the daemon-receipt
+    test below): resume exits 0 there only when the daemon accepted the
+    turn, so no transcript re-read runs for them."""
+    v = Verdict("aaaa1111-0000", "claude-worker", "blocked", WAKE, "silent", "resume", "claude")
     reads: list[str] = []
     calls = {"n": 0}
 
@@ -866,7 +869,56 @@ def test_apply_wake_confirms_through_the_verdicts_harness(monkeypatch):
     runner = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
     outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
     assert outcome == "applied"
-    assert reads == ["codex", "codex"]
+    assert reads == ["claude", "claude"]
+
+
+def test_apply_wake_codex_row_accepts_resumes_own_daemon_receipt(monkeypatch):
+    """A codex thread wake that exits 0 is delivered: the daemon accepted
+    the turn, which is the same receipt mail trusts. The transcript
+    re-confirm must not run - a lagging rollout write would read as a
+    refusal on a delivered wake and invite a duplicate turn."""
+    v = Verdict("thread-9", "codex-worker", "blocked", WAKE, "silent", "resume", "codex")
+
+    monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **kw: None)
+
+    def _no_confirm(*a, **kw):
+        raise AssertionError("the transcript confirm must not run for codex")
+
+    monkeypatch.setattr(watchdog, "confirm_wake_landed", _no_confirm)
+    runner = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
+    outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
+    assert outcome == "applied"
+    assert "delivery receipt (codex)" in detail
+
+
+def test_apply_wake_refusal_carries_resumes_own_receipt_line(monkeypatch):
+    """AC5-HP (x-6ac3): resume's exit 0 was the false receipt, so its own
+    before -> after line belongs in the refusal detail the next operator
+    reads, without re-running anything."""
+    v = Verdict("aaaa1111-0000", "w1", "blocked", WAKE, "silent", "resume", "claude")
+    monkeypatch.setattr(watchdog, "confirm_wake_landed", lambda *a, **kw: False)
+    runner = lambda cmd, **kw: SimpleNamespace(
+        returncode=0,
+        stderr="",
+        stdout="w1 (aaaa1111-0000): Needs input -> Working\n",
+    )
+    outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
+    assert outcome == "refused"
+    assert "Needs input -> Working" in detail
+
+
+def test_apply_wake_refusal_unchanged_when_resume_prints_nothing(monkeypatch):
+    """AC5-EDGE (x-6ac3): a silent resume keeps today's text with no
+    trailing separator."""
+    v = Verdict("aaaa1111-0000", "w1", "blocked", WAKE, "silent", "resume", "claude")
+    monkeypatch.setattr(watchdog, "confirm_wake_landed", lambda *a, **kw: False)
+    runner = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
+    outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
+    assert outcome == "refused"
+    assert detail == (
+        f"resume reported success but {watchdog.WAKE_MESSAGE!r} is not in "
+        "the transcript after the wake"
+    )
 
 
 def test_a_transcript_read_without_an_agent_refuses():
