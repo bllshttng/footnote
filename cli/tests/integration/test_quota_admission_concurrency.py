@@ -11,6 +11,7 @@ No production quota mutation and no real login is a precondition: runtime
 state is pinned by env, the provider table and the binding proof are
 monkeypatched, and the usage snapshots are written fixtures.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,7 +25,7 @@ import pytest
 from fno.adapters.providers import runtime_state as rs
 from fno.adapters.providers.model import ProviderRecord
 from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
-from fno.config._routing_admission import AdmissionPolicy
+from fno.config.routing_blocks import RoutingAdmissionBlock
 
 NOW = time.time()
 
@@ -75,27 +76,34 @@ def _child_reserve(state_path_str: str, dispatch_id: str, result_queue) -> None:
 
         if sys_path not in sys.path:
             sys.path.insert(0, sys_path)
-        from fno.adapters.providers import admission
+        import fno.config.routing_blocks as routing_blocks
+        from fno.adapters.providers import runtime_state as rs
         from fno.adapters.providers.model import ProviderRecord
-        from fno.config._routing_admission import AdmissionPolicy
+        from fno.config.routing_blocks import RoutingAdmissionBlock
 
-        policy = AdmissionPolicy(
+        policy = RoutingAdmissionBlock(
             enabled=True,
             max_inflight_per_pool=8,
             reservation_ttl_seconds=900.0,
             demand_pct={"do": {"high": 10}},
             reserve_pct={"do": {"high": 10}},
         )
-        admission.resolve_admission_policy = lambda: policy
+        routing_blocks.resolve_admission_policy = lambda: policy
         record = ProviderRecord(
-            id="rec-a", name="rec-a", harness="claude", auth="api_key",
+            id="rec-a",
+            name="rec-a",
+            harness="claude",
+            auth="api_key",
             env={"ANTHROPIC_API_KEY": "sk-test"},
         )
-        receipt = admission.reserve_admission(
-            record, dispatch_id=dispatch_id, verb="do", difficulty="high",
+        receipt = rs.reserve_admission(
+            record,
+            dispatch_id=dispatch_id,
+            verb="do",
+            difficulty="high",
             policy=policy,
         )
-        result_queue.put((receipt.status, receipt.reservation_id))
+        result_queue.put((receipt["status"], receipt["reservation_id"]))
     except Exception as exc:  # pragma: no cover - surfaced as a failure
         result_queue.put((f"error: {exc!r}", None))
 
@@ -154,7 +162,7 @@ def test_canonical_account_change_recomputes_pool_at_launch(tmp_path, monkeypatc
     import json
 
     import fno.adapters.providers.binding as binding_mod
-    from fno.adapters.providers import admission
+    from fno.adapters.providers import runtime_state as rs
 
     state_path = tmp_path / "runtime-state.json"
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(state_path))
@@ -173,29 +181,33 @@ def test_canonical_account_change_recomputes_pool_at_launch(tmp_path, monkeypatc
 
         return _resolve
 
-    monkeypatch.setattr(
-        binding_mod, "resolve_account_binding", _binding_for("makers")
-    )
+    monkeypatch.setattr(binding_mod, "resolve_account_binding", _binding_for("makers"))
     managed = ProviderRecord(id="managed", name="managed", harness="claude", auth="managed")
-    policy = AdmissionPolicy(enabled=True, demand_pct={}, reserve_pct={})
-    first = admission.reserve_admission(
-        managed, dispatch_id="spawn:sel", demand_pct=10.0, policy=policy, now=NOW,
+    policy = RoutingAdmissionBlock(enabled=True, demand_pct={}, reserve_pct={})
+    first = rs.reserve_admission(
+        managed,
+        dispatch_id="spawn:sel",
+        demand_pct=10.0,
+        policy=policy,
+        now=NOW,
     )
-    assert first.admitted
-    assert first.pool == "principal:makers"
+    assert first["status"] == "admitted"
+    assert first["pool"] == "principal:makers"
 
     # The operator manually signs the canonical slot into another account.
-    monkeypatch.setattr(
-        binding_mod, "resolve_account_binding", _binding_for("readyrule")
+    monkeypatch.setattr(binding_mod, "resolve_account_binding", _binding_for("readyrule"))
+    second = rs.reserve_admission(
+        managed,
+        dispatch_id="spawn:launch",
+        demand_pct=10.0,
+        policy=policy,
+        now=NOW,
     )
-    second = admission.reserve_admission(
-        managed, dispatch_id="spawn:launch", demand_pct=10.0, policy=policy, now=NOW,
-    )
-    assert second.admitted
-    assert second.pool == "principal:readyrule"
+    assert second["status"] == "admitted"
+    assert second["pool"] == "principal:readyrule"
     on_disk = json.loads(state_path.read_text())["reservations"]
-    assert on_disk[first.reservation_id]["pool"] == "principal:makers"
-    assert on_disk[second.reservation_id]["pool"] == "principal:readyrule"
+    assert on_disk[first["reservation_id"]]["pool"] == "principal:makers"
+    assert on_disk[second["reservation_id"]]["pool"] == "principal:readyrule"
 
     # An unprovable principal refuses rather than guessing a pool.
     def _unknown(record, **kw):
@@ -204,38 +216,49 @@ def test_canonical_account_change_recomputes_pool_at_launch(tmp_path, monkeypatc
         )
 
     monkeypatch.setattr(binding_mod, "resolve_account_binding", _unknown)
-    from fno.adapters.providers.admission import UNKNOWN_IDENTITY
-
-    refused = admission.reserve_admission(
-        managed, dispatch_id="spawn:third", demand_pct=1.0, policy=policy, now=NOW,
+    refused = rs.reserve_admission(
+        managed,
+        dispatch_id="spawn:third",
+        demand_pct=1.0,
+        policy=policy,
+        now=NOW,
     )
-    assert refused.status == UNKNOWN_IDENTITY
-    assert "credential-unreadable" in (refused.reason or "")
+    assert refused["status"] == rs.UNKNOWN_IDENTITY
+    assert "credential-unreadable" in (refused["reason"] or "")
 
 
 def test_repeated_previews_leave_the_state_byte_identical(tmp_path, monkeypatch):
     """AC4-EDGE: previews render reservations without consuming or touching
     them, and every receipt carries its units and evidence age."""
-    from fno.adapters.providers import admission
+    from fno.adapters.providers import runtime_state as rs
 
     state_path = tmp_path / "runtime-state.json"
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(state_path))
     _seed(state_path)
-    policy = AdmissionPolicy(enabled=True, demand_pct={"do": {"high": 15}}, reserve_pct={"do": {"high": 10}})
-    record = _record()
-    held = admission.reserve_admission(
-        record, dispatch_id="spawn:live", demand_pct=10.0, policy=policy, now=NOW,
+    policy = RoutingAdmissionBlock(
+        enabled=True, demand_pct={"do": {"high": 15}}, reserve_pct={"do": {"high": 10}}
     )
-    assert held.admitted
+    record = _record()
+    held = rs.reserve_admission(
+        record,
+        dispatch_id="spawn:live",
+        demand_pct=10.0,
+        policy=policy,
+        now=NOW,
+    )
+    assert held["status"] == "admitted"
     before = state_path.read_bytes()
 
     for _ in range(5):
-        verdict = admission.preview_admission(
-            record, verb="do", difficulty="high", policy=policy,
+        verdict = rs.preview_admission(
+            record,
+            verb="do",
+            difficulty="high",
+            policy=policy,
         )
-        assert verdict.admitted
-        assert verdict.units == "subscription-percent"
-        assert verdict.evidence_age_s is not None
-        snapshot = admission.reservations_snapshot()
-        assert held.reservation_id in snapshot
+        assert verdict["status"] == "admitted"
+        assert verdict["units"] == "subscription-percent"
+        assert verdict["evidence_age_s"] is not None
+        on_disk = json.loads(state_path.read_text())["reservations"]
+        assert held["reservation_id"] in on_disk
     assert state_path.read_bytes() == before

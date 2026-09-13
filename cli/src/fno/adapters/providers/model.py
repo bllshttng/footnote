@@ -3,6 +3,7 @@
 Phase 01 of the provider rotation substrate (ab-256f6b6e).
 Only data shapes; no CLI surface, no loop wiring.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -88,9 +89,7 @@ class ProviderRecord(BaseModel):
     distinction the old `config.providers` name hid.
     """
 
-    model_config = ConfigDict(
-        extra="allow", str_strip_whitespace=True, populate_by_name=True
-    )
+    model_config = ConfigDict(extra="allow", str_strip_whitespace=True, populate_by_name=True)
 
     # Required fields
     id: str = Field(..., pattern=_ID_PATTERN)
@@ -99,9 +98,7 @@ class ProviderRecord(BaseModel):
     # The `cli` alias keeps pre-rename config.toml loading. Unknown record
     # metadata is retained for forward-compatible round trips, while these
     # known account fields remain strictly typed.
-    harness: _HARNESS_LITERAL = Field(
-        ..., validation_alias=AliasChoices("harness", "cli")
-    )
+    harness: _HARNESS_LITERAL = Field(..., validation_alias=AliasChoices("harness", "cli"))
     auth: _AUTH_LITERAL
     priority: int = Field(default=100, ge=0)
     # Optional explicit model route for unattended outage handoff. These axes
@@ -135,10 +132,8 @@ class ProviderRecord(BaseModel):
 
     # Optional metadata
     account_id: str | None = None
-    # Declared quota-pool association (x-1afa): credentials known to share one
-    # provider budget name the same pool, so admission counts them together.
-    # Undeclared, records stay separate; the canonical managed Claude slot
-    # uses its observed principal as the budget identity instead of this key.
+    # Declared quota-pool key (x-1afa): records that share one provider
+    # budget share one admission pool; undeclared, they stay separate.
     quota_pool: str | None = Field(default=None, min_length=1)
     tags: list[str] = Field(default_factory=list)
     description: str | None = None
@@ -198,24 +193,18 @@ class ProviderRecord(BaseModel):
         from fno.agents.model_routing import _parse_target
 
         if _parse_target(v) is None:
-            raise ValueError(
-                "route must use provider/model spelling with a non-empty model"
-            )
+            raise ValueError("route must use provider/model spelling with a non-empty model")
         return v
 
     @model_validator(mode="after")
     def _check_auth_strategy(self) -> "ProviderRecord":
         """Validate that auth strategy is consistent with credentials fields."""
         if self.route and self.auth != "api_key":
-            raise ValueError(
-                f"auth_strategy_mismatch: {self.id}: "
-                "route requires auth=api_key"
-            )
+            raise ValueError(f"auth_strategy_mismatch: {self.id}: route requires auth=api_key")
         if self.auth == "oauth_dir":
             if self.credentials_source is None:
                 raise ValueError(
-                    f"auth_strategy_mismatch: {self.id}: "
-                    "auth=oauth_dir requires credentials_source"
+                    f"auth_strategy_mismatch: {self.id}: auth=oauth_dir requires credentials_source"
                 )
         elif self.auth == "api_key":
             if self.env and self.route:
@@ -340,9 +329,7 @@ class ProvidersConfig(BaseModel):
                 duplicates.append(r.id)
             seen.add(r.id)
         if duplicates:
-            raise ValueError(
-                f"duplicate_record_ids: {sorted(set(duplicates))}"
-            )
+            raise ValueError(f"duplicate_record_ids: {sorted(set(duplicates))}")
         return self
 
     @property

@@ -425,28 +425,20 @@ def _echo_slots(slots: list[dict]) -> None:
 def admission_cmd(
     # Positionals, not options: the Python flag surface is ratchet-frozen
     # (scripts/ci/flag-baseline.txt); a new flag belongs in crates.
-    verb: str = typer.Argument(
-        "do", help="The work verb to price."
-    ),
-    difficulty: str = typer.Argument(
-        "high", help="The difficulty band to price."
-    ),
+    verb: str = typer.Argument("do", help="The work verb to price."),
+    difficulty: str = typer.Argument("high", help="The difficulty band to price."),
 ) -> None:
     """Preview shared-account capacity admission per declared record (x-1afa).
 
-    PURE READ: this command never reserves, commits, or releases anything.
-    The word ``preview`` on every row marks it as distinct from an actual
-    admission receipt, which only the launch seam (spawn-gate) issues.
+    PURE READ: never reserves; the word ``preview`` marks every row as
+    distinct from an actual launch-seam receipt.
     """
-    from fno.adapters.providers.admission import (
-        outstanding_for_pool,
-        preview_admission,
-    )
+    from fno.adapters.providers import runtime_state as rs
     from fno.adapters.providers.loader import load_providers
-    from fno.config._routing_admission import resolve_admission_policy
+    from fno.config.routing_blocks import resolve_admission_policy
 
     policy = resolve_admission_policy()
-    if not policy.enabled:
+    if policy is None:
         typer.echo(
             "admission: off (config.routing.admission.enabled is false); "
             "rows below are the unarmed preview"
@@ -455,29 +447,20 @@ def admission_cmd(
         f"admission: preview (no reservation consumed) verb={verb} "
         f"difficulty={difficulty} units=subscription-percent"
     )
-    loaded = load_providers()
-    for record in loaded.records:
-        # One binding resolution per record: the receipt carries the pool the
-        # preview used, so the row never re-probes the identity a second time.
-        receipt = preview_admission(
-            record, verb=verb, difficulty=difficulty, policy=policy
-        )
-        pool = receipt.pool
-        outstanding_pct, inflight = (
-            outstanding_for_pool(pool) if pool else (0.0, 0)
-        )
+    for record in load_providers().records:
+        # The receipt carries the pool and the pool's load; the row never
+        # re-probes the identity or re-reads the state doc.
+        receipt = rs.preview_admission(record, verb=verb, difficulty=difficulty, policy=policy)
         line = (
-            f"  {record.id}: {receipt.status} pool={pool} "
-            f"remaining={receipt.remaining_admission_pct}% "
-            f"outstanding={round(outstanding_pct, 2)}% "
-            f"inflight={inflight}/{policy.max_inflight_per_pool} "
-            f"demand={receipt.demand_applied}% "
-            f"reserve={receipt.reserve_applied}%"
+            f"  {record.id}: {receipt['status']} pool={receipt['pool']} "
+            f"remaining={receipt['remaining_admission_pct']}% "
+            f"outstanding={round(receipt['outstanding_pct'] or 0.0, 2)}% "
+            f"inflight={receipt['inflight'] or 0}/{policy.max_inflight_per_pool if policy else 3} "
+            f"demand={receipt['demand_applied']}% reserve={receipt['reserve_applied']}%"
         )
-        if receipt.reason:
-            line += f" ({receipt.reason})"
+        if receipt["reason"]:
+            line += f" ({receipt['reason']})"
         typer.echo(line)
-
 
 
 @route_app.command("env")

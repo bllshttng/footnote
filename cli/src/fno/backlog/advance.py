@@ -3294,8 +3294,7 @@ def advance(
             ),
             node_cwd=node_cwd,
             node_id=node_id,
-            # The admission preview prices the node's own band (x-1afa); the
-            # verb is the one work shape this launcher dispatches.
+            # The admission preview prices the node's own band (x-1afa).
             admission_difficulty=str(node.get("difficulty") or "high"),
         )
     except Exception:  # noqa: BLE001 - a quota read must never wedge advance
@@ -3306,8 +3305,7 @@ def advance(
             node_id=node_id,
             provider=route.source_record,
             retry_at=route.retry_at,
-            # An admission refusal (x-1afa) records which conjunct refused so
-            # the queue receipt names the budget, not just the wait.
+            # An admission refusal names the budget conjunct, not just the wait.
             detail=route.reason if str(route.reason).startswith("admission:") else None,
         )
     if route is not None and route.action == "cutover":

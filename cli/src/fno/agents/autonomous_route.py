@@ -309,55 +309,26 @@ def _admission_deferral(
     verb: str,
     difficulty: str,
 ) -> Optional["AutonomousRoute"]:
-    """The opt-in shared-account reservation read (x-1afa).
-
-    A pure preview: the reservation itself is taken at the launch seam
-    (``spawn_gate``), so this read never consumes anything. A typed refusal
-    defers the launch with its reason and retry hint; a disabled policy, a
-    stale observation, or an unreadable record answers None and the caller
-    keeps whatever verdict the quota signal produced. ``p0`` is the priority
-    exception: it may consume the protected reserve, and still cannot bypass
-    known exhaustion, the inflight cap, or an unprovable identity.
-    """
+    """The opt-in shared-account read (x-1afa): a typed refusal defers;
+    ``p0`` may consume the protected reserve and still cannot bypass the
+    hard refusals. A pure preview that never consumes anything."""
     try:
-        from fno.adapters.providers.admission import (
-            EXHAUSTED,
-            INFLIGHT_CAP,
-            INVALID_POLICY,
-            RESERVED_CAPACITY,
-            UNKNOWN_IDENTITY,
-            preview_admission,
-        )
+        from fno.adapters.providers import runtime_state as rs
         from fno.adapters.providers.loader import load_providers
-        from fno.config._routing_admission import resolve_admission_policy
+        from fno.config.routing_blocks import resolve_admission_policy
 
         policy = resolve_admission_policy()
-        if not policy.enabled:
+        if policy is None:
             return None
-        record = load_providers(
-            repo_root=Path(node_cwd) if node_cwd else None
-        ).by_id.get(provider_id)
+        record = load_providers(repo_root=Path(node_cwd) if node_cwd else None).by_id.get(provider_id)
         if record is None:
             return None
-        receipt = preview_admission(
-            record,
-            verb=verb,
-            difficulty=difficulty,
-            consume_reserve=(priority or "").strip().lower() == "p0",
-            policy=policy,
-        )
+        receipt = rs.preview_admission(record, verb=verb, difficulty=difficulty, consume_reserve=(priority or "").strip().lower() == "p0", policy=policy)
     except Exception:  # noqa: BLE001 - a preview must never block dispatch
         return None
-    if receipt.status not in (
-        EXHAUSTED, RESERVED_CAPACITY, INFLIGHT_CAP, UNKNOWN_IDENTITY, INVALID_POLICY,
-    ):
+    if receipt["status"] not in rs.ADMISSION_REFUSAL_STATUSES:
         return None
-    return AutonomousRoute(
-        "defer",
-        f"admission:{receipt.status}",
-        source_record=provider_id,
-        retry_at=receipt.retry_at,
-    )
+    return AutonomousRoute("defer", f"admission:{receipt['status']}", source_record=provider_id, retry_at=receipt["retry_at"])
 
 
 def select_autonomous_route(
@@ -376,11 +347,9 @@ def select_autonomous_route(
     ``pinned`` is any explicit harness / provider / account / model / node
     route pin: it forbids automatic replacement, never the existing defer.
     ``node_id`` is only for the ``quota_rotation_declined`` telemetry event -
-    it never changes the routing decision.
-
-    When the opt-in admission policy is armed, the stay verdicts are read
-    through the shared-account reservation preview first: a typed refusal
-    defers with an ``admission:<status>`` reason (x-1afa).
+    it never changes the routing decision. When the opt-in admission policy
+    is armed, a typed shared-account refusal defers with an
+    ``admission:<status>`` reason (x-1afa).
     """
     from fno.adapters.providers.runtime_state import (
         HeadroomState,

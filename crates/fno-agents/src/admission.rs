@@ -85,6 +85,114 @@ struct Window {
     resets_at: Option<f64>,
 }
 
+/// The field vocabulary of the config block, sorted; an unknown-field error
+/// names it so a typo'd key refuses instead of silently reading as absent.
+const POLICY_FIELDS: [&str; 5] = [
+    "demand_pct",
+    "enabled",
+    "max_inflight_per_pool",
+    "reservation_ttl_seconds",
+    "reserve_pct",
+];
+
+const POLICY_DIFFICULTIES: [&str; 4] = ["default", "low", "medium", "high"];
+
+/// Python `repr` for the one config value an error sentence quotes, so the
+/// refusal reads the same sentence the config shell used to print.
+fn py_repr(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("'{s}'"),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn is_currency_amount(text: &str) -> bool {
+    text.contains('$')
+        || text.contains('€')
+        || text.contains('£')
+        || text.to_lowercase().contains("usd")
+}
+
+/// The armed block's validation. The config shell never raises and never
+/// strips: raw values travel, and this owner refuses an armed-but-tainted
+/// policy with the exact field-and-unit error.
+fn policy_errors(policy: &Value, unknown_fields: Vec<String>) -> Vec<String> {
+    let mut errs: Vec<String> = Vec::new();
+    if !unknown_fields.is_empty() {
+        errs.push(format!(
+            "routing.admission: unknown field(s) {}; known: {}",
+            unknown_fields.join(", "),
+            POLICY_FIELDS.join(", ")
+        ));
+    }
+    for (key, unit) in [
+        ("max_inflight_per_pool", "positive concurrency bound"),
+        ("reservation_ttl_seconds", "positive TTL"),
+    ] {
+        let ok =
+            matches!(policy.get(key), Some(Value::Number(n)) if n.as_i64().is_some_and(|v| v >= 1));
+        if !ok {
+            errs.push(format!(
+                "routing.admission.{key}: {} is not a {unit}",
+                py_repr(policy.get(key).unwrap_or(&Value::Null))
+            ));
+        }
+    }
+    for name in ["demand_pct", "reserve_pct"] {
+        let table = match policy.get(name) {
+            None | Some(Value::Null) => continue,
+            Some(Value::Object(rows)) => rows,
+            Some(_) => {
+                errs.push(format!(
+                    "routing.admission.{name}: expected a verb -> difficulty table"
+                ));
+                continue;
+            }
+        };
+        for (verb, inner) in table {
+            let rows = match inner.as_object() {
+                Some(rows) => rows,
+                None => {
+                    errs.push(format!(
+                        "routing.admission.{name}.{verb}: expected a difficulty table"
+                    ));
+                    continue;
+                }
+            };
+            for (difficulty, pct) in rows {
+                let where_ = format!("{name}.{verb}.{difficulty}");
+                if !POLICY_DIFFICULTIES.contains(&difficulty.as_str()) {
+                    errs.push(format!(
+                        "routing.admission.{where_}: unknown difficulty '{difficulty}'; known: {}",
+                        POLICY_DIFFICULTIES.join(", ")
+                    ));
+                    continue;
+                }
+                let in_range = matches!(pct, Value::Number(n) if n.as_f64().is_some_and(|f| (0.0..=100.0).contains(&f)));
+                if in_range {
+                    continue;
+                }
+                if let Value::String(text) = pct {
+                    if is_currency_amount(text) {
+                        errs.push(format!(
+                            "routing.admission.{where_}: '{text}' is a currency amount; admission counts subscription-window percentages (0..100), not dollars - API spend forecasting is unsupported"
+                        ));
+                        continue;
+                    }
+                }
+                errs.push(format!(
+                    "routing.admission.{where_}: {} is not a subscription percentage in [0, 100]",
+                    py_repr(pct)
+                ));
+            }
+        }
+    }
+    errs
+}
+
 struct Snapshot {
     provider_id: String,
     probed_at: f64,
@@ -444,27 +552,36 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
         }
         .to_json());
     }
-    let config_errors = armed
-        && policy
-            .get("config_errors")
-            .and_then(Value::as_object)
-            .map(|m| !m.is_empty())
-            .unwrap_or(false);
-    if config_errors {
-        let reason = str_of(policy.get("config_error_text"))
-            .unwrap_or("routing.admission is armed but its table failed validation")
-            .to_string();
-        return Ok(Receipt {
-            status: "invalid_policy",
-            reason: Some(reason),
-            ..Receipt::with_status("invalid_policy", 0.0, 0.0)
+    // The owner validates the armed block itself - percentage range, the
+    // currency marker, the difficulty vocabulary, the two scalars, unknown
+    // block fields - so the config shell passes raw values through untouched.
+    if armed {
+        let unknown = payload
+            .get("policy_unknown_fields")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        let errors = policy_errors(&policy, unknown);
+        if !errors.is_empty() {
+            return Ok(Receipt {
+                status: "invalid_policy",
+                reason: Some(errors.join("; ")),
+                ..Receipt::with_status("invalid_policy", 0.0, 0.0)
+            }
+            .to_json());
         }
-        .to_json());
     }
     let record = payload.get("record").cloned().unwrap_or_else(|| json!({}));
+    // The mutate modes act on the reservation ROW, which carries its own
+    // provider, so they never need the request's record id.
     let provider_id = match str_of(record.get("id")) {
-        Some(p) => p.to_string(),
-        None => return Err("payload needs record.id".into()),
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ if matches!(mode, "commit" | "release" | "refresh") => String::new(),
+        _ => return Err("payload needs record.id".into()),
     };
     let verb = str_of(payload.get("verb")).unwrap_or("do");
     let difficulty = str_of(payload.get("difficulty")).unwrap_or("high");
@@ -644,6 +761,8 @@ fn preview_answer(
     .to_json();
     if let Some(o) = answer.as_object_mut() {
         o.insert("pool".into(), json!(pool));
+        o.insert("outstanding_pct".into(), json!(round4(outstanding)));
+        o.insert("inflight".into(), json!(count));
     }
     Ok(answer)
 }
@@ -714,6 +833,8 @@ fn reserve_answer(
         let mut answer = verdict.to_json();
         if let Some(o) = answer.as_object_mut() {
             o.insert("pool".into(), json!(pool));
+            o.insert("outstanding_pct".into(), json!(round4(outstanding)));
+            o.insert("inflight".into(), json!(count));
         }
         return Ok(answer);
     }
@@ -759,6 +880,8 @@ fn reserve_answer(
     if let Some(o) = answer.as_object_mut() {
         o.insert("pool".into(), json!(pool));
         o.insert("reservation_id".into(), json!(rid));
+        o.insert("outstanding_pct".into(), json!(round4(outstanding)));
+        o.insert("inflight".into(), json!(count));
     }
     Ok(answer)
 }
@@ -841,10 +964,9 @@ mod tests {
         json!({
             "enabled": true,
             "max_inflight_per_pool": 3,
-            "reservation_ttl_seconds": 900.0,
+            "reservation_ttl_seconds": 900,
             "demand_pct": {"do": {"high": 15.0}},
             "reserve_pct": {"do": {"high": 10.0}},
-            "config_errors": {},
         })
     }
 
@@ -895,9 +1017,86 @@ mod tests {
     #[test]
     fn armed_tainted_policy_is_invalid() {
         let mut p = payload("preview", json!({}), json!({}));
-        p["policy"]["config_errors"] = json!({"routing.admission.reserve_pct": "bad"});
+        p["policy_unknown_fields"] = json!(["no_such_knob"]);
         let answer = resolve(&p).unwrap();
         assert_eq!(status(&answer), "invalid_policy");
+        assert!(answer["reason"].as_str().unwrap().contains("no_such_knob"));
+    }
+
+    #[test]
+    fn armed_out_of_range_percentage_is_invalid_with_field_and_unit() {
+        let mut p = payload("preview", json!({}), json!({}));
+        p["policy"]["reserve_pct"] = json!({"review": {"default": 150}});
+        let answer = resolve(&p).unwrap();
+        assert_eq!(status(&answer), "invalid_policy");
+        let reason = answer["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("routing.admission.reserve_pct.review.default"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("is not a subscription percentage in [0, 100]"),
+            "{reason}"
+        );
+        assert!(reason.contains("150"), "{reason}");
+    }
+
+    #[test]
+    fn armed_currency_amount_gets_the_unit_error() {
+        let mut p = payload("preview", json!({}), json!({}));
+        p["policy"]["demand_pct"] = json!({"do": {"high": "$5"}});
+        let answer = resolve(&p).unwrap();
+        assert_eq!(status(&answer), "invalid_policy");
+        let reason = answer["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("routing.admission.demand_pct.do.high"),
+            "{reason}"
+        );
+        assert!(reason.contains("currency amount"), "{reason}");
+        assert!(reason.contains("unsupported"), "{reason}");
+    }
+
+    #[test]
+    fn armed_unknown_difficulty_is_invalid() {
+        let mut p = payload("preview", json!({}), json!({}));
+        p["policy"]["demand_pct"] = json!({"do": {"impossible": 10}});
+        let answer = resolve(&p).unwrap();
+        assert_eq!(status(&answer), "invalid_policy");
+        assert!(answer["reason"]
+            .as_str()
+            .unwrap()
+            .contains("unknown difficulty 'impossible'"));
+    }
+
+    #[test]
+    fn armed_bad_scalars_are_invalid() {
+        let mut p = payload("preview", json!({}), json!({}));
+        p["policy"]["max_inflight_per_pool"] = json!(0);
+        p["policy"]["reservation_ttl_seconds"] = json!(-5);
+        let answer = resolve(&p).unwrap();
+        assert_eq!(status(&answer), "invalid_policy");
+        let reason = answer["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("max_inflight_per_pool: 0 is not a positive concurrency bound"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("reservation_ttl_seconds: -5 is not a positive TTL"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn disarmed_block_is_never_validated() {
+        let mut p = payload("preview", json!({}), json!({}));
+        p["policy"]["enabled"] = json!(false);
+        p["policy"]["reserve_pct"] = json!({"review": {"default": 150}});
+        let answer = resolve(&p).unwrap();
+        assert_eq!(status(&answer), "stale_observation");
+        assert!(answer["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("admission is not enabled"));
     }
 
     #[test]

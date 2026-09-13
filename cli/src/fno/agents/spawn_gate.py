@@ -1141,47 +1141,30 @@ def _refuse_quota_lock(account: str, resets_at: Optional[float]) -> NoReturn:
     })
 
 
-#: Admission statuses that refuse a launch even for a priority exception.
-#: Stale evidence is deliberately absent: a stale observation defers to the
-#: lane's own on_unknown policy (the policy admission does not duplicate), and
-#: a disabled policy means the axis never ran.
-_ADMISSION_REFUSAL_STATUSES = frozenset({
-    "reserved_capacity",
-    "exhausted",
-    "inflight_cap",
-    "unknown_identity",
-    "invalid_policy",
-})
-
-
 def _reserve_account_budget(
     route_provider: Optional[str],
     name: str,
+    guard: "GateGuard",
     *,
     verb: str,
     difficulty: str,
     consume_reserve: bool,
 ) -> Optional[dict[str, object]]:
-    """Reserve shared-account capacity at the admit seam (x-1afa).
-
-    The reserve and the check are one atomic decision inside the admission
-    owner, so two spawners cannot both spend the same remaining allowance.
-    Returns the admitted receipt (for the spawn event), None when the axis is
+    """Reserve shared-account capacity at the admit seam (x-1afa): one
+    atomic decision inside the Rust owner. Returns the receipt, None when
     disarmed or the account is unknown here, and raises :class:`GateRefused`
-    on a typed refusal. A machinery fault degrades open: a broken reservation
-    layer must not wedge every spawn, and the refusal statuses that matter
-    (exhaustion) come from observations the gate would refuse on anyway.
-    """
+    on a typed refusal (releasing the guard first). A machinery fault
+    degrades open."""
     if not route_provider:
         return None
     try:
-        from fno.adapters.providers.admission import reserve_admission
+        from fno.adapters.providers import runtime_state as rs
         from fno.adapters.providers.loader import load_providers
 
         record = load_providers().by_id.get(route_provider)
         if record is None:
             return None
-        receipt = reserve_admission(
+        receipt = rs.reserve_admission(
             record,
             dispatch_id=f"spawn:{name}",
             verb=verb,
@@ -1193,34 +1176,22 @@ def _reserve_account_budget(
     except Exception as exc:  # noqa: BLE001 - a reservation fault admits unreserved
         _warn(f"spawn-gate: admission unavailable ({exc}); admitting unreserved")
         return None
-    if receipt.admitted or receipt.status not in _ADMISSION_REFUSAL_STATUSES:
-        return {
-            "status": receipt.status,
-            "pool": receipt.pool,
-            "reservation_id": receipt.reservation_id,
-            "binding_window": receipt.binding_window,
-            "remaining_admission_pct": receipt.remaining_admission_pct,
-            "units": receipt.units,
-        }
-    from datetime import datetime, timezone
-
-    when = (
-        datetime.fromtimestamp(receipt.retry_at, tz=timezone.utc).isoformat()
-        if receipt.retry_at else "unknown (no reset was readable)"
-    )
+    if receipt["status"] not in rs.ADMISSION_REFUSAL_STATUSES:
+        return receipt
     _warn(
-        f"spawn-gate: account admission refused ({receipt.status}) on "
-        f"{route_provider}: {receipt.reason}; retry at {when}"
+        f"spawn-gate: account admission refused ({receipt['status']}) on "
+        f"{route_provider}: {receipt['reason']}"
     )
+    guard.release()
     _refuse(EXIT_PROVIDER_CAP, {
         "status": "refused",
         "reason": "account_admission_refused",
-        "admission_status": receipt.status,
-        "pool": receipt.pool,
+        "admission_status": receipt["status"],
+        "pool": receipt["pool"],
         "account": route_provider,
-        "detail": receipt.reason,
-        "resets_at": receipt.retry_at,
-        "units": receipt.units,
+        "detail": receipt["reason"],
+        "resets_at": receipt["retry_at"],
+        "units": receipt["units"],
     })
 
 
@@ -1627,12 +1598,9 @@ def run_gate(
 ) -> GateGuard:
     """Run the full gate. Returns a :class:`GateGuard` to hold across dispatch
     on pass; raises :class:`GateRefused` (a SystemExit) on refusal/timeout.
-    All output goes to stderr (the stdout receipt shape is reserved).
-
-    ``admission_verb``/``admission_difficulty`` feed the opt-in shared-account
-    capacity reservation (x-1afa) taken at the admit seams below; the
-    defaults are the most demanding reading, so a caller without node context
-    still reserves conservatively."""
+    All output goes to stderr (the stdout receipt shape is reserved). The
+    admission axes feed the opt-in shared-account reserve taken at the admit
+    seams below; the defaults are the most demanding reading."""
     # Set before the first branch that can refuse, so every refusal event in
     # this run names the spawn it refused (see _CURRENT_SPAWN).
     _CURRENT_SPAWN.set((name, substrate))
@@ -1701,18 +1669,9 @@ def run_gate(
         # Byte-twin with the Rust gate (check-reachable-paths); force also
         # bypasses the king share here, which _check_king_share's own refusal
         # names where it matters. Force consumes the protected reserve (an
-        # operator priority exception) but never known exhaustion, the
-        # inflight cap, or an unprovable identity.
+        # operator priority exception) but never the hard refusals.
         _warn("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)")
-        try:
-            _reserve_account_budget(
-                route_provider, name,
-                verb=admission_verb, difficulty=admission_difficulty,
-                consume_reserve=True,
-            )
-        except GateRefused:
-            guard.release()  # nothing held yet; a no-op kept for symmetry
-            raise
+        _reserve_account_budget(route_provider, name, guard, verb=admission_verb, difficulty=admission_difficulty, consume_reserve=True)
         if substrate == "headless":
             _acquire_worker_slot(guard, name, holder, route_provider)
         return guard
@@ -1877,15 +1836,7 @@ def run_gate(
                     "spawn-gate: forced past cap, RAM floor, and load ceiling "
                     "(--force); provider cap remains enforced"
                 )
-                try:
-                    _reserve_account_budget(
-                        route_provider, name,
-                        verb=admission_verb, difficulty=admission_difficulty,
-                        consume_reserve=True,
-                    )
-                except GateRefused:
-                    guard.release()
-                    raise
+                _reserve_account_budget(route_provider, name, guard, verb=admission_verb, difficulty=admission_difficulty, consume_reserve=True)
                 if substrate == "headless":
                     _take_headless_slot(guard, name, holder, route_provider, provider_cap)
                 return guard
@@ -2049,20 +2000,11 @@ def run_gate(
                         # conjunct, decided where every other axis answers.
                         axes_read["admission"] = "checking"
                         try:
-                            budget_receipt = _reserve_account_budget(
-                                route_provider, name,
-                                verb=admission_verb, difficulty=admission_difficulty,
-                                consume_reserve=False,
-                            )
+                            budget_receipt = _reserve_account_budget(route_provider, name, guard, verb=admission_verb, difficulty=admission_difficulty, consume_reserve=False)
                         except GateRefused:
-                            guard.release()
                             axes_read["admission"] = "refused"
                             raise
-                        axes_read["admission"] = (
-                            str(budget_receipt.get("status"))
-                            if budget_receipt
-                            else "off"
-                        )
+                        axes_read["admission"] = str(budget_receipt["status"]) if budget_receipt else "off"
                         _CURRENT_AXIS.set("max_live")
                         if substrate == "headless":
                             _take_headless_slot(guard, name, holder, route_provider, provider_cap)

@@ -252,58 +252,38 @@ def gates_for(
         out.append(_unreadable("fleet-rows", exc, key="agents.max_live"))
 
     # Shared-account admission (x-1afa): a PREVIEW of the budget conjunct the
-    # launch seam reserves. Pure read half only - an explain never consumes a
-    # reservation - and rendered as a preview verdict, never an admission
-    # receipt.
+    # launch seam reserves; an explain never consumes a reservation.
     if node is not None:
         node_cwd = node.get("_resolved_cwd") or node.get("cwd") or None
         try:
-            from fno.adapters.providers.admission import preview_admission
+            from fno.adapters.providers import runtime_state as rs
             from fno.adapters.providers.loader import effective_active, load_providers
-            from fno.config._routing_admission import resolve_admission_policy
+            from fno.config.routing_blocks import resolve_admission_policy
 
             policy = resolve_admission_policy()
-            if policy.enabled:
-                record_id = (
-                    effective_active(repo_root=Path(node_cwd) if node_cwd else None)
-                    or provider
+            root = Path(node_cwd) if node_cwd else None
+            record_id = (effective_active(repo_root=root) if policy else None) or provider
+            record = load_providers(repo_root=root).by_id.get(record_id or "") if policy else None
+            if policy is not None and record is not None:
+                receipt = rs.preview_admission(record, verb="do", difficulty=str(node.get("difficulty") or "high"), policy=policy)
+                if receipt["remaining_admission_pct"] is not None:
+                    measured = f"{receipt['remaining_admission_pct']}% ({receipt['binding_window']})"
+                else:
+                    measured = f"{receipt['status']} ({receipt['binding_window']})" if receipt["binding_window"] else receipt["status"]
+                verdict = "pass" if receipt["status"] == rs.ADMITTED else ("unknown" if receipt["status"] == rs.STALE_OBSERVATION else "refuse")
+                note = f"preview, not a receipt; units {receipt['units']}; pool {receipt['pool'] or '?'}"
+                if receipt["evidence_age_s"] is not None:
+                    note += f"; evidence age {receipt['evidence_age_s']:.0f}s"
+                out.append(
+                    Gate(
+                        "account-budget",
+                        measured,
+                        f"reserve {(receipt['reserve_applied'] or 0):.0f}%",
+                        verdict,
+                        key="routing.admission",
+                        note=note,
+                    )
                 )
-                record = load_providers(
-                    repo_root=Path(node_cwd) if node_cwd else None
-                ).by_id.get(record_id or "")
-                if record is not None:
-                    receipt = preview_admission(
-                        record,
-                        verb="do",
-                        difficulty=str(node.get("difficulty") or "high"),
-                        policy=policy,
-                    )
-                    armed = receipt.status not in ("stale_observation",)
-                    out.append(
-                        Gate(
-                            "account-budget",
-                            (
-                                f"{receipt.remaining_admission_pct}% ({receipt.binding_window})"
-                                if receipt.remaining_admission_pct is not None
-                                else (
-                                    f"{receipt.status} ({receipt.binding_window})"
-                                    if receipt.binding_window
-                                    else receipt.status
-                                )
-                            ),
-                            f"reserve {receipt.reserve_applied if receipt.reserve_applied is not None else 0:.0f}%",
-                            "pass" if receipt.admitted else ("refuse" if armed else "unknown"),
-                            key="routing.admission",
-                            note=(
-                                f"preview, not a receipt; units {receipt.units}; "
-                                f"pool {receipt.pool or '?'}; "
-                                f"evidence age "
-                                f"{receipt.evidence_age_s if receipt.evidence_age_s is not None else '?':.0f}s"
-                                if receipt.evidence_age_s is not None
-                                else f"preview, not a receipt; units {receipt.units}"
-                            ),
-                        )
-                    )
         except Exception as exc:  # noqa: BLE001 - a preview gate holds no opinion
             out.append(_unreadable("account-budget", exc, key="routing.admission"))
 

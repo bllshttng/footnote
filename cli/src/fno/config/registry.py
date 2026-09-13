@@ -586,8 +586,7 @@ FIELD_META: dict[str, Meta] = {
     "routing.operator_access": Meta(
         "never", "The operator's access posture: local (attending), remote (only verified-native-view rows qualify), or unknown (the default; filters like remote, labeled unknown in receipts). Never inferred.",
     ),
-    # --- config.routing.admission.* (x-1afa, opt-in shared-account capacity
-    # reservations) ---
+    # --- config.routing.admission.* (x-1afa, opt-in capacity reservations) ---
     "routing.admission.enabled": Meta(
         "never", "Arms opt-in shared-account capacity reservations before a routing-lane launch. False (the default) reserves nothing and dispatch behaves exactly as before. Subscription-percent admission only: every value is a share of ONE quota window (0..100), never a dollar amount; API spend forecasting is unsupported.",
     ),
