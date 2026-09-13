@@ -161,9 +161,11 @@ git log origin/main..HEAD --pretty=format:"- %s%n%b" | head -50
 
 ### 4.5 Out-of-scope items are born tracked
 
-**Purpose:** the CI gate `check-oos-tracked.sh` reds any PR whose body has an "Out of scope" / "Not touched here" section containing an item with no tracked reference. This step makes every such item born tracked so the PR lands gate-green. Advisory and best-effort - identical error posture to step 5.5: a tracking failure degrades to today's behavior (a red gate for a human to resolve), NEVER a blocked or failed PR.
+**Purpose:** the CI gate `check-oos-tracked.sh` reds any PR whose body has an "Out of scope" / "Not touched here" / "Not in this PR" section containing an item with no tracked reference. This step makes every such item born tracked so the PR lands gate-green. Advisory and best-effort - identical error posture to step 5.5: a tracking failure degrades to today's behavior (a red gate for a human to resolve), NEVER a blocked or failed PR.
 
-**Fires ONLY when** the description you just composed already contains an ATX heading matching (case-insensitive) `Out of scope`, `Out-of-scope`, or `Not touched here`. Never invent such a section, and never invent items - the section exists only when there is genuinely deferred work grounded in the commits, the plan, or the dispatch context.
+**Fires ONLY when** the description you just composed already contains an ATX heading matching (case-insensitive) `Out of scope`, `Out-of-scope`, `Not touched here`, or `(Explicitly) not in this PR`. Never invent such a section, and never invent items - the section exists only when there is genuinely deferred work grounded in the commits, the plan, or the dispatch context.
+
+When the plan frontmatter says `carveouts: forbidden`, filing a node for an exclusion does not make the PR mergeable. The plan fidelity gate refuses any PR that declares an exclusion section.
 
 Read the graph node id once (the same value step 5.5 reads):
 

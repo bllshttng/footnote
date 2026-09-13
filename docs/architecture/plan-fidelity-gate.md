@@ -55,6 +55,16 @@ A guard on one of N reachable paths is decorative. The two readers enforce indep
 
 A stop-gate-only check is skipped by a direct `fno do pr merge`. A merge-gate-only check is skipped by every autonomous loop that terminates without merging. The join is plan-grain. An inline run with no separate planning thread has zero planned rows and passes. The gate catches an orphan plan that never shipped.
 
+### A plan that forbids carve-outs
+
+The waiver above asks whether a carve-out is tracked. It never asks whether the plan allowed one. A plan answers that with one frontmatter key, `carveouts`, set to `allowed` or `forbidden`. Absent means allowed, and the decision is unchanged.
+
+On `forbidden` the decision refuses in two ways. A carveout filed by the plan's sessions no longer covers a shortfall; it refuses. The PR body is read over REST, and `scripts/ci/check-oos-tracked.sh` runs on it with `PLAN_CARVEOUTS=forbidden`. That script is the one body parser. In this mode any exclusion item refuses, tracked or waived, and the reason is its first stderr line.
+
+Every read fails closed. An unreadable body, a missing script, or a timeout refuses. A node with no PR yet skips the body read, because the stop gate runs only after a PR is open.
+
+The specimen is PR 1599. Its plan said one PR and no new nodes. It shipped five tracked exclusions under `## Explicitly not in this PR`, a heading the script did not match until this change.
+
 ## Carveout severity, stamped by provenance
 
 `fno backlog carveout add` gained a `severity` field, one of `critical`, `high`, `medium`, or `low`. It is plumbed to `RawItem.severity`. The existing `severity_to_priority` in `retro/classify.py` maps it to `p0..p3`. The routing already existed. Only the field was missing.
