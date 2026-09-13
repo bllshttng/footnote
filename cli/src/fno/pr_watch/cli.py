@@ -1088,7 +1088,6 @@ def tick() -> None:
             if result is None or not result.execute_queue:
                 return
             from fno.pr_watch._dispatch import run_execute_queue
-
             executed, skipped = run_execute_queue(
                 result,
                 emit=_emit_event,

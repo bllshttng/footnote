@@ -260,11 +260,9 @@ def _run_launchctl_timed(*args: str, timeout_s: float = _LAUNCHCTL_TIMEOUT_S) ->
 
 
 def _tick_in_flight() -> Optional[int]:
-    """PID of a live, young ``pr-watch:tick`` claim holder, else None.
-
-    Under one StartInterval (600s) is a tick mid-flight; older is a hung tick
-    and the bounce proceeds. Contract: docs/architecture/pr-watch-merge-phase.md.
-    """
+    """PID of a live, young ``pr-watch:tick`` claim holder, else None. Under one
+    StartInterval (600s) is a tick mid-flight; older is a hung tick and bounces.
+    Contract: docs/architecture/pr-watch-merge-phase.md."""
     try:
         from fno.claims.core import claim_status
 

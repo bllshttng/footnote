@@ -147,11 +147,8 @@ def _mark_handled(delivery_state: dict[str, dict], key: str, obs_state: str) -> 
 def _notify_parked_pr(notify, pr: int, slug: str, retries: int, why: str) -> None:
     """One operator notice for a retries-exhausted park; never raises."""
     try:
-        notify(
-            f"PR #{pr} ({slug}) parked after {retries} failed {why} attempts",
-            pr=pr,
-            repo_slug=slug,
-        )
+        notify(f"PR #{pr} ({slug}) parked after {retries} failed {why} attempts",
+               pr=pr, repo_slug=slug)
     except Exception as exc:
         log.warning("pr-watch: notify failed: %s", exc)
 
@@ -1301,7 +1298,6 @@ def run_execute_queue(
             store.set(key, entry)
             set_tick_phase("merge:execute")
             from fno.pr._merge import run_merge_for_durable_grant
-
             try:
                 rc = run_merge_for_durable_grant(
                     pr, str(cand.repo_dir), timeout_s=_ritual_timeout()
