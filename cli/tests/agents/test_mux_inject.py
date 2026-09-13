@@ -568,54 +568,69 @@ def _capture_audits(monkeypatch) -> list[tuple[dict, object]]:
     return seen
 
 
-def test_mux_pane_send_audits_raw_inject(monkeypatch) -> None:
-    """AC10: the mux pane lane records an agent_raw_inject for an unwrapped
-    payload (it never reaches the Rust mail-inject binary, so this site is
-    mandatory, not decorative) and stays silent for a <fno_mail>-wrapped one.
+def _capture_paste_argv(fake: FakeMux) -> list[str] | None:
+    """The payload paste's argv: the one pane send that carries --stdin."""
+    for argv, _input in fake.calls:
+        if "--stdin" in argv:
+            return argv
+    return None
 
-    Since node x-3a64 an unwrapped payload only reaches the pane through
-    ``raw=True``, the keystroke opt-out -- a default send is enveloped and so is
-    audited by construction. That is the row keeping its meaning, not losing it:
-    it still marks every send that arrives at a prompt with no attribution."""
+
+def test_mux_pane_send_leaves_the_audit_to_the_floor(monkeypatch) -> None:
+    """x-91ba moved the raw-inject row into the `fno mux pane send` verb
+    itself, so this lane writes no row of its own: a second write would make
+    every pane dispatch read as two. The unwrapped-vs-wrapped distinction
+    moved with it -- the floor audits every payload identically and never
+    inspects the bytes to decide."""
     from fno.agents.dispatch import _mux_pane_send
 
     fake = FakeMux()
     _patch_mux(monkeypatch, fake)
     seen = _capture_audits(monkeypatch)
 
-    # Unwrapped -> one audit record; wrapped envelope -> none.
+    # Unwrapped keystroke and wrapped envelope: neither produces a lane row.
     _mux_pane_send(_mux_entry(), "/code-review <level> --comment --fix", raw=True)
     _mux_pane_send(_mux_entry(), "<fno_mail from=\"a\">hi</fno_mail>")
 
-    assert len(seen) == 1, "only the unwrapped payload is audited"
-    event, path = seen[0]
-    # The CANONICAL {type, source, data} envelope, not the flat {kind, ...} shape:
-    # ~/.fno/agents/events.jsonl is canonical-only, and a consumer reading
-    # data.target_session (where schema.yaml says it lives) must not miss this.
-    assert event["type"] == "agent_raw_inject"
-    assert event["source"] == "daemon"
-    data = event["data"]
-    assert data["payload"] == "/code-review <level> --comment --fix"
-    assert data["lane"] == "mux-pane"
-    assert data["harness"] == "claude"
-    assert data["target_cwd"] == "/w"
-    assert data["confirmed"] is True
-    # The Python mux site writes the SAME log the Rust mail-inject binary uses
-    # (~/.fno/agents/events.jsonl), so the audit floor is one file, not two.
-    assert str(path).endswith("agents/events.jsonl")
+    assert seen == [], "the lane must not write a second row beside the floor's"
+    paste = _capture_paste_argv(fake)
+    assert paste is not None
+    assert "--source" not in paste, "no label declared, none passed"
 
 
-def test_mux_pane_send_audit_records_a_failed_send_as_unconfirmed(monkeypatch) -> None:
-    """No phantom records: a stalled pane still audits (the bytes may have
-    landed) but says so, instead of asserting an injection that never happened."""
+def test_mux_pane_send_declared_source_rides_the_paste(monkeypatch) -> None:
+    """A declared source_label reaches the floor's verb on the payload paste,
+    so the floor's row joins the dispatch to its bus record."""
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    _capture_audits(monkeypatch)
+
+    _mux_pane_send(
+        _mux_entry(),
+        "/code-review <level> --comment --fix",
+        raw=True,
+        source_label="mail:msg-abc123",
+    )
+
+    assert _capture_paste_argv(fake) is not None
+    paste = _capture_paste_argv(fake)
+    assert paste is not None
+    assert paste[paste.index("--source") + 1] == "mail:msg-abc123"
+
+
+def test_mux_pane_send_failed_send_writes_no_lane_row(monkeypatch) -> None:
+    """No phantom records, x-91ba shape: a failed send is recorded by the
+    floor's own row (outcome refused, confirmed false); the lane writes
+    nothing and demotes the message to durable."""
     from fno.agents.dispatch import _mux_pane_send
 
     _patch_mux(monkeypatch, FakeMux(fail_verbs={"send"}))
     seen = _capture_audits(monkeypatch)
 
     assert _mux_pane_send(_mux_entry(), "/code-review", raw=True) is False
-    assert len(seen) == 1
-    assert seen[0][0]["data"]["confirmed"] is False
+    assert seen == []
 
 
 def test_mux_pane_send_does_not_audit_cross_session_envelope(monkeypatch) -> None:

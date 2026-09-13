@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::mux_cli::{
-    EXIT_CONTROL_UNANSWERED, EXIT_ERROR, EXIT_OK, EXIT_SUBMIT_UNCONFIRMED, EXIT_TARGET_DND,
+    EXIT_CONTROL_UNANSWERED, EXIT_OK, EXIT_SUBMIT_UNCONFIRMED, EXIT_TARGET_DND,
     EXIT_TARGET_IDENTITY_MISMATCH,
 };
 use crate::proto::{read_msg_sync, write_msg_sync, ClientMsg, ServerMsg};
@@ -225,7 +225,7 @@ fn pane_send_audit_events_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mux_cli::{dispatch, parse_pane_args, PaneCmd, SendSource};
+    use crate::mux_cli::{dispatch, parse_pane_args, PaneCmd, SendSource, EXIT_ERROR};
     use std::ffi::OsString;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
