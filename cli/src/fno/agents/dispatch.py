@@ -7529,6 +7529,9 @@ def _queue_durable_fallback(
             provider_to=entry.harness,
             provider_from=provider_from,
             from_session=from_session,
+            # The envelope no longer renders the model (x-d7cf); the durable
+            # row carries it, matching what the live hosted path records.
+            from_model=mail_ctx.model,
             owner=owner or DurableOwner.WAKE_DAEMON.value,
             origin=mail_ctx.origin,
             # Count the raw body, not the wire wrapper: Rule 7 and the rolling

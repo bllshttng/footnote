@@ -2571,6 +2571,11 @@ def _name_lane_send(
             # envelope does, so a drained reply resolves the collision-safe
             # address exactly as a live one does (node x-3a64).
             from_session=sender_session,
+            # And the same sender provenance the hosted and typed rows carry:
+            # the compact envelope no longer renders the model, so the durable
+            # row is where audit reads it.
+            provider_from=sender_harness,
+            from_model=sender_model,
             word_count=authored_words,
             origin=origin,
         )
