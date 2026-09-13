@@ -75,12 +75,9 @@ def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     """Render ``K=V`` pairs as ONE ``-c shell_environment_policy.set={...}``.
 
     A daemon-run tool inherits the daemon's env, not the TUI's, so worker
-    identity stops at the TUI without this. One inline table, not one flag
-    per pair: measured 2026-09-13, repeated `-c` leaves of the same table do
-    not merge on the daemon lane (only the first reached the tool); a single
-    override replaces atomically. The JSON object is a valid TOML inline
-    table and merges with the config.toml ``set`` table at the override
-    layer.
+    identity stops at the TUI without this. Measured 2026-09-13: repeated
+    `-c` leaves of one table do not merge on the daemon lane; one inline
+    table carries every pair atomically.
     """
     table: dict[str, str] = {}
     for pair in pairs:
