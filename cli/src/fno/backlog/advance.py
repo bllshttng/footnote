@@ -4001,13 +4001,20 @@ def _binding_provider() -> Optional[str]:
     from fno.agents import spawn_gate
     from fno.config import load_settings
 
+    probe_lanes = spawn_gate.probe_capacity(only=["lanes"]).get("lanes")
+    if not isinstance(probe_lanes, dict):
+        return None  # an unreadable probe names no binding lane
     binding: Optional[str] = None
     binding_remaining: Optional[int] = None
     for name, budget in dict(load_settings().agents.provider_limits).items():
         cap = spawn_gate.provider_lanes_cap(budget)
         if cap is None:
             continue  # an uncapped provider cannot bind anything
-        remaining = cap - spawn_gate.provider_live_count(name)
+        lane_answer = probe_lanes.get(name)
+        live = lane_answer.get("live") if isinstance(lane_answer, dict) else None
+        if live is None:
+            continue  # an unreadable lane cannot bind the choice
+        remaining = cap - int(live)
         if binding_remaining is None or remaining < binding_remaining:
             binding, binding_remaining = name, remaining
     return binding
@@ -4030,13 +4037,14 @@ class _LaneBudget:
 
 
 def _spawn_budget(provider: Optional[str] = None) -> _LaneBudget:
-    """One pass's width state from the gate's own counters, shared by the drain
-    and the ``--explain`` preview so both price children identically."""
+    """One pass's width state from the ONE gate's probe answer, shared by the
+    drain and the ``--explain`` preview so both price children identically -
+    and identically to the gate that refuses."""
     from fno.agents import spawn_gate
     from fno.config import load_settings
 
     agents_cfg = load_settings().agents
-    fleet = int(agents_cfg.max_live) - spawn_gate.census().slot_count
+    cap = int(agents_cfg.max_live)
     limits = dict(agents_cfg.provider_limits)
     pin_vendor: Optional[str] = None
     if provider is not None:
@@ -4048,18 +4056,47 @@ def _spawn_budget(provider: Optional[str] = None) -> _LaneBudget:
         scoped: dict = {pin_vendor: limits.get(pin_vendor)} if pin_vendor else limits
     else:
         scoped = limits
+    # One probe answer feeds the slot headroom, the per-vendor headroom and
+    # the CPU verdict - three reads of one answer can never disagree.
+    answer = spawn_gate.probe_capacity()
+    probe_lanes = answer.get("lanes") if isinstance(answer, dict) else None
+    if not isinstance(probe_lanes, dict) or answer.get("verdict") == "unknown":
+        # An unreadable probe is fail-closed: no width until the gate can read
+        # the machine again. A width computed from a stale or partial read
+        # would dispatch into refusals.
+        _LOG.warning(
+            "gate probe %s, dispatch width 0: %s",
+            answer.get("verdict", "unreadable"),
+            answer.get("reason", "the gate answered no lanes"),
+        )
+        return _LaneBudget(fleet=0, vendor_remaining={}, binding=None, binding_remaining=None)
+    slots = answer.get("slots")
+    fleet = cap - int(slots) if isinstance(slots, int) else 0
     vendor_remaining: dict[str, int] = {}
     for name, budget in scoped.items():
-        cap = spawn_gate.provider_lanes_cap(budget)
-        if cap is None:
+        cap_v = spawn_gate.provider_lanes_cap(budget)
+        if cap_v is None:
             continue  # an uncapped provider cannot bound the width
-        vendor_remaining[name] = cap - spawn_gate.provider_live_count(name)
+        lane_answer = probe_lanes.get(name)
+        live = lane_answer.get("live") if isinstance(lane_answer, dict) else None
+        if live is None:
+            # An unreadable lane refuses in the gate; here it zeroes the width.
+            _LOG.warning("gate probe could not read lane %s; dispatch width 0", name)
+            return _LaneBudget(fleet=0, vendor_remaining={}, binding=None, binding_remaining=None)
+        vendor_remaining[name] = cap_v - int(live)
     # x-7783 AC10: a hold or undecidable CPU verdict queues/refuses every spawn.
-    from fno.agents.spawn_gate import _cpu_axis
-
-    admission = _cpu_axis()
-    if admission.verdict != "admit":
-        _LOG.warning("cpu axis %s, dispatch width 0: %s", admission.verdict, admission.reason)
+    cpu_refused = answer.get("verdict") == "refused"
+    if not cpu_refused:
+        for row in answer.get("rows") or []:
+            if isinstance(row, dict) and row.get("name") == "cpu-share":
+                cpu_refused = row.get("verdict") == "refuse"
+                break
+    if cpu_refused:
+        _LOG.warning(
+            "gate probe %s, dispatch width 0: %s",
+            answer.get("verdict"),
+            answer.get("message") or answer.get("reason"),
+        )
         fleet = 0
     binding: Optional[str]
     binding_remaining: Optional[int]

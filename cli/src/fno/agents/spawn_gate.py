@@ -515,225 +515,6 @@ _KNOWN_UNROUTED_PROVIDER = "__uncapped__"
 _PROVIDER_ADMISSION_TOKEN = object()
 
 
-def _provider_roster_live_short_ids(short_ids: set[str]) -> set[str]:
-    """Return requested bg ids with a positive live roster marker."""
-    try:
-        raw = json.loads(_roster_path().read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise ProviderCountUnavailable(f"claude roster unreadable: {exc}") from exc
-    workers = raw.get("workers") if isinstance(raw, dict) else None
-    if not isinstance(workers, dict):
-        raise ProviderCountUnavailable("claude roster has no workers object")
-
-    live: set[str] = set()
-    undecidable: set[str] = set()
-    for worker in workers.values():
-        if not isinstance(worker, dict):
-            continue
-        session_id = worker.get("sessionId")
-        if not isinstance(session_id, str) or not session_id:
-            continue
-        short_id = claude_transport_short_id(session_id)
-        if short_id not in short_ids:
-            continue
-        pid = worker.get("pid") if isinstance(worker.get("pid"), int) else None
-        state = _pid_alive(pid, None)
-        if state is True:
-            live.add(short_id)
-        elif state is None:
-            undecidable.add(short_id)
-    unknown = undecidable - live
-    if unknown:
-        raise ProviderCountUnavailable(
-            f"process incarnation unreadable for bg worker(s) {sorted(unknown)}"
-        )
-    return live
-
-
-#: Registry shapes already warned about in THIS process. The unattributed-row
-#: warning describes the registry as a whole, not one provider, so a caller
-#: asking about several providers - or a spawn queueing round the gate loop -
-#: repeated the identical line once per call. Deduped per process rather than
-#: silenced: the fact still reaches stderr exactly once.
-_UNATTRIBUTED_WARNED: set[tuple[str, str]] = set()
-
-
-def provider_live_count(provider: str, counted: Optional[set[str]] = None) -> int:
-    """Count provider rows only when status and positive liveness agree.
-
-    ``counted``, when given, is filled with the names of the rows this count
-    actually included. That is deliberately an out-parameter on the COUNTER
-    rather than a second walk in the caller: a display that recounted would
-    disagree with the refusal the first time either changed, and a lane display
-    that disagrees with the gate is worse than no display. Measured while
-    building `fno agents top`'s lane block: a naive registry walk listed five
-    openai rows beside the gate's count of 0, because status and positive
-    liveness are not the same population.
-    """
-    try:
-        from fno.agents.registry import load_registry
-
-        loaded = load_registry()
-        if getattr(loaded, "complete", True) is not True:
-            raise ProviderCountUnavailable(
-                "registry forward read skipped rows; provider count is incomplete"
-            )
-        live_rows = [row for row in loaded if row.status in LIVE_STATUSES]
-        unattributed: dict[tuple[str, str], int] = {}
-        for row in live_rows:
-            if row.provider:
-                continue
-            if row.origin == "operator":
-                # A hand-started session can never carry a spawn-time provider
-                # stamp; warning about it on every gate read taught nobody
-                # anything and rode stderr ahead of real refusals. Adopted and
-                # unknown-origin rows keep the warning: absence means unknown,
-                # and an unstamped spawn-minted row is the defect it names.
-                continue
-            shape = (row.harness or "unknown", row.origin or "unknown")
-            unattributed[shape] = unattributed.get(shape, 0) + 1
-        for (harness, origin), count in sorted(unattributed.items()):
-            if (harness, origin) in _UNATTRIBUTED_WARNED:
-                continue
-            _UNATTRIBUTED_WARNED.add((harness, origin))
-            _warn(
-                f"{count} live row(s) were minted without a provider stamp "
-                f"(harness={harness}, origin={origin})"
-            )
-        candidates = [row for row in live_rows if row.provider == provider]
-    except Exception as exc:
-        raise ProviderCountUnavailable(f"fno registry unreadable: {exc}") from exc
-
-    bg_short_ids = {
-        row.short_id
-        for row in candidates
-        if row.pid is None
-        and row.harness == "claude"
-        and bool(row.short_id)
-    }
-    bg_live = (
-        _provider_roster_live_short_ids(bg_short_ids) if bg_short_ids else set()
-    )
-
-    count = 0
-    counted_names: set[str] = set()
-
-    def _pane_state(row) -> "bool | None":
-        """Pane liveness via the mux probe. Raises ProviderCountUnavailable
-        when the probe crashes; None when the row carries no pane ref."""
-        if not isinstance(row.mux, dict):
-            return None
-        try:
-            from fno.agents.mux_spawn import _mux_pane_alive
-
-            return _mux_pane_alive(row.mux)
-        except Exception as exc:
-            raise ProviderCountUnavailable(
-                f"pane liveness unreadable for {row.name}: {exc}"
-            ) from exc
-
-    for row in candidates:
-        if row.pid is not None:
-            if row.pid_start_time is None:
-                state = _pid_alive(row.pid, None)
-                if state is False:
-                    continue
-                pane = _pane_state(row)
-                if pane is True:
-                    count += 1
-                    counted_names.add(row.name)
-                    continue
-                if pane is False:
-                    continue
-                raise ProviderCountUnavailable(
-                    f"process incarnation token missing for {row.name}"
-                )
-            state = _pid_alive(row.pid, row.pid_start_time)
-            if state is None:
-                raise ProviderCountUnavailable(
-                    f"process incarnation unreadable for {row.name}"
-                )
-            if state is True:
-                count += 1
-                counted_names.add(row.name)
-            continue
-        pane = _pane_state(row)
-        if pane is True:
-            count += 1
-            counted_names.add(row.name)
-            continue
-        if pane is False:
-            continue
-        if isinstance(row.mux, dict):
-            # Unreadable is not absent: the cap refuses before the bg fallback.
-            raise ProviderCountUnavailable(
-                f"pane liveness unreadable for {row.name}"
-            )
-        if row.short_id and row.short_id in bg_live:
-            count += 1
-            counted_names.add(row.name)
-    if counted is not None:
-        counted.update(counted_names)
-    return count + _provider_live_slot_claims(provider, counted_names)
-
-
-def _provider_live_slot_claims(provider: str, counted_names: set[str]) -> int:
-    """Count provider-tagged headless reservations not represented by rows."""
-    try:
-        from fno.claims.core import claim_status
-
-        root = _gate_claims_root()
-        claims_dir = root / ".fno" / "claims"
-        if not claims_dir.exists():
-            return 0
-        paths = list(claims_dir.glob("worker%3A*.lock"))
-    except Exception as exc:
-        raise ProviderCountUnavailable(
-            f"worker reservations unreadable: {exc}"
-        ) from exc
-
-    count = 0
-    for path in paths:
-        key = unquote(path.name[: -len(".lock")])
-        name = key.removeprefix("worker:")
-        if name in counted_names:
-            continue
-        try:
-            status = claim_status(key, root=root)
-        except Exception as exc:
-            raise ProviderCountUnavailable(
-                f"worker reservation {key} unreadable: {exc}"
-            ) from exc
-        state = status.get("state")
-        if state in ("free", "stale"):
-            continue
-        if state == "corrupted":
-            raise ProviderCountUnavailable(
-                f"worker reservation {key} is corrupted"
-            )
-        metadata = status.get("metadata")
-        model_provider = (
-            metadata.get("model_provider") if isinstance(metadata, dict) else None
-        )
-        if not isinstance(model_provider, str) or not model_provider:
-            _warn(
-                f"live worker reservation {key} was minted without "
-                "model_provider; skipping"
-            )
-            continue
-        if model_provider == _KNOWN_UNROUTED_PROVIDER:
-            continue
-        if model_provider != provider:
-            continue
-        if state == "suspect":
-            raise ProviderCountUnavailable(
-                f"worker reservation {key} liveness is suspect"
-            )
-        if state == "live":
-            count += 1
-    return count
-
-
 def _gate_claims_root() -> Path:
     from fno.claims.io import global_claims_root
 
@@ -1287,110 +1068,6 @@ def _load_snapshot(max_load_per_cpu: float) -> LoadSnapshot:
     )
 
 
-def _king_share(cap: int, crowned: set[str], caller: str) -> int:
-    """One king's fair share of the ceiling: ``cap // crowns`` (x-5283 LD1).
-
-    The divisor counts CROWNS from the court's own ``crown_level`` field; the
-    caller folds in only when itself crowned (LD2: still share-checked, never
-    in the divisor). The floor of 1 keeps a crowded fleet able to start one
-    worker per king. A fleet with NO crowns divides by nothing, so every
-    uncrowned caller's share floors at 1: a session holds one worker until
-    someone is crowned. That is the crownless fleet refusing to be
-    ungoverned, not a malfunction, and the refusal's "across 0 kings" names
-    it.
-    """
-    divisor = len(crowned | ({caller} if caller in crowned else set()))
-    return max(1, cap // divisor) if divisor else 1
-
-
-def share_reading(census_obj: "LiveCensus", cap: int, caller: Optional[str]) -> dict:
-    """One share reading, printed by every surface that answers the question.
-
-    ``kings``/``share``/``held``/``held_rows`` (the caller's worker rows, by
-    name) and ``unattributed`` (the LD4 bucket: live rows that name nobody).
-    An unreadable registry returns None for every count (x-5283 AC9).
-    """
-    if not census_obj.registry_readable:
-        return {"kings": None, "share": None, "held": None,
-                "held_rows": None, "unattributed": None}
-    king_sessions = set(census_obj.crowned_sessions)
-    unattributed_rows = census_obj.worker_rows.get(None, [])
-    held_rows = list(census_obj.worker_rows.get(caller, [])) if caller else []
-    return {
-        "kings": len(king_sessions),
-        "share": _king_share(cap, king_sessions, caller or ""),
-        "held": len(held_rows),
-        "held_rows": held_rows,
-        "unattributed": {
-            "count": len(unattributed_rows),
-            "rows": list(unattributed_rows),
-        },
-    }
-
-
-def _take_headless_slot(
-    guard, name, holder, route_provider, provider_cap
-) -> None:
-    """The headless arm: bind the worker slot now. pane/bg keep the gate mutex
-    until dispatch returns (the caller releases via guard.release())."""
-    try:
-        _acquire_worker_slot(
-            guard, name, holder, route_provider,
-            fail_closed=provider_cap is not None,
-        )
-    except ProviderCountUnavailable as exc:
-        guard.release()
-        # A worker-slot claim fault is not the gate mutex; name the site.
-        _refuse_gate_fault(
-            route_provider or "unknown", exc, reason="lane_reservation_unavailable"
-        )
-    guard.release_gate_mutex()
-
-
-def _check_king_share(
-    census_obj: "LiveCensus", cap: int, *, caller_session: Optional[str]
-) -> None:
-    """Refuse (never queue) when the calling king holds its full share (x-3f84 W4).
-
-    The share divides ``max_live`` by CROWNS (x-5283 LD1); ``held`` counts
-    the caller's worker rows only; only a caller whose session identity
-    resolved is checked; and waiting cannot help - only the caller's own
-    workers dying frees its share - so this refuses like the provider cap.
-    Every number comes from :func:`share_reading`: the count the gate
-    refuses on and the count any readout prints are one value.
-    """
-    if not caller_session:
-        return
-    reading = share_reading(census_obj, cap, caller_session)
-    held, share, kings = reading["held"], reading["share"], reading["kings"]
-    if held is None or share is None or kings is None:
-        # An unreadable registry leaves every count unknown; there is nothing
-        # to enforce and no zero to fail open on.
-        return
-    if held >= share:
-        msg = (
-            f"spawn-gate: king {caller_session[:8]} holds {held} of max_live {cap} "
-            f"across {kings} kings (share {share}); refusing to spawn -- waiting "
-            f"cannot help while your own workers hold the share (--force to bypass)"
-        )
-        unattributed = reading["unattributed"] or {}
-        if unattributed.get("count"):
-            shown = ", ".join(unattributed["rows"][:5])
-            extra = "..." if unattributed["count"] > 5 else ""
-            msg += f"; {unattributed['count']} live row(s) name nobody and sit " \
-                f"in the unattributed bucket ({shown}{extra})"
-        _warn(msg)
-        _refuse(
-            EXIT_KING_SHARE,
-            reason="king_share",
-            king=caller_session,
-            held=held,
-            share=share,
-            max_live=cap,
-            kings=kings,
-        )
-
-
 def _acquire_worker_slot(
     guard: GateGuard,
     name: str,
@@ -1519,12 +1196,14 @@ def run_gate(
     )
 
 
-def probe_capacity() -> dict:
+def probe_capacity(only: Optional[list[str]] = None) -> dict:
     """Answer "would a dispatch be admitted right now" - by asking the ONE
     gate's read-only probe mode. No mutex, no reservations, no refusal events.
     Never raises: an unanswered gate returns ``verdict: unknown``, never
     saturation, and the measurement blocks (``lanes``/``share``/``rows``)
-    carry whatever the probe managed to read.
+    carry whatever the probe managed to read. ``only=["lanes"]`` skips the
+    CPU and RAM reads for callers already on the spawn path (route
+    resolution), where a footprint probe costs seconds under load.
     """
     try:
         from fno.claims.self_identity import resolve_self_identity
@@ -1535,27 +1214,12 @@ def probe_capacity() -> dict:
     from fno.rust_binary import verb_call
 
     try:
-        return verb_call("spawn-gate", {"mode": "probe", "caller_session": caller})
+        return verb_call(
+            "spawn-gate", {"mode": "probe", "caller_session": caller, "only": only}
+        )
     except Exception as exc:  # noqa: BLE001 - an unanswered gate is unknown
         return {"verdict": "unknown", "reason": "gate_unavailable", "error": str(exc)}
 
-
-
-def _probe_refused(reason: str, message: str, **fields: object) -> dict:
-    """One refused probe payload, receipt-shaped like the real gate's."""
-    return {"verdict": "refused", "reason": reason, "message": message, **fields}
-
-# ---------------------------------------------------------------------------
-# Layer 3: background QoS
-# ---------------------------------------------------------------------------
-
-def _qos_enabled() -> bool:
-    try:
-        from fno.config import load_settings
-
-        return load_settings().agents.worker_qos != "off"
-    except Exception:
-        return True
 
 
 def qos_wrap(argv: list[str]) -> list[str]:

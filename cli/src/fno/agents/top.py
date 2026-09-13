@@ -28,58 +28,46 @@ def lane_rows() -> list[dict]:
 
     The constraint that governs this fleet was invisible: measured 2026-09-01
     the zai lane cap was binding (7 live rows, a spawn refused) while every
-    machine-capacity surface said "plenty of room". Counted by the gate's OWN
-    functions (:func:`provider_live_count`, :func:`provider_lanes_cap`),
-    never a second registry walk - a display that recounts disagrees with the
-    refusal the first time either changes. A count that cannot be read is
-    reported as unreadable, NEVER as 0: the gate treats the unreadable case
-    as a refusal (fail-closed), so an empty fleet would invert the meaning.
-    Providers appear when capped or when a live row names them (`cap: None`).
+    machine-capacity surface said "plenty of room". Read from the ONE gate's
+    probe answer (`fno.agents.spawn_gate.probe_capacity`), never a second
+    registry walk - a display that recounts disagrees with the refusal the
+    first time either changes. A count the probe could not read is rendered
+    unreadable, NEVER as 0: the gate treats the unreadable case as a refusal
+    (fail-closed), so an empty fleet would invert the meaning. Providers
+    appear when capped or when a live row names them (`cap: None`).
     """
-    from fno.agents.spawn_gate import (
-        LIVE_STATUSES,
-        ProviderCountUnavailable,
-        provider_lanes_cap,
-        provider_live_count,
-    )
+    from fno.agents.spawn_gate import probe_capacity
 
-    try:
-        from fno.config import load_settings, provider_limits_table
-
-        agents_cfg = load_settings().agents
-        limits = dict(provider_limits_table(agents_cfg))
-    except Exception as exc:  # noqa: BLE001 - an unreadable config is reported
-        return [{"provider": None, "unreadable": f"config unreadable: {exc}"}]
-
-    # Which providers to ASK about. A row's mere presence is enough to raise the
-    # question; whether it OCCUPIES a lane is the counter's answer, not this
-    # set's. Keeping the two apart is what stops an uncapped provider from
-    # disappearing just because nothing counted for it.
-    observed: set[str] = set()
-    try:
-        from fno.agents.registry import load_registry
-
-        for row in load_registry():
-            if row.status in LIVE_STATUSES and row.provider:
-                observed.add(row.provider)
-    except Exception:  # noqa: BLE001 - degrade to the configured providers
-        pass
+    answer = probe_capacity()
+    lanes = answer.get("lanes") if isinstance(answer, dict) else None
+    if not isinstance(lanes, dict):
+        # The probe answered unknown (or not at all): render the whole lane
+        # block unreadable, never as an empty fleet.
+        reason = answer.get("reason") if isinstance(answer, dict) else None
+        error = answer.get("error") if isinstance(answer, dict) else None
+        detail = ": ".join(str(part) for part in (reason, error) if part)
+        return [
+            {
+                "provider": None,
+                "unreadable": f"gate probe unreadable{': ' + detail if detail else ''}",
+            }
+        ]
 
     out: list[dict] = []
-    for provider in sorted(set(limits) | observed):
-        cap = provider_lanes_cap(limits.get(provider))
+    for provider in sorted(lanes):
+        lane_answer = lanes.get(provider) or {}
+        cap = lane_answer.get("cap")
+        live = lane_answer.get("live")
         lane: dict = {"provider": provider, "cap": cap, "holders": []}
-        counted: set[str] = set()
-        try:
-            lane["count"] = provider_live_count(provider, counted)
-        except ProviderCountUnavailable as exc:
+        if live is None:
             lane["count"] = None
-            lane["unreadable"] = str(exc)
+            lane["unreadable"] = "the gate could not read this lane"
         else:
-            lane["full"] = cap is not None and lane["count"] >= cap
-            # Holders come from the counter's own tally, never a second walk:
+            lane["count"] = live
+            lane["full"] = cap is not None and live >= cap
+            # Holders come from the probe's own tally, never a second walk:
             # printing rows the count did not include reads as "0 of these 5".
-            lane["holders"] = sorted(counted)
+            lane["holders"] = sorted(lane_answer.get("counted") or [])
         out.append(lane)
     return out
 
