@@ -51,6 +51,56 @@ resolve_arg() {
         echo "$arg"
         return 0
     fi
+    # A GRAPH_JSON override is a sandbox contract (the shim's own tests, and
+    # callers pinning a scratch graph): resolve against that file with the
+    # full-tier resolver, never the ambient store the verb reads.
+    if [[ -n "${GRAPH_JSON:-}" && ! -f "${GRAPH_JSON:-}" ]]; then
+        echo "[graph-resolve] $GRAPH_JSON missing; using '$arg' as-is" >&2
+        echo "$arg"
+        return 0
+    fi
+    if [[ -n "${GRAPH_JSON:-}" ]]; then
+        local sandbox_result
+        sandbox_result=$(GRAPH_JSON="$GRAPH_JSON" QUERY="$arg" python3 - <<'PYEOF' 2>/dev/null
+import os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), "cli", "src"))
+try:
+    from fno.graph.fuzzy import resolve_id
+    from fno.graph.store import read_graph_strict
+except ImportError:
+    sys.exit(5)
+from pathlib import Path
+entries = read_graph_strict(Path(os.environ["GRAPH_JSON"]))
+match = resolve_id(os.environ["QUERY"], entries)
+if match.kind in ("exact", "fuzzy") and match.candidates:
+    matched = match.candidates[0]
+    if matched.get("plan_path"):
+        sys.stdout.write(matched["plan_path"])
+        sys.exit(0)
+    sys.exit(3)
+if match.kind == "ambiguous":
+    sys.exit(4)
+sys.exit(1)
+PYEOF
+)
+        rc=$?
+        [[ $rc -ne 0 ]] && sandbox_result=""
+        if [[ $rc -eq 0 && -n "$sandbox_result" ]]; then
+            echo "$sandbox_result"
+            return 0
+        fi
+        if [[ $rc -eq 1 ]]; then
+            echo "[graph-resolve] no match for '$arg'" >&2
+        elif [[ $rc -eq 3 ]]; then
+            echo "[graph-resolve] node '$arg' has no plan_path" >&2
+        elif [[ $rc -eq 4 ]]; then
+            echo "[graph-resolve] ambiguous '$arg'" >&2
+        fi
+        [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
+        echo "$arg"
+        return 0
+    fi
+
     if ! command -v fno >/dev/null 2>&1; then
         echo "[graph-resolve] fno CLI unavailable; using '$arg' as-is" >&2
         echo "$arg"

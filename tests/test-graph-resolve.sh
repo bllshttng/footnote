@@ -194,53 +194,56 @@ else
     fail "missing graph.json" "expected 'ab-9728b70b', got '$result'"
 fi
 
-# 9. Legacy fallback: when the fno package is not importable, the
-# resolver should fall back to exact-match-only and tell the user that
-# partial prefixes cannot resolve in this environment. Simulate by
-# pointing PYTHONPATH at an empty directory that shadows the package.
-# We invoke python3 directly (not uv run) and override PYTHONPATH so the
-# import of fno.graph.fuzzy fails.
-echo "test 9: legacy fallback (rc=5) on package import failure"
+# 9. Package absent: the store-cutover resolver has one degradation, not
+# a second resolver leg. When fno.graph is unimportable the sandbox
+# heredoc exits rc=5 and the resolver soft-fails by echoing the arg
+# unchanged, exactly like any other unresolved query. The resolver
+# self-inserts <cwd>/cli/src onto sys.path, so the simulation runs from
+# the empty directory itself: no cli/src beside it, and PYTHONPATH
+# shadowed, the import of fno.graph.fuzzy fails.
+echo "test 9: package import failure passes the arg through (rc=5)"
 EMPTY_DIR=$(mktemp -d -t graph-resolve-empty.XXXXXX)
 trap 'rm -rf "$STDERR_CAPTURE" "$EMPTY_DIR"' EXIT
 
-# 9a. Full ab-id in legacy mode resolves via the legacy path.
+# 9a. Full ab-id with the package absent echoes unchanged.
 : > "$STDERR_CAPTURE"
 result=$(
-    cd "$REPO_ROOT" || exit 99
+    cd "$EMPTY_DIR" || exit 99
     export GRAPH_JSON="$FIXTURE"
     export PYTHONPATH="$EMPTY_DIR"
     bash -c "source '$RESOLVER' && resolve_arg 'ab-9728b70b'" 2>"$STDERR_CAPTURE"
 )
-expected="internal/fno/plans/2026-05-05-provider-rotation-failover.md"
-if [[ "$result" == "$expected" ]]; then
-    pass "legacy fallback resolves full ab-id"
+if [[ "$result" == "ab-9728b70b" ]]; then
+    pass "package-absent full id echoes unchanged"
 else
-    fail "legacy fallback full id" "expected '$expected', got '$result' (stderr: $(cat "$STDERR_CAPTURE"))"
+    fail "package-absent full id" "expected 'ab-9728b70b', got '$result' (stderr: $(cat "$STDERR_CAPTURE"))"
 fi
-if grep -q "falling back to legacy" "$STDERR_CAPTURE" 2>/dev/null; then
-    pass "legacy fallback prints explicit notice"
-else
-    fail "legacy fallback notice" "expected 'falling back to legacy' in stderr, got: $(cat "$STDERR_CAPTURE")"
+if [[ "${RESOLVE_STRICT:-}" != "1" ]]; then
+    rc_probe=$(
+        cd "$EMPTY_DIR" || exit 99
+        export GRAPH_JSON="$FIXTURE" PYTHONPATH="$EMPTY_DIR" RESOLVE_STRICT=1
+        bash -c "source '$RESOLVER' && resolve_arg 'ab-9728b70b' >/dev/null" 2>/dev/null
+    )
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        pass "package-absent strict mode fails closed"
+    else
+        fail "package-absent strict mode" "expected nonzero exit under RESOLVE_STRICT=1"
+    fi
 fi
 
-# 9b. Partial ab-id in legacy mode echoes input + warns the user.
+# 9b. Partial ab-id with the package absent echoes unchanged too.
 : > "$STDERR_CAPTURE"
 result=$(
-    cd "$REPO_ROOT" || exit 99
+    cd "$EMPTY_DIR" || exit 99
     export GRAPH_JSON="$FIXTURE"
     export PYTHONPATH="$EMPTY_DIR"
     bash -c "source '$RESOLVER' && resolve_arg 'ab-9728'" 2>"$STDERR_CAPTURE"
 )
 if [[ "$result" == "ab-9728" ]]; then
-    pass "legacy fallback echoes partial prefix unchanged"
+    pass "package-absent partial prefix echoes unchanged"
 else
-    fail "legacy fallback partial echo" "expected 'ab-9728', got '$result'"
-fi
-if grep -q "partial-prefix" "$STDERR_CAPTURE" 2>/dev/null; then
-    pass "legacy fallback warns about partial-prefix limitation"
-else
-    fail "legacy fallback partial warning" "expected 'partial-prefix' in stderr, got: $(cat "$STDERR_CAPTURE")"
+    fail "package-absent partial prefix" "expected 'ab-9728', got '$result'"
 fi
 
 # 10. Non-hex ab- inputs are filtered at the shell-regex level (hex-only
