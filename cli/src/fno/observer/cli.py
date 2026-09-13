@@ -430,13 +430,7 @@ def sweep(
         # Deliberately NOT wired into the session-start hook: an autonomous
         # spawner needs its own registry row and a config.autonomy gate.
         for item in items[-judge_n:]:
-            pp = item.get("plan_path")
-            text = _plan_text_of(Path(pp)) if pp else None
-            if not text or not _has_five_questions(text):
-                continue  # coverage gap, never a fail
-            n = by_id.get(item.get("graph_node_id")) or {}
-            node_text = "\n".join(filter(None, [str(n.get("title") or ""), str(n.get("details") or "")]))
-            _run_judge(text, node_text, item, run_id, events_paths)
+            _judge_one_item(item, _node_text(by_id.get(item.get("graph_node_id")) or {}), run_id, events_paths)
         typer.echo(f"  judge: offered the model judge to {min(judge_n, len(items))} window plan(s)")
 
     state = "ok" if scored_count == len(items) else "partial"
@@ -488,6 +482,10 @@ def _has_five_questions(text: str) -> bool:
         return False
 
 
+def _node_text(n: dict) -> str:
+    return "\n".join(filter(None, [str(n.get("title") or ""), str(n.get("details") or "")]))
+
+
 def _node_text_of(node_id: Optional[str]) -> str:
     if not node_id:
         return ""
@@ -495,7 +493,17 @@ def _node_text_of(node_id: Optional[str]) -> str:
     from fno.scoreboard.fold import read_graph_nodes
 
     n = {x.get("id"): x for x in read_graph_nodes(_paths.graph_json())}.get(node_id) or {}
-    return "\n".join(filter(None, [str(n.get("title") or ""), str(n.get("details") or "")]))
+    return _node_text(n)
+
+
+def _judge_one_item(item: dict, node_text: str, run_id: str, events_paths: list[Path]) -> tuple[str, int]:
+    """Read the item's plan, skip coverage gaps, judge it into run_id.
+    Returns ("judged", fail_count) or ("gap", 0) - a gap is coverage, never a fail."""
+    pp = item.get("plan_path")
+    text = _plan_text_of(Path(pp)) if pp else None
+    if not text or not _has_five_questions(text):
+        return "gap", 0
+    return "judged", _run_judge(text, node_text, item, run_id, events_paths)
 
 
 def _run_judge(text: str, node_text: str, item: dict, run_id: str, events_paths: list[Path]) -> int:
@@ -542,16 +550,17 @@ def judge_cmd(
     if not force and loop_level("blueprint_judge") == "report":
         typer.echo("skipped level=report")
         return
-    text = _plan_text_of(plan)
-    if text is None:
+    if not plan.exists():
         typer.echo(f"unanswered: no plan at {plan}")
         raise typer.Exit(1)
-    if not _has_five_questions(text):
+    typer.echo(f"judging {plan} ({node or 'no node'})")
+    status, fails = _judge_one_item(
+        {"session_id": None, "graph_node_id": node, "plan_path": str(plan)},
+        _node_text_of(node), _mint_run_id("fno:blueprint"), _events_paths(),
+    )
+    if status == "gap":
         typer.echo("unanswered: plan carries no ## Five questions section; no judge call")
         return
-    typer.echo(f"judging {plan} ({node or 'no node'})")
-    fails = _run_judge(text, _node_text_of(node), {"session_id": None, "graph_node_id": node},
-                       _mint_run_id("fno:blueprint"), _events_paths())
     if fails:
         typer.echo("revise the plan once, or write a one-line disposition under that question; intake proceeds either way")
 
