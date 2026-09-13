@@ -160,11 +160,34 @@ Same-project by-name delivery was the unfinished half of the bus: `fno agents se
 
 - `from_session` - the sender's session id, the audit/robustness key for sender-exclusion on a broadcast.
 - `from_model` - the sender's model, reserved for the render. No truthful source exists in `AgentEntry` today, so no producer sets it yet; the field is forward-compat room, not fabricated.
-- `to_kind` - the addressing discriminator: `name | session | project`. `fno agents send <name>` sets `name`; the `--to-project` durable path sets `project`.
+- `to_kind` - the addressing discriminator: `name | session | project | fleet`. `fno agents send <name>` sets `name`; the `--to-project` durable path sets `project`; a fleet announcement sets `fleet`.
 
-**Sender-exclusion.** `scan_unread(name, *, exclude_from=...)` drops messages whose `from`/`from_session` is in `exclude_from`. By-name reads pass nothing (a direct address is never a self-echo); the project-broadcast read excludes the worker itself so it never drains its own broadcast back. The load-bearing exclusion key is the sender name (always present); `from_session` is secondary.
+**Sender-exclusion.** `scan_unread(name, *, exclude_from=...)` drops messages whose `from`/`from_session` is in `exclude_from`. By-name reads pass nothing (a direct address is never a self-echo). The load-bearing exclusion key is the sender name (always present); `from_session` is secondary. The project-broadcast read that used this exclusion is gone: no writer ever produced a `to_kind: project` row (measured 2026-09-13: 0 of 4609 bus lines), and fleet announcements (below) are addressed to `fleet:<scope>`, which no session handle equals, so `scan_unread` cannot return one by construction.
 
-**Loop-boundary drain.** `peek_nudge` now drains the union of (a) by-name mail to this worker and (b) project broadcasts not sent by it, restoring global oldest-first order across the two cursor-bounded scans. The worker's own registry name is resolved best-effort from its unique live cwd (`_resolve_self_name`); zero-or-many live entries at one cwd degrade to project-only delivery rather than guess. The Rust `nudge.rs` is unchanged: it already shells out to the Python `fno agents nudge-peek`, so the fix lands entirely in the Python it calls.
+**Loop-boundary drain.** `peek_nudge` drains by-name mail to this worker, oldest first, through its own cursor-bounded scan. The worker's own registry name is resolved best-effort from its unique live cwd (`_resolve_self_name`); no resolvable name means nothing drains rather than a guessed recipient. Fleet announcements take the SAME boundary natively: `nudge.rs::append_inbox_nudge` calls `crate::announce::read_render` before the addressed-mail shell-out, so one block message carries both.
+
+## Fleet announcements (one bus line)
+
+One announcement is ONE `kind: "announce"` envelope on the shared bus, appended under the same sidecar flock every Python appender uses (`crates/fno-agents/src/announce.rs`, reached as `fno agents mail team` or the binary-direct `fno-agents announce send`). Sending costs one write at any fleet size; the old per-recipient `dispatch_send` loop (37 sends in 19 minutes, 18 durable copies no one proved read) is gone.
+
+**Envelope.** Key order matches `to_json_line`; `to: "fleet:<scope>"` and `to_kind: "fleet"` mean no Python address can ever equal it, so `scan_unread` and every addressed-mail reader cannot deliver it. `meta` carries `scope`, `audience` (the snapshot), `subject`, `expires_at`, `urgent`, `supersedes`.
+
+**Audience snapshot.** At send time the writer records the `session_identity_key` of every live registry row matching the scope: non-terminal status, a session id, `crown_level` set for `kings`, territory equality (alias-normalized) for a crown scope, and the same equality or a cwd path match for `project:<p>`. That list is the receipt denominator.
+
+**Late arrivals.** A session outside the snapshot that matches the scope at read time still sees a standing announcement. Receipts count it as `late`, never in the audience N.
+
+**Per-session cursor.** `<state_dir>/announce-cursors/<session>.json`, a seen-id set in the nudge-cursors shape but a separate file on purpose: `peek_nudge` prunes its cursor to its own unread set, so a shared file would drop announcement ids and re-surface them forever. The reader prunes to ids still on retained bus segments.
+
+**Render.** `<fno_mail id="..." kind="announce" from="..." subject="..." expires="...">body</fno_mail>`. The id inside the open tag is what a transcript scan proves landing with; no new marker exists.
+
+**Receipts.** `announce status <id>` is the sender view: `audience N, landed L, pending P, woken W, unreachable U, late K`. A session is `landed` when a `kind: "landed"` control row exists for the (announcement, session) pair, else when its transcript carries the id (claude `<projects>/*/<id>.jsonl`, codex rollout scan; a session with no resolvable store is `unreachable`, never `pending`). On transcript proof the status run appends the landed control row, so the next run re-reads nothing. `mail team --json` prints the send receipt only; status is a separate read.
+
+**Expiry and supersession.** `--expires` defaults to 24h and caps at 7d; readers skip expired rows. A newer announcement with the same `subject` and scope lists the older standing one in `meta.supersedes`, and readers skip superseded rows, so a woken session only ever sees current news.
+
+**Authority and rate limit.** The Python shim keeps the three body guards (forged envelope, byte cap, style lint - the single style implementation stays there) and resolves the sender: a session whose harness identity the process can prove it owns stamps `agent`, everything else stamps `operator`. Rust accepts an operator, or an `agent` whose live registry row holds a crown; anything else refuses with exit 2. Six announcements per sender per rolling hour, counted from the bus itself.
+
+**Boundaries.** Claude: `inject-announce.sh` on SessionStart (source `compact` maps to the compact boundary) and UserPromptSubmit. Codex: UserPromptSubmit, PostCompact, and section 6a of `session-start.sh`. The target loop reads natively in `nudge.rs` at its block paths. opencode reads in `experimental.chat.system.transform`; pi reads in `before_agent_start`, the pre-turn event whose returned message is injected into the session. A plain Stop is not a delivery boundary (the turn is over); urgent wake for idle sessions is wave 4 and depends on x-6ac3.
+
 
 **Projection.** `fno inbox view [--from P] [--all] [--json] [-n N]` renders the bus log (the source of record) read-only, surfacing the enriched fields when present and ignoring unknown fields (forward-compatible). It is project-scoped by default (traffic to/from the project or an agent in it) so a cross-project body is not leaked; `--all` is the explicit operator view. The bus log file is created `0o600` (it holds message bodies; create-only, so pre-existing logs keep their prior mode).
 
