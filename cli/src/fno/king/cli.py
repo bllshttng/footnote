@@ -749,9 +749,30 @@ def drain_cmd(
     failure as drained.
     """
     from fno.graph.store import GraphUnreadableError, StoreUnavailable
+    from fno.king import drain_cache
     from fno.king.scope import scope_undelivered
-    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
+    from fno.tracker import active_backend_name
+    from fno.tracker.metadata import (
+        ExternalMetadataUnavailable,
+        _graph_store_path,
+        read_entries,
+    )
 
+    path = _graph_store_path()
+    # The cache rides only the default backend: an external selection raises
+    # below, and its data must never be answered from a graph-store row.
+    ident = (
+        drain_cache.graph_ident(path) if active_backend_name() == "graph" else None
+    )
+    if ident is not None:
+        cached = drain_cache.load(scope, ident)
+        if cached is not None and drain_cache.graph_ident(path) == ident:
+            # `cached` names which store this count came from; the gate
+            # reads `undelivered` and ignores the extra key.
+            typer.echo(
+                json.dumps({"scope": scope, "undelivered": cached, "cached": True})
+            )
+            return
     try:
         entries = read_entries("king drain", strict=True)
         undelivered = scope_undelivered(scope, entries)
@@ -763,6 +784,12 @@ def drain_cmd(
     ) as exc:
         typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
         raise typer.Exit(1) from exc
+    # Key the row on the post-read stat: the entries describe the file as of
+    # the keeper's read, so the row cannot outlive the bytes it was computed
+    # from beyond the one-hit race window the keeper's own cache carries.
+    post = drain_cache.graph_ident(path)
+    if post is not None:
+        drain_cache.store(scope, post, undelivered)
     typer.echo(json.dumps({"scope": scope, "undelivered": undelivered}))
 
 
