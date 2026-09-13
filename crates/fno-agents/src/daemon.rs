@@ -10222,12 +10222,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     // shrink).
     #[path = "gc_receipts.rs"]
     mod gc_receipts;
-    // The x-e3cc hold-clock and release-verb families: same fixtures, new
-    // file, so gc_receipts stays under the budget its own tests grew it to.
     #[path = "keeper_sweep.rs"]
     mod keeper_sweep;
     #[path = "reap_holds.rs"]
     mod reap_holds;
+    #[path = "reap_session.rs"]
+    mod reap_session;
     #[path = "rm_refusal.rs"]
     mod rm_refusal;
     // The rm success family, moved verbatim into its own module for the
