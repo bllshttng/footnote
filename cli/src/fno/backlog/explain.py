@@ -10,7 +10,7 @@ selection.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, cast
+from typing import Optional
 
 from fno.graph.store import ready as store_ready
 from fno.graph._intake import repo_root

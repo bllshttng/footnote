@@ -33,7 +33,7 @@ One table is shared by both trees. It lives in `cli/src/fno/agents/spawn_gate.py
 
 ## Refusal events stay Python-emitted
 
-Some spawns ENTER Python: pane, routed, and account. For them the verb returns the event fields, and the Python transport emits `spawn_gate_refused` through `_refuse`. The journal vocabulary is unchanged. The native unrouted arms emit nothing yet. x-ab75 owns a Rust emit, blocked on a config-resolved state-dir parity. See `scripts/ci/check-gate-refusals-emit.sh` for the seam guard.
+Some spawns ENTER Python: pane, routed, and account. For them the verb returns the event fields, and the Python transport emits `spawn_gate_refused` through `_refuse`. The journal vocabulary is unchanged. The native unrouted arms emit nothing yet. A Rust emitter is still owed, blocked on a config-resolved state-dir parity. See `scripts/ci/check-gate-refusals-emit.sh` for the seam guard.
 
 ## The registry schema check refuses writes it cannot understand
 
