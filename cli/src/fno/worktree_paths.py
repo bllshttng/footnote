@@ -388,6 +388,67 @@ def resolve_worktree_policy(
     )
 
 
+def _repo_identity(path: Path) -> Optional[tuple[Path, Path]]:
+    """``(top, common dir)`` for ``path``; None outside a git repo / on failure.
+
+    The top is what the resolver reads config against; the common dir is the
+    identity, so a linked worktree of the caller's own repo never reads as
+    foreign.
+    """
+    try:
+        top_p = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True,
+        )
+        common_p = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return None
+    top_out = top_p.stdout.strip()
+    common_out = common_p.stdout.strip()
+    if not top_out or not common_out:
+        return None
+    top = Path(top_out).resolve()
+    common = Path(common_out)
+    if not common.is_absolute():
+        common = top / common
+    return top, common.resolve()
+
+
+def undeclared_dispatch_pin(
+    target_cwd: Path, caller_cwd: Path, harness: Optional[str]
+) -> dict[str, str]:
+    """The env a dispatcher exports for a spawn into an UNDECLARED repo.
+
+    Identity is the git common dir, so a worker dispatched from a linked
+    worktree into its own repo's canonical checkout is the same repo, not a
+    foreign target. ``source == "default"`` means nothing anywhere named the
+    target repo - not a per-project entry, not a global key, not the repo's
+    own config. Reached by a dispatch from elsewhere, that is the repo whose
+    edits the child's hooks would block and whose worktree ceremony the child
+    would loop in, so the dispatcher pins ``never`` for the child instead of
+    writing config into somebody else's project. The caller's own repo, a
+    declared repo, an already-decided ``FNO_WORKTREE_POLICY`` (source
+    ``env``), and a non-git target all keep the ambient posture. An
+    undecidable resolve (parse error) also keeps it: the child's own hooks
+    hit the same resolver and refuse with the reason, so the dispatch adds no
+    second refusal surface.
+    """
+    target = _repo_identity(target_cwd)
+    caller = _repo_identity(caller_cwd)
+    if target is None or caller is None or target[1] == caller[1]:
+        return {}
+    try:
+        pol = resolve_worktree_policy(target[0], harness)
+    except Exception:  # noqa: BLE001 - undecidable target keeps the ambient posture
+        return {}
+    if pol.source != "default":
+        return {}
+    return {"FNO_WORKTREE_POLICY": "never"}
+
+
 def _worktrees_base_from(merged: dict) -> Path:
     """Repo-scoped worktrees base from the merged (repo>global) config.
 

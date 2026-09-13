@@ -1775,6 +1775,10 @@ PROVENANCE_KEYS: tuple[str, ...] = (
     "FNO_SLUG",
     "FNO_PLAN",
     "FNO_NODE_CLAIM_HOLDER",
+    # A worktree-policy pin rides the group: set-or-clear is the only safe
+    # inheritance rule for it too. A child dispatched into a different repo
+    # must not inherit the parent's pin for a repo it never targeted.
+    "FNO_WORKTREE_POLICY",
 )
 
 #: Re-exported (x-3a64), never redefined: the clear list must not drift from the

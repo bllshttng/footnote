@@ -2051,6 +2051,24 @@ def cmd_spawn(
         if launch_account_label:
             prov_env["FNO_ACCOUNT"] = launch_account_label
 
+    # A spawn into an undeclared FOREIGN repo pins `never` for the child: the
+    # dispatcher is the one side that knows the target is not the caller's own,
+    # and the alternative is the child's hooks blocking its edits and pushing
+    # it into worktree ceremony the target never asked for. The pin rides the
+    # provenance overlay (set-or-clear on every substrate); the receipt line
+    # is what makes a later `why did that worker work in place` answerable.
+    from fno.worktree_paths import undeclared_dispatch_pin
+
+    _pin = undeclared_dispatch_pin(workdir, Path(os.getcwd()), harness)
+    if _pin:
+        prov_env = dict(prov_env) if prov_env is not None else {}
+        prov_env.update(_pin)
+        print(
+            "worktree=never (undeclared repo; declare "
+            "work.workspaces.<slug>.projects[].worktree to change it)",
+            file=sys.stderr,
+        )
+
     # The loop gate, on the same message and for the same reason as the carrier
     # above. resolve_dispatch runs this check too, and the comment three lines
     # up is why it is not enough: a direct spawn never reaches that resolver, so
