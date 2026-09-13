@@ -2075,12 +2075,9 @@ def run_merge(
             file=sys.stderr,
         )
 
-    # (2b) The flake probe, pinned to covered_head. Rerun-recovery reads
-    # workflow-run history at the head the gate just pinned - facts immutable
-    # at that SHA - so the decision cannot describe one head while the owner
-    # authorizes another. Still outside the serialized lock: network reads
-    # inside the lock stretch the window every queued merge waits on. The
-    # hold/journal decision itself stays in _do_merge, ahead of the stamp.
+    # (2b) The flake probe, pinned to covered_head (immutable history at that
+    # SHA, and outside the lock so the reads never stretch the merge window).
+    # The hold/journal decision stays in _do_merge, ahead of the stamp.
     flake = None
     if auto_merge.require_checks_pass:
         try:
@@ -2360,12 +2357,9 @@ def _do_merge(
     if decision.get("outcome") != "authorized":
         return _emit_authorized_outcome(pr_number, decision, strategy)
 
-    # The flake hold: a rerun-recovered green is not a clean green. The checks
-    # verdict reads only the latest rollup, so a CI failure recovered by a
-    # re-run authorizes like never-failed - the path that merged a known
-    # shard-ordering flake and reded main with it. The probe ran before the
-    # lock (run_merge 2b); this is only the decision. Sits before the coverage
-    # stamp: a head this gate holds must not green for the web button.
+    # The flake hold: a rerun-recovered green is not a clean green (the checks
+    # verdict reads only the latest rollup). Probe ran at 2b; this is only the
+    # decision. Sits before the coverage stamp: a held head must not green.
     if flake is not None and flake.get("recovered"):
         failed = ", ".join(flake.get("failed") or []) or "unknown checks"
         if not accept_flake:
