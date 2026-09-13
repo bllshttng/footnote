@@ -68,6 +68,10 @@ pub struct WebArgs {
     /// remote reach is delegated to tailscale / a reverse proxy, not in-process TLS.
     pub bind: String,
     pub port: u16,
+    /// `--stop`: kill the running bridge for this session instead of serving
+    /// one. The state file names the pid; the pid's start token names the
+    /// process.
+    pub stop: bool,
 }
 
 impl Default for WebArgs {
@@ -76,6 +80,7 @@ impl Default for WebArgs {
             session: proto::DEFAULT_SESSION.to_string(),
             bind: "127.0.0.1".to_string(),
             port: 8722,
+            stop: false,
         }
     }
 }
@@ -144,25 +149,118 @@ fn reign_html_path() -> PathBuf {
 /// once. Written 0600 (the token is the only URL guard); removed by `Drop`
 /// on every exit path. A SIGKILLed bridge leaves it behind - the reader
 /// (`mux_cli::print_pane_url`) probes the TCP port, so a corpse file reads
-/// as "no bridge", never as a dead URL.
+/// as "no bridge", never as a dead URL. `serve --web --stop` is the other
+/// reader: it kills the recorded pid, and the `started` token is what lets
+/// it refuse a recycled pid instead of signalling a stranger.
 struct WebStateFile(PathBuf);
+
+/// Path of the bridge's live-state marker beside a session socket. The one
+/// construction for writer and readers, so the file name cannot drift.
+fn web_state_path(socket: &Path) -> Option<PathBuf> {
+    let session = socket
+        .file_stem()
+        .and_then(|s| s.to_str())
+        // socket_path() names the file <session>.sock; the stem is the name.
+        .unwrap_or(proto::DEFAULT_SESSION);
+    socket
+        .parent()
+        .map(|p| p.join(format!("web-{session}.json")))
+}
+
+/// The state-file path from a session name; the one lookup for readers
+/// outside this module (`--stop` resolves the socket itself).
+pub(crate) fn web_state_path_for_session(session: &str) -> Option<PathBuf> {
+    web_state_path(&proto::socket_path(session).ok()?)
+}
+
+/// Read a session's web-bridge state file (x-b80d) and build the pasteable
+/// per-pane URL. The bridge writes `web-<session>.json` at bind; a file whose
+/// port no longer answers is a corpse, not a bridge, so the TCP probe - not
+/// the file's existence - decides liveness. Exit codes follow the mux verbs'
+/// (0 printed, 1 no usable bridge).
+pub(crate) fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
+    let hint = format!(
+        "no web bridge for session {session}; start one with: fno mux serve --web --session {session}"
+    );
+    let Some(path) = web_state_path_for_session(session) else {
+        eprintln!("{verb}: {hint}");
+        return 1;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        eprintln!("{verb}: {hint}");
+        return 1;
+    };
+    let state: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("{verb}: {hint}");
+            return 1;
+        }
+    };
+    let bind = state
+        .get("bind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1");
+    let port = match state.get("port").and_then(|v| v.as_u64()) {
+        Some(p) => p,
+        None => {
+            eprintln!("{verb}: {hint}");
+            return 1;
+        }
+    };
+    let token = state
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    // A wide bind is reachable locally too; the pasteable URL says where THIS
+    // machine finds it, mirroring the bind-time print's host hint.
+    let host = if bind == "0.0.0.0" || bind == "::" {
+        "127.0.0.1"
+    } else {
+        bind
+    };
+    // Probe liveness for ANY spelling the operator may have bound. A bare
+    // SocketAddr parse only accepts IPs, so `localhost` and `::1` would skip
+    // the probe and trust a corpse file (codex P2); the tuple form resolves
+    // hostnames and needs no IPv6 brackets.
+    let probe_addr = {
+        use std::net::ToSocketAddrs;
+        (host, port as u16)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut it| it.next())
+    };
+    if let Some(addr) = probe_addr {
+        let timeout = Duration::from_millis(300);
+        if std::net::TcpStream::connect_timeout(&addr, timeout).is_err() {
+            eprintln!("{verb}: {hint}");
+            return 1;
+        }
+    }
+    // Bracket a literal IPv6 host; a bare ::1 in a URL truncates at the colon.
+    let url_host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    println!("http://{url_host}:{port}/?t={token}&pane={pane}");
+    0
+}
 
 impl WebStateFile {
     fn write(socket: &Path, bind: &str, port: u16, token: &str) -> Option<Self> {
-        let session = socket
-            .file_stem()
-            .and_then(|s| s.to_str())
-            // socket_path() names the file <session>.sock; the stem is the name.
-            .unwrap_or(proto::DEFAULT_SESSION);
-        let path = socket.parent()?.join(format!("web-{session}.json"));
+        let path = web_state_path(socket)?;
         // `pid` makes the file's ownership checkable: two bridges may share a
         // session on different ports, the later bind owns the file, and an
         // exiting OLDER bridge must not delete the newer one's state (codex P2).
+        // `started` is the pid's start-time token, so `--stop` can tell the
+        // bridge it names from a process that later reused the pid.
         let body = serde_json::json!({
             "bind": bind,
             "port": port,
             "token": token,
             "pid": std::process::id(),
+            "started": proto::pid_start_time(std::process::id()),
         });
         let wrote = {
             use std::io::Write;
@@ -201,6 +299,94 @@ impl Drop for WebStateFile {
     }
 }
 
+/// How long a SIGINT'd bridge gets to exit before `--stop` escalates to
+/// SIGKILL. SIGINT is the bridge's own Ctrl-C path (browser sockets close,
+/// the state file's Drop runs), so a healthy bridge is well inside this; a
+/// wedged one is why the rung exists.
+const WEB_STOP_GRACE: Duration = Duration::from_secs(3);
+
+/// `serve --web --stop`: kill the running bridge for a session. The state
+/// file names the pid; the pid's start token names the process. Exit 0 for
+/// every "nothing to stop" shape - no state file, a corpse file, a recycled
+/// pid - so an "ensure stopped" script converges, and 1 only for a failure
+/// to act (unreadable state, a refused signal).
+fn stop_web(session: &str, socket: &Path) -> i32 {
+    let Some(state) = web_state_path(socket) else {
+        eprintln!("fno mux serve --web: cannot place the bridge state beside {socket:?}");
+        return 1;
+    };
+    let raw = match std::fs::read_to_string(&state) {
+        Ok(r) => r,
+        Err(_) => {
+            println!("no web bridge recorded for session {session:?}");
+            return 0;
+        }
+    };
+    let v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("fno mux serve --web: bridge state is not JSON: {e}");
+            return 1;
+        }
+    };
+    let Some(pid) = v
+        .get("pid")
+        .and_then(|p| p.as_u64())
+        .map(|p| p as libc::pid_t)
+    else {
+        // A state file that names no pid cannot be stopped or validated;
+        // it is a corpse by definition.
+        let _ = std::fs::remove_file(&state);
+        println!(
+            "no web bridge recorded for session {session:?} (state file named no pid; removed)"
+        );
+        return 0;
+    };
+    // Identity: a dead or zombie pid is gone whatever the file says, and a
+    // recorded start token that no longer matches proves the pid was reused
+    // after the bridge died - signalling it would hit a stranger.
+    let recorded = v.get("started").and_then(|s| s.as_u64());
+    let stale = proto::pid_confirmed_dead(pid)
+        || proto::pid_is_zombie(pid)
+        || recorded.is_some_and(|r| proto::pid_start_time(pid as u32).is_none_or(|now| now != r));
+    if stale {
+        let _ = std::fs::remove_file(&state);
+        println!("no live web bridge for session {session:?} (stale state file removed)");
+        return 0;
+    }
+    // SIGINT, not SIGTERM: the bridge's graceful-shutdown arm listens for
+    // Ctrl-C (tokio::signal::ctrl_c), so the same signal closes every browser
+    // socket, lets the state file's Drop run, and a SIGTERM would bypass all
+    // of it.
+    if unsafe { libc::kill(pid, libc::SIGINT) } != 0 {
+        let e = std::io::Error::last_os_error();
+        eprintln!("fno mux serve --web: cannot signal pid {pid}: {e}");
+        return 1;
+    }
+    // The pid's start token at signal time; if it stops matching during the
+    // grace window, the bridge was reaped and the pid reused - the bridge is
+    // gone, and the newcomer must not inherit the escalation.
+    let signalled_start = proto::pid_start_time(pid as u32);
+    let deadline = Instant::now() + WEB_STOP_GRACE;
+    while Instant::now() < deadline {
+        let gone = proto::pid_confirmed_dead(pid)
+            || proto::pid_is_zombie(pid)
+            || signalled_start
+                .is_some_and(|s| proto::pid_start_time(pid as u32).is_none_or(|now| now != s));
+        if gone {
+            println!("web bridge for session {session:?} stopped (pid {pid})");
+            return 0;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    println!(
+        "web bridge for session {session:?} ignored SIGINT; killed (pid {pid}); \
+         the state file it could not remove reads as no bridge"
+    );
+    0
+}
+
 /// Entry point for the `mux serve --web` role. Owns its own runtime like the
 /// server role; returns the process exit code.
 pub fn serve(args: WebArgs) -> i32 {
@@ -211,6 +397,9 @@ pub fn serve(args: WebArgs) -> i32 {
             return 2;
         }
     };
+    if args.stop {
+        return stop_web(&args.session, &socket);
+    }
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -717,6 +906,85 @@ mod tests {
         assert_eq!(a.len(), 64, "32 bytes -> 64 hex chars");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "two mints must differ (astronomically)");
+    }
+
+    /// A temp dir per test; tests using it must clean up after themselves.
+    fn temp_state_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("web-stop-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn stop_with_no_state_file_reports_done() {
+        let dir = temp_state_dir("none");
+        let socket = dir.join("t.sock");
+        assert_eq!(stop_web("t", &socket), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stop_removes_a_corpse_state_file() {
+        let dir = temp_state_dir("corpse");
+        let socket = dir.join("t.sock");
+        // A pid proven dead: spawned, reaped, gone.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(proto::pid_confirmed_dead(pid as libc::pid_t));
+        let state = web_state_path(&socket).unwrap();
+        std::fs::write(
+            &state,
+            serde_json::json!({"pid": pid, "started": 1}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(stop_web("t", &socket), 0);
+        assert!(!state.exists(), "the corpse file is gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stop_refuses_to_signal_a_recycled_pid() {
+        let dir = temp_state_dir("recycled");
+        let socket = dir.join("t.sock");
+        // pid names THIS live test process, but the recorded start token is
+        // wrong: the identity check must read stale, and this process must
+        // survive the verb.
+        let own_start =
+            proto::pid_start_time(std::process::id()).expect("start time on test platform");
+        let state = web_state_path(&socket).unwrap();
+        std::fs::write(
+            &state,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "started": own_start.wrapping_add(1),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(stop_web("t", &socket), 0);
+        assert!(!state.exists(), "the stale file is gone");
+    }
+
+    #[test]
+    fn state_file_records_the_pid_start_token() {
+        let dir = temp_state_dir("token");
+        let socket = dir.join("t.sock");
+        let guard = WebStateFile::write(&socket, "127.0.0.1", 8722, "tok").unwrap();
+        let raw = std::fs::read_to_string(web_state_path(&socket).unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["pid"].as_u64(), Some(std::process::id() as u64));
+        assert_eq!(
+            v["started"].as_u64(),
+            proto::pid_start_time(std::process::id())
+        );
+        drop(guard);
+        assert!(
+            !web_state_path(&socket).unwrap().exists(),
+            "Drop removes the file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

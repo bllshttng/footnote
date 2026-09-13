@@ -1557,7 +1557,9 @@ fn spawn_needs_python_seam(params: &Value) -> bool {
 /// Exec the Python front door with the given spawn argv. `fno` is the entry
 /// point on a deployed machine; a bare venv install (CI runners included)
 /// only ships `fno-py`, so a NotFound on the first candidate falls through
-/// to it. Returns the last exec error so the caller's refusal names reality.
+/// to the PATH-robust resolver ([`fno_agents::scrape::fno_py`]) - a bare
+/// name here failed whenever the wheel bin was off PATH (x-cf15). Returns
+/// the last exec error so the caller's refusal names reality.
 fn exec_python_front(args: &[String]) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(fno_agents::scrape::fno_bin())
@@ -1566,7 +1568,7 @@ fn exec_python_front(args: &[String]) -> std::io::Error {
         .env("FNO_AGENTS_RUNTIME", "python")
         .exec();
     if err.kind() == std::io::ErrorKind::NotFound {
-        return std::process::Command::new("fno-py")
+        return std::process::Command::new(fno_agents::scrape::fno_py())
             .arg("agents")
             .args(args)
             .env("FNO_AGENTS_RUNTIME", "python")

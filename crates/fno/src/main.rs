@@ -119,6 +119,10 @@ enum Role {
     /// `mux serve --web [--session <name>] [--bind <addr>] [--port <n>]`: the
     /// read-only web bridge (x-6a14). Attaches to a session as an observer and
     /// serves its frame stream to browsers over HTTP+WebSocket. No TTY needed.
+    /// `mux serve --stop [--session <name>]` kills the running bridge: it reads
+    /// the bridge's own state file, identity-checks the pid against its
+    /// recorded start token, then SIGINTs (the bridge's graceful exit) with a
+    /// SIGKILL escalation for a wedged one.
     MuxWeb(fno::web::WebArgs),
     /// A verb named in [`MUX_TOMBSTONES`]: refuse, naming what replaced it.
     MuxRemoved(String),
@@ -172,9 +176,9 @@ fn split_json(rest: &[OsString]) -> Option<(Vec<&str>, bool)> {
     Some((positionals, json))
 }
 
-/// Parse `serve` flags into [`fno::web::WebArgs`]. `--web` is required; a missing
-/// flag value, an unknown flag, a non-UTF-8 arg, or a bad `--port` is `None`
-/// (the caller maps that to `MuxUsage`, exit 2).
+/// Parse `serve` flags into [`fno::web::WebArgs`]. `--web` or `--stop` is
+/// required; a missing flag value, an unknown flag, a non-UTF-8 arg, or a bad
+/// `--port` is `None` (the caller maps that to `MuxUsage`, exit 2).
 fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
     let mut web = false;
     let mut args = fno::web::WebArgs::default();
@@ -182,6 +186,7 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
     while let Some(a) = it.next() {
         match a.to_str()? {
             "--web" => web = true,
+            "--stop" => args.stop = true,
             tok @ ("--server" | "--session") => {
                 mux_cli::note_server_flag(tok);
                 args.session = it.next()?.to_str()?.to_string()
@@ -191,7 +196,7 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
             _ => return None,
         }
     }
-    web.then_some(args)
+    (web || args.stop).then_some(args)
 }
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
@@ -247,7 +252,8 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 Role::ServerSession(session)
             }
             // `mux serve --web ...`: the read-only web bridge (x-6a14). `--web`
-            // is required (the `serve` verb reserves room for future modes).
+            // or `--stop` is required (the `serve` verb reserves room for
+            // future modes; `--stop` is the bridge's kill switch).
             Some("serve") => match parse_web_args(&args[2..]) {
                 Some(w) => Role::MuxWeb(w),
                 None => Role::MuxUsage,
@@ -370,6 +376,7 @@ fn main() {
                  | fno mux kill-server [<name>] [--json] \
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
                  | fno mux serve --web [--server <name>] [--bind <addr>] [--port <n>] \
+                 | fno mux serve --stop [--server <name>] \
                  | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
                  | fno mux block pipe|annotate ... \
                  | fno mux tab ls|create|rename|join|move|close ... (--tab takes the visible \

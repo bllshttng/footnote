@@ -87,10 +87,10 @@ fn row_tr(n: &Value, titles: &BTreeMap<String, &Value>) -> String {
         .map(|p| format!("#{p}"))
         .unwrap_or_default();
     format!(
-        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+        "<tr><td>{}</td><td>{}</td>{}<td>{}</td><td>{}</td></tr>",
         esc(id),
         esc(title),
-        esc(s_str(n, "status").unwrap_or("")),
+        pill_td(s_str(n, "status").unwrap_or("")),
         worker,
         pr
     )
@@ -144,36 +144,53 @@ fn crown_section(
             esc(s_str(&fold, "reason").unwrap_or(""))
         ));
     } else {
-        out.push_str(&format!(
-            "<p class=\"counts\">{} nodes: {} ({} not listed)</p>",
-            as_i64(&fold, "total"),
-            esc(&counts_line(&fold)),
-            as_i64(&fold, "omitted"),
-        ));
         let listed = fold
             .get("nodes")
             .and_then(|n| n.as_array())
             .cloned()
             .unwrap_or_default();
+        let listed_ids: BTreeSet<&str> = listed.iter().filter_map(|n| s_str(n, "id")).collect();
+        // The rows below back-fill the fold's omitted members from the graph,
+        // so "not listed" may only claim what the back-fill could not name.
+        let backfilled = members
+            .map(|m| {
+                m.iter()
+                    .filter(|id| !listed_ids.contains(id.as_str()))
+                    .count() as i64
+            })
+            .unwrap_or(0);
+        let unlisted = as_i64(&fold, "omitted") - backfilled;
+        let unlisted = if unlisted > 0 {
+            format!(" ({unlisted} not listed)")
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "<p class=\"counts\">{} nodes: {}{unlisted}</p>",
+            as_i64(&fold, "total"),
+            esc(&counts_line(&fold)),
+        ));
         let mut rows: Vec<String> = listed.iter().map(|n| row_tr(n, titles)).collect();
         // The omitted half of the scope renders with titles too: a count with
         // no names is a number where a fact should be.
         if let Some(members) = members {
-            let listed_ids: BTreeSet<&str> = listed.iter().filter_map(|n| s_str(n, "id")).collect();
             for id in members {
                 if listed_ids.contains(id.as_str()) {
                     continue;
                 }
                 let entry = titles.get(id).copied().cloned().unwrap_or(json!({}));
                 rows.push(format!(
-                    "<tr><td>{}</td><td>{}</td><td>{}</td><td></td><td></td></tr>",
+                    "<tr><td>{}</td><td>{}</td>{}<td></td><td></td></tr>",
                     esc(id),
                     esc(s_str(&entry, "title").unwrap_or("-")),
-                    esc(s_str(&entry, "status").unwrap_or("")),
+                    pill_td(s_str(&entry, "status").unwrap_or("")),
                 ));
             }
         }
-        out.push_str(&format!("{TABLE_HEAD}{}</tbody></table>", rows.join("")));
+        out.push_str(&format!(
+            "<div class=\"tscroll\">{TABLE_HEAD}{}</tbody></table></div>",
+            rows.join("")
+        ));
     }
     out.push_str("</section>");
     out
@@ -213,17 +230,17 @@ fn uncrowned_section(
         .iter()
         .map(|e| {
             format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td>{}<td>{}</td></tr>",
                 esc(s_str(e, "id").unwrap_or("")),
                 esc(s_str(e, "title").unwrap_or("-")),
-                esc(s_str(e, "status").unwrap_or("")),
+                pill_td(s_str(e, "status").unwrap_or("")),
                 esc(s_str(e, "priority").unwrap_or("")),
             )
         })
         .collect();
     format!(
         "<section class=\"crown\"><h2>uncrowned epics</h2><p class=\"meta\">{} uncrowned, {p1} at p1</p>\
-         <table><thead><tr><th>node</th><th>title</th><th>status</th><th>priority</th></tr></thead><tbody>{rows}</tbody></table></section>",
+         <div class=\"tscroll\"><table><thead><tr><th>node</th><th>title</th><th>status</th><th>priority</th></tr></thead><tbody>{rows}</tbody></table></div></section>",
         orphans.len()
     )
 }
@@ -259,10 +276,10 @@ fn orphan_leaves_section(entries: &[Value]) -> String {
         .iter()
         .map(|e| {
             format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td>{}<td>{}</td></tr>",
                 esc(s_str(e, "id").unwrap_or("")),
                 esc(s_str(e, "title").unwrap_or("-")),
-                esc(s_str(e, "status").unwrap_or("")),
+                pill_td(s_str(e, "status").unwrap_or("")),
                 esc(s_str(e, "priority").unwrap_or("")),
             )
         })
@@ -274,19 +291,46 @@ fn orphan_leaves_section(entries: &[Value]) -> String {
     };
     format!(
         "<section class=\"crown\"><h2>orphan leaves</h2><p class=\"meta\">{n} {word}, {p1} at p1</p>\
-         <table><thead><tr><th>node</th><th>title</th><th>status</th><th>priority</th></tr></thead><tbody>{rows}</tbody></table></section>",
+         <div class=\"tscroll\"><table><thead><tr><th>node</th><th>title</th><th>status</th><th>priority</th></tr></thead><tbody>{rows}</tbody></table></div></section>",
         n = leaves.len(),
     )
 }
 
-const CSS: &str = "body{font-family:-apple-system,'Segoe UI',sans-serif;margin:24px auto;max-width:900px;color:#1a1a2e}\
-h1{font-size:20px;margin:0 0 4px}.meta{color:#6b7280;font-size:12px;margin:2px 0}\
-.note{color:#b91c1c;font-size:12.5px}\
-section.crown{border:1px solid #e5e7eb;border-radius:8px;padding:10px 14px;margin:14px 0}\
+// Palette, pills and tabular numerals ported from the operator's court
+// board (internal/fno/backlog/backlog.html), not a third style.
+const CSS: &str = ":root{--bg:#f6f5f9;--surface:#fff;--line:#dedae8;--ink:#1a1922;--muted:#6b677e;\
+--accent:#9a5418;--accent-soft:#f2e4d4;--ready:#9a5f08;--ready-bg:#fdf0dc;--done:#1f7358;--done-bg:#dff0e8;\
+--idea:#5c5975;--idea-bg:#e9e7f0;--prog:#3b5bbf;--prog-bg:#e2e7f8;--defer:#62606e;--defer-bg:#e6e4ec;\
+--blocked:#a8331f;--blocked-bg:#f8e2de;--sup:#7c5c8c;--sup-bg:#efe6f3}\
+@media (prefers-color-scheme:dark){:root{--bg:#121118;--surface:#1a1922;--line:#302d3d;--ink:#eae8f2;\
+--muted:#8e8aa3;--accent:#e09a55;--accent-soft:#33261a;--ready:#f0ad4e;--ready-bg:#3a2b13;--done:#59c79c;\
+--done-bg:#14342a;--idea:#9d99b5;--idea-bg:#26242f;--prog:#7f9cf5;--prog-bg:#1d2440;--defer:#8b8799;\
+--defer-bg:#232130;--blocked:#f0715c;--blocked-bg:#3a1d18;--sup:#b490c4;--sup-bg:#2d2337}}\
+body{font-family:-apple-system,'Segoe UI',sans-serif;margin:24px auto;max-width:900px;color:var(--ink);background:var(--bg)}\
+h1{font-size:20px;margin:0 0 4px}.meta{color:var(--muted);font-size:12px;margin:2px 0}\
+.note{color:var(--blocked);font-size:12.5px}.counts{font-variant-numeric:tabular-nums}\
+section.crown{border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin:14px 0;background:var(--surface)}\
 section.crown h2{font-size:14px;margin:0 0 4px;font-family:ui-monospace,monospace}\
-table{width:100%;border-collapse:collapse;font-size:12px;font-family:ui-monospace,monospace}\
-th{text-align:left;color:#6b7280;font-weight:500;padding:3px 8px 3px 0;border-bottom:1px solid #e5e7eb}\
-td{padding:3px 8px 3px 0;border-bottom:1px solid #f3f4f6;word-break:break-all}";
+.tscroll{overflow-x:auto}\
+table{width:100%;min-width:34rem;border-collapse:collapse;font-size:12px;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums}\
+th{text-align:left;color:var(--muted);font-weight:500;padding:3px 8px 3px 0;border-bottom:1px solid var(--line)}\
+td{padding:3px 8px 3px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}\
+th:first-child,td:first-child{white-space:nowrap}\
+.pill{display:inline-block;font-size:10px;font-weight:500;padding:1px 6px;border-radius:5px;letter-spacing:.04em}\
+.s-in_progress{color:var(--prog);background:var(--prog-bg)}.s-in_review{color:var(--accent);background:var(--accent-soft)}\
+.s-ready{color:var(--ready);background:var(--ready-bg)}.s-done{color:var(--done);background:var(--done-bg)}\
+.s-idea,.s-design{color:var(--idea);background:var(--idea-bg)}.s-deferred{color:var(--defer);background:var(--defer-bg)}\
+.s-blocked{color:var(--blocked);background:var(--blocked-bg)}.s-superseded{color:var(--sup);background:var(--sup-bg)}";
+
+/// The status cell as a pill; a status outside the vocabulary renders as the
+/// neutral pill base, the same fallback the court board uses.
+fn pill_td(status: &str) -> String {
+    if status.is_empty() {
+        return "<td></td>".to_string();
+    }
+    let s = esc(status);
+    format!("<td><span class=\"pill s-{s}\">{s}</span></td>")
+}
 
 /// The whole page. An empty court renders "no live crowns"; an unreadable
 /// registry renders the named reason. Never a blank or falsely healthy page.
@@ -297,7 +341,9 @@ pub fn render(court: &Value, entries: &[Value], generated: &str) -> String {
     let crowns = court.get("crowns").and_then(|c| c.as_array()).cloned();
     let titles = titles_of(entries);
     let mut out = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Reign Ledger</title><style>{CSS}</style></head><body>\
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>Reign Ledger</title><style>{CSS}</style></head><body>\
          <h1>Reign Ledger</h1><p class=\"meta\">generated {generated}</p>"
     );
     match &crowns {
@@ -652,5 +698,51 @@ mod tests {
         let mode = std::fs::metadata(&out_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "reign.html must match graph.html's 600 mode");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn head_declares_the_device_viewport() {
+        let page = page(base_court(json!([base_crown()])), vec![]);
+        assert!(page
+            .contains("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"));
+    }
+
+    #[test]
+    fn cells_wrap_words_not_characters() {
+        let page = page(base_court(json!([base_crown()])), vec![]);
+        assert!(page.contains("overflow-wrap:anywhere"));
+        assert!(!page.contains("word-break:break-all"));
+    }
+
+    #[test]
+    fn every_table_scrolls_inside_its_own_container() {
+        let page = page(base_court(json!([base_crown()])), vec![]);
+        assert!(page.contains(".tscroll{overflow-x:auto}"));
+        assert_eq!(page.matches("<div class=\"tscroll\"><table>").count(), 1);
+    }
+
+    #[test]
+    fn counts_line_stays_silent_when_every_member_is_listed() {
+        let entries = vec![
+            json!({"id": "e-1", "type": "epic", "title": "the crown epic", "status": "in_progress"}),
+            json!({"id": "x-done", "parent": "e-1", "title": "shipped thing", "status": "done"}),
+        ];
+        let page = page(base_court(json!([base_crown()])), entries);
+        assert!(page.contains("3 nodes:"));
+        assert!(!page.contains("not listed"));
+    }
+
+    #[test]
+    fn counts_line_names_what_the_rows_cannot_show() {
+        let mut crown = base_crown();
+        crown.as_object_mut().unwrap().remove("scope");
+        let page = page(base_court(json!([crown])), vec![]);
+        assert!(page.contains("(1 not listed)"));
+    }
+
+    #[test]
+    fn statuses_render_as_pills() {
+        let page = page(base_court(json!([base_crown()])), vec![]);
+        assert!(page.contains("<span class=\"pill s-in_progress\">in_progress</span>"));
     }
 }
