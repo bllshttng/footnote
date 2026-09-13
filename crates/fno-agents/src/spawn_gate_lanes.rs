@@ -366,7 +366,10 @@ fn provider_live_slot_claims(
         Some(root) => root,
         None => return Ok(0),
     };
-    let dir = root.join(".fno").join("claims");
+    let dir = match claims::claims_dir_for(Some(&root)) {
+        Some(dir) => dir,
+        None => return Ok(0),
+    };
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(_) => return Ok(0),
