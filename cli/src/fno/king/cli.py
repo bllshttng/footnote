@@ -752,20 +752,14 @@ def drain_cmd(
     from fno.king import drain_cache
     from fno.king.scope import scope_undelivered
     from fno.tracker import active_backend_name
-    from fno.tracker.metadata import (
-        ExternalMetadataUnavailable,
-        _graph_store_path,
-        read_entries,
-    )
+    from fno.tracker.metadata import ExternalMetadataUnavailable
+    from fno.tracker.metadata import _graph_store_path, read_entries
 
     path = _graph_store_path()
-    # Cache rides only the default backend; an external one raises below.
     ident = drain_cache.graph_ident(path) if active_backend_name() == "graph" else None
     if ident is not None:
         cached = drain_cache.load(scope, ident)
-        if cached is not None and drain_cache.graph_ident(path) == ident:
-            # `cached` names which store this count came from; the gate
-            # reads `undelivered` and ignores the extra key.
+        if cached is not None:
             typer.echo(
                 json.dumps({"scope": scope, "undelivered": cached, "cached": True})
             )
@@ -774,15 +768,11 @@ def drain_cmd(
         entries = read_entries("king drain", strict=True)
         undelivered = scope_undelivered(scope, entries)
     except (
-        ExternalMetadataUnavailable,
-        GraphUnreadableError,
-        StoreUnavailable,
-        ValueError,
+        ExternalMetadataUnavailable, GraphUnreadableError, StoreUnavailable, ValueError
     ) as exc:
         typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
         raise typer.Exit(1) from exc
-    # Store only when no write landed during the read: a post-read identity
-    # that moved describes bytes the count never saw.
+    # A moved post-read identity describes bytes the count never saw.
     post = drain_cache.graph_ident(path)
     if post is not None and post == ident:
         drain_cache.store(scope, post, undelivered)

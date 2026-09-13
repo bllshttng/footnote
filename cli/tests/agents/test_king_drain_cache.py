@@ -223,26 +223,26 @@ def test_wake_entries_read_once_per_graph_identity(graph, monkeypatch):
     assert epic["status"] == "done"  # the fresh row, not the memo
 
 
-def test_sqlite_backend_names_no_file_identity(graph):
-    import sqlite3
-
+def test_sqlite_backend_keys_on_the_store_version(graph, monkeypatch):
     from fno.king import drain_cache
 
-    assert drain_cache.graph_ident(graph) is not None
-    con = sqlite3.connect(graph.with_suffix(".db"))
-    try:
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS graph_meta ("
-            "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        con.execute(
-            "INSERT INTO graph_meta(key, value) VALUES('backend', 'sqlite')"
-        )
-        con.commit()
-    finally:
-        con.close()
-    # The keeper serves graph.db under this backend; the json file can lag
-    # until export, so no file identity may exist to key a cache on.
+    assert drain_cache.graph_ident(graph) is not None  # json backend: stat identity
+    import fno.graph.store as store
+
+    monkeypatch.setattr(
+        store,
+        "store_export_status",
+        lambda p: {"backend": "sqlite", "version": "v1"},
+    )
+    assert drain_cache.graph_ident(graph) == ("sqlite", "v1")
+    # The file's stat is irrelevant under sqlite: the version is the store.
+    monkeypatch.setattr(
+        store, "store_export_status", lambda p: {"backend": "sqlite"}
+    )
+    assert drain_cache.graph_ident(graph) is None
+    # An unreachable keeper names no identity at all: no cache may key on a
+    # stat of a file the store does not serve.
+    monkeypatch.setattr(store, "store_export_status", lambda p: {})
     assert drain_cache.graph_ident(graph) is None
 
 

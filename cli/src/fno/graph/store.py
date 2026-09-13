@@ -1046,6 +1046,15 @@ def read_nodes_by_ids(path: Path, tokens: "list[str]") -> "dict | None":
         return None
 
 
+def store_export_status(path: Path) -> dict:
+    """The keeper's backend/version row, no entries: the identity surface
+    for derived caches. Empty dict on any failure, never a guess."""
+    try:
+        return _client_for(Path(path)).request("export_status", {})
+    except Exception:  # noqa: BLE001 - identity is an optimization; the read owns correctness
+        return {}
+
+
 def read_archive_entries() -> list[dict]:
     """The archived nodes, best-effort: an absent archive is []. Callers that
     may test many ids read once and pass the list to
