@@ -18,6 +18,11 @@
 #     (b) potentially large. A worktree with a built cargo target dir runs to
 #     gigabytes and git already holds every byte. Trashing one relocates the
 #     bytes instead of reclaiming them, which inverts the operation's purpose.
+#   scripts/lib/worktree-lifecycle.sh
+#     (b) potentially large. The cargo sweep deletes whole build-base hash
+#     dirs at the same gigabyte scale. Measured 2026-09-12: a sweep reaped
+#     118 hash dirs through a trash-aliased rm into a 177 GB Trash - zero
+#     bytes reclaimed. The file carries the spelling as one _srm() helper.
 #
 # Sanctioned spellings (the two-rung form the guarded files use):
 #   command -p rm   resolves via the default PATH, so a wrapper earlier in the
@@ -45,6 +50,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ALLOWLIST=(
   "scripts/ci/preflight.sh|criterion (a) concurrency-critical: preflight lock protocol and teardown"
   "hooks/worktree-remove.sh|criterion (b) potentially large: worktree removal must unlink, not trash-move"
+  "scripts/lib/worktree-lifecycle.sh|criterion (b) potentially large: cargo sweep deletes gigabyte-scale build-base hash dirs; a trash move reclaims nothing"
 )
 
 VIOLATIONS=0
