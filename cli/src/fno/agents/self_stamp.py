@@ -36,7 +36,7 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
         # self-blind exactly where nothing proves self.
         return row_owning_session_id(session_id, self_binding=own_pair)
 
-    # Same injection seam as collide: claims cannot import agents (x-a409).
+    # Same injection seam as collide; claims cannot import agents (x-a409).
     from fno.agents.codex_rollout import codex_rollout_witness
 
     return _resolve_self_identity(

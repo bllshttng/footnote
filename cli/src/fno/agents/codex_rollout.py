@@ -67,10 +67,10 @@ def codex_rollout_witness(
     """Session ids a live codex rollout witnesses for THIS process (x-a409).
 
     Injected into claims.resolve_self_identity: an fd is process ground a
-    leaked env marker cannot forge. Tree scan first; when empty (the post-
-    x-a095 shape, where the app-server daemon holds the fd), the daemon
-    oracle requires the present CODEX_THREAD_ID to match a row's session_id
-    at this cwd, uniquely. Anything else: empty set. Never raises.
+    leaked env marker cannot forge. Tree scan first; when empty (post-x-a095,
+    the daemon holds the fd), the daemon oracle requires the present
+    CODEX_THREAD_ID to match a row at this cwd, uniquely. Else empty; never
+    raises.
     """
     try:
         if harness != "codex":
