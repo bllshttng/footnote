@@ -385,10 +385,18 @@ def format_violations(violations: list[Violation]) -> str:
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
     # Name the surface explicitly: --stdin defaults to mail, which checks the
     # word cap only, so the bare command would pass a prose rewrite vacuously.
-    lines.append(
-        'run "fno doctor lint style --stdin --surface pr-body" to check a '
-        "rewrite first."
-    )
+    # The check must also see the gate that fired: pr-body never counts words,
+    # so for rule 7 it clears a rewrite the mail gate refuses again.
+    if 7 in by_rule:
+        lines.append(
+            'run "fno doctor lint style --stdin --surface mail" to check a '
+            "rewrite first. Fewer words."
+        )
+    else:
+        lines.append(
+            'run "fno doctor lint style --stdin --surface pr-body" to check a '
+            "rewrite first."
+        )
     return "\n\n".join(lines)
 
 
