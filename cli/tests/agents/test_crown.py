@@ -1992,7 +1992,7 @@ def test_send_reign_verb_reports_subprocess_failure(monkeypatch) -> None:
     assert verdict == "not delivered (rc=16: resolve failed: no such agent)"
 
 
-# --- a crown grant arms the epic's mission (x-14c0) --------------------------
+# --- a crown grant arms the epic's mission -----------------------------------
 #
 # Operator rule 2026-09-09: every epic with an owner is a mission. The drain
 # keys one loop per epic with mission_active=true, so a crown that left the
