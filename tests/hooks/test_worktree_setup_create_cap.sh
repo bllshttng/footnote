@@ -40,17 +40,32 @@ make_repo() {
     )
 }
 
-# Hermetic fno: config carries a tmp state_dir (so the latch never lands in
-# the real ~/.fno) and harness-native policy (no relocation surprises).
+# Hermetic fno: the CI runner has no fno on PATH, and the cap depends on it
+# (shell-stub for the latch dir, policy for the never gate). Stub both verbs;
+# the stub's state file points the latch at the tmp state dir.
 export HOME="$TMP_BASE/home"
 mkdir -p "$HOME"
-export FNO_CONFIG="$TMP_BASE/config.toml"
-cat > "$FNO_CONFIG" <<EOF
-state_dir = "$TMP_BASE/state"
-
-[worktree]
-policy = "harness-native"
+STUB_BASE="$TMP_BASE/state/worktrees"
+export STUB_STATE_FILE="$TMP_BASE/fno-paths-stub.sh"
+cat > "$STUB_STATE_FILE" <<EOF
+STATE_DIR="$TMP_BASE/state"
+LATCHES_DIR="$TMP_BASE/state/latches"
 EOF
+mkdir -p "$TMP_BASE/stub-bin"
+cat > "$TMP_BASE/stub-bin/fno" <<STUB
+#!/usr/bin/env bash
+case "\$1 \$2 \$3 \$4" in
+  "config paths shell-stub")
+    printf '%s\n' "\$STUB_STATE_FILE"
+    exit 0;;
+  "agents workspace worktree policy"|"workspace worktree policy")
+    printf 'harness-native\nbase=%s\n' "\$STUB_BASE"
+    exit 0;;
+esac
+exit 0
+STUB
+chmod +x "$TMP_BASE/stub-bin/fno"
+export PATH="$TMP_BASE/stub-bin:$PATH"
 
 run_hook() { # <cwd> <json-payload>; stdout captured by the caller
     ( cd "$1" && printf '%s' "$2" | bash "$HOOK" 2>"$TMP_BASE/stderr.txt" )
