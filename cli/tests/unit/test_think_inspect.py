@@ -286,6 +286,35 @@ def test_exact_archived_node_is_labeled_and_keeps_pr_link(tmp_path: Path) -> Non
     assert receipt["graph"]["resolved"]["pr_number"] == 321
 
 
+def test_closure_carries_the_retraction_stamp(tmp_path: Path) -> None:
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    retracted = {
+        "id": "x-false",
+        "slug": "false-premise-row",
+        "title": "Row filed on a false premise",
+        "status": "deferred",
+        "deferred_kind": "retracted",
+        "deferred_reason": "the premise was measured false",
+    }
+
+    receipt = build_receipt(
+        "x-false",
+        repo=repo,
+        graph_entries=[retracted],
+        archive_entries=[],
+        plans_path=tmp_path / "plans",
+        home=tmp_path,
+        run=_result_without_title_assertion,
+    )
+
+    closure = receipt["graph"]["closure"]
+    assert closure["status"] == "deferred"
+    assert closure["deferred_kind"] == "retracted"
+
+
 # --- AC3-HP / AC4-EDGE / AC5-EDGE: seed lane recall and its honesty marker ---
 
 
