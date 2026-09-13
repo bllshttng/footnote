@@ -215,6 +215,7 @@ RUST_CLIENT_VERBS = frozenset(
         # resolves. Dispatched in client.rs before build_request (no daemon
         # RPC, no Python impl).
         "feed",
+        "day",
         # Standalone review_coverage producer: the same resolver +
         # emitter the stop hook uses, so any path that can reach the merge gate
         # (``fno do pr merge``/``status`` recompute, a manifest-less session) can
@@ -526,6 +527,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "needs": "Needs-me queue fold over events + ledger across all sessions (review_wedged/budget_stop): [--since-epoch <secs>] [--fires-floor <n>] [--json].",
     "select-read": "One bounded backlog read (next|undispatched) under [auto_continue] select_timeout_s; prints an ok/unmeasured/error receipt JSON.",
     "feed": "Activity feed projection over questions.jsonl + graph.json (questions, decisions, node lifecycle): [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--json].",
+    "day": "Morning or end-of-day readback over existing project records: --kind start|end [--events-path <path> ...] [--now <RFC3339>] [--json].",
     "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
     "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter: --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
     "distress-scan": "Read a transcript for a <help> tag and append a blocked row on a hit: --transcript <path> --run <id> [--node <id>] [--harness <name>] [--cwd <dir>]. Best-effort, always exits 0.",

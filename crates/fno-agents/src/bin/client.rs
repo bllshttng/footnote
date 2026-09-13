@@ -44,6 +44,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "source-pin",
     "court-orphans",
     "court-fold",
+    "day",
     "detect",
     "digest",
     "distress-scan",
@@ -995,6 +996,13 @@ async fn run(args: Vec<String>) -> i32 {
     // (72% ticks; lifecycle derives from the graph, never copied).
     if verb == "feed" {
         return fno_agents::feed::run_feed(&args[1..], &AgentsHome::from_env()).await;
+    }
+
+    // `day`: deterministic morning/end-of-day readback over existing records.
+    // It is daemon-free like `feed` and `needs`, and writes nothing; the Python
+    // inbox adapter owns the validated boundary append.
+    if verb == "day" {
+        return fno_agents::day::run_day(&args[1..], &AgentsHome::from_env());
     }
 
     // `status` reports on a *running* daemon: it must NOT lazy-start one just to
