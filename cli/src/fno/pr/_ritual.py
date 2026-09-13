@@ -411,7 +411,15 @@ class Ritual:
                 err=True,
             )
         try:
-            r = self._sh(argv, env_prefix=[f"FNO_DIE_WITH_PARENT={os.getpid()}"])
+            # Same bound the merge uses: above reconcile's 240s close-probe
+            # budget, never below it.
+            from fno.backlog.single_flight import POST_MERGE_RECONCILE_TIMEOUT_S
+
+            r = self._sh(
+                argv,
+                env_prefix=[f"FNO_DIE_WITH_PARENT={os.getpid()}"],
+                timeout=POST_MERGE_RECONCILE_TIMEOUT_S,
+            )
         except subprocess.TimeoutExpired:
             self._emit("reconcile", _FAILED, "timeout")
             return
