@@ -197,12 +197,10 @@ def reconcile_gate(*, dry_run: bool, node: Optional[str], json_out: bool, pr_num
 
 
 def _arm_flight_watchdog(flight: "Flight", verb: str) -> tuple[threading.Event, Optional[IO[str]]]:
-    """Bound a live holder (x-626f: every specimen was LIVE at 0.0 pct CPU,
-    which no pid probe can call dead): a stack file SIGUSR1 can dump into,
-    plus a daemon thread that releases the flight and exits when the budget
-    trips or an opted-in parent dies. os._exit is safe: every graph write
-    commits server-side under the keeper lock, and reconcile is idempotent.
-    """
+    """Bound a live holder (x-626f: LIVE at 0.0 pct CPU, invisible to a pid
+    probe): a SIGUSR1 stack file plus a thread that releases the flight and
+    exits when the budget trips or an opted-in parent dies. os._exit is safe:
+    graph writes commit server-side and reconcile is idempotent."""
     def _budget_s() -> float:
         try:
             return float(os.environ.get(_BUDGET_ENV) or _FLIGHT_BUDGET_DEFAULT_S)
@@ -222,8 +220,8 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> tuple[threading.Event, 
             fh.close()
             fh = None
     budget_s = _budget_s()
-    parent_raw = os.environ.get("FNO_DIE_WITH_PARENT", "")
-    parent_pid = int(parent_raw) if parent_raw.isdigit() else None
+    spawner = os.environ.get("FNO_DIE_WITH_PARENT", "")
+    parent_pid = int(spawner) if spawner.isdigit() else None
     start = time.monotonic()
 
     def _watch() -> None:

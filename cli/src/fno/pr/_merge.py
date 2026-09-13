@@ -1505,9 +1505,8 @@ def _finish_confirmed_merge(
     release_lock: Optional[Callable[[], None]] = None,
 ) -> int:
     """Emit and finalize one confirmed merge, including remote cleanup truth."""
-    # The race the lock closes ended at the merged receipt; release before
-    # the unbounded post-merge work (x-626f). Holder-checked, so the
-    # finally-release in _merge_lock stays correct.
+    # The race the lock closes ended at the merged receipt; release first so
+    # a peer never queues behind the post-merge work (x-626f).
     if release_lock is not None:
         release_lock()
     cleanup_parts = [prior_cleanup_failure] if prior_cleanup_failure else []
