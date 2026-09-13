@@ -131,13 +131,11 @@ def cmd_note(
 def _receipt(stdout: str) -> Optional[dict]:
     """The one JSON receipt line the native action prints on stdout."""
     for line in reversed((stdout or "").strip().splitlines()):
-        line = line.strip()
         if line.startswith("{"):
             try:
-                parsed = json.loads(line)
+                return json.loads(line)
             except ValueError:
                 continue
-            return parsed if isinstance(parsed, dict) else None
     return None
 
 

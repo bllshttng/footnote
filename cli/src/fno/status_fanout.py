@@ -795,6 +795,7 @@ def _machine_note(graph_path, node_id: str, kind, text: str) -> "dict | None":
     ``None`` on a refused write or a missing node."""
     import subprocess as _sp
 
+    from fno.graph.note_cli import _receipt
     from fno.rust_binary import resolve_binary
 
     binary = resolve_binary()
@@ -816,15 +817,7 @@ def _machine_note(graph_path, node_id: str, kind, text: str) -> "dict | None":
     proc = _sp.run(argv, input=text, text=True, check=False, capture_output=True)
     if proc.returncode != 0:
         return None
-    for line in reversed((proc.stdout or "").strip().splitlines()):
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                parsed = json.loads(line)
-            except ValueError:
-                continue
-            return parsed if isinstance(parsed, dict) else None
-    return None
+    return _receipt(proc.stdout)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
