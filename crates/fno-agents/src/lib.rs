@@ -205,6 +205,7 @@ pub mod subscribe;
 pub mod supervisor;
 pub mod task_context;
 pub mod terminal_stop;
+pub mod territory;
 pub mod test_run;
 pub mod tick_ledger;
 pub mod truth_probe;

@@ -970,14 +970,12 @@ def test_ac1_hp_rank_top_pins_to_lane_front(tmp_graph):
 
 
 def test_rank_top_names_when_no_live_dispatcher_reaches_node(tmp_graph, monkeypatch):
-    import fno.active_backlog as active_backlog
+    import fno.graph.rank as rank
 
     monkeypatch.setattr(
-        active_backlog,
-        "resolve_drain_reading",
-        lambda **_: active_backlog.DrainReading(
-            targets=[SimpleNamespace(mission="x-beef")], missions=1, skip_reason=None
-        ),
+        rank,
+        "_drain_receipt",
+        lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -1003,14 +1001,12 @@ def test_rank_top_names_when_no_live_dispatcher_reaches_node(tmp_graph, monkeypa
 def test_rank_top_names_the_epic_activation_command(tmp_graph, monkeypatch):
     """x-7f1f: the note names the ONE command that makes a dispatcher take the
     node - activating the epic it hangs from."""
-    import fno.active_backlog as active_backlog
+    import fno.graph.rank as rank
 
     monkeypatch.setattr(
-        active_backlog,
-        "resolve_drain_reading",
-        lambda **_: active_backlog.DrainReading(
-            targets=[SimpleNamespace(mission="x-beef")], missions=1, skip_reason=None
-        ),
+        rank,
+        "_drain_receipt",
+        lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -1034,12 +1030,12 @@ def test_rank_top_names_the_config_when_the_drain_is_disabled(tmp_graph, monkeyp
     The epic-activation lever cannot work while the drain reads nothing, so the
     note prescribes the config fix and never tells the reader to activate an
     epic that may already be active."""
-    import fno.active_backlog as active_backlog
+    import fno.graph.rank as rank
 
     monkeypatch.setattr(
-        active_backlog,
-        "resolve_drain_reading",
-        lambda **_: active_backlog.DrainReading(targets=[], missions=6, skip_reason="drain_disabled"),
+        rank,
+        "_drain_receipt",
+        lambda: {"targets": [], "missions": 6, "skip_reason": "drain_disabled"},
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -1060,14 +1056,12 @@ def test_rank_top_names_the_config_when_the_drain_is_disabled(tmp_graph, monkeyp
 
 
 def test_rank_top_keeps_normal_receipt_when_mission_reaches_node(tmp_graph, monkeypatch):
-    import fno.active_backlog as active_backlog
+    import fno.graph.rank as rank
 
     monkeypatch.setattr(
-        active_backlog,
-        "resolve_drain_reading",
-        lambda **_: active_backlog.DrainReading(
-            targets=[SimpleNamespace(mission="x-beef")], missions=1, skip_reason=None
-        ),
+        rank,
+        "_drain_receipt",
+        lambda: {"targets": [{"mission": "x-beef"}], "missions": 1, "skip_reason": None},
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -1088,12 +1082,12 @@ def test_rank_top_keeps_normal_receipt_when_mission_reaches_node(tmp_graph, monk
 def test_rank_top_names_unavailable_dispatcher_scope_without_absence_claim(
     tmp_graph, monkeypatch
 ):
-    import fno.active_backlog as active_backlog
+    import fno.graph.rank as rank
 
     def _raise_scope_error(*, strict=False):
         raise RuntimeError("scope read failed")
 
-    monkeypatch.setattr(active_backlog, "resolve_drain_reading", _raise_scope_error)
+    monkeypatch.setattr(rank, "_drain_receipt", _raise_scope_error)
     tmp_graph.write_text(json.dumps({
         "entries": [{
             "id": "x-0abc", "title": "Unknown", "status": "ready",

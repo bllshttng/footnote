@@ -31,12 +31,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-/// The nine readings of the check-in body, in print order.
-const READING_NAMES: [&str; 9] = [
+/// The ten readings of the check-in body, in print order.
+const READING_NAMES: [&str; 10] = [
     "user_notes",
     "board",
     "blocked_child",
     "court",
+    "territory",
     "capacity",
     "workers",
     "crown",
@@ -620,6 +621,23 @@ fn r_main_ci() -> Result<Value, String> {
     Ok(Value::String("pending".into()))
 }
 
+/// One territory row per scope (x-e221): live against cap, the blueprinter
+/// handle, and the kingless mark, read from the same projection the spawn
+/// gate's cap enforces. An `membership: unknown` row is a failed reading, so
+/// a blind spot prints `READER FAILED territory` instead of an empty table.
+fn r_territory(ctx: &Ctx) -> Result<Value, String> {
+    let registry = crate::paths::AgentsHome::from_env().registry_json();
+    let rows = crate::territory::territory_rows(&ctx.cwd, &registry);
+    if rows.len() == 1 && rows[0].get("membership").and_then(Value::as_str) == Some("unknown") {
+        let reason = rows[0]
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("territory attribution unreadable");
+        return Err(reason.to_string());
+    }
+    Ok(Value::Array(rows))
+}
+
 // ---------------------------------------------------------------------------
 // gather
 
@@ -644,6 +662,7 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     take("board", r_board(&beat.board, &beat.folded, open_pr_count()));
     take("blocked_child", r_blocked_child(&beat.board));
     take("court", r_court(&beat.folded));
+    take("territory", r_territory(ctx));
     take("capacity", r_capacity());
     take("workers", r_workers());
     take("crown", r_crown());
@@ -877,6 +896,45 @@ fn render_lines(
                     dash(row.get("worker")),
                     dash(row.get("pr_number")),
                     dash(row.get("session")),
+                ));
+            }
+            let hidden = rows.len().saturating_sub(MAX_COURT_ROWS);
+            if hidden > 0 {
+                lines.push(format!("  ... {hidden} more rows cut"));
+            }
+        }
+    }
+
+    match failed("territory") {
+        Some(r) => lines.push(format!("READER FAILED territory: {}", r.error)),
+        None => {
+            let territory = by_name("territory")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let rows = territory.as_array().cloned().unwrap_or_default();
+            lines.push(format!("territory: {} scopes", rows.len()));
+            for row in rows.iter().take(MAX_COURT_ROWS) {
+                let kingless = if row.get("kingless").and_then(Value::as_bool) == Some(true) {
+                    " kingless"
+                } else {
+                    ""
+                };
+                let bp = row.get("blueprinter").filter(|b| !b.is_null());
+                let bp_name = bp.and_then(|b| s_str(b, "name")).unwrap_or("none");
+                let bp_live = bp
+                    .and_then(|b| b.get("live"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                lines.push(format!(
+                    "  {} rung {} mission {} live {}/{}{} blueprinter {}{}",
+                    dash(row.get("scope")),
+                    dash(row.get("rung")),
+                    dash(row.get("mission")),
+                    dash(row.get("live")),
+                    dash(row.get("cap")),
+                    kingless,
+                    bp_name,
+                    if bp_live { " (live)" } else { "" },
                 ));
             }
             let hidden = rows.len().saturating_sub(MAX_COURT_ROWS);
@@ -1364,6 +1422,7 @@ mod tests {
             Reading::took("board", board),
             Reading::took("blocked_child", json!([{"node": "x-1"}])),
             Reading::took("court", court),
+            Reading::took("territory", json!([])),
             Reading::took("capacity", cap),
             Reading::took("workers", workers),
             Reading::took(
@@ -1410,7 +1469,7 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(9)));
+        assert_eq!(data.get("coverage"), Some(&json!(10)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
     }
 
@@ -1429,7 +1488,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 8 of 9 readings ok")));
+            .any(|l| l.starts_with("coverage: 9 of 10 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -1444,7 +1503,7 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        readings[7] = Reading::failed("drain", "drain unreadable".into());
+        readings[8] = Reading::failed("drain", "drain unreadable".into());
         let data = build_data(&readings, "x-a792");
         assert!(derive_change(None, &data, "").starts_with("no numeric movement; readings failed"));
     }

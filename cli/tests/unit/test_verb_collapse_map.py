@@ -114,13 +114,20 @@ def test_map_covers_current_surface_once():
     # transcript read the loopcheck distress leg shells) and this branch adds
     # `agents friction-escalate` (the watchdog friction lane): 571 -> 573.
     # This branch also allocates `backlog requeue` its row: 573 -> 574.
-    # Upstream's cargo-offload rows (`agents workspace worktree cargo-offload`
-    # and the legacy `worktree cargo-offload`) took 574 -> 576 and the
-    # two-lane discovery branch allocated `backlog discover`: 576 -> 577. The
-    # routing branch allocates `agents route-slot`, the delivery-slot resolver
-    # the spawn seam's client invokes directly (hidden verb): 577 -> 578. The
+    # x-e221 allocates the hidden territory readout
+    # `config active-backlog-territories`: 574 -> 575, then retires its
+    # `agents worker blueprint-feed` (+ `worker` mirror) rows when the feed
+    # ported native to the binary: net -2 from 577. Upstream's cargo-offload
+    # rows (`agents workspace worktree cargo-offload` and the legacy
+    # `worktree cargo-offload`) took 574 -> 576, the two-lane discovery
+    # branch allocated `backlog discover`: 576 -> 577, and the routing
+    # branch allocates `agents route-slot`, the delivery-slot resolver the
+    # spawn seam's client invokes directly (hidden verb): 577 -> 578. The
     # harness-keyed-defaults branch allocates `agents spawn-overlay` and
     # `agents fallback-chain`, the two client verbs the spawn seam degrades
+    # This branch (x-e221) allocated `agents test-run`, `backlog worked`,
+    # and `agents blueprint-feed`; the retired `config
+    # active-backlog-territories` row left the map in the same change.
     # open around (hidden verbs): 578 -> 580. The one-authorized-merge branch
     # allocates `agents authorized-merge`, the merge/arm decision every merge
     # path asks through the single Python door (hidden verb): 580 -> 581.
@@ -183,7 +190,7 @@ def test_map_covers_current_surface_once():
     # 614 -> 616. `agents provider-cap`, the relay that reads and answers the
     # provider-cap actor's questions: 616 -> 617. `agents compaction`, the
     # hidden relay over the PreCompact stamp the hook writes: 617 -> 618.
-    assert len(mapped) == 618, (
+    assert len(mapped) == 619, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

@@ -20,6 +20,7 @@ def _entry(
     sid="uuid-full",
     provider=None,
     route_settings_path=None,
+    node=None,
 ):
     return SimpleNamespace(
         status=status,
@@ -28,6 +29,7 @@ def _entry(
         harness_session_id=sid,
         provider=provider,
         route_settings_path=route_settings_path,
+        node=node,
     )
 
 
