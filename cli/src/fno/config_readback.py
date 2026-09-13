@@ -171,11 +171,8 @@ _MISSING = object()
 def _holder_file(
     layers: list[tuple[Path, dict[str, object]]], loc: tuple[object, ...]
 ) -> str:
-    """The first priority-ordered layer holding the failing key's path; that
-    layer contributed the merged value, so it is the file to fix. One
-    trailing segment may be dropped: legacy coercion derives a deeper key
-    (``watchdog = "on"`` stores a scalar, the error names
-    ``watchdog.mode``), and the stored parent is still the thing to fix."""
+    """First priority-ordered layer holding the key; one trailing segment may
+    drop, since legacy coercion derives a deeper key than the file stores."""
     unwrap = _cfg()._unwrap_config_dict
     for path, parsed in layers:
         if _path_held(unwrap(dict(parsed)), loc) or _path_held(
@@ -199,10 +196,9 @@ def _path_held(node: Any, loc: tuple[object, ...]) -> bool:
 def describe_config_failure(
     exc: Any, layers: list[tuple[Path, dict[str, object]]]
 ) -> str:
-    """One line per schema error, naming the file, key, value and legal set.
+    """One line per schema error, naming file, key, value and legal set.
 
-    Shared by the loader's ``SettingsRefused`` and the doctor's value check,
-    so every site that refuses a config value speaks one message shape
+    Shared by the loader's ``SettingsRefused`` and the doctor's value check
     (x-49db). ``layers`` is the loader's priority-ordered (path, parsed) list.
     """
     errors = exc.errors()

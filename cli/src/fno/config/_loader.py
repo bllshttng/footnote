@@ -20,13 +20,8 @@ if TYPE_CHECKING:
 
 
 class SettingsRefused(click.ClickException):
-    """A settings file carries a value the schema refuses; loading stops.
-
-    ``load_settings`` raises this instead of the raw pydantic
-    ``ValidationError`` (a ClickException renders clean: message on stderr,
-    exit 1, no traceback), and the message names the file, the key, the
-    offending value and the legal set (x-49db).
-    """
+    """A settings file carries a value the schema refuses; the message names
+    the file, the key, the value and the legal set (x-49db)."""
 
 
 def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:
@@ -181,7 +176,6 @@ def _load_settings_at(key: _SettingsKey) -> "SettingsModel":
     try:
         return SettingsModel.model_validate(raw)
     except ValidationError as exc:
-        # importlib, same as warn_unknown_keys above: a static edge to
-        # config_readback is the mypy SCC the caller imports it to avoid.
+        # importlib hop, same mypy-SCC reason as warn_unknown_keys above.
         describe = importlib.import_module("fno.config_readback").describe_config_failure
         raise SettingsRefused(describe(exc, layers)) from exc

@@ -408,9 +408,7 @@ def run_doctor() -> int:
     try:
         s = load_settings()
     except SettingsRefused as exc:
-        # The refusal already names file, key, value and legal set; printing
-        # it verbatim IS the report (x-49db). The generic arm below would
-        # misdirect to migrate-paths, which recreates files, not values.
+        # The refusal names file, key, value and legal set; print verbatim.
         print(f"[doctor] {exc}")
         return 1
     except Exception as exc:
