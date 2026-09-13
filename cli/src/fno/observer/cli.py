@@ -180,10 +180,9 @@ def _default_gh(args: list[str]) -> "tuple[int, str, str]":
         return 1, "", str(exc)
 
 
-# Per-run cap on gh invocations. The eval loop is a background accumulator, not
-# a deadline job: nodes past the cap are picked up by later daily sweeps. Bounds
-# a sweep's total network fan-out (each gh call already has its own 60s timeout)
-# so N concurrent sweeps can't stretch a seconds-job into tens of minutes (x-dbdf).
+# Per-run cap on gh invocations: bounds a sweep's total network fan-out so N
+# concurrent sweeps can't stretch a seconds-job into tens of minutes; nodes
+# past the cap are picked up by later daily sweeps, not lost.
 _GH_FANOUT_CAP = int(os.environ.get("FNO_OBSERVER_GH_CAP", "10"))
 
 
