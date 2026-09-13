@@ -4409,10 +4409,7 @@ def advance_epic(
 
 
 def _ready_loose_nodes(project: str) -> list[dict]:
-    """Ready PARENTLESS (loose) nodes of one project, in board order.
-
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
+    """Ready PARENTLESS (loose) nodes of one project, in board order."""
     from fno.graph._intake import repo_root
     from fno.graph.store import ready as store_ready
 
@@ -4457,23 +4454,16 @@ def advance_project_loose(
 
     root = project_root_from_settings(project)
     if not root:
-        _emit(
-            EVENT_SKIPPED,
-            {"reason": "unmapped-project", "mission": label,
+        _emit(EVENT_SKIPPED, {"reason": "unmapped-project", "mission": label,
              "detail": f"{project} (add config.work.workspaces.<ws>.projects[].path)",
-             "rank": rank},
-            ev_path,
-        )
+             "rank": rank}, ev_path)
         return AdvanceEpicResult(project, error="unmapped-project")
 
     try:
         children = _ready_loose_nodes(project)
     except Exception as exc:  # noqa: BLE001 - never guess on a read error
-        _emit(
-            EVENT_SKIPPED,
-            {"reason": "children-error", "mission": label, "detail": str(exc)[:200], "rank": rank},
-            ev_path,
-        )
+        _emit(EVENT_SKIPPED, {"reason": "children-error", "mission": label,
+             "detail": str(exc)[:200], "rank": rank}, ev_path)
         return AdvanceEpicResult(
             project,
             child_results=(AdvanceResult("skipped", EVENT_SKIPPED, reason="children-error"),),
@@ -4488,12 +4478,10 @@ def advance_project_loose(
         if max_dispatch is not None and total >= max_dispatch:
             break
         if total >= max_lanes:
-            _emit(
-                EVENT_SKIPPED,
-                {"reason": "lane-cap", "node_id": child["id"], "mission": label,
+            _emit(EVENT_SKIPPED, {"reason": "lane-cap", "node_id": child["id"],
+                 "mission": label,
                  "detail": f"{project}: headroom={max_lanes} (spawn gate)", "rank": rank},
-                ev_path,
-            )
+                ev_path)
             results.append(
                 AdvanceResult("skipped", EVENT_SKIPPED, reason="lane-cap", node_id=child["id"])
             )
@@ -4562,6 +4550,8 @@ def echo_advance_receipt(result: AdvanceEpicResult, *, kind: str, json_out: bool
         for r in result.child_results:
             for note in r.notes:
                 typer.echo(f"{kind} {result.epic_id}: {r.node_id}: {note}")
+
+
 def run_advance_epic(
     epic: str,
     *,

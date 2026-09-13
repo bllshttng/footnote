@@ -8759,16 +8759,6 @@ def cmd_advance(
         if loose:
             typer.echo("advance: --loose and --epic are mutually exclusive", err=True)
             raise typer.Exit(code=2)
-        _run_advance_epic(
-            epic,
-            stop=stop,
-            max_dispatch=max_dispatch,
-            json_out=json_out,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-            continuation=continuation,
-        )
         # One in flight per mission (x-ef2c); the key uses the CANONICAL id so
         # both spellings of an epic are one scope. --stop is a control action
         # and never queues behind its own drain.

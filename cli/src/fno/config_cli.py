@@ -969,8 +969,6 @@ def active_backlog_cmd(
     """Print the active-backlog drain reading. Full contract:
     docs/architecture/coordination.md#per-territory-team-cap
     """
-    import json as _json
-
     from fno.rust_binary import call_binary_json
 
     error, reading = call_binary_json("active-backlog-receipt")
@@ -982,7 +980,7 @@ def active_backlog_cmd(
         reading = {"targets": reading, "missions": len(reading), "skip_reason": None}
     targets = reading["targets"]
     if json_out:
-        typer.echo(_json.dumps(reading))
+        typer.echo(json.dumps(reading))
         return
     if not targets:
         reason = reading["skip_reason"] or "no_missions"

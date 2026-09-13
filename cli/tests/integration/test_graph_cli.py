@@ -1030,12 +1030,12 @@ def test_rank_top_names_the_config_when_the_drain_is_disabled(tmp_graph, monkeyp
     The epic-activation lever cannot work while the drain reads nothing, so the
     note prescribes the config fix and never tells the reader to activate an
     epic that may already be active."""
-    import fno.active_backlog as active_backlog
+    import fno.graph.rank as rank
 
     monkeypatch.setattr(
-        active_backlog,
-        "resolve_drain_reading",
-        lambda **_: active_backlog.DrainReading(targets=[], missions=6, skip_reason="drain_disabled"),
+        rank,
+        "_drain_receipt",
+        lambda: {"targets": [], "missions": 6, "skip_reason": "drain_disabled"},
     )
     tmp_graph.write_text(json.dumps({
         "entries": [

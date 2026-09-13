@@ -1410,6 +1410,8 @@ mod tests {
             claims: empty.clone(),
             claimed_nodes: empty.clone(),
             holder_activity: HashMap::new(),
+            drivers: SourceRead::ok(json!([])),
+            holder_activity_error: None,
             prs: SourceRead::ok(prs),
             pr_nodes: SourceRead::ok(pr_nodes),
             outstanding: empty.clone(),
