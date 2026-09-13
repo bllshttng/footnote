@@ -894,12 +894,12 @@ def test_codex_binds_through_the_daemon_oracle_when_the_fd_probe_misses(
     test_spawn_codex_session_capture.py; this test only checks the dispatch
     wiring picks up whatever the probe returns.
     """
-    from fno.agents import mux_spawn
+    from fno.agents import codex_pane
     from fno.agents.registry import load_registry
 
     session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
     monkeypatch.setattr(
-        mux_spawn, "_make_codex_bind_probe", lambda **_kwargs: (lambda: session_id)
+        codex_pane, "_make_codex_bind_probe", lambda **_kwargs: (lambda: session_id)
     )
 
     result, _ = _spawn(
@@ -919,11 +919,11 @@ def test_codex_daemon_ambiguity_still_reaps_rather_than_guessing(
     daemon oracle refuses to guess (returns None), so the spawn fails exactly
     like today's binding-window-expired case rather than misbinding."""
     from fno.agents.dispatch import DispatchAskError
-    from fno.agents import mux_spawn
+    from fno.agents import codex_pane
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(
-        mux_spawn, "_make_codex_bind_probe", lambda **_kwargs: (lambda: None)
+        codex_pane, "_make_codex_bind_probe", lambda **_kwargs: (lambda: None)
     )
 
     runner = FakeRunner()

@@ -3177,6 +3177,22 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
     source_auth = source_home / "auth.json"
     if source_auth.is_file():
         (codex_home / "auth.json").symlink_to(source_auth.resolve())
+    # The pane argv asserts the daemon (--remote unix://), so the canary
+    # starts one under its private CODEX_HOME; nothing here touches the
+    # operator's daemon, and every exit path stops it again.
+    from fno.agents.codex_pane import ensure_codex_daemon
+
+    daemon_env = {**os.environ, "CODEX_HOME": str(codex_home)}
+    ensure_codex_daemon(subprocess.run, env=daemon_env)
+
+    def _stop_daemon() -> None:
+        subprocess.run(
+            ["codex", "app-server", "daemon", "stop"],
+            capture_output=True,
+            text=True,
+            env=daemon_env,
+        )
+
     prompt = "fno codex bind canary: reply READY and take no other action."
     argv = build_pane_argv("codex", prompt, cwd, True, None, name=name)
     argv = ["env", f"CODEX_HOME={codex_home}", *argv]
@@ -3194,6 +3210,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
         subprocess.run,
     )
     if proc.returncode != 0:
+        _stop_daemon()
         return {
             "bound": False,
             "session_id": None,
@@ -3209,6 +3226,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
         # dispatch raises on): the canary pane may exist without a way to
         # name it, so point at the manual cleanup path instead of a silent
         # leak.
+        _stop_daemon()
         return {
             "bound": False,
             "session_id": None,
@@ -3281,6 +3299,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
         }
     finally:
         _reap_spawned_pane(session, pane_id, subprocess.run)
+        _stop_daemon()
 
 
 def _emit_codex_bind_report(result: dict[str, Any]) -> None:
