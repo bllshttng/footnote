@@ -480,15 +480,11 @@ def reconcile(
         print(f"reconcile: {_reeval_pr(pr, proposed[pr], events)}")
 
 
-# Dimensions a /blueprint replay can re-score structurally (Review Amendment A1:
-# replay sets include_shipped_outcome=False, so shipped_outcome is never emitted;
-# the failure-modes-heading dimension was retired 2026-09-12, leaving
-# collision_free as the last code dimension). Judge dimensions are never
-# replayable: a replay spawns blueprint headless, and a missing judge answer
-# there would read as a regression. If the top failure dimension is not one of
-# these, there is no structural before/after to compute - the deferred outcome
-# horizon owns it (Locked Decision 1), so reconcile closes it as
-# outcome-pending rather than replaying.
+# Dimensions a /blueprint replay can re-score structurally (Review Amendment
+# A1; collision_free is the only code dimension left post-x-9983). Judge
+# dimensions are never replayable: a missing judge answer there would read as
+# a regression. Anything else has no before/after to compute, so reconcile
+# closes it as outcome-pending (Locked Decision 1) rather than replaying.
 _REPLAYABLE_DIMS = {"collision_free"}
 
 

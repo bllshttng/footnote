@@ -476,16 +476,9 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
 # (crates/fno-agents/src/blueprint_judge.rs, x-9983's flag-registry port).
 
 
-def _has_five_questions(text: str) -> bool:
-    try:
-        return load_plan_text(text).has_section("Five questions")
-    except Exception:  # unparseable -> no section, no judge call
-        return False
-
-
 def _judge_via_rust(argv: list[str]) -> Optional[dict]:
-    """One ``fno-agents judge`` round-trip: JSON out, ``None`` on any fault
-    (a coverage gap, never a fabricated verdict)."""
+    """One fno-agents judge round-trip: JSON out, None on any fault (a
+    coverage gap, never a fabricated verdict)."""
     binary = resolve_binary()
     if binary is None:
         typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
@@ -503,14 +496,17 @@ def _judge_via_rust(argv: list[str]) -> Optional[dict]:
 
 
 def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[str, int]:
-    """Read the item's plan, skip coverage gaps, judge it via fno-agents.
-    Returns ("judged", fail_count) or ("gap", 0) - a gap is coverage, never a fail."""
+    """("judged", fail_count) or ("gap", 0) - a gap is coverage, never a fail."""
     pp = item.get("plan_path")
     try:
         text = Path(pp).read_text(encoding="utf-8") if pp else None
     except OSError:
         text = None
-    if not text or not _has_five_questions(text):
+    try:
+        has_five = bool(text) and load_plan_text(text).has_section("Five questions")
+    except Exception:  # unparseable -> no section, no judge call
+        has_five = False
+    if not has_five:
         return "gap", 0
     argv = ["--plan", pp]
     if item.get("graph_node_id"):
