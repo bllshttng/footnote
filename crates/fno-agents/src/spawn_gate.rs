@@ -705,19 +705,10 @@ pub fn run_gate(
             },
         ) {
             claims::AcquireOutcome::Acquired(_) => true,
-            claims::AcquireOutcome::HeldByOther { holder: h, .. } => {
-                if fail_closed {
-                    eprintln!(
-                        "spawn-gate: gate mutex held by {h}; the provider cap requires a                          serialized count, refusing"
-                    );
-                    return Err(gate_fault_refusal(
-                        route_provider,
-                        "gate_mutex_unavailable",
-                        &format!("spawn mutex held by {h}"),
-                    ));
-                }
-                false
-            }
+            // Contention is a peer or a corpse, never a verdict: queue. The
+            // wait budget's takeover decides a dead holder; --no-wait refuses
+            // fast. Exactly the Python gate's CLAIM_UNAVAILABLE arm.
+            claims::AcquireOutcome::HeldByOther { .. } => false,
             claims::AcquireOutcome::Error(e) => {
                 if fail_closed {
                     return Err(gate_fault_refusal(

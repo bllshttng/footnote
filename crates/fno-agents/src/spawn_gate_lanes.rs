@@ -176,6 +176,13 @@ fn pid_liveness(pid: u32) -> Result<bool, ()> {
     }
 }
 
+/// One lane's count could not be proved: the probe's unknown verdict, with
+/// the lane and the fault named.
+pub(crate) struct LaneFault {
+    pub(crate) provider: String,
+    pub(crate) error: String,
+}
+
 /// The requested bg short ids with a positive live roster marker. Fails closed
 /// on an unreadable roster and on an undecidable incarnation
 /// (`_provider_roster_live_short_ids`).
