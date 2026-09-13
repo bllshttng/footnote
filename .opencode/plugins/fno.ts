@@ -13,8 +13,36 @@
 
 import { tool, type ToolDefinition } from "@opencode-ai/plugin"
 import type { Plugin, PluginInput } from "@opencode-ai/plugin"
+import { execFile } from "node:child_process"
 import { readFileSync, readdirSync, existsSync } from "node:fs"
 import { join, basename } from "node:path"
+
+// x-8cfb: fleet announcements at the system-prompt boundary. One bus line,
+// one per-session cursor; a session that already read the id hears silence.
+// Fail-open: any error or missing binary injects nothing.
+async function injectAnnouncements(
+  input: unknown,
+  output: { system: string[] },
+): Promise<void> {
+  try {
+    const session = input as { session?: { id?: string }; sessionID?: string } | null
+    const sessionId = session?.session?.id ?? session?.sessionID
+    if (!sessionId) return
+    const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+    const out = await new Promise<string>((resolve) => {
+      execFile(
+        bin,
+        ["announce", "read", "--session-id", sessionId, "--harness", "opencode", "--boundary", "prompt"],
+        { timeout: 2000 },
+        (err, stdout) => resolve(err ? "" : String(stdout)),
+      )
+    })
+    const text = out.trim()
+    if (text) output.system.push(text)
+  } catch {
+    // A hook must never block a session on announcement state.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -459,8 +487,9 @@ const plugin: Plugin = async (input: PluginInput) => {
       }
       config.agent = agent
     },
-    async "experimental.chat.system.transform"(_input: unknown, output: { system: string[] }) {
+    async "experimental.chat.system.transform"(input: unknown, output: { system: string[] }) {
       output.system.unshift(orchestratorPrompt)
+      await injectAnnouncements(input, output)
     },
     tool: {
       task: taskTool,

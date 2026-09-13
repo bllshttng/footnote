@@ -65,6 +65,22 @@ impl AnnouncePaths {
             state_root: dot_fno,
         }
     }
+
+    /// `None` under a test process with no declared home - in-process callers
+    /// (nudge.rs) skip the announce read instead of panicking on the fence.
+    pub(crate) fn from_env_opt() -> Option<Self> {
+        let home = crate::paths::AgentsHome::from_env_opt()?;
+        let dot_fno = home
+            .root()
+            .parent()
+            .unwrap_or_else(|| home.root())
+            .to_path_buf();
+        Some(Self {
+            bus_live: dot_fno.join("bus").join("messages.jsonl"),
+            registry: home.registry_json(),
+            state_root: dot_fno,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

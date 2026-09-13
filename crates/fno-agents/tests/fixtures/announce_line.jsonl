@@ -1,0 +1,1 @@
+{"v":1,"id":"msg-abc123","ts":"2026-09-13T08:00:00Z","thread":"msg-abc123","from":"op","to":"fleet:all","kind":"announce","to_kind":"fleet","word_count":5,"meta":{"scope":"all","audience":["aaaa1111-1111-1111-1111-111111111111"],"subject":"","expires_at":"2026-09-14T08:00:00Z","urgent":false,"supersedes":[]},"body":"one announcement is one bus line"}
