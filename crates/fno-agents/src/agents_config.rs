@@ -886,6 +886,19 @@ pub fn notify_min_interval_s(cwd: &Path) -> u64 {
     .unwrap_or(300)
 }
 
+/// `[notify] arm_failing_after_s` (default 1800): how long an arm stays failing, or stale from a dead scheduler, before the arm_watch daemon arm tells the operator. Also the rate floor between arm notices. `0` or a value that does not parse falls back to 1800.
+pub fn notify_arm_failing_after_s(cwd: &Path) -> u64 {
+    resolve(cwd, |t| {
+        t.get("notify")?
+            .as_table()?
+            .get("arm_failing_after_s")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u64)
+    })
+    .filter(|v| *v > 0)
+    .unwrap_or(1800)
+}
+
 /// `mux.notify_on_blocked` (default ON): the daemon fires an OS notification when
 /// a badge ENTERS `blocked` (x-dd84).
 pub fn notify_on_blocked_enabled(cwd: &Path) -> bool {
@@ -965,6 +978,27 @@ mod tests {
         clear_config_env();
         let cwd = write_project_settings("state-reap-defaults", "schema_version = 1\n");
         assert_eq!(state_reap_config(&cwd), StateReapConfig::default());
+        clear_config_env();
+    }
+
+    /// AC9-HP: unset, `0`, or an unparseable value all read 1800; only a
+    /// positive integer changes the threshold.
+    #[test]
+    fn arm_failing_after_s_defaults_and_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("arm-failing-default", "schema_version = 1\n");
+        assert_eq!(notify_arm_failing_after_s(&cwd), 1800);
+        let cwd = write_project_settings("arm-failing-zero", "[notify]\narm_failing_after_s = 0\n");
+        assert_eq!(notify_arm_failing_after_s(&cwd), 1800);
+        let cwd = write_project_settings(
+            "arm-failing-string",
+            "[notify]\narm_failing_after_s = \"600\"\n",
+        );
+        assert_eq!(notify_arm_failing_after_s(&cwd), 1800);
+        let cwd =
+            write_project_settings("arm-failing-valid", "[notify]\narm_failing_after_s = 600\n");
+        assert_eq!(notify_arm_failing_after_s(&cwd), 600);
         clear_config_env();
     }
 

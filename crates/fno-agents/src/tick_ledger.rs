@@ -20,6 +20,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::loop_runtime::Journal;
+use crate::paths::AgentsHome;
 
 /// The journal event type every arm writes once per run.
 pub const EVENT_TYPE: &str = "control_plane_tick";
@@ -93,6 +94,11 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
     },
     ArmSpec {
         arm: "machine_watch",
+        default_interval_s: 300,
+        scheduler: SCHED_DAEMON,
+    },
+    ArmSpec {
+        arm: "arm_watch",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
     },
@@ -175,6 +181,19 @@ pub struct ArmStatus {
     /// The rendered readout line, filled by [`explain`] for every row, red or
     /// not, so no consumer re-formats it.
     pub line: String,
+}
+
+/// The journal list every arms read folds: the agents home journal plus the
+/// global mirror derived from the agents root (its parent dir), never a
+/// hand-built path. One list for the client readout and the arm_watch daemon
+/// arm, so two hand-built lists cannot drift.
+pub fn journals(home: &AgentsHome) -> Vec<PathBuf> {
+    let global = home
+        .root()
+        .parent()
+        .map(|p| p.join("events.jsonl"))
+        .unwrap_or_else(|| home.events_jsonl());
+    vec![home.events_jsonl(), global]
 }
 
 /// Fold every journal (plus `.1` rotations) into one row per known arm.
@@ -820,6 +839,19 @@ mod tests {
                 .as_nanos()
         ));
         p
+    }
+
+    /// AC8-HP: the readout knows the arm even before its first tick - one
+    /// `KNOWN_ARMS` row, daemon scheduler, the 300s beat.
+    #[test]
+    fn arm_watch_is_the_eleventh_known_arm_on_the_daemon() {
+        assert_eq!(KNOWN_ARMS.len(), 11);
+        let spec = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "arm_watch")
+            .expect("arm_watch row");
+        assert_eq!(spec.default_interval_s, 300);
+        assert_eq!(spec.scheduler, SCHED_DAEMON);
     }
 
     fn write_rows(path: &Path, rows: &[Value]) {
