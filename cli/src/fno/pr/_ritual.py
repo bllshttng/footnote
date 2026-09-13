@@ -406,7 +406,7 @@ class Ritual:
         try:
             # Same bound the merge uses: above reconcile's 240s close-probe
             # budget, never below it.
-            from fno.backlog.single_flight import POST_MERGE_RECONCILE_TIMEOUT_S
+            from fno.pr._merge import POST_MERGE_RECONCILE_TIMEOUT_S
 
             r = self._sh(argv, timeout=POST_MERGE_RECONCILE_TIMEOUT_S)
         except subprocess.TimeoutExpired:

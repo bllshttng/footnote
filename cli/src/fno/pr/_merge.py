@@ -45,6 +45,10 @@ from fno.pr._proc import run
 
 _PR_RE = re.compile(r"^[1-9][0-9]*$")
 
+# The post-merge reconcile bound (merge child and the ritual's leg alike):
+# above reconcile's own 240s close-probe budget (graph/_reconcile.py).
+POST_MERGE_RECONCILE_TIMEOUT_S = 300.0
+
 # Merge serialization (parallel mode, epic x-42d5 G4, Locked Decision #9):
 # builds run parallel, merges run ONE AT A TIME. The lock is held across the
 # gh merge call and its post-merge followups (typically seconds), so the wait
@@ -1010,17 +1014,17 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
             return []
 
         from fno import _subprocess_util
-        from fno.backlog.single_flight import POST_MERGE_RECONCILE_TIMEOUT_S, child_env
 
-        # Bounded and parent-bound (x-626f): the timeout group-kills a wedged
-        # child (see _proc.run), and child_env exits the child when WE die.
+        # The merge's post-merge reconcile child: bounded above reconcile's
+        # own 240s close-probe budget, and parent-bound - FNO_DIE_WITH_PARENT
+        # makes the child's watchdog exit it when WE die (x-626f).
         try:
             res = run(
                 [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile",
                  "--pr-number", str(pr_number), "--repo", repo, "--json"],
                 cwd=cwd or os.getcwd(),
                 timeout=POST_MERGE_RECONCILE_TIMEOUT_S,
-                env=child_env(),
+                env=dict(os.environ, FNO_DIE_WITH_PARENT=str(os.getpid())),
             )
         except subprocess.TimeoutExpired:
             print(
@@ -1605,7 +1609,10 @@ def _merge_lock() -> Iterator[tuple[_MergeLockState, Optional[Callable[[], None]
     finally:
         if release is not None and state == "acquired":
             assert key is not None and holder is not None  # set together before release
-            release(key, holder)
+            try:
+                release(key, holder)
+            except Exception:  # noqa: BLE001 - pid-liveness frees it anyway
+                pass
 
 
 def _live_lane_count() -> int:

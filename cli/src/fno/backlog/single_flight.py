@@ -33,17 +33,6 @@ FLIGHT_TTL_MS = 30 * 60 * 1000
 # A live holder never outlives its own lease: the budget trips a minute
 # before the TTL so the release is always ours, never the expiry.
 _FLIGHT_BUDGET_DEFAULT_S = FLIGHT_TTL_MS // 1000 - 60
-_BUDGET_ENV = "FNO_FLIGHT_BUDGET_S"
-
-# The merge's post-merge reconcile child: above reconcile's own 240s
-# close-probe budget (graph/_reconcile.py), never below it.
-POST_MERGE_RECONCILE_TIMEOUT_S = 300.0
-
-
-def child_env() -> dict[str, str]:
-    """os.environ plus FNO_DIE_WITH_PARENT: the child's watchdog exits it the
-    moment its spawner dies (x-626f)."""
-    return dict(os.environ, FNO_DIE_WITH_PARENT=str(os.getpid()))
 
 
 def advance_flight_key(epic: Optional[str]) -> str:
@@ -203,7 +192,7 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> tuple[threading.Event, 
     graph writes commit server-side and reconcile is idempotent."""
     def _budget_s() -> float:
         try:
-            return float(os.environ.get(_BUDGET_ENV) or _FLIGHT_BUDGET_DEFAULT_S)
+            return float(os.environ.get("FNO_FLIGHT_BUDGET_S") or _FLIGHT_BUDGET_DEFAULT_S)
         except ValueError:
             return float(_FLIGHT_BUDGET_DEFAULT_S)
 
