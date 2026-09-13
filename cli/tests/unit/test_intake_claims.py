@@ -33,6 +33,7 @@ def _node(node_id: str, **overrides) -> dict:
         "id": node_id,
         "parent": None,
         "title": "default-title",
+        "slug": node_id,
         "type": "feature",
         "project": "fno",
         "cwd": "/tmp/fno",

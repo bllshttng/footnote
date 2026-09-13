@@ -5758,7 +5758,12 @@ def cmd_task_list(
     # it refuses here too rather than paying a full locked write each time.
     for e in wire_rows(path=_graph_path()):
         if isinstance(e, dict) and e.get("id") == node_id:
-            rows = [r for r in e.get("tasks") or [] if isinstance(r, dict)]
+            # The keeper round-trip drops a null owner key; restore it.
+            rows = [
+                {**r, "owner": r.get("owner")}
+                for r in e.get("tasks") or []
+                if isinstance(r, dict)
+            ]
             known = {r.get("id") for r in rows}
             if all(i in known for i in ids):
                 if rows:

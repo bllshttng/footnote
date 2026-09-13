@@ -120,11 +120,13 @@ def test_contract_dependents_copies_provider(monkeypatch, tmp_path):
     from fno.backlog import reconcile_dispatch as rdmod
 
     graph = [
-        {"id": "x-blk", "status": "done"},
-        {"id": "x-dep", "blocked_by": ["x-blk"], "dep": "contract",
-         "provider": "claude", "difficulty": "medium"},
+        {"id": "x-blk", "slug": "x-blk", "title": "x-blk", "type": "feature",
+         "priority": "p2", "status": "done"},
+        {"id": "x-dep", "slug": "x-dep", "title": "x-dep", "type": "feature",
+         "priority": "p2", "status": "ready", "blocked_by": ["x-blk"],
+         "dep": "contract", "provider": "claude", "difficulty": "medium"},
     ]
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda _p: graph)
+    monkeypatch.setattr("fno.graph.api.wire_rows", lambda path=None, **k: graph)
     monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
     deps = rdmod._contract_dependents("x-blk")
     assert deps and deps[0]["provider"] == "claude"
@@ -225,7 +227,7 @@ def test_fire_pending_reconcile_dispatches_and_releases(iso, tmp_path, monkeypat
     monkeypatch.setattr(rd, "_contract_dependents", lambda c: [])  # unused path guard
     calls = _patch_spawn(monkeypatch)
     # graph lookup inside fire_* will read the real graph; force the fallback.
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda *a, **k: [])
+    monkeypatch.setattr("fno.graph.api.wire_rows", lambda *a, **k: [])
 
     res = rd.fire_pending_reconcile("x-dep", tmp_path)
     assert res is not None and res.decision == "dispatched"

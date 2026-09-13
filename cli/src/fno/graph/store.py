@@ -249,10 +249,11 @@ def _is_canonical(path: Path) -> bool:
     Reading the RESOLVER, not the facade, also keeps this immune to the
     monkeypatch baking trap: a test that patches the facade and restores it
     leaves a frozen attribute behind."""
+    path = Path(path)  # a concretized _constants value may be a str
     try:
         from fno import paths as _paths
 
-        configured = _paths.graph_json()
+        configured = Path(_paths.graph_json())
     except Exception:  # noqa: BLE001 - a broken config owns no graph
         return False
     try:
