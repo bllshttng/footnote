@@ -18,7 +18,8 @@
 //! is not a record). Per node the newest record by mtime among PASS and FAIL
 //! wins; SKIP and BLOCKED carry no verdict, so they never retire a FAIL. A
 //! FAIL row is `open` until a ruling whose `text` names the report retires it
-//! (`fno inbox decisions`). The verb never changes a node's status: an
+//! (read from the machine-wide decision index). The verb never changes a
+//! node's status: an
 //! unverified auditor must not move doneness, a king rules. `--route` writes
 //! the one progress note that surfaces an open, unrouted FAIL on the node.
 
@@ -93,7 +94,8 @@ pub fn run_prove_it_verdicts(args: &[String]) -> i32 {
     graph_store::apply_readiness_overlay(&mut entries);
 
     let mut unreadable: Vec<Value> = Vec::new();
-    let rows = build_rows(&entries, &mut unreadable, &fetch_decisions);
+    let rulings = load_rulings();
+    let rows = build_rows(&entries, &mut unreadable, &rulings);
 
     let mut exit = 0;
     if route {
@@ -119,11 +121,7 @@ struct Report {
     mtime: SystemTime,
 }
 
-fn build_rows(
-    entries: &[Value],
-    unreadable: &mut Vec<Value>,
-    fetch_decisions: &dyn Fn(&str) -> Option<Value>,
-) -> Vec<Value> {
+fn build_rows(entries: &[Value], unreadable: &mut Vec<Value>, rulings: &[Value]) -> Vec<Value> {
     let mut rows = Vec::new();
     for entry in entries.iter().filter(|e| e.is_object()) {
         let Some(node) = entry_id(entry) else {
@@ -176,12 +174,7 @@ fn build_rows(
             .filter(|r| r.verdict == "PASS" || r.verdict == "FAIL")
             .max_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.path.cmp(&b.path)));
         let Some(win) = winner else { continue };
-        let decisions = if win.verdict == "FAIL" {
-            fetch_decisions(node)
-        } else {
-            None
-        };
-        rows.push(row_for(node, entry, win, decisions.as_ref()));
+        rows.push(row_for(node, entry, win, rulings));
     }
     rows
 }
@@ -259,7 +252,7 @@ fn terminal_record(text: &str) -> Result<Option<(String, String)>, String> {
     Ok(Some((verdict.to_string(), claim.to_string())))
 }
 
-fn row_for(node: &str, entry: &Value, win: &Report, decisions: Option<&Value>) -> Value {
+fn row_for(node: &str, entry: &Value, win: &Report, rulings: &[Value]) -> Value {
     let status = s_str(entry, "status").map(str::to_string);
     // `routed` reads the graph, the ledger this run already has: any progress
     // note naming the report means the note (the delivery leg) already ran.
@@ -278,7 +271,7 @@ fn row_for(node: &str, entry: &Value, win: &Report, decisions: Option<&Value>) -
     let mut ruled_by = None;
     let mut open = false;
     if win.verdict == "FAIL" {
-        ruled_by = decisions.as_ref().and_then(|d| ruling_for(d, &win.path));
+        ruled_by = ruling_for(rulings, &win.path);
         open = ruled_by.is_none();
     }
     json!({
@@ -294,38 +287,56 @@ fn row_for(node: &str, entry: &Value, win: &Report, decisions: Option<&Value>) -
     })
 }
 
-/// The decision index lives on the Python side (journal fold + graph
-/// projection + plan rulings), so the verb consumes `fno inbox decisions` as
-/// a reader instead of re-implementing its resolution. A failed read answers
-/// None: the row stays open, which re-surfaces a maybe-ruled FAIL but never
-/// hides a live one.
-fn fetch_decisions(node: &str) -> Option<Value> {
-    let out = Command::new("fno")
-        .args(["inbox", "decisions", node, "--json"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+/// The machine-wide decision index (`paths.decisions_jsonl()`), the same file
+/// `fno inbox decisions` reads first. The retirement key is the report PATH in
+/// a ruling's text, which needs no subject resolution, so the verb reads the
+/// index directly: measured 2026-09-12, shelling the Python verb costs ~25s
+/// per FAIL row (it folds graph projections and journal roots), which breaks
+/// the SessionStart budget this verb's outstanding leg runs inside. A missing
+/// or damaged index reads as no rulings: a maybe-ruled FAIL re-surfaces, a
+/// live one is never hidden. Damaged lines are skipped, matching the Python
+/// reader's posture.
+fn load_rulings() -> Vec<Value> {
+    let path = default_state_path("decisions.jsonl");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line: &str| serde_json::from_str::<Value>(line).ok())
+        .filter(|row: &Value| {
+            matches!(
+                row.get("_event_type").and_then(Value::as_str),
+                None | Some("") | Some("operator_decision")
+            )
+        })
+        .filter(|row| row.get("text").and_then(Value::as_str).is_some())
+        .collect()
+}
+
+/// `$FNO_HOME/<name>`, else `$HOME/.fno/<name>`: the same resolution
+/// `graph_get::default_graph_path` applies to the graph store.
+fn default_state_path(name: &str) -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_HOME") {
+        return PathBuf::from(v).join(name);
     }
-    serde_json::from_slice(&out.stdout).ok()
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".fno").join(name)
 }
 
 /// A ruling retires the FAIL when its `text` names the report path.
-fn ruling_for(decisions: &Value, report: &str) -> Option<String> {
-    decisions
-        .get("decisions")?
-        .as_array()?
-        .iter()
-        .find_map(|d| {
-            let text = d.get("text").and_then(Value::as_str)?;
-            if text.contains(report) {
-                d.get("decision_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            } else {
-                None
-            }
-        })
+fn ruling_for(rulings: &[Value], report: &str) -> Option<String> {
+    rulings.iter().find_map(|d| {
+        let text = d.get("text").and_then(Value::as_str)?;
+        if text.contains(report) {
+            d.get("decision_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        } else {
+            None
+        }
+    })
 }
 
 fn note_exit(node: &str, body: &str, quiet: bool) -> Option<i32> {
@@ -497,7 +508,7 @@ mod tests {
             json!({"id": "x-ccc", "status": "done", "plan_path": mk("c.md"), "cwd": dir.path().display().to_string()}),
         ];
         let mut unreadable = Vec::new();
-        let rows = build_rows(&entries, &mut unreadable, &|_n| None);
+        let rows = build_rows(&entries, &mut unreadable, &[]);
 
         assert_eq!(rows.len(), 2, "no PASS/FAIL record means no row: {rows:?}");
         let a = rows.iter().find(|r| r["node"] == "x-aaa").expect("row a");
@@ -548,7 +559,7 @@ mod tests {
             json!({"id": "x-bbb", "status": "ready", "plan_path": "plans/rel.md"}),
         ];
         let mut unreadable = Vec::new();
-        let rows = build_rows(&entries, &mut unreadable, &|_n| None);
+        let rows = build_rows(&entries, &mut unreadable, &[]);
         assert!(rows.is_empty(), "no legal record, no row: {rows:?}");
         assert_eq!(
             unreadable.len(),
@@ -605,26 +616,27 @@ mod tests {
             claim: "c".to_string(),
             mtime: SystemTime::now(),
         };
-        let row = row_for("x-aaa", &entry, &win, None);
+        let rulings: Vec<Value> = vec![json!({"decision_id": "d-2", "text": "unrelated"})];
+        let row = row_for("x-aaa", &entry, &win, &rulings);
         assert_eq!(
             row["routed"], true,
             "a note naming the report is the routed marker"
         );
         assert_eq!(row["open"], true, "routed-but-unruled stays open");
 
-        let decisions = json!({"subject": "x-aaa", "decisions": [
-            {"decision_id": "d-1", "text": "ruled on /plans/a.md.artifacts/coverage/REPORT.md: wont_fix"},
-            {"decision_id": "d-2", "text": "unrelated"},
-        ]});
-        let row = row_for("x-aaa", &entry, &win, Some(&decisions));
+        let rulings = vec![
+            json!({"decision_id": "d-1", "text": "ruled on /plans/a.md.artifacts/coverage/REPORT.md: wont_fix"}),
+            json!({"decision_id": "d-2", "text": "unrelated"}),
+        ];
+        let row = row_for("x-aaa", &entry, &win, &rulings);
         assert_eq!(row["ruled_by"], "d-1");
         assert_eq!(
             row["open"], false,
             "a ruling naming the report retires the FAIL"
         );
 
-        assert_eq!(ruling_for(&decisions, "/nowhere/else.md"), None);
-        assert_eq!(ruling_for(&json!({"decisions": []}), report_path), None);
+        assert_eq!(ruling_for(&rulings, "/nowhere/else.md"), None);
+        assert_eq!(ruling_for(&[], report_path), None);
     }
 
     #[test]
