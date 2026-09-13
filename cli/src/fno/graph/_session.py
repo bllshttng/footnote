@@ -133,6 +133,7 @@ def cmd_session_add(
 ) -> None:
     """Stamp a node with a lifecycle phase record (idempotent, append-only).
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
+    Self-close spelling (the owning session): session add <node> --phase <phase> --ended-at <ISO-8601 now>.
     """
     from fno.graph.fuzzy import resolve_node
     from fno.graph.store import (
@@ -141,6 +142,44 @@ def cmd_session_add(
         read_graph,
         stamp_session_for_pr,
     )
+
+    def _open_row_to_end(node_id: str):
+        """The open (phase, session) row an --ended-at append would close,
+        read only when an end is being recorded - every other call pays
+        nothing."""
+        if ended_at is None:
+            return None
+        from fno.graph.statuses import is_open_phase_row
+
+        for entry in read_graph(_graph_path()) or []:
+            if not (isinstance(entry, dict) and entry.get("id") == node_id):
+                continue
+            for row in entry.get("sessions") or []:
+                if (isinstance(row, dict) and isinstance(row.get("phase"), str)
+                        and row["phase"] == phase
+                        and row.get("session_id") == eff_session
+                        and is_open_phase_row(row, phase)):
+                    return row
+        return None
+
+    def _refuse_foreign_row(node_id: str, prior) -> None:
+        # Ending another live session's open row is the synthesized-death move
+        # reap-open owns (it demands proof of death); only the owning session
+        # ends its own row here. Keyed on session identity, never the
+        # --session-id override: a guard a caller satisfies by asserting its
+        # own answer is not a guard.
+        if prior is None or eff_session == (ident.session_id or "").strip():
+            return
+        owner_harness = prior.get("harness") or eff_harness
+        typer.echo(
+            f"session add: {owner_harness}:{eff_session} owns an open {phase} row "
+            f"on {node_id}; only that session ends it here. A dead session's row "
+            f"closes with: fno backlog session reap-open {node_id} --phase {phase} "
+            f"--harness {owner_harness} --session-id {eff_session} "
+            "(after proving death).",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     if (node is None) == (pr is None):
         typer.echo("session add: pass exactly one of NODE or --pr-number.", err=True)
@@ -226,8 +265,16 @@ def cmd_session_add(
         # costs a stamp on a legacy node; guessing costs a corrupted one, and
         # the skip is now LOUD (it names the candidates), so nothing is silent.
 
+    prior_open = None
     try:
         if pr is not None:
+            # Both paths resolve one node before the stamp: find_nodes_for_pr
+            # yields exactly one id here or stamp_session_for_pr skips below.
+            if ended_at is not None:
+                single = find_nodes_for_pr(_graph_path(), pr, repo=repo)
+                if len(single) == 1:
+                    prior_open = _open_row_to_end(single[0])
+                    _refuse_foreign_row(single[0], prior_open)
             node_id, status = stamp_session_for_pr(
                 _graph_path(),
                 pr,
@@ -307,6 +354,8 @@ def cmd_session_add(
                         f"plan {guard_plan} claims {sorted(claims)} != node {node_id}",
                         node_id=node_id,
                     )
+            prior_open = _open_row_to_end(node_id)
+            _refuse_foreign_row(node_id, prior_open)
             found, added = append_session_record(
                 _graph_path(),
                 node_id,
@@ -324,12 +373,25 @@ def cmd_session_add(
         typer.echo(f"session add: {exc} (target={who} phase={phase})", err=True)
         raise typer.Exit(code=2)
 
+    # An honest self-close is not a duplicate: an open row existed before and
+    # reads closed after, so the receipt says what happened. A backfill (no
+    # prior open row) keeps `recorded`; a re-close keeps `already recorded`.
+    # A harness mismatch appends a second row and leaves the first open, so it
+    # is not an end.
+    ended_existing = (
+        prior_open is not None
+        and prior_open.get("harness") == eff_harness
+        and ended_at is not None
+    )
     if json_out:
         typer.echo(
             json.dumps(
                 {
                     "node_id": node_id,
-                    "status": "added" if added else "duplicate",
+                    "status": (
+                        "ended" if ended_existing
+                        else ("added" if added else "duplicate")
+                    ),
                     "phase": phase,
                     "harness": eff_harness,
                     "session_id": eff_session,
@@ -337,6 +399,8 @@ def cmd_session_add(
                 }
             )
         )
+    elif ended_existing:
+        typer.echo(f"ended {phase} {eff_harness}:{eff_session} on {node_id}")
     else:
         state = "recorded" if added else "already recorded"
         typer.echo(f"{state} {phase} {eff_harness}:{eff_session} on {node_id}")

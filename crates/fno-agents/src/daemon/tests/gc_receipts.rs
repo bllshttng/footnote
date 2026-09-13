@@ -100,6 +100,7 @@ pub(super) fn graph_read(
             .push(node.to_string());
     }
     Some(GraphRead {
+        work_index: index.clone(),
         index,
         open_do: open,
         phases: std::collections::HashMap::new(),

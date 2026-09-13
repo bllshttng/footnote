@@ -296,6 +296,10 @@ def closed_worker_session_ids(entry: dict) -> set[str]:
         if not (isinstance(row, dict) and isinstance(row.get("session_id"), str)
                 and isinstance(row.get("phase"), str)):
             continue
+        # A ship row is a link event (see live_worked_node_ids): it must not
+        # reopen a session this node already saw finish.
+        if row["phase"] == "ship":
+            continue
         (open_ids if is_open_phase_row(row, row["phase"]) else closed).add(row["session_id"])
     return closed - open_ids
 
@@ -350,7 +354,11 @@ def live_worked_node_ids(
                     workers.append(label)
 
             for row in entry.get("sessions") or []:
+                # A ship row is a link event, never occupancy: the PR-link
+                # stamp opens it and no terminal closes it, so it cannot show
+                # that anyone is working the node.
                 if not (isinstance(row, dict) and isinstance(row.get("phase"), str)
+                        and row["phase"] != "ship"
                         and is_open_phase_row(row, row["phase"])):
                     continue
                 roster_row = reading.row_for_session(row["session_id"])

@@ -334,6 +334,27 @@ def test_requeue_still_refuses_a_worker_with_a_climbing_sample_count(
     assert _read(tmp_graph)[0]["status"] == "in_progress"
 
 
+def test_ac3_hp_the_reachable_refusal_names_the_owners_self_close(
+    tmp_graph, claims_root, monkeypatch
+):
+    """The refusal names the next command: the owning session ends its own do
+    row with `session add --ended-at`. reap-open is NOT named - this worker
+    reads reachable, so a death claim would be false."""
+    _seed(tmp_graph, [_wedged_node()])
+    _dead_truth(
+        monkeypatch,
+        state="working",
+        age_s=13 * 60,
+        observed={"kind": "observed", "model": "glm-5.3-flash", "samples": 31},
+    )
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code == 3
+    assert (
+        f"fno backlog session add {NODE_ID} --phase do --ended-at" in _out(result)
+    )
+    assert "reap-open" not in _out(result)
+
+
 def test_the_receipt_prints_the_sample_count_beside_the_state(
     tmp_graph, claims_root, monkeypatch
 ):

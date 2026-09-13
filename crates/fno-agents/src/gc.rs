@@ -1967,6 +1967,7 @@ mod tests {
             vec![("N1".to_string(), "done".to_string())],
         );
         let graph = std::cell::RefCell::new(Some(gc_sweep::GraphRead {
+            work_index: index.clone(),
             index,
             open_do: HashMap::new(),
             phases: HashMap::new(),
@@ -2077,6 +2078,7 @@ mod tests {
             vec![("N1".to_string(), "done".to_string())],
         );
         let graph = std::cell::RefCell::new(Some(gc_sweep::GraphRead {
+            work_index: index.clone(),
             index,
             open_do: HashMap::new(),
             phases: HashMap::new(),
