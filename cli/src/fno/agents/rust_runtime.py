@@ -753,9 +753,8 @@ def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
 def _export_worktree_policy_pin_at_seam(args: "Sequence[str]") -> None:
     """Pin an undeclared foreign target's policy for the Rust route.
 
-    Auto mode execs the Rust client before ``cmd_spawn`` runs; the binary is a
-    same-env replacement, so exporting here reaches the child.
-    """
+    Auto mode execs the Rust client before ``cmd_spawn`` runs; the binary is
+    a same-env replacement, so exporting here reaches the child."""
     try:
         if os.environ.get("FNO_WORKTREE_POLICY"):
             return

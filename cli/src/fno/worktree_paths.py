@@ -336,8 +336,8 @@ def resolve_worktree_policy(
             source = "global"
     if raw_policy is None:
         raw_policy = "harness-native"
-    # The env override sits above every config layer and flows into the SAME
-    # validation below: out-of-enum refuses exactly like a bad config value.
+    # The env override sits above every config layer; the SAME validation
+    # below refuses an out-of-enum value like a bad config value.
     env_policy = os.environ.get("FNO_WORKTREE_POLICY")
     if env_policy:
         raw_policy, source = env_policy, "env"
@@ -395,8 +395,6 @@ def _repo_identity(path: Path) -> Optional[tuple[Path, Path]]:
     except (OSError, subprocess.CalledProcessError, ValueError):
         return None
     outs = proc.stdout.split()
-    if len(outs) < 2:
-        return None
     top = Path(outs[0]).resolve()
     common = Path(outs[1])
     if not common.is_absolute():
