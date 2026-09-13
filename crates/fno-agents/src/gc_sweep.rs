@@ -1687,6 +1687,8 @@ pub(crate) fn run_with_release(
             branch_merged: None,
             planning,
             planning_closed,
+            planning_plan_written: Vec::new(),
+            planning_released: false,
             confirm_hold,
             session_terminal,
             superseded_by_live_peer,
@@ -1758,7 +1760,7 @@ pub(crate) fn run_with_release(
                 Some(KeepReason::PrStateContradicts { node, detail }) => {
                     summary.kept_pr_contradicts.push((id, node, detail))
                 }
-                Some(KeepReason::PlanningUnclosed { node }) => {
+                Some(KeepReason::PlanningUnclosed { node, .. }) => {
                     summary.kept_planning_unclosed.push((id, node))
                 }
                 // GraphUnreadable / OpenDoRow are decided above, before the
