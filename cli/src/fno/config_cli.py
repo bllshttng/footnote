@@ -242,7 +242,6 @@ def _repo_has_fno_activity(repo_root: Path, project_id: Optional[str]) -> bool:
     False (dormant) on any unreadable state - a false negative degrades to
     today's silent behavior; a false positive is the nag we are removing.
     """
-    import json
 
     # 1. In-flight target session (cheapest: a stat). An imminent merge counts.
     try:
@@ -1093,7 +1092,6 @@ def get_cmd(
     a value the merge discarded, is stderr-only. ``--json`` carries both
     streams' facts as one object.
     """
-    import json
     import os
     import sys
 
@@ -1576,7 +1574,6 @@ def history(
     ),
 ) -> None:
     """Read config-write receipts from the global and project journals."""
-    import json
 
     from fno.paths import event_journals
 

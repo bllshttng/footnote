@@ -580,7 +580,6 @@ pub fn resolve_territories(
 ) -> Result<Vec<Territory>, TerritoryUnknown> {
     let crowns = live_crowns(registry_path)?;
     let entries = graph_entries(config_cwd)?;
-    let projects = project_map(config_cwd);
     let paths = workspace_paths(config_cwd);
 
     let epic_project = |epic_id: &str| -> Option<String> {
@@ -1131,6 +1130,7 @@ fn deliver_one(bin: &str, worker_name: &str, node_id: &str) -> bool {
 /// `fno-agents territory-rows`: the AC7 projection as JSON on stdout.
 /// Daemon-free, invoked by the config passthroughs and the status fold.
 pub fn run_territory_rows(args: &[String]) -> i32 {
+    let _ = args;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let registry = AgentsHome::from_env().registry_json();
     let rows = territory_rows(&cwd, &registry);
