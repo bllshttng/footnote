@@ -36,7 +36,6 @@ log "AC1-HP: TARGET_MISSION_* set => mission fields populated"
 TMP1=$(mktemp -d -t init-mission-fields-set.XXXXXX)
 trap 'rm -rf "$TMP1" "${TMP2:-}"' EXIT
 
-export FNO_SPACES_DIR="$TMP1/spaces"
 cd "$TMP1"
 git init -q
 mkdir -p .fno

@@ -85,6 +85,7 @@ JSON
   HOME="${TMP_A}/home" \
   PATH="${TMP_A}/bin:$PATH" \
   FNO_TEST_SPACE="${TMP_A}/space" \
+  FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
   FNO_TARGET_INIT_GATED=1 \
   TARGET_START=1 \
   TARGET_INPUT="tst-11000a" \
@@ -119,6 +120,7 @@ rm -f "${TMP_B}/home/.fno/graph.json"
   HOME="${TMP_B}/home" \
   PATH="${TMP_B}/bin:$PATH" \
   FNO_TEST_SPACE="${TMP_B}/space" \
+  FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
   FNO_TARGET_INIT_GATED=1 \
   TARGET_START=1 \
   TARGET_INPUT="ab-1100b0b0" \
@@ -161,6 +163,7 @@ JSON
   HOME="${TMP_C}/home" \
   PATH="${TMP_C}/bin:$PATH" \
   FNO_TEST_SPACE="${TMP_C}/space" \
+  FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
   FNO_TARGET_INIT_GATED=1 \
   TARGET_START=1 \
   TARGET_INPUT="ab-deadbeef" \
@@ -203,6 +206,7 @@ printf '{"entries":[]}\n' > "${TMP_D}/home/.fno/graph.json"
   HOME="${TMP_D}/home" \
   PATH="${TMP_D}/bin:$PATH" \
   FNO_TEST_SPACE="${TMP_D}/space" \
+  FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
   FNO_TARGET_INIT_GATED=1 \
   FNO_GLOBAL_SETTINGS_PATH="${TMP_D}/home/.fno/config.toml" \
   TARGET_START=1 \

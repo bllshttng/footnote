@@ -43,8 +43,8 @@ ALLOWED = {
     "tests/hooks/test_loop_check_e2e.sh":
         "drives loop-check with an explicit --state and a pinned FNO_SPACES_DIR",
     "tests/target-preflight/test-init-location-gate.sh":
-        "unrepaired legacy harness, out of scope per the x-f105 plan surface; "
-        "nothing runs tests/target-preflight in CI",
+        "unrepaired legacy harness, out of scope per the plan's surface "
+        "notes; nothing runs tests/target-preflight in CI",
     "tests/test-handoff.sh":
         "names the script only in a comment and never runs init",
     "tests/test-register-task.sh":

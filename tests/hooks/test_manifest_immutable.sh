@@ -87,7 +87,6 @@ make_git_repo "$_TMP"
 
 # The manifest lives in the repo's space; the state-path stub pins the
     # answer into the sandbox so CI proves the space leg too.
-export FNO_SPACES_DIR="$_TMP/spaces"
 install_stub "$_TMP"
 MANIFEST="$_TMP/space/target-state.md"
 
