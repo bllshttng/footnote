@@ -193,13 +193,15 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 pub struct Arm {
     last_tick: Mutex<Option<std::time::Instant>>,
     in_flight: Arc<std::sync::atomic::AtomicBool>,
+    config_cwd: PathBuf,
 }
 
-impl Default for Arm {
-    fn default() -> Self {
+impl Arm {
+    pub fn new(config_cwd: PathBuf) -> Self {
         Self {
             last_tick: Mutex::new(None),
             in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            config_cwd,
         }
     }
 }
@@ -208,7 +210,8 @@ impl Default for Arm {
 /// `provider_cap_off` when disarmed (still measuring, still persisting the
 /// snapshot), `ok` when armed and nothing owed. Waves 3/4 hang the leave and
 /// return decisions off the armed branch.
-pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome, config_cwd: PathBuf) {
+pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
+    let config_cwd = arm.config_cwd.clone();
     let interval = Duration::from_secs(PROVIDER_CAP_INTERVAL_S);
     {
         let mut last = arm.last_tick.lock().unwrap_or_else(|e| e.into_inner());
