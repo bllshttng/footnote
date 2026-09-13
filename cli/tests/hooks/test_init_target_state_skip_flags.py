@@ -261,7 +261,7 @@ def test_no_phase_init_event_emitted(tmp_path):
     state_file = _space_state(tmp_path)
     assert state_file.exists(), "State file must still be created"
 
-    events_file = tmp_path / ".fno" / "events.jsonl"
+    events_file = tmp_path / "space" / "events.jsonl"
     if events_file.exists():
         phase_init_found = any(
             '"type":"phase_init"' in line or '"event":"phase_init"' in line
@@ -271,7 +271,9 @@ def test_no_phase_init_event_emitted(tmp_path):
             "phase_init event must NOT be emitted by the new immutable init "
             "(loop-check reads manifest directly; ab-d0337fbc)"
         )
-    # If events.jsonl doesn't exist at all, that's also correct.
+    # If events.jsonl doesn't exist at all, that's also correct. The stub
+    # resolves init's events.jsonl into the space dir; the legacy .fno path is
+    # never written under the stub, so reading it would assert nothing.
 
 
 def test_cancelled_claimless_session_is_archived_on_next_init(tmp_path):
