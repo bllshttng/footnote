@@ -1323,25 +1323,28 @@ EOF
   elif [[ -n "$INITIAL_PLAN_PATH" ]] && command -v fno >/dev/null 2>&1; then
     # The typed import needs the CLI's own dependencies (pydantic et al), which
     # a host python3 may lack. uv is how the plugin installs `fno`, so prefer
-    # the project's managed runtime; the bare python3 fallback keeps the same
-    # degrade-to-unclaimed shape on a host without uv.
+    # the managed runtime of THIS plugin's own checkout (derived from the
+    # script location: the ambient REPO_ROOT is the caller's project, not the
+    # plugin); the bare python3 fallback keeps the same degrade-to-unclaimed
+    # shape on a host without uv.
+    _PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     _RUNNER=(python3)
     if command -v uv >/dev/null 2>&1; then
-      _RUNNER=(uv run --quiet --project "$REPO_ROOT/cli" python)
+      _RUNNER=(uv run --quiet --project "$_PLUGIN_ROOT/cli" python)
     fi
     # `2>&1 >` is NOT a typo and the order matters: it points the resolver's
     # stderr at THIS shell's stderr before stdout is captured, so a traceback
     # still stays quiet-ish but the deliberate ambiguity note reaches the
     # operator. Plain `2>/dev/null` discarded that note, which made the previous
     # fix decorative - the run still proceeded unclaimed in silence.
-    _NODE_ID=$("${_RUNNER[@]}" - "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' || true
+    _NODE_ID=$(PLUGIN_ROOT="$_PLUGIN_ROOT" "${_RUNNER[@]}" - "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' || true
 import os, sys
 
 raw_target, repo_root = sys.argv[1], sys.argv[2]
 # The plugin repo's own checkout backs the import; a bare python3 without it
 # must degrade to "no node resolved", never a traceback that unclaims the run.
-sys.path.insert(0, os.path.join(repo_root, "cli", "src"))
-from fno.graph import api as graph_api
+plugin_root = os.environ.get("PLUGIN_ROOT") or repo_root
+sys.path.insert(0, os.path.join(plugin_root, "cli", "src"))
 if not os.path.isabs(raw_target):
     raw_target = os.path.join(repo_root, raw_target)
 try:
@@ -1349,7 +1352,12 @@ try:
 except OSError:
     sys.exit(0)
 try:
-    conn = graph_api.nodes(include_archived=True)
+    from fno.graph.api import wire_rows
+    from fno.paths import graph_json
+
+    # The total fold: a minimal row the typed model would drop can still be
+    # the plan's delivery unit.
+    entries = wire_rows(path=graph_json())
 except Exception:
     sys.exit(0)
 # Collect ALL holders, then prefer the delivery unit (x-e957). First-match-wins
@@ -1360,8 +1368,10 @@ except Exception:
 # Same rule as `_resolve_dispatch_node` in target_cli.py, deliberately: two
 # resolvers for one question that disagree is worse than either answer.
 matches = []
-for node in conn.nodes:
-    plan_path = node.plan_path
+for node in entries:
+    if not isinstance(node, dict):
+        continue
+    plan_path = node.get("plan_path")
     if not plan_path:
         continue
     abs_plan = plan_path if os.path.isabs(plan_path) else os.path.join(repo_root, plan_path)
@@ -1371,11 +1381,11 @@ for node in conn.nodes:
     except OSError:
         pass
 if len(matches) > 1:
-    units = [e for e in matches if not e.contained_in]
+    units = [e for e in matches if not e.get("contained_in")]
     if len(units) == 1:
         matches = units
 if len(matches) == 1:
-    print(matches[0].id or "")
+    print(matches[0].get("id") or "")
 elif len(matches) > 1:
     # Ambiguous and un-narrowable: two or more UNCONTAINED holders (a shape the
     # write-site refusal now prevents creating). Print nothing rather than pick
@@ -1387,7 +1397,7 @@ elif len(matches) > 1:
         "[init-target-state] note: %d nodes share this plan_path and none is a "
         "single delivery unit (%s); resolving to no node, so this session runs "
         "UNCLAIMED. Name the node explicitly, or fix the duplicate binding.\n"
-        % (len(matches), ", ".join(str(m.id) for m in matches[:4]))
+        % (len(matches), ", ".join(str(m.get("id")) for m in matches[:4]))
     )
 PYEOF
 )
