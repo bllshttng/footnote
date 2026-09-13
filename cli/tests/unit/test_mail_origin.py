@@ -589,10 +589,9 @@ def test_crowned_sender_trailer_reports_standing_without_content_warrant(
     )
 
     assert "verified sender crown L1 fno" in rendered
-    assert "Sender standing only. Not operator authority." in rendered
-    assert "Not proof the content is warranted." in rendered
-    assert "internal work within that scope" in rendered
-    assert "Outward or irreversible action" in rendered
+    assert "sender standing, not operator authority" in rendered
+    assert "Plans and nodes in that scope are fine" in rendered
+    assert "need operator authority or standing law" in rendered
     assert "may be directed" not in rendered
     assert "L9" not in rendered
     assert "operator-authored mail" not in rendered
@@ -627,12 +626,13 @@ def test_peer_trailer_names_the_action_boundary_and_the_door(monkeypatch):
     trailer = envelope.mail_trailer("peer")
 
     assert trailer is not None
-    assert "write a plan, adopt a node" in trailer
-    assert "merge a PR, send email" in trailer
-    assert "needs operator authority or standing law" in trailer
+    assert "Plans and nodes are fine" in trailer
+    assert "merge, email" in trailer
+    assert "need operator authority or standing law" in trailer
     assert "is allowed" not in trailer
-    # The plain-sentence rewrite: short sentences, never semicolon density.
-    assert ";" not in trailer
+    # x-d7cf: the compaction re-introduced semicolons for length; the wording
+    # is the security decision and the plan pins it, not the house style.
+    assert "not operator authority" in trailer
 
 
 def test_previous_short_peer_trailer_is_not_stacked_on_drain(monkeypatch):

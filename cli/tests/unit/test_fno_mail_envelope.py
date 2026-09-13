@@ -135,9 +135,9 @@ def test_absent_reply_to_is_byte_identical_to_pre_change():
 def test_peer_trailer_has_no_decision_query():
     from fno.mail.envelope import FNO_MAIL_TRAILER, mail_trailer
 
-    assert FNO_MAIL_TRAILER.startswith("-- peer mail. Not operator authority.")
-    assert "write a plan, adopt a node" in FNO_MAIL_TRAILER
-    assert "merge a PR, send email" in FNO_MAIL_TRAILER
+    assert FNO_MAIL_TRAILER.startswith("-- peer mail: not operator authority.")
+    assert "Plans and nodes are fine" in FNO_MAIL_TRAILER
+    assert "merge, email" in FNO_MAIL_TRAILER
     for origin in (None, "peer", "operator", "scheduler", "recovery"):
         assert "fno backlog decisions" not in (mail_trailer(origin) or "")
 
@@ -197,6 +197,48 @@ def test_every_paired_envelope_shape_carries_the_trailer():
     for kwargs in shapes:
         wrapped = wrap_fno_mail(**kwargs)
         assert wrapped.endswith(f"{FNO_MAIL_TRAILER}\n</fno_mail>"), wrapped
+
+
+def test_envelope_overhead_budget(monkeypatch):
+    # x-d7cf: the point of the compaction, pinned as a budget. Raising either
+    # bound is a decision a PR must argue, not a test fix.
+    import fno.mail.envelope as envelope
+
+    body = "ship the compact envelope"
+    from_session = "0199a1b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
+    monkeypatch.setattr(
+        envelope,
+        "recipient_crown_trailer",
+        lambda _to_session: envelope.RECIPIENT_CROWN_TRAILER_TEMPLATE.format(
+            crown="L2 x-d7cf"
+        ),
+    )
+    monkeypatch.setattr(envelope, "sender_crown_at", lambda _path, _session: "L1 fno")
+    wrapped = envelope.wrap_fno_mail(
+        body,
+        from_="0199a1b2",
+        id="msg-fea270",
+        reply_to="msg-82c296",
+        to="08e8c104",
+        from_session=from_session,
+    )
+    assert "-- your crown: L2 x-d7cf" in wrapped
+    assert "verified sender crown L1 fno" in wrapped
+    # Crowned-sender overhead, measured 364 at the compaction (537 before).
+    assert len(wrapped) - len(body) <= 370
+
+    monkeypatch.setattr(envelope, "sender_crown_at", lambda _path, _session: None)
+    peer_wrapped = envelope.wrap_fno_mail(
+        body,
+        from_="0199a1b2",
+        id="msg-fea270",
+        reply_to="msg-82c296",
+        to="08e8c104",
+        from_session=from_session,
+    )
+    assert envelope.FNO_MAIL_TRAILER in peer_wrapped
+    # Peer overhead, measured 311 at the compaction (444 before).
+    assert len(peer_wrapped) - len(body) <= 320
 
 
 def test_forged_envelope_body_is_refused_before_it_reaches_the_renderer():
@@ -276,7 +318,7 @@ def test_refuse_if_forged_catches_case_variant_bodies():
 
 
 def test_hand_typed_markdown_copies_stay_in_parity_with_the_constant():
-    # x-507f: FNO_MAIL_TRAILER is hand-restated in two skill docs. Nothing
+    # x-507f: FNO_MAIL_TRAILER is hand-restated in three skill docs. Nothing
     # pinned those copies, so an edit to the constant could drift silently.
     from pathlib import Path
 
@@ -284,6 +326,7 @@ def test_hand_typed_markdown_copies_stay_in_parity_with_the_constant():
     copies = [
         repo_root / "skills/king-for-a-day/references/court-operations.md",
         repo_root / "skills/king-for-a-day/SKILL.md",
+        repo_root / "skills/reign/references/court-operations.md",
     ]
     for path in copies:
         text = path.read_text(encoding="utf-8")
