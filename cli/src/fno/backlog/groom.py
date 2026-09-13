@@ -241,6 +241,7 @@ def _run_mechanical(age: int) -> dict[str, str]:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=_LEG_TIMEOUT_S,
                 env=child_env() if name == "reconcile" else None,
+                start_new_session=name == "reconcile",
             )
         except Exception as exc:  # noqa: BLE001 - a wedged leg must not abort the pass
             results[name] = f"failed: {type(exc).__name__}: {str(exc)[:120]}"

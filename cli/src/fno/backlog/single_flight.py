@@ -35,8 +35,9 @@ FLIGHT_TTL_MS = 30 * 60 * 1000
 _FLIGHT_BUDGET_DEFAULT_S = FLIGHT_TTL_MS // 1000 - 60
 _BUDGET_ENV = "FNO_FLIGHT_BUDGET_S"
 
-# The merge's post-merge reconcile child: same bound as the ritual's leg.
-POST_MERGE_RECONCILE_TIMEOUT_S = 120.0
+# The merge's post-merge reconcile child: above reconcile's own 240s
+# close-probe budget (graph/_reconcile.py), never below it.
+POST_MERGE_RECONCILE_TIMEOUT_S = 300.0
 
 
 def child_env() -> dict[str, str]:
@@ -243,6 +244,11 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> tuple[threading.Event, 
                     f"after {int(elapsed)}s; flight {flight.key} released; stack at {stack_path}\n"
                 )
             flight.release()
+            if os.getpgrp() == os.getpid():
+                # We lead our group (start_new_session spawners), so the kill
+                # takes the awaited subprocess subtree with us, not our parent.
+                with contextlib.suppress(OSError):
+                    os.killpg(os.getpid(), signal.SIGKILL)
             os._exit(124)
 
     threading.Thread(target=_watch, name=f"flight-watchdog-{os.getpid()}", daemon=True).start()

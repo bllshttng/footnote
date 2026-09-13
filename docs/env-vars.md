@@ -67,7 +67,9 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_CONFIG_SEARCH_ROOT` | py | unclear: cli/src/fno/config_io.py:66 |
 | `FNO_CONTEXT_OBSERVATION_DIR` | py | unclear: cli/src/fno/context_observation.py:120 |
 | `FNO_CONTROL_PLANE_SCHEDULER` | py | unclear: cli/src/fno/control_plane.py:22 |
+| `FNO_CONTROL_PLANE_SCHEDULER` | py | unclear: cli/src/fno/control_plane.py:22 |
 | `FNO_CURSOR_AGENT_MODEL` | py+rs | unclear: cli/src/fno/agents/harnesses/cursor_agent.py:326 |
+| `FNO_DIE_WITH_PARENT` | py | Names the spawner pid a flight-holder watchdog compares getppid() against; when the spawner is gone the holder releases its flight and exits, so a killed parent never orphans the child. Opt-in: unset means never trip on parent death. |
 | `FNO_CURSOR_AGENT_PROVIDER` | py+rs | unclear: cli/src/fno/agents/harnesses/cursor_agent.py:321 |
 | `FNO_DEBUG` | py | unclear: cli/src/fno/agents/mux_spawn.py:1854 |
 | `FNO_DISPATCH_ACCOUNT_ENV` | py | unclear: cli/src/fno/agents/cli.py:1905 |

@@ -3087,7 +3087,7 @@ def test_reconcile_child_is_bounded_and_parent_bound(enabled, monkeypatch, tmp_p
     hits = [kw for cmd, kw in captured if "reconcile" in cmd]
     assert hits, "the merge must run its post-merge reconcile"
     kw = hits[0]
-    assert kw.get("timeout") == 120.0
+    assert kw.get("timeout") == 300.0
     assert kw.get("env", {}).get("FNO_DIE_WITH_PARENT") == str(os.getpid())
 
 
@@ -3110,13 +3110,13 @@ def test_reconcile_timeout_reports_and_keeps_merge_exit(enabled, monkeypatch, tm
 
     def fake(cmd, **kwargs):
         if "reconcile" in cmd:
-            raise subprocess.TimeoutExpired(cmd, 120)
+            raise subprocess.TimeoutExpired(cmd, 300)
         return inner(cmd, **kwargs)
 
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     # one readouterr: a second read returns only the post-consumption capture
     cap = capsys.readouterr()
-    assert "timed out after 120s" in cap.err
+    assert "timed out after 300s" in cap.err
     assert "#42" in cap.err
     assert json.loads(cap.out.strip().splitlines()[-1])["outcome"] == "merged"
