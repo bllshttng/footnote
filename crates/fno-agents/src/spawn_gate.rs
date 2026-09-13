@@ -1495,6 +1495,14 @@ fn format_machine_status_line(raw: &str) -> Option<String> {
 }
 
 pub(crate) fn footprint_cause_raw() -> Result<String, String> {
+    // Test seam: a pinned payload keeps gate tests measuring their own axis,
+    // never the live machine's load or whatever probe PATH resolves here.
+    #[cfg(test)]
+    if let Ok(raw) = std::env::var("FNO_TEST_FOOTPRINT_PAYLOAD") {
+        if !raw.is_empty() {
+            return Ok(raw);
+        }
+    }
     let argv = footprint_probe_argv().ok_or_else(|| {
         "no footprint probe resolves on PATH (fno-footprint-cause, fno-py)".to_string()
     })?;
@@ -2333,6 +2341,14 @@ MemAvailable:    8000000 kB\n";
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
         std::env::remove_var("FNO_SPAWN_GATE");
+        // Pin the CPU axis to an admit: the king share under test sits AFTER
+        // the CPU axis in gate order, so a busy machine (or a CI runner with
+        // no probe installed) would refuse with 79 before reaching it.
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(
@@ -2387,6 +2403,10 @@ MemAvailable:    8000000 kB\n";
         match prior_spawn_gate {
             Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
             None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
         }
         let refusal = got.err().expect("the full share must refuse");
         assert_eq!(refusal.exit_code, EXIT_KING_SHARE, "{refusal:?}");
