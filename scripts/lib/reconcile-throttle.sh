@@ -105,6 +105,11 @@ reconcile_maybe_fire() {
     # so it drains within one throttle window of the next session start instead
     # of waiting for an unrelated PR to merge. Best-effort, sequenced last; dedup
     # by existing-node + consumed_at makes a race with a post-merge run safe.
+    #
+    # `fno agents prove-it-verdicts --route` co-fires too (x-6d64): a FAIL verdict
+    # written to plan artifacts gets its progress note within one throttle window
+    # instead of sitting unread. Idempotent by the routed marker (a note already
+    # naming the report is never rewritten). Best-effort.
     nohup bash -c '
         cd "$1" 2>/dev/null || exit 0
         "$2" backlog reconcile --json > "$3.tmp" 2>/dev/null \
@@ -112,6 +117,7 @@ reconcile_maybe_fire() {
         "$2" retro run >/dev/null 2>&1 || true
         "$2" backlog capture tidy >/dev/null 2>&1 || true
         "$2" retro drain-postmortems >/dev/null 2>&1 || true
+        "$2" agents prove-it-verdicts --route >/dev/null 2>&1 || true
     ' _ "$repo_root" "$fno_cmd" "$result" >/dev/null 2>&1 &
     disown 2>/dev/null || true
 
