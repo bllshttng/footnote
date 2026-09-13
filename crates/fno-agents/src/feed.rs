@@ -31,7 +31,7 @@ pub struct FeedRow {
     pub ts: String,
     /// `question_asked` | `question_closed` | `decision_recorded` |
     /// `node_created` | `node_started` | `pr_created` | `node_ended` |
-    /// `session_reaped`
+    /// `session_reaped` | `day_boundary`
     pub kind: String,
     pub node: Option<String>,
     pub session_id: Option<String>,
@@ -187,6 +187,16 @@ pub fn project(
             }
         };
         let kind = match v.get("type").and_then(Value::as_str) {
+            Some("day_boundary") => {
+                let boundary_kind = s_field(data, "kind").unwrap_or_default();
+                FeedRow {
+                    ts,
+                    kind: "day_boundary".into(),
+                    title: format!("day {boundary_kind}"),
+                    r#ref: s_field(data, "boundary_id"),
+                    ..FeedRow::default()
+                }
+            }
             Some("operator_question") => {
                 let title = data
                     .get("question")
@@ -717,6 +727,16 @@ mod tests {
             kinds(&p.rows),
             ["question_asked", "question_closed", "decision_recorded"]
         );
+    }
+
+    #[test]
+    fn day_boundary_rows_are_projected_without_being_skipped() {
+        let questions = r#"{"ts":"2026-09-13T08:00:00Z","type":"day_boundary","source":"operator","data":{"kind":"start","boundary_id":"day-start-20260913-ab12"}}"#;
+        let p = project(questions, &[], &[]);
+        assert_eq!(p.skipped_lines, 0);
+        assert_eq!(kinds(&p.rows), ["day_boundary"]);
+        assert_eq!(p.rows[0].title, "day start");
+        assert_eq!(p.rows[0].r#ref.as_deref(), Some("day-start-20260913-ab12"));
     }
 
     #[test]
