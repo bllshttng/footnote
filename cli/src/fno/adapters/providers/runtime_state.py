@@ -167,6 +167,12 @@ class ProviderRuntimeState:
     windows_opened: dict[str, dict[str, dict[str, Any]]] = dataclasses.field(
         default_factory=dict
     )
+    # Opt-in admission reservations (x-1afa): reservation id -> record. They
+    # ride this document so the check and the write share the one
+    # ``.update.lock`` with every other observation; every writer parses and
+    # re-persists the block so an unrelated health write never eats a live
+    # worker's reservation. Additive, so older files read forward.
+    reservations: dict[str, dict[str, Any]] = dataclasses.field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
 
 
@@ -272,6 +278,11 @@ def _fold_one_legacy_file(target: Path, legacy: Path) -> None:
                     prior_open.get("opened_at")
                 ):
                     windows_opened.setdefault(wid, {})[label] = opened
+        # A fold never costs a live worker's reservation: keep the target's
+        # block (the legacy file predates reservations by construction).
+        reservations = _drop_expired_reservations(
+            _parse_reservations_payload(dst), time.time()
+        )
         now = time.time()
         health, _dropped = _drop_stale(health, now)
         _write_state_atomic(
@@ -282,6 +293,7 @@ def _fold_one_legacy_file(target: Path, legacy: Path) -> None:
                     combo_cursors=cursors,
                     usage=usage,
                     windows_opened=windows_opened,
+                    reservations=reservations,
                     schema_version=int(dst.get("schema_version", SCHEMA_VERSION)),
                 )
             ),
@@ -350,8 +362,39 @@ def _serialize_state(state: ProviderRuntimeState) -> str:
             pid: dataclasses.asdict(s) for pid, s in state.usage.items()
         },
         "windows_opened": state.windows_opened,
+        "reservations": state.reservations,
     }
     return json.dumps(payload, indent=2, sort_keys=True)
+
+
+def _parse_reservations_payload(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Best-effort parse of the ``reservations`` block.
+
+    Same drop-the-bad-entry discipline as :func:`_parse_usage_payload`: one
+    corrupt record must never cost the whole file, and an older file without
+    the block parses to empty.
+    """
+    block = raw.get("reservations") or {}
+    if not isinstance(block, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for rid, record in block.items():
+        if isinstance(rid, str) and isinstance(record, dict):
+            out[rid] = record
+    return out
+
+
+def _drop_expired_reservations(
+    reservations: dict[str, dict[str, Any]], now: float
+) -> dict[str, dict[str, Any]]:
+    """The unexpired subset. Read filters use it to answer honestly; the
+    writers use it under the lock the way ``_drop_stale`` cleans health rows
+    incrementally on every write."""
+    return {
+        rid: record
+        for rid, record in reservations.items()
+        if float(record.get("expires_at") or 0.0) > now
+    }
 
 
 WINDOW_LABEL = "window"
@@ -490,6 +533,9 @@ def mark_window_warned(
                 combo_cursors=cursors,
                 usage=_parse_usage_payload(raw),
                 windows_opened=windows_opened,
+                reservations=_drop_expired_reservations(
+                    _parse_reservations_payload(raw), now
+                ),
                 schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
             )))
             return True
@@ -534,6 +580,9 @@ def stamp_window_open(
                 combo_cursors=cursors,
                 usage=_parse_usage_payload(raw),
                 windows_opened=windows_opened,
+                reservations=_drop_expired_reservations(
+                    _parse_reservations_payload(raw), now
+                ),
                 schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
             )))
             return True
@@ -880,6 +929,9 @@ def read_state(now: float | None = None) -> ProviderRuntimeState:
         combo_cursors=cursors_kept,
         usage=usage,
         windows_opened=_parse_windows_opened(raw),
+        reservations=_drop_expired_reservations(
+            _parse_reservations_payload(raw), now
+        ),
         schema_version=schema_version,
     )
 
@@ -1063,6 +1115,9 @@ def update_provider_health(
                 combo_cursors=cursors,
                 usage=usage,
                 windows_opened=windows_opened,
+                reservations=_drop_expired_reservations(
+                    _parse_reservations_payload(raw or {}), now
+                ),
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))
@@ -1124,6 +1179,9 @@ def reset_provider_health(
                 combo_cursors=cursors,
                 usage=usage,
                 windows_opened=windows_opened,
+                reservations=_drop_expired_reservations(
+                    _parse_reservations_payload(raw), now
+                ),
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))
@@ -1256,6 +1314,9 @@ def write_usage_snapshot(
                 combo_cursors=cursors,
                 usage=usage,
                 windows_opened=windows_opened,
+                reservations=_drop_expired_reservations(
+                    _parse_reservations_payload(raw), now
+                ),
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))
@@ -1869,6 +1930,9 @@ def advance_cursor(
                 combo_cursors=cursors,
                 usage=usage,
                 windows_opened=windows_opened,
+                reservations=_drop_expired_reservations(
+                    _parse_reservations_payload(raw), now
+                ),
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))
