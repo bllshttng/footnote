@@ -3176,9 +3176,8 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
     source_auth = source_home / "auth.json"
     if source_auth.is_file():
         (codex_home / "auth.json").symlink_to(source_auth.resolve())
-    # The pane argv asserts the daemon (--remote unix://), so the canary
-    # starts one under its private CODEX_HOME; nothing here touches the
-    # operator's daemon, and every exit path stops it again.
+    # The pane argv asserts the daemon; start one under the private
+    # CODEX_HOME and stop it on every exit path.
     from fno.agents.codex_pane import ensure_codex_daemon
 
     daemon_env = {**os.environ, "CODEX_HOME": str(codex_home)}

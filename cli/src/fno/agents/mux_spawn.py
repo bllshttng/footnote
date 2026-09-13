@@ -1498,14 +1498,10 @@ def _mesh_env_wrapper(
 ) -> list[str]:
     """Format :func:`_mesh_env_pairs` as one ``env(1)`` prefix on ``argv``.
 
-    ``precomputed`` reuses one pairs computation (the codex pane splice
-    renders the same pairs as config-set leaves); output is byte-identical
-    either way."""
+    ``precomputed`` reuses the caller's pairs computation (x-a095 splice)."""
     if precomputed is None:
         precomputed = _mesh_env_pairs(
-            name,
-            harness,
-            role,
+            name, harness, role,
             provenance=provenance,
             account_env=account_env,
             route_env=route_env,
@@ -3651,8 +3647,7 @@ def dispatch_spawn_pane(
     # `--session-id` out of the argv it forwards, and it never wraps pi.
     pin_session = pin_session or provider == "pi"
     session_uuid = str(_uuid.uuid4()) if pin_session else None
-    # One pairs computation for the whole spawn (x-a095): the codex splice
-    # renders these pairs as config-set leaves; the wrapper formats them.
+    # One pairs computation feeds both the codex splice and the wrapper.
     seed_prov = _seed_provenance_env(message, provenance)
     mesh_unset, mesh_pairs = _mesh_env_pairs(
         name,
@@ -3831,9 +3826,8 @@ def dispatch_spawn_pane(
         # correlate against a fabricated empty baseline.
         codex_daemon_baseline_ids: Optional[set[str]] = None
         if provider == "codex":
-            # The create form asserts the daemon; start it before the pane
-            # and the baseline snapshot below. Calls resolve through the
-            # module so a patch on codex_pane reaches them.
+            # Start the daemon the create form asserts; through the module so
+            # patches on codex_pane reach these calls.
             from fno.agents import codex_pane
 
             codex_pane.ensure_codex_daemon(runner)

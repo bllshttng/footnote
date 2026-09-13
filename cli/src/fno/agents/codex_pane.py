@@ -1,9 +1,8 @@
-"""The codex pane lane's daemon-owned-thread helpers.
+"""The codex pane lane's daemon-owned-thread helpers (x-a095).
 
 Remote Control is served by the shared ``codex app-server`` daemon, which
-loads only threads it owns. The pane lane starts that daemon (the
-interactive_create form's ``pre_exec``) and launches against it
-(``--remote unix://``). Measured 2026-09-13 on codex-cli 0.154.0.
+loads only threads it owns; the pane lane starts it (the create form's
+``pre_exec``) and launches against it (``--remote unix://``).
 """
 
 from __future__ import annotations
@@ -18,9 +17,7 @@ from typing import Callable, Optional, Sequence
 
 from fno.agents.dispatch import DispatchAskError
 
-#: `daemon start` is a no-op when a daemon is already running, so the bound
-#: only has to cover a cold start.
-_CODEX_DAEMON_START_TIMEOUT_S = 15
+_CODEX_DAEMON_START_TIMEOUT_S = 15  # `daemon start` no-ops when running.
 
 #: A dotted or quoted key is a table path in TOML, not one leaf.
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -32,9 +29,9 @@ def ensure_codex_daemon(
 ) -> None:
     """Start (or confirm) the shared app-server daemon before a codex pane.
 
-    The command is read from the create form's ``pre_exec`` through
+    The command is the create form's ``pre_exec`` through
     ``capabilities("codex")``, never hardcoded. A failure raises before any
-    pane exists, so no TUI opens to mint a thread the daemon cannot serve.
+    pane exists, so no TUI mints a thread the daemon cannot serve.
     """
     from fno.agents.harness_map import capabilities
 
@@ -58,8 +55,7 @@ def ensure_codex_daemon(
     except subprocess.TimeoutExpired:
         raise DispatchAskError(
             f"codex pane launch refused: `{display}` timed out after "
-            f"{_CODEX_DAEMON_START_TIMEOUT_S}s; the shared app-server daemon "
-            "did not come up",
+            f"{_CODEX_DAEMON_START_TIMEOUT_S}s",
             exit_code=2,
         ) from None
     except OSError as exc:
@@ -79,10 +75,9 @@ def ensure_codex_daemon(
 def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     """Render ``K=V`` pairs as ``-c shell_environment_policy.set.K="<V>"``.
 
-    A daemon-run tool inherits the daemon's env, not the TUI's, so the
-    worker identity stops at the TUI without this (measured 2026-09-13);
-    the JSON string is a valid TOML basic string and merges with the
-    config.toml ``set`` table.
+    A daemon-run tool inherits the daemon's env, not the TUI's, so worker
+    identity stops at the TUI without this; the JSON string is a valid TOML
+    basic string and merges with the config.toml ``set`` table.
     """
     args: list[str] = []
     for pair in pairs:
@@ -98,11 +93,8 @@ def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     return args
 
 
-#: The rollout-fd probe (in mux_spawn) stays cheap because it is a local
-#: process-tree walk. The daemon oracle below costs a subprocess plus a
-#: websocket round trip, so the binding loop's caller rate-limits it to this
-#: interval even though the loop itself ticks every ``_BINDING_POLL_S``
-#: (0.75s).
+#: Rate-limit for the daemon oracle below (a websocket round trip), vs the
+#: binding loop's own ``_BINDING_POLL_S`` tick.
 _CODEX_DAEMON_PROBE_INTERVAL_S = 2.0
 
 
@@ -236,8 +228,7 @@ def _make_codex_bind_probe(
             condition[:] = [text]
 
     def _probe() -> Optional[str]:
-        # Lazy: mux_spawn imports this module, so a module-level import
-        # here would be circular.
+        # Lazy: mux_spawn imports this module; a top-level import loops.
         from fno.agents.mux_spawn import (
             _PROBE_TIMEOUT_S,
             _backfill_codex_session_id,

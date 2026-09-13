@@ -1263,13 +1263,11 @@ def live_thread_row_for_cwd(
 ) -> Optional[tuple[str, str]]:
     """The ``(harness, session_id)`` of the ONE live codex row holding ``cwd``.
 
-    A codex worker owns no process for identity purposes: thread workers share
-    one daemon pid, and a remote pane worker's tool shell runs under that same
-    daemon (x-a095), so the process walk lands on the daemon and cannot name
-    either one's session id. The spawn record can - the daemon writes the row
-    before the worker's first turn, keyed by the cwd fno named at spawn (one
-    worktree per worker), so a sibling's lookup returns its own row. Exactly
-    one ownership-live ``thread`` or ``pane`` row with a non-empty harness and
+    A codex worker's process walk lands on the shared daemon (thread workers
+    share its pid; a remote pane's tool shell runs under it, x-a095), so the
+    spawn record - written before the worker's first turn, keyed by the cwd
+    fno named at spawn - is what names the session. Exactly one
+    ownership-live ``thread`` or ``pane`` row with a non-empty harness and
     session id answers; zero and two-plus matches return None, as does an
     unreadable or absent registry (raise nothing).
     """
