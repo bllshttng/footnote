@@ -22,6 +22,8 @@
 #   K10 a claude transcript beats a lone foreign codex marker
 #   K11 foreign target + matching king still gates the king
 #   K12 agy foreign target + matching king reaches the king refusal
+#   K15 claude shim, king stop, no pending state -> no candidate in the checkout
+#   K16 claude shim, target stop -> candidate still staged beside the pending state
 
 set -uo pipefail
 
@@ -466,6 +468,73 @@ STUB
         pass "K14: a king block on exit 2 is honored, not counted as unavailable"
     else
         fail "K14: rc=$CLAUDE_RC (want 2) stderr=${ERR_TEXT:-<empty>}"
+    fi
+    cleanup
+}
+
+# ── K15: a king stop writes no delivery candidate into the checkout ─────────
+# The candidate path is the pending-delivery path plus a suffix. A king stop has
+# no pending state, so the path collapsed to a bare `.candidate.<pid>` and the
+# king manifest was copied into the checkout the hook runs in. The copy runs
+# just before loop-check, so the stub lists candidates at the instant it is
+# called and the case never races the EXIT trap.
+{
+    setup_king
+    SEEN="${TMP_DIR}/loopcheck-saw"
+    cat > "$BIN" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "manifest-for-session" ]]; then exit 1; fi
+if [[ "\$1" == "loop-check" ]]; then
+    find "${TMP_DIR}" -name '*.candidate.*' -print > "${SEEN}"
+    echo '{"decision":"block","message":"king board has work"}'
+    exit 0
+fi
+exit 0
+STUB
+    chmod +x "$BIN"
+    run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
+    ROOT_HIT="$(find "$TMP_DIR" -maxdepth 1 -name '.candidate.*' -print)"
+    if [[ ! -f "$SEEN" ]]; then
+        fail "K15: loop-check never ran, so the copy site was not reached (rc=$CLAUDE_RC)"
+    elif grep -qE "^${TMP_DIR}/\.candidate\." "$SEEN" || [[ -n "$ROOT_HIT" ]]; then
+        fail "K15: king manifest copied into the checkout: $(cat "$SEEN") ${ROOT_HIT}"
+    else
+        pass "K15: a king stop reaches loop-check and leaves no candidate in the checkout"
+    fi
+    cleanup
+}
+
+# ── K16: a target stop still stages its candidate beside the pending state ──
+# The guard that keeps K15 clean must not stop the copy a real delivery needs.
+{
+    setup_king
+    cat > "${TMP_DIR}/.fno/target-state.md" <<'MANIFEST'
+---
+session_id: target-test-001
+harness_session_id: transcript
+created_at: 2026-08-18T00:00:00Z
+---
+MANIFEST
+    SEEN="${TMP_DIR}/loopcheck-saw"
+    cat > "$BIN" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "manifest-for-session" ]]; then exit 1; fi
+if [[ "\$1" == "loop-check" ]]; then
+    find "${TMP_DIR}" -name '*.candidate.*' -print > "${SEEN}"
+    echo '{"decision":"allow","message":"nothing to do"}'
+    exit 0
+fi
+exit 0
+STUB
+    chmod +x "$BIN"
+    run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
+    COUNT="$(grep -c . "$SEEN" 2>/dev/null || true)"
+    if [[ ! -f "$SEEN" ]]; then
+        fail "K16: loop-check never ran (rc=$CLAUDE_RC)"
+    elif [[ "$COUNT" != "1" ]] || ! grep -q "delivery-finalize-pending-.*\.candidate\." "$SEEN"; then
+        fail "K16: expected one pending-state candidate, saw ${COUNT}: $(cat "$SEEN")"
+    else
+        pass "K16: a target stop still stages its candidate beside the pending state"
     fi
     cleanup
 }
