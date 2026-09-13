@@ -1311,7 +1311,11 @@ def resolve_owned_identity_cmd() -> None:
         # the leg this verb deleted (x-0992).
         return row_owning_session_id(sid, self_binding=own_pair)
 
-    owned = resolve_self_identity(env, collide=_collide)
+    # Same injection seam self_stamp uses: the codex rollout fd proves the
+    # pane's own id where no env-carried marker can (x-a409).
+    from fno.agents.codex_rollout import codex_rollout_witness
+
+    owned = resolve_self_identity(env, collide=_collide, witness=codex_rollout_witness)
     # AC5-CON: record any non-trivial resolution (a refused collision or a
     # non-single disposition) so a future leak is reconstructable from the event
     # log alone. A single-family resolve can still carry a refused collision, so

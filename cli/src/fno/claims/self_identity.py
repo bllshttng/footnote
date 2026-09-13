@@ -11,6 +11,7 @@ from typing import Callable, Mapping, Optional, Tuple, Union
 from fno.harness_identity import (
     live_thread_row_for_cwd,
     parse_canonical_identity,
+    present_harness_markers,
     resolve_attester_identity,
     resolve_owned_identity,
     session_identity_key,
@@ -23,6 +24,7 @@ def resolve_self_identity(
     collide: Optional[
         Callable[[str, str, Optional[Tuple[str, str]]], Optional[str]]
     ] = None,
+    witness: Optional[Callable[[str], frozenset]] = None,
 ):
     """Resolve the harness identity this process can prove it owns.
 
@@ -73,6 +75,13 @@ def resolve_self_identity(
     witnesses its marker from process ancestry, and fails closed otherwise.
     The agreement check stays in the registry; this layer computes the pair
     and hands it over.
+
+    ``witness(harness) -> frozenset[session_id]`` names the session ids a live
+    rollout fd witnesses for this process (codex only; see
+    ``fno.agents.mux_spawn.codex_rollout_witness``). It lets a name_only stamp
+    complete its own pair where no env-carried marker can prove self
+    (x-a409): the id comes from the fd, not from the marker under test, so it
+    is not circular.
     """
     from fno.claims.session_pid import resolve_session_harness
 
@@ -104,19 +113,54 @@ def resolve_self_identity(
         return _fill_spawn_record(resolve_owned_identity(env, prove=fallback_prove))
 
     try:
-        attested_session_id, witness = resolve_attester_identity(env)
+        attested_session_id, attester_witness = resolve_attester_identity(env)
     except Exception:
-        attested_session_id, witness = "", ""
+        attested_session_id, attester_witness = "", ""
     canonical_session_id = canonical.session_id or attested_session_id
     canonical_proven = bool(
         true_harness
         and canonical.harness == true_harness
-        and witness == "process"
+        and attester_witness == "process"
         and canonical_session_id
         and attested_session_id
         and session_identity_key(canonical_session_id)
         == session_identity_key(attested_session_id)
     )
+
+    # x-a409: a name_only codex stamp names no id, and codex never carries
+    # CODEX_THREAD_ID in its own env, so neither the stamp nor the attester can
+    # complete the pair - the collider then ran self-blind and read the
+    # session's OWN backfilled row as a foreign owner. The injected witness is
+    # the rollout fd the codex tree (or, post-x-a095, the daemon) holds open:
+    # process ground a leaked marker cannot forge. A marker value the witness
+    # sees in a live rollout IS this process's id, so it completes
+    # canonical_session_id exactly as an attested match would. The thread id
+    # wins when present because codex sets CODEX_SESSION_ID to the ROOT
+    # session and CODEX_THREAD_ID per thread.
+    witnessed_value: Optional[str] = None
+    if (
+        witness is not None
+        and not canonical_proven
+        and canonical.disposition == "name_only"
+        and true_harness
+        and canonical.harness == true_harness
+    ):
+        environ_w = os.environ if env is None else env
+        seen = {session_identity_key(s) for s in witness(true_harness)}
+        thread_value = (environ_w.get("CODEX_THREAD_ID") or "").strip()
+        if thread_value and session_identity_key(thread_value) in seen:
+            witnessed_value = thread_value
+        else:
+            witnessed = [
+                value
+                for _marker, harness, value in present_harness_markers(environ_w)
+                if harness == true_harness and session_identity_key(value) in seen
+            ]
+            if len(witnessed) == 1:
+                witnessed_value = witnessed[0]
+        if witnessed_value:
+            canonical_session_id = witnessed_value
+            canonical_proven = True
 
     def prove(harness: str, session_id: str) -> Optional[bool]:
         if true_harness is None:
@@ -139,6 +183,11 @@ def resolve_self_identity(
             canonical.harness.strip().lower(),
             session_identity_key(canonical.session_id),
         )
+    elif witnessed_value:
+        # The witness-completed pair: same ground as a COMPLETE stamp (a live
+        # rollout named the id), so the registry's own-row agreement check
+        # applies to it too (x-a409 AC1).
+        own_pair = (true_harness, session_identity_key(witnessed_value))
 
     return _fill_spawn_record(
         resolve_owned_identity(

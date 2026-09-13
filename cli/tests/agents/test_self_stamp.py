@@ -217,6 +217,65 @@ def test_self_stamp_passes_the_explicit_sentinel_without_an_id(monkeypatch):
     assert identity.rejected[0]["owner"] == "some-row"
 
 
+def test_self_stamp_variant_f_resolves_to_the_thread_id(monkeypatch):
+    """AC3 through the runtime lane (x-a409): a name_only codex stamp over a
+    root+thread id pair. The rollout witness sees both rollout ids; codex sets
+    CODEX_SESSION_ID to the root and CODEX_THREAD_ID per thread, so the thread
+    id is the process's own, and stamp_from resolves the handle, not "fno"."""
+    root = "019cc081-de0d-7283-97cc-751c46742a07"
+    thread = "019cc082-1111-7283-97cc-751c46742a08"
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: "codex",
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: ("", "env_only"),
+    )
+    monkeypatch.setattr(
+        "fno.agents.codex_rollout.codex_rollout_witness",
+        lambda harness, env=None: frozenset({root, thread}),
+    )
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("CODEX_SESSION_ID", root)
+    monkeypatch.setenv("CODEX_THREAD_ID", thread)
+
+    identity = self_stamp.resolve_self_identity()
+
+    assert identity.disposition == "single"
+    assert identity.session_id == thread
+    assert identity.harness == "codex"
+    assert identity.rejected == ()
+    assert self_stamp.stamp_from(None) == thread[:8]
+
+
+def test_ambiguity_message_names_the_owned_row(monkeypatch):
+    """AC5 (x-a409): the king's refusal said "multiple harness markers" for
+    what was really the session's OWN backfilled row. When a rejection names a
+    live owner, the message says that instead."""
+    from fno.harness_identity import OwnedHarnessIdentity
+
+    identity = OwnedHarnessIdentity(
+        None,
+        None,
+        (("CODEX_THREAD_ID", "codex", "01a06d40-5f68-7da0-96cb-f57006ca2d2c"),),
+        "ambiguous",
+        (
+            {
+                "marker": "CODEX_THREAD_ID",
+                "harness": "codex",
+                "session_id": "01a06d40-5f68-7da0-96cb-f57006ca2d2c",
+                "reason": "owned_by_live_row",
+                "owner": "king-4d9b-delivery",
+            },
+        ),
+    )
+    message = self_stamp.identity_ambiguity_message(identity)
+    assert "owned by live row king-4d9b-delivery" in message
+    assert "multiple harness markers" not in message
+    assert "markers: CODEX_THREAD_ID" in message
+
+
 def test_ambiguity_message_names_the_strip_set(monkeypatch):
     """x-b57a: the refusal tells a poisoned session exactly which env vars to
     strip, per family, built from the same list the scrub reads (runtime text

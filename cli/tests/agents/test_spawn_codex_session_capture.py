@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.agents import mux_spawn
+from fno.agents import codex_rollout, mux_spawn
 from fno.agents.discover import codex_session_ids_started_in
 from fno.agents.mux_spawn import _backfill_codex_session_id
 
@@ -530,7 +530,7 @@ def test_a_repeated_daemon_candidate_refuses_to_bind_a_dead_pane(monkeypatch) ->
 def test_codex_session_ids_for_pid_returns_every_distinct_id(tmp_path: Path) -> None:
     """The set view of the tree scan: two rollouts in one tree surface both ids,
     while the one-element wrapper still refuses an ambiguous tree (None)."""
-    from fno.agents.mux_spawn import _codex_session_id_for_pid, _codex_session_ids_for_pid
+    from fno.agents.codex_rollout import _codex_session_id_for_pid, _codex_session_ids_for_pid
 
     roll_a = _write_rollout_with_id(tmp_path / "a", SID_A, SID_A)
     roll_b = _write_rollout_with_id(tmp_path / "b", SID_B, SID_B)
@@ -544,14 +544,14 @@ def test_codex_rollout_witness_skips_non_codex(monkeypatch) -> None:
     """Only codex gets the rollout witness; nothing is probed for any other
     harness (no psutil walk, no daemon round trip)."""
     monkeypatch.setattr(
-        mux_spawn, "_codex_session_ids_for_pid",
+        codex_rollout, "_codex_session_ids_for_pid",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("tree scanned")),
     )
     monkeypatch.setattr(
         "fno.agents.discover._codex_daemon_threads_raw",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("daemon probed")),
     )
-    assert mux_spawn.codex_rollout_witness("claude") == frozenset()
+    assert codex_rollout.codex_rollout_witness("claude") == frozenset()
 
 
 def test_codex_rollout_witness_prefers_the_tree_scan(monkeypatch) -> None:
@@ -561,13 +561,13 @@ def test_codex_rollout_witness_prefers_the_tree_scan(monkeypatch) -> None:
         "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: 4242
     )
     monkeypatch.setattr(
-        mux_spawn, "_codex_session_ids_for_pid", lambda pid: frozenset({SID_A})
+        codex_rollout, "_codex_session_ids_for_pid", lambda pid: frozenset({SID_A})
     )
     monkeypatch.setattr(
         "fno.agents.discover._codex_daemon_threads_raw",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("daemon probed")),
     )
-    assert mux_spawn.codex_rollout_witness("codex") == frozenset({SID_A})
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset({SID_A})
 
 
 def test_codex_rollout_witness_daemon_fallback_unique_row(monkeypatch, tmp_path) -> None:
@@ -582,7 +582,7 @@ def test_codex_rollout_witness_daemon_fallback_unique_row(monkeypatch, tmp_path)
         "fno.agents.discover._codex_daemon_threads_raw",
         lambda *_a, **_k: [{"session_id": SID_A, "cwd": str(tmp_path)}],
     )
-    assert mux_spawn.codex_rollout_witness("codex") == frozenset({SID_A})
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset({SID_A})
 
 
 def test_codex_rollout_witness_daemon_unavailable_fails_closed(monkeypatch) -> None:
@@ -594,7 +594,7 @@ def test_codex_rollout_witness_daemon_unavailable_fails_closed(monkeypatch) -> N
     monkeypatch.setattr(
         "fno.agents.discover._codex_daemon_threads_raw", lambda *_a, **_k: None
     )
-    assert mux_spawn.codex_rollout_witness("codex") == frozenset()
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset()
 
 
 def test_codex_rollout_witness_daemon_cwd_mismatch_fails_closed(
@@ -611,7 +611,7 @@ def test_codex_rollout_witness_daemon_cwd_mismatch_fails_closed(
         "fno.agents.discover._codex_daemon_threads_raw",
         lambda *_a, **_k: [{"session_id": SID_A, "cwd": "/somewhere/else"}],
     )
-    assert mux_spawn.codex_rollout_witness("codex") == frozenset()
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset()
 
 
 def test_codex_rollout_witness_daemon_ambiguous_fails_closed(
@@ -630,7 +630,7 @@ def test_codex_rollout_witness_daemon_ambiguous_fails_closed(
             {"session_id": SID_A.upper(), "cwd": str(tmp_path)},
         ],
     )
-    assert mux_spawn.codex_rollout_witness("codex") == frozenset()
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset()
 
 
 def test_codex_rollout_witness_blank_thread_fails_closed(monkeypatch) -> None:
@@ -644,4 +644,4 @@ def test_codex_rollout_witness_blank_thread_fails_closed(monkeypatch) -> None:
         "fno.agents.discover._codex_daemon_threads_raw",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("daemon probed")),
     )
-    assert mux_spawn.codex_rollout_witness("codex") == frozenset()
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset()
