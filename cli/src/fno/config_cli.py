@@ -961,13 +961,12 @@ def _report_harness_overlays() -> None:
 
 
 @app.command("active-backlog")
-def active_backlog_cmd(
-    json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit a JSON receipt of the drain reading for the daemon."
-    ),
-) -> None:
+def active_backlog_cmd() -> None:
     """Print the active-backlog drain reading. Full contract:
     docs/architecture/coordination.md#per-territory-team-cap
+
+    JSON readers call the binary door directly:
+    fno-agents active-backlog-receipt
     """
     from fno.rust_binary import call_binary_json
 
@@ -979,9 +978,6 @@ def active_backlog_cmd(
         # A pre-338c binary prints a bare target list.
         reading = {"targets": reading, "missions": len(reading), "skip_reason": None}
     targets = reading["targets"]
-    if json_out:
-        typer.echo(json.dumps(reading))
-        return
     if not targets:
         reason = reading["skip_reason"] or "no_missions"
         if reason == "no_missions":
@@ -1008,42 +1004,6 @@ def active_backlog_cmd(
         typer.echo(
             f"{tg['scope']}\t{tg['cwd']}\tinterval={tg['interval_seconds']}s\t"
             f"failure_limit={tg['failure_limit']}{mission}"
-        )
-
-
-@app.command("active-backlog-territories", hidden=True)
-def active_backlog_territories_cmd(
-    json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit a JSON list of territory rows."
-    ),
-) -> None:
-    """The territory readout: one row per scope. Full contract:
-    docs/architecture/coordination.md#per-territory-team-cap
-    """
-    from fno.rust_binary import call_binary_json
-
-    error, rows = call_binary_json("territory-rows")
-    if error is not None:
-        typer.echo(f"territories: {error}", err=True)
-        raise typer.Exit(code=1)
-    if json_out:
-        typer.echo(json.dumps(rows))
-        return
-    if not isinstance(rows, list):
-        rows = []
-    if not rows:
-        typer.echo("territories: none")
-        return
-    for r in rows:
-        worker = r.get("blueprinter")
-        worker_txt = (
-            f" blueprinter={worker['name']}{'!' if worker['live'] else '?'}"
-            if worker
-            else ""
-        )
-        holder = f" king={r['holder']}" if r.get("holder") else " kingless"
-        typer.echo(
-            f"{r['scope']}\trung={r['rung']}{holder}\tlive={r['live']}/{r['cap']}{worker_txt}"
         )
 
 

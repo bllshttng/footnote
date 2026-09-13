@@ -39,8 +39,9 @@ use std::collections::HashSet;
 pub const EXIT_QUEUE_TIMEOUT: i32 = 75;
 pub const EXIT_NO_WAIT: i32 = 76;
 /// The per-territory team cap refused the spawn (x-e221), or its attribution
-/// was unreadable. Byte-twin of the Python gate's `EXIT_TERRITORY_CAP`.
-pub const EXIT_TERRITORY_CAP: i32 = 82;
+/// was unreadable. The team cap is the one permanent, non-queueable machine
+/// refusal with its own number, so a caller never retries it as capacity.
+pub const EXIT_TERRITORY_CAP: i32 = 86;
 pub const EXIT_RAM_REFUSED: i32 = 77;
 /// The lane declares nothing about how it stands toward the fno state root
 /// (epic rule R3). NOT "declares no carrier": an unsandboxed lane needs none.

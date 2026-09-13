@@ -131,8 +131,7 @@ def test_map_covers_current_surface_once():
     # test-run`, the native test-suite process-group owner, and `backlog
     # worked`, the one-read live-worker surface the ready gate and king board
     # consume - rows main also allocated in the same window, counted once -
-    # then `agents blueprint-feed`, the native blueprinter feed door, and
-    # `config active-backlog-territories`, the territory readout (x-e221).
+    # then `agents blueprint-feed`, the native blueprinter feed door (x-e221);
     # Main's window allocated, among others: authorized-merge, king faq
     # add/list, distress-verdicts, court-fold, spawn-axes, workspace reap,
     # graph export, merge-result-check + its pr view, gate-status, census,
@@ -146,7 +145,7 @@ def test_map_covers_current_surface_once():
     # task-context verbs with their retired resume-receipt rows, and
     # canonical-check - each branch's full running ledger stays in its own
     # git history.
-    assert len(mapped) == 618, (
+    assert len(mapped) == 617, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

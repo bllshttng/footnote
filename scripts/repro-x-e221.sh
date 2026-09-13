@@ -171,7 +171,7 @@ print("fixture claims written under", root)
 PYEOF
 
 echo "== 1. resolver =="
-RESOLVER=$( (cd "$FIXTURE" && fno_py config active-backlog --json) ) || fail "resolver verb"
+RESOLVER=$( (cd "$FIXTURE" && "$AGENTS_BIN" active-backlog-receipt) ) || fail "resolver verb"
 echo "$RESOLVER" | python3 -c '
 import json, sys
 reading = json.load(sys.stdin)
