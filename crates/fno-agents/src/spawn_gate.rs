@@ -24,12 +24,10 @@ use serde::Deserialize;
 
 use crate::agents_config;
 use crate::claims;
-use crate::spawn_gate_lanes::{
-    check_account_quota_lock, check_registry_schema,
-};
-use crate::spawn_gate_lanes;
 use crate::claude_roster::ClaudeRoster;
 use crate::daemon::pid_is_ours;
+use crate::spawn_gate_lanes;
+use crate::spawn_gate_lanes::{check_account_quota_lock, check_registry_schema};
 use crate::state::{load_registry, Registry};
 use crate::AgentStatus;
 
@@ -651,7 +649,8 @@ pub fn run_gate(
 
     // The lane cap binds the provider axis only; an unrouted spawn is
     // uncapped (KNOWN_UNROUTED_PROVIDER slots carry no provider tag).
-    let provider_cap = route_provider.and_then(|p| spawn_gate_lanes::provider_lanes_cap(config_cwd, p));
+    let provider_cap =
+        route_provider.and_then(|p| spawn_gate_lanes::provider_lanes_cap(config_cwd, p));
 
     if flags.force && provider_cap.is_none() {
         eprintln!("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)");
@@ -803,7 +802,11 @@ pub fn run_gate(
             // it. An unreadable count refuses - never a zero.
             if let Some(cap_value) = provider_cap {
                 let mut lane_warnings = Vec::new();
-                match spawn_gate_lanes::provider_live_count(registry_path, route_provider.unwrap_or_default(), &mut lane_warnings) {
+                match spawn_gate_lanes::provider_live_count(
+                    registry_path,
+                    route_provider.unwrap_or_default(),
+                    &mut lane_warnings,
+                ) {
                     Ok((live, _counted)) => {
                         for w in &lane_warnings {
                             eprintln!("{w}");
@@ -976,7 +979,10 @@ pub fn run_gate(
                             eprintln!("{w}");
                         }
                         if slots < cap {
-                            axes_read.insert("slots".into(), serde_json::json!(format!("{slots}/{cap} ok")));
+                            axes_read.insert(
+                                "slots".into(),
+                                serde_json::json!(format!("{slots}/{cap} ok")),
+                            );
                             // Re-checked on dequeue for the same reason the RAM floor is: a
                             // spawn can sit queued past QUEUE_POLL for minutes, and another
                             // process can raise the shared schema inside that window.
@@ -992,8 +998,13 @@ pub fn run_gate(
                             for w in &dequeue_warnings {
                                 eprintln!("{w}");
                             }
-                            check_king_share(registry_path, cap, input.caller_session.as_deref(), &axes_read)
-                                .inspect_err(|_| guard.release())?;
+                            check_king_share(
+                                registry_path,
+                                cap,
+                                input.caller_session.as_deref(),
+                                &axes_read,
+                            )
+                            .inspect_err(|_| guard.release())?;
                             axes_read.insert("king_share".into(), serde_json::json!("ok"));
                             if substrate == "headless" {
                                 if let Err(fault) = acquire_worker_slot(
@@ -1337,10 +1348,7 @@ pub(crate) struct CpuAdmission {
 /// `cpu_instrument_unreadable`: the sensor blinding under the load it
 /// measures is itself a symptom, and an unknown share is not headroom. The
 /// probe's own failure words (`probe_err`) travel into that refusal.
-pub(crate) fn check_cpu_axis(
-    prefetched: Option<&str>,
-    probe_err: Option<&str>,
-) -> CpuAdmission {
+pub(crate) fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) -> CpuAdmission {
     fn instrument_refusal(why: &str) -> CpuAdmission {
         CpuAdmission {
             payload: AdmissionPayload {
@@ -1615,11 +1623,7 @@ fn acquire_worker_slot(
 /// The claims-layer fault refusal: the gate could not serialize the decision
 /// or take a lane reservation, so no count was measured and no cap may be
 /// named. The reason names the faulted site, never a cap.
-fn gate_fault_refusal(
-    provider: Option<&str>,
-    reason: &str,
-    error: &str,
-) -> Refusal {
+fn gate_fault_refusal(provider: Option<&str>, reason: &str, error: &str) -> Refusal {
     Refusal::with_receipt(
         EXIT_PROVIDER_CAP,
         serde_json::json!({
@@ -1664,7 +1668,8 @@ fn takeover_dead_gate_mutex(root: Option<&Path>) -> Takeover {
             return Takeover::Gone;
         }
     };
-    let (provably_dead, bucket) = claims::classify_for_sweep(&record, None, &|pid| claims::probe_pid(pid), None, None);
+    let (provably_dead, bucket) =
+        claims::classify_for_sweep(&record, None, &|pid| claims::probe_pid(pid), None, None);
     if provably_dead {
         let _ = std::fs::remove_file(&path);
         return Takeover::Freed;
@@ -1858,7 +1863,10 @@ mod tests {
         };
         std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
 
-        assert_eq!(fleet_incident_gate().err().map(|r| r.exit_code), Some(EXIT_FLEET_STOP));
+        assert_eq!(
+            fleet_incident_gate().err().map(|r| r.exit_code),
+            Some(EXIT_FLEET_STOP)
+        );
         match saved {
             Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
             None => std::env::remove_var("FNO_AGENTS_HOME"),
@@ -2312,6 +2320,88 @@ MemAvailable:    8000000 kB\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The port of `test_king_at_share_refuses_under_cap`: a caller whose own
+    /// workers hold its full share refuses exit 80 even with fleet slots free,
+    /// because waiting cannot help while the caller's own workers hold it.
+    #[test]
+    fn king_share_refuses_when_the_caller_holds_its_full_share() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-share-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 4\nmin_free_gb = 0\n",
+        )
+        .unwrap();
+
+        let pid = std::process::id();
+        let start = claims::process_create_time_ms(pid as i32).unwrap_or(0);
+        let live = |name: &str, spawned_by: &str| {
+            format!(
+                r#"{{"name":"{name}","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"spawned_by_session":"{spawned_by}"}}"#
+            )
+        };
+        let crowned = |name: &str, session: &str| {
+            format!(
+                r#"{{"name":"{name}","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"{session}"}}"#
+            )
+        };
+        // 2 kings -> share 2; the caller holds its full share with 2 rows, so
+        // 2 slots remain fleet-wide and the king share still refuses.
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":{},"entries":[{},{},{},{}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                crowned("king-a", "session-aaaaaaaa"),
+                crowned("king-b", "session-bbbbbbbb"),
+                live("w1", "session-aaaaaaaa"),
+                live("w2", "session-aaaaaaaa"),
+            ),
+        )
+        .unwrap();
+
+        let got = run_gate(
+            &dir,
+            &reg,
+            GateInput {
+                name: "w3".into(),
+                substrate: "bg".into(),
+                flags: GateFlags {
+                    force: false,
+                    no_wait: true,
+                },
+                caller_session: Some("session-aaaaaaaa".into()),
+                ..Default::default()
+            },
+        );
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        let refusal = got.err().expect("the full share must refuse");
+        assert_eq!(refusal.exit_code, EXIT_KING_SHARE, "{refusal:?}");
+        assert_eq!(
+            refusal.event.get("reason"),
+            Some(&serde_json::json!("king_share"))
+        );
+        assert_eq!(refusal.event.get("held"), Some(&serde_json::json!(2)));
+        assert_eq!(refusal.event.get("share"), Some(&serde_json::json!(2)));
+        assert_eq!(refusal.event.get("kings"), Some(&serde_json::json!(2)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn urldecode_inverts_encode_key() {
         let key = "worker:my agent/x";
@@ -2336,8 +2426,7 @@ MemAvailable:    8000000 kB\n";
             root: Some(root.clone()),
         };
 
-        acquire_worker_slot(&mut guard, "plain-codex", "spawn-gate:test", None, false)
-            .unwrap();
+        acquire_worker_slot(&mut guard, "plain-codex", "spawn-gate:test", None, false).unwrap();
 
         let claim_path = root
             .join(".fno/claims")
