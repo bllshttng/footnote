@@ -195,3 +195,29 @@ def test_external_backend_never_serves_the_cache(graph, monkeypatch):
     result = CliRunner().invoke(agents_king_app, ["drain", SCOPE])
     assert result.exit_code != 0  # unreadable under an external backend, as before
     assert "999" not in result.output  # the poisoned cache row never surfaced
+
+
+def test_wake_entries_read_once_per_graph_identity(graph, monkeypatch):
+    import fno.pr_watch._king_wake as wake
+
+    wake._WAKE_ENTRIES_MEMO.update(ident=None, entries=None)
+    calls: list[int] = []
+
+    def _counting_read(path):
+        calls.append(1)
+        from fno.graph.store import read_graph_strict
+
+        return read_graph_strict(path)
+
+    monkeypatch.setattr("fno.graph.store.read_graph", _counting_read)
+    first = wake._graph_entries_for_wake()
+    second = wake._graph_entries_for_wake()
+    assert len(first) == FILLER + CHILDREN + 1
+    assert first == second
+    assert len(calls) == 1  # the unchanged graph is served, not re-read
+
+    _write_graph(graph, done_children=CHILDREN, done_epic=True)
+    third = wake._graph_entries_for_wake()
+    assert len(calls) == 2  # the write moved the identity: one real re-read
+    epic = next(row for row in third if row.get("id") == SCOPE)
+    assert epic["status"] == "done"  # the fresh row, not the memo

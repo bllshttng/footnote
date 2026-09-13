@@ -434,6 +434,35 @@ def _dispatch_walk(
 #: being cut mid-read and losing every crown before it.
 _KING_STEP_FLOOR_S = 15.0
 
+_WAKE_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
+
+
+def _graph_entries_for_wake() -> list:
+    """The wake's full-graph read, one real read per graph identity.
+
+    Identity-keyed like the drain cache: an unchanged graph is byte-identical,
+    so serving the memo is not staleness, and the tick stops re-paying the
+    keeper read the stop gate already stopped paying.
+    """
+    from fno.graph.store import read_graph
+    from fno.king import drain_cache
+    from fno.paths import graph_json
+    from fno.tracker import active_backend_name
+
+    try:
+        if active_backend_name() != "graph":
+            return []
+        path = graph_json()
+        ident = drain_cache.graph_ident(path)
+        if ident is not None and _WAKE_ENTRIES_MEMO["ident"] == ident:
+            return _WAKE_ENTRIES_MEMO["entries"]
+        entries = read_graph(path)
+        if ident is not None:
+            _WAKE_ENTRIES_MEMO.update(ident=ident, entries=entries)
+        return entries
+    except Exception:  # noqa: BLE001 - an unreadable graph is no signal
+        return []
+
 
 def run_king_wake(
     settings,
@@ -479,20 +508,7 @@ def run_king_wake(
 
         answered_fn = read_answered_questions
     if entries_fn is None:
-
-        def entries_fn() -> list:  # noqa: F811 - lazy default, loaded once below
-            # Backend-switched like the tick's board read: a stale graph under
-            # an external tracker backend must not drive a trigger.
-            from fno.graph.store import read_graph
-            from fno.paths import graph_json
-            from fno.tracker import active_backend_name
-
-            try:
-                if active_backend_name() != "graph":
-                    return []
-                return read_graph(graph_json())
-            except Exception:  # noqa: BLE001 - an unreadable graph is no signal
-                return []
+        entries_fn = _graph_entries_for_wake
 
     entries: Optional[list] = None
     if admit_fn is None:
