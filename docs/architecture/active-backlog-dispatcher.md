@@ -5,6 +5,8 @@ supervisor daemon that continuously converges ACTIVE MISSIONS - epics with
 `mission_active=true` - by dispatching their ready leaf children across all
 projects, sleeping between drains. Config-gated, default-off, fail-safe.
 
+Two writers arm a mission: the epic advance (`fno backlog advance --epic`) and a crown grant over an epic (`fno agents crown`, `fno agents spawn --crown`). The grant sets the flag at grant time. A crowned epic is never invisible to the drain.
+
 > **Mission-scoped drains (K2).** The daemon originally ran one drain
 > loop **per enabled project**, each acquiring `walker:<cwd>` and dispatching one
 > node per tick through a local `drain_tick`. That per-project interval arm is

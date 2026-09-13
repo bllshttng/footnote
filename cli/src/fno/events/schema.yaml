@@ -4281,7 +4281,7 @@ event_types:
     consumers: [operator]
 
   - name: mission_activated
-    description: "Emitted by `fno backlog advance --epic <id>` (x-9608 K1) on the first epic advance of an epic mission: the epic node is marked mission_active=true (a durable graph field K2's drain loop reads) and converge pass 1 begins. Emitted once per activation - a re-run of an already-active mission runs the idempotent converge pass without re-emitting this. A mission is an epic node plus its transitive children (the parent edge is the mission key; mission_id is untouched)."
+    description: "Emitted by `fno backlog advance --epic <id>` (x-9608 K1) on the first epic advance of an epic mission: the epic node is marked mission_active=true (a durable graph field K2's drain loop reads) and converge pass 1 begins. Emitted once per activation - a re-run of an already-active mission runs the idempotent converge pass without re-emitting this. A mission is an epic node plus its transitive children (the parent edge is the mission key; mission_id is untouched). A crown grant over an epic (fno agents crown / fno agents spawn --crown) also emits this with source=crown, so a crowned epic can never lack the flag the drain reads."
     sources: [backlog]
     data:
       required: [epic_id]
@@ -4289,6 +4289,10 @@ event_types:
         epic_id:
           type: string
           description: "The epic (container) node id marked active."
+        source:
+          type: string
+          enum: [advance, crown]
+          description: "What armed the mission. Absent means the epic advance; `crown` means a crown grant armed it."
     consumers: [operator]
 
   - name: mission_deactivated
