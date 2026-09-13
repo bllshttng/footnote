@@ -81,7 +81,7 @@ pub fn tick_arm_watch(
     token_parts.sort();
     let token = token_parts.join(",");
     let title = "control plane: arm failing";
-    let body = notice_body(&overdue, now_unix);
+    let body = notice_body(&overdue);
     let verdict = crate::operator_notice::notify_signal_via(
         store,
         now_unix,
@@ -120,12 +120,12 @@ pub fn tick_arm_watch(
 /// One body line per overdue arm, then the pointer. Lines stop when the next
 /// one would push the body past the 600-char cap; the pointer is kept
 /// whatever the truncation cuts.
-fn notice_body(overdue: &[&ArmStatus], now_unix: u64) -> String {
+fn notice_body(overdue: &[&ArmStatus]) -> String {
     const CAP: usize = 600;
     let pointer = "fno agents status";
     let mut body = String::new();
     for row in overdue {
-        let line = row_line(row, now_unix);
+        let line = row_line(row);
         let sep = if body.is_empty() { "" } else { "\n" };
         if body.len() + sep.len() + line.len() + 1 + pointer.len() > CAP {
             break;
@@ -142,7 +142,7 @@ fn notice_body(overdue: &[&ArmStatus], now_unix: u64) -> String {
 }
 
 /// The body line for one overdue row: FAIL names the skip reason and how long the arm has been failing; STALE names the cause and the row age.
-fn row_line(row: &ArmStatus, now_unix: u64) -> String {
+fn row_line(row: &ArmStatus) -> String {
     if row.failing {
         let skip = row.skip_reason.as_deref().unwrap_or("unknown");
         return match row.failing_for_s {
@@ -152,16 +152,16 @@ fn row_line(row: &ArmStatus, now_unix: u64) -> String {
     }
     let cause = row.cause.as_deref().unwrap_or("stale");
     let age = row.age_s.unwrap_or(0);
-    let _ = now_unix;
     format!("{} STALE {cause} for {age}s", row.arm)
 }
 
-/// The token anchor: `now - failing_for_s` for a failing row (the newest ok run) and the row's `last_ts` for a stale row. Both stay constant while the episode lasts, so a quiet episode dedupes and a set change is a new token.
+/// The token anchor: `now - failing_for_s` for a failing row (the newest ok run) and the row's `last_ts` for a stale row. Both stay constant while the episode lasts, so a quiet episode dedupes and a set change is a new token. A failing row with no ok run in the journals anchors on the constant 0: its last_ts is the newest FAILED run and advances per interval, which would re-page the same episode every rate floor.
 fn anchor(row: &ArmStatus, now_unix: u64) -> u64 {
     if row.failing {
-        if let Some(s) = row.failing_for_s {
-            return now_unix.saturating_sub(s);
-        }
+        return match row.failing_for_s {
+            Some(s) => now_unix.saturating_sub(s),
+            None => 0,
+        };
     }
     row.last_ts
         .as_deref()

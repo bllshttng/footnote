@@ -204,3 +204,30 @@ fn a_failed_send_stores_no_token_so_the_next_tick_retries() {
     assert_eq!(sends, 1);
     std::fs::remove_file(&store).ok();
 }
+
+/// An episode with no ok run in the journals anchors on a constant, so it
+/// pages once and dedupes instead of re-paging every rate floor.
+#[test]
+fn an_anchorless_failing_episode_pages_once_not_every_floor() {
+    let store = temp_store("anchorless");
+    let mut r = row("king_wake");
+    r.failing = true;
+    r.skip_reason = Some("timeout".to_string());
+    r.failing_for_s = None;
+    r.age_s = Some(30);
+    let rows = vec![r];
+    let mut sends = 0usize;
+    let first = tick_arm_watch(&rows, 1800, &store, TS_UNIX, |_, _| {
+        sends += 1;
+        true
+    });
+    assert_eq!(first.acted, 1);
+    let second = tick_arm_watch(&rows, 1800, &store, TS_UNIX + 300, |_, _| {
+        sends += 1;
+        true
+    });
+    assert_eq!(second.acted, 0);
+    assert_eq!(second.detail, "deduped");
+    assert_eq!(sends, 1);
+    std::fs::remove_file(&store).ok();
+}
