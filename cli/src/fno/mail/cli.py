@@ -1560,8 +1560,8 @@ def cmd_pane_prepare(
     # collides for codex siblings spawned inside one ~65s bucket, which fused
     # two distinct workers into one pair and refused normal parallel fanout.
     # The inbound-reset lookup keeps the display handles (bus envelopes carry
-    # handles). A row without a session id still gets a budget, keyed on the
-    # pane address rather than skipped.
+    # handles). A control body without a session id still reserves, keyed on
+    # the pane address rather than skipped.
     pane_address = f"pane {session}:{pane}"
     recipient = identity.handle if identity and identity.handle else pane_address
     _reserve_budget(

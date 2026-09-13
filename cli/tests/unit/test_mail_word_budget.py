@@ -216,6 +216,67 @@ def test_control_window_resets_on_an_inbound_reply():
     assert second.reset_by == reset_id
 
 
+@pytest.mark.parametrize("kind", ["heads-up", "question", "fyi"])
+def test_each_authored_inbound_kind_resets_the_control_window(kind):
+    control_send("a", "b", 55, f"ctl-out-{kind}")
+    reset_id = _inbound("a", "b", f"ctl-in-{kind}", kind=kind)
+    second = control_send("a", "b", 55, f"ctl-after-{kind}")
+    assert second.running_before == 0
+    assert second.reset_by == reset_id
+
+
+@pytest.mark.parametrize("kind", ["migration", "withdraw", "audit"])
+def test_non_authored_reverse_rows_do_not_reset_the_control_window(kind):
+    control_send("a", "b", 55, f"ctl-out-{kind}")
+    _inbound("a", "b", f"ctl-in-{kind}", kind=kind)
+    with pytest.raises(budget.BudgetRefused) as raised:
+        control_send("a", "b", 55, f"ctl-after-{kind}")
+    assert raised.value.running == 55
+
+
+def test_control_reset_requires_the_exact_pair():
+    control_send("a", "b", 55, "ctl-out1")
+    _inbound("a", "other", "ctl-in-wrong")  # from "other", not from "b"
+    with pytest.raises(budget.BudgetRefused):
+        control_send("a", "b", 55, "ctl-out2")
+
+
+def test_control_self_send_does_not_reset_its_own_pair():
+    control_send("a", "a", 55, "ctl-self-one")
+    _inbound("a", "a", "ctl-self-loop")
+    with pytest.raises(budget.BudgetRefused) as raised:
+        control_send("a", "a", 55, "ctl-self-two")
+    assert raised.value.running == 55
+
+
+def test_same_second_inbound_resets_once_without_erasing_a_later_reservation(
+    monkeypatch,
+):
+    from fno.bus.log import Envelope, append
+
+    monkeypatch.setattr(budget.time, "time", lambda: 1_000.75)
+    control_send("a", "b", 55, "ctl-out-one")
+    append(
+        Envelope.new(
+            id="ctl-inbound",
+            from_="b",
+            to="a",
+            kind="send",
+            body="ok",
+            ts="1970-01-01T00:16:40Z",
+            word_count=1,
+        )
+    )
+
+    second = control_send("a", "b", 55, "ctl-out-two")
+    assert second.running_before == 0
+    assert second.reset_by == "ctl-inbound"
+
+    with pytest.raises(budget.BudgetRefused) as raised:
+        control_send("a", "b", 6, "ctl-after-reset")
+    assert raised.value.running == 55
+
+
 def test_control_lane_keys_colliding_codex_siblings_separately():
     budget.reserve_control(
         sender="king", recipient="01a0370b", words=55, msg_id="ctl-a",

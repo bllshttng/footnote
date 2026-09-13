@@ -7619,9 +7619,9 @@ def _reserve_send_budget(
     from fno import style
     from fno.mail import budget
 
-    words = style.word_count(message)
     if not budget.is_control(message):
         return None
+    words = style.word_count(message)
     try:
         return budget.reserve_control(
             sender=sender, recipient=recipient, words=words, msg_id=msg_id
