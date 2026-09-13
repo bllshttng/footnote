@@ -1321,7 +1321,7 @@ def _mesh_env_pairs(
 ) -> tuple[list[str], list[str]]:
     """The ``env(1)`` unset args and ``K=V`` pairs :func:`_mesh_env_wrapper`
     formats, split out so the codex pane splice renders the same pairs as
-    config-set leaves (x-a095).
+    config-set leaves.
 
     The mesh identity the daemon worker used to set on its PTY child
     (worker.rs), plus any role-routing env (x-d2fe) and node provenance
@@ -1498,7 +1498,7 @@ def _mesh_env_wrapper(
 ) -> list[str]:
     """Format :func:`_mesh_env_pairs` as one ``env(1)`` prefix on ``argv``.
 
-    ``precomputed`` reuses the caller's pairs computation (x-a095 splice)."""
+    ``precomputed`` reuses the caller's pairs computation (the codex splice)."""
     if precomputed is None:
         precomputed = _mesh_env_pairs(
             name, harness, role,
@@ -3678,8 +3678,8 @@ def dispatch_spawn_pane(
         computed_dirs=computed_writable_dirs,
     )
     if provider == "codex" and argv and argv[0] == provider:
-        # Identity rides as config-set leaves (x-a095); passthrough-checked
-        # like the route splice. The argv[0] guard keeps it on codex's form.
+        # Identity rides as config-set leaves; passthrough-checked like the
+        # route splice. The argv[0] guard keeps it on codex's own form.
         from fno.agents.codex_pane import codex_shell_env_args
 
         env_config_args = codex_shell_env_args(mesh_pairs)

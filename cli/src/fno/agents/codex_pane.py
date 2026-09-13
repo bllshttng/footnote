@@ -1,4 +1,4 @@
-"""The codex pane lane's daemon-owned-thread helpers (x-a095).
+"""The codex pane lane's daemon-owned-thread helpers.
 
 Remote Control is served by the shared ``codex app-server`` daemon, which
 loads only threads it owns; the pane lane starts it and launches against it.
@@ -71,14 +71,19 @@ def ensure_codex_daemon(
 
 
 def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
-    """Render ``K=V`` pairs as ONE ``-c shell_environment_policy.set={...}``.
+    """Render the worker's own identity as ONE ``-c`` config-set leaf.
 
-    A daemon-run tool inherits the daemon's env, not the TUI's; repeated
-    `-c` leaves of one table do not merge on the daemon lane (measured
-    2026-09-13), so one inline table carries every pair.
+    A daemon-run tool inherits the daemon's env, not the TUI's, so without
+    this the worker name stops at the TUI. Measured 2026-09-13 on
+    codex-cli 0.154.0, headless: codex applies only the FIRST ``-c`` per
+    top-level config key and drops the rest, one leaf replaces the whole
+    ``[shell_environment_policy.set]`` table when it is that first edit, and
+    an inline-table value is refused at config load. One leaf therefore
+    carries ``FNO_AGENT_SELF`` (merging with the config table); every other
+    pair is left for the env(1) wrapper on the TUI itself.
     """
-    table: dict[str, str] = {}
-    for pair in pairs:
+    ordered = sorted(pairs, key=lambda pair: not pair.startswith("FNO_AGENT_SELF="))
+    for pair in ordered:
         key, sep, value = pair.partition("=")
         if not sep or not _ENV_KEY_RE.fullmatch(key):
             raise DispatchAskError(
@@ -87,10 +92,8 @@ def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
                 "shell_environment_policy config path",
                 exit_code=2,
             )
-        table[key] = value
-    if not table:
-        return []
-    return ["-c", f"shell_environment_policy.set={json.dumps(table)}"]
+        return ["-c", f"shell_environment_policy.set.{key}={json.dumps(value)}"]
+    return []
 
 
 _CODEX_DAEMON_PROBE_INTERVAL_S = 2.0  # a websocket round trip; rate-limit it

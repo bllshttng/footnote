@@ -1264,7 +1264,7 @@ def live_thread_row_for_cwd(
     """The ``(harness, session_id)`` of the ONE live codex row holding ``cwd``.
 
     A codex worker's process walk lands on the shared daemon (thread workers
-    share its pid; a remote pane's tool shell runs under it, x-a095), so the
+    share its pid; a remote pane's tool shell runs under it), so the
     spawn record - written before the worker's first turn, keyed by the cwd
     fno named at spawn - is what names the session. Exactly one
     ownership-live ``thread`` or ``pane`` row with a non-empty harness and

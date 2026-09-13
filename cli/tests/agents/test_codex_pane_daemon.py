@@ -47,16 +47,15 @@ def test_ensure_codex_daemon_failure_and_timeout_name_the_command() -> None:
         codex_pane.ensure_codex_daemon(hanging)
 
 
-def test_codex_shell_env_args_renders_one_inline_table() -> None:
-    """One `-c` override carries the whole set table: repeated leaves of the
-    same table do not merge on the daemon lane (measured 2026-09-13)."""
+def test_codex_shell_env_args_renders_one_self_leaf() -> None:
+    """codex applies only the FIRST `-c` per config key and drops the rest
+    (measured 2026-09-13, headless), so the renderer emits exactly one leaf
+    and it carries FNO_AGENT_SELF."""
     from fno.agents.codex_pane import codex_shell_env_args
 
-    args = codex_shell_env_args(["FNO_AGENT_SELF=w1", "FNO_NODE=x-1"])
-    assert args == [
-        "-c",
-        'shell_environment_policy.set={"FNO_AGENT_SELF": "w1", "FNO_NODE": "x-1"}',
-    ]
+    args = codex_shell_env_args(["FNO_NODE=x-1", "FNO_AGENT_SELF=w1"])
+    assert args == ["-c", 'shell_environment_policy.set.FNO_AGENT_SELF="w1"']
+    assert codex_shell_env_args([]) == []
 
 
 def test_codex_shell_env_args_refuses_a_key_outside_the_leaf_shape() -> None:
@@ -133,9 +132,10 @@ def test_codex_pane_mesh_identity_rides_config_set_args(
     assert tail[0] == "env"
     assert "FNO_AGENT_SELF=w1" in tail
     codex_at = tail.index("codex")
-    assert tail[codex_at + 1] == "-c"
-    assert 'FNO_AGENT_SELF": "w1"' in tail[codex_at + 2]
-    assert '"FNO_AGENT_HARNESS": "codex"' in tail[codex_at + 2]
+    assert tail[codex_at + 1 : codex_at + 3] == [
+        "-c",
+        'shell_environment_policy.set.FNO_AGENT_SELF="w1"',
+    ]
 
     claude_runner = FakeRunner()
     _spawn(monkeypatch, tmp_path, name="w2", runner=claude_runner)
@@ -157,12 +157,10 @@ def test_two_codex_workers_carry_only_their_own_identity(
 
     tail_one = _codex_pane_run_tail(first)
     tail_two = _codex_pane_run_tail(second)
-    leaf_one = tail_one[tail_one.index("codex") + 2]
-    leaf_two = tail_two[tail_two.index("codex") + 2]
-    assert '"FNO_AGENT_SELF": "w1"' in leaf_one
-    assert '"FNO_AGENT_SELF": "w2"' not in leaf_one
-    assert '"FNO_AGENT_SELF": "w2"' in leaf_two
-    assert '"FNO_AGENT_SELF": "w1"' not in leaf_two
+    assert 'shell_environment_policy.set.FNO_AGENT_SELF="w1"' in tail_one
+    assert 'shell_environment_policy.set.FNO_AGENT_SELF="w2"' not in tail_one
+    assert 'shell_environment_policy.set.FNO_AGENT_SELF="w2"' in tail_two
+    assert 'shell_environment_policy.set.FNO_AGENT_SELF="w1"' not in tail_two
 
 
 def test_codex_binds_through_the_daemon_oracle_when_the_fd_probe_misses(
