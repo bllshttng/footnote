@@ -197,7 +197,7 @@ def _run_tick(tmp_path: Path, store_path: Path) -> list[dict]:
         run_execute_queue(
             result, store_path=store_path, emit=emit,
             notify=lambda *a, **k: None, max_retries=3,
-            claim=_NullTickClaim(), now_iso=NOW,
+            claim=_NullTickClaim(),
         )
     return events
 
