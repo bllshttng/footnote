@@ -534,10 +534,10 @@ def settings_ls_cmd(
     """List every recorded route-settings overlay.
 
     One row per file: digest name, provider (stamp/base_url match against
-    today's registry), model, haiku tier, a STALE marker naming old -> new
-    when the tier differs from today's provider default, age, and whether a
-    registry row still references it. Never prints file contents: the
-    overlays carry live auth tokens.
+    today's registry), model, haiku tier, the provider's declared tier map, a
+    STALE marker naming old -> new when a declared tier differs from today's
+    provider default, age, and whether a registry row still references it.
+    Never prints file contents: the overlays carry live auth tokens.
     """
     import time
 
@@ -546,6 +546,7 @@ def settings_ls_cmd(
         effective_providers,
         provider_name_for_route,
         read_route_settings,
+        tier_models_for,
     )
     from fno.config import load_settings
 
@@ -586,12 +587,15 @@ def settings_ls_cmd(
         except Exception:  # noqa: BLE001 - one bad file degrades its row, not the listing
             route = None
         pname = provider_name_for_route(route or {}, settings=settings) if route else None
-        stale = ""
-        if route and pname:
-            todays = effective_providers(settings.model_routing)[pname].get("haiku_model")
-            recorded = route.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
-            if todays and recorded and str(todays) != recorded:
-                stale = f"{recorded} -> {todays}"
+        record = effective_providers(settings.model_routing)[pname] if pname else None
+        tiers = tier_models_for(record) if record else {}
+        stale_parts = []
+        if route and record:
+            for alias, todays in tiers.items():
+                recorded = route.get(f"ANTHROPIC_DEFAULT_{alias.upper()}_MODEL")
+                if todays and recorded and str(todays) != str(recorded):
+                    stale_parts.append(f"{alias} {recorded} -> {todays}")
+        stale = "; ".join(stale_parts)
         referenced = (
             "?" if referenced_paths is None else ("yes" if str(path) in referenced_paths else "no")
         )
@@ -600,6 +604,9 @@ def settings_ls_cmd(
             "provider": pname or "-",
             "model": (route or {}).get("ANTHROPIC_MODEL", "-"),
             "haiku": (route or {}).get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "-"),
+            "tiers": (
+                ",".join(f"{a}={m}" for a, m in sorted(tiers.items())) if tiers else "-"
+            ),
             "stale": stale or "-",
             "age_days": round(age, 1),
             "referenced": referenced,
@@ -615,12 +622,13 @@ def settings_ls_cmd(
     if json_output:
         typer.echo(json.dumps({"rows": rows, "pruned": pruned}, indent=2))
         return
-    cols = ("file", "provider", "model", "haiku", "stale", "age_days", "referenced")
+    cols = ("file", "provider", "model", "haiku", "tiers", "stale", "age_days", "referenced")
     header = {
         "file": "FILE",
         "provider": "PROVIDER",
         "model": "MODEL",
         "haiku": "HAIKU",
+        "tiers": "TIERS",
         "stale": "STALE",
         "age_days": "AGE-D",
         "referenced": "REF",

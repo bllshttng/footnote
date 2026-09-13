@@ -220,3 +220,36 @@ def test_harness_overlay_malformed_table_degrades_to_empty():
     """One typo must never brick every command at load."""
     s = _settings({"agents": {"defaults": {"harness": "banana"}}})
     assert s.agents.defaults.harness == {}
+
+
+def test_provider_tier_models_rejects_unknown_tier_key():
+    """AC5-ERR: a tier_models key outside the Claude tier aliases is refused at
+    load, naming the bad key and the legal set - a typo is a refusal, never a
+    silently ignored tier."""
+    import pytest
+    from pydantic import ValidationError
+
+    from fno.config import ModelProvider
+
+    with pytest.raises(ValidationError) as excinfo:
+        ModelProvider(tier_models={"bogus": "glm-5.3[1m]"})
+    message = str(excinfo.value)
+    assert "bogus" in message
+    assert "opus" in message
+
+
+def test_provider_tier_models_rejects_empty_model():
+    import pytest
+    from pydantic import ValidationError
+
+    from fno.config import ModelProvider
+
+    with pytest.raises(ValidationError):
+        ModelProvider(tier_models={"opus": "  "})
+
+
+def test_provider_tier_models_normalizes_keys():
+    from fno.config import ModelProvider
+
+    record = ModelProvider(tier_models={" OPUS ": "glm-5.3[1m]"})
+    assert record.tier_models == {"opus": "glm-5.3[1m]"}
