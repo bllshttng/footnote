@@ -320,8 +320,12 @@ def _run(text: str, only: set[int] | None) -> list[Violation]:
 _EXCERPT_CAP = 12
 
 
-def format_violations(violations: list[Violation]) -> str:
+def format_violations(violations: list[Violation], surface: str | None = None) -> str:
     """Render violations as a self-teaching, rule-compliant refusal message.
+
+    ``surface`` names the gate that produced the violations, so a rule 7
+    refusal can point the rewrite check at a surface that sees the same cap.
+    Unknown falls back to ``mail``, the dominant capped surface.
 
     The message itself passes rules 1 to 8: every banned word it names is
     double-quoted, and the masking pass replaces quoted spans with one token
@@ -386,10 +390,11 @@ def format_violations(violations: list[Violation]) -> str:
     # Name the surface explicitly: --stdin defaults to mail, which checks the
     # word cap only, so the bare command would pass a prose rewrite vacuously.
     # The check must also see the gate that fired: pr-body never counts words,
-    # so for rule 7 it clears a rewrite the mail gate refuses again.
+    # so for rule 7 it clears a rewrite the capped gate refuses again.
     if 7 in by_rule:
+        named = surface or "mail"
         lines.append(
-            'run "fno doctor lint style --stdin --surface mail" to check a '
+            f'run "fno doctor lint style --stdin --surface {named}" to check a '
             "rewrite first. Fewer words."
         )
     else:

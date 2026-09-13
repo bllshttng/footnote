@@ -597,6 +597,17 @@ def test_format_keeps_pr_body_advice_for_prose_rules():
     assert "--surface pr-body" in msg
 
 
+def test_format_points_encounter_rule_7_at_its_own_surface():
+    # The encounter gate caps evidence bodies too, so its refusal must name a
+    # rewrite check that reads the same cap, not the mail surface.
+    body = " ".join("word" for _ in range(81)) + "."
+    msg = style.format_violations(
+        style.check(body, surface="encounter"), surface="encounter"
+    )
+    assert "--surface encounter" in msg
+    assert "--surface mail" not in msg
+
+
 def test_format_adds_word_cap_recipe_only_for_rule_7():
     body = " ".join("word" for _ in range(81)) + "."
     wordcap_msg = style.format_violations(style.check(body, surface="mail"))
