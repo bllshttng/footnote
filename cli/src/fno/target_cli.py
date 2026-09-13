@@ -1063,7 +1063,7 @@ def _read_pr_metadata(pr_number: int, cwd: Path) -> dict[str, Any]:
 
 def _resolve_self_review_identity() -> tuple[str, str]:
     """Return the owned harness and full session id for the self-send lane."""
-    from fno.claims.self_identity import resolve_self_identity
+    from fno.agents.self_stamp import resolve_self_identity
 
     identity = resolve_self_identity()
     harness = (identity.harness or "").strip()
@@ -3055,7 +3055,7 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
         if own_id and holder == f"target-session:{own_id}":
             return True
     try:
-        from fno.claims.self_identity import resolve_self_identity
+        from fno.agents.self_stamp import resolve_self_identity
 
         own_sid = (resolve_self_identity().session_id or "").strip()
     except Exception:
@@ -3152,7 +3152,7 @@ def _successor_claim_holder() -> Optional[str]:
     entropy. An unresolved identity is a refusal because the claim would not
     answer who acquired it.
     """
-    from fno.claims.self_identity import resolve_self_identity
+    from fno.agents.self_stamp import resolve_self_identity
 
     identity = resolve_self_identity()
     session_id = (identity.session_id or "").strip()
