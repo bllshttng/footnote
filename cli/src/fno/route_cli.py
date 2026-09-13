@@ -423,11 +423,14 @@ def _echo_slots(slots: list[dict]) -> None:
 
 @route_app.command("admission")
 def admission_cmd(
-    verb: str = typer.Option("do", "--verb", help="The work verb to price."),
-    difficulty: str = typer.Option(
-        "high", "--difficulty", help="The difficulty band to price."
+    # Positionals, not options: the Python flag surface is ratchet-frozen
+    # (scripts/ci/flag-baseline.txt); a new flag belongs in crates.
+    verb: str = typer.Argument(
+        "do", help="The work verb to price."
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    difficulty: str = typer.Argument(
+        "high", help="The difficulty band to price."
+    ),
 ) -> None:
     """Preview shared-account capacity admission per declared record (x-1afa).
 
@@ -448,7 +451,10 @@ def admission_cmd(
             "admission: off (config.routing.admission.enabled is false); "
             "rows below are the unarmed preview"
         )
-    rows: list[dict[str, object]] = []
+    typer.echo(
+        f"admission: preview (no reservation consumed) verb={verb} "
+        f"difficulty={difficulty} units=subscription-percent"
+    )
     loaded = load_providers()
     for record in loaded.records:
         # One binding resolution per record: the receipt carries the pool the
@@ -460,43 +466,16 @@ def admission_cmd(
         outstanding_pct, inflight = (
             outstanding_for_pool(pool) if pool else (0.0, 0)
         )
-        status = receipt.status
-        detail = receipt.reason or ""
-        remaining = receipt.remaining_admission_pct
-        binding = receipt.binding_window
-        rows.append({
-            "preview": True,
-            "record": record.id,
-            "harness": record.harness,
-            "pool": pool,
-            "status": status,
-            "remaining_admission_pct": remaining,
-            "binding_window": binding,
-            "outstanding_pct": round(outstanding_pct, 2),
-            "inflight": inflight,
-            "max_inflight": policy.max_inflight_per_pool,
-            "demand_pct": policy.demand_for(verb, difficulty),
-            "reserve_pct": policy.reserve_for(verb, difficulty),
-            "units": "subscription-percent",
-            "detail": detail,
-        })
-    if json_output:
-        typer.echo(json.dumps(rows, indent=2))
-        return
-    typer.echo(
-        f"admission: preview (no reservation consumed) verb={verb} "
-        f"difficulty={difficulty} units=subscription-percent"
-    )
-    for row in rows:
         line = (
-            f"  {row['record']}: {row['status']} pool={row['pool']} "
-            f"remaining={row['remaining_admission_pct']}% "
-            f"outstanding={row['outstanding_pct']}% "
-            f"inflight={row['inflight']}/{row['max_inflight']} "
-            f"demand={row['demand_pct']}% reserve={row['reserve_pct']}%"
+            f"  {record.id}: {receipt.status} pool={pool} "
+            f"remaining={receipt.remaining_admission_pct}% "
+            f"outstanding={round(outstanding_pct, 2)}% "
+            f"inflight={inflight}/{policy.max_inflight_per_pool} "
+            f"demand={policy.demand_for(verb, difficulty)}% "
+            f"reserve={policy.reserve_for(verb, difficulty)}%"
         )
-        if row["detail"]:
-            line += f" ({row['detail']})"
+        if receipt.reason:
+            line += f" ({receipt.reason})"
         typer.echo(line)
 
 

@@ -203,17 +203,12 @@ def test_preview_rows_never_consume(armed, capsys):
     from fno.route_cli import admission_cmd
 
     before = armed.read_text()
-    admission_cmd(verb="do", difficulty="high", json_output=False)
+    admission_cmd(verb="do", difficulty="high")
     assert armed.read_text() == before
     out = capsys.readouterr().out
+    # The positive preview marker and the units ride the header line; the
+    # row names the record it previews.
     assert "preview (no reservation consumed)" in out
+    assert "units=subscription-percent" in out
     assert "rec-a" in out
-    # JSON rows carry the positive preview marker and the units.
-    import json as _json
-
-    from typer.testing import CliRunner  # noqa: F401 - rows read via direct call
-
-    admission_cmd(verb="do", difficulty="high", json_output=True)
-    rows = _json.loads(capsys.readouterr().out)
-    assert all(row["preview"] is True for row in rows)
-    assert all(row["units"] == "subscription-percent" for row in rows)
+    assert "pool=" in out
