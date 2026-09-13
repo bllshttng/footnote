@@ -571,12 +571,9 @@ def judge_cmd(ctx: typer.Context) -> None:
 # target sweep: PR-anchored walk-back (x-6ff0)
 # --------------------------------------------------------------------------- #
 
-# gh pr list defaults to 30 results (Domain Pitfall); pull generously so the
-# *list* limit does not silently shrink the denominator. target makes NO per-PR
-# gh calls (outcome comes from the graph, signals from events), so ONE `gh pr
-# list` per repo covers a whole repo - a high limit costs nothing extra, and an
-# active repo ships >100 PRs inside a 28d window, so a low cap would truncate the
-# default sweep (the truncation caveat still fires past this ceiling).
+# gh pr list defaults to 30 (Domain Pitfall); one call per repo covers the
+# whole repo at this limit, so pull generously - an active repo still ships
+# >100 PRs in a 28d window (the truncation caveat still fires past this cap).
 _PR_LIST_LIMIT = int(os.environ.get("FNO_OBSERVER_PR_LIST_LIMIT", "600"))
 
 
@@ -812,10 +809,9 @@ def _sweep_target(*, since: int, repo: Optional[str], json_out: bool) -> None:
     items = corpus["items"]
     coverage = corpus["coverage"]
 
-    # Boundary: 0 merged/closed PRs. Distinguish a genuine empty window (exit 0,
-    # legitimately nothing to do) from an outage where every scoped repo's gh
-    # call failed - the denominator was never OBSERVED, so reporting `no_data`
-    # would hide a coverage failure from operators/automation (exit non-zero).
+    # Boundary: 0 merged/closed PRs. A genuine empty window exits 0; every
+    # scoped repo's gh call failing means the denominator was never observed,
+    # so that outage reports as a failure instead of a fabricated no_data.
     if coverage["prs_total"] == 0:
         if meta["repos_scoped"] > 0 and meta["dropped_repos"] >= meta["repos_scoped"]:
             typer.echo(
