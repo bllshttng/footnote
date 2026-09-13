@@ -12,16 +12,18 @@ Failures (each names the file:line and the doc):
   2. a table row no read site has,
   3. a row whose Read by column (py / rs / py+rs) disagrees with the sites.
 
-Scans (regex feeds, per the plan):
+Scans (regex feeds, per the plan, applied to whole file content so a call
+split across lines is still seen):
   py  cli/src/fno/**/*.py   environ.get(, os.getenv(, getenv(, environ[,
                             environ.setdefault(, environ.pop( with a literal
                             UPPER_SNAKE name
   rs  crates/**/*.rs        env::var( and env::var_os( with a literal name,
                             any path part named target excluded
 
-Known limit: a name passed through a variable is not seen. Names read only in
-tests or fixtures are out of scope (cli/tests and crates/*/tests are not
-scanned).
+Known limit: a name passed through a variable is not seen. On the Rust side
+only directories named tests are excluded, so a read inside a #[cfg(test)]
+module in a src file still counts (it gets a row; delete the row if the read
+moves out).
 
 --update rewrites the table, preserving the Meaning text of surviving rows;
 new rows get `unclear: <first site>` and dead rows drop.
@@ -63,25 +65,32 @@ RS_READ_RE = re.compile(r'\benv::var(?:_os)?\(\s*"([A-Z][A-Z0-9_]+)"')
 def scan(root: Path) -> dict[str, dict[str, list[str]]]:
     """Return {name: {"py": [file:line, ...], "rs": [...]}}."""
     sites: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+
+    def harvest(pattern: re.Pattern[str], text: str, rel: Path, side: str) -> None:
+        # Whole-content finditer: a call split across lines is still a site.
+        for m in pattern.finditer(text):
+            lineno = text.count("\n", 0, m.start()) + 1
+            name = next(g for g in m.groups() if g)
+            sites[name][side].append(f"{rel}:{lineno}")
+
     for path in sorted((root / PY_ROOT).rglob("*.py")):
         rel = path.relative_to(root)
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
-        ):
-            for m in PY_READ_RE.finditer(line):
-                name = next(g for g in m.groups() if g)
-                sites[name]["py"].append(f"{rel}:{lineno}")
+        harvest(
+            PY_READ_RE,
+            path.read_text(encoding="utf-8", errors="replace"),
+            rel,
+            "py",
+        )
     for path in sorted((root / RS_ROOT).rglob("*.rs")):
         rel = path.relative_to(root)
-        if any(part == "target" for part in rel.parts):
+        if any(part == "target" or part == "tests" for part in rel.parts):
             continue
-        if "tests" in rel.parts:
-            continue
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
-        ):
-            for m in RS_READ_RE.finditer(line):
-                sites[m.group(1)]["rs"].append(f"{rel}:{lineno}")
+        harvest(
+            RS_READ_RE,
+            path.read_text(encoding="utf-8", errors="replace"),
+            rel,
+            "rs",
+        )
     return sites
 
 
@@ -154,11 +163,12 @@ def selftest() -> int:
         py.mkdir(parents=True)
         rs.mkdir(parents=True)
         (py / "a.py").write_text(
-            'import os\nx = os.environ.get("FOO_BAR")\ny = os.environ["BAZ_QUX"]\n',
+            'import os\nx = os.environ.get("FOO_BAR")\ny = os.environ[\n    "BAZ_QUX"\n]\n',
             encoding="utf-8",
         )
         (rs / "b.rs").write_text(
-            'fn f() { if let Ok(v) = std::env::var("FOO_BAR") {} }\n', encoding="utf-8"
+            'fn f() {\n    if let Ok(v) = std::env::var(\n        "FOO_BAR",\n    ) {}\n}\n',
+            encoding="utf-8",
         )
         # A read inside a tests dir is out of scope by contract.
         tests = root / RS_ROOT / "fno" / "tests"
