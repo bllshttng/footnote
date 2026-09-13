@@ -413,6 +413,37 @@ def test_extra_env_still_wins_over_tier_map() -> None:
     assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "hand-pinned"
 
 
+def test_refuses_bare_tier_alias_on_foreign_endpoint() -> None:
+    # AC6-ERR: a z.ai endpoint asked for "sonnet" dies on its first turn behind
+    # a receipt that already printed live; refuse at compose, naming the alias
+    # and the provider.
+    notes, sink = _collector()
+    route = mr.resolve_explicit_route(
+        "zai", "sonnet", settings=_settings(), env={"ZAI_API_KEY": "k"}, notice=sink
+    )
+    assert route is None
+    assert any("sonnet" in n and "zai" in n for n in notes)
+
+
+def test_accepts_bare_tier_alias_on_anthropic_endpoint() -> None:
+    # AC7-INV: endpoint and model agree on Anthropic's own endpoint, so the
+    # alias is Claude Code's own customization, not a vendor conflict.
+    settings = _settings(
+        providers={
+            "anthropic-via-proxy": {
+                "base_url": "https://api.anthropic.com",
+                "api_key_env": "PROXY_KEY",
+            }
+        }
+    )
+    route = mr.resolve_explicit_route(
+        "anthropic-via-proxy", "sonnet", settings=settings, env={"PROXY_KEY": "k"}
+    )
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "sonnet"
+    assert route["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+
+
 def test_materialized_settings_keep_floor_and_undeclared_tiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

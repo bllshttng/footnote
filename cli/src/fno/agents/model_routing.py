@@ -995,6 +995,25 @@ def _route_for_target(
         )
         return None
 
+    # A bare tier alias is resolved by Claude Code against the endpoint it is
+    # pointed at, and a third-party endpoint has no "sonnet": the spawn would
+    # print a live receipt and die on its first turn. is_anthropic_model draws
+    # the same alias line for the AMBIENT-env conflict; here the endpoint is
+    # known, so the check is local. Refuse, never coerce: picking a model on
+    # the operator's behalf is how a spawn ends up billing somewhere nobody
+    # chose.
+    if (
+        model.strip().lower() in TIER_ALIASES
+        and _base_url_host(base_url) not in ("", ANTHROPIC_API_HOST)
+    ):
+        _emit(
+            notice,
+            f"model-routing: refusing model {model!r} for provider {pname!r}: a bare "
+            "tier alias resolves against the endpoint the worker is pointed at, and "
+            f"{base_url} is not Anthropic's; name a model id this provider serves",
+        )
+        return None
+
     route = {"ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_AUTH_TOKEN": key}
     # The blanket fill is load-bearing: an undeclared tier must be PRESENT and
     # set to the spawn model, never absent, or Claude Code resolves that tier
