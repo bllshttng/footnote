@@ -414,7 +414,7 @@ def test_the_exemption_does_not_hide_a_typo_in_the_same_file(tmp_path: Path) -> 
     assert "reveiw.cross_model" in unknown[0]
 
 
-# --- x-49db: an out-of-enum value refuses by name --------------------------
+# --- an out-of-enum value refuses by name -----------------------------------
 
 
 def test_an_out_of_enum_value_refuses_by_name(tmp_path: Path) -> None:

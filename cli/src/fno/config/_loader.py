@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 class SettingsRefused(click.ClickException):
     """A settings file carries a value the schema refuses; the message names
-    the file, the key, the value and the legal set (x-49db)."""
+    the file, the key, the value and the legal set."""
 
 
 def _canonical_root_from_gitfile(repo_root: Path) -> Optional[Path]:

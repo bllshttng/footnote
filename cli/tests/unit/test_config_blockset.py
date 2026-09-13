@@ -129,7 +129,7 @@ def test_ac3_ui_cli_confirms_block(tmp_path, monkeypatch):
     assert tomllib.loads((gpath.parent / "config.toml").read_text())["review"]["required_bots"] == ["x"]
 
 
-# --- x-49db: an out-of-enum value cannot be stored -------------------------
+# --- an out-of-enum value cannot be stored ----------------------------------
 
 
 def test_out_of_enum_scalar_leaf_refused_exit2_unchanged(tmp_path):

@@ -173,11 +173,12 @@ def _holder_file(
 ) -> str:
     """First priority-ordered layer holding the key; one trailing segment may
     drop, since legacy coercion derives a deeper key than the file stores."""
+    if not loc:
+        return "settings"
     unwrap = _cfg()._unwrap_config_dict
     for path, parsed in layers:
-        if _path_held(unwrap(dict(parsed)), loc) or _path_held(
-            unwrap(dict(parsed)), loc[:-1]
-        ):
+        flat = unwrap(dict(parsed))
+        if _path_held(flat, loc) or _path_held(flat, loc[:-1]):
             return str(path)
     return "settings"
 
@@ -198,8 +199,8 @@ def describe_config_failure(
 ) -> str:
     """One line per schema error, naming file, key, value and legal set.
 
-    Shared by the loader's ``SettingsRefused`` and the doctor's value check
-    (x-49db). ``layers`` is the loader's priority-ordered (path, parsed) list.
+    Shared by the loader's ``SettingsRefused`` and the doctor's value check.
+    ``layers`` is the loader's priority-ordered (path, parsed) list.
     """
     errors = exc.errors()
     lines = []

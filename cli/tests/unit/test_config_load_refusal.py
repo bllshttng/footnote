@@ -1,4 +1,4 @@
-"""`load_settings` refuses an out-of-schema value by name (x-49db).
+"""`load_settings` refuses an out-of-schema value by name.
 
 The filed crash: one bad value in a config file raised the raw pydantic
 ValidationError through every consumer (`fno backlog idea` died in a
@@ -62,6 +62,19 @@ def test_a_clean_config_still_loads(tmp_path: Path) -> None:
         'schema_version = 1\n[recovery.watchdog]\nmode = "report"\n',
     )
     assert load_settings().recovery.watchdog.mode == "report"
+
+
+def test_an_empty_loc_error_names_no_file(tmp_path: Path) -> None:
+    """A root-level schema error (loc == ()) carries no key to attribute."""
+    from fno.config_readback import describe_config_failure
+
+    class _FakeErr:
+        def errors(self):
+            return [{"loc": (), "input": "x", "msg": "bad root"}]
+
+    msg = describe_config_failure(_FakeErr(), [(tmp_path / "a.toml", {"schema_version": 1})])
+    assert "a.toml" not in msg
+    assert "settings" in msg
 
 
 def test_refusal_points_at_the_layer_that_decides(tmp_path: Path) -> None:
