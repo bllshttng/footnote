@@ -2051,10 +2051,9 @@ def cmd_spawn(
         if launch_account_label:
             prov_env["FNO_ACCOUNT"] = launch_account_label
 
-    # A spawn into an undeclared FOREIGN repo pins `never` for the child (the
-    # dispatcher is the one side that knows the target is not the caller's own);
-    # an explicit ambient override rides the same overlay, else the pane
-    # wrapper's set-or-clear strips what the operator set.
+    # A spawn into an undeclared FOREIGN repo pins `never` for the child; an
+    # explicit ambient override rides the same overlay, else the pane wrapper's
+    # set-or-clear strips what the operator set.
     from fno.worktree_paths import UNDECLARED_REPO_RECEIPT, undeclared_dispatch_pin
 
     _pin = undeclared_dispatch_pin(workdir, Path(os.getcwd()), harness)
