@@ -4342,7 +4342,7 @@ fn view_picker(verb: &str, json: bool, url: bool) -> i32 {
     match run_focus_picker(pane_rows) {
         Some((session, pane)) => {
             if url {
-                print_pane_url(verb, &session, pane)
+                crate::web::print_pane_url(verb, &session, pane)
             } else {
                 focus_pane(verb, &session, pane, true, json)
             }
@@ -4351,10 +4351,6 @@ fn view_picker(verb: &str, json: bool, url: bool) -> i32 {
     }
 }
 
-/// Read a session's web-bridge state file (x-b80d) and build the pasteable
-/// per-pane URL. The bridge writes `web-<session>.json` at bind; a file whose
-/// port no longer answers is a corpse, not a bridge, so the TCP probe - not
-/// the file's existence - decides liveness.
 /// The first-eight short form of a session id, matching Python's
 /// `fno.harness_identity.canonical_handle` closely enough for DISPLAY (the
 /// resolver never consumes this spelling, so the ses_ case rule that matters
@@ -4365,75 +4361,6 @@ fn short_handle(session_id: &str) -> String {
         .take(8)
         .collect::<String>()
         .to_lowercase()
-}
-
-fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
-    let hint = format!(
-        "no web bridge for session {session}; start one with: fno mux serve --web --session {session}"
-    );
-    let Some(path) = crate::web::web_state_path_for_session(session) else {
-        eprintln!("{verb}: {hint}");
-        return EXIT_ERROR;
-    };
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        eprintln!("{verb}: {hint}");
-        return EXIT_ERROR;
-    };
-    let state: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("{verb}: {hint}");
-            return EXIT_ERROR;
-        }
-    };
-    let bind = state
-        .get("bind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("127.0.0.1");
-    let port = match state.get("port").and_then(|v| v.as_u64()) {
-        Some(p) => p,
-        None => {
-            eprintln!("{verb}: {hint}");
-            return EXIT_ERROR;
-        }
-    };
-    let token = state
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    // A wide bind is reachable locally too; the pasteable URL says where THIS
-    // machine finds it, mirroring the bind-time print's host hint.
-    let host = if bind == "0.0.0.0" || bind == "::" {
-        "127.0.0.1"
-    } else {
-        bind
-    };
-    // Probe liveness for ANY spelling the operator may have bound. A bare
-    // SocketAddr parse only accepts IPs, so `localhost` and `::1` would skip
-    // the probe and trust a corpse file (codex P2); the tuple form resolves
-    // hostnames and needs no IPv6 brackets.
-    let probe_addr = {
-        use std::net::ToSocketAddrs;
-        (host, port as u16)
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut it| it.next())
-    };
-    if let Some(addr) = probe_addr {
-        let timeout = std::time::Duration::from_millis(300);
-        if std::net::TcpStream::connect_timeout(&addr, timeout).is_err() {
-            eprintln!("{verb}: {hint}");
-            return EXIT_ERROR;
-        }
-    }
-    // Bracket a literal IPv6 host; a bare ::1 in a URL truncates at the colon.
-    let url_host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    println!("http://{url_host}:{port}/?t={token}&pane={pane}");
-    EXIT_OK
 }
 
 /// Split a `--workspace <name>` (alias `--squad`/`-s`) pair out of an
@@ -4531,7 +4458,7 @@ fn location_lookup(
             // URL on stdout, never the client move - the same precedence the
             // agent-matched path of `view` gives the flag.
             if url {
-                return print_pane_url(verb, &session, pane);
+                return crate::web::print_pane_url(verb, &session, pane);
             }
             // JSON stdout carries exactly ONE document: this receipt. The
             // focus action still runs, but its own receipt is suppressed for
@@ -4662,7 +4589,7 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
         return EXIT_NOT_PANE_HOSTED;
     };
     if url {
-        return print_pane_url(verb, &host_session, pane);
+        return crate::web::print_pane_url(verb, &host_session, pane);
     }
     let session = resolve_session(session_flag.as_deref(), Some(&host_session));
     focus_pane(verb, &session, pane, true, json)
