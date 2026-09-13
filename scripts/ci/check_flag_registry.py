@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Flag-surface ratchet: the inline ``typer.Option`` count in cli/src/fno
-never grows.
+"""Flag-surface ratchet: a change may not add ``typer.Option`` calls to
+cli/src/fno.
 
 Operator ruling 2026-09-12 (node x-72fc): all new code is Rust and the flag
 registry is structural there (clap, one declaration per flag). A new Python
-flag means a new verb, and a new verb belongs in crates. So the gate is not
-"one declaration per name" but the stricter, simpler one: ANY new
-typer.Option call in cli/src/fno fails, against a checked-in count in
-scripts/ci/flag-baseline.txt. Shrink-only, both-directional like
-check-file-budget.sh: a removal must lower the baseline in the same PR, so a
-deletion can never bank credit for a later addition.
+flag means a new verb, and a new verb belongs in crates. The gate measures
+the change against its own base - the merge base of PR_BASE_REF on a PR, the
+previous tip (FLAG_BASE_SHA = github.event.before) on a push - over only the
+files the change touched, and refuses any growth. There is no stored count:
+a checked-in total made every count-changing PR edit one shared
+line, and on 2026-09-13 two pairs of PRs merged green on stale bases and
+left main red, once growing and once shrinking. Removals bank
+no credit either: the base is always the live tree on main, so an earlier
+removal never leaves spare count for a later PR.
 
 Lives in scripts/ci, not cli/src/fno: the Python tree is the compatibility
 shell and is itself shrink-only (net +100), so the gate that enforces that
@@ -17,130 +20,244 @@ cannot be part of the tree it guards.
 
 Usage:
   python3 scripts/ci/check_flag_registry.py            # check
-  python3 scripts/ci/check_flag_registry.py --update   # rewrite the baseline
-  python3 scripts/ci/check_flag_registry.py --selftest # fixture selftest
+  python3 scripts/ci/check_flag_registry.py --selftest # git-repo selftest
 
-Exit: 0 pass, 1 refused grow or stale baseline, 2 selftest failure.
+Env: FLAG_BASE_SHA (pin the base; never falls back to the merge base),
+PR_BASE_REF (default main), PR_REMOTE (default origin).
+
+Exit: 0 pass, 1 refused grow, 2 selftest failure or unresolvable base.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCAN_REL = Path("cli/src/fno")
-BASELINE_REL = Path("scripts/ci/flag-baseline.txt")
 
 
-def count_options(root: Path) -> int:
-    """Count typer.Option(...) call sites under cli/src/fno via AST."""
-    total = 0
-    for path in sorted((root / SCAN_REL).rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "Option"
-            ):
-                total += 1
-    return total
-
-
-def read_baseline(path: Path) -> int:
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            return int(line.split("\t")[0].strip())
-    raise ValueError(f"no data row in {path}")
-
-
-def write_baseline(path: Path, count: int) -> None:
-    path.write_text(
-        "# Flag-surface ratchet (node x-72fc, operator ruling 2026-09-12): the\n"
-        "# inline typer.Option call count under cli/src/fno never grows. New\n"
-        "# flags are Rust work (clap in crates). --update rewrites this number;\n"
-        "# a removal must lower it in the same PR.\n"
-        f"{count}\n",
-        encoding="utf-8",
+def count_source(text: str) -> int:
+    """Count typer.Option(...) call sites in one Python source text via AST."""
+    tree = ast.parse(text)
+    return sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "Option"
     )
 
 
-def run(root: Path, update: bool = False) -> int:
-    baseline_path = root / BASELINE_REL
-    live = count_options(root)
-    if update:
-        write_baseline(baseline_path, live)
-        print(f"flag-registry: baseline set to {live}")
-        return 0
-    baseline = read_baseline(baseline_path)
-    if live > baseline:
+def git(root: Path, *args: str) -> bytes | None:
+    """Run git in root; stdout on success, None on any failure."""
+    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True)
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def resolve_base(
+    root: Path, explicit_sha: str, base_ref: str, remote: str
+) -> str | None:
+    """The one base to measure against, or None (caller refuses, exit 2).
+
+    An explicit sha never falls back to the merge base: on main the merge
+    base IS HEAD, and that silent empty diff would read as a pass.
+    """
+    if explicit_sha and explicit_sha != "0" * 40:
+        base = git(root, "rev-parse", "--verify", "--quiet", explicit_sha + "^{commit}")
+        if base is None:
+            print(
+                f"flag-registry: FLAG_BASE_SHA {explicit_sha} does not resolve; "
+                "refusing rather than passing on an empty diff (the checkout "
+                "must hold that commit)",
+                file=sys.stderr,
+            )
+            return None
+        return base.decode().strip()
+    if git(
+        root,
+        "fetch",
+        "--quiet",
+        remote,
+        f"+refs/heads/{base_ref}:refs/remotes/{remote}/{base_ref}",
+    ) is None:
         print(
-            f"flag-registry: FAIL\n"
-            f"typer.Option count {live} > baseline {baseline} in {SCAN_REL}. "
+            f"flag-registry: cannot fetch {remote}/{base_ref} - unable to "
+            "establish the merge base (set PR_BASE_REF/PR_REMOTE)",
+            file=sys.stderr,
+        )
+        return None
+    tip = git(root, "rev-parse", "--verify", "--quiet", f"{remote}/{base_ref}")
+    base = git(root, "merge-base", tip.decode().strip(), "HEAD") if tip else None
+    if base is None:
+        print(
+            f"flag-registry: cannot establish a merge base between "
+            f"{remote}/{base_ref} and HEAD - refusing (shallow checkout? "
+            "fetch full history)",
+            file=sys.stderr,
+        )
+        return None
+    return base.decode().strip()
+
+
+def changed_files(root: Path, base: str) -> list[str]:
+    out = git(
+        root,
+        "-c",
+        "core.quotepath=off",
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        base,
+        "HEAD",
+        "--",
+        "cli/src/fno/*.py",
+    )
+    if out is None:
+        return []
+    return [p for p in out.decode("utf-8", errors="replace").split("\0") if p]
+
+
+def count_at(root: Path, rev: str, path: str) -> int:
+    """Option count of one file at a rev; a missing blob (added/deleted) is 0."""
+    out = git(root, "show", f"{rev}:{path}")
+    if out is None:
+        return 0
+    return count_source(out.decode("utf-8", errors="replace"))
+
+
+def run(
+    root: Path, base_sha: str = "", base_ref: str = "main", remote: str = "origin"
+) -> int:
+    base = resolve_base(root, base_sha, base_ref, remote)
+    if base is None:
+        return 2
+    deltas: dict[str, int] = {}
+    paths = changed_files(root, base)
+    for path in paths:
+        delta = count_at(root, "HEAD", path) - count_at(root, base, path)
+        if delta:
+            deltas[path] = delta
+    total = sum(deltas.values())
+    if total > 0:
+        print("flag-registry: FAIL", file=sys.stderr)
+        print(
+            f"typer.Option count grew by +{total} against base {base[:7]} "
+            f"in {SCAN_REL}:",
+            file=sys.stderr,
+        )
+        for path in sorted(deltas):
+            if deltas[path] > 0:
+                print(f"  {path} +{deltas[path]}", file=sys.stderr)
+        print(
             "A new flag is a new verb and a new verb belongs in crates "
             "(clap; operator ruling 2026-09-12, node x-72fc). Shrink the "
-            "Python flag surface, never grow it. If this PR only removed "
-            "options, lower scripts/ci/flag-baseline.txt to the live count.",
+            "Python flag surface, never grow it.",
             file=sys.stderr,
         )
         return 1
-    if live < baseline:
-        print(
-            f"flag-registry: FAIL\n"
-            f"baseline {baseline} > live count {live}: the surface shrank. "
-            f"Lower scripts/ci/flag-baseline.txt to {live} in this PR so a "
-            "removal can never bank credit for a later addition.",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"flag-registry: ok ({live} inline typer.Option calls, at baseline)")
+    print(
+        f"flag-registry: ok (base {base[:7]}, {total:+d} typer.Option calls "
+        f"across {len(paths)} changed files)"
+    )
     return 0
 
 
 def selftest() -> int:
-    """Fixture check: the gate fails a grow, a stale row, and passes a fresh
-    baseline. Runs against a synthetic tree, never the real one."""
+    """Fixture check in throwaway git repos: grow refused, the two-PR race
+    composes, a merged removal banks no credit, an unresolvable base refuses.
+    Always passes run() an explicit base sha, never env."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        (root / SCAN_REL).mkdir(parents=True)
-        (root / BASELINE_REL).parent.mkdir(parents=True)
-        src = root / SCAN_REL / "sample.py"
-        src.write_text(
-            "import typer\n"
-            "def cmd(a: bool = typer.Option(False, '--json')):\n"
-            "    pass\n",
-            encoding="utf-8",
+        ident = (
+            "-c",
+            "user.name=selftest",
+            "-c",
+            "user.email=selftest@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
         )
 
-        def baseline(n: int) -> None:
-            write_baseline(root / BASELINE_REL, n)
+        def sh(*args: str) -> str:
+            out = git(root, *args)
+            assert out is not None, args
+            return out.decode().strip()
 
-        baseline(1)
-        if run(root) != 0:
-            print("selftest: at-baseline case failed", file=sys.stderr)
-            return 2
+        def commit(msg: str) -> str:
+            sh("add", "-A")
+            sh(*ident, "commit", "-q", "-m", msg)
+            return sh("rev-parse", "HEAD")
 
-        src.write_text(
-            src.read_text(encoding="utf-8")
-            + "def cmd2(b: bool = typer.Option(False, '--force')):\n    pass\n",
-            encoding="utf-8",
-        )
-        if run(root) != 1:
+        def write_opts(name: str, count: int) -> None:
+            path = root / SCAN_REL / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "import typer\n"
+                + "".join(
+                    f"X{i} = typer.Option(False, '--f{i}')\n" for i in range(count)
+                ),
+                encoding="utf-8",
+            )
+
+        sh("init", "-q", "-b", "main")
+
+        # Base B: one Option in a.py, one in b.py.
+        write_opts("a.py", 1)
+        write_opts("b.py", 1)
+        base_b = commit("base")
+
+        # Grow: a branch adds one in a new file - refused against B.
+        sh("checkout", "-q", "-b", "grow")
+        write_opts("c.py", 1)
+        commit("grow")
+        if run(root, base_b) != 1:
             print("selftest: grow case did not fail", file=sys.stderr)
             return 2
+        sh("checkout", "-q", "main")
 
-        baseline(3)
-        if run(root) != 1:
-            print("selftest: stale-baseline case did not fail", file=sys.stderr)
+        # The race (the 2026-09-13 specimen): x and y each remove a different
+        # Option from B. Each passes against B on its own branch.
+        sh("checkout", "-q", "-b", "x")
+        (root / SCAN_REL / "a.py").unlink()
+        commit("x removes a.py")
+        tip_x = sh("rev-parse", "HEAD")
+        if run(root, base_b) != 0:
+            print("selftest: shrink case did not pass", file=sys.stderr)
+            return 2
+        sh("checkout", "-q", "main")
+        sh("checkout", "-q", "-b", "y")
+        (root / SCAN_REL / "b.py").unlink()
+        commit("y removes b.py")
+        if run(root, base_b) != 0:
+            print("selftest: shrink case did not pass", file=sys.stderr)
+            return 2
+        sh("checkout", "-q", "main")
+        sh(*ident, "merge", "-q", "--no-edit", "x")
+        sh(*ident, "merge", "-q", "--no-edit", "y")
+        # The merged tip against x's tip (the push-alarm base) is clean: the
+        # two removals composed, and no stored count existed to race on.
+        if run(root, tip_x) != 0:
+            print("selftest: race case did not compose clean", file=sys.stderr)
             return 2
 
-        if run(root, update=True) != 0 or read_baseline(root / BASELINE_REL) != 2:
-            print("selftest: --update case failed", file=sys.stderr)
+        # No banking: from the merged tip, one added Option is still refused.
+        merged_tip = sh("rev-parse", "main")
+        sh("checkout", "-q", "-b", "z")
+        write_opts("c.py", 1)
+        commit("z grows again")
+        if run(root, merged_tip) != 1:
+            print("selftest: no-banking case did not fail", file=sys.stderr)
+            return 2
+
+        # An unresolvable base refuses instead of passing on an empty diff.
+        if run(root, "d" * 40) != 2:
+            print("selftest: unresolvable-base case did not refuse", file=sys.stderr)
             return 2
     print("selftest: ok")
     return 0
@@ -148,12 +265,16 @@ def selftest() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--update", action="store_true", help="rewrite the baseline")
-    parser.add_argument("--selftest", action="store_true", help="fixture selftest")
+    parser.add_argument("--selftest", action="store_true", help="git-repo selftest")
     args = parser.parse_args()
     if args.selftest:
         return selftest()
-    return run(REPO_ROOT, update=args.update)
+    return run(
+        REPO_ROOT,
+        base_sha=os.environ.get("FLAG_BASE_SHA", ""),
+        base_ref=os.environ.get("PR_BASE_REF", "main"),
+        remote=os.environ.get("PR_REMOTE", "origin"),
+    )
 
 
 if __name__ == "__main__":
