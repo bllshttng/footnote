@@ -428,7 +428,7 @@ fn main() {
             }
             exit_mux(fno::web::serve(web_args))
         }
-        Role::MuxWebCtl(rest) => exit_mux(mux_cli::web(&rest, env_session.as_deref())),
+        Role::MuxWebCtl(rest) => exit_mux(mux_cli::web_ctl::web(&rest, env_session.as_deref())),
         Role::MuxPane(rest) => exit_mux(mux_cli::pane(&rest, env_session.as_deref())),
         Role::MuxBlock(rest) => exit_mux(mux_cli::block(&rest, env_session.as_deref())),
         Role::MuxTab(rest) => exit_mux(mux_cli::tab(&rest, env_session.as_deref())),
