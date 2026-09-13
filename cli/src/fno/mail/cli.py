@@ -4330,14 +4330,12 @@ def _team_sender_kind_and_from(from_name: Optional[str]) -> tuple[str, str]:
     return ("agent" if owned else "operator"), stamp_from(from_name)
 
 
-@mail_app.command("team")
+@mail_app.command("team", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def cmd_team(
+    ctx: typer.Context,
     scope: str = typer.Option(..., "--scope", help="Fleet scope: all | kings | <crown scope> | project:<p>."),
     message: str | None = typer.Argument(None, help="One announcement body."),
     from_name: str | None = typer.Option(None, "--from-name", help="Envelope identity (see send)."),
-    subject: str | None = typer.Option(None, "--subject", help="Supersede key: a newer announcement with the same subject and scope replaces the older standing one."),
-    expires: str | None = typer.Option(None, "--expires", help="Standing window, e.g. 45m / 24h / 7d (default 24h, max 7d)."),
-    urgent: bool = typer.Option(False, "--urgent", help="Mark the announcement urgent."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Send receipt as JSON."),
 ) -> None:
     """Announce one body to a fleet scope as ONE bus line.
@@ -4347,6 +4345,11 @@ def cmd_team(
     size. Delivery proofs are a separate read (`fno-agents announce status
     <id>`). The body is linted here (the single style implementation); the
     Rust writer owns authority, the audience snapshot, and the locked append.
+
+    Announcement flags belong to the Rust writer and are relayed verbatim:
+    `--subject S` (supersede key), `--expires 45m|24h|7d` (standing window,
+    default 24h, max 7d), `--urgent`. Any unrecognized flag is passed through
+    the same way and refused there, so this shim adds no Python flag surface.
     """
     import shutil
 
@@ -4372,13 +4375,8 @@ def cmd_team(
         "--scope", scope,
         "--from", sender,
         "--sender-kind", sender_kind,
+        *ctx.args,
     ]
-    if subject:
-        args += ["--subject", subject]
-    if expires:
-        args += ["--expires", expires]
-    if urgent:
-        args.append("--urgent")
     if json_out:
         args.append("--json")
     proc = subprocess.run(args, input=message, capture_output=True, text=True)
