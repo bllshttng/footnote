@@ -105,53 +105,26 @@ def _resolve_self_name(cwd: str) -> Optional[str]:
 def peek_nudge(session_id: str, cwd: str) -> Optional[str]:
     """Return a one-line nudge for the oldest un-nudged unread msg, or None.
 
-    Drains the worker's addressed mail at the loop boundary: direct by-name mail
-    to this worker (cv-d54ddd45) plus project broadcasts NOT sent by it
-    (sender-excluded). Side effect: records the surfaced message id in the
-    per-session cursor so it is not surfaced again (US3/AC3-FR). Fail-open:
-    returns None on any error so the loop-check that shells out to us is never
-    broken by inbox state.
+    Drains the worker's ADDRESSED mail at the loop boundary: direct by-name
+    mail to this worker (cv-d54ddd45). The project broadcast leg is gone: the
+    fleet announcement rides its own bus line and cursor (`fno-agents announce
+    read`), which the loop boundary calls natively. Side effect:
+    records the surfaced message id in the per-session cursor so it is not
+    surfaced again (US3/AC3-FR). Fail-open: returns None on any error so the
+    loop-check that shells out to us is never broken by inbox state.
     """
     if not cwd:
         return None
     try:
-        from fno.agents.discover import resolve_project_for_cwd
-
-        project = resolve_project_for_cwd(cwd)
         my_name = _resolve_self_name(cwd)
-        if not project and not my_name:
+        if not my_name:
             return None
 
         from fno.bus.cursor import scan_unread
 
-        # Direct by-name mail to this worker (no self-echo by construction), plus
-        # project broadcasts excluding this worker's own sends. Each scan honors
-        # its own per-recipient cursor (advanced by `fno agents mail ack`).
-        matched: list = []
-        if my_name:
-            matched += scan_unread(my_name, warn=False)
-        if project:
-            # Sender-exclusion: my_name is the load-bearing key (a self-broadcast's
-            # from_ equals this worker's registry name). session_id is a secondary
-            # match against from_session that only fires when the two id namespaces
-            # agree; it is belt-and-suspenders, never the sole guard.
-            exclude = {x for x in (my_name, session_id) if x}
-            matched += scan_unread(project, warn=False, exclude_from=exclude)
-        if not matched:
-            return None
-
-        # Dedup + restore oldest->newest order across the two scans WITHOUT a
-        # third full bus scan (peek_nudge runs at every loop boundary, and the
-        # bus can be tens of MB). Both scans already returned parsed envelopes in
-        # global order; sorting their union by ts is correct (ISO-8601 sorts
-        # chronologically) and a stable sort keeps same-second order intact.
-        seen: set[str] = set()
-        msgs = []
-        for m in matched:
-            if m.id not in seen:
-                seen.add(m.id)
-                msgs.append(m)
-        msgs.sort(key=lambda m: m.ts)
+        # Direct by-name mail to this worker (no self-echo by construction).
+        # Honors its own per-recipient cursor (advanced by `fno agents mail ack`).
+        msgs = scan_unread(my_name, warn=False)
         if not msgs:
             return None
 

@@ -24,6 +24,7 @@ use std::io::IsTerminal;
 const ALL_CLIENT_ACTIONS: &[&str] = &[
     "--emit-schema",
     "adopt",
+    "announce",
     "ask",
     "attach",
     "authorized-merge",
@@ -387,6 +388,13 @@ async fn run(args: Vec<String>) -> i32 {
     // `test-run`, so the parity tests stay in sync.
     if verb == "fleet-incident" {
         return fno_agents::fleet_incident::run_fleet_incident(&args[1..]);
+    }
+
+    // `announce`: fleet announcements (see announce.rs doc). Direct
+    // dispatch; no daemon RPC - a send is one locked bus append, a read is a
+    // scan + cursor write, and both must work when the daemon is wedged.
+    if verb == "announce" {
+        return fno_agents::announce::run_announce(&args[1..]);
     }
 
     // `review-coverage`: standalone review_coverage producer (see its own doc

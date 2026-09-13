@@ -4312,82 +4312,78 @@ def cmd_send(
         print(f"{result.msg_id} queued (durable) [{reason_tok}]")
 
 
-def _team_recipients(scope: str) -> list[tuple[str, str]]:
-    """Snapshot a fleet scope: sorted (name, identity), deduped by identity.
-    ``all``/``kings`` are live-row filters; else crown territory equality.
+def _team_sender_kind_and_from(from_name: Optional[str]) -> tuple[str, str]:
+    """Resolve the announce envelope identity.
+
+    A session whose harness identity this process can PROVE it owns stamps its
+    own handle as ``agent`` (Rust then demands a crown of that row); everything
+    else (a bare shell, cron, an explicit alias) stamps ``operator``.
     """
-    from fno.agents.registry import TERMINAL_STATUSES, load_registry
-    from fno.harness_identity import session_identity_key
-
-    rows = load_registry()
-    if scope not in ("all", "kings"):
-        from fno.agents.crown import crown_scope_matches
-
-        rows = [r for r in rows if crown_scope_matches(getattr(r, "crown_scope", None), scope)]
-    pairs: dict[str, str] = {}
-    for row in rows:
-        if row.status in TERMINAL_STATUSES or not row.session_id:
-            continue
-        if scope == "kings" and row.crown_level is None:
-            continue
-        pairs.setdefault(session_identity_key(row.session_id), row.name)
-    return sorted((name, identity) for identity, name in pairs.items())
-
-
-@mail_app.command("team")
-def cmd_team(
-    scope: str = typer.Option(..., "--scope", help="Fleet scope: all | kings | <crown scope>."),
-    message: str | None = typer.Argument(None, help="One body for every recipient."),
-    from_name: str | None = typer.Option(None, "--from-name", help="Envelope identity (see send)."),
-    json_out: bool = typer.Option(False, "--json", "-J", help="Recipients and receipts as JSON."),
-) -> None:
-    """Announce one body to a fleet scope via the ordinary named-send core.
-
-    Delivery is per recipient and irreversible: the body is validated once,
-    successes stand, and a partial failure exits 1 naming every unsent
-    recipient. Mail is never gated by a fleet incident stop.
-    """
-    from fno.agents.dispatch import dispatch_send
     from fno.agents.self_stamp import stamp_from
+    from fno.harness_identity import resolve_owned_identity
+
+    try:
+        ident = resolve_owned_identity()
+    except Exception:  # noqa: BLE001 - identity is best-effort, never a crash
+        ident = None
+    owned = bool(ident is not None and ident.session_id and ident.harness)
+    return ("agent" if owned else "operator"), stamp_from(from_name)
+
+
+@mail_app.command("team", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def cmd_team(
+    ctx: typer.Context,
+    scope: str = typer.Option(..., "--scope", help="Fleet scope: all | kings | <crown scope> | project:<p>."),
+    message: str | None = typer.Argument(None, help="One announcement body."),
+    from_name: str | None = typer.Option(None, "--from-name", help="Envelope identity (see send)."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Send receipt as JSON."),
+) -> None:
+    """Announce one body to a fleet scope as ONE bus line.
+
+    The bus line IS the announcement: every session reads it through its own
+    cursor at its next hook boundary, so a send costs one write at any fleet
+    size. Delivery proofs are a separate read (`fno-agents announce status
+    <id>`). The body is linted here (the single style implementation); the
+    Rust writer owns authority, the audience snapshot, and the locked append.
+
+    Announcement flags belong to the Rust writer and are relayed verbatim:
+    `--subject S` (supersede key), `--expires 45m|24h|7d` (standing window,
+    default 24h, max 7d), `--urgent`. Any unrecognized flag is passed through
+    the same way and refused there, so this shim adds no Python flag surface.
+    """
+    import shutil
 
     if not message:
-        print("usage: fno agents mail team --scope <all|kings|<crown>> <message>", file=sys.stderr)
+        print("usage: fno agents mail team --scope <all|kings|<crown>|project:<p>> <message>", file=sys.stderr)
         raise typer.Exit(code=2)
     _refuse_forged_envelope(message)
     _enforce_body_cap(message)
     _enforce_style(message, allow_reason=None)
-    recipients = _team_recipients(scope)
-    if not recipients:
-        typer.secho(f"mail team: no live recipients in scope {scope!r}", err=True)
+
+    sender_kind, sender = _team_sender_kind_and_from(from_name)
+
+    binary = shutil.which("fno-agents")
+    if binary is None:
+        print(
+            "error: mail team needs the fno-agents binary on PATH (the announce writer)",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=1)
 
-    sent = queued = failed = 0
-    receipts: list[dict[str, object]] = []
-    for name, identity in recipients:
-        try:
-            result = dispatch_send(
-                name=name, message=message, provider=None, cwd=Path(os.getcwd()),
-                from_name=stamp_from(from_name),
-            )
-        except Exception as exc:  # noqa: BLE001 - one recipient never aborts the fleet
-            failed += 1
-            receipts.append({"name": name, "identity": identity, "error": str(exc)})
-            typer.secho(f"{name}: refused: {exc}", err=True)
-            continue
-        if result.delivery == "hosted":
-            sent += 1
-            receipt = f"{result.msg_id} delivered (hosted)"
-        else:
-            queued += 1
-            receipt = f"{result.msg_id} queued (durable)"
-        receipts.append({"name": name, "identity": identity, "msg_id": result.msg_id, "delivery": result.delivery})
-        print(f"{name}: {receipt}")
+    args = [
+        binary, "announce", "send",
+        "--scope", scope,
+        "--from", sender,
+        "--sender-kind", sender_kind,
+        *ctx.args,
+    ]
     if json_out:
-        print(json.dumps({"scope": scope, "recipients": [i for _, i in recipients], "receipts": receipts, "sent": sent, "queued": queued, "failed": failed}))
-    else:
-        typer.echo(f"team scope={scope}: sent {sent}, queued {queued}, failed {failed}")
-    if failed:
-        raise typer.Exit(code=1)
+        args.append("--json")
+    proc = subprocess.run(args, input=message, capture_output=True, text=True)
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    if proc.returncode != 0:
+        raise typer.Exit(code=proc.returncode if proc.returncode > 0 else 1)
 
 
 @mail_app.command("unread")
