@@ -736,28 +736,32 @@ def _lookup_registry_row_exact(handle: str):
     """Return the registry row whose stored name or session id matches ``handle``.
 
     This diagnostic runs only after transcript and mux resolution both miss.
-    It deliberately does not resolve aliases or prefixes: the message must name
-    the exact requested row, and an unreadable registry contributes no
-    diagnosis. The session id is matched alongside the name because that is the
-    string ``fno agents adopt`` and ``fno agents peek``'s own miss text hand the
-    caller, and a row addressable by one spelling and not the other is the same
-    dead end by a shorter route.
+    It deliberately does not resolve name aliases: the message must name the
+    exact requested row, and an unreadable registry contributes no diagnosis.
+    The session id is matched alongside the name through the same handle tiers
+    every other reader uses (full uuid, canonical first-eight, legacy
+    last-eight): a row addressable by one spelling and not the other is the
+    same dead end by a shorter route, and x-f715 is exactly that dead end - a
+    short-id handle against a row that stores the full uuid. Two rows matching
+    one short handle is a guess this refuses to make, so it returns None and
+    the not-found path below speaks.
     """
     from fno.agents.registry import load_registry
+    from fno.harness_identity import session_handle_tier
 
     try:
         entries = load_registry()
     except Exception:  # noqa: BLE001 - the existing not-found path owns read failures
         return None
-    return next(
-        (
-            entry
-            for entry in entries
-            if getattr(entry, "name", None) == handle
-            or getattr(entry, "harness_session_id", None) == handle
-        ),
-        None,
-    )
+    matches = []
+    for entry in entries:
+        if getattr(entry, "name", None) == handle:
+            matches.append(entry)
+            continue
+        sid = getattr(entry, "harness_session_id", None)
+        if isinstance(sid, str) and session_handle_tier(handle, sid) is not None:
+            matches.append(entry)
+    return matches[0] if len(matches) == 1 else None
 
 
 class _RegistrySession:
@@ -1156,7 +1160,7 @@ def peek(
     agent = getattr(session, "agent", "claude")
     session_id = getattr(session, "session_id", "")
     short_id = getattr(session, "short_id", "")
-    cwd = getattr(session, "cwd", "")
+    cwd = getattr(session, "cwd", "") or ""
 
     if not json_out:
         out.write(
@@ -1252,9 +1256,9 @@ def peek(
         # dead; liveness verdicts belong to `fno agents truth`. Refusing to
         # tail is still right, because nothing here can observe the writer.
         err.write(
-            f"--follow: {handle} resolved from its registry row, not from a live "
-            "session, so there is no writer to tail; showed the tail only. "
-            "For a liveness verdict: fno agents truth\n"
+            f"--follow: {handle} resolved from durable state (a registry row or "
+            "transcript store), not from a live session, so there is no writer "
+            "to tail; showed the tail only. For a liveness verdict: fno agents truth\n"
         )
         return EXIT_OK
 
