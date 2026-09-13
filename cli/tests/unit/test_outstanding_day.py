@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 
 import pytest
 
@@ -55,8 +56,8 @@ def test_index_failure_names_boundary_id(monkeypatch: pytest.MonkeyPatch) -> Non
     })
     monkeypatch.setattr(day, "append_event", fake_append)
     monkeypatch.setattr(day, "events_path", lambda root: root / "events.jsonl")
-    monkeypatch.setattr(day, "questions_path", lambda: day.Path("questions.jsonl"))
-    monkeypatch.setattr(day, "resolve_carveout_root", lambda: day.Path("project"))
+    monkeypatch.setattr(day, "questions_path", lambda: Path("questions.jsonl"))
+    monkeypatch.setattr(day, "resolve_carveout_root", lambda: Path("project"))
 
     with pytest.raises(day.DayIndexWriteError, match="day-end-20260913-ab12"):
         day._record_boundary("end")
