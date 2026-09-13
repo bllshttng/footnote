@@ -110,7 +110,7 @@ pub(crate) fn read_king_board(
     let _ = fno_bin;
     let opts = crate::king_board::BoardOpts {
         budget_ms: crate::loopcheck::stopgate_read_timeout().as_millis() as u64,
-        max_pr_reads: 20,
+        max_pr_reads: crate::king_board::DEFAULT_MAX_PR_READS,
         state_path: Some(state_path.to_path_buf()),
         cwd: Some(cwd.to_path_buf()),
     };

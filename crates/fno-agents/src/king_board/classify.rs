@@ -138,7 +138,24 @@ pub(crate) fn holder_reading(probe: Option<&crate::truth_probe::TruthProbe>) -> 
         return match reachability {
             "reachable" => HolderReading::Active,
             "unreachable" => HolderReading::Inactive,
-            _ => HolderReading::Unmeasured,
+            // An unknown reachability is Inactive only when the probe both
+            // named a positive-silence basis and dated the quiet past the
+            // stall line: an answered, aged silence is the measured-no shape.
+            // Basis strings are cli reachability.py's SILENT / STALE_TRANSCRIPT
+            // crossing the process boundary on the probe.
+            _ => {
+                let quiet_basis = probe
+                    .basis
+                    .as_deref()
+                    .is_some_and(|b| b == "silent" || b == "stale-transcript");
+                let quiet_long =
+                    matches!(probe.last_activity_age_s, Some(age) if age > STALLED_AFTER_S);
+                if quiet_basis && quiet_long {
+                    HolderReading::Inactive
+                } else {
+                    HolderReading::Unmeasured
+                }
+            }
         };
     }
     // A truth build predating the field: fall back to the state+age mapping,
@@ -229,6 +246,37 @@ pub(crate) fn node_has_pr(node: &Value) -> bool {
             .unwrap_or(false)
 }
 
+/// The candidate fold shared by `roster_verdict` and the worked-feed arm:
+/// any Active is active; any Unmeasured or unprobed token is unmeasured; all
+/// Inactive is none (the `None` return). Active outranks a later unmeasured,
+/// and a candidate the probe could not measure stays unmeasured, never
+/// absent: a codex transcript outside the claude project store must not read
+/// as a dead driver, which is the false "dead" that invites reaping a live
+/// worker. An empty token list is no candidates, the caller's concern.
+fn fold_candidates(
+    tokens: &[&str],
+    activity: &HashMap<String, crate::truth_probe::TruthProbe>,
+) -> Option<&'static str> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut saw_unmeasured = false;
+    for token in tokens {
+        match activity.get(*token) {
+            Some(probe) => match holder_reading(Some(probe)) {
+                HolderReading::Active => return Some("active"),
+                HolderReading::Inactive => {}
+                HolderReading::Unmeasured => saw_unmeasured = true,
+            },
+            None => saw_unmeasured = true,
+        }
+    }
+    if saw_unmeasured {
+        return Some("unmeasured");
+    }
+    None
+}
+
 /// The roster's driver verdict for one node: `Some` when the roster answers,
 /// `None` when it has no candidate or every candidate positively died. The
 /// join is on the registry row's `node` field alone, so a crown's own row
@@ -246,9 +294,7 @@ pub(crate) fn roster_verdict(
     let Some(rows) = drivers.payload.as_ref().and_then(Value::as_array) else {
         return None;
     };
-    let mut saw_candidate = false;
-    let mut saw_inactive = false;
-    let mut saw_unmeasured = false;
+    let mut tokens: Vec<&str> = Vec::new();
     for row in rows {
         if !row
             .get("node")
@@ -257,26 +303,11 @@ pub(crate) fn roster_verdict(
         {
             continue;
         }
-        saw_candidate = true;
-        let token = row.get("token").and_then(Value::as_str).unwrap_or("");
-        match activity.get(token) {
-            Some(probe) => match holder_reading(Some(probe)) {
-                HolderReading::Active => return Some("active"),
-                HolderReading::Inactive => saw_inactive = true,
-                HolderReading::Unmeasured => saw_unmeasured = true,
-            },
-            None => saw_unmeasured = true,
+        if let Some(t) = row.get("token").and_then(Value::as_str) {
+            tokens.push(t);
         }
     }
-    // A candidate the probe could not measure stays unmeasured, never absent:
-    // a codex transcript outside the claude project store must not read as a
-    // dead driver, which is the false "dead" that invites reaping a live
-    // worker.
-    if saw_candidate && (!saw_inactive || saw_unmeasured) {
-        Some("unmeasured")
-    } else {
-        None
-    }
+    fold_candidates(&tokens, activity)
 }
 
 /// Who is driving this node: active, stalled, crowned, none, or unmeasured.
@@ -356,27 +387,43 @@ pub(crate) fn node_driver<'a>(
         if crowned {
             return ("crowned", None);
         }
-        // No claim row: consult the worked feed before saying none. The feed
-        // answering "no worker" is the only path to a positive none; an
-        // unreadable feed is unmeasured, never none.
+        // No claim row: the worked feed NOMINATES candidates, it never
+        // decides. A listed row's worker tokens run the shared candidate fold;
+        // the listing alone no longer reads active - a feed row is history,
+        // and the probe is the liveness answer. Unlisted (the feed answered
+        // and found nothing) is the only path to a positive none; an
+        // unreadable feed, a row with no tokens, and an unmapped row are
+        // unmeasured, never none.
         let Some(read) = worked else {
             return ("unmeasured", None);
         };
         if !read.is_ok() {
             return ("unmeasured", None);
         }
-        let driven = read
+        let Some(row) = read
             .payload
             .as_ref()
             .and_then(Value::as_array)
-            .is_some_and(|rows| {
+            .and_then(|rows| {
                 rows.iter()
-                    .any(|row| row.get("id").and_then(Value::as_str) == Some(node_id))
-            });
-        if driven {
-            return ("active", None);
+                    .find(|row| row.get("id").and_then(Value::as_str) == Some(node_id))
+            })
+        else {
+            return ("none", None);
+        };
+        let tokens: Vec<&str> = row
+            .get("tokens")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if tokens.is_empty() || row.get("unmapped").map(truthy).unwrap_or(false) {
+            return ("unmeasured", None);
         }
-        return ("none", None);
+        return match fold_candidates(&tokens, activity) {
+            Some("active") => ("active", None),
+            Some(_) => ("unmeasured", None),
+            None => ("none", None),
+        };
     };
     // Before the dead check: an unprobed holder is neither dead nor active,
     // so the dead-state clock must not eat the missing measurement.
@@ -451,6 +498,90 @@ mod tests {
             holder_reading(Some(&legacy)),
             HolderReading::Active
         ));
+    }
+
+    fn answered_unknown(basis: Option<&str>, age_s: Option<f64>) -> crate::truth_probe::TruthProbe {
+        let mut p = probe("unknown", age_s.unwrap_or(0.0));
+        p.reachability = Some("unknown".to_string());
+        p.basis = basis.map(str::to_string);
+        p
+    }
+
+    #[test]
+    fn a_quiet_roster_candidate_past_the_stall_line_reads_none() {
+        // A roster row whose probe answered unknown + silent + aged past the
+        // stall line is the measured-no shape: node_driver none, so
+        // undriven_pr may name the node.
+        let node = json!({"id": "x-5767", "priority": "p2", "pr_number": 1881});
+        let drivers = drivers_read(json!([driver_row("x-5767", "quiet-worker")]));
+        let mut activity = HashMap::new();
+        activity.insert(
+            "quiet-worker".to_string(),
+            answered_unknown(Some("silent"), Some(63858.0)),
+        );
+        assert_eq!(
+            node_driver(
+                &node,
+                &HashMap::new(),
+                &activity,
+                None,
+                Some(&ok_worked(&[])),
+                Some(&drivers)
+            )
+            .0,
+            "none"
+        );
+    }
+
+    #[test]
+    fn an_unknown_reading_without_aged_silence_stays_unmeasured() {
+        // The demotion needs BOTH the positive-silence basis and the age past
+        // the stall line. A young silence, a dated but non-silent basis, or a
+        // silence with no date all stay unmeasured - absence of a measurement
+        // is not a measurement of absence.
+        for (basis, age) in [
+            (Some("silent"), Some(3600.0)),
+            (Some("mtime-only"), Some(96718.0)),
+            (Some("no-evidence"), Some(96718.0)),
+            (Some("no-inference"), Some(96718.0)),
+            (Some("silent"), None),
+        ] {
+            let node = json!({"id": "x-edge", "priority": "p2", "pr_number": 1});
+            let drivers = drivers_read(json!([driver_row("x-edge", "edge-worker")]));
+            let mut activity = HashMap::new();
+            activity.insert("edge-worker".to_string(), answered_unknown(basis, age));
+            assert_eq!(
+                node_driver(
+                    &node,
+                    &HashMap::new(),
+                    &activity,
+                    None,
+                    Some(&ok_worked(&[])),
+                    Some(&drivers)
+                )
+                .0,
+                "unmeasured",
+                "basis {basis:?} age {age:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quiet_claim_holder_past_the_stall_line_reads_stalled() {
+        // The same predicate answers the claim arm: a live claim whose holder
+        // reads stale-transcript past the stall line reads stalled, so
+        // stalled_holder gains the row.
+        let node = json!({"id": "x-quiet", "priority": "p1"});
+        let mut claims = HashMap::new();
+        claims.insert("x-quiet".to_string(), handover_claim("x-quiet"));
+        let mut activity = HashMap::new();
+        activity.insert(
+            "t-x-quiet-worker".to_string(),
+            answered_unknown(Some("stale-transcript"), Some(90000.0)),
+        );
+        let (state, claim) = node_driver(&node, &claims, &activity, None, None, None);
+        assert_eq!(state, "stalled");
+        assert!(claim.is_some());
     }
 
     #[test]
@@ -672,6 +803,10 @@ mod tests {
         assert!(
             text.contains(r#"_ACTIVE_STATES = frozenset({"working", "watching", "your-move"})"#)
         );
+        // The basis strings the board demotes on cross the process boundary;
+        // a rename Python-side must fail loudly here.
+        assert!(text.contains(r#"SILENT = "silent""#));
+        assert!(text.contains(r#"STALE_TRANSCRIPT = "stale-transcript""#));
     }
 
     // --- x-9958: stalled asks for progress, never for a lease ---------------
@@ -769,9 +904,10 @@ mod tests {
 
     #[test]
     fn a_no_claim_node_reads_what_the_worked_feed_answers() {
-        // x-dead task 1.4 (the PR 1747 shape): a live worker with no claim row
-        // is not an undriven PR. The worked feed answering is the only path to
-        // a positive none; an unreadable feed is unmeasured, never none.
+        // A live worker with no claim row is not an undriven PR. The feed
+        // nominates, the probe decides: a listed row with no probed tokens
+        // reads unmeasured, never active. Unlisted is the one positive none;
+        // an unreadable feed is unmeasured, never none.
         let node = json!({"id": "x-1747", "priority": "p1"});
         let claims: HashMap<String, Value> = HashMap::new();
         let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
@@ -783,8 +919,30 @@ mod tests {
             Some(&ok_worked(&["x-1747"])),
             None,
         );
-        assert_eq!(state, "active");
+        // No tokens on the listed row: the probe never got a candidate, so
+        // this reads unmeasured, never active.
+        assert_eq!(state, "unmeasured");
         assert!(claim.is_none());
+        // A listed row whose worker token reads reachable is the new active:
+        // the probe, not the listing, answers.
+        let listed = crate::king_board::SourceRead::ok(json!([
+            {"id": "x-1747", "tokens": ["t-1747"]},
+        ]));
+        let mut alive: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        alive.insert("t-1747".to_string(), probe("working", 30.0));
+        assert_eq!(
+            node_driver(&node, &claims, &alive, None, Some(&listed), None).0,
+            "active"
+        );
+        // A label the registry never confirmed maps to no token: unmeasured,
+        // never active and never none.
+        let unmapped_row = crate::king_board::SourceRead::ok(json!([
+            {"id": "x-1747", "unmapped": true},
+        ]));
+        assert_eq!(
+            node_driver(&node, &claims, &alive, None, Some(&unmapped_row), None).0,
+            "unmeasured"
+        );
         // The feed answered and found nothing: this is the one positive none.
         assert_eq!(
             node_driver(&node, &claims, &activity, None, Some(&ok_worked(&[])), None).0,
