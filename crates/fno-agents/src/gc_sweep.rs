@@ -417,6 +417,13 @@ fn plan_file_exists(plan_path: &str, cwd: Option<&str>) -> bool {
     path.is_file()
 }
 
+/// The planning hold's detail (d-81c6da7e). One builder: the hold the sweep
+/// pushes and the string a release ruling must match are the same bytes, so
+/// the two sites cannot drift.
+fn planning_hold_detail(node: &str, status: &str) -> String {
+    format!("{node} {status}: no close and no plan written by this session")
+}
+
 /// One row the pass decided to retire, with everything the write tail needs.
 pub(crate) struct RetireOrder {
     pub(crate) id: String,
@@ -1796,8 +1803,7 @@ pub(crate) fn run_with_release(
                         status: status.clone(),
                     }
                     .as_str();
-                    let detail =
-                        format!("{node} {status}: no close and no plan written by this session");
+                    let detail = planning_hold_detail(node, status);
                     if let Some(r) = release_for_row {
                         if r.matches(hold_reason, &detail) {
                             row.planning_released = true;
@@ -1888,9 +1894,7 @@ pub(crate) fn run_with_release(
                             status: status.clone(),
                         }
                         .as_str(),
-                        detail: format!(
-                            "{node} {status}: no close and no plan written by this session"
-                        ),
+                        detail: planning_hold_detail(&node, &status),
                         age_s: hold_age_s,
                         age_basis: hold_age_basis,
                         escalated: false,
