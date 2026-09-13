@@ -47,6 +47,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_AGENT_ROW_PENDING` | py | unclear: cli/src/fno/agents/register_session.py:200 |
 | `FNO_AGENT_SELF` | py+rs | unclear: cli/src/fno/agent/cli.py:363 |
 | `FNO_AGENT_SESSION` | py | unclear: cli/src/fno/agents/context.py:237 |
+| `FNO_CARGO_TARGETS_BASE` | py | Overrides the managed cargo build base the removal-time reclaim deletes under; test escape hatch. |
 | `FNO_AUTO_MEMORY_DIR` | py | unclear: cli/src/fno/inbox/drain.py:407 |
 | `FNO_BG` | py | unclear: cli/src/fno/target/orient.py:254 |
 | `FNO_BIN` | py+rs | Overrides the Python fno porcelain path at the Rust/Python seam. |
