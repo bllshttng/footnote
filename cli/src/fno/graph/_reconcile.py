@@ -923,32 +923,14 @@ def _close_probe_runner_shellout(
 
 
 def _verdict_reader_shellout(plan_path: str) -> "dict[str, Any]":
-    """Default ``verdict_reader``: shell out to ``fno-agents prove-it-verdicts``.
-
-    Returns the verb's payload ({read_at, rows, unreadable}). Raises on a
-    missing binary or non-zero exit; the caller degrades to a warning, the
-    same posture a plan read failure takes.
+    """Default ``verdict_reader``: one round-trip with ``fno-agents
+    prove-it-verdicts``. Returns {read_at, rows, unreadable}; raises
+    ``VerbUnavailable`` on a missing/failed verb, which the caller degrades to
+    a warning, the same posture a plan read failure takes.
     """
-    from fno.rust_binary import resolve_binary
+    from fno.rust_binary import verb_call
 
-    exe = resolve_binary()
-    if not exe:
-        raise OSError(
-            "the fno-agents binary was not found (set FNO_AGENTS_BIN or run "
-            "`fno doctor update --rust`)"
-        )
-    proc = subprocess.run(
-        [str(exe), "prove-it-verdicts", "--json"],
-        capture_output=True,
-        text=True,
-        timeout=PROBE_RUN_TIMEOUT_S,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise OSError(
-            f"prove-it-verdicts exited {proc.returncode}: {(proc.stderr or '').strip()[:200]}"
-        )
-    return json.loads(proc.stdout)
+    return verb_call("prove-it-verdicts", {})
 
 
 def resolve_promise_evidence(

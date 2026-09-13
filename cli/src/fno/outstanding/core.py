@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, NamedTuple, Optional
 
 from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
 
@@ -120,8 +120,7 @@ class Capture:
         }
 
 
-@dataclass(frozen=True)
-class VerdictRow:
+class VerdictRow(NamedTuple):
     """One open prove-it FAIL verdict (x-6d64): claimed outcome did not hold."""
 
     node: str
@@ -132,14 +131,7 @@ class VerdictRow:
     mtime: Optional[str] = None
 
     def as_dict(self) -> "dict[str, Any]":
-        return {
-            "node": self.node,
-            "report": self.report,
-            "verdict": self.verdict,
-            "claim": self.claim,
-            "status": self.status,
-            "mtime": self.mtime,
-        }
+        return self._asdict()
 
 
 @dataclass(frozen=True)
@@ -804,20 +796,18 @@ def _read_open_verdicts() -> "tuple[list[VerdictRow], Optional[str]]":
         payload = verb_call("prove-it-verdicts", {})
     except (VerbUnavailable, OSError, ValueError) as exc:
         return [], str(exc)
-    rows = []
-    for row in payload.get("rows") or []:
-        if not row.get("open"):
-            continue
-        rows.append(
-            VerdictRow(
-                node=str(row.get("node") or ""),
-                report=str(row.get("report") or ""),
-                verdict=str(row.get("verdict") or "FAIL"),
-                claim=str(row.get("claim") or ""),
-                status=row.get("status"),
-                mtime=row.get("mtime"),
-            )
+    rows = [
+        VerdictRow(
+            node=str(r.get("node") or ""),
+            report=str(r.get("report") or ""),
+            verdict=str(r.get("verdict") or "FAIL"),
+            claim=str(r.get("claim") or ""),
+            status=r.get("status"),
+            mtime=r.get("mtime"),
         )
+        for r in payload.get("rows") or []
+        if r.get("open")
+    ]
     return rows, None
 
 
