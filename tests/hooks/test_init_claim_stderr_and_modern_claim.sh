@@ -230,28 +230,30 @@ log "(e): spawn-handover claim + env unset + own name => init acquires via the d
 make_repo TMP_E
 _ALL_TMPS+=("$TMP_E")
 cat > "${TMP_E}/home/.fno/graph.json" <<'JSON'
-{"entries":[{"id":"tst-ho7471","title":"handover fallback test node","session_id":null}]}
+{"entries":[{"id":"tst-ca7471","title":"handover fallback test node","session_id":null}]}
 JSON
 
 HOME="${TMP_E}/home" FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
-  fno agents claim acquire "node:tst-ho7471" \
+  fno agents claim acquire "node:tst-ca7471" \
   --holder "spawn-handover:t-ho-worker" --ttl 15m --pid-unavailable \
   --reason "test stage" >/dev/null 2>&1 \
   || fail "(e): staging the spawn-handover claim failed"
 
 (cd "$TMP_E" && \
   HOME="${TMP_E}/home" \
+  PATH="${TMP_E}/bin:$PATH" \
+  FNO_TEST_SPACE="${TMP_E}/space" \
   FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
   FNO_TARGET_INIT_GATED=1 \
   FNO_WORKER_NAME="t-ho-worker" \
   TARGET_START=1 \
-  TARGET_INPUT="tst-ho7471" \
+  TARGET_INPUT="tst-ca7471" \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(e): init exited non-zero"
 
 _HOLDER_E="$(HOME="${TMP_E}/home" FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
-  fno agents claim status "node:tst-ho7471" --json 2>/dev/null \
+  fno agents claim status "node:tst-ca7471" --json 2>/dev/null \
   | sed -n 's/.*"holder"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 [[ "$_HOLDER_E" == target-session:* ]] \
   || fail "(e): claim holder is '${_HOLDER_E}', expected the init acquire to land via the handover fallback"
@@ -270,28 +272,30 @@ log "(g): spawn-handover claim naming another worker + own name proven => no tak
 make_repo TMP_G
 _ALL_TMPS+=("$TMP_G")
 cat > "${TMP_G}/home/.fno/graph.json" <<'JSON'
-{"entries":[{"id":"tst-bystander","title":"bystander control node","session_id":null}]}
+{"entries":[{"id":"tst-feed42","title":"bystander control node","session_id":null}]}
 JSON
 
 HOME="${TMP_G}/home" FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
-  fno agents claim acquire "node:tst-bystander" \
+  fno agents claim acquire "node:tst-feed42" \
   --holder "spawn-handover:someone-elses-worker" --ttl 15m --pid-unavailable \
   --reason "bystander stage" >/dev/null 2>&1 \
   || fail "(g): staging the foreign launch-window claim failed"
 
 (cd "$TMP_G" && \
   HOME="${TMP_G}/home" \
+  PATH="${TMP_G}/bin:$PATH" \
+  FNO_TEST_SPACE="${TMP_G}/space" \
   FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
   FNO_TARGET_INIT_GATED=1 \
   FNO_WORKER_NAME="this-worker" \
   TARGET_START=1 \
-  TARGET_INPUT="tst-bystander" \
+  TARGET_INPUT="tst-feed42" \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(g): init exited non-zero"
 
 _HOLDER_G="$(HOME="${TMP_G}/home" FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
-  fno agents claim status "node:tst-bystander" --json 2>/dev/null \
+  fno agents claim status "node:tst-feed42" --json 2>/dev/null \
   | sed -n 's/.*"holder"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 [[ "$_HOLDER_G" == "spawn-handover:someone-elses-worker" ]] \
   || fail "(g): claim holder changed to '${_HOLDER_G}'; a bystander must never take a live claim minted for another worker"
@@ -303,27 +307,29 @@ log "(f): non-handover claim + env unset => ordinary acquire still refuses (no t
 make_repo TMP_F
 _ALL_TMPS+=("$TMP_F")
 cat > "${TMP_F}/home/.fno/graph.json" <<'JSON'
-{"entries":[{"id":"tst-no7471","title":"no-takeover control node","session_id":null}]}
+{"entries":[{"id":"tst-c0ffee","title":"no-takeover control node","session_id":null}]}
 JSON
 
 HOME="${TMP_F}/home" FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
-  fno agents claim acquire "node:tst-no7471" \
+  fno agents claim acquire "node:tst-c0ffee" \
   --holder "target-session:resident" --ttl 2h --pid-unavailable \
   --reason "control stage" >/dev/null 2>&1 \
   || fail "(f): staging the resident claim failed"
 
 (cd "$TMP_F" && \
   HOME="${TMP_F}/home" \
+  PATH="${TMP_F}/bin:$PATH" \
+  FNO_TEST_SPACE="${TMP_F}/space" \
   FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
   FNO_TARGET_INIT_GATED=1 \
   TARGET_START=1 \
-  TARGET_INPUT="tst-no7471" \
+  TARGET_INPUT="tst-c0ffee" \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(f): init exited non-zero"
 
 _HOLDER_F="$(HOME="${TMP_F}/home" FNO_BOOTSTRAP_WHEEL="${REPO_ROOT}/cli" \
-  fno agents claim status "node:tst-no7471" --json 2>/dev/null \
+  fno agents claim status "node:tst-c0ffee" --json 2>/dev/null \
   | sed -n 's/.*"holder"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 [[ "$_HOLDER_F" == "target-session:resident" ]] \
   || fail "(f): claim holder changed to '${_HOLDER_F}'; a published non-handover holder must never be taken over"
