@@ -143,7 +143,7 @@ The second thing you run after a code review: a different CLASS of evidence, wit
 bash "${SKILL_DIR}/scripts/validate-prove-it.sh" <report-file>
 ```
 
-The validator REFUSES a PASS whose Steps list carries no marked probe - a happy-path replay is not a verification - and REFUSES a PASS whose `### Claims` section is missing or carries a claim row with no `CMD:` - an unproven claim is a claim nobody checked - and passes FAIL, BLOCKED, and SKIP through untouched (they carry no verdict on the change). prove-it emits no attestation of its own; a PASS satisfies a declared `done_probe`, a FAIL is a blocking finding, and BLOCKED/SKIP read as unanswered.
+The validator REFUSES a PASS whose Steps list carries no marked probe - a happy-path replay is not a verification - and REFUSES a PASS whose `### Claims` section is missing or carries a claim row with no `CMD:` - an unproven claim is a claim nobody checked - and passes FAIL, BLOCKED, and SKIP through untouched (they carry no verdict on the change). prove-it emits no attestation of its own; a PASS satisfies a declared `done_probe`, a FAIL is a blocking finding, and BLOCKED/SKIP read as unanswered; an ad-hoc report saved under the audited plan's `.artifacts/` gets a reader through `fno-agents prove-it-verdicts`, which notes an open FAIL on the node and holds its close.
 
 ## Step 2c: cleanup mode (apply-or-skip terminus)
 

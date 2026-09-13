@@ -70,6 +70,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ping",
     "pr-heal",
     "probe-run",
+    "prove-it-verdicts",
     "test-run",
     "promote",
     "publish-review",
@@ -359,6 +360,13 @@ async fn run(args: Vec<String>) -> i32 {
     // `probe-run`: see its own doc in acceptance_evidence.rs. Direct dispatch.
     if verb == "probe-run" {
         return fno_agents::acceptance_evidence::run_probe_run(&args[1..]);
+    }
+
+    // `prove-it-verdicts`: the one reader for terminal prove-it records
+    // (x-6d64, see its own doc in prove_it_verdicts.rs). Direct dispatch; no
+    // daemon RPC - a verdict read walks the graph and plan artifacts files.
+    if verb == "prove-it-verdicts" {
+        return fno_agents::prove_it_verdicts::run_prove_it_verdicts(&args[1..]);
     }
 
     // `test-run`: the native process-group owner behind `fno doctor test`
