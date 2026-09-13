@@ -136,10 +136,10 @@ def cmd_session_add(
     Self-close spelling (the owning session): session add <node> --phase <phase> --ended-at <ISO-8601 now>.
     """
     from fno.graph.fuzzy import resolve_node
+    from fno.graph.api import wire_rows
     from fno.graph.store import (
         append_session_record,
         find_nodes_for_pr,
-        read_graph,
         stamp_session_for_pr,
     )
 
@@ -328,7 +328,7 @@ def cmd_session_add(
             # session add is a mutation verb: local-store resolution, guarded
             # against external backends by the shared refusal (task 4.2), not
             # the display-reader seam.
-            match = resolve_node(node, read_graph(_graph_path()))
+            match = resolve_node(node, wire_rows(path=_graph_path()))
             if match.kind != "exact":
                 typer.echo(f"session add: no node matches {node!r} (phase={phase}).", err=True)
                 raise typer.Exit(code=2)
@@ -432,7 +432,7 @@ def cmd_session_open(
     from fno.claims.io import claims_root_for
     from fno.claims.self_identity import resolve_self_identity
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
 
     ident = resolve_self_identity()
     eff_harness = (harness or ident.harness or "").strip()
@@ -443,7 +443,7 @@ def cmd_session_open(
             err=True,
         )
         raise typer.Exit(code=2)
-    match = resolve_node(node, read_graph(_graph_path()))
+    match = resolve_node(node, wire_rows(path=_graph_path()))
     if match.kind != "exact":
         typer.echo(f"session open: no exact node matches {node!r}.", err=True)
         raise typer.Exit(code=2)
@@ -523,7 +523,8 @@ def cmd_session_close(
 
     from fno.claims.self_identity import resolve_self_identity
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import append_session_record, locked_mutate_graph, read_graph
+    from fno.graph.api import wire_rows
+    from fno.graph.store import append_session_record, commit_rows_via_store
 
     summary = summary.strip()
     launch = launch.strip()
@@ -540,7 +541,7 @@ def cmd_session_close(
             err=True,
         )
         raise typer.Exit(code=2)
-    match = resolve_node(node, read_graph(_graph_path()))
+    match = resolve_node(node, wire_rows(path=_graph_path()))
     if match.kind != "exact":
         typer.echo(f"session close: no exact node matches {node!r}.", err=True)
         raise typer.Exit(code=2)
@@ -605,7 +606,7 @@ def cmd_session_close(
                     break
             return entries
 
-        locked_mutate_graph(_graph_path(), _write_dispatch_verb)
+        commit_rows_via_store(_graph_path(), _write_dispatch_verb)
     else:
         typer.echo(
             f"session close: dispatch_verb not written: launch token "
@@ -670,7 +671,9 @@ def cmd_session_reap_open(
     """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open do row on its own, so this verb is the hand path for every other case, including a node still in flight. Without a node the identity form settles every node holding an open row for the session."""
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import is_open_do_row, is_open_phase_row
-    from fno.graph.store import reap_open_session_record, read_graph
+    from fno.graph import api as graph_api
+    from fno.graph.api import wire_rows
+    from fno.graph.store import reap_open_session_record
     from fno.graph.types import SESSION_PHASES
 
     if node is None:
@@ -697,7 +700,7 @@ def cmd_session_reap_open(
             )
         return
 
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
     match = resolve_node(node, entries)
     if match.kind != "exact":
         typer.echo(f"session reap-open: no exact node matches {node!r}.", err=True)
@@ -711,8 +714,8 @@ def cmd_session_reap_open(
         typer.echo(f"session reap-open: {exc}", err=True)
         raise typer.Exit(code=2)
 
-    reread = read_graph(_graph_path())
-    rebound = next((entry for entry in reread if entry.get("id") == node_id), None)
+    reread = graph_api.node(node_id, path=_graph_path())
+    rebound = reread.model_dump(by_alias=True) if reread else None
     if rebound is None:
         typer.echo(f"session reap-open: node {node_id} disappeared on read-back.", err=True)
         raise typer.Exit(code=1)
@@ -729,7 +732,7 @@ def cmd_session_reap_open(
             rebound.get(field)
             for field in ("completed_at", "superseded_by", "deferred_at", "pr_number")
         )
-        or rebound.get("status") == "blocked"
+        or rebound.get("persisted_status") == "blocked"
     )
     expected_in_progress = bool(rebound.get("locked_by")) or remaining > 0
     status_ok = higher_precedence or (

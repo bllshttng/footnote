@@ -548,19 +548,9 @@ def api_nodes_wire(graph_path):
     (the rows the store itself serializes), for folds that predate the
     typed-model switch. A store that was never created reads as empty, the
     same tolerance the raw read seam had."""
-    from fno.graph import api as graph_api
-    from fno.graph.store import StoreUnavailable
+    from fno.graph.api import wire_rows
 
-    try:
-        conn = graph_api.nodes(include_archived=True, path=graph_path)
-    except StoreUnavailable:
-        if not Path(graph_path).exists():
-            return []
-        raise
-    return [
-        n.model_dump(by_alias=True)
-        for n in conn.nodes
-    ]
+    return wire_rows(path=graph_path)
 
 
 def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:

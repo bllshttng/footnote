@@ -105,3 +105,18 @@ def cmd_version() -> None:
     import typer
 
     typer.echo(version())
+
+
+def wire_rows(*, path: Path = GRAPH_JSON) -> list[dict]:
+    """Every working-graph row as wire-shaped dicts, for folds that still
+    speak dicts (resolve_node, row inspectors). Absent store reads empty,
+    matching the old read_graph contract."""
+    from fno.graph.store import StoreUnavailable
+
+    try:
+        conn = nodes(include_archived=True, path=path)
+    except StoreUnavailable:
+        if not path.exists():
+            return []
+        raise
+    return [n.model_dump(by_alias=True) for n in conn.nodes]

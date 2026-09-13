@@ -252,7 +252,8 @@ def _stamp_launch_edge(node: "str | None") -> None:
     # keeper cycle here. Say when nothing was written, or a graph missing the
     # node commits an unchanged snapshot and exits 0.
     try:
-        from fno.graph.store import locked_mutate_graph, read_graph
+        from fno.graph.api import wire_rows
+        from fno.graph.store import commit_rows_via_store
         from fno.paths import graph_json
         from fno.tracker import active_backend_name
 
@@ -260,7 +261,7 @@ def _stamp_launch_edge(node: "str | None") -> None:
             # Under an external tracker this graph.json is not the record.
             return
 
-        existing = next((r for r in read_graph() if r.get("id") == node), None)
+        existing = next((r for r in wire_rows() if r.get("id") == node), None)
         if existing is None:
             print(f"spawn: launch edge not recorded on {node} (node not in graph); "
                   f"the edge was not written. Skipped.", file=sys.stderr)
@@ -281,7 +282,7 @@ def _stamp_launch_edge(node: "str | None") -> None:
                 row["spawned_by_cwd"] = parent_cwd
             return entries
 
-        locked_mutate_graph(graph_json(), mutator)
+        commit_rows_via_store(graph_json(), mutator)
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
         print(f"spawn: launch edge not recorded on {node}: {exc}", file=sys.stderr)
 
