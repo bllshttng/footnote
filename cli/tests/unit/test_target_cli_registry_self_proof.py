@@ -50,6 +50,20 @@ def _silent_walk_and_attester(monkeypatch, attested_id: str):
     )
 
 
+def _silent_walk_and_attester_with_codex_proof(monkeypatch, attested_id: str):
+    """The king's shape (x-a409): the process tree DOES prove codex (the pane
+    runner), but the attester stays env_only - codex never carries
+    CODEX_THREAD_ID in its own env, so ancestry cannot witness the id value.
+    This is exactly the gap the rollout witness fills."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda from_pid=None: "codex"
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: (attested_id, "env_only"),
+    )
+
+
 def test_name_only_pane_stamp_resolves_without_row_or_proof(tmp_path, monkeypatch):
     """The x-0992 repro, pinned: a pane-spawned codex worker's environment
     (name_only stamp, both codex markers carrying the same uuid, no walk, no
@@ -132,6 +146,89 @@ def test_name_only_own_row_resolves_when_the_attester_witnesses(
     assert fields["SESSION_ID"] == mine
     assert fields["DISPOSITION"] == "canonical"
     assert fields["COLLISION"] == ""
+
+
+def test_name_only_own_row_resolves_by_rollout_witness(tmp_path, monkeypatch):
+    """AC1 (x-a409): the king shape. A name_only codex stamp, a live registry
+    row holding the marker id, a codex-proofed tree, and an attester that only
+    saw env - yet the rollout fd witnesses the id, and that fd cannot be
+    forged by a leaked marker. The resolver completes its own pair and answers
+    canonically instead of rejecting its own row as a stranger."""
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    register_existing_session(harness="codex", session_id=mine, cwd="/x")
+    _silent_walk_and_attester_with_codex_proof(monkeypatch, mine)
+    monkeypatch.setattr(
+        "fno.agents.codex_rollout.codex_rollout_witness",
+        lambda harness, env=None: frozenset({mine}),
+    )
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("CODEX_THREAD_ID", mine)
+    monkeypatch.setenv("CODEX_SESSION_ID", mine)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["HARNESS"] == "codex"
+    assert fields["SESSION_ID"] == mine
+    assert fields["DISPOSITION"] == "canonical"
+    assert fields["COLLISION"] == ""
+
+
+def test_name_only_foreign_row_with_other_witness_fails_closed(tmp_path, monkeypatch):
+    """AC2 (x-a409): the marker names another live row's id and the rollout
+    witness sees a DIFFERENT session - no ground to claim the marker, so the
+    refusal stands and names the owner."""
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    theirs = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    other = "019cc082-1111-7283-97cc-751c46742a08"
+    owner = register_existing_session(harness="codex", session_id=theirs, cwd="/x").name
+    _silent_walk_and_attester_with_codex_proof(monkeypatch, theirs)
+    monkeypatch.setattr(
+        "fno.agents.codex_rollout.codex_rollout_witness",
+        lambda harness, env=None: frozenset({other}),
+    )
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("CODEX_THREAD_ID", theirs)
+    monkeypatch.setenv("CODEX_SESSION_ID", theirs)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["DISPOSITION"] == "ambiguous"
+    assert fields["COLLISION"] == owner
+    assert fields["COLLISION_ID"] == theirs
+
+
+def test_name_only_own_row_daemon_unavailable_fails_closed(tmp_path, monkeypatch):
+    """AC6-ERR (x-a409): no tree rollout and no daemon answer means no witness.
+    A name_only worker whose id a live row holds still refuses; the daemon
+    being down never widens into a guess."""
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    owner = register_existing_session(harness="codex", session_id=mine, cwd="/x").name
+    _silent_walk_and_attester_with_codex_proof(monkeypatch, mine)
+    monkeypatch.setattr(
+        "fno.agents.codex_rollout.codex_rollout_witness", lambda harness, env=None: frozenset()
+    )
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("CODEX_THREAD_ID", mine)
+    monkeypatch.setenv("CODEX_SESSION_ID", mine)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["DISPOSITION"] == "ambiguous"
+    assert fields["COLLISION"] == owner
 
 
 def test_session_harness_stamp_honored_while_pid_alive(monkeypatch):

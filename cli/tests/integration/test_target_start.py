@@ -1039,7 +1039,7 @@ def _wire_happy(monkeypatch, wt_path: Path, *, manifest_exists: bool):
         "fno.worktree._run_setup_worktree_hook", lambda r, w: (0, "")
     )
     monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
+        "fno.agents.self_stamp.resolve_self_identity",
         lambda *a, **k: SimpleNamespace(
             harness="codex", session_id="test-successor-session", disposition="single"
         ),
@@ -1925,7 +1925,7 @@ def test_successor_claim_holder_prefers_tsid(monkeypatch):
     monkeypatch.setenv("TARGET_SESSION_ID", "abc-123")
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
     monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
+        "fno.agents.self_stamp.resolve_self_identity",
         lambda *a, **k: SimpleNamespace(
             harness="claude", session_id="abc-123", disposition="single"
         ),
@@ -1937,7 +1937,7 @@ def test_successor_claim_holder_codex_parity(monkeypatch):
     monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-z")
     monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
+        "fno.agents.self_stamp.resolve_self_identity",
         lambda *a, **k: SimpleNamespace(
             harness="codex", session_id="thread-z", disposition="single"
         ),
@@ -1953,7 +1953,7 @@ def test_successor_claim_holder_resolves_each_acquire(monkeypatch):
         ]
     )
     monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
+        "fno.agents.self_stamp.resolve_self_identity",
         lambda *a, **k: next(identities),
     )
     assert target_cli._successor_claim_holder() == "target-session:session-a"
@@ -1964,7 +1964,7 @@ def test_successor_claim_holder_refuses_without_proven_identity(monkeypatch):
     monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
     monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
+        "fno.agents.self_stamp.resolve_self_identity",
         lambda *a, **k: SimpleNamespace(
             harness="claude", session_id=None, disposition="single", markers_present=()
         ),

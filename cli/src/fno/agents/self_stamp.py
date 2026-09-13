@@ -31,28 +31,26 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
     ) -> Optional[str]:
         from fno.agents.registry import row_owning_session_id
 
-        # own_pair is the canonical pair claims.self_identity completed from
-        # the spawn stamp plus the same family's marker (None when it could
-        # not). The registry applies the agreement check: a row matching the
-        # pair on both halves is this worker's own and never contention, a
-        # pair of None keeps this detector self-blind exactly where nothing
-        # proves self.
+        # own_pair is the pair claims.self_identity completed (None when it
+        # could not); the registry's agreement check keeps this detector
+        # self-blind exactly where nothing proves self.
         return row_owning_session_id(session_id, self_binding=own_pair)
 
-    return _resolve_self_identity(env, collide=collide)
+    # Same injection seam as collide; claims cannot import agents (x-a409).
+    from fno.agents.codex_rollout import codex_rollout_witness
+
+    return _resolve_self_identity(
+        env, collide=collide, witness=codex_rollout_witness
+    )
 
 
 def identity_ambiguity_message(identity) -> str:
     """Render the single refusal sentence for an unproven mixed environment.
 
-    The strip lines are the self-rescue: the session cannot prove which
-    harness it is (that is the ambiguity), but the operator knows, and
-    stripping the foreign family's markers - every one the scrub knows about,
-    not just the two the resolver consults - restores self-resolution. Built
-    from :func:`fno.harness_identity.ambient_identity_strip_flags`, which reads
-    the same list the scrub reads, so the text cannot drift from behavior
-    (x-b57a: a poisoned claude session stripped two codex names and nothing
-    changed; all seven restored it).
+    The strip lines are the self-rescue: stripping the foreign family's
+    markers restores self-resolution. Built from
+    :func:`fno.harness_identity.ambient_identity_strip_flags`, which reads the
+    same list the scrub reads, so the text cannot drift from behavior (x-b57a).
     """
     from fno.harness_identity import ambient_identity_strip_flags
 
@@ -83,9 +81,21 @@ def identity_ambiguity_message(identity) -> str:
         if strip_lines
         else ""
     )
+    rejection = identity.rejected[0] if identity.rejected else None
+    # owned_by_live_row is a different ambiguity than mixed families (x-a409).
+    if rejection:
+        opening = (
+            "cannot decide which session is 'self': id "
+            f"{rejection.get('session_id', '')} is owned by live row "
+            f"{rejection.get('owner', '')}"
+        )
+    else:
+        opening = (
+            "cannot decide which session is 'self': multiple harness markers "
+            "present (inherited env?)"
+        )
     return (
-        "cannot decide which session is 'self': multiple harness markers present "
-        "(inherited env?)\n"
+        f"{opening}\n"
         f"markers: {markers}\n"
         "resolve with: find ~/.codex/sessions ~/.claude/projects -name "
         f"'*{lookup_id}*'\n" + strip_section

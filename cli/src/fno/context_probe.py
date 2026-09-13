@@ -23,8 +23,8 @@ from fno.agents.self_stamp import (
     _TAIL_BYTES,
     _complete_lines,
     resolve_own_transcript,
+    resolve_self_identity,
 )
-from fno.claims.self_identity import resolve_self_identity
 
 
 @dataclass(frozen=True)

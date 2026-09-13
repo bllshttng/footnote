@@ -1658,7 +1658,7 @@ def test_holder_is_ours_recognizes_own_pid_unavailable_claim(monkeypatch):
     monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
     monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
+        "fno.agents.self_stamp.resolve_self_identity",
         lambda env=None: SimpleNamespace(session_id="aaaa1111-mine"),
     )
     info = {"pid_unavailable": True, "host": "other-box", "machine_id": "m2"}
@@ -1672,7 +1672,7 @@ def test_holder_is_ours_identity_arm_fails_closed(monkeypatch):
     monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
     monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
+        "fno.agents.self_stamp.resolve_self_identity",
         lambda env=None: SimpleNamespace(session_id=""),
     )
     info = {"pid_unavailable": True, "host": "h", "machine_id": "m"}

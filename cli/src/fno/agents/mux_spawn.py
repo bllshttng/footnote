@@ -50,6 +50,9 @@ from fno.agents.dispatch import (
     _touch_log_path,
     validate_spawn_name,
 )
+from fno.agents.codex_rollout import (  # noqa: F401 - re-export: dispatch and tests bind it here
+    _codex_session_id_for_pid,
+)
 from fno.agents.harness_map import DispatchResolveError, normalize_command, render_seed
 from fno.agents.spawn_defaults import is_verb_seed
 from fno.agents.writable_dirs import (
@@ -809,62 +812,6 @@ def _backfill_opencode_session_id(
 # probe without shrinking the capture window (Codex P2, #603).
 _CODEX_BACKFILL_ATTEMPTS = 5
 _CODEX_BACKFILL_DELAY_S = 0.75
-
-
-def _codex_session_id_for_pid(pid: int, *, psutil_mod=None) -> Optional[str]:
-    """The codex TUI's session id, read race-free from an open rollout in the
-    pane's own process tree.
-
-    codex holds its rollout fd open and the first-line session_meta carries the
-    id, so the pane's process identifies its session deterministically: each
-    pane's tree holds a distinct rollout, so a same-cwd sibling can never be
-    mis-identified (Codex P1, #603). The pane pid AND its descendants are
-    inspected: a wrapper launcher (the @openai/codex Node shim) holds the pane
-    pid while its native child opens the rollout (Codex P1, #603 r5). The id
-    comes from session_meta.payload.id, not the filename UUID, which is not
-    always the session id in older turn-id layouts (Codex P2, #603 r5).
-
-    Returns None when psutil is unavailable, the process is gone, no rollout is
-    open yet, or the tree holds more than one distinct session (ambiguous).
-    """
-    psu = psutil_mod
-    if psu is None:
-        try:
-            import psutil
-        except ImportError:
-            return None
-        psu = psutil
-    try:
-        procs = [psu.Process(pid)]
-    except Exception:  # noqa: BLE001 -- NoSuchProcess / AccessDenied / ZombieProcess
-        return None
-    try:
-        procs += psu.Process(pid).children(recursive=True)
-    except Exception:  # noqa: BLE001 -- a child dying mid-walk yields a partial tree
-        pass
-    rollout_paths = []
-    for proc in procs:
-        try:
-            files = proc.open_files()
-        except Exception:  # noqa: BLE001 -- NoSuchProcess / AccessDenied per proc
-            continue
-        for f in files:
-            base = os.path.basename(f.path)
-            if base.startswith("rollout-") and base.endswith(".jsonl"):
-                rollout_paths.append(f.path)
-    if not rollout_paths:
-        return None
-    from fno.agents.discover import _codex_session_meta
-
-    ids = set()
-    for path in rollout_paths:
-        payload = _codex_session_meta(Path(path))
-        sid = payload.get("id") if payload else None
-        if isinstance(sid, str) and sid:
-            ids.add(sid)
-    if len(ids) == 1:
-        return next(iter(ids))
-    return None
 
 
 def _backfill_codex_session_id(
