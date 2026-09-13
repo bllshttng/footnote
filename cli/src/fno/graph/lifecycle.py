@@ -204,22 +204,22 @@ def register_lifecycle_commands(
     def cmd_retract(
         task_ids: List[str] = typer.Argument(
             ...,
-            help="Feature IDs (ab-XXXXXXXX). Multiple via space and/or comma: 'ab-X,ab-Y ab-Z'.",
+            help="Feature IDs (ab-XXXXXXXX). Multiple via comma: 'ab-X,ab-Y'.",
         ),
-        reason: str = typer.Option(
+        reason: str = typer.Argument(
             ...,
-            "--reason",
-            "-R",
             help="The false premise this row was filed on (applies to all). Surfaced by `fno backlog undefer` and the think-inspect receipt.",
         ),
     ) -> None:
         """Retract one or more backlog nodes: defer + stamp ``deferred_kind: retracted``.
 
-        One act for a row filed on a false premise. The deferral removes it
-        from every dispatch reader, and the retracted kind is the halt signal
-        the blueprint consolidation gate reads, so planning against it stops
-        too. Forwards to ``cmd_defer`` with the kind forced; batch atomicity
-        and the blank-reason refusal are inherited.
+        Usage: ``fno backlog retract <ids> "<the false premise>"``. One act
+        for a row filed on a false premise. The deferral removes it from every
+        dispatch reader, and the retracted kind is the halt signal the
+        blueprint consolidation gate reads, so planning against it stops too.
+        Forwards to ``cmd_defer`` with the kind forced; batch atomicity and
+        the blank-reason refusal are inherited. The reason rides a positional,
+        not a flag: the Python flag surface is shrink-only (x-72fc).
         """
         cmd_defer(task_ids=task_ids, reason=reason, kind="retracted")
 

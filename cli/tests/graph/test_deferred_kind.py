@@ -106,7 +106,7 @@ def test_defer_rejects_unknown_kind(tmp_graph):
 
 
 def test_retract_defers_and_stamps_the_kind(tmp_graph):
-    r = runner.invoke(cli, ["retract", "x-dddd", "-R", "filed on a false premise"])
+    r = runner.invoke(cli, ["retract", "x-dddd", "filed on a false premise"])
     assert r.exit_code == 0, r.output
     node = {e["id"]: e for e in read_graph(tmp_graph)}["x-dddd"]
     assert node["status"] == "deferred"
@@ -119,14 +119,14 @@ def test_retract_defers_and_stamps_the_kind(tmp_graph):
 
 
 def test_retract_refuses_blank_reason(tmp_graph):
-    r = runner.invoke(cli, ["retract", "x-dddd", "-R", "   "])
+    r = runner.invoke(cli, ["retract", "x-dddd", "   "])
     assert r.exit_code == 1
     assert "blank" in r.output
     assert {e["id"]: e for e in read_graph(tmp_graph)}["x-dddd"].get("status") != "deferred"
 
 
 def test_retract_batch_is_atomic(tmp_graph):
-    r = runner.invoke(cli, ["retract", "x-dddd,x-nope", "-R", "false premise"])
+    r = runner.invoke(cli, ["retract", "x-dddd,x-nope", "false premise"])
     assert r.exit_code != 0
     assert {e["id"]: e for e in read_graph(tmp_graph)}["x-dddd"].get("status") != "deferred"
 

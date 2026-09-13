@@ -178,7 +178,7 @@ Priority is bounded to four values, so two agents disagreeing about a node produ
 | Action | Command | Effect |
 |--------|---------|--------|
 | Pause a node | `fno backlog defer <id> --reason "..."` | leaves the board; `status: deferred` |
-| Retract a false row | `fno backlog retract <id> -R "the false premise"` | defers + stamps `deferred_kind: retracted` in one act; the blueprint consolidation gate halts on the stamp |
+| Retract a false row | `fno backlog retract <id> "the false premise"` | defers + stamps `deferred_kind: retracted` in one act; the blueprint consolidation gate halts on the stamp |
 | Resume it | `fno backlog undefer <id>` | returns to `ready`/`idea` |
 | Replace with a newer node | `fno backlog supersede <new> --replaces <old> --cause "..." --surface <path>` | old's status reads `superseded` from the edge alone; a merged PR touching every `--surface` stamps the record's `verified_at` |
 | Mark complete | `fno backlog done <id>` | closes only on a MERGED PR; sets `completed_at`, unblocks dependents |
