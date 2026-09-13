@@ -391,9 +391,7 @@ def resolve_worktree_policy(
 def _repo_identity(path: Path) -> Optional[tuple[Path, Path]]:
     """``(top, common dir)`` for ``path``; None outside a git repo / on failure.
 
-    The top is what the resolver reads config against; the common dir is the
-    identity, so a linked worktree of the caller's own repo never reads as
-    foreign.
+    The resolver reads config against the top; identity is the common dir.
     """
     try:
         top_p = subprocess.run(
@@ -417,24 +415,25 @@ def _repo_identity(path: Path) -> Optional[tuple[Path, Path]]:
     return top, common.resolve()
 
 
+UNDECLARED_REPO_RECEIPT = (
+    "worktree=never (undeclared repo; declare "
+    "work.workspaces.<slug>.projects[].worktree to change it)"
+)
+
+
 def undeclared_dispatch_pin(
     target_cwd: Path, caller_cwd: Path, harness: Optional[str]
 ) -> dict[str, str]:
     """The env a dispatcher exports for a spawn into an UNDECLARED repo.
 
-    Identity is the git common dir, so a worker dispatched from a linked
-    worktree into its own repo's canonical checkout is the same repo, not a
-    foreign target. ``source == "default"`` means nothing anywhere named the
-    target repo - not a per-project entry, not a global key, not the repo's
-    own config. Reached by a dispatch from elsewhere, that is the repo whose
-    edits the child's hooks would block and whose worktree ceremony the child
-    would loop in, so the dispatcher pins ``never`` for the child instead of
-    writing config into somebody else's project. The caller's own repo, a
-    declared repo, an already-decided ``FNO_WORKTREE_POLICY`` (source
-    ``env``), and a non-git target all keep the ambient posture. An
-    undecidable resolve (parse error) also keeps it: the child's own hooks
-    hit the same resolver and refuse with the reason, so the dispatch adds no
-    second refusal surface.
+    Identity is the git common dir, so a linked worktree of the caller's own
+    repo is not foreign. ``source == "default"`` means nothing anywhere named
+    the target repo; reached by a dispatch from elsewhere, that is the repo
+    whose edits the child's hooks would block, so the dispatcher pins ``never``
+    instead of writing config into somebody else's project. A declared repo, a
+    non-git target, an ambient ``FNO_WORKTREE_POLICY`` (source ``env``), and an
+    undecidable resolve (the child's own hooks refuse with the reason) all keep
+    the ambient posture.
     """
     target = _repo_identity(target_cwd)
     caller = _repo_identity(caller_cwd)

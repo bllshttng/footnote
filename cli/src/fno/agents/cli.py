@@ -2051,27 +2051,18 @@ def cmd_spawn(
         if launch_account_label:
             prov_env["FNO_ACCOUNT"] = launch_account_label
 
-    # A spawn into an undeclared FOREIGN repo pins `never` for the child: the
-    # dispatcher is the one side that knows the target is not the caller's own,
-    # and the alternative is the child's hooks blocking its edits and pushing
-    # it into worktree ceremony the target never asked for. The pin rides the
-    # provenance overlay (set-or-clear on every substrate); the receipt line
-    # is what makes a later `why did that worker work in place` answerable.
-    from fno.worktree_paths import undeclared_dispatch_pin
+    # A spawn into an undeclared FOREIGN repo pins `never` for the child (the
+    # dispatcher is the one side that knows the target is not the caller's own);
+    # an explicit ambient override rides the same overlay, else the pane
+    # wrapper's set-or-clear strips what the operator set.
+    from fno.worktree_paths import UNDECLARED_REPO_RECEIPT, undeclared_dispatch_pin
 
     _pin = undeclared_dispatch_pin(workdir, Path(os.getcwd()), harness)
     if _pin:
         prov_env = dict(prov_env) if prov_env is not None else {}
         prov_env.update(_pin)
-        print(
-            "worktree=never (undeclared repo; declare "
-            "work.workspaces.<slug>.projects[].worktree to change it)",
-            file=sys.stderr,
-        )
+        print(UNDECLARED_REPO_RECEIPT, file=sys.stderr)
     elif os.environ.get("FNO_WORKTREE_POLICY"):
-        # An explicit ambient override rides the same overlay: the pane
-        # wrapper's set-or-clear would otherwise strip what the operator set,
-        # while bg/headless children inherit it - two substrates disagreeing.
         prov_env = dict(prov_env) if prov_env is not None else {}
         prov_env["FNO_WORKTREE_POLICY"] = os.environ["FNO_WORKTREE_POLICY"]
 
@@ -2622,8 +2613,7 @@ def cmd_spawn(
         from fno.agents.mux_spawn import PROVENANCE_KEYS
 
         prov_prev.update({k: os.environ.get(k) for k in PROVENANCE_KEYS})
-        # The worktree-policy pin clears like the group but is not node
-        # provenance, so it joins by name instead of joining the tuple.
+        # The worktree-policy pin clears like the group but is not node provenance.
         prov_prev["FNO_WORKTREE_POLICY"] = os.environ.get("FNO_WORKTREE_POLICY")
         for _k in (*PROVENANCE_KEYS, "FNO_WORKTREE_POLICY"):
             os.environ.pop(_k, None)

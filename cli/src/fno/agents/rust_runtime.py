@@ -751,16 +751,12 @@ def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
         pass  # ponytail: a grant we cannot compute must never block the spawn
 
 def _export_worktree_policy_pin_at_seam(args: "Sequence[str]") -> None:
-    """Pin an undeclared foreign target's worktree policy for the Rust route.
+    """Pin an undeclared foreign target's policy for the Rust route.
 
-    Beside the other pre-route seam checks: in auto mode the Rust client execs
-    the default thread/headless spawn, so ``cmd_spawn``'s own pin never runs.
-    The exec'd binary is a same-env replacement and its worker a direct child,
-    so exporting here reaches it. Only an explicit ``--cwd`` can name a foreign
-    repo (the default resolves the caller's own), and an ambient
-    ``FNO_WORKTREE_POLICY`` already decided the question (the resolver reads it
-    as source ``env``). Pane and other Python-lane shapes never reach this
-    branch; ``cmd_spawn`` pins for them.
+    Auto mode execs the Rust client before ``cmd_spawn`` runs, and the exec'd
+    binary is a same-env replacement with a direct child worker, so exporting
+    here reaches the child. Only an explicit ``--cwd`` can name a foreign repo;
+    pane and other Python-lane shapes never reach this branch.
     """
     try:
         if os.environ.get("FNO_WORKTREE_POLICY"):
@@ -768,7 +764,7 @@ def _export_worktree_policy_pin_at_seam(args: "Sequence[str]") -> None:
         from pathlib import Path
 
         from fno.agents.spawn_defaults import _flag_value
-        from fno.worktree_paths import undeclared_dispatch_pin
+        from fno.worktree_paths import UNDECLARED_REPO_RECEIPT, undeclared_dispatch_pin
 
         cwd = _flag_value(list(args), "--cwd", "-c")
         if not cwd:
@@ -777,11 +773,7 @@ def _export_worktree_policy_pin_at_seam(args: "Sequence[str]") -> None:
         pin = undeclared_dispatch_pin(Path(cwd), Path(os.getcwd()), harness)
         if pin:
             os.environ.update(pin)
-            print(
-                "worktree=never (undeclared repo; declare "
-                "work.workspaces.<slug>.projects[].worktree to change it)",
-                file=sys.stderr,
-            )
+            print(UNDECLARED_REPO_RECEIPT, file=sys.stderr)
     except Exception:
         pass  # ponytail: a pin we cannot compute must never block the spawn
 
