@@ -470,7 +470,7 @@ def test_rerun_recovered_green_is_held_without_the_flag(
         "_pr_head_ref_and_oid",
         lambda pr, repo, runner=None: ("feature/x", "abc123", "OPEN"),
     )
-    _owner_answers(monkeypatch, "authorized")
+    _owner_answers(monkeypatch, "authorized", "abc123")
     _flake_recovered(monkeypatch)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     obj = _last_json(capsys, stream="err")
