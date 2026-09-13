@@ -301,6 +301,65 @@ def _emit_quota_rotation_declined(
         pass
 
 
+def _admission_deferral(
+    provider_id: str,
+    *,
+    priority: Optional[str],
+    node_cwd: Optional[str],
+    verb: str,
+    difficulty: str,
+) -> Optional["AutonomousRoute"]:
+    """The opt-in shared-account reservation read (x-1afa).
+
+    A pure preview: the reservation itself is taken at the launch seam
+    (``spawn_gate``), so this read never consumes anything. A typed refusal
+    defers the launch with its reason and retry hint; a disabled policy, a
+    stale observation, or an unreadable record answers None and the caller
+    keeps whatever verdict the quota signal produced. ``p0`` is the priority
+    exception: it may consume the protected reserve, and still cannot bypass
+    known exhaustion, the inflight cap, or an unprovable identity.
+    """
+    try:
+        from fno.adapters.providers.admission import (
+            EXHAUSTED,
+            INFLIGHT_CAP,
+            INVALID_POLICY,
+            RESERVED_CAPACITY,
+            UNKNOWN_IDENTITY,
+            preview_admission,
+        )
+        from fno.adapters.providers.loader import load_providers
+        from fno.config._routing_admission import resolve_admission_policy
+
+        policy = resolve_admission_policy()
+        if not policy.enabled:
+            return None
+        record = load_providers(
+            repo_root=Path(node_cwd) if node_cwd else None
+        ).by_id.get(provider_id)
+        if record is None:
+            return None
+        receipt = preview_admission(
+            record,
+            verb=verb,
+            difficulty=difficulty,
+            consume_reserve=(priority or "").strip().lower() == "p0",
+            policy=policy,
+        )
+    except Exception:  # noqa: BLE001 - a preview must never block dispatch
+        return None
+    if receipt.status not in (
+        EXHAUSTED, RESERVED_CAPACITY, INFLIGHT_CAP, UNKNOWN_IDENTITY, INVALID_POLICY,
+    ):
+        return None
+    return AutonomousRoute(
+        "defer",
+        f"admission:{receipt.status}",
+        source_record=provider_id,
+        retry_at=receipt.retry_at,
+    )
+
+
 def select_autonomous_route(
     *,
     provider_id: str,
@@ -309,6 +368,8 @@ def select_autonomous_route(
     node_cwd: Optional[str] = None,
     now: Optional[float] = None,
     node_id: Optional[str] = None,
+    admission_verb: str = "do",
+    admission_difficulty: str = "high",
 ) -> AutonomousRoute:
     """Resolve one autonomous launch's route from one quota probe.
 
@@ -316,6 +377,10 @@ def select_autonomous_route(
     route pin: it forbids automatic replacement, never the existing defer.
     ``node_id`` is only for the ``quota_rotation_declined`` telemetry event -
     it never changes the routing decision.
+
+    When the opt-in admission policy is armed, the stay verdicts are read
+    through the shared-account reservation preview first: a typed refusal
+    defers with an ``admission:<status>`` reason (x-1afa).
     """
     from fno.adapters.providers.runtime_state import (
         HeadroomState,
@@ -328,6 +393,13 @@ def select_autonomous_route(
         cutover_low_after_minutes=_cutover_low_after_minutes(node_cwd),
         now=now,
         repo_root=Path(node_cwd) if node_cwd else None,
+    )
+    held = _admission_deferral(
+        provider_id,
+        priority=priority,
+        node_cwd=node_cwd,
+        verb=admission_verb,
+        difficulty=admission_difficulty,
     )
     window = sig.state.value
     if sig.cutover and not pinned:
@@ -370,10 +442,14 @@ def select_autonomous_route(
             window=window,
         )
     if sig.state is HeadroomState.UNKNOWN:
+        if held is not None:
+            return held
         _emit_quota_rotation_declined(node_id, sig.provider_id, sig.reason)
         return AutonomousRoute(
             "unknown-proceed", sig.reason, source_record=sig.provider_id, window=window
         )
+    if held is not None:
+        return held
     return AutonomousRoute(
         "stay", sig.reason, source_record=sig.provider_id, window=window
     )

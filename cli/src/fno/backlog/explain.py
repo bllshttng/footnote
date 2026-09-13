@@ -10,6 +10,7 @@ selection.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, cast
 
 from fno.graph.store import ready as store_ready
@@ -249,6 +250,59 @@ def gates_for(
         )
     except Exception as exc:  # noqa: BLE001
         out.append(_unreadable("fleet-rows", exc, key="agents.max_live"))
+
+    # Shared-account admission (x-1afa): a PREVIEW of the budget conjunct the
+    # launch seam reserves. Pure read half only - an explain never consumes a
+    # reservation - and rendered as a preview verdict, never an admission
+    # receipt.
+    if node is not None:
+        node_cwd = node.get("_resolved_cwd") or node.get("cwd") or None
+        try:
+            from fno.adapters.providers.admission import preview_admission
+            from fno.adapters.providers.loader import effective_active, load_providers
+            from fno.config._routing_admission import resolve_admission_policy
+
+            policy = resolve_admission_policy()
+            if policy.enabled:
+                record_id = (
+                    effective_active(repo_root=Path(node_cwd) if node_cwd else None)
+                    or provider
+                )
+                record = load_providers(
+                    repo_root=Path(node_cwd) if node_cwd else None
+                ).by_id.get(record_id or "")
+                if record is not None:
+                    receipt = preview_admission(
+                        record,
+                        verb="do",
+                        difficulty=str(node.get("difficulty") or "high"),
+                        policy=policy,
+                    )
+                    armed = receipt.status not in ("stale_observation",)
+                    out.append(
+                        Gate(
+                            "account-budget",
+                            f"{receipt.remaining_admission_pct if receipt.remaining_admission_pct is not None else receipt.status}"
+                            + (
+                                f"% ({receipt.binding_window})"
+                                if receipt.binding_window
+                                else ""
+                            ),
+                            f"reserve {policy.reserve_for('do', str(node.get('difficulty') or 'high')):.0f}%",
+                            "pass" if receipt.admitted else ("refuse" if armed else "unknown"),
+                            key="routing.admission",
+                            note=(
+                                f"preview, not a receipt; units {receipt.units}; "
+                                f"pool {receipt.pool or '?'}; "
+                                f"evidence age "
+                                f"{receipt.evidence_age_s if receipt.evidence_age_s is not None else '?':.0f}s"
+                                if receipt.evidence_age_s is not None
+                                else f"preview, not a receipt; units {receipt.units}"
+                            ),
+                        )
+                    )
+        except Exception as exc:  # noqa: BLE001 - a preview gate holds no opinion
+            out.append(_unreadable("account-budget", exc, key="routing.admission"))
 
     out.extend(_machine_gates(load_decision))
     return out

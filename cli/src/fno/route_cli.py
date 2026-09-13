@@ -421,6 +421,88 @@ def _echo_slots(slots: list[dict]) -> None:
             typer.echo(f"    {reason}")
 
 
+@route_app.command("admission")
+def admission_cmd(
+    verb: str = typer.Option("do", "--verb", help="The work verb to price."),
+    difficulty: str = typer.Option(
+        "high", "--difficulty", help="The difficulty band to price."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Preview shared-account capacity admission per declared record (x-1afa).
+
+    PURE READ: this command never reserves, commits, or releases anything.
+    The word ``preview`` on every row marks it as distinct from an actual
+    admission receipt, which only the launch seam (spawn-gate) issues.
+    """
+    from fno.adapters.providers.admission import (
+        outstanding_for_pool,
+        preview_admission,
+        resolve_pool,
+    )
+    from fno.adapters.providers.loader import load_providers
+    from fno.config._routing_admission import resolve_admission_policy
+
+    policy = resolve_admission_policy()
+    if not policy.enabled:
+        typer.echo(
+            "admission: off (config.routing.admission.enabled is false); "
+            "rows below are the unarmed preview"
+        )
+    rows: list[dict[str, object]] = []
+    loaded = load_providers()
+    for record in loaded.records:
+        pool, identity_error = resolve_pool(record, by_id=loaded.by_id)
+        outstanding_pct, inflight = (
+            outstanding_for_pool(pool) if pool else (0.0, 0)
+        )
+        if record is None or pool is None:
+            status, detail = "unknown_identity", (identity_error or "")
+            remaining, binding = None, None
+        else:
+            receipt = preview_admission(
+                record, verb=verb, difficulty=difficulty, policy=policy
+            )
+            status = receipt.status
+            detail = receipt.reason or ""
+            remaining = receipt.remaining_admission_pct
+            binding = receipt.binding_window
+        rows.append({
+            "preview": True,
+            "record": record.id,
+            "harness": record.harness,
+            "pool": pool,
+            "status": status,
+            "remaining_admission_pct": remaining,
+            "binding_window": binding,
+            "outstanding_pct": round(outstanding_pct, 2),
+            "inflight": inflight,
+            "max_inflight": policy.max_inflight_per_pool,
+            "demand_pct": policy.demand_for(verb, difficulty),
+            "reserve_pct": policy.reserve_for(verb, difficulty),
+            "units": "subscription-percent",
+            "detail": detail,
+        })
+    if json_output:
+        typer.echo(json.dumps(rows, indent=2))
+        return
+    typer.echo(
+        f"admission: preview (no reservation consumed) verb={verb} "
+        f"difficulty={difficulty} units=subscription-percent"
+    )
+    for row in rows:
+        line = (
+            f"  {row['record']}: {row['status']} pool={row['pool']} "
+            f"remaining={row['remaining_admission_pct']}% "
+            f"outstanding={row['outstanding_pct']}% "
+            f"inflight={row['inflight']}/{row['max_inflight']} "
+            f"demand={row['demand_pct']}% reserve={row['reserve_pct']}%"
+        )
+        if row["detail"]:
+            line += f" ({row['detail']})"
+        typer.echo(line)
+
+
 
 @route_app.command("env")
 def env_cmd(
