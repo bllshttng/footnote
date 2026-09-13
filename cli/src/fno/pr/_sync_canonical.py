@@ -89,7 +89,9 @@ def _canonical_check(payload: dict) -> dict:
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
-        return verb_call("canonical-check", payload, timeout=60)
+        # The verb's own budget is a 30s fetch plus 10s per probe; the door
+        # must outlast the verb's worst case, not report it unreachable.
+        return verb_call("canonical-check", payload, timeout=120)
     except VerbUnavailable as exc:
         typer.echo(f"post-merge sync: canonical check unavailable ({exc}); proceeding", err=True)
         return {}
