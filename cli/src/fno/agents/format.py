@@ -325,7 +325,7 @@ def serialize_entry(
         "progress": progress,
         "progress_basis": progress_basis,
         "last_activity_age_s": last_activity_age_s,
-        # (x-6d16) The instrument the age came from (`last-entry` | `mtime` |
+        # The instrument the age came from (`last-entry` | `mtime` |
         # `opencode-db`), or the resolver's reason word (`not-found` |
         # `no-records` | `resolver-error`) when it could not resolve the
         # handle at all - never a bare null: those words separate "no

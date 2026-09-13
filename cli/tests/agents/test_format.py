@@ -422,7 +422,7 @@ def test_serialize_entry_key_set_matches_shared_contract() -> None:
 
 
 def test_serialize_entry_emits_last_activity_basis() -> None:
-    """x-6d16: the age's instrument rides the row on the Python lane too.
+    """The age's instrument rides the row on the Python lane too.
 
     The contract test above pins the KEY on both serializers; this pins the
     value lane: the resolver's instrument word when it answered, its reason

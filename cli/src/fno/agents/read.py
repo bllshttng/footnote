@@ -170,7 +170,7 @@ def list_agents(
         # The transcript stamp + last turn text, same single read.
         last_event_at = truth.get("last_event_at")
         last_message = truth.get("last_message")
-        # (x-6d16) The age's instrument, or the resolver's reason word on the
+        # The age's instrument, or the resolver's reason word on the
         # unknown paths (`not-found` | `no-records` | `resolver-error`): the
         # difference between "no transcript" and "the resolver crashed",
         # rendered as the same blank before. Read off the SAME truth call,

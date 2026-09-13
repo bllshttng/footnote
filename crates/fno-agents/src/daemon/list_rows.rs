@@ -130,7 +130,7 @@ pub(crate) fn progress_from_truth(
     harness: &str,
     route_settings_path: Option<&str>,
 ) -> (&'static str, &'static str) {
-    // The probe's own absence splits by the batch outcome (x-6d16): a handle
+    // The probe's own absence splits by the batch outcome: a handle
     // missing from a batch that ran clean is the measured `no-evidence`
     // verdict; a handle missing because the batch itself timed out is
     // `unmeasured`, a different fact the row may not publish as a verdict. A
@@ -181,7 +181,7 @@ pub(crate) fn registry_truth_handle(entry: &RegistryEntry) -> String {
     }
 }
 
-/// The `basis` leg beside `reachability` (x-6d16), worded by the batch
+/// The `basis` leg beside `reachability`, worded by the batch
 /// outcome when the probe is absent: a handle the batch never measured reads
 /// `unmeasured`, a handle a clean batch resolved nothing for keeps the null
 /// an absent reading has always rendered (the `no-evidence` verdict lives on
@@ -206,8 +206,8 @@ pub(super) fn basis_word_from_truth(
 /// when it could not resolve the handle, and `unmeasured` when the batch
 /// never ran for this page. The three unknown-reason words are the
 /// difference between "this worker has no transcript" and "the resolver
-/// crashed"; both rendered as the same blank before (d-d6cb1827: a null
-/// never stands alone).
+/// crashed"; both rendered as the same blank before, and a null
+/// never stands alone.
 pub(super) fn activity_basis_from_truth(
     probe: Option<&crate::truth_probe::TruthProbe>,
     batch: crate::truth_probe::BatchOutcome,
@@ -342,9 +342,9 @@ pub(super) fn apply_row_contradiction(
         if contradicted {
             json!(format!("contradicted-by-{incoming_basis}"))
         } else {
-            // (x-6d16) This projection never runs the claude live-status
+            // This projection never runs the claude live-status
             // probe, so null here would read as "measured, nothing found".
-            // The lane that did not ask says so (d-d6cb1827: a blank is the
+            // The lane that did not ask says so: a blank is the
             // one thing this pair may not be); the Python list surface, which
             // does run it, keeps its own words.
             json!("not-probed")
@@ -618,7 +618,7 @@ mod tests {
         );
     }
 
-    /// x-6d16's positive control, since the live fleet-wide timeout does not
+    /// The positive control, since the live fleet-wide timeout does not
     /// reproduce on demand: the SAME missing-handle input, worded by the batch
     /// outcome. `unmeasured` says the instrument did not run; `no-evidence`
     /// stays the verdict a clean batch that resolved nothing earns. Assert the
@@ -749,7 +749,7 @@ mod tests {
         for case in fixture["cases"].as_array().expect("cases is an array") {
             let mut row = case["row"].as_object().expect("row is an object").clone();
             apply_row_contradiction(&mut row, now);
-            // x-6d16: where the two lanes legitimately differ - the Rust
+            // Where the two lanes legitimately differ - the Rust
             // projection never runs the claude live-status probe, so its
             // no-contradiction basis reads `not-probed` where Python renders
             // null - the case carries an `expected_rust` override. Absent,
@@ -765,7 +765,7 @@ mod tests {
         }
     }
 
-    /// x-6d16, end to end through the row projection: when the batch seam
+    /// End to end through the row projection: when the batch seam
     /// reports the page was never measured, every row words it (`unmeasured`)
     /// instead of rendering the `no-evidence` verdict the old lossy seam
     /// published for a run that did not run. The measured-path twin is the

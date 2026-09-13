@@ -30,7 +30,7 @@ TRANSCRIPT = "transcript"
 #: Basis when nothing at all resolved: no transcript, no falsifier, no signal.
 NO_EVIDENCE = "no-evidence"
 #: Basis when the instrument did not run: a timed-out batch probe, a page the
-#: truth reader never reached. NOT a verdict (x-6d16) - `no-evidence` is what
+#: truth reader never reached. NOT a verdict - `no-evidence` is what
 #: a clean reader earns on no evidence; `unmeasured` says there was no reader.
 #: The Rust lane reads the same word (crates/fno-agents/src/truth_probe.rs).
 UNMEASURED = "unmeasured"

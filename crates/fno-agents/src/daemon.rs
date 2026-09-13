@@ -5127,8 +5127,8 @@ where
             // absent, never as no-evidence. Both basis legs are worded, never
             // blank-on-a-guess: `basis_word_from_truth` decides between an
             // absent reading and a page the batch never measured, and
-            // `activity_basis_from_truth` names the age's instrument beside it
-            // (x-6d16, d-d6cb1827).
+            // `activity_basis_from_truth` names the age's instrument beside
+            // it.
             let basis_word = basis_word_from_truth(truth.as_ref(), batch_outcome);
             let activity_basis = activity_basis_from_truth(truth.as_ref(), batch_outcome);
             let evidence = (
@@ -5351,7 +5351,7 @@ where
                     "progress": progress,
                     "progress_basis": progress_basis,
                     "last_activity_age_s": last_activity_age_s,
-                    // (x-6d16) The instrument the age came from (`last-entry` |
+                    // The instrument the age came from (`last-entry` |
                     // `mtime` | `opencode-db`), the resolver's reason word
                     // (`not-found` | `no-records` | `resolver-error`) when it
                     // could not resolve the handle, or `unmeasured` when the
