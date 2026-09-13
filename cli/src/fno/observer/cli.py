@@ -473,19 +473,17 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
 
 
 def _judge_via_rust(argv: list[str]) -> Optional[dict]:
-    """One fno-agents judge round-trip: JSON out, None on any fault (a
-    coverage gap, never a fabricated verdict)."""
+    """One fno-agents judge round-trip: JSON out, None on any fault (a coverage gap, never a fabricated verdict)."""
     binary = resolve_binary()
     if binary is None:
         typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
         return None
     try:
         result = subprocess.run([str(binary), "judge", *argv], capture_output=True, text=True, timeout=3600)
+        return json.loads(result.stdout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         typer.echo(f"judge fault: {exc}", err=True)
         return None
-    try:
-        return json.loads(result.stdout)
     except ValueError:
         typer.echo(f"judge fault: bad output: {result.stdout[:200]}", err=True)
         return None
@@ -495,18 +493,13 @@ def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[
     """("judged", fail_count) or ("gap", 0) - a gap is coverage, never a fail."""
     pp = item.get("plan_path")
     try:
-        text = Path(pp).read_text(encoding="utf-8") if pp else None
-    except OSError:
-        text = None
-    try:
+        text = Path(pp).read_text(encoding="utf-8") if pp else ""
         has_five = bool(text) and load_plan_text(text).has_section("Five questions")
-    except Exception:  # unparseable -> no section, no judge call
+    except Exception:  # unreadable/unparseable -> no section, no judge call
         has_five = False
     if not has_five:
         return "gap", 0
-    argv = ["--plan", pp]
-    if item.get("graph_node_id"):
-        argv += ["--node", item["graph_node_id"]]
+    argv = ["--plan", pp] + (["--node", item["graph_node_id"]] if item.get("graph_node_id") else [])
     out = _judge_via_rust(argv)
     if out is None:
         return "judged", 0
@@ -531,8 +524,7 @@ def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
 )
 def judge_cmd(ctx: typer.Context) -> None:
-    """Advisory five-question judge: never blocks; a judge error is never a fail.
-    Every flag is fno-agents' (node x-72fc); forwards raw argv, no typer.Option."""
+    """Advisory five-question judge, never blocking. Every flag is fno-agents' (x-72fc); forwards raw argv, no typer.Option."""
     args = ctx.args
     if "--labels" in args:
         out = _judge_via_rust(args)
