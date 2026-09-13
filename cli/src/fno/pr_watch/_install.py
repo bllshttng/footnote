@@ -262,11 +262,8 @@ def _run_launchctl_timed(*args: str, timeout_s: float = _LAUNCHCTL_TIMEOUT_S) ->
 def _tick_in_flight() -> Optional[int]:
     """PID of a live, young ``pr-watch:tick`` claim holder, else None.
 
-    A bounce bootouts the label and ``kickstart -k`` SIGTERMs any running
-    tick (eight ``why=killed`` tick_end rows in one hour, one per
-    SessionStart, while the dead verdict stood). A live claim younger than
-    one StartInterval (600s, above the 480s tick ceiling) is a tick mid-
-    flight; an older one is a hung tick and the bounce proceeds.
+    A live claim under one StartInterval (600s, above the 480s tick ceiling)
+    is a tick mid-flight; an older one is a hung tick and the bounce proceeds.
     """
     try:
         from fno.claims.core import claim_status
@@ -315,10 +312,9 @@ def bounce(
     liveness confirmation; a job that mutates shared state on each fire would
     instead perform that work at install time, against the plist's own schedule.
 
-    ``defer_when_ticking``: a self-heal fired while a tick is
-    mid-flight would kill the very tick the verdict wrongly called dead, so
-    the heal defers instead and runs no launchctl step. A refresh that loads
-    a new binary must not pass it.
+    ``defer_when_ticking``: a heal fired mid-tick would kill the very tick the
+    verdict wrongly called dead, so it defers and runs no launchctl step. A
+    refresh that loads a new binary must not pass it.
     """
     if uid is None:
         uid = os.getuid()

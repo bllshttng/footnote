@@ -1097,12 +1097,7 @@ def tick() -> None:
                 notify=lambda message, **_kw: _notify_parked(message),
                 max_retries=cfg.retries,
                 claim=ClaimAdapter(),
-                now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
-            cfg_interval = int(getattr(cfg, "interval_seconds", 600)) if cfg is not None else 600
-            _emit_tick_row("pr_watch_merge", interval_s=cfg_interval,
-                           acted=executed,
-                           detail=f"outcome=merge_phase (executed={executed}, skipped={skipped})")
             typer.echo(f"pr-watch merge phase: executed={executed} skipped={skipped}")
 
 
@@ -1272,10 +1267,8 @@ def tick() -> None:
         # a proven-stale canonical through its SessionStart hook.
         sweep_started = True
         _run_phase("sweep", _phase_sweep, on_end=_sweep_ended)
-        # The durable-grant merge attempts drain here , not inside the
-        # sweep: a ~120s merge call inside the 150s sweep slice hit the alarm
-        # before the receipt and the same PR headed every later tick. Its own
-        # slice right after the scan keeps the fleet tail cut first.
+        # The durable-grant merge attempts drain in their own phase (see
+        # run_execute_queue): the merge call must not spend the sweep's slice.
         _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")

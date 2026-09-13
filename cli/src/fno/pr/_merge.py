@@ -1797,8 +1797,7 @@ def run_merge_for_durable_grant(
     in-flight review, incarnation fence, stub manifest, coverage, posture,
     CI - runs identically. The exit code is the receipt's outcome: 0 merged,
     2 held/skipped (retryable, no failure budget consumed), anything else a
-    failed attempt. ``timeout_s`` bounds the authorized-merge owner call;
-    the pr-watch merge phase passes its slice remainder .
+    failed attempt. ``timeout_s`` bounds the authorized-merge owner call.
     """
     return run_merge(
         [str(int(pr_number))], cwd=cwd, authority="durable_grant", timeout_s=timeout_s
@@ -1806,11 +1805,8 @@ def run_merge_for_durable_grant(
 
 
 def run_merge(
-    argv: Sequence[str],
-    cwd: Optional[str] = None,
-    *,
-    authority: str = "manifest",
-    timeout_s: float = 300.0,
+    argv: Sequence[str], cwd: Optional[str] = None, *,
+    authority: str = "manifest", timeout_s: float = 300.0,
 ) -> int:
     """Merge one PR through the canonical guard chain.
 
