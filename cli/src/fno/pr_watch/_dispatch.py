@@ -1255,39 +1255,33 @@ def run_execute_queue(
     result: TickResult,
     *,
     store_path: Optional[Path] = None,
-    emit: Optional[Callable[[str, dict], Optional[bool]]] = None,
-    notify: Optional[Callable] = None,
-    max_retries: Optional[int] = None,
-    claim: Optional[Any] = None,
+    emit: Callable[[str, dict], Optional[bool]],
+    notify: Callable,
+    max_retries: int,
+    claim: Any,
 ) -> tuple[int, int]:
-    """Run the sweep's queued durable-grant merges under the merge phase's own
-    slice; returns ``(executed, skipped)``. One retry is persisted BEFORE each
-    call, so an alarm cut parks at ``max_retries`` instead of replaying the
-    same PR at the head of every tick."""
+    """Run the sweep's queued durable-grant merges; returns ``(executed,
+    skipped)``. One retry is persisted BEFORE each call, so an alarm cut
+    parks at ``max_retries`` instead of replaying the PR every tick."""
     from fno.pr_watch._state import WatermarkStore
 
-    queue = getattr(result, "execute_queue", None) or []
-    if not queue:
+    if not result.execute_queue:
         return (0, 0)
-    _emit = emit if emit is not None else _noop_emit
-    _notify = notify if notify is not None else (lambda *a, **kw: None)
-    _max_retries = max_retries if max_retries is not None else _MAX_RETRIES
-    _claim = claim if claim is not None else _NullClaim()
     holder = f"pr-watch-merge:{os.getpid()}"
 
     def _grant(phase: str, pr: int, cand: Any, grant: dict, **extra: Any) -> None:
-        _emit("merge_grant_execution",
-              {"phase": phase, "actor": "pr-watch", "pr": pr,
-               "node_id": cand.node_id, **extra, **grant})
+        emit("merge_grant_execution",
+             {"phase": phase, "actor": "pr-watch", "pr": pr,
+              "node_id": cand.node_id, **extra, **grant})
 
     store = WatermarkStore(path=store_path)
     executed = 0
     skipped = 0
-    for cand, key, grant_fields in queue:
+    for cand, key, grant_fields in result.execute_queue:
         pr = cand.pr_number
         pr_lock_key = f"pr-watch:{cand.repo_slug or 'unknown'}:{pr}"
         try:
-            _claim.acquire_pr_lock(pr_lock_key, holder)
+            claim.acquire_pr_lock(pr_lock_key, holder)
         except Exception:
             log.debug("pr-watch: PR #%d already being merged, skipping", pr)
             skipped += 1
@@ -1300,7 +1294,7 @@ def run_execute_queue(
                 continue
             left = phase_seconds_left()
             if left is not None and left < _FIRE_FLOOR_S:
-                _emit("pr_watch_skipped", {"pr": pr, "reason": "execute-budget"})
+                emit("pr_watch_skipped", {"pr": pr, "reason": "execute-budget"})
                 skipped += 1
                 continue
             try:
@@ -1335,17 +1329,17 @@ def run_execute_queue(
                 _grant("held", pr, cand, grant_fields)
             else:
                 _grant("failed", pr, cand, grant_fields, exit_code=rc)
-                if prior_retries + 1 >= _max_retries:
+                if prior_retries + 1 >= max_retries:
                     entry["parked"] = "retries-exhausted"
                     store.set(key, entry)
-                    _emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
+                    emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
                     _notify_parked_pr(
-                        _notify, pr, cand.repo_slug, prior_retries + 1,
+                        notify, pr, cand.repo_slug, prior_retries + 1,
                         "durable-grant merge",
                     )
         finally:
             try:
-                _claim.release_pr_lock(pr_lock_key, holder)
+                claim.release_pr_lock(pr_lock_key, holder)
             except Exception as exc:
                 log.warning("pr-watch: failed to release PR lock for #%d: %s", pr, exc)
     return (executed, skipped)

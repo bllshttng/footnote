@@ -4385,7 +4385,7 @@ class TestScanResumesLeastRecentlyPolled:
 
         run_execute_queue(
             results[-1], store_path=store_path, emit=deps["emit"],
-            notify=deps["notify"], claim=deps["claim"],
+            notify=deps["notify"], max_retries=2, claim=deps["claim"],
         )
         executed = [
             e for e in deps["events"]
@@ -4461,7 +4461,7 @@ class TestScanResumesLeastRecentlyPolled:
 
         executed, _skipped = run_execute_queue(
             res, store_path=store_path, emit=deps["emit"],
-            notify=deps["notify"], claim=deps["claim"],
+            notify=deps["notify"], max_retries=2, claim=deps["claim"],
         )
         assert executed == 1
         state = WatermarkStore(path=store_path).load()
