@@ -313,6 +313,10 @@ def test_closure_carries_the_retraction_stamp(tmp_path: Path) -> None:
     closure = receipt["graph"]["closure"]
     assert closure["status"] == "deferred"
     assert closure["deferred_kind"] == "retracted"
+    # the summary rows (duplicates fold targets, parent, resolved) carry the
+    # kind too, so the gate can settle a SIBLING's liveness, not just the
+    # resolved node's
+    assert receipt["graph"]["resolved"]["deferred_kind"] == "retracted"
 
 
 # --- AC3-HP / AC4-EDGE / AC5-EDGE: seed lane recall and its honesty marker ---
