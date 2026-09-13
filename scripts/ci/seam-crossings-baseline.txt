@@ -5,20 +5,20 @@
 # stays the only Python file that execs fno-agents by literal name.
 crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/authorized_merge.rs	567	let out = Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	1510	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	1565	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	3005	match std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	4262	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
+crossing	crates/fno-agents/src/bin/client.rs	1520	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	1575	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	3009	match std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	4266	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
 crossing	crates/fno-agents/src/client_verbs.rs	1279	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	2877	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	2953	let mut pane_command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	3277	let mut pane_command = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/daemon.rs	1116	let out = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	1276	let mut cmd = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/daemon.rs	2367	let mut cmd = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/daemon.rs	2459	std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	6528	let mut child = match std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	7348	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	1119	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	1279	let mut cmd = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/daemon.rs	2369	let mut cmd = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/daemon.rs	2462	std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	6370	let mut child = match std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	7190	let out = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/distress.rs	148	.or_else(|| newest_assistant_text_via_reader(&loopcheck_fno_bin(), transcript_path, cwd));
 crossing	crates/fno-agents/src/distress.rs	271	std::ffi::OsStr::new(&loopcheck_fno_bin()),
 crossing	crates/fno-agents/src/distress.rs	350	let text = newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript, &cwd);
@@ -30,6 +30,7 @@ crossing	crates/fno-agents/src/finalize.rs	2412	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2644	let out = match Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2664	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/gc.rs	884	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
+crossing	crates/fno-agents/src/king_checkin.rs	138	let mut argv = vec![fno_bin()];
 crossing	crates/fno-agents/src/loop_dispatch.rs	364	let out = Command::new("fno")
 crossing	crates/fno-agents/src/loopcheck.rs	3495	pub(crate) fn loopcheck_fno_bin() -> String {
 crossing	crates/fno-agents/src/loopcheck.rs	10345	&loopcheck_fno_bin(),
@@ -45,15 +46,15 @@ crossing	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsStr
 crossing	crates/fno-agents/src/scrape.rs	334	let bin = fno_bin();
 crossing	crates/fno-agents/src/scratch.rs	1300	let out = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/spawn_gate.rs	418	let _ = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/truth_probe.rs	80	let mut command = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/truth_probe.rs	603	let mut command = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/truth_probe.rs	88	let mut command = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/truth_probe.rs	633	let mut command = std::process::Command::new("fno");
 crossing	crates/fno/src/backlog_view.rs	142	let mut command = crate::process_admission::std_command(crate::server::fno_bin());
-crossing	crates/fno/src/client.rs	2328	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-crossing	crates/fno/src/client.rs	14090	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+crossing	crates/fno/src/client.rs	2332	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+crossing	crates/fno/src/client.rs	14073	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/client/update_menu.rs	73	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/client/update_menu.rs	237	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-crossing	crates/fno/src/connections_view.rs	1458	let mut command = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/connections_view.rs	1496	let mut cmd = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/connections_view.rs	1435	let mut command = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/connections_view.rs	1473	let mut cmd = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/court_overlay.rs	636	fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/court_overlay.rs	637	crate::server::fno_bin()
 crossing	crates/fno/src/court_overlay.rs	648	let mut command = crate::process_admission::tokio_command(fno_bin());
@@ -76,7 +77,7 @@ crossing	crates/fno/src/yard_overlay.rs	50	crate::server::fno_bin()
 crossing	crates/fno/src/yard_overlay.rs	57	let mut command = crate::process_admission::tokio_command(fno_bin());
 resolver	crates/fno-agents/src/census.rs	399	fn resolve_fno() -> Option<PathBuf> {
 resolver	crates/fno-agents/src/claims.rs	2714	fn durable_session_pid() -> Option<i32> {
-resolver	crates/fno-agents/src/daemon.rs	2012	pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
+resolver	crates/fno-agents/src/daemon.rs	2015	pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
 resolver	crates/fno-agents/src/delivery_completion.rs	142	pub fn evaluate_manifest(cwd: &Path, plan_path: Option<&str>, events: &Path) -> DeliveryCompletion {
 resolver	crates/fno-agents/src/loop_dispatch.rs	136	pub(crate) fn fno_cmd(fno_bin: &str) -> Command {
 resolver	crates/fno-agents/src/loop_target.rs	374	fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
@@ -89,9 +90,7 @@ resolver	crates/fno-agents/src/operator_notice.rs	33	pub fn notify_operator(titl
 resolver	crates/fno-agents/src/plugin_install.rs	57	fn build_stage(cwd: &Path) -> Result<PathBuf, String> {
 resolver	crates/fno-agents/src/reclaim.rs	114	fn plugin_cache_copies() -> Vec<PathBuf> {
 resolver	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsString {
-# owner: x-cf15 - PATH-robust fno-py resolver, same seam as the fno_bin entry
-# above; drains when the bare-name family is gone.
 resolver	crates/fno-agents/src/scrape.rs	212	fn fno_py_in_tools_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
 resolver	crates/fno/src/bootstrap.rs	1116	fn diagnose_locate_failure() -> Option<String> {
-resolver	crates/fno/src/mux_cli.rs	5709	fn prepare_pane_bytes(
+resolver	crates/fno/src/mux_cli.rs	5702	fn prepare_pane_bytes(
 resolver	crates/fno/src/server.rs	2614	pub(crate) fn fno_bin() -> PathBuf {

@@ -50,6 +50,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "help",
     "host",
     "kill-check",
+    "king-checkin",
     "king-history",
     "reign-ledger",
     "route-slot",
@@ -515,6 +516,15 @@ async fn run(args: Vec<String>) -> i32 {
     // owns the scan so the file-budget Python-tree ratchet holds.
     if verb == "king-history" {
         return fno_agents::king_history::run_king_history(&args[1..]);
+    }
+
+    // `king-checkin`: one verb runs the reign check-in body for
+    // `fno agents king checkin`. Daemon-free beat like king-history:
+    // Python resolves the caller's crown scope and the paths Python owns,
+    // the native side gathers, prints, diffs and journals the row, reusing
+    // the court-fold fold and the king-history scan in process.
+    if verb == "king-checkin" {
+        return fno_agents::king_checkin::run_king_checkin(&args[1..]);
     }
     // `reign-ledger`: the reign ledger page for `fno agents king ledger`.
     // Same split as king-history: Python resolves the court and the paths,

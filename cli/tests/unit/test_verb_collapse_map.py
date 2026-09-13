@@ -174,8 +174,11 @@ def test_map_covers_current_surface_once():
     # one-act defer + retracted-kind stamp the blueprint consolidation gate
     # halts on: 612 -> 613. `agents announce`, the fleet-announcement
     # writer/reader/status surface the binary dispatches directly: counted
-    # from the merged file, 613 -> 614.
-    assert len(mapped) == 614, (
+    # from the merged file, 613 -> 614. `agents king checkin`, the one verb
+    # that runs the reign check-in body and journals its row, plus its
+    # direct-dispatch alias `agents king-checkin` beside king-history's:
+    # 614 -> 616.
+    assert len(mapped) == 616, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
