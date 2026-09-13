@@ -1,12 +1,10 @@
-"""Rolling word budget for one canonical sender-recipient pair.
+"""Rolling word ledger for the control mail lane.
 
-Rule 7 caps one message at 80 masked words. The rolling policy caps each
-canonical pair at 80 words over 10 minutes. Any inbound message from the
-recipient back to the sender resets the running total.
-
-Time catches an unanswered burst. The inbound reset is what separates evasion
-from a real conversation, and it is proven by an addressed bus envelope from
-recipient to sender, never by a liveness probe or by receipt text.
+A `control:` body (stop, resume, scope change) keeps its own rolling ledger
+at CONTROL_CAP words per canonical pair over 10 minutes. Any inbound message
+from the recipient back to the sender resets the running total. An ordinary
+send carries no pair ledger: rule 7 (one message, 80 masked words) is the
+only word gate on it.
 
 The reservation is taken BEFORE any outward delivery and released only on a
 proven non-delivery. A crash after the body has left leaves the reservation
@@ -25,28 +23,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# CAP is the default, not the whole policy. It moved under config
-# (`style.pair_budget_words`) because it is coupled to the per-message rule 7
-# cap: a project that raises `style.word_cap.mail` and cannot raise this one is
-# refused at the window total for a message the per-message cap now permits, and
-# the refusal names a number nobody set. The old comment here said a per-project
-# override "would let the noisiest fleet raise its own cap", which is true and
-# is now the operator's call to make in one visible place rather than a silent
-# floor. WINDOW_SECONDS stays fixed policy: nothing is coupled to it.
-CAP = 80
+# WINDOW_SECONDS stays fixed policy: nothing is coupled to it.
 WINDOW_SECONDS = 600
 
 # The control lane. A stop, a resume, or a scope change must arrive
-# even when the pair's ordinary window is spent, because the window fills with
-# incident traffic exactly when control matters most -- three refusals measured
-# on 2026-08-29 were all control during a live incident, none chatter. The lane
-# is bounded so it cannot become a bypass: the body must OPEN with a `control:`
-# line, and the lane keeps its OWN rolling ledger at CONTROL_CAP words per pair
-# per window. The window cap is also the first message's length cap, so one
-# number bounds both directions. It stays fixed policy like WINDOW_SECONDS,
-# strictly below CAP, and deliberately unconfigurable: an override would let
-# the lane become the bypass. Control traffic never charges the ordinary
-# window, so a stop cannot spend the budget the conversation after it needs.
+# even when a conversation runs long, so the lane keeps its OWN rolling
+# ledger at CONTROL_CAP words per pair per window. The window cap is also
+# the first message's length cap, so one number bounds both directions. It
+# stays fixed policy like WINDOW_SECONDS and deliberately unconfigurable:
+# an override would let the lane become a bypass.
 CONTROL_CAP = 60
 CONTROL_PREFIX = "control:"
 
@@ -74,7 +59,7 @@ class BudgetRefused(Exception):
         pair: str,
         running: int,
         current: int,
-        cap: int = CAP,
+        cap: int,
     ) -> None:
         self.pair = pair
         self.running = running
@@ -220,29 +205,25 @@ def _parse_ts(raw: str) -> Optional[float]:
         return None
 
 
-def reserve(
+def _reserve(
     *,
     sender: str,
     recipient: str,
     words: int,
     msg_id: str,
-    enforce: bool = True,
     sender_key: Optional[str] = None,
     recipient_key: Optional[str] = None,
-    cap: int = CAP,
+    cap: int,
 ) -> Reservation:
     """Charge ``words`` to the pair, refusing when the projection breaks the cap.
 
-    ``enforce=False`` is the style-exception path: the send is permitted, but it
-    is still charged. An exception is authority to exceed the cap once, never a
-    licence to spend the window unrecorded. A REFUSED attempt is never charged.
-
-    ``sender_key`` / ``recipient_key`` rekey the LEDGER while the display pair
-    and the inbound-reset lookup keep the handles callers address by. Eight-hex
-    handles collide for time-ordered codex ids (two siblings spawned inside one
-    ~65s bucket share a prefix), so a caller that holds the occupant's full
-    session id keys the ledger on it and the siblings charge separately. The
-    inbound reset must keep matching bus envelopes, which carry handles.
+    A REFUSED attempt is never charged. ``sender_key`` / ``recipient_key``
+    rekey the LEDGER while the display pair and the inbound-reset lookup keep
+    the handles callers address by. Eight-hex handles collide for time-ordered
+    codex ids (two siblings spawned inside one ~65s bucket share a prefix), so
+    a caller that holds the occupant's full session id keys the ledger on it
+    and the siblings charge separately. The inbound reset must keep matching
+    bus envelopes, which carry handles.
     """
     pair = pair_label(sender_key or sender, recipient_key or recipient)
     path = _ledger_path(pair)
@@ -271,7 +252,7 @@ def reserve(
                 reset_by = reset_id
             entries = kept
         running = sum(e["words"] for e in entries)
-        if enforce and running + words > cap:
+        if running + words > cap:
             # Refused attempts never consume budget: the pruned ledger is still
             # written back so an expired window is not re-read on the next send.
             _store(path, pair, entries)
@@ -305,36 +286,38 @@ def reserve_control(
     sender_key: Optional[str] = None,
     recipient_key: Optional[str] = None,
 ) -> Reservation:
-    """Reserve against the control lane's own ledger, never the ordinary window.
+    """Reserve against the control lane's own ledger.
 
     The ledger is keyed ``control:<sender> -> <recipient>`` so control traffic
-    neither spends nor competes with the pair's ordinary budget. The inbound
-    reset still matches raw bus handles (``reserve`` keeps those on the display
-    pair), so a peer's reply clears both windows. ``sender_key`` /
-    ``recipient_key`` rekey the control ledger the same way ``reserve`` rekeys
-    the ordinary one: two codex siblings sharing a head-8 handle charge their
-    own windows, never one fused pair.
+    charges its own window. The inbound reset still matches raw bus handles
+    (``_reserve`` keeps those on the display pair), so a peer's reply clears
+    the window. ``sender_key`` / ``recipient_key`` rekey the control ledger
+    the same way ``_reserve`` keys the display pair: two codex siblings
+    sharing a head-8 handle charge their own windows, never one fused pair.
     """
-    return reserve(
+    return _reserve(
         sender=sender,
         recipient=recipient,
         words=words,
         msg_id=msg_id,
-        enforce=True,
         sender_key=f"{CONTROL_PREFIX}{sender_key or sender}",
         recipient_key=recipient_key,
         cap=CONTROL_CAP,
     )
 
 
-def release(reservation: Reservation) -> None:
+def release(reservation: Optional[Reservation]) -> None:
     """Give back a reservation whose message provably never left.
 
-    Only a refusal or a confirmed failure releases. A send that reached the
-    recipient stays charged until the window expires or an inbound reply resets
-    it. Best-effort: a failed release overcharges for at most 10 minutes, which
+    ``None`` reserves nothing (an ordinary send), so callers release
+    unconditionally and this returns at once. Only a refusal or a confirmed
+    failure releases a real reservation. A send that reached the recipient
+    stays charged until the window expires or an inbound reply resets it.
+    Best-effort: a failed release overcharges for at most 10 minutes, which
     is the safe direction.
     """
+    if reservation is None:
+        return
     path = _ledger_path(reservation.pair)
     try:
         lock = _acquire(path, reservation.pair)

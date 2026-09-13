@@ -2460,13 +2460,14 @@ def test_dispatch_send_agent_lock_timeout_queues_durable(
     assert "hello" in threads[0].messages[0].body
 
 
-def test_dispatch_send_agent_lock_timeout_reserves_the_pair_budget(
+def test_dispatch_send_agent_lock_timeout_leaves_no_ledger(
     tmp_path: Path, monkeypatch
 ) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno import paths
+    from fno.agents.dispatch import dispatch_send
 
     body = " ".join("word" for _ in range(79))
     _fail_first_lock_acquire(monkeypatch)
@@ -2480,52 +2481,21 @@ def test_dispatch_send_agent_lock_timeout_reserves_the_pair_budget(
     )
     assert first.delivery == "durable"
     assert first.reason == "agent-lock-timeout"
-
-    with pytest.raises(DispatchAskError) as raised:
-        dispatch_send(
-            name="red",
-            message=body,
-            provider=None,
-            cwd=tmp_path,
-            lock_timeout=0.2,
-            from_name="sender",
-        )
-
-    assert raised.value.exit_code == 1
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in str(
-        raised.value
+    assert not (paths.bus_dir() / "word-budget").exists(), (
+        "an ordinary send reserves nothing, even on the timeout path"
     )
 
 
-def test_dispatch_send_lock_timeout_budget_refusal_clears_dispatch_context(
+def test_dispatch_send_control_refusal_clears_dispatch_context(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from contextlib import contextmanager
-
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
     from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import DispatchAskError, dispatch_send
-    from fno.agents.lock import AgentLockTimeout
 
-    real_hold = dispatch_mod.hold_agent_lock
-    calls = 0
-
-    @contextmanager
-    def _timeout_then_grace(lock_name, registry_path, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls % 2 == 1:
-            raise AgentLockTimeout(
-                name=lock_name,
-                timeout=kwargs.get("timeout", 0.1),
-            )
-        with real_hold(lock_name, registry_path, **kwargs) as handle:
-            yield handle
-
-    monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _timeout_then_grace)
-    body = " ".join("word" for _ in range(79))
+    body = "control: " + " ".join("word" for _ in range(50))
 
     first = dispatch_send(
         name="red",
@@ -2549,17 +2519,18 @@ def test_dispatch_send_lock_timeout_budget_refusal_clears_dispatch_context(
         )
 
     assert raised.value.exit_code == 1
+    assert "refused: control word budget" in str(raised.value)
     assert dispatch_mod._DISPATCH_CTX.get() is None
 
 
-def test_registered_sender_normal_and_timeout_paths_share_canonical_budget(
+def test_registered_sender_normal_and_timeout_paths_write_no_ledger(
     tmp_path: Path, monkeypatch
 ) -> None:
     use_tmpdir(monkeypatch, tmp_path)
 
-    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno import paths
+    from fno.agents.dispatch import dispatch_send
     from fno.agents.registry import AgentEntry, write_registry
-    from fno.bus.log import iter_messages
 
     write_registry(
         [
@@ -2599,23 +2570,19 @@ def test_registered_sender_normal_and_timeout_paths_share_canonical_budget(
     assert first.delivery == "durable"
 
     _fail_first_lock_acquire(monkeypatch)
-    with pytest.raises(DispatchAskError) as raised:
-        dispatch_send(
-            name="red",
-            message=body,
-            provider=None,
-            cwd=tmp_path,
-            lock_timeout=0.2,
-            from_name="sender-worker",
-        )
-
-    assert raised.value.exit_code == 1
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in str(
-        raised.value
+    second = dispatch_send(
+        name="red",
+        message=body,
+        provider=None,
+        cwd=tmp_path,
+        lock_timeout=0.2,
+        from_name="sender-worker",
     )
-    rows = [row for row in iter_messages(warn=False) if row.kind == "send"]
-    assert len(rows) == 1
-    assert rows[0].from_ == "cccccccc"
+    assert second.delivery == "durable"
+    assert second.reason == "agent-lock-timeout"
+    assert not (paths.bus_dir() / "word-budget").exists(), (
+        "neither the normal path nor the timeout path resurrects a ledger"
+    )
 
 
 def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(

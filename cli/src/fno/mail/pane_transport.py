@@ -46,8 +46,9 @@ class PaneSendRefused(Exception):
 class PaneIdentity:
     """One registry row's identity for a pane, resolved as a single snapshot.
 
-    The budget keys the pair on ``session_id`` (the full id, collision-proof
-    for time-ordered codex siblings), the envelope addresses ``handle``, and
+    The control ledger keys the pair on ``session_id`` (the full id,
+    collision-proof for time-ordered codex siblings), the envelope addresses
+    ``handle``, and
     the identity gate pins ``name``/``fno_id``. Resolving them together from
     ONE registry read is what makes a pane reassignment between resolve and
     gate a refusal instead of a stale-attribution send.
@@ -355,7 +356,7 @@ def wrap(
     ``resolve_harness_identity`` and never ``--from-self``: both stamp the shared
     ambient id.
 
-    ``msg_id`` lets a caller that also charges the word budget share ONE
+    ``msg_id`` lets a caller that also charges the control ledger share ONE
     identity between the envelope and the ledger entry; unset, an id is minted
     here.
     """

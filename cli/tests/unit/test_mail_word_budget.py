@@ -1,8 +1,9 @@
-"""Rolling sender-recipient word budget (x-3700 Wave 2, ruling d-0ac789e6).
+"""Control lane word ledger (x-3700 Wave 2, reshaped by x-34c1).
 
-Every assertion here is a positive marker. No criterion passes because an id or
-a body is merely absent, because an absence has two explanations and one of them
-is that the instrument never ran.
+An ordinary send charges no rolling ledger: rule 7 is its only word gate, and
+the acceptance test proves three same-pair sends inside one window all deliver
+with no ledger file at all. The `control:` lane keeps its own 60-word rolling
+ledger, and every control assertion here is a positive marker.
 """
 from __future__ import annotations
 
@@ -30,17 +31,17 @@ def words(n: int) -> str:
     return text
 
 
-def send(sender: str, recipient: str, n: int, msg_id: str, *, enforce: bool = True):
-    return budget.reserve(
+def control_send(sender: str, recipient: str, n: int, msg_id: str, **keys):
+    return budget.reserve_control(
         sender=sender,
         recipient=recipient,
-        words=style.word_count(words(n)),
+        words=n,
         msg_id=msg_id,
-        enforce=enforce,
+        **keys,
     )
 
 
-# --- AC2-EDGE: one count, three callers -----------------------------------
+# --- one count, three callers -----------------------------------------------
 
 def test_rule_seven_and_budget_share_one_count():
     body = "Ship the fix. See `cli/src/fno/mail/budget.py` and --flag now."
@@ -61,29 +62,20 @@ def test_identifier_masking_preserves_snake_case():
     assert style._mask_inline("foo_bar foo_bar_baz") == "x x"
 
 
-# --- AC2-HP: the rolling pair budget blocks a burst ------------------------
+# --- AC1-HP: an ordinary pair window does not exist -------------------------
 
-def test_burst_of_three_79_word_sends_is_refused():
-    first = send("a", "b", 79, "msg-001")
-    assert first.running_before == 0
-
-    with pytest.raises(budget.BudgetRefused) as exc:
-        send("a", "b", 79, "msg-002")
-    assert exc.value.marker() == (
-        "running=79 current=79 projected=158 cap=80 window=10m"
-    )
-
-    with pytest.raises(budget.BudgetRefused) as exc2:
-        send("a", "b", 79, "msg-003")
-    assert exc2.value.running == 79, "a refused attempt is never charged"
-
-
-def test_name_lane_refuses_the_second_send_before_transport(
+def test_three_79_word_sends_deliver_without_a_ledger(
     monkeypatch,
+    tmp_path,
+    stubbed_pane,
     capsys,
 ):
+    """The flipped burst acceptance, all three lanes: three 79-word ordinary
+    sends from one sender to one recipient inside one window all deliver, and
+    no ``<bus_dir>/word-budget/`` file is ever written."""
+    from fno import paths
     from fno.agents.discover import DiscoveredSession
-    from fno.bus.log import iter_messages
+    from fno.agents.registry import AgentEntry, write_registry
     from fno.mail import cli
 
     recipient = DiscoveredSession(
@@ -97,36 +89,14 @@ def test_name_lane_refuses_the_second_send_before_transport(
         agent="codex",
         truth_state="working",
     )
-    attempts: list[str] = []
     monkeypatch.setattr(
         "fno.agents.dispatch._mail_inject_codex",
-        lambda _sid, body, **_kwargs: (attempts.append(body), False)[1],
+        lambda _sid, body, **_kwargs: (body, False)[1],
     )
     body = words(79)
-
-    cli._name_lane_send(body, from_name="sender", resolved=recipient)
-    assert "queued (durable)" in capsys.readouterr().out
-
-    with pytest.raises(typer.Exit) as raised:
+    for _ in range(3):
         cli._name_lane_send(body, from_name="sender", resolved=recipient)
-
-    assert raised.value.exit_code == 1
-    refusal = capsys.readouterr().err
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in refusal
-    assert len(attempts) == 1
-    rows = [row for row in iter_messages(warn=False) if row.kind == "send"]
-    assert len(rows) == 1
-    assert rows[0].word_count == 79
-
-
-def test_registered_dispatch_refuses_the_second_send(
-    monkeypatch,
-    tmp_path,
-):
-    from fno import paths
-    from fno.agents.dispatch import DispatchAskError, dispatch_send
-    from fno.agents.registry import AgentEntry, write_registry
-    from fno.bus.log import iter_messages
+        assert "queued (durable)" in capsys.readouterr().out
 
     registry = tmp_path / "agents.json"
     monkeypatch.setattr(paths, "agents_registry_path", lambda: registry)
@@ -148,338 +118,33 @@ def test_registered_dispatch_refuses_the_second_send(
         "fno.agents.dispatch._registered_family1_state",
         lambda _entry: "sleeping",
     )
-    body = words(79)
+    from fno.agents.dispatch import dispatch_send
 
-    first = dispatch_send(
-        "worker", body, provider=None, cwd=tmp_path, from_name="sender"
-    )
-    assert first.delivery == "durable"
-
-    with pytest.raises(DispatchAskError) as raised:
-        dispatch_send(
+    for _ in range(3):
+        result = dispatch_send(
             "worker", body, provider=None, cwd=tmp_path, from_name="sender"
         )
+        assert result.delivery == "durable"
 
-    assert raised.value.exit_code == 1
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in str(
-        raised.value
-    )
-    rows = [row for row in iter_messages(warn=False) if row.kind == "send"]
-    assert len(rows) == 1
-    assert rows[0].word_count == 79
+    for _ in range(3):
+        prepared = _pane_prepare(_clean_body(45))
+        assert prepared.exit_code == 0, prepared.output
+        assert "</fno_mail>" in prepared.output
 
-
-def test_registered_dispatch_budget_sender_matches_the_hosted_envelope(
-    monkeypatch,
-    tmp_path,
-):
-    from fno import paths
-    from fno.agents.dispatch import dispatch_send
-    from fno.agents.registry import AgentEntry, write_registry
-    from fno.bus.log import iter_messages
-
-    registry = tmp_path / "agents.json"
-    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry)
-    write_registry(
-        [
-            AgentEntry(
-                name="sender-worker",
-                harness="claude",
-                harness_session_id="cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee",
-                short_id="cccccccc",
-                cwd=str(tmp_path),
-                log_path="",
-                status="live",
-            ),
-            AgentEntry(
-                name="recipient-worker",
-                harness="claude",
-                harness_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-                short_id="aaaaaaaa",
-                cwd=str(tmp_path),
-                log_path="",
-                status="live",
-            ),
-        ],
-        registry,
-    )
-    monkeypatch.setattr(
-        "fno.agents.dispatch._registered_family1_state",
-        lambda _entry: "working",
-    )
-    monkeypatch.setattr(
-        "fno.agents.dispatch._deliver_live",
-        lambda *_args, **_kwargs: True,
-    )
-    real_reserve = budget.reserve
-    reserved_senders: list[str] = []
-
-    def _capture_sender(**kwargs):
-        reserved_senders.append(kwargs["sender"])
-        return real_reserve(**kwargs)
-
-    monkeypatch.setattr(budget, "reserve", _capture_sender)
-
-    result = dispatch_send(
-        "recipient-worker",
-        "hello",
-        provider=None,
-        cwd=tmp_path,
-        from_name="sender-worker",
+    assert not (paths.bus_dir() / "word-budget").exists(), (
+        "an ordinary send charges no rolling ledger"
     )
 
-    assert result.delivery == "hosted"
-    rows = list(iter_messages(warn=False))
-    assert len(rows) == 1
-    assert rows[0].delivery == "hosted"
-    assert reserved_senders == [rows[0].from_] == ["cccccccc"]
 
-
-def test_job_lane_refuses_the_second_send(monkeypatch, capsys):
-    from fno.mail import cli, job_lane
-    from fno.mail.job_address import JobHolder
-
-    job = JobHolder(
-        node_id="work-1234",
-        address="node:work-1234",
-        state="live",
-        session_id="bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
-        harness="claude",
-    )
-    monkeypatch.setattr(
-        "fno.mail.job_address.resolve_job_address", lambda _token: job
-    )
-    attempts: list[str] = []
-    monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude",
-        lambda _sid, body, **_kwargs: (attempts.append(body), False)[1],
-    )
-    body = words(79)
-
-    job_lane.job_lane_send(body, "node:work-1234", from_name="sender")
-    assert "queued (durable)" in capsys.readouterr().out
+def test_ordinary_81_word_body_still_breaks_rule_seven(capsys):
+    """AC1-EDGE: the per-message cap is the only ordinary word gate, unchanged.
+    The style gate fires in the send verb, before any lane is chosen."""
+    from fno.mail import cli
 
     with pytest.raises(typer.Exit) as raised:
-        job_lane.job_lane_send(body, "node:work-1234", from_name="sender")
-
+        cli._enforce_style(_clean_body(81))
     assert raised.value.exit_code == 1
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in (
-        capsys.readouterr().err
-    )
-    assert len(attempts) == 1
-
-
-def test_job_lane_durable_failure_releases_the_reservation(monkeypatch):
-    from fno.mail import cli, job_lane
-    from fno.mail.job_address import JobHolder
-
-    job = JobHolder(
-        node_id="work-1234",
-        address="node:work-1234",
-        state="live",
-        session_id="bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
-        harness="claude",
-    )
-    monkeypatch.setattr(
-        "fno.mail.job_address.resolve_job_address", lambda _token: job
-    )
-    monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude",
-        lambda _sid, _body, **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        "fno.inbox.store.write_new_thread",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
-    )
-    body = words(79)
-
-    with pytest.raises(typer.Exit) as failed:
-        job_lane.job_lane_send(body, "node:work-1234", from_name="sender")
-    assert failed.value.exit_code == 12
-
-    retry = send("sender", "node:work-1234", 79, "msg-retry")
-    assert retry.running_before == 0
-
-
-def test_exactly_the_cap_is_allowed():
-    send("a", "b", 80, "msg-cap")
-    with pytest.raises(budget.BudgetRefused):
-        send("a", "b", 1, "msg-over")
-
-
-# --- AC2-PAIR: accounting does not leak across identities ------------------
-
-def test_each_pair_keeps_an_independent_total():
-    send("a", "b", 79, "msg-ab")
-    send("a", "c", 79, "msg-ac")  # different recipient: own window
-    send("z", "b", 79, "msg-zb")  # different sender: own window
-    with pytest.raises(budget.BudgetRefused):
-        send("a", "b", 79, "msg-ab2")
-
-
-def test_reservation_names_the_canonical_pair():
-    res = send("canon-sender", "canon-recipient", 10, "msg-pair")
-    assert res.pair == "canon-sender -> canon-recipient"
-    path = budget._ledger_path(res.pair)
-    stored = json.loads(path.read_text())
-    assert stored["pair"] == "canon-sender -> canon-recipient"
-
-
-# --- AC2-RESET: an inbound message starts a new conversation budget --------
-
-def _inbound(
-    sender: str,
-    recipient: str,
-    msg_id: str,
-    *,
-    kind: str = "send",
-) -> str:
-    """Write one bus envelope FROM the recipient TO the sender."""
-    from fno.bus.log import Envelope, append
-
-    append(
-        Envelope.new(
-            id=msg_id,
-            from_=recipient,
-            to=sender,
-            kind=kind,
-            body="ok",
-            word_count=1,
-        )
-    )
-    return msg_id
-
-
-@pytest.mark.parametrize("kind", ["heads-up", "question", "fyi"])
-def test_each_authored_inbound_kind_resets_the_running_total(kind):
-    send("a", "b", 79, f"msg-out-{kind}")
-    reset_id = _inbound("a", "b", f"msg-in-{kind}", kind=kind)
-
-    second = send("a", "b", 79, f"msg-after-{kind}")
-    assert second.running_before == 0
-    assert second.reset_by == reset_id
-
-
-@pytest.mark.parametrize("kind", ["migration", "withdraw", "audit"])
-def test_non_authored_reverse_rows_do_not_reset_the_running_total(kind):
-    send("a", "b", 79, f"msg-out-{kind}")
-    _inbound("a", "b", f"msg-in-{kind}", kind=kind)
-
-    with pytest.raises(budget.BudgetRefused) as raised:
-        send("a", "b", 79, f"msg-after-{kind}")
-    assert raised.value.running == 79
-
-
-def test_inbound_reply_resets_the_running_total():
-    send("a", "b", 79, "msg-out1")
-    reset_id = _inbound("a", "b", "msg-in1")
-    second = send("a", "b", 79, "msg-out2")
-    assert second.running_before == 0
-    assert second.reset_by == reset_id
-
-
-def test_same_second_inbound_resets_once_without_erasing_a_later_reservation(
-    monkeypatch,
-):
-    from fno.bus.log import Envelope, append
-
-    monkeypatch.setattr(budget.time, "time", lambda: 1_000.75)
-    send("a", "b", 79, "msg-out-one")
-    append(
-        Envelope.new(
-            id="msg-inbound",
-            from_="b",
-            to="a",
-            kind="send",
-            body="ok",
-            ts="1970-01-01T00:16:40Z",
-            word_count=1,
-        )
-    )
-
-    second = send("a", "b", 79, "msg-out-two")
-    assert second.running_before == 0
-    assert second.reset_by == "msg-inbound"
-
-    with pytest.raises(budget.BudgetRefused) as raised:
-        send("a", "b", 2, "msg-after-reset")
-    assert raised.value.running == 79
-
-
-def test_reset_requires_the_exact_pair():
-    send("a", "b", 79, "msg-out1")
-    _inbound("a", "other", "msg-in-wrong")  # from "other", not from "b"
-    with pytest.raises(budget.BudgetRefused):
-        send("a", "b", 79, "msg-out2")
-
-
-def test_self_send_does_not_reset_its_own_pair():
-    send("a", "a", 79, "msg-self-one")
-    _inbound("a", "a", "msg-self-loop")
-
-    with pytest.raises(budget.BudgetRefused) as raised:
-        send("a", "a", 79, "msg-self-two")
-
-    assert raised.value.running == 79
-
-
-def test_non_send_reverse_row_does_not_reset_the_pair():
-    from fno.bus.log import Envelope, append
-
-    send("a", "b", 79, "msg-out-one")
-    append(
-        Envelope.new(
-            id="msg-migration",
-            from_="b",
-            to="a",
-            kind="migration",
-            body="migrated",
-        )
-    )
-
-    with pytest.raises(budget.BudgetRefused) as raised:
-        send("a", "b", 79, "msg-out-two")
-
-    assert raised.value.running == 79
-
-
-# --- AC2-CONCURRENCY: two sends cannot both pass stale history -------------
-
-def test_concurrent_sends_serialize_on_the_pair_ledger():
-    import threading
-
-    results: list = []
-
-    def attempt(msg_id: str) -> None:
-        try:
-            results.append(("ok", send("a", "b", 50, msg_id)))
-        except budget.BudgetRefused as exc:
-            results.append(("refused", exc))
-
-    threads = [threading.Thread(target=attempt, args=(f"msg-c{i}",)) for i in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    kinds = sorted(k for k, _ in results)
-    assert kinds == ["ok", "refused"]
-    refusal = next(v for k, v in results if k == "refused")
-    assert refusal.marker() == (
-        "running=50 current=50 projected=100 cap=80 window=10m"
-    )
-    stored = json.loads(budget._ledger_path("a -> b").read_text())
-    assert len(stored["entries"]) == 1, "exactly one live reservation for the pair"
-
-
-# --- AC2-EXCEPTION: an explicit exception does not erase history -----------
-
-def test_exception_permits_the_send_and_still_charges_it():
-    res = send("a", "b", 100, "msg-exempt", enforce=False)
-    assert res.words == 100
-    with pytest.raises(budget.BudgetRefused) as exc:
-        send("a", "b", 1, "msg-after")
-    assert exc.value.running == 100, "the exempt send stays charged"
+    assert "81" in capsys.readouterr().err
 
 
 # --- control lane: operational control rides its own window ----------------
@@ -493,7 +158,43 @@ def test_is_control_reads_the_first_non_blank_line_only():
     assert not budget.is_control("")
 
 
-def test_control_lane_caps_itself_and_leaves_the_pair_untouched():
+def test_control_body_over_the_cap_refuses_with_the_lane_marker(monkeypatch, capsys):
+    """AC1-ERR: one 61-word control body refuses naming the lane; two 40-word
+    control bodies refuse on the second."""
+    from fno.agents.discover import DiscoveredSession
+    from fno.mail import cli
+
+    recipient = DiscoveredSession(
+        session_id="11111111-2222-3333-4444-555566667777",
+        short_id="11111111",
+        handle="11111111",
+        pid=0,
+        cwd="/tmp",
+        project=None,
+        status=None,
+        agent="codex",
+        truth_state="working",
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda _sid, _body, **_kwargs: False,
+    )
+    with pytest.raises(typer.Exit) as raised:
+        cli._name_lane_send("control: " + words(60), from_name="sender", resolved=recipient)
+    assert raised.value.exit_code == 1
+    assert "refused: control word budget" in capsys.readouterr().err
+
+    cli._name_lane_send("control: " + words(39), from_name="sender", resolved=recipient)
+    capsys.readouterr()
+    with pytest.raises(typer.Exit) as raised2:
+        cli._name_lane_send("control: " + words(39), from_name="sender", resolved=recipient)
+    assert raised2.value.exit_code == 1
+    refusal = capsys.readouterr().err
+    assert "refused: control word budget" in refusal
+    assert "running=40 current=40 projected=80 cap=60 window=10m" in refusal
+
+
+def test_control_lane_caps_itself_and_the_ordinary_lane_writes_nothing():
     res = budget.reserve_control(sender="a", recipient="b", words=50, msg_id="msg-ctl-1")
     assert res.pair == "control:a -> b"
 
@@ -502,11 +203,9 @@ def test_control_lane_caps_itself_and_leaves_the_pair_untouched():
     assert exc.value.cap == budget.CONTROL_CAP
     assert exc.value.pair == "control:a -> b"
 
-    # The control traffic never touched the ordinary window: a full 80-word
-    # ordinary send still passes, and the ordinary ledger holds only itself.
-    send("a", "b", 80, "msg-ordinary")
-    stored = json.loads(budget._ledger_path("a -> b").read_text())
-    assert [e["words"] for e in stored["entries"]] == [80]
+    # The control ledger holds only the control traffic; an ordinary send
+    # reserves nothing, so the ordinary pair file never comes into existence.
+    assert not budget._ledger_path("a -> b").exists()
 
 
 def test_control_window_resets_on_an_inbound_reply():
@@ -542,117 +241,123 @@ def test_control_body_skips_the_style_check(monkeypatch):
     cli._enforce_style("control: HOLD all spawns now. Load 219 on 12 cores.")
 
 
-def test_name_lane_control_send_delivers_when_the_pair_window_is_spent(monkeypatch, capsys):
-    """The node's acceptance, end to end on the real user path: spend the pair,
-    deliver a control stop, then watch an ordinary body of the same length
-    refuse in the same window. The control send proves the lane; the refusal
-    proves the budget still works."""
-    from fno.agents.discover import DiscoveredSession
-    from fno.mail import cli
+# --- the control ledger ------------------------------------------------------
 
-    recipient = DiscoveredSession(
-        session_id="11111111-2222-3333-4444-555566667777",
-        short_id="11111111",
-        handle="11111111",
-        pid=0,
-        cwd="/tmp",
-        project=None,
-        status=None,
-        agent="codex",
-        truth_state="working",
+def _inbound(
+    sender: str,
+    recipient: str,
+    msg_id: str,
+    *,
+    kind: str = "send",
+) -> str:
+    """Write one bus envelope FROM the recipient TO the sender."""
+    from fno.bus.log import Envelope, append
+
+    append(
+        Envelope.new(
+            id=msg_id,
+            from_=recipient,
+            to=sender,
+            kind=kind,
+            body="ok",
+            word_count=1,
+        )
+    )
+    return msg_id
+
+
+def test_reservation_names_the_canonical_pair():
+    res = control_send("canon-sender", "canon-recipient", 10, "msg-pair")
+    assert res.pair == "control:canon-sender -> canon-recipient"
+    path = budget._ledger_path(res.pair)
+    stored = json.loads(path.read_text())
+    assert stored["pair"] == "control:canon-sender -> canon-recipient"
+
+
+def test_concurrent_sends_serialize_on_the_pair_ledger():
+    import threading
+
+    results: list = []
+
+    def attempt(msg_id: str) -> None:
+        try:
+            results.append(("ok", control_send("a", "b", 50, msg_id)))
+        except budget.BudgetRefused as exc:
+            results.append(("refused", exc))
+
+    threads = [threading.Thread(target=attempt, args=(f"msg-c{i}",)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    kinds = sorted(k for k, _ in results)
+    assert kinds == ["ok", "refused"]
+    refusal = next(v for k, v in results if k == "refused")
+    assert refusal.marker() == (
+        "running=50 current=50 projected=100 cap=60 window=10m"
+    )
+    stored = json.loads(budget._ledger_path("control:a -> b").read_text())
+    assert len(stored["entries"]) == 1, "exactly one live reservation for the pair"
+
+
+def test_job_lane_durable_failure_releases_the_control_reservation(monkeypatch):
+    from fno.mail import job_lane
+    from fno.mail.job_address import JobHolder
+
+    job = JobHolder(
+        node_id="work-1234",
+        address="node:work-1234",
+        state="live",
+        session_id="bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        harness="claude",
     )
     monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_codex",
+        "fno.mail.job_address.resolve_job_address", lambda _token: job
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
         lambda _sid, _body, **_kwargs: False,
     )
-    body = words(79)
-
-    cli._name_lane_send(body, from_name="sender", resolved=recipient)
-    assert "queued (durable)" in capsys.readouterr().out
-
-    control = "control: HOLD all spawns now. Load 219 on 12 cores."
-    cli._name_lane_send(control, from_name="sender", resolved=recipient)
-    captured = capsys.readouterr()
-    assert "queued (durable)" in captured.out, "the control stop is delivered"
-    assert "control lane" in captured.err, "the receipt names the lane"
-
-    with pytest.raises(typer.Exit) as raised:
-        cli._name_lane_send(body, from_name="sender", resolved=recipient)
-    assert raised.value.exit_code == 1
-    refusal = capsys.readouterr().err
-    assert "running=79 current=79 projected=158 cap=80 window=10m" in refusal
-    assert "control:" in refusal, "the refusal teaches the escape"
-
-
-def test_registered_dispatch_control_send_delivers_when_the_window_is_spent(
-    monkeypatch,
-    tmp_path,
-):
-    from fno import paths
-    from fno.agents.dispatch import DispatchAskError, dispatch_send
-    from fno.agents.registry import AgentEntry, write_registry
-
-    registry = tmp_path / "agents.json"
-    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry)
-    write_registry(
-        [
-            AgentEntry(
-                name="worker",
-                harness="claude",
-                harness_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-                short_id="aaaaaaaa",
-                cwd=str(tmp_path),
-                log_path="",
-                status="idle",
-            )
-        ],
-        registry,
-    )
     monkeypatch.setattr(
-        "fno.agents.dispatch._registered_family1_state",
-        lambda _entry: "sleeping",
+        "fno.inbox.store.write_new_thread",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
-    body = words(79)
+    body = "control: " + words(50)
 
-    first = dispatch_send("worker", body, provider=None, cwd=tmp_path, from_name="sender")
-    assert first.delivery == "durable"
+    with pytest.raises(typer.Exit) as failed:
+        job_lane.job_lane_send(body, "node:work-1234", from_name="sender")
+    assert failed.value.exit_code == 12
 
-    second = dispatch_send(
-        "worker",
-        "control: resume now. Load back under cap.",
-        provider=None,
-        cwd=tmp_path,
-        from_name="sender",
-    )
-    assert second.delivery == "durable", "the control resume is delivered"
-
-    with pytest.raises(DispatchAskError) as raised:
-        dispatch_send("worker", body, provider=None, cwd=tmp_path, from_name="sender")
-    assert "running=79 current=79 projected=158 cap=80" in str(raised.value)
-    assert "control:" in str(raised.value), "the refusal teaches the escape"
+    retry = control_send("sender", "node:work-1234", 50, "msg-retry")
+    assert retry.running_before == 0, "the proven non-delivery released its words"
 
 
 # --- window expiry and release --------------------------------------------
 
 def test_entries_older_than_the_window_are_pruned():
-    res = send("a", "b", 79, "msg-old")
+    res = control_send("a", "b", 55, "msg-old")
     path = budget._ledger_path(res.pair)
     stored = json.loads(path.read_text())
     stored["entries"][0]["ts"] = time.time() - budget.WINDOW_SECONDS - 1
     path.write_text(json.dumps(stored))
-    fresh = send("a", "b", 79, "msg-new")
+    fresh = control_send("a", "b", 55, "msg-new")
     assert fresh.running_before == 0
 
 
 def test_release_gives_back_a_proven_non_delivery():
-    res = send("a", "b", 79, "msg-fail")
+    res = control_send("a", "b", 55, "msg-fail")
     budget.release(res)
-    again = send("a", "b", 79, "msg-retry")
+    again = control_send("a", "b", 55, "msg-retry")
     assert again.running_before == 0
 
 
+def test_release_of_a_none_reservation_is_a_no_op():
+    budget.release(None)
+
+
 def test_an_empty_ledger_file_is_removed():
-    res = send("a", "b", 10, "msg-solo")
+    res = control_send("a", "b", 10, "msg-solo")
     budget.release(res)
     assert not budget._ledger_path(res.pair).exists()
 
@@ -660,34 +365,16 @@ def test_an_empty_ledger_file_is_removed():
 # --- fail closed ----------------------------------------------------------
 
 def test_a_malformed_active_ledger_refuses_rather_than_resetting():
-    res = send("a", "b", 79, "msg-one")
+    res = control_send("a", "b", 55, "msg-one")
     path = budget._ledger_path(res.pair)
     path.write_text("{ not json")
     with pytest.raises(budget.BudgetUnavailable) as exc:
-        send("a", "b", 1, "msg-two")
-    assert "a -> b" in str(exc.value)
+        control_send("a", "b", 1, "msg-two")
+    assert "control:a -> b" in str(exc.value)
     assert str(path) in str(exc.value), "the refusal names the recovery path"
 
 
-# --- legacy rows ----------------------------------------------------------
-
-def test_a_legacy_row_reads_back_without_a_fabricated_count():
-    from fno.bus.log import from_json_line, to_json_line, Envelope
-
-    legacy = '{"v":1,"id":"msg-legacy","ts":"2026-01-01T00:00:00Z","thread":"msg-legacy",'\
-             '"from":"a","to":"b","kind":"send","body":"hello there"}'
-    env = from_json_line(legacy)
-    assert env.word_count is None
-    assert "word_count" not in to_json_line(env)
-
-    counted = Envelope.new(from_="a", to="b", kind="send", body="hello there", word_count=2)
-    assert json.loads(to_json_line(counted))["word_count"] == 2
-
-    zero = Envelope.new(from_="a", to="b", kind="send", body="", word_count=0)
-    assert json.loads(to_json_line(zero))["word_count"] == 0, "a real zero is not legacy"
-
-
-# --- the pane lane (x-4268): same gates, same ledger ----------------------
+# --- the pane lane (x-4268): same style gate, control bodies only ----------
 
 def _pane_prepare(body: str, *extra: str):
     from typer.testing import CliRunner
@@ -740,103 +427,3 @@ def _clean_body(n_words: int) -> str:
     text = " ".join(sentences)
     assert style.word_count(text) == n_words
     return text
-
-
-def test_pane_lane_refuses_the_second_send_before_any_envelope(stubbed_pane, capsys):
-    """AC2-HP through the real CLI: two clean 45-word bodies, one pair, one
-    window; the second refuses with the exact rolling numbers and only the
-    first envelope reaches stdout."""
-    first = _pane_prepare(_clean_body(45))
-    assert first.exit_code == 0, first.output
-    assert "</fno_mail>" in first.output
-
-    second = _pane_prepare(_clean_body(45))
-    assert second.exit_code == 1, second.output
-    assert "running=45 current=45 projected=90 cap=80 window=10m" in second.output
-    assert "</fno_mail>" not in second.output
-
-
-def test_pane_lane_ledger_entry_matches_the_envelope_identity(stubbed_pane):
-    """AC on LD2: the pair file's entry id and words are the envelope's id and
-    the body's masked count, not a second minted identity. The ledger pair is
-    keyed on the FULL session ids, while the envelope keeps its handles."""
-    import re as _re
-
-    result = _pane_prepare(_clean_body(20))
-    assert result.exit_code == 0, result.output
-    envelope_id = _re.search(r'id="([^"]+)"', result.output)
-    assert envelope_id, result.output
-
-    pair = budget.pair_label(
-        "44444444-5555-6666-7777-888899990000",
-        "33333333-2222-1111-4444-555566667777",
-    )
-    entries = budget._load(budget._ledger_path(pair), pair)
-    assert len(entries) == 1
-    assert entries[0]["id"] == envelope_id.group(1)
-    assert entries[0]["words"] == 20
-
-
-def test_pane_lane_keys_colliding_codex_siblings_separately(monkeypatch):
-    """The measured P1: two codex panes whose full ids share eight leading hex
-    are DISTINCT recipients. Keyed on handles they fused into one pair and the
-    second 45-word send refused at a projected 90; keyed on full ids both
-    charge their own window."""
-    from fno.agents.registry import AgentEntry
-    from fno.mail.pane_transport import PaneIdentity
-
-    s1 = "01a0370b-1111-4aaa-8bbb-ccccdddd0001"
-    s2 = "01a0370b-2222-4aaa-8bbb-ccccdddd0002"
-
-    def _identity(session, pane_id):
-        full = s1 if int(pane_id) == 3 else s2
-        return PaneIdentity(name=f"w{pane_id}", fno_id=full, session_id=full, handle="01a0370b")
-
-    rows = [
-        AgentEntry(
-            name="w3",
-            cwd="/tmp",
-            log_path="/tmp/w3.log",
-            harness="codex",
-            harness_session_id=s1,
-            mux={"session": "s", "pane_id": 3},
-        ),
-        AgentEntry(
-            name="w4",
-            cwd="/tmp",
-            log_path="/tmp/w4.log",
-            harness="codex",
-            harness_session_id=s2,
-            mux={"session": "s", "pane_id": 4},
-        ),
-    ]
-    monkeypatch.setattr(
-        "fno.mail.pane_transport.resolve_pane_harness", lambda s, p: "codex"
-    )
-    monkeypatch.setattr("fno.mail.pane_transport.prompt_refusal", lambda **_kw: None)
-    monkeypatch.setattr("fno.agents.self_stamp.stamp_from", lambda _n: "king-0000")
-    monkeypatch.setattr("fno.agents.self_stamp.resolve_self_session_id", lambda: "king")
-    monkeypatch.setattr("fno.mail.pane_transport.resolve_pane_identity", _identity)
-    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
-
-    def _prepare_pane(body: str, pane: str):
-        from typer.testing import CliRunner
-
-        from fno.mail.cli import mail_app
-
-        return CliRunner().invoke(
-            mail_app,
-            ["pane-prepare", "--session-id", "s", "--pane", pane],
-            input=body,
-        )
-
-    first = _prepare_pane(_clean_body(45), "3")
-    assert first.exit_code == 0, first.output
-    second = _prepare_pane(_clean_body(45), "4")
-    # Distinct codex siblings sharing head-8 must charge separate windows.
-    assert second.exit_code == 0, second.output
-    # Two distinct ledger files, one entry each: the pair keys are the full ids.
-    for full in (s1, s2):
-        pair = budget.pair_label("king", full)
-        entries = budget._load(budget._ledger_path(pair), pair)
-        assert [e["words"] for e in entries] == [45], pair
