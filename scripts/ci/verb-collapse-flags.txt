@@ -59,7 +59,6 @@ mail hold-release !--poll-s
 mail pane-prepare !--session
 mail send !--origin
 mail send !--provider
-paths handoff !--session
 resume receipt validate !--session
 resume receipt write !--session
 retro run !--pr

@@ -4485,11 +4485,10 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
     focus_pane(verb, &session, pane, true, json)
 }
 
-// (x-9b60) The `fno mux thread` verb lives in the child module below, named
-// by the question it answers; the file-budget gate keeps this over-budget
-// file shrink-only.
+// The `fno mux thread` verb, same child-module pattern.
 mod thread_verb;
 pub use thread_verb::thread;
+pub mod web_ctl;
 // (v71) The prune aftermath (reload live servers + the receipt), same rule.
 mod prune_sync;
 // (v71) The live-tab fold, same rule; its tests moved with it.

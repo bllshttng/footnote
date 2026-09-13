@@ -124,6 +124,9 @@ enum Role {
     /// recorded start token, then SIGINTs (the bridge's graceful exit) with a
     /// SIGKILL escalation for a wedged one.
     MuxWeb(fno::web::WebArgs),
+    /// `mux web reap [--json]`: the corpse sweep for the `--web` bridge
+    /// marker. Same carry-verbatim shape; `mux_cli::web` parses.
+    MuxWebCtl(Vec<OsString>),
     /// A verb named in [`MUX_TOMBSTONES`]: refuse, naming what replaced it.
     MuxRemoved(String),
     /// `version [--json]`: report the mux binary's own baked-in build rev so
@@ -258,6 +261,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 Some(w) => Role::MuxWeb(w),
                 None => Role::MuxUsage,
             },
+            // `mux web reap ...`: the bridge marker's corpse sweep. A bare
+            // `mux web` falls through to MuxUsage.
+            Some("web") if args.len() > 2 => Role::MuxWebCtl(args[2..].to_vec()),
             // `mux pane <verb> ...`: hand the rest to the pane verb family;
             // a bare `mux pane` (no verb) falls through to MuxUsage. Nothing
             // under `mux pane` ever forwards to Python (AC).
@@ -377,6 +383,7 @@ fn main() {
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
                  | fno mux serve --web [--server <name>] [--bind <addr>] [--port <n>] \
                  | fno mux serve --stop [--server <name>] \
+                 | fno mux web reap [--json] \
                  | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
                  | fno mux block pipe|annotate ... \
                  | fno mux tab ls|create|rename|join|move|close ... (--tab takes the visible \
@@ -421,6 +428,7 @@ fn main() {
             }
             exit_mux(fno::web::serve(web_args))
         }
+        Role::MuxWebCtl(rest) => exit_mux(mux_cli::web_ctl::web(&rest, env_session.as_deref())),
         Role::MuxPane(rest) => exit_mux(mux_cli::pane(&rest, env_session.as_deref())),
         Role::MuxBlock(rest) => exit_mux(mux_cli::block(&rest, env_session.as_deref())),
         Role::MuxTab(rest) => exit_mux(mux_cli::tab(&rest, env_session.as_deref())),
