@@ -377,10 +377,10 @@ fn real_deps() -> crate::provider_cap::LeaveDeps {
                         .collect::<String>()
                 ));
             }
-            Ok(String::from_utf8_lossy(&out.stdout)
-                .chars()
-                .take(64)
-                .collect())
+            // The handle we pass to confirm is the NAME we chose, not the
+            // receipt: `fno agents truth` resolves a registry handle, and the
+            // spawn receipt is prose no lookup accepts.
+            Ok(name)
         }),
         confirm: Box::new(|sid| {
             run_fno(
