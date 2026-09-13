@@ -1319,9 +1319,9 @@ def _mesh_env_pairs(
     seed_provenance: Optional[dict[str, str]] = None,
     session_id: Optional[str] = None,
 ) -> tuple[list[str], list[str]]:
-    """The ``env(1)`` unset args and ``K=V`` pairs
-    :func:`_mesh_env_wrapper` formats, split out so the codex pane splice can
-    read the same pairs it renders as config-set leaves (x-a095).
+    """The ``env(1)`` unset args and ``K=V`` pairs :func:`_mesh_env_wrapper`
+    formats, split out so the codex pane splice renders the same pairs as
+    config-set leaves (x-a095).
 
     The mesh identity the daemon worker used to set on its PTY child
     (worker.rs), plus any role-routing env (x-d2fe) and node provenance
@@ -3688,8 +3688,7 @@ def dispatch_spawn_pane(
         computed_dirs=computed_writable_dirs,
     )
     if provider == "codex" and argv and argv[0] == provider:
-        # A daemon-run tool inherits the daemon's env, not the TUI's, so the
-        # identity rides as config-set leaves (x-a095); passthrough-checked
+        # Identity rides as config-set leaves (x-a095); passthrough-checked
         # like the route splice below. The argv[0] guard keeps the splice on
         # the provider's own form.
         from fno.agents.codex_pane import codex_shell_env_args

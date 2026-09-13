@@ -93,7 +93,7 @@ def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     return args
 
 
-#: Rate-limit for the daemon oracle below (a websocket round trip), vs the
+#: Rate-limit for the daemon oracle (a websocket round trip) vs the
 #: binding loop's own ``_BINDING_POLL_S`` tick.
 _CODEX_DAEMON_PROBE_INTERVAL_S = 2.0
 
@@ -103,10 +103,9 @@ def _codex_session_ids_loaded(
 ) -> Optional[set[str]]:
     """Session ids the app-server daemon reports as loaded for ``cwd``.
 
-    None means the daemon could not answer - distinct from an empty set, so
-    an unreachable daemon never reads as "nothing new here". Paths compare
-    ``realpath``-normalized: the daemon may report a symlink-resolved cwd
-    (macOS ``/tmp`` -> ``/private/tmp``) our raw string never equals.
+    None (daemon could not answer) is distinct from an empty set, so an
+    unreachable daemon never reads as "nothing new here". Paths compare
+    ``realpath``-normalized: the daemon may report a symlink-resolved cwd.
     """
     from fno.agents.discover import _codex_daemon_threads_raw
 
@@ -144,21 +143,18 @@ def _codex_daemon_candidate(
 ) -> Optional[str]:
     """The single session id the app-server daemon reports as new for ``cwd``.
 
-    This is the arm that binds on the modern pane lane: the TUI launches
-    with ``--remote unix://``, the thread is the daemon's, and the fd probe
-    finds no rollout in the pane's own tree (measured 2026-09-13 on
-    codex-cli 0.154.0). The fd probe still runs first for any build that
-    owns its rollout (and for ``codex exec``).
+    This arm binds on the modern pane lane: the TUI launches with
+    ``--remote unix://``, the thread is the daemon's, and the fd probe finds
+    no rollout in the pane's own tree. The fd probe still runs first for any
+    build that owns its rollout (and for ``codex exec``).
 
     ``baseline_ids`` None (no pre-spawn snapshot) is refused, never treated
     as empty: an empty stand-in would let any loaded stranger for this cwd
     read as "the one new id". Only ONE new id answers - two or more is a
     sibling race, and a healthy stranger is worse than unbound. Single-shot
-    read; the caller owns the repeat-before-trust gate.
-
-    ``observed`` is the out-of-band sink for WHY a poll declined, written in
-    place so it always holds the last observation. Four states here all
-    return bare ``None``; a blown window must name what it saw, not the
+    read; the caller owns the repeat-before-trust gate. ``observed`` is the
+    out-of-band sink for WHY a poll declined, written in place so it holds
+    the last observation: a blown window must name what it saw, not the
     clock.
     """
 
