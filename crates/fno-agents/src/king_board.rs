@@ -42,7 +42,7 @@ mod claims;
 mod classify;
 mod prs;
 mod queues;
-mod scope;
+pub(crate) mod scope;
 
 pub(crate) use queues::not_read_status;
 
