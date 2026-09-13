@@ -3428,11 +3428,10 @@ class ParallelBlock(BaseModel):
 class ModelProvider(BaseModel):
     """One secondary model provider for role-based routing (z.ai, DeepSeek, ...).
 
-    Only ``anthropic``-protocol providers are usable for the claude lane (the
-    vendor's Anthropic-compatible endpoint, not its OpenAI ``/v4`` path); the
-    key comes from the env var named by ``api_key_env`` (falling back to
-    ``api_key_file``), never settings.yaml. ``zai`` is built in; list a
-    provider here to override it or to add another (e.g. ``deepseek``).
+    Anthropic-protocol only for the claude lane (the vendor's compatible
+    endpoint, not its OpenAI ``/v4`` path); the key comes from
+    ``api_key_env`` / ``api_key_file``, never settings.yaml. ``zai`` is built
+    in; list a provider here to override it or add another.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -3445,9 +3444,8 @@ class ModelProvider(BaseModel):
     # runs cheap while opus/sonnet stay on the role model; unset keeps the role
     # model there. The built-in zai provider defaults it to glm-4.7.
     haiku_model: Optional[str] = None
-    # Model per Claude tier ({opus = "glm-5.3[1m]"}) so /model in a routed
-    # worker offers a real choice; undeclared tiers keep the spawn model.
-    # Validation rules live beside TIER_ALIASES in model_routing.
+    # Model per Claude tier ({opus = "glm-5.3[1m]"}) so /model offers a real
+    # choice; undeclared tiers keep the spawn model. Rules beside TIER_ALIASES.
     tier_models: Optional[dict[str, str]] = None
 
     @field_validator("tier_models")
@@ -3467,10 +3465,9 @@ class ModelProvider(BaseModel):
 class ModelRoutingBlock(BaseModel):
     """Role-based per-spawn model routing (config.model_routing in settings.yaml).
 
-    Routes auxiliary coordination roles (coordinate / tidy / orient /
-    consolidate) to a secondary provider (z.ai GLM by default) at spawn time
-    while production roles stay on the primary Anthropic model. Keys live in env
-    vars / .env files named per provider, never here. See
+    Routes auxiliary coordination roles to a secondary provider (z.ai GLM by
+    default) at spawn time while production roles stay primary. Keys live in
+    env vars / .env files named per provider, never here. See
     fno.agents.model_routing.
     """
 
