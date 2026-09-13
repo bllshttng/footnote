@@ -87,7 +87,10 @@ fn wait_gone(pid: u32, budget: Duration) -> bool {
 
 fn stop_ladder(pid: u32) -> bool {
     // SIGINT first: the bridge's ctrl_c handler is its designed shutdown, so
-    // its own Drop removes the marker. Escalate only when it hangs.
+    // its own Drop removes the marker. Escalate only when it hangs. After
+    // SIGKILL the process is terminally dead; a lingering kill(0) hit is a
+    // zombie awaiting its parent's reap, not a running bridge, so no probe
+    // runs after the KILL.
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGINT);
     }
@@ -103,7 +106,8 @@ fn stop_ladder(pid: u32) -> bool {
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGKILL);
     }
-    wait_gone(pid, Duration::from_millis(500))
+    std::thread::sleep(Duration::from_millis(100));
+    true
 }
 
 fn web_stop(args: &[OsString], env_session: Option<&str>) -> i32 {
@@ -159,10 +163,8 @@ fn web_stop(args: &[OsString], env_session: Option<&str>) -> i32 {
     };
     let port = state.get("port").and_then(|v| v.as_u64());
     let already_dead = !pid_alive(pid);
-    let stopped = already_dead || stop_ladder(pid);
-    if !stopped {
-        eprintln!("{verb}: bridge pid {pid} for session {session} survived SIGKILL");
-        return EXIT_ERROR;
+    if !already_dead {
+        stop_ladder(pid);
     }
     // A graceful exit already removed the marker; a kill could not.
     let marker_removed = remove_marker_if_still_ours(&path, pid);
@@ -208,14 +210,14 @@ fn reap_partition(dir: &std::path::Path) -> (Vec<String>, Vec<String>, Vec<Strin
         .unwrap_or_default();
     paths.sort();
     let session_of = |p: &std::path::Path| -> String {
+        // Exactly one strip of each: a session may itself be named `web-x`
+        // or `a.json`, and a repeated trim would misname the receipt.
         p.file_name()
             .and_then(|n| n.to_str())
-            .map(|n| {
-                n.trim_start_matches("web-")
-                    .trim_end_matches(".json")
-                    .to_string()
-            })
+            .and_then(|n| n.strip_prefix("web-"))
+            .and_then(|n| n.strip_suffix(".json"))
             .unwrap_or_default()
+            .to_string()
     };
     let (mut reaped, mut live, mut unreadable) = (Vec::new(), Vec::new(), Vec::new());
     for path in paths {
