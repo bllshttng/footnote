@@ -588,23 +588,20 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.routing.admission.* (x-1afa, opt-in shared-account capacity
     # reservations) ---
-    "routing.admission": Meta(
-        "advanced", "Opt-in shared-account capacity reservations before a routing-lane launch. Subscription-percent admission only: every value is a share of ONE quota window (0..100), never a dollar amount; API spend forecasting is unsupported. Default off; a fresh install reserves nothing.",
-    ),
     "routing.admission.enabled": Meta(
-        "advanced", "Arms admission. False (the default) reserves nothing and dispatch behaves exactly as before.",
+        "never", "Arms opt-in shared-account capacity reservations before a routing-lane launch. False (the default) reserves nothing and dispatch behaves exactly as before. Subscription-percent admission only: every value is a share of ONE quota window (0..100), never a dollar amount; API spend forecasting is unsupported.",
     ),
     "routing.admission.max_inflight_per_pool": Meta(
-        "advanced", "Concurrent reserved+committed dispatches allowed per quota pool, regardless of percentages. Default 3.",
+        "never", "Concurrent reserved+committed dispatches allowed per quota pool, regardless of percentages. Default 3.",
     ),
     "routing.admission.reservation_ttl_seconds": Meta(
-        "advanced", "How long one reservation survives without a proven worker. A live worker past its TTL is revalidated, never refunded. Default 900.",
+        "never", "How long one reservation survives without a proven worker. A live worker past its TTL is revalidated, never refunded. Default 900.",
     ),
     "routing.admission.demand_pct": Meta(
-        "advanced", "verb -> difficulty -> percent of the window this dispatch may consume. Difficulty keys: default|low|medium|high; lookups take the most specific row at or below the node's band and fall back to the default verb.",
+        "never", "verb -> difficulty -> percent of the window this dispatch may consume. Difficulty keys: default|low|medium|high; lookups take the most specific row at or below the node's band and fall back to the default verb.",
     ),
     "routing.admission.reserve_pct": Meta(
-        "advanced", "verb -> difficulty -> percent of the window held back for difficult work and reviews. A configured priority exception may consume it; known exhaustion is never configured away.",
+        "never", "verb -> difficulty -> percent of the window held back for difficult work and reviews. A configured priority exception may consume it; known exhaustion is never configured away.",
     ),
     # --- config.sideline.colors (x-1b35, the mux sideline lane color) ---
     # Four axis tables, every key naming its axis. A bare key under

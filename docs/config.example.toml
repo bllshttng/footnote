@@ -401,7 +401,7 @@ enforce_inventory = false
 operator_access = "unknown"
 
 [routing.admission]
-# Arms admission. False (the default) reserves nothing and dispatch behaves exactly as before.
+# Arms opt-in shared-account capacity reservations before a routing-lane launch. False (the default) reserves nothing and dispatch behaves exactly as before. Subscription-percent admission only: every value is a share of ONE quota window (0..100), never a dollar amount; API spend forecasting is unsupported.
 enabled = false
 # Concurrent reserved+committed dispatches allowed per quota pool, regardless of percentages. Default 3.
 max_inflight_per_pool = 3
