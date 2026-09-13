@@ -3596,10 +3596,10 @@ event_types:
           description: "The injected text, verbatim when short (a slash command) and truncated for the event line when long. Leading-slash is the marker a human reads as 'invocation, not a typed ruling'."
         harness:
           type: string
-          description: "Recipient harness: claude, codex, etc."
+          description: "Recipient harness: claude, codex, etc. The pane-send floor writes 'unknown' when the pane hosts no registry row it can resolve."
         lane:
           type: string
-          description: "The live lane used: control.sock (claude), codex-daemon, or mux-pane."
+          description: "The live lane used: control.sock (claude), codex-daemon, pane-send (the `fno mux pane send` floor itself, which writes every prompt write, x-91ba), or mux-pane (legacy mail-lane pane deliveries)."
         target_cwd:
           type: string
           description: "Optional. Recipient working dir, for the authorship join (did the sender author that sha?)."
@@ -3618,6 +3618,36 @@ event_types:
         self_send:
           type: boolean
           description: "True when the caller explicitly addressed its own session with --to-self."
+        source:
+          type: string
+          description: "Optional (pane-send floor, x-91ba). DECLARED, not sniffed: the caller names itself via `pane send --source <label>`; the floor never inspects the payload to guess. Default `unattributed:<pid>` when no caller declares one."
+        payload_sha256:
+          type: string
+          description: "Optional (pane-send floor). SHA-256 over the exact bytes typed at the pane (post-wrap, post-cap), so a row joins to the payload the recipient actually saw without storing it twice."
+        payload_bytes:
+          type: integer
+          description: "Optional (pane-send floor). Byte length of the exact typed payload."
+        target_pane:
+          type: integer
+          description: "Optional (pane-send floor). The pane id the bytes were typed at, beside the target_session mux name."
+        target_name:
+          type: string
+          description: "Optional (pane-send floor). The occupant's registry row name when the pane hosts one."
+        caller_session:
+          type: string
+          description: "Optional (pane-send floor). The FNO_SESSION of the calling process when it sits in an fno pane; absent for a caller outside the mux."
+        caller_pid:
+          type: integer
+          description: "Optional (pane-send floor). The calling process's pid, always present beside an unattributed source."
+        submit:
+          type: boolean
+          description: "Optional (pane-send floor). Whether the send requested a submit carriage return."
+        outcome:
+          type: string
+          description: "Optional (pane-send floor). The attempt's verdict: submitted, delivered, unconfirmed, identity-mismatch, dnd, unanswered, or refused. Exit 22 is recorded unconfirmed, never delivered."
+        exit_code:
+          type: integer
+          description: "Optional (pane-send floor). The verb's own exit code the outcome word came from."
     consumers: [operator]
 
   - name: mail_origin_classified
