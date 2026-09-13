@@ -57,7 +57,7 @@ Bus-log reply lookup therefore applies only to durable delivery; hosted delivery
 fno agents mail send backend-worker "review my PR diff" --from-name "orchestrator-alpha"
 ```
 
-The recipient sees the body inside the `<fno_mail from="..." harness="..." model="...">` envelope. The framing marks the sender as a peer, not the operator, so the receiving model responds in a directed style rather than treating the injection as a user interrupt. See [docs/architecture/mail-live-inject.md](../architecture/mail-live-inject.md) for the envelope and delivery model.
+The recipient sees the body inside the `<fno_mail from="..." id="...">` envelope. The framing marks the sender as a peer, not the operator, so the receiving model responds in a directed style rather than treating the injection as a user interrupt. See [docs/architecture/mail-live-inject.md](../architecture/mail-live-inject.md) for the envelope and delivery model.
 
 ## Live-inject-first semantics
 
