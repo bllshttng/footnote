@@ -216,6 +216,18 @@ into the Now column (between ``claimed`` and the priority-driven
 promotion rule).
 Cleared automatically by ``cmd_done``; reversible via ``unqueue``.
 
+## cmd_retract
+
+Measured 2026-09-13 at a cost of three dispatches: a king filed a row on
+a false premise, wrote the retraction as a progress note, and the row
+stayed plannable. Three blueprint sessions then each spent a spawn proving
+the same premise false. A note is prose beside the status every reader
+keys on. ``retract`` makes the remedy one act that cannot be half done:
+it defers (out of every dispatch reader) and stamps
+``deferred_kind: retracted`` (the halt signal the blueprint consolidation
+gate reads). It forwards to ``cmd_defer`` with the kind forced, so batch
+atomicity and the blank-reason refusal are inherited, never reimplemented.
+
 ## cmd_done (formerly at line 8491)
 
 A query that is not a bare node id (title substring, bare hex, slug,

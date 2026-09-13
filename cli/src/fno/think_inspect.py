@@ -97,6 +97,7 @@ def _node_summary(entry: dict[str, Any], *, archived: bool = False) -> dict[str,
             "title",
             "status",
             "superseded_by",
+            "deferred_kind",
             "domain",
             "project",
             "parent",
@@ -289,6 +290,7 @@ def _graph_section(
             "status": resolved.get("status"),
             "pr_number": resolved.get("pr_number"),
             "superseded_by": resolved.get("superseded_by"),
+            "deferred_kind": resolved.get("deferred_kind"),
         }
     return {
         "status": "partial" if archive_error else "ok",
