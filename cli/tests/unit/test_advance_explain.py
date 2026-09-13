@@ -24,10 +24,14 @@ from __future__ import annotations
 def _lane_fill_world(monkeypatch, ready, *, max_lanes=2, gates=None):
     """Hermetic seams for build_lane_fill_report (x-7f1f): the preview runs the
     drain's own selection (_ready_leaf_children through _converge_gate), so the
-    seams pin exactly those."""
+    seams pin exactly those. x-fa3a: the budget is stubbed at the seam the
+    drain reads, and children carry no lane of their own unless a test gives
+    one, so max_lanes stays a pure fleet bound."""
     from fno.backlog import advance as adv
 
-    monkeypatch.setattr(adv, "_spawn_headroom", lambda *a, **k: max_lanes)
+    budget = adv._LaneBudget(fleet=max_lanes)
+    monkeypatch.setattr(adv, "_spawn_budget_or_degraded", lambda provider=None: budget)
+    monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: None)
     monkeypatch.setattr(adv, "_ready_leaf_children", lambda epic: ready)
     monkeypatch.setattr(adv, "_auto_continue_resolve", lambda: (False, "config"))
     monkeypatch.setattr(
@@ -69,6 +73,59 @@ def test_epic_explain_reports_the_children_the_drain_would_dispatch(monkeypatch)
     assert "in-flight-collision" not in drops
     assert "unevaluated" not in drops
     assert [e["id"] for e in report["selection"]["would_fill"]] == ["x-win"]
+
+
+def test_explain_forwards_the_pins_into_the_per_child_pricing(monkeypatch):
+    """x-fa3a AC4: --provider/--model reach the width seam AND the per-child
+    verdict instead of being dropped, so a pinned explain describes the pass
+    the pin would actually make."""
+    adv = _lane_fill_world(monkeypatch, [_ready_node("x-bp")])
+    seen: dict = {}
+
+    def fake_budget(provider=None):
+        seen["budget_provider"] = provider
+        return adv._LaneBudget(fleet=3)
+
+    def fake_vendor(child, *, model=None, provider=None):
+        seen["vendor_model"] = model
+        seen["vendor_provider"] = provider
+        return None
+
+    monkeypatch.setattr(adv, "_spawn_budget_or_degraded", fake_budget)
+    monkeypatch.setattr(adv, "_child_lane_vendor", fake_vendor)
+
+    from fno.backlog.explain import build_lane_fill_report
+
+    report = build_lane_fill_report(epic="x-epic", provider="claude", model="opus")
+    assert seen == {
+        "budget_provider": "claude",
+        "vendor_model": "opus",
+        "vendor_provider": "claude",
+    }
+    assert [e["id"] for e in report["selection"]["would_fill"]] == ["x-bp"]
+
+
+def test_unpinned_explain_classifies_lane_caps_like_the_drain(monkeypatch):
+    """x-fa3a AC5: with one zai lane free, the first zai child fills, the next
+    two drop lane-cap on zai, and each drop names its lane - the same set the
+    drain's counters produce."""
+    adv = _lane_fill_world(
+        monkeypatch,
+        [_ready_node("x-1"), _ready_node("x-2"), _ready_node("x-3")],
+        max_lanes=8,
+    )
+    budget = adv._LaneBudget(fleet=8, vendor_remaining={"zai": 1})
+    monkeypatch.setattr(adv, "_spawn_budget_or_degraded", lambda provider=None: budget)
+    monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: "zai")
+
+    from fno.backlog.explain import build_lane_fill_report
+
+    report = build_lane_fill_report(epic="x-epic")
+    assert [e["id"] for e in report["selection"]["would_fill"]] == ["x-1"]
+    caps = [e for e in report["selection"]["excluded"] if e["reason"] == "lane-cap"]
+    assert [(e["id"], e.get("lane")) for e in caps] == [("x-2", "zai"), ("x-3", "zai")]
+    drops = {d["filter"]: d["dropped"] for d in report["selection"]["drops"]}
+    assert drops["lane-cap"] == 2
 
 
 def test_epic_explain_names_the_gate_that_dropped_the_asked_node(monkeypatch):

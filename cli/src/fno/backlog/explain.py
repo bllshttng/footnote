@@ -656,6 +656,8 @@ def build_lane_fill_report(
     node_id: Optional[str] = None,
     top: int = 5,
     max_dispatch: Optional[int] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict:
     """``--explain --epic``: the fan-out the daemon's drain would make, as a READ.
 
@@ -666,8 +668,10 @@ def build_lane_fill_report(
     2320 graph nodes carry - so it reported an empty mission for every epic
     (x-7f1f). It now classifies the SAME children through the SAME pre-spawn
     gates the drain runs (``_converge_gate`` plus the epic fan-out's own
-    no-project / unmapped-project / lane-cap), so it cannot describe a
-    selection the drain would not make.
+    no-project / unmapped-project / lane-cap, priced per child by
+    ``_lane_cap_verdict``), so it cannot describe a selection the drain would
+    not make. ``provider``/``model`` forward the dispatch pins raw (the
+    explain branch returns before the CLI validates them).
 
     Never dispatches, never claims, never emits.
     """
@@ -680,7 +684,7 @@ def build_lane_fill_report(
     from fno.backlog import advance as adv
     from fno.graph._intake import project_root_from_settings
 
-    width = adv._spawn_headroom()
+    budget = adv._spawn_budget_or_degraded(provider)
     ready = adv._ready_leaf_children(epic)
 
     # Classify every child through the fan-out's gates, in the drain's order.
@@ -688,8 +692,10 @@ def build_lane_fill_report(
     reasons_by_id: dict[str, str] = {}
     excluded: list[dict] = []
     selected: list[dict] = []
+    filled = 0
     for child in ready:
         reason: Optional[str]
+        lane: Optional[str] = None
         proj = child.get("project")
         if not proj:
             reason = "no-project"
@@ -697,18 +703,30 @@ def build_lane_fill_report(
             root = project_root_from_settings(proj)
             if not root:
                 reason = "unmapped-project"
-            elif len(selected) >= width:
+            else:
                 # The drain checks the cap BEFORE the converge gates
                 # (advance_epic), so the preview must name the same drop first.
-                reason = "lane-cap"
-            else:
-                reason = adv._converge_gate(child, root)
+                refused, lane, _headroom = adv._lane_cap_verdict(
+                    child, budget, total=filled, model=model, provider=provider
+                )
+                if refused:
+                    reason = "lane-cap"
+                else:
+                    reason = adv._converge_gate(child, root)
         if reason is not None:
             reasons_by_id[child["id"]] = reason
             counts[reason] = counts.get(reason, 0) + 1
-            excluded.append({"id": child["id"], "reason": reason})
+            row: dict = {"id": child["id"], "reason": reason}
+            if reason == "lane-cap":
+                row["lane"] = lane
+            excluded.append(row)
         else:
             selected.append(child)
+            filled += 1
+            if lane is not None:
+                budget.dispatched_by_vendor[lane] = (
+                    budget.dispatched_by_vendor.get(lane, 0) + 1
+                )
 
     # The live run's overall --max binds after the spawn-gate width does, so a
     # dry run that ignored it would promise more dispatches than the run makes.
@@ -771,7 +789,7 @@ def build_lane_fill_report(
         "mode": "lane-fill",
         "epic": epic,
         "selection": {
-            "width": width,
+            "width": budget.fleet,
             "pool": len(ready),
             "drops": drops,
             "would_fill": [
@@ -825,7 +843,8 @@ def render_lane_fill_report(report: dict) -> str:
         out.append(f"  {sel['slot_note']}")
     out.append(f"  stop: {sel['stop']}")
     for row in sel["excluded"]:
-        out.append(f"    excluded {row.get('id')}: {row.get('reason')}")
+        lane = f" (lane {row['lane']})" if row.get("lane") else ""
+        out.append(f"    excluded {row.get('id')}: {row.get('reason')}{lane}")
     if sel["would_fill"]:
         out.append("  would fill:")
         for i, e in enumerate(sel["would_fill"]):

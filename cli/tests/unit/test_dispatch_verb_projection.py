@@ -213,7 +213,11 @@ def test_epic_advance_declared_verb_reaches_spawn_argv(iso, monkeypatch):
         "fno.graph._intake.project_root_from_settings",
         lambda project: str(repo) if project == "web" else None,
     )
-    monkeypatch.setattr(adv, "_spawn_headroom", lambda provider=None: 2)
+    monkeypatch.setattr(
+        adv, "_spawn_budget_or_degraded",
+        lambda provider=None: adv._LaneBudget(fleet=2),
+    )
+    monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: None)
     calls = _record_spawns(monkeypatch)
 
     res = adv.advance_epic("x-EPIC", events_path=iso.events)
@@ -248,7 +252,11 @@ def test_epic_advance_undeclared_node_derives_the_target_intake(iso, monkeypatch
         "fno.graph._intake.project_root_from_settings",
         lambda project: str(repo) if project == "web" else None,
     )
-    monkeypatch.setattr(adv, "_spawn_headroom", lambda provider=None: 2)
+    monkeypatch.setattr(
+        adv, "_spawn_budget_or_degraded",
+        lambda provider=None: adv._LaneBudget(fleet=2),
+    )
+    monkeypatch.setattr(adv, "_child_lane_vendor", lambda child, **k: None)
     calls = _record_spawns(monkeypatch)
 
     res = adv.advance_epic("x-EPIC", events_path=iso.events)
