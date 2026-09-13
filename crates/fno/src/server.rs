@@ -35,15 +35,16 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::agents_view::{self, RegistryAgent};
 use crate::backlog_view;
+#[cfg(test)]
+use crate::proto::AgentRow;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge,
-    AgentNoPaneReason, AgentRow, AgentRowReceipt, AnchoredLayoutSpec, BacklogCard, BindOutcome,
-    BlockDir, BlockSel, CardState, ClientMsg, Command, ControlVerb, Frame, LayoutBinding,
-    LayoutScope, LayoutSlot, LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent,
-    MouseKind, PaneInfo, PaneMeta, PanePlacement, PaneTarget, PlacementFallback, PortalSlot,
-    ProtoError, Reach, ResolvedPlacement, RestoreRow, ServerMsg, SlotBinding, SlotOutcome,
-    SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta, TabPaneOccupant, TabSel,
-    WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    AgentNoPaneReason, AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel, CardState,
+    ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot, LayoutSpec,
+    LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
+    PanePlacement, PaneTarget, PlacementFallback, PortalSlot, ProtoError, Reach, ResolvedPlacement,
+    RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo,
+    TabLayout, TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::restore_liveness::{
@@ -81,13 +82,12 @@ mod truth_probe;
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
 use self::keeper_adopt::{keeper_worker_bin, AdoptedKeeper};
-#[cfg(test)]
-use self::resume_argv::{
-    clear_resume_program, set_declared_resume_form, set_resume_program, DeclaredResumeFormsGuard,
-    ResumeProgramGuard,
-};
 use self::resume_argv::{
     declared_resume_form, resume_argv_for, resume_target_from_argv, ResumeReplay,
+};
+#[cfg(test)]
+use self::resume_argv::{
+    set_declared_resume_form, set_resume_program, DeclaredResumeFormsGuard, ResumeProgramGuard,
 };
 use self::truth_probe::TruthReading;
 use self::truth_probe::{probe_truth_map, TruthProbeLatch, TRUTH_PROBE_EVERY};
@@ -2474,9 +2474,9 @@ pub(crate) fn restore_member_cwd(
 // test override live in `restore_gate`, next to the restore refusals.
 use crate::restore_gate::restore_registry_rows;
 
-/// (x-9052) The restore gate's done set, overridable in tests (a unit test
-/// cannot populate the real graph). `None` falls through to the live
-/// `backlog_view::done_session_ids` read.
+// (x-9052) The restore gate's done set, overridable in tests (a unit test
+// cannot populate the real graph). `None` falls through to the live
+// `backlog_view::done_session_ids` read.
 #[cfg(test)]
 thread_local! {
     static RESTORE_DONE_SESSIONS: std::cell::RefCell<Option<HashSet<(String, String)>>> =
@@ -9508,7 +9508,7 @@ impl Core {
             .map(|s| s.canonical_cwd().to_string())
             .collect();
         let derived = squad::display_names(&cwds);
-        let mut squads: Vec<SquadMeta> = self
+        let squads: Vec<SquadMeta> = self
             .session
             .squads
             .iter()
@@ -23728,6 +23728,7 @@ mod tests {
         assert!(core.unique_worker_pane_by_name("reused-name").is_err());
     }
 
+    #[test]
     fn resumed_pane_resolves_fno_id_from_its_resume_birthright() {
         // (x-b029) AC3-HP: a pane the daemon re-homed through the resume path
         // resolves its fno_id from the (harness, session) record the resume

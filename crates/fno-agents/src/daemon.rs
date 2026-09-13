@@ -12,12 +12,6 @@
 //! a working supervisor end-to-end.
 
 use crate::events::EventEmitter;
-// Test-only consumers (daemon's own cfg(test) modules and src/daemon/tests/*)
-// reach these through `use super::*`, so the imports stay scoped to test builds.
-#[cfg(test)]
-use crate::client_verbs::RowLiveness;
-#[cfg(test)]
-use crate::codex_thread_entry::build_codex_thread_entry;
 // The receipt builders moved to `receipt.rs` (x-a879) so the write choke
 // point (`state::update_registry`) can stage the same recovery record for a
 // row removed through ANY door; re-exported so the reap path's references
@@ -1376,8 +1370,6 @@ use crate::liveness_sweep;
 pub(crate) use crate::liveness_sweep::{
     apply_reconcile_change, plan_reconcile, ReconcileChange, ReconcileOutcome, SweepMode,
 };
-#[cfg(test)]
-pub(crate) use crate::row_truth::{apply_title_changes, row_truth_handles};
 pub(crate) use crate::row_truth::{
     batched_row_probes, fold_positive_death, row_truth_handle, served_fresh_liveness,
     served_liveness_basis, title_changes,
@@ -8748,6 +8740,14 @@ fn fill_random(buf: &mut [u8]) {
     }
 }
 
+// Test-only consumers (daemon's own cfg(test) modules and src/daemon/tests/*)
+// reach these through `use super::*`, so the imports stay scoped to test builds.
+#[cfg(test)]
+use crate::client_verbs::RowLiveness;
+#[cfg(test)]
+use crate::codex_thread_entry::build_codex_thread_entry;
+#[cfg(test)]
+pub(crate) use crate::row_truth::{apply_title_changes, row_truth_handles};
 #[cfg(test)]
 mod tests {
     #[path = "blocking_bound_tests.rs"]

@@ -1477,7 +1477,9 @@ mod feed_detail;
 mod feed_view;
 mod keys_modal;
 mod needs_view;
-pub(crate) use needs_view::{needs_overlay_lines, NeedsProjection};
+pub(crate) use needs_view::needs_overlay_lines;
+#[cfg(test)]
+pub(crate) use needs_view::NeedsProjection;
 
 /// The move-tab / move-pane destination picker's state (x-96e8, cursored by
 /// x-3e17). Was a bare `(MoveSrc, Vec<u64>)` tuple, which had nowhere to keep a
@@ -2308,9 +2310,11 @@ const UNLANED: &str = "unlaned";
 mod update_menu;
 
 use update_menu::{
-    build_sideline_menu, build_update_modal, probe_update_readiness, run_restart_verb, RunningRow,
-    UpdateOutcome, UpdateReadiness,
+    build_sideline_menu, build_update_modal, probe_update_readiness, run_restart_verb,
+    UpdateOutcome,
 };
+#[cfg(test)]
+use update_menu::{RunningRow, UpdateReadiness};
 
 /// The operator tapped a choice: the modal named the counts, so the tap IS
 /// the confirmation. Queue the apply for the run loop (or say why not).
@@ -8929,7 +8933,7 @@ fn need_glyph(k: NeedKind) -> char {
 /// item joined to the roster (leg 2), reduced to what the overlay renders and
 /// routes on. Identity for cursor re-anchor is `(kind, name)`.
 #[derive(Clone)]
-struct NeedRow {
+pub(crate) struct NeedRow {
     kind: NeedKind,
     name: String,
     reason: String,
@@ -8958,7 +8962,7 @@ impl NeedRow {
 }
 
 #[derive(Clone)]
-enum NeedsOverlayRow {
+pub(crate) enum NeedsOverlayRow {
     Mine(crate::needs_overlay::MineItem),
     Question(crate::needs_overlay::QuestionItem),
     Need(NeedRow),

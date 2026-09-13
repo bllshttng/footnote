@@ -1187,7 +1187,7 @@ impl ConnectionsView {
         }
         // Session-local pending logins render after the real records; `r`
         // registers the selected one into a managed account.
-        for (j, p) in self.pending.iter().enumerate() {
+        for (j, _p) in self.pending.iter().enumerate() {
             let idx = self.accounts.len() + j;
             let cursor = if idx == self.acct_sel { ">" } else { " " };
             out.push(format!(

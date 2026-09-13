@@ -454,6 +454,7 @@ pub(crate) fn held_worker_names(
 
 /// (x-6b0b) Worker names the journal positively records as never bound, with
 /// the removal reason each carries.
+#[cfg(test)]
 pub(crate) fn parse_never_bound_removals(raw: &str) -> HashMap<String, String> {
     parse_journal_events(raw).never_bound
 }

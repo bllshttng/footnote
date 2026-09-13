@@ -756,7 +756,10 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     // The reaper thread joined below reaped the incumbent the moment TERM
     // landed; without that reap it would linger as a zombie and the count
     // would report two supervisors for one live one.
-    reaper.join().expect("incumbent reaper joins").expect("incumbent reap succeeds");
+    reaper
+        .join()
+        .expect("incumbent reaper joins")
+        .expect("incumbent reap succeeds");
 
     // The successor serves. `status` stays on the async runtime, so this reads
     // the event loop's liveness rather than a handler's own work.
@@ -830,7 +833,10 @@ async fn daemon_child_env_isolated_probe() {
     };
     let mut sibling = start_daemon_with_bin(&sibling_home, &sibling_bin);
     let outcome = restart.await.unwrap().expect("probe restart succeeds");
-    reaper.join().expect("incumbent reaper joins").expect("incumbent reap succeeds");
+    reaper
+        .join()
+        .expect("incumbent reaper joins")
+        .expect("incumbent reap succeeds");
     terminate_untracked(outcome.new_pid);
     let sibling_pid = sibling.id();
     unsafe { libc::kill(sibling_pid as libc::pid_t, libc::SIGTERM) };

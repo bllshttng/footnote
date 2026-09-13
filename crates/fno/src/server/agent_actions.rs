@@ -17,12 +17,6 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Stage (or clear, with `None`) the test verdict `run_reentry_plan` returns.
-#[cfg(test)]
-pub(crate) fn stage_reentry_plan(plan: Option<Result<ReentryVerdict, String>>) {
-    REENTRY_PLAN_STUB.with(|stub| *stub.borrow_mut() = plan);
-}
-
 #[cfg(test)]
 thread_local! {
     /// Hermetic seam over the off-loop resume-argv shell-out: a staged argv
@@ -30,12 +24,6 @@ thread_local! {
     /// [`REENTRY_PLAN_STUB`].
     static RESUME_ARGV_STUB: std::cell::RefCell<Option<Result<Vec<String>, String>>> =
         const { std::cell::RefCell::new(None) };
-}
-
-/// Stage (or clear, with `None`) the argv `run_resume_argv` returns.
-#[cfg(test)]
-pub(crate) fn stage_resume_argv(argv: Option<Result<Vec<String>, String>>) {
-    RESUME_ARGV_STUB.with(|stub| *stub.borrow_mut() = argv);
 }
 
 /// (x-eb79) Shell `fno-agents resume-argv <harness> <sid> --cwd <dir> [--cd]
@@ -760,17 +748,11 @@ mod tests {
         write_fake_bin(
             &tmp.join("fake-agents.sh"),
             "#!/bin/bash\n\
-
          if [ \"$1\" = \"stop\" ]; then\n\
-
          echo \"claude stop corpse failed: agent not found\" >&2\n\
-
          exit 1\n\
-
          fi\n\
-
          echo \"removed: corpse (fno; claude row already absent)\"\n\
-
          exit 0\n",
         );
 
@@ -809,17 +791,11 @@ mod tests {
         &tmp.join("fake-agents.sh"),
 
         "#!/bin/bash\n\
-
          if [ \"$1\" = \"stop\" ]; then\n\
-
          printf '{\"entries\":[{\"name\":\"corpse\",\"cwd\":\"/w\",\"status\":\"exited\"}]}' > \"$FNO_AGENTS_HOME/registry.json\"\n\
-
          exit 0\n\
-
          fi\n\
-
          echo \"removed: corpse\"\n\
-
          exit 0\n",
 
     );

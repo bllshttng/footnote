@@ -31,7 +31,7 @@
 //!   per-reply shapes in [`render_reply`].
 
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 

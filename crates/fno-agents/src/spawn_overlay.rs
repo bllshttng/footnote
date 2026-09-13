@@ -1020,4 +1020,3 @@ mod tests {
         assert_eq!(out["verdict"], "refuse");
     }
 }
-

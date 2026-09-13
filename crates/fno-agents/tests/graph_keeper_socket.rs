@@ -52,9 +52,7 @@ fn spawn_keeper(tag: &str, graph: &Path, sock: &Path) -> Keeper {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn store keeper");
-    Keeper {
-        child,
-    }
+    Keeper { child }
 }
 
 fn wait_for_socket(sock: &Path) {

@@ -109,11 +109,6 @@ fn portal_seat_refusal_keys_on_the_claude_attach_argv() {
         .is_none());
 }
 
-/// The drifted-to-agent-view argv the AC3 cases share.
-fn drifted_argv() -> Vec<String> {
-    ["claude", "agents"].iter().map(|s| s.to_string()).collect()
-}
-
 /// A claude Drive row keyed by its attach id on the portal under test.
 fn claude_portal_row() -> crate::agents_view::RegistryAgent {
     let mut row = agent_in("sess", 99, None, false);
