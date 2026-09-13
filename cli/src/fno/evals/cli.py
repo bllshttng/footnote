@@ -237,6 +237,41 @@ def report_command(
     raise typer.Exit(code=4 if report["regression_alarm"] else 0)
 
 
+@evals_app.command(
+    "macro",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def macro_command(ctx: typer.Context) -> None:
+    """Find recurring labelled failure patterns in existing event journals."""
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.paths import event_journals
+    from fno.rust_binary import resolve_binary
+
+    # A pure argv forwarder: the flags are the binary's (operator ruling on
+    # x-72fc - the Python flag surface never grows), so this arm declares no
+    # typer.Options of its own. It only resolves the journal defaults the
+    # verb needs when the caller passed no --events.
+    args = list(ctx.args)
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno doctor evals macro: the fno-agents binary was not found. It ships in the "
+            "`pip install fno` wheel and with the plugin; reinstall fno or run "
+            "`fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    argv = [str(binary), "evals-macro", *args]
+    if not any(a == "--events" or a.startswith("--events=") for a in args):
+        for path in event_journals():
+            argv += ["--events", str(path)]
+    result = subprocess.run(argv, check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
 @evals_app.command("graduate")
 def graduate_command(
     task_id: str = typer.Argument(..., help="Bank task id to graduate to the regression tier."),

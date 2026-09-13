@@ -46,6 +46,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "distress-scan",
     "drive",
     "drive-authority",
+    "evals-macro",
     "evidence-gate",
     "law-match",
     "finalize",
@@ -584,6 +585,14 @@ async fn run(args: Vec<String>) -> i32 {
     // the court-fold fold and the king-history scan in process.
     if verb == "king-checkin" {
         return fno_agents::king_checkin::run_king_checkin(&args[1..]);
+    }
+    // `evals-macro`: the macro-eval failure-pattern leaderboard for
+    // `fno doctor evals macro`. Daemon-free read, `==` dispatch like
+    // king-history: Python resolves the journal paths (identity and paths are
+    // Python-owned), the native side owns the fold so the file-budget
+    // Python-tree ratchet holds.
+    if verb == "evals-macro" {
+        return fno_agents::evals_macro::run_evals_macro(&args[1..]);
     }
     // `reign-ledger`: the reign ledger page for `fno agents king ledger`.
     // Same split as king-history: Python resolves the court and the paths,

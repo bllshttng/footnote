@@ -247,6 +247,11 @@ RUST_CLIENT_VERBS = frozenset(
         # passes every journal paths.event_journals resolves, then invokes
         # the binary directly (not via `fno agents` routing).
         "king-history",
+        # Failure-pattern leaderboard fold for `fno doctor evals macro`:
+        # daemon-free read; Python resolves the journal list and forwards the
+        # flags, then invokes the binary directly (not via `fno agents`
+        # routing).
+        "evals-macro",
         # The reign check-in beat for `fno agents king checkin`: daemon-free
         # read; Python resolves the caller's crown scope and the paths Python
         # owns, then invokes the binary directly (not via `fno agents`
@@ -509,6 +514,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
     "court-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json|html-section; invoked directly by `fno agents court`, not `fno agents` routing.",
     "king-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; invoked directly by `fno agents king history`, which passes every journal paths.event_journals resolves.",
+    "evals-macro": "The macro-eval failure-pattern leaderboard fold: --events <journal.jsonl> [--events ...] [--since 30d] [--topic TYPE:LABEL] [--window 20] [--all] [--json]; invoked directly by `fno doctor evals macro`, which resolves the journal defaults.",
     "king-checkin": "One verb runs the reign check-in body: --scope <scope> --events-path <events.jsonl> [--events-path ...] --graph <graph.json> --handoffs-dir <dir> [--faqs-dir <dir>] [--board-state <manifest>] [--emit-path <events.jsonl>] [--no-emit] [--json]; invoked directly by `fno agents king checkin`, which resolves the crown and the paths.",
     "reign-ledger": "The reign ledger page renderer: --court-json <court.json> --graph <graph.json> --generated <ts> --out <reign.html>; invoked directly by `fno agents king ledger`, which resolves the court and the paths.",
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",

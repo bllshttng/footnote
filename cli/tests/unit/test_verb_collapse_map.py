@@ -190,7 +190,11 @@ def test_map_covers_current_surface_once():
     # 614 -> 616. `agents provider-cap`, the relay that reads and answers the
     # provider-cap actor's questions: 616 -> 617. `agents compaction`, the
     # hidden relay over the PreCompact stamp the hook writes: 617 -> 618.
-    assert len(mapped) == 619, (
+    # Counted from the merged file at the x-f33e fold: main carried 619
+    # (provider-cap and compaction among them) and this branch allocates
+    # `doctor evals macro`, its forwarded `evals macro` spelling, and the
+    # binary-first `agents evals-macro` action the dispatchers expose.
+    assert len(mapped) == 622, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

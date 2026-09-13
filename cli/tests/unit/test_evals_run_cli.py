@@ -1,13 +1,21 @@
 """`fno doctor evals run` CLI exit-code contract (no spawn / no worktree needed)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from fno.evals.cli import evals_app
+from fno.rust_binary import find_dev_binary
 
 runner = CliRunner()
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
 
 
 def _bank(tmp_path: Path, name: str, body: str) -> Path:
@@ -220,3 +228,72 @@ def test_lane_and_cohort_flags_pass_through_to_run_task(tmp_path: Path, monkeypa
     assert seen["experiment_id"] == "cohort-a"
     # A lane is a complete coordinate; the provider default must not override it.
     assert seen["provider"] is None
+
+
+def _macro_journal(path: Path, *, old: bool = False) -> None:
+    ts = "2025-01-01T10:00:00Z" if old else "2026-09-12T10:00:00Z"
+    rows = [
+        {"ts": ts, "type": "loop_check_watch_idle", "data": {"session_id": "s1", "node_id": "n1", "reason": "ci"}},
+        {"ts": ts, "type": "termination", "data": {"session_id": "s1", "node_id": "n1", "reason": "Budget"}},
+        {"ts": ts, "type": "loop_check_watch_idle", "data": {"session_id": "s2", "node_id": "n2", "reason": "ci"}},
+        {"ts": ts, "type": "termination", "data": {"session_id": "s2", "node_id": "n2", "reason": "Budget"}},
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+
+def _capture_child_stdout(monkeypatch) -> list[str]:
+    """The child binary inherits real stdout, which CliRunner cannot see;
+    capture it and hand back the child outputs in call order."""
+    import subprocess
+
+    real_run = subprocess.run
+    outputs: list[str] = []
+
+    def run_capture(argv, check=False):
+        proc = real_run(argv, check=check, capture_output=True, text=True)
+        outputs.append(proc.stdout)
+        return proc
+
+    monkeypatch.setattr(subprocess, "run", run_capture)
+    return outputs
+
+
+@requires_rust
+def test_macro_json_and_topic_drilldown(tmp_path: Path, monkeypatch) -> None:
+    """The delegation end to end: the CLI shells the dev binary, which folds."""
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
+    outputs = _capture_child_stdout(monkeypatch)
+    journal = tmp_path / "events.jsonl"
+    _macro_journal(journal)
+
+    result = runner.invoke(evals_app, ["macro", "--events", str(journal), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(outputs[0])
+    assert payload["leaderboard"][0]["pattern"] == "termination:Budget"
+
+    drill = runner.invoke(evals_app, ["macro", "--events", str(journal),
+                                      "--topic", "termination:Budget"])
+    assert drill.exit_code == 0
+    assert "s1" in outputs[1] and "s2" in outputs[1]
+    assert "termination:Budget" in outputs[1]
+
+
+@requires_rust
+def test_macro_topic_error_and_empty_window(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
+    outputs = _capture_child_stdout(monkeypatch)
+    journal = tmp_path / "events.jsonl"
+    _macro_journal(journal)
+
+    missing = runner.invoke(evals_app, ["macro", "--events", str(journal),
+                                       "--topic", "nope:never"])
+    assert missing.exit_code == 1
+    assert "patterns present" in outputs[0]
+
+    old_journal = tmp_path / "old-events.jsonl"
+    _macro_journal(old_journal, old=True)
+    empty = runner.invoke(evals_app, ["macro", "--events", str(old_journal),
+                                      "--since", "1h"])
+    assert empty.exit_code == 0
+    assert "no events since" in outputs[1]
