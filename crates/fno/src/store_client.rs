@@ -99,9 +99,7 @@ fn which_worker() -> Option<PathBuf> {
 }
 
 fn spawn_keeper(graph: &Path) -> Result<(), String> {
-    let binary = worker_binary().ok_or_else(|| {
-        "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)".to_string()
-    })?;
+    let binary = worker_binary().ok_or_else(crate::product_boundary::graph_worker_missing_error)?;
     let sock = store_socket_for(graph);
     let session = format!("mux-{}", std::process::id());
     std::process::Command::new(&binary)
@@ -118,7 +116,7 @@ fn spawn_keeper(graph: &Path) -> Result<(), String> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| format!("cannot spawn store keeper: {e}"))?;
+        .map_err(|e| crate::product_boundary::graph_worker_spawn_error(&binary, e))?;
     Ok(())
 }
 

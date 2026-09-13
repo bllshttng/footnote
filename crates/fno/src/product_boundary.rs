@@ -113,6 +113,12 @@ pub fn graph_worker_missing_error() -> String {
     format!("{GRAPH_WORKER_BIN} not found (set FNO_AGENTS_WORKER or install the runtime)")
 }
 
+/// The classified refusal when the worker binary exists but cannot spawn.
+/// The receipt names the component and the underlying reason either way.
+pub fn graph_worker_spawn_error(bin: &Path, err: std::io::Error) -> String {
+    format!("cannot spawn {GRAPH_WORKER_BIN} ({}): {err}", bin.display())
+}
+
 /// The ONE PATH walk for a paired binary. store_client's worker resolver and
 /// the runtime observation both land here.
 pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
