@@ -924,9 +924,8 @@ def _close_probe_runner_shellout(
 
 def _verdict_reader_shellout(plan_path: str) -> "dict[str, Any]":
     """Default ``verdict_reader``: one round-trip with ``fno-agents
-    prove-it-verdicts`` returning {read_at, rows, unreadable}. Raises
-    ``VerbUnavailable``, which the caller degrades to a warning, the same
-    posture a plan read failure takes."""
+    prove-it-verdicts``; a ``VerbUnavailable`` degrades to a warning, the
+    same posture a plan read failure takes."""
     from fno.rust_binary import verb_call
 
     return verb_call("prove-it-verdicts", {})
@@ -1014,9 +1013,8 @@ def resolve_promise_evidence(
     plan_display = node.get("plan_path", plan_path_clean)
 
     # Condition E (x-6d64): an open prove-it FAIL on this node's own plan
-    # artifacts is claimed work whose outcome did not hold. Needs no
-    # declaration - the artifacts sidecar hangs off plan_path itself. A done
-    # node is never reopened; a failed reader is a warning, never a silent pass.
+    # artifacts is claimed work whose outcome did not hold; it needs no
+    # declaration. A done node is never reopened; a failed reader is a warning.
     if node_id:
         try:
             payload = (verdict_reader or _verdict_reader_shellout)(plan_path_clean)

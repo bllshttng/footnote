@@ -775,8 +775,7 @@ def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:
 
 def _read_open_verdicts() -> "tuple[list[VerdictRow], Optional[str]]":
     """Open prove-it FAIL rows from the Rust reader, or why it could not be
-    read. A failed call does NOT raise ``OutstandingError``: that would blank
-    the questions leg, which reads stores the verdict reader never touches."""
+    read. A failed call never raises: that would blank the questions leg."""
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
