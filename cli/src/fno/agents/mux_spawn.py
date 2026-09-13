@@ -3687,8 +3687,7 @@ def dispatch_spawn_pane(
         argv = [argv[0], *env_config_args, *argv[1:]]
     elif provider == "codex" and argv:
         print(
-            f"codex pane: identity leaves skipped; argv[0] is {argv[0]!r}, "
-            "not the provider binary",
+            f"codex pane: identity leaves skipped; argv[0] is {argv[0]!r}",
             file=sys.stderr,
         )
     if codex_route is not None:

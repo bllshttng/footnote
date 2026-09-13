@@ -73,27 +73,26 @@ def ensure_codex_daemon(
 def codex_shell_env_args(pairs: Sequence[str]) -> list[str]:
     """Render the worker's own identity as ONE ``-c`` config-set leaf.
 
-    A daemon-run tool inherits the daemon's env, not the TUI's, so without
-    this the worker name stops at the TUI. Measured 2026-09-13 on
-    codex-cli 0.154.0, headless: codex applies only the FIRST ``-c`` per
-    top-level config key and drops the rest, one leaf replaces the whole
-    ``[shell_environment_policy.set]`` table when it is that first edit, and
-    an inline-table value is refused at config load. One leaf therefore
-    carries ``FNO_AGENT_SELF`` (merging with the config table); every other
-    pair is left for the env(1) wrapper on the TUI itself.
+    A daemon-run tool inherits the daemon's env, not the TUI's. Measured
+    2026-09-13 on codex-cli 0.154.0, headless: only the FIRST ``-c`` per
+    top-level config key is applied, one leaf replaces the config's
+    ``[shell_environment_policy.set]`` table, and an inline-table value is
+    refused at load. One leaf therefore carries ``FNO_AGENT_SELF``; the
+    other pairs stay on the env(1) wrapper.
     """
-    ordered = sorted(pairs, key=lambda pair: not pair.startswith("FNO_AGENT_SELF="))
-    for pair in ordered:
-        key, sep, value = pair.partition("=")
-        if not sep or not _ENV_KEY_RE.fullmatch(key):
-            raise DispatchAskError(
-                f"refusing mesh pair {pair!r}: the key must match "
-                "[A-Za-z_][A-Za-z0-9_]* to name one "
-                "shell_environment_policy config path",
-                exit_code=2,
-            )
-        return ["-c", f"shell_environment_policy.set.{key}={json.dumps(value)}"]
-    return []
+    chosen = next((p for p in pairs if p.startswith("FNO_AGENT_SELF=")), None)
+    chosen = chosen or (pairs[0] if pairs else "")
+    if not chosen:
+        return []
+    key, sep, value = chosen.partition("=")
+    if not sep or not _ENV_KEY_RE.fullmatch(key):
+        raise DispatchAskError(
+            f"refusing mesh pair {chosen!r}: the key must match "
+            "[A-Za-z_][A-Za-z0-9_]* to name one "
+            "shell_environment_policy config path",
+            exit_code=2,
+        )
+    return ["-c", f"shell_environment_policy.set.{key}={json.dumps(value)}"]
 
 
 _CODEX_DAEMON_PROBE_INTERVAL_S = 2.0  # a websocket round trip; rate-limit it
