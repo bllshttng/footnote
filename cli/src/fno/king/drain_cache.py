@@ -40,10 +40,10 @@ def load(scope: str, ident: tuple) -> "int | None":
     """The cached count for `scope` when the graph still has this identity."""
     try:
         data = json.loads(cache_file().read_text(encoding="utf-8"))
-        row = data.get(scope)
+        row = data.get(scope) if isinstance(data, dict) else None
         if isinstance(row, dict) and row.get("ident") == list(ident):
             return int(row["undelivered"])
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, KeyError):
         pass
     return None
 

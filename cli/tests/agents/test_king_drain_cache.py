@@ -62,6 +62,14 @@ def _entry(node_id: str, **fields) -> dict:
     return {"id": node_id, **fields}
 
 
+def _ident(graph: Path) -> tuple:
+    from fno.king import drain_cache
+
+    ident = drain_cache.graph_ident(graph)
+    assert ident is not None
+    return ident
+
+
 def _write_graph(path: Path, done_children: int, done_epic: bool = False) -> None:
     entries = [
         _entry(f"filler-{i}", type="feature", status="intake", project="web")
@@ -151,8 +159,22 @@ def test_corrupt_cache_reads_as_a_miss(graph):
 
     cache = paths.state_dir() / "cache" / "king-drain.json"
     cache.parent.mkdir(parents=True, exist_ok=True)
+    # Both shapes: unparseable bytes, and valid JSON with the wrong shape
+    # (array root; a row whose ident matches but carries no count).
+    ident = list(_ident(graph))
     cache.write_text("{not json", encoding="utf-8")
+    exit_code, payload, _ = _invoke_drain()
+    assert exit_code == 0
+    assert payload["undelivered"] == UNDELIVERED_COUNT
+    assert "cached" not in payload
 
+    cache.write_text(json.dumps([1, 2]), encoding="utf-8")
+    exit_code, payload, _ = _invoke_drain()
+    assert exit_code == 0
+    assert payload["undelivered"] == UNDELIVERED_COUNT
+    assert "cached" not in payload
+
+    cache.write_text(json.dumps({SCOPE: {"ident": ident}}), encoding="utf-8")
     exit_code, payload, _ = _invoke_drain()
     assert exit_code == 0
     assert payload["undelivered"] == UNDELIVERED_COUNT
