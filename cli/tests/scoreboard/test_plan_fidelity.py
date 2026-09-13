@@ -571,7 +571,8 @@ def _forbidden_setup(monkeypatch, tmp_path, *, carveouts_line, body_reader):
     monkeypatch.setattr(paths, "resolve_plugin_script", lambda rel: _REPO / rel)
     monkeypatch.setattr(
         fid, "_load_graph_nodes",
-        lambda: [{"id": "x-1", "plan_path": str(plan), "project": "footnote", "pr_number": 1599}],
+        # A relative path, as ledger rows carry it: the lookup keys on the node id.
+        lambda: [{"id": "x-1", "plan_path": "internal/fno/plans/plan.md", "pr_number": 1599}],
     )
     monkeypatch.setattr(fid, "_read_pr_body", body_reader)
     return fid, plan
@@ -588,6 +589,15 @@ def test_compute_plan_fidelity_refuses_declared_exclusions_when_plan_forbids(mon
     assert decision["refused"] is True
     assert "declares 5 exclusion item(s)" in decision["reason"], decision["reason"]
     assert decision["carveouts_policy"] == "forbidden"
+    assert decision["carveouts_pr"] == 1599
+
+
+def test_compute_plan_fidelity_treats_a_typoed_carveouts_value_as_forbidden(monkeypatch, tmp_path):
+    fid, plan = _forbidden_setup(
+        monkeypatch, tmp_path, carveouts_line="carveouts: forbiden\n",
+        body_reader=lambda pr, root: _SPECIMEN_BODY,
+    )
+    assert fid.compute_plan_fidelity(plan_path=str(plan))["refused"] is True
 
 
 def test_compute_plan_fidelity_ignores_exclusions_when_plan_is_silent(monkeypatch, tmp_path):

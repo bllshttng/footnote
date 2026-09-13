@@ -99,14 +99,17 @@ def compute_plan_fidelity(
     target = _plan_key(plan_path, project)
     rows = [r for r in rows if _plan_key(r.get("plan_path"), r.get("project")) == target]
 
-    forbidden = _plan_carveouts_policy(plan_file) == "forbidden"
+    fm = _plan_frontmatter(plan_file)
+    # Any declared value but `allowed` is forbidden, so a typo fails closed.
+    forbidden = fm.get("carveouts") is not None and str(fm["carveouts"]).strip().lower() != "allowed"
+    node_id = fm.get("node") or fm.get("claims")
     pf = build_plan_fidelity(
         rows, graph_nodes, since_days=since_days, now=now, unmeasurable="refuse"
     )
     if pf.get("state") != "ok":
         # No planned rows in window: nothing to measure, nothing to refuse.
         decision = _passthrough(planned=0, delivered=0)
-        return _apply_body_leg(decision, forbidden, plan_path, graph_nodes, repo_root)
+        return _apply_body_leg(decision, forbidden, node_id, graph_nodes, repo_root)
 
     # No re-check against `target`: the fold saw only pre-filtered rows, and its
     # results carry no `project`, so a re-check would silently drop every row.
@@ -124,11 +127,11 @@ def compute_plan_fidelity(
     decision["planned"] = planned
     decision["delivered"] = delivered
     decision["plan_path"] = plan_path
-    return _apply_body_leg(decision, forbidden, plan_path, graph_nodes, repo_root)
+    return _apply_body_leg(decision, forbidden, node_id, graph_nodes, repo_root)
 
 
 def _apply_body_leg(
-    decision: dict, forbidden: bool, plan_path: str, graph_nodes: list[dict],
+    decision: dict, forbidden: bool, node_id: Any, graph_nodes: list[dict],
     repo_root: Optional[str],
 ) -> dict:
     """A plan with `carveouts: forbidden` also refuses a PR body that declares
@@ -138,11 +141,10 @@ def _apply_body_leg(
     decision["carveouts_policy"] = "forbidden"
     if decision["refused"]:
         return decision
-    want = Path(plan_path.split("#", 1)[0]).expanduser()
-    pr_number = next((n["pr_number"] for n in graph_nodes if n.get("pr_number") and Path(
-        str(n.get("plan_path") or "").split("#", 1)[0]).expanduser() == want), None)
-    if pr_number is None:
+    pr_number = next((n.get("pr_number") for n in graph_nodes if node_id and n.get("id") == node_id), None)
+    if not pr_number:
         return decision  # no PR yet; the stop gate runs only after one is open
+    decision["carveouts_pr"] = pr_number
     body = _read_pr_body(pr_number, repo_root)
     reason = _body_carveout_refusal(body) if body is not None else (
         "PR body unreadable; a gate degrades to refuse")
@@ -191,15 +193,13 @@ def _read_covering_carveouts(repo_root: Optional[str], session_ids: set) -> list
         return []
 
 
-def _plan_carveouts_policy(plan_file: Path) -> Optional[str]:
+def _plan_frontmatter(plan_file: Path) -> dict:
     from fno.plan._doc import _parse_frontmatter, _split_frontmatter
 
     try:
-        fm = _parse_frontmatter(_split_frontmatter(plan_file.read_text(encoding="utf-8"))[0])
+        return _parse_frontmatter(_split_frontmatter(plan_file.read_text(encoding="utf-8"))[0])
     except Exception:  # noqa: BLE001 - unparseable frontmatter declares nothing
-        return None
-    value = fm.get("carveouts")
-    return str(value).strip().lower() if value is not None else None
+        return {}
 
 
 def _read_pr_body(pr_number: int, repo_root: Optional[str]) -> Optional[str]:
