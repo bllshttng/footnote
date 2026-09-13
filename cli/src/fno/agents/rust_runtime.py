@@ -227,19 +227,12 @@ RUST_CLIENT_VERBS = frozenset(
         # (no daemon RPC, no Python impl); this entry keeps the
         # client.rs<->router parity test in sync and provides the help line.
         "recover",
-        # Batch graph read, Bash-call census, and the session-start byte total
-        # (x-997a): all three dispatch directly in client.rs before
-        # build_request (no daemon RPC, no Python impl). `fno backlog get`'s
-        # forwarder and `fno doctor bash-census` invoke the binary directly
-        # (not via `fno agents` routing); these entries keep the
-        # client.rs<->router parity test in sync.
+        # Batch graph read, bash-census, and session-start bytes (x-997a): all
+        # three dispatch directly in client.rs before build_request, never `fno agents`.
         "graph-get",
         "bash-census",
         "session-start-bytes",
-        # Blueprint judge verb (x-9983): daemon-free grading read, dispatched
-        # directly in client.rs before build_request (no daemon RPC); Python
-        # calls it via fno.rust_binary.verb_call, not `fno agents` routing.
-        # This entry keeps the client.rs<->router parity test in sync.
+        # Blueprint judge verb (x-9983): daemon-free grading read, never `fno agents`.
         "judge",
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
         "court-orphans",
