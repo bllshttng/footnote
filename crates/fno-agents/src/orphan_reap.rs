@@ -42,7 +42,7 @@ fn deps_binary_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         // No `/target` segment: under build.build-dir the deps dir lives at
-        // <build-base>/<h2>/<h2>/<hash>/debug/deps, with no dir named target.
+        // <build-base>/<h2>/<hash>/debug/deps, with no dir named target.
         Regex::new(r"/(?:debug|release)/deps/[A-Za-z0-9_]+-[0-9a-f]{16}$").unwrap()
     })
 }
@@ -409,7 +409,7 @@ mod tests {
         // build.build-dir layout measured 2026-09-10: the deps dir sits under a
         // sharded hash dir carrying CACHEDIR.TAG, with NO dir named target.
         let dir = temp_dir("builddir");
-        let hash = dir.join("bd/ef/bac4721f2d16ec");
+        let hash = dir.join("bd/bac4721f2d16ec");
         let deps = hash.join("debug/deps");
         std::fs::create_dir_all(&deps).unwrap();
         std::fs::write(hash.join("CACHEDIR.TAG"), "Signature: x").unwrap();
@@ -424,7 +424,7 @@ mod tests {
     fn build_dir_confirmation_still_demands_the_tag() {
         // Same shape, no CACHEDIR.TAG on the hash dir: not confirmed.
         let dir = temp_dir("builddir-notag");
-        let deps = dir.join("bd/ef/bac4721f2d16ec/debug/deps");
+        let deps = dir.join("bd/bac4721f2d16ec/debug/deps");
         std::fs::create_dir_all(&deps).unwrap();
         let orphan = OrphanedTestBinary {
             pid: 1,
