@@ -52,7 +52,7 @@ pub struct TruthProbe {
     /// The instrument the activity age came from (`last-entry` | `mtime` |
     /// `opencode-db`), or the resolver's reason word (`not-found` |
     /// `no-records` | `resolver-error`) when it could not resolve the handle
-    /// at all (x-6d16). Those three are the difference between "this worker
+    /// at all. Those three are the difference between "this worker
     /// has no transcript" and "the resolver crashed", and both rendered as
     /// the same blank before. `None` on a truth build that predates the
     /// field: absence renders as absence.
@@ -564,7 +564,7 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
             .and_then(|value| value.get("reachability")?.as_str().map(str::to_owned)),
         basis: parsed.and_then(|value| value.get("basis")?.as_str().map(str::to_owned)),
         last_activity_age_s: parsed.and_then(|value| value.get("last_activity_age_s")?.as_f64()),
-        // (x-6d16) The age's instrument, straight off the payload. When the
+        // The age's instrument, straight off the payload. When the
         // resolver answered `unknown`, that key is null and `reason` carries
         // why; fall back to the reason, but ONLY the three unknown-path
         // words - a `stalled` row's `api-error-tail` reason is about its
@@ -683,14 +683,14 @@ pub fn family1_truth_probe_many(
 /// or outlived its bound and answered for the page as a whole
 /// ([`BatchOutcome::NotMeasured`]). A reader may not collapse the two:
 /// `no-evidence` is a verdict the instrument earned, `unmeasured` says the
-/// instrument did not run - the two facts x-6d16 exists to separate.
+/// instrument did not run - the two facts this seam exists to separate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BatchOutcome {
     Measured,
     NotMeasured,
 }
 
-/// The list seam's entry point (x-6d16): whatever the batch measured, PLUS
+/// The list seam's entry point: whatever the batch measured, PLUS
 /// whether it measured at all. [`family1_truth_probe_many_checked`] drops the
 /// map on a timeout, which is right for a caller that wants a verdict and
 /// wrong for the row projection, which must word a handle the instrument
@@ -712,17 +712,35 @@ pub fn family1_truth_probe_many_measured(
     let (batchable, unrepresentable): (Vec<String>, Vec<String>) =
         handles.iter().cloned().partition(|h| !h.contains(','));
     let (mut probes, timed_out) = family1_truth_probe_batchable(&batchable);
+    // A comma handle whose single probe did not answer is the same fact the
+    // batchable leg's `timed_out` carries: the instrument never produced a
+    // reading for that handle. Fold it into the page outcome, so the row words
+    // `unmeasured` instead of publishing the `no-evidence` verdict a clean
+    // page earns.
+    let mut fallback_unanswered = false;
     for handle in unrepresentable {
-        if let Some(probe) = family1_truth_probe(&handle) {
-            probes.insert(handle, probe);
+        match family1_truth_probe(&handle) {
+            Some(probe) => {
+                probes.insert(handle, probe);
+            }
+            None => fallback_unanswered = true,
         }
     }
-    let outcome = if timed_out {
+    let outcome = page_outcome(timed_out, fallback_unanswered);
+    (probes, outcome)
+}
+
+/// The page outcome folds BOTH failure legs: the batchable probe's own
+/// timeout, and any comma handle the single-probe fallback could not answer.
+/// Either one means the instrument did not complete for the page, and a
+/// handle without a reading must never inherit the verdict a clean page
+/// earns.
+fn page_outcome(batchable_timed_out: bool, fallback_unanswered: bool) -> BatchOutcome {
+    if batchable_timed_out || fallback_unanswered {
         BatchOutcome::NotMeasured
     } else {
         BatchOutcome::Measured
-    };
-    (probes, outcome)
+    }
 }
 
 /// [`family1_truth_probe_many`] with the batch's failure made honest: a run
@@ -1022,7 +1040,7 @@ mod tests {
             .is_none());
     }
 
-    /// x-6d16: the age's instrument parses off the same wire, and on the
+    /// The age's instrument parses off the same wire, and on the
     /// unknown paths the resolver's reason word stands in for it - but ONLY
     /// the three unknown-path words. A `stalled` row's `api-error-tail`
     /// reason describes its tail, not the age's instrument, and must never
@@ -1072,6 +1090,25 @@ mod tests {
             .unwrap()
             .last_activity_basis
             .is_none());
+    }
+
+    /// The page outcome folds both failure legs: a batchable timeout and a
+    /// comma handle the single-probe fallback could not answer each word the
+    /// page unmeasured; only a fully answered page stays Measured.
+    #[test]
+    fn page_outcome_folds_the_fallback_leg_into_the_batch_leg() {
+        use BatchOutcome::{Measured, NotMeasured};
+        assert_eq!(page_outcome(false, false), Measured);
+        assert_eq!(
+            page_outcome(true, false),
+            NotMeasured,
+            "a batchable timeout is unmeasured whatever the fallback did"
+        );
+        assert_eq!(
+            page_outcome(false, true),
+            NotMeasured,
+            "a comma handle the fallback never answered must not inherit the clean-page verdict"
+        );
     }
 
     /// A shell command, built fresh per attempt so the retry path can spawn it
