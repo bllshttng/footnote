@@ -3211,12 +3211,11 @@ def cmd_update(
 ) -> None:
     # x-665f: the patch door first; lifecycle.forward_update_door owns the rest.
     door_args = list(ctx.args or [])
-    from fno.graph.lifecycle import forward_update_door, refuse_stray_update_flags
+    from fno.graph.lifecycle import DOOR_FLAGS, forward_update_door, refuse_stray_update_flags
 
-    # The stray refusal runs first, so a retired flag stays an error even when
-    # a door flag rides the same call.
+    # The stray refusal runs first, so a retired flag stays an error.
     refuse_stray_update_flags(door_args)
-    if any(a.split("=", 1)[0] in ("--status", "--leave", "--set") for a in door_args):
+    if any(a.split("=", 1)[0] in DOOR_FLAGS for a in door_args):
         forward_update_door(task_id, door_args, _graph_path(), locals())
 
     from fno._flag_aliases import refuse_retired_model_tier

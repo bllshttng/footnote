@@ -56,14 +56,15 @@ def _flag_spelling(param: str) -> str:
     return _FLAG_SPELLING_EXCEPTIONS.get(param, "--" + param.replace("_", "-"))
 
 
+#: The door flags `fno backlog update` carries as extra args. ONE copy: the
+#: stray refusal and cmd_update's forward condition both read this.
+DOOR_FLAGS = ("--status", "--leave", "--set")
+
+
 def refuse_stray_update_flags(door_args: List[str]) -> None:
-    """`update`'s extra args may only be door flags: ``ignore_unknown_options``
-    would otherwise revive a retired spelling (``--completed``) as a silent
-    no-op, and the done writer gate counts on that call failing."""
-    strays = [
-        a for a in door_args
-        if a.startswith("-") and a.split("=", 1)[0] not in ("--status", "--leave", "--set")
-    ]
+    """Extra args may only be door flags: ``ignore_unknown_options`` would
+    revive a retired spelling (``--completed``) as a silent no-op."""
+    strays = [a for a in door_args if a.startswith("-") and a.split("=", 1)[0] not in DOOR_FLAGS]
     if strays:
         typer.echo(
             f"Error: no such option: {strays[0]}. `fno backlog update` carries "

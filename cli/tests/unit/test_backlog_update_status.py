@@ -420,3 +420,14 @@ def test_a_retired_flag_refuses_naming_the_door_flags(tmp_graph):
     assert "--completed" in r.output
     assert "--status" in r.output
     assert _entry(tmp_graph, "x-0001")["status"] == "idea"
+
+
+def test_the_equals_spelling_rides_the_door(tmp_graph):
+    """`--status=idea` is the same flag as `--status idea`: the forward
+    condition admits the =-spelling, so the door parses it too."""
+    _seed(tmp_graph, _node("x-0001"))
+
+    r = _invoke("update", "x-0001", "--status=idea")
+
+    assert r.exit_code == 0, r.output
+    assert _entry(tmp_graph, "x-0001")["status"] == "idea"

@@ -51,6 +51,7 @@ pub fn classify_deferred_reason(reason: &str) -> Option<&'static str> {
 }
 
 /// One parsed invocation of the patch door.
+#[derive(Debug)]
 pub struct PatchRequest {
     pub node: String,
     pub status: Option<String>,
@@ -997,17 +998,31 @@ fn parse_args(args: &[String]) -> Result<(PatchRequest, Option<PathBuf>, bool), 
     };
     let mut graph: Option<PathBuf> = None;
     let mut json_out = false;
+    // `--flag=value` is the same flag as `--flag value`: the Python forward
+    // condition admits the =-spelling, so the door parses it too.
+    let mut flat: Vec<String> = Vec::with_capacity(args.len());
+    for a in args {
+        match a.split_once('=') {
+            Some((f, v))
+                if matches!(f, "--graph" | "--node" | "--status" | "--leave" | "--set") =>
+            {
+                flat.push(f.to_string());
+                flat.push(v.to_string());
+            }
+            _ => flat.push(a.clone()),
+        }
+    }
     let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    while i < flat.len() {
+        match flat[i].as_str() {
             "--graph" => {
                 i += 1;
-                let v = args.get(i).ok_or((1, "--graph needs a path".to_string()))?;
+                let v = flat.get(i).ok_or((1, "--graph needs a path".to_string()))?;
                 graph = Some(PathBuf::from(v));
             }
             "--node" => {
                 i += 1;
-                req.node = args
+                req.node = flat
                     .get(i)
                     .ok_or((1, "--node needs an id".to_string()))?
                     .clone();
@@ -1015,7 +1030,7 @@ fn parse_args(args: &[String]) -> Result<(PatchRequest, Option<PathBuf>, bool), 
             "--status" => {
                 i += 1;
                 req.status = Some(
-                    args.get(i)
+                    flat.get(i)
                         .ok_or((1, "--status needs a word".to_string()))?
                         .clone(),
                 );
@@ -1023,14 +1038,14 @@ fn parse_args(args: &[String]) -> Result<(PatchRequest, Option<PathBuf>, bool), 
             "--leave" => {
                 i += 1;
                 req.leave = Some(
-                    args.get(i)
+                    flat.get(i)
                         .ok_or((1, "--leave needs deferred or superseded".to_string()))?
                         .clone(),
                 );
             }
             "--set" => {
                 i += 1;
-                let v = args
+                let v = flat
                     .get(i)
                     .ok_or((1, "--set needs field=value".to_string()))?;
                 let (field, value) = v
@@ -1132,6 +1147,35 @@ mod tests {
     use super::*;
     use crate::graph_store::CANONICAL_FIELD_ORDER;
     use std::io::Write;
+
+    #[test]
+    fn parse_args_reads_the_equals_spelling() {
+        let s = |x: &str| x.to_string();
+        let (req, graph, json_out) = parse_args(&[
+            s("--node=x-1"),
+            s("--graph=/tmp/g.json"),
+            s("--status=idea"),
+            s("--set=title=New"),
+            s("--leave=deferred"),
+        ])
+        .expect("=-spelling parses");
+        assert_eq!(req.node, "x-1");
+        assert_eq!(graph.as_deref(), Some(std::path::Path::new("/tmp/g.json")));
+        assert_eq!(req.status.as_deref(), Some("idea"));
+        assert_eq!(req.leave.as_deref(), Some("deferred"));
+        assert_eq!(req.sets, vec![("title".to_string(), "New".to_string())]);
+        assert!(!json_out);
+
+        // A value containing '=' survives: only the FIRST '=' splits.
+        let (req2, _, _) =
+            parse_args(&[s("--node=x-1"), s("--set=details=a=b")]).expect("nested = parses");
+        assert_eq!(req2.sets, vec![("details".to_string(), "a=b".to_string())]);
+
+        // An unknown =-flag still refuses by name.
+        let err = parse_args(&[s("--node=x-1"), s("--nope=1")]).expect_err("unknown refuses");
+        assert_eq!(err.0, 1);
+        assert!(err.1.contains("--nope"));
+    }
 
     fn write_graph(entries: &[Value]) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
