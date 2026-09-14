@@ -390,3 +390,57 @@ def test_an_unanswerable_count_renders_as_a_question_mark(
     result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
     assert result.exit_code == 0, _out(result)
     assert "samples=?" in result.output
+
+
+# -- x-b68d: the suspect refusal names when the grace ends ---------------------
+
+
+def test_requeue_suspect_refusal_names_when_the_grace_ends(
+    tmp_graph, claims_root, monkeypatch
+):
+    _seed(tmp_graph, [_wedged_node()])
+    _dead_truth(monkeypatch)
+    import time
+
+    import fno.claims.core as cc
+    real_status = cc.claim_status
+
+    def fake_status(key, **kw):
+        s = dict(real_status(key, **kw))
+        if key == f"node:{NODE_ID}":
+            s.update(
+                state="suspect",
+                basis="ttl-expired-unresolved",
+                holder="spawn-handover:ghost",
+                reclaimable_at=int((time.time() + 12 * 60) * 1000),
+            )
+        return s
+
+    monkeypatch.setattr(cc, "claim_status", fake_status)
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code == 3, _out(result)
+    assert "ttl-expired-unresolved" in _out(result)
+    assert "reclaimable at" in _out(result)
+    assert "fno backlog requeue ab-4f44feed" in _out(result)
+    node = _read(tmp_graph)[0]
+    assert node["status"] == "in_progress"
+    assert node["sessions"][0].get("ended_at") is None
+
+
+def test_requeue_suspect_refusal_invents_no_clock(tmp_graph, claims_root, monkeypatch):
+    _seed(tmp_graph, [_wedged_node()])
+    _dead_truth(monkeypatch)
+    import fno.claims.core as cc
+    real_status = cc.claim_status
+
+    def fake_status(key, **kw):
+        s = dict(real_status(key, **kw))
+        if key == f"node:{NODE_ID}":
+            s.update(state="suspect", basis="pid-absent", holder="target-session:held")
+        return s
+
+    monkeypatch.setattr(cc, "claim_status", fake_status)
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code == 3, _out(result)
+    assert "pid-absent" in _out(result)
+    assert "reclaimable" not in _out(result)
