@@ -69,6 +69,7 @@ pub(crate) mod lifecycle_target;
 mod pane_close;
 mod pane_identity;
 mod pane_reseat;
+mod placement_fit;
 mod portal_reach;
 mod resume_argv;
 mod retire_session;
@@ -3769,21 +3770,8 @@ impl Core {
                 ));
             }
         }
-        // (x-ae47) `fit` hands the tab choice to the server; an explicit
-        // geometry would contradict it. Re-validated here because the control
-        // socket is reachable by any client - the CLI gate covers one caller.
-        if placement.fit
-            && (placement.tab.is_some()
-                || placement.at.is_some()
-                || placement.split.is_some()
-                || placement.here
-                || placement.wants_portal())
-        {
-            return Err((
-                err_code::BAD_REQUEST,
-                "--fit selects its own tab and cannot be combined with --tab, --at, or --split"
-                    .into(),
-            ));
+        if let Some(refusal) = placement_fit::refuse_fit_with_geometry(&placement) {
+            return Err(refusal);
         }
         // Create-if-absent lives ONLY here on the script path (Locked 7, x-9f75): a `pane run --squad
         // <name>` for a not-yet-existing squad mints one so lanes group by project; AttachAgent / UI targets
@@ -4018,64 +4006,6 @@ impl Core {
                 Err((err_code::BAD_REQUEST, e.to_string()))
             }
         }
-    }
-
-    /// `fit` placement (v80, x-ae47): the server picks the pane's tab. A
-    /// squad-less route births the squad and its first tab (the same path a
-    /// no-tab placement takes); a resolved squad takes the first tab in
-    /// display order with room below `max_panes`, splitting at that tab's
-    /// focus. No tab takes the pane -> a new tab, with `fell_back` true only
-    /// when a tab WITH room refused the split for size, so the caller can
-    /// tell "crowded tab" from the ordinary no-room mint.
-    fn place_with_fit(
-        &mut self,
-        dest: Option<u64>,
-        squad_key: &str,
-        pid: u64,
-        placement: &PanePlacement,
-    ) -> Result<(u64, TabId, bool), (u32, String)> {
-        let Some(sid) = dest else {
-            return self
-                .place_spawned_pane(dest, squad_key, pid, None)
-                .map_err(|e| (err_code::SPAWN_FAILED, e));
-        };
-        let Some(si) = self.session.squads.iter().position(|s| s.id == sid) else {
-            self.reap_pane(pid);
-            return Err((err_code::SPAWN_FAILED, "selected squad vanished".into()));
-        };
-        let mut refused_with_room = false;
-        for ti in 0..self.session.squads[si].tabs.len() {
-            if let Some(cap) = placement.max_panes {
-                if tree::leaves(&self.session.squads[si].tabs[ti].root).len() >= cap {
-                    continue;
-                }
-            }
-            let tid = self.session.squads[si].tabs[ti].id;
-            let vp = self.tab_rect(tid);
-            let anchor = self.session.squads[si].tabs[ti].focus;
-            let res = {
-                let tab = &mut self.session.squads[si].tabs[ti];
-                tree::split_at(tab, vp, anchor, Dir::Down, pid)
-            };
-            match res {
-                Ok(()) => return Ok((sid, tid, false)),
-                Err(tree::SplitError::TooSmall { .. }) => {
-                    refused_with_room = true;
-                }
-                Err(e) => {
-                    self.reap_pane(pid);
-                    return Err((err_code::BAD_REQUEST, e.to_string()));
-                }
-            }
-        }
-        let tid = self.session.mint_tab_id();
-        self.session.squads[si].tabs.push(Tab {
-            name: None,
-            id: tid,
-            root: Node::Leaf(pid),
-            focus: pid,
-        });
-        Ok((sid, tid, refused_with_room))
     }
 
     /// Strict origin placement for `--at current` (v44, x-6928): the anchor is
@@ -17285,231 +17215,19 @@ mod tests {
         );
     }
 
-    fn full_tab(id: TabId, leaves: [u64; 4]) -> Tab {
-        Tab {
-            name: None,
-            id,
-            root: Node::Branch {
-                axis: Axis::Horizontal,
-                children: leaves.map(|p| (0.25, Node::Leaf(p))).to_vec(),
-            },
-            focus: leaves[0],
-        }
-    }
-
-    #[test]
-    fn place_with_fit_births_squad_on_route_miss() {
-        // AC1-HP: a fit placement onto a squad-less route births the squad
-        // and its first tab, the same path the no-tab placement takes.
+    /// A one-tab squad (id 1) whose single tab (id 5) holds one real spawned
+    /// shell pane, plus a scratch shell so template shell slots can spawn.
+    fn template_core() -> (Core, u64) {
         let mut core = empty_core();
-        let (sid, tid, fell_back) = core
-            .place_with(
-                None,
-                "/fresh",
-                9,
-                &PanePlacement {
-                    fit: true,
-                    max_panes: Some(4),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert!(!fell_back);
-        let sq = core.session.squad(sid).unwrap();
-        assert_eq!(sq.origins, vec!["/fresh".to_string()]);
-        assert_eq!(sq.tabs.len(), 1);
-        assert_eq!(sq.tabs[0].id, tid);
-        assert_eq!(tree::leaves(&sq.tabs[0].root), vec![9]);
+        core.shells = vec!["/bin/cat".into()];
+        core.next_pane_id = 100;
+        let p = core.spawn_pane(24, 80, "/a").unwrap();
+        core.session
+            .add_squad(1, vec!["/a".into()], Some("sq".into()), leaf_tab(5, p));
+        core.tab_areas.insert(5, (24, 80));
+        (core, p)
     }
 
-    #[test]
-    fn place_with_fit_walks_to_first_tab_with_room() {
-        // AC2-HP: a full tab is skipped; the pane lands in the first tab
-        // below the cap, and the squad's tab count is unchanged.
-        let mut core = empty_core();
-        core.session
-            .add_squad(1, vec!["/a".into()], None, full_tab(10, [1, 2, 3, 4]));
-        core.session
-            .squad_mut(1)
-            .unwrap()
-            .tabs
-            .push(leaf_tab(20, 5));
-
-        let (_sid, tid, fell_back) = core
-            .place_with(
-                Some(1),
-                "/a",
-                9,
-                &PanePlacement {
-                    fit: true,
-                    max_panes: Some(4),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert!(!fell_back);
-        assert_eq!(tid, 20);
-        let sq = core.session.squad(1).unwrap();
-        assert_eq!(sq.tabs.len(), 2, "fit adds no tab when one has room");
-        assert_eq!(tree::leaves(&sq.tabs[0].root), vec![1, 2, 3, 4]);
-        assert_eq!(tree::leaves(&sq.tabs[1].root), vec![5, 9]);
-    }
-
-    #[test]
-    fn place_with_fit_mints_tab_when_every_tab_is_full() {
-        // AC3-EDGE: every tab at the cap -> the squad gains a tab with the
-        // pane as its lone leaf. No tab refused for size, so no fallback.
-        let mut core = empty_core();
-        core.session
-            .add_squad(1, vec!["/a".into()], None, full_tab(10, [1, 2, 3, 4]));
-
-        let (_sid, tid, fell_back) = core
-            .place_with(
-                Some(1),
-                "/a",
-                9,
-                &PanePlacement {
-                    fit: true,
-                    max_panes: Some(4),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert!(!fell_back);
-        let sq = core.session.squad(1).unwrap();
-        assert_eq!(sq.tabs.len(), 2);
-        assert_eq!(sq.tabs[1].id, tid);
-        assert_eq!(tree::leaves(&sq.tabs[0].root), vec![1, 2, 3, 4]);
-        assert_eq!(tree::leaves(&sq.tabs[1].root), vec![9]);
-    }
-
-    #[test]
-    fn place_with_fit_too_small_tab_hands_pane_to_next_with_room() {
-        // A tab with room that refuses the split for size does not dead-end:
-        // the walk continues to the next tab with room, still no fallback.
-        let mut core = empty_core();
-        core.session
-            .add_squad(1, vec!["/a".into()], None, leaf_tab(10, 1));
-        core.session
-            .squad_mut(1)
-            .unwrap()
-            .tabs
-            .push(leaf_tab(20, 2));
-        // 3 rows cannot hold two MIN_ROWS(2)-tall halves -> Dir::Down refusal.
-        core.tab_areas.insert(10, (3, 80));
-
-        let (_sid, tid, fell_back) = core
-            .place_with(
-                Some(1),
-                "/a",
-                9,
-                &PanePlacement {
-                    fit: true,
-                    max_panes: Some(4),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert!(!fell_back, "the next tab with room took the pane");
-        assert_eq!(tid, 20);
-        assert_eq!(
-            tree::leaves(&core.session.squad(1).unwrap().tabs[1].root),
-            vec![2, 9]
-        );
-    }
-
-    #[test]
-    fn place_with_fit_too_small_everywhere_mints_with_fell_back() {
-        // fell_back is the "a tab WITH room refused for size" signal: the
-        // pane still lands, as a new tab in the same squad.
-        let mut core = empty_core();
-        core.session
-            .add_squad(1, vec!["/a".into()], None, leaf_tab(10, 1));
-        // 3 rows cannot hold two MIN_ROWS(2)-tall halves -> Dir::Down refusal.
-        core.tab_areas.insert(10, (3, 80));
-
-        let (_sid, tid, fell_back) = core
-            .place_with(
-                Some(1),
-                "/a",
-                9,
-                &PanePlacement {
-                    fit: true,
-                    max_panes: Some(4),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert!(fell_back);
-        let sq = core.session.squad(1).unwrap();
-        assert_eq!(sq.tabs.len(), 2);
-        assert_eq!(sq.tabs[1].id, tid);
-        assert_eq!(tree::leaves(&sq.tabs[1].root), vec![9]);
-    }
-
-    #[test]
-    fn run_pane_refuses_fit_with_explicit_geometry() {
-        // AC4-ERR: the server re-validates the CLI gate - fit plus any
-        // explicit geometry is BAD_REQUEST before any pane exists.
-        let mut core = empty_core();
-        for (placement, label) in [
-            (
-                PanePlacement {
-                    fit: true,
-                    tab: Some(TabSel::Id(1)),
-                    ..Default::default()
-                },
-                "tab",
-            ),
-            (
-                PanePlacement {
-                    fit: true,
-                    at: Some(3),
-                    ..Default::default()
-                },
-                "at",
-            ),
-            (
-                PanePlacement {
-                    fit: true,
-                    split: Some(Dir::Down),
-                    ..Default::default()
-                },
-                "split",
-            ),
-            (
-                PanePlacement {
-                    fit: true,
-                    here: true,
-                    ..Default::default()
-                },
-                "here",
-            ),
-        ] {
-            let err = core
-                .run_pane(
-                    "/a".into(),
-                    "/a".into(),
-                    vec!["true".into()],
-                    24,
-                    80,
-                    false,
-                    placement,
-                    None,
-                )
-                .unwrap_err();
-            assert_eq!(err.0, err_code::BAD_REQUEST, "{label}");
-            assert_eq!(
-                err.1,
-                "--fit selects its own tab and cannot be combined with --tab, --at, or --split"
-            );
-            assert!(core.session.squads.is_empty(), "{label}: nothing placed");
-        }
-    }
-
-    // ---- v41 (x-d865) layout script API server ops ----------------------
-
-    /// squad 1: tab 10 = panes [1,2] (H-split); tab 20 "bee" = pane [3].
     fn two_tab_core() -> Core {
         let mut core = empty_core();
         core.session.add_squad(
@@ -17538,27 +17256,10 @@ mod tests {
         core
     }
 
-    // ---- v42 (x-c4d4) declarative layout templates -----------------------
-
-    /// A registry row binding fno id `sess_id` to live `pane` in the test
-    /// session ("test"), so `resolve_local_pane` can find it.
     fn bound_agent(sess_id: &str, pane: u64) -> RegistryAgent {
         let mut a = agent_in("test", pane, None, false);
         a.session_id = Some(sess_id.into());
         a
-    }
-
-    /// A one-tab squad (id 1) whose single tab (id 5) holds one real spawned
-    /// shell pane, plus a scratch shell so template shell slots can spawn.
-    fn template_core() -> (Core, u64) {
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        core.next_pane_id = 100;
-        let p = core.spawn_pane(24, 80, "/a").unwrap();
-        core.session
-            .add_squad(1, vec!["/a".into()], Some("sq".into()), leaf_tab(5, p));
-        core.tab_areas.insert(5, (24, 80));
-        (core, p)
     }
 
     fn shell_spec(t: TemplateName, k: usize) -> LayoutSpec {
@@ -18457,6 +18158,10 @@ mod tests {
     // the shrink-only line, and test motion is the sanctioned shrink.
     #[path = "pane_run_receipt_tests.rs"]
     mod pane_run_receipt_tests;
+
+    // The fit placement tests (x-ae47) moved out for the same reason.
+    #[path = "placement_fit_tests.rs"]
+    mod placement_fit_tests;
 
     #[test]
     fn exact_current_refuses_conflicting_tab_selector() {

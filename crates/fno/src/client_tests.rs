@@ -11900,17 +11900,9 @@ async fn attach_placement_selects_target_and_direction() {
         ClientMsg::Command(Command::AttachAgent {
             id: "c19cd2c3".into(),
             placement: PanePlacement {
-                portal_new: false,
-                portal: None,
-                tab: None,
-                at: None,
                 target: PaneTarget::SquadId(2),
                 split: Some(Dir::Left),
-                here: false,
-                fallback: PlacementFallback::NewTab,
-                max_panes: None,
-                thread_pane: false,
-                fit: false,
+                ..Default::default()
             },
         })
     );
@@ -12261,17 +12253,9 @@ async fn attach_placement_new_tab_and_cancel_are_distinct() {
         ClientMsg::Command(Command::AttachAgent {
             id: "c19cd2c3".into(),
             placement: PanePlacement {
-                portal_new: false,
-                portal: None,
-                tab: None,
-                at: None,
                 target: PaneTarget::SquadId(1),
                 split: None,
-                here: false,
-                fallback: PlacementFallback::NewTab,
-                max_panes: None,
-                thread_pane: false,
-                fit: false,
+                ..Default::default()
             },
         })
     );
@@ -12315,17 +12299,9 @@ async fn attach_placement_enter_commits_the_cursor_and_space_attaches_here() {
         ClientMsg::Command(Command::AttachAgent {
             id: "c19cd2c3".into(),
             placement: PanePlacement {
-                portal_new: false,
-                portal: None,
-                tab: None,
-                at: None,
                 target: PaneTarget::SquadId(10),
                 split: None,
-                here: false,
-                fallback: PlacementFallback::NewTab,
-                max_panes: None,
-                thread_pane: false,
-                fit: false,
+                ..Default::default()
             },
         }),
         "Enter must attach to the marked workspace, not here"

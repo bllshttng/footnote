@@ -13377,17 +13377,9 @@ async fn execute_row_menu_action(
                 &ClientMsg::Command(Command::AttachAgent {
                     id,
                     placement: PanePlacement {
-                        portal_new: false,
                         target: PaneTarget::CurrentRoute,
                         split,
-                        here: false,
-                        tab: None,
-                        at: None,
-                        fallback: PlacementFallback::NewTab,
-                        max_panes: None,
-                        thread_pane: false,
-                        portal: None,
-                        fit: false,
+                        ..Default::default()
                     },
                 }),
             )
