@@ -2347,7 +2347,9 @@ def _run_census_deferred(args: Sequence[str]) -> int:
         "rtk is bypassed, and PYTHONPATH is pinned to the worktree's cli/src. "
         "Bare `fno doctor test` runs the Python suite in parallel and captures "
         "to .fno/last-test.log; `--stream` restores inherited stdio. "
-        "--census-deferred refuses a quarantined test that now passes."
+        "--census-deferred refuses a quarantined test that now passes. "
+        "Tests only: this verb never type-checks; ruff + mypy run in CI job "
+        "main-python-static and locally via bash scripts/ci/check-python-static.sh."
     ),
 )
 @click.option("--stream", is_flag=True, help="Stream full output (no capture/log).")
@@ -2363,6 +2365,15 @@ def _run_census_deferred(args: Sequence[str]) -> int:
 )
 @click.argument("runner_args", nargs=-1, type=click.UNPROCESSED)
 def test_command(stream: bool, log_override: Optional[Path], runner_args: tuple[str, ...]) -> None:
+    # Scope statement, every mode, pass or fail: a green run here is pytest's
+    # verdict alone, and the reader must learn the typing gate lives elsewhere
+    # at the moment they might conclude otherwise.
+    print(
+        "fno doctor test runs tests only and does NOT type-check; ruff + mypy "
+        "run separately: bash scripts/ci/check-python-static.sh (CI job "
+        "main-python-static runs the same script).",
+        flush=True,
+    )
     args = list(runner_args)
     if log_override is not None and (
         stream or (args and args[0] in ("smoke", "--census-deferred"))
