@@ -722,6 +722,54 @@ pub fn run_resume_argv(rest: &[String]) -> i32 {
     }
     let harness = positional[0];
     let session_id = positional[1];
+    // x-3954: this verb's stdout is a recipe the mux gesture pastes into a
+    // pane, and a pane spawn has no secret-free channel for a route's key
+    // (the claude verdict prefix puts `env K=V` on the argv, visible in ps).
+    // A routed codex row therefore refuses here by name instead of printing
+    // the unrouted recipe, and the caller (and the operator) are pointed at
+    // the door that restores the route. No row, or an unrouted row, changes
+    // nothing.
+    if harness == "codex" {
+        if let Some(home) = crate::paths::AgentsHome::from_env_opt() {
+            let entries = match crate::client_verbs::read_registry_entries(&home.registry_json()) {
+                Ok(e) => e,
+                Err(_) => Vec::new(),
+            };
+            let row = entries.iter().find(|e| {
+                e.get("harness_session_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(session_id)
+            });
+            if let Some(row) = row {
+                let name = row
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(session_id);
+                let identity = crate::codex_route::row_route_identity(
+                    row.get("harness").and_then(serde_json::Value::as_str),
+                    row.get("route_provider_id")
+                        .and_then(serde_json::Value::as_str),
+                    row.get("model_name").and_then(serde_json::Value::as_str),
+                );
+                let refusal = match identity {
+                    Err(reason) => Some(format!(
+                        "{name} was launched on a codex route and it cannot be carried \
+                         through this door ({reason}); resume it with \
+                         `fno agents resume {name}`, which restores the route"
+                    )),
+                    Ok(Some((provider, _))) => Some(format!(
+                        "{name} runs on codex route {provider}; resume it with \
+                         `fno agents resume {name}`, which restores the route"
+                    )),
+                    Ok(None) => None,
+                };
+                if let Some(line) = refusal {
+                    eprintln!("resume-argv: {line}");
+                    return crate::reentry::REENTRY_REFUSED_EXIT;
+                }
+            }
+        }
+    }
     match build_resume_argv_split(harness, session_id, cwd.as_deref(), pin_cd) {
         Some(argv) => {
             if json {

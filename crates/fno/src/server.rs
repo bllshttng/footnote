@@ -2516,6 +2516,27 @@ fn member_structural_refusal(member: &crate::squad_store::StoredMember) -> Optio
     None
 }
 
+/// (x-3954) The routed-codex refusal for one restore candidate: the row's
+/// `route_provider_id` names a route (set, non-empty, not the `openai`
+/// sentinel), so the pane door refuses and names the door that restores the
+/// route. Twin of `codex_route::row_route_identity` in fno-agents - crates/fno
+/// never links fno-agents, so the routed predicate is spelled a second time
+/// here, as one small fn. That is shared vocabulary, not a second builder.
+fn member_routed_codex_refusal(row: &RegistryAgent, name: &str) -> Option<String> {
+    if row.harness.as_deref() != Some("codex") {
+        return None;
+    }
+    let provider = row
+        .route_provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && *p != "openai")?;
+    Some(format!(
+        "{name} runs on codex route {provider}; resume it with `fno agents resume {name}`, \
+         which restores the route"
+    ))
+}
+
 pub(crate) fn agent_harness_session_id(agent: &RegistryAgent) -> Option<&str> {
     agent
         .harness_session_id
@@ -6469,6 +6490,33 @@ impl Core {
                 continue;
             }
             let harness_name = member.harness.clone();
+            // x-3954: a routed codex member refuses before any staging. A
+            // pane spawn's only env channel is an argv prefix (visible in
+            // ps), so it cannot carry the route's key; `fno agents resume`
+            // is the door that restores the route, and the member is marked
+            // refused in this receipt.
+            if harness_name.as_deref() == Some("codex") {
+                let row = self.agents.iter().find(|a| {
+                    agent_harness_session_id(a)
+                        == member
+                            .harness_session_id
+                            .as_deref()
+                            .filter(|s| !s.is_empty())
+                });
+                if let Some(reason) = row.and_then(|row| member_routed_codex_refusal(row, &name)) {
+                    rows.push(RestoreRow {
+                        member: name,
+                        harness: harness_name,
+                        squad: 0,
+                        outcome: "refused".into(),
+                        pane: None,
+                        tab: None,
+                        reason: Some(reason),
+                        notice: None,
+                    });
+                    continue;
+                }
+            }
             // A claude member without a resolvable plan refuses here instead
             // of firing a stray off-loop resolution from the bulk path; the
             // single gesture keeps its own replay behavior.
