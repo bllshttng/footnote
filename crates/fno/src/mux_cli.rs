@@ -2688,12 +2688,8 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 // (x-d865) exact placement: land in a named tab, adjacent to an
                 // anchor pane.
                 "--tab" => tab = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
-                // Bare "at" mirrors the "split" alias above: the outer
-                // pane-run transport (mux_spawn.py placement_args) sends
-                // placement directives unprefixed, and this arm's absence
-                // used to fall through to `_ => break`, folding "at" and
-                // everything after it into the spawned process's own argv
-                // instead of the placement it named.
+                // Bare "at" mirrors bare "split" above: mux_spawn.py's
+                // placement_args sends directives unprefixed (x-d865).
                 "--at" | "at" => {
                     let v = flag_value(args, &mut i, "--at")?;
                     if v == "current" {
@@ -2712,8 +2708,6 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     }
                     max_panes = Some(parsed);
                 }
-                // (x-ae47) The server picks the tab: first with room below
-                // --max-panes, else a new one.
                 "--fit" => fit = true,
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
                 _ => break, // first bare token begins the command argv
@@ -2753,11 +2747,20 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             at = Some(fno_pane);
             fallback = PlacementFallback::Refuse;
         }
-        if fit && (tab.is_some() || at.is_some() || split.is_some()) {
-            return Err(
-                "--fit selects its own tab and cannot be combined with --tab, --at, or --split"
-                    .to_string(),
-            );
+        let placement = PanePlacement {
+            target: squad
+                .map(PaneTarget::SquadName)
+                .unwrap_or(PaneTarget::CurrentRoute),
+            split,
+            tab,
+            at,
+            fallback,
+            max_panes,
+            fit,
+            ..Default::default()
+        };
+        if let Some((_, msg)) = crate::server::placement_fit::refuse_fit_with_geometry(&placement) {
+            return Err(msg);
         }
         return Ok(ParsedPane {
             session,
@@ -2767,21 +2770,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 argv,
                 claim,
                 worker,
-                placement: PanePlacement {
-                    portal_new: false,
-                    target: squad
-                        .map(PaneTarget::SquadName)
-                        .unwrap_or(PaneTarget::CurrentRoute),
-                    split,
-                    here: false,
-                    tab,
-                    at,
-                    fallback,
-                    max_panes,
-                    thread_pane: false,
-                    portal: None,
-                    fit,
-                },
+                placement,
             },
         });
     }
@@ -7425,10 +7414,6 @@ mod tests {
             } if argv == &["codex"]
         ));
     }
-
-    // The fit parse/wire tests (x-ae47) moved out for the same budget rule.
-    #[path = "placement_fit_tests.rs"]
-    mod placement_fit_tests;
 
     #[test]
     fn mux_pane_parse_wait_defaults_and_units() {

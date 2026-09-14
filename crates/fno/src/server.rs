@@ -69,7 +69,7 @@ pub(crate) mod lifecycle_target;
 mod pane_close;
 mod pane_identity;
 mod pane_reseat;
-mod placement_fit;
+pub(crate) mod placement_fit;
 mod portal_reach;
 mod resume_argv;
 mod retire_session;

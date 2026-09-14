@@ -7,7 +7,7 @@ use super::*;
 /// server, so an explicit `tab`/`at`/`split`/`here`/portal contradicts it.
 /// The control socket is reachable by any client, so the CLI gate covers one
 /// caller and `run_pane` re-validates through here.
-pub(super) fn refuse_fit_with_geometry(placement: &PanePlacement) -> Option<(u32, String)> {
+pub(crate) fn refuse_fit_with_geometry(placement: &PanePlacement) -> Option<(u32, String)> {
     if placement.fit
         && (placement.tab.is_some()
             || placement.at.is_some()
