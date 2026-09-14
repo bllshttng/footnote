@@ -302,11 +302,13 @@ pub fn apply(
                 let mut landed = crate::mail_inject::mail_send_landed(code, &stdout);
                 let mut fallback = false;
                 // Exit 0 is only a queue acceptance. When the receipt says
-                // the lane cannot reach the session, remember it; either way
-                // the attempt must still have had a chance to land, so the
-                // same pass falls back to the content-confirmed resume.
+                // the lane cannot reach the session (the verb prints both
+                // `queued (durable)` and `appended (durable)`), remember it;
+                // either way the attempt must still have had a chance to
+                // land, so the same pass falls back to the
+                // content-confirmed resume.
                 if !landed {
-                    if crate::mail_inject::mail_send_receipt(&stdout).contains("queued (durable)") {
+                    if crate::mail_inject::mail_send_receipt(&stdout).contains("durable") {
                         state.mail_durable = true;
                     }
                     let (resume_code, _) = runner(&resume_argv, "");
@@ -836,6 +838,37 @@ mod tests {
         let ev = last_event(&home, "pr_nudge_sent");
         assert_eq!(ev["data"]["delivered"], serde_json::json!(false));
         assert_eq!(ev["data"]["fallback"], "resume");
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn appended_durable_receipt_also_stamps_mail_durable() {
+        // The verb has two durable wordings; both mean the lane cannot
+        // confirm the landing, so both take the sticky rung.
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                return (0, "1943 OPEN pending\n".into());
+            }
+            if argv.contains(&"send".to_string()) {
+                return (0, "msg-1 appended (durable) to thread-t1\n".into());
+            }
+            (0, String::new())
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-appended"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &row(true),
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        let saved = load_state(&home, &row(true).session_id);
+        assert!(saved.mail_durable);
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
     }
 
