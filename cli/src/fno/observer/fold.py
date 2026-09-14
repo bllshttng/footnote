@@ -171,9 +171,8 @@ JUDGE_DIMENSIONS = ("persona", "surface_fit", "uncovered_case", "deletable", "du
 # collision_free imports the validator's own parallel-surface check.
 
 def _surface_collisions(plan_text: str) -> Optional[list[str]]:
-    """Files claimed by more than one task of a parallel wave, per the
-    validator. ``None`` when the text does not parse as a plan (a PR diff,
-    malformed frontmatter): a coverage gap, never a fail."""
+    """Files claimed by more than one parallel-wave task, per the validator.
+    ``None`` for unparseable text (a PR diff): a coverage gap, never a fail."""
     try:
         doc = load_plan_text(plan_text)
         if not doc.frontmatter:

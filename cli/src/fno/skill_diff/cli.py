@@ -480,11 +480,9 @@ def reconcile(
         print(f"reconcile: {_reeval_pr(pr, proposed[pr], events)}")
 
 
-# Dimensions a /blueprint replay can re-score structurally (Review Amendment
-# A1; collision_free is the only code dimension left post-x-9983). Judge
-# dimensions are never replayable: a missing judge answer there would read as
-# a regression. Anything else has no before/after to compute, so reconcile
-# closes it as outcome-pending (Locked Decision 1) rather than replaying.
+# Replayable blueprint dimensions (A1; collision_free is the only code one
+# left). Judge dimensions are never replayable: a missing judge answer would
+# read as a regression. Rest: reconcile closes outcome-pending.
 _REPLAYABLE_DIMS = {"collision_free"}
 
 

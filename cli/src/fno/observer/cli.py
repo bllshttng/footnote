@@ -468,7 +468,6 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
 
 
 # the advisory five-question judge (grading: crates/fno-agents/src/blueprint_judge.rs).
-
 def _arg_value(args: list[str], flag: str) -> Optional[str]:
     i = args.index(flag) + 1 if flag in args else -1
     return args[i] if 0 <= i < len(args) else None

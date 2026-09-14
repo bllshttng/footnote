@@ -232,7 +232,6 @@ RUST_CLIENT_VERBS = frozenset(
         "graph-get",
         "bash-census",
         "session-start-bytes",
-        # Blueprint judge verb: daemon-free grading read, never `fno agents`.
         "judge",
         # backlog-note + backlog-notes (the bounded-state change): direct
         # client.rs dispatch, never `fno agents` routing; keeps the
