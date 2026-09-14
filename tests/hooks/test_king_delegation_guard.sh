@@ -408,6 +408,14 @@ echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/nul
   && pass "limb: transcript with no spawn tool_use denied" \
   || fail "limb no-spawn rc=$RC out=${OUT:0:300}"
 
+# An aborted spawn the king worked past has a LATER tool_use after it: it no
+# longer holds the allowance, so the write is the king's own again (denied).
+printf '{"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_open01","name":"Agent","input":{"description":"aborted"}}]}}\n{"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_r2","name":"Read","input":{"file_path":"/tmp/x"}}]}}\n' > "$PARENT_TRANS"
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$PARENT_TRANS")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "limb: orphaned open spawn with later tool_use denied" \
+  || fail "limb orphan rc=$RC out=${OUT:0:300}"
+
 # Positive control on the harness itself: the stub fno must be reachable and
 # the crown read live, else every "allow" above is a silent stub failure.
 command -v fno >/dev/null 2>&1 \

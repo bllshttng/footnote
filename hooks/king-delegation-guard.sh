@@ -32,11 +32,10 @@
 # 2026-09-13/14 on a live court). So the guard reads three signatures: a
 # non-empty agent_id (harnesses that send one), a transcript under the session
 # id's subagents/ directory (harnesses that populate it), and the world-truth
-# marker - a Task/Agent tool_use still open in the parent transcript is a limb
-# in flight, and the king's own main thread is blocked while it runs. The
-# open-fork ceiling: a background fork reads the same, so the king's own
-# writes pass while one runs - the same accepted floor as `python3 -c` below.
-# Any other shape fail-closes.
+# marker - a Task/Agent tool_use still open (no tool_result, and no later
+# tool_use) in the parent transcript is a sync limb in flight, and the
+# king's own main thread is blocked while it runs, so its spawn is always
+# the transcript's newest tool_use. Anything else fail-closes.
 #
 # NEVER blocks by accident. Any failure to read the payload, the registry,
 # the manifest, or the config exits 0 and allows - the compact-hook contract
@@ -288,18 +287,18 @@ if [[ -n "$TRANSCRIPT" ]]; then
     fi
     # Third signature: the claude payload carries no per-call subagent marker
     # (agent_id rides SubagentStart/Stop, transcript_path names this same
-    # parent main transcript), so read the world instead. A Task/Agent
-    # tool_use with no tool_result yet is a limb in flight, and the king's
-    # own main thread is blocked while it runs, so this shape cannot be the
-    # king. Ceiling: an open background fork reads the same - the king's own
-    # writes pass while one runs, the accepted `python3 -c` floor again.
-    # Tail only: a live transcript grows large, and the open entry sits at
-    # the end (sync limbs block the writer; recent forks stay near it). A
+    # parent main transcript), so read the world instead. The sync-limb
+    # shape is exact: a Task/Agent tool_use with no tool_result yet AND no
+    # later tool_use - the king's own main thread is blocked while the limb
+    # runs, so its spawn is always the transcript's newest tool_use. An
+    # aborted spawn the king worked past, or an old background fork, has
+    # later tool_use entries and stops holding the allowance. Tail only: a
+    # live transcript grows large, and the open entry sits at the end. A
     # missing or unreadable transcript falls through: fail closed.
     if [[ -f "$TRANSCRIPT" ]] \
         && tail -c 262144 "$TRANSCRIPT" 2>/dev/null | python3 -c '
 import json, sys
-spawn, done = set(), set()
+open_spawn, done = None, set()
 for line in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines():
     line = line.strip()
     if not line.startswith("{"):
@@ -314,11 +313,14 @@ for line in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines():
     for c in content:
         if not isinstance(c, dict):
             continue
-        if c.get("type") == "tool_use" and c.get("name") in ("Task", "Agent"):
-            spawn.add(c.get("id"))
+        if c.get("type") == "tool_use":
+            if c.get("name") in ("Task", "Agent"):
+                open_spawn = c.get("id")
+            else:
+                open_spawn = None
         elif c.get("type") == "tool_result":
             done.add(c.get("tool_use_id"))
-sys.exit(0 if spawn - done else 1)
+sys.exit(0 if open_spawn is not None and open_spawn not in done else 1)
 ' 2>/dev/null; then
         echo "king-delegation-guard: limb of crowned session $SID (open Task/Agent tool_use in the parent transcript); allowing" >&2
         _approve
