@@ -229,6 +229,165 @@ pub(super) fn locate_tier_notice(row: &RegistryAgent) -> Option<String> {
     })
 }
 
+/// (x-a6b9) The passive client id a restore-verb fill rides: the verb has no
+/// focused client, so the seat's own tab rect and this id stand in.
+pub(super) const RESTORE_CLIENT: u64 = u64::MAX;
+
+/// (x-a6b9) The row names of held portals whose fill needs the off-loop
+/// claude re-entry plan: one Drive row answering the key, seat still held.
+pub(super) fn portals_needing_claude_plan(core: &Core) -> Vec<String> {
+    core.portals
+        .keys()
+        .copied()
+        .filter_map(|idx| match classify_portal_restore(core, idx) {
+            Some(PortalRestoreClass::NeedsClaudePlan(name)) => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// (x-a6b9) One report row per stored portal, classified by the same door
+/// the focus fill uses, appended after the member rows. A held claude Drive
+/// seat fills from its staged attach verdict; a fill that did not land
+/// reports refused, never silent. The one-row / ambiguous / no-row texts
+/// are the reach's own refusal vocabulary.
+pub(super) fn portal_restore_rows(
+    core: &mut Core,
+    dry_run: bool,
+    plans: &mut HashMap<String, Result<ReentryVerdict, String>>,
+) -> Vec<RestoreRow> {
+    let portal_indices: Vec<u8> = core.portals.keys().copied().collect();
+    let mut rows = Vec::with_capacity(portal_indices.len());
+    for idx in portal_indices {
+        let (row_key, seat, tab_id) = match core.portals.get(&idx) {
+            Some(p) => (p.row_key.clone(), p.seat, p.tab),
+            None => continue,
+        };
+        let mk = |outcome: &str,
+                  pane: Option<u64>,
+                  tab: Option<u64>,
+                  reason: Option<String>,
+                  notice: Option<String>| RestoreRow {
+            member: row_key.clone(),
+            harness: None,
+            squad: 0,
+            portal: Some(idx),
+            outcome: outcome.into(),
+            pane,
+            tab,
+            reason,
+            notice,
+        };
+        match classify_portal_restore(core, idx) {
+            Some(PortalRestoreClass::SeatGone) => {
+                rows.push(mk(
+                    "refused",
+                    None,
+                    None,
+                    Some("portal seat is gone".into()),
+                    None,
+                ));
+            }
+            Some(PortalRestoreClass::Focused) => {
+                rows.push(mk("focused", Some(seat), Some(tab_id), None, None));
+            }
+            Some(PortalRestoreClass::NoRow) => {
+                rows.push(mk(
+                    "refused",
+                    None,
+                    None,
+                    Some(format!("no live row answers {row_key}")),
+                    None,
+                ));
+            }
+            Some(PortalRestoreClass::Ambiguous) => {
+                rows.push(mk(
+                    "refused",
+                    None,
+                    None,
+                    Some(format!("{row_key} is ambiguous - reach it by its pane")),
+                    None,
+                ));
+            }
+            Some(
+                cls @ (PortalRestoreClass::NeedsClaudePlan(_) | PortalRestoreClass::FillDirect(_)),
+            ) => {
+                if dry_run {
+                    rows.push(mk("planned", None, None, None, None));
+                    continue;
+                }
+                let locate_notice = match &cls {
+                    PortalRestoreClass::FillDirect(row) => locate_tier_notice(row),
+                    _ => None,
+                };
+                if let PortalRestoreClass::NeedsClaudePlan(name) = &cls {
+                    match plans.remove(&format!("portal:{name}")) {
+                        Some(Ok(verdict)) => {
+                            core.reentry_verdict = Some(verdict);
+                        }
+                        Some(Err(reason)) => {
+                            rows.push(mk("refused", None, None, Some(reason), None));
+                            continue;
+                        }
+                        None => {
+                            rows.push(mk(
+                                "refused",
+                                None,
+                                None,
+                                Some(
+                                    "claude re-entry plan unresolved; resume it from the agent panel"
+                                        .into(),
+                                ),
+                                None,
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                // Fill through the focus door's one body; the seat pane's
+                // own size keeps the replacement viewer at the geometry it
+                // held. The reach repoints in place, so the entry's own
+                // seat and tab are the report's values.
+                let (srows, scols) = core
+                    .panes
+                    .get(&seat)
+                    .map(|e| e.vt.size())
+                    .unwrap_or((crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS));
+                let vp = tree::Rect {
+                    x: 0,
+                    y: 0,
+                    rows: srows,
+                    cols: scols,
+                };
+                let _ = fill_held_portal_at(core, RESTORE_CLIENT, (0, tab_id), vp, idx);
+                core.reentry_verdict = None;
+                let filled = core
+                    .portals
+                    .get(&idx)
+                    .is_some_and(|p| core.panes.get(&p.seat).is_some_and(|e| e.cmd.is_some()));
+                if filled {
+                    let (pseat, ptab) = core
+                        .portals
+                        .get(&idx)
+                        .map(|p| (Some(p.seat), Some(p.tab)))
+                        .unwrap_or((None, None));
+                    rows.push(mk("resumed", pseat, ptab, None, locate_notice));
+                } else {
+                    rows.push(mk(
+                        "refused",
+                        None,
+                        None,
+                        Some("portal fill did not land; the seat stays held".into()),
+                        None,
+                    ));
+                }
+            }
+            None => continue,
+        }
+    }
+    rows
+}
+
 /// One control-door reach parked while the row's re-entry plan resolves
 /// off-loop: the observer stays registered, the harvest receiver and the
 /// held reply wait here, and the ReentryPlanReady replay finishes the reach

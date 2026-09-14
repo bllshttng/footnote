@@ -441,6 +441,38 @@ impl super::Core {
     }
 }
 
+/// (x-a6b9) Resolve the restore verb's claude re-entry plans OFF the core
+/// loop: squad members resolve their `resume` transition, held portals their
+/// `attach` transition (keyed `portal:<name>` so one row that is both a
+/// member and a held portal resolves each transition it actually needs).
+/// Every failure shape is that row's visible refusal, the same typed `Err`
+/// a single plan carries.
+pub(super) async fn resolve_restore_plans(
+    claude_names: Vec<String>,
+    portal_names: Vec<String>,
+) -> std::collections::HashMap<String, Result<ReentryVerdict, String>> {
+    let mut set = tokio::task::JoinSet::new();
+    for name in claude_names {
+        set.spawn(async move {
+            let verdict = run_reentry_plan(&name, "resume").await;
+            (name, verdict)
+        });
+    }
+    for name in portal_names {
+        set.spawn(async move {
+            let verdict = run_reentry_plan(&name, "attach").await;
+            (format!("portal:{name}"), verdict)
+        });
+    }
+    let mut plans = std::collections::HashMap::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((name, verdict)) = joined {
+            plans.insert(name, verdict);
+        }
+    }
+    plans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

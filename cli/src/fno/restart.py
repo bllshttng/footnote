@@ -10,51 +10,19 @@
   auto-restarted only when it has no live panes, healing pair-deploy skew
   without killing sessions. A stale-wire server with live panes is reported and
   spared unless --mux. A CURRENT-wire server stays opt-in behind --mux.
-- Worker revival: killing a mux server also kills the worker PTYs it hosted.
-  After a kill, registered claude workers that died with the server are
-  respawned onto their recorded session (`fno agents spawn --resume`, the
-  revive-in-place lane) so the restart reconnects them instead of orphaning
-  them. Best-effort and opt-out via --no-revive; bg workers survive the kill
-  and are never touched.
+- Worker panes: killing a mux server ends the worker PTYs it hosted. A
+  keeper-hosted pane outlives the kill and is re-adopted with the same pid;
+  `fno mux workspace restore` brings back what a workspace held. There is no
+  respawn lane here (x-a6b9: the claude-only revive leg is deleted).
 """
 from __future__ import annotations
 
 import json
 import shutil
 import subprocess
-import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import typer
-
-# Killed panes' worker processes take a moment to die; probing liveness too
-# early would read them as survivors and skip the revive.
-_REVIVE_SETTLE_SECS = 3.0
-
-
-def _revive_enabled() -> bool:
-    """Resolve whether crash-recovery worker revival is armed (x-aaaf wave 2).
-
-    ``config.restart.enabled`` defaults True (matches the spawner's prior,
-    ungated behavior). A malformed value degrades to True (never opt-in), but
-    a config that fails to load at all degrades to False - the global
-    invariant that an unreadable config resolves every gate to off, never on.
-
-    Also stops when ``config.autonomy.enabled`` (the wave-3 master panic
-    switch) is off, checked first. Only reached when the operator did not
-    pass an explicit ``--revive``/``--no-revive`` (that always wins - an
-    explicit human command is not autonomy).
-    """
-    from fno.config import autonomy_master_enabled
-
-    if not autonomy_master_enabled():
-        return False
-    try:
-        from fno.config import load_settings
-
-        return bool(load_settings().restart.enabled)
-    except Exception:  # noqa: BLE001 - fail-safe to disabled on a read failure
-        return False
 
 
 def _mux_sessions() -> Optional[list[dict[str, Any]]]:
@@ -85,142 +53,6 @@ def _mux_sessions() -> Optional[list[dict[str, Any]]]:
     return data if isinstance(data, list) else None
 
 
-def _agents_rows() -> list[dict[str, Any]]:
-    """Registered agents via `fno agents list --json`; [] on any failure."""
-    fno = shutil.which("fno")
-    if not fno:
-        return []
-    try:
-        proc = subprocess.run(
-            [fno, "agents", "list", "--json"], capture_output=True, text=True, timeout=15
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    if proc.returncode != 0:
-        return []
-    try:
-        data = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError:
-        return []
-    if isinstance(data, list):
-        rows = data
-    elif isinstance(data, dict):
-        rows = data.get("agents", [])
-    else:
-        rows = []
-    return [r for r in rows if isinstance(r, dict)]
-
-
-def is_revivable(row: dict[str, Any]) -> bool:
-    """True when `row` (an `fno agents list --json` row) is a claude worker with
-    a recorded resumable session - the exact predicate `_revive_orphans` applies
-    per orphan. The update-readiness resolver (`fno.update`) calls this same
-    function to count what `--revive` would bring back: one predicate, two
-    callers, so they cannot drift apart. Checks `harness`, the canonical
-    identity field (`AgentEntry.harness`) - the legacy `provider` key was
-    removed from the row schema and is always absent now."""
-    return row.get("harness") == "claude" and bool(row.get("session_id"))
-
-
-#: Served-activity words a restart orphans into `--revive`: a row still live
-#: when the kill landed. `refused` rides along (x-e594): a usage-capped worker
-#: is live, its process just cannot get a turn until the reset, so a restart
-#: must resume it afterwards rather than leave it unrecorded.
-REVIVABLE_STATUSES = ("writing", "quiet", "parked", "refused")
-
-
-def _revive_orphans(
-    pre_live: dict[str, dict[str, Any]],
-    say: Callable[..., None],
-    result: dict[str, Any],
-) -> None:
-    """Respawn workers orphaned by a mux-server kill onto their recorded claude
-    sessions. Best-effort: a failed revive is reported in the summary but never
-    fails the restart (which already succeeded); revive-in-place refuses to
-    double-spawn if the worker is actually still alive."""
-    fno = shutil.which("fno")
-    if not fno:
-        return
-    time.sleep(_REVIVE_SETTLE_SECS)
-    try:
-        subprocess.run([fno, "agents", "reconcile"], capture_output=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    now_live = {
-        r.get("name")
-        for r in _agents_rows()
-        if r.get("status") in REVIVABLE_STATUSES
-    }
-    for name, row in pre_live.items():
-        if name in now_live:
-            continue
-        session = row.get("session_id")
-        if not is_revivable(row):
-            result["agents_revive_skipped"].append(name)
-            say(
-                f"fno agents restart: worker '{name}' died with its mux server and has no "
-                "resumable claude session; not revived.",
-                err=True,
-            )
-            continue
-        # x-84b2: ro-<verb>-<identity>-<short>; the old name aliases the new row.
-        from fno.agents.naming import (
-            AgentNameError,
-            dispatch_agent_name,
-            legacy_verb_code,
-            parse_dispatch_agent_name,
-        )
-
-        parsed = parse_dispatch_agent_name(name)
-        verb = parsed.verb if parsed else (legacy_verb_code(name) or "t")
-        short = str(session)[:8]
-        identity, slug = (parsed.node, short) if parsed and parsed.node else (f"session-{short}", None)
-        try:
-            new_name = dispatch_agent_name("ro", verb, identity, slug=slug)
-        except AgentNameError as exc:
-            result["agents_revive_failed"].append(name)
-            say(
-                f"fno agents restart: worker '{name}' revive name unrepresentable "
-                f"({exc}); resume it manually: fno agents resume {name}",
-                err=True,
-            )
-            continue
-        # Pin the provider explicitly: a bare spawn inherits
-        # config.agents.defaults.provider, and a non-claude default makes the
-        # spawn seam inject --provider <that>, which the --resume guard then
-        # rejects - every revive would fail in such an environment. --substrate
-        # bg is what --resume implies; naming it is belt-and-suspenders.
-        cmd = [
-            fno, "agents", "spawn", "--name", new_name,
-            "--harness", "claude", "--substrate", "bg", "--resume", str(session),
-        ]
-        if row.get("cwd"):
-            cmd += ["--cwd", str(row["cwd"])]
-        try:
-            rc = subprocess.run(cmd, capture_output=True, text=True, timeout=120).returncode
-        except (OSError, subprocess.SubprocessError):
-            rc = 1
-        if rc == 0:
-            try:
-                from fno.agents.registry import append_row_alias
-
-                append_row_alias(new_name, name)
-            except (OSError, ValueError):
-                pass
-            result["agents_revived"].append(new_name)
-            say(
-                f"fno agents restart: revived worker '{new_name}' (was '{name}') "
-                f"onto session {session}."
-            )
-        else:
-            result["agents_revive_failed"].append(name)
-            say(
-                f"fno agents restart: could not revive worker '{name}' (spawn --resume "
-                f"exited {rc}); resume it manually: fno agents resume {name}",
-                err=True,
-            )
-
-
 def _fold_keepers(keepers: dict, result: dict, failures: list) -> None:
     """Fold the daemon child's keepers summary in; spared keepers are failures."""
     result["store_keepers"] = keepers.get("store_keepers", [])
@@ -242,15 +74,6 @@ def restart_command(
         "--mux",
         help="Also restart live mux servers (DESTRUCTIVE: ends their shells/panes).",
     ),
-    revive: Optional[bool] = typer.Option(
-        None,
-        "--revive/--no-revive",
-        help="After killing a mux server, respawn the claude workers that died with "
-        "it onto their recorded sessions (spawn --resume). Workers that survive "
-        "(bg substrate) or have no recorded session are left alone. Unset resolves "
-        "config.restart.enabled (default True); an explicit flag always wins "
-        "(x-aaaf wave 2).",
-    ),
     json_out: bool = typer.Option(
         False, "--json", "-J", help="Emit a single JSON summary on stdout; text to stderr."
     ),
@@ -261,10 +84,7 @@ def restart_command(
     server below the compatibility floor is auto-restarted only when it hosts
     no live panes; one with live panes is reported and spared unless --mux. A
     current-wire server is reported by default and restarted only with --mux.
-    Claude workers that die with a killed server are respawned onto their
-    recorded sessions (--no-revive to skip).
     """
-    revive = revive if revive is not None else _revive_enabled()
     result: dict[str, Any] = {
         "daemon": None,
         "mux_sessions": [],  # all LIVE rows, including spared ones; the set actually restarted is mux_restarted
@@ -272,9 +92,6 @@ def restart_command(
         "mux_wedged": [],  # wedged rows: actionable failures (holds socket, not accepting)
         "mux_other": [],  # other non-live rows (stale/unqueryable): reported, never killed
         "mux_restarted": [],
-        "agents_revived": [],
-        "agents_revive_failed": [],
-        "agents_revive_skipped": [],
     }
     failures: list[str] = []  # non-empty -> exit 1
 
@@ -407,7 +224,7 @@ def restart_command(
                 say(
                     f"fno agents restart: mux session '{row['session']}' has {row['panes']} live "
                     "pane(s); its stale-wire server is spared. Use `fno agents restart --mux` "
-                    "to force-kill and revive it."
+                    "to force-kill it."
                 )
                 # Sparing is deliberate, but the fleet is NOT healed: an exit 0
                 # here lets automation conclude the skew was cleared, the same
@@ -422,15 +239,6 @@ def restart_command(
         to_restart = (stale_live if mux else stale_pane_free) + (current_live if mux else [])
         if not live:
             say("fno agents restart: no live mux sessions.")
-        # Snapshot live workers BEFORE the kill: the kill is what orphans them,
-        # so this is the only moment their pre-kill liveness is observable.
-        pre_live: dict[str, dict[str, Any]] = {}
-        if to_restart and revive:
-            pre_live = {
-                r["name"]: r
-                for r in _agents_rows()
-                if r.get("name") and r.get("status") in REVIVABLE_STATUSES
-            }
         if to_restart:
             fno = shutil.which("fno")
             if not fno:
@@ -468,8 +276,6 @@ def restart_command(
                     else:
                         say(f"fno agents restart: could not kill mux session '{name}' (exit {kc}).", err=True)
                         failures.append(f"mux: kill {name} exit {kc}")
-        if revive and result["mux_restarted"] and pre_live:
-            _revive_orphans(pre_live, say, result)
         # Current-wire servers left running (opt-in): report so the operator can
         # restart them deliberately. Skipped when --mux already restarted them.
         if current_live and not mux:

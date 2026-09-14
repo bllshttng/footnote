@@ -502,8 +502,6 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.groom.* ---
     "groom.enabled": Meta("never", "Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true."),
-    # --- config.restart.* ---
-    "restart.enabled": Meta("never", "Enable crash-recovery worker revival after `fno agents restart --mux` kills a server. Defaults true."),
     # --- config.evals.* ---
     "evals.enabled": Meta("never", "Enable the headless eval-suite grading-worker spawn. Defaults true."),
     "evals.schedule_days": Meta("never", "Days between scheduled regression-tier runs on the pr-watch tick (0 disables)."),

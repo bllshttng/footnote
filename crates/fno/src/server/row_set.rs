@@ -498,6 +498,20 @@ impl Core {
     /// client-side fold, which is client state the server cannot see). The
     /// receipt distinguishes "present but suppressed" from "absent from the
     /// published set" - the reading the plan demanded before any render fix.
+    /// The operator-facing text for a registry row's no-pane classification:
+    /// one string per `AgentNoPaneReason`, so every door that names a refusal
+    /// names it the same way.
+    pub(crate) fn no_pane_reason_text(reason: AgentNoPaneReason) -> &'static str {
+        match reason {
+            AgentNoPaneReason::LivePaneless => "session is live elsewhere",
+            AgentNoPaneReason::MissingHarness => "harness is missing",
+            AgentNoPaneReason::MissingSessionId => "session id is missing",
+            AgentNoPaneReason::UnsupportedHarness => "harness cannot resume sessions",
+            AgentNoPaneReason::BackendNotLive => "backend liveness is unconfirmed",
+            AgentNoPaneReason::LivenessUnmeasured => "liveness was never measured",
+        }
+    }
+
     pub(crate) fn agent_rows_receipt(&self) -> Vec<AgentRowReceipt> {
         self.agent_rows()
             .into_iter()

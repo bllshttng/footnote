@@ -25,7 +25,6 @@ cli/src/fno/pr_watch/_dispatch.py::fire_skill  # pr_watch headless PR poll (conf
 cli/src/fno/provenance/spawn_think.py::_spawn_think_worker  # spawn_think (config.think_spawn.enabled)
 cli/src/fno/recovery.py::_redispatch  # recovery sweep (config.recovery.enabled)
 cli/src/fno/recovery.py::_respawn_bg_resume  # recovery sweep (config.recovery.enabled)
-cli/src/fno/restart.py::_revive_orphans  # restart (config.restart.enabled)
 cli/src/fno/retro/keep_going.py::_spawn_target_worker  # keep_going (config.keep_going.enabled)
 cli/src/fno/verify_advise.py::run_verifier  # NOT autonomy: synchronous ship-time verify sub-step of an already-permitted ship, not its own self-start trigger
 hooks/context-nudge.sh::  # NOT a call site: quotes `fno agents spawn` inside an operator-facing nudge message
