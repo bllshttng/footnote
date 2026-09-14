@@ -202,9 +202,9 @@ def test_map_covers_current_surface_once():
     # Later folds allocate `agents backlog-note` and `agents backlog-notes`,
     # the two native note verbs (625 -> 627). `agents spawn-gate`, the verb
     # the Python gate transport calls, landed in parallel: 627 -> 628. This
-    # branch allocates `do pr hold` and `pr hold`, the dispatch_hold writer:
-    # counted from the merged file, 628 -> 630.
-    assert len(mapped) == 630, (
+    # branch allocated `do pr hold` / `pr hold` rows then removed them when
+    # the writer moved into crates: counted from the merged file, 628.
+    assert len(mapped) == 628, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
