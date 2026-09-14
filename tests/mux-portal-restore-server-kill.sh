@@ -31,6 +31,10 @@ if [[ ! -x "$MUX_BIN" || ! -x "$WORKER_BIN" ]]; then
     cargo build --manifest-path "$REPO_ROOT/crates/fno/Cargo.toml" --bin fno
 fi
 
+# The proof owns its server; the CI harness's e2e breadcrumbs (FNO_E2E)
+# only add a "client <sentinel> gone" line the parked portal reach's
+# observer teardown legitimately produces, which the log scanners flag.
+unset FNO_E2E
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fpr.XXXXXX")"
 MUX_DIR="$TMP_DIR/mux"
 mkdir -p "$MUX_DIR"
@@ -141,7 +145,9 @@ cleanup() {
         kill -9 "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
-    rm -rf "$TMP_DIR"
+    if [[ "${KEEP_TMP:-0}" != "1" ]]; then
+        rm -rf "$TMP_DIR"
+    fi
 }
 trap cleanup EXIT
 

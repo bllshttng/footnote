@@ -502,10 +502,6 @@ wedged_after_ticks = 3
 # Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true.
 enabled = true
 
-[restart]
-# Enable crash-recovery worker revival after `fno agents restart --mux` kills a server. Defaults true.
-enabled = true
-
 [evals]
 # Enable the headless eval-suite grading-worker spawn. Defaults true.
 enabled = true
