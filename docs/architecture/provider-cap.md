@@ -35,7 +35,18 @@ Migration per member, journalled to `<home>/provider-cap/<lane>-<epoch>.jsonl`:
 
 ## Returning
 
-Planned as a dedicated follow-up node and not built yet: canary first, then a trickle, never a clock-only return. The one-liner: resume one canary at reset, require a clean survive window, then announce or trickle the rest.
+The actor reads the quota lock from `provider-runtime-state.json`, the file Python's recovery sweep writes. Before x-6412 it defaulted to `runtime-state.json`, a file nobody writes. When the lock's `rate_limited_until` passes and no member's 429 is newer, the lane reads `returning`, not open. The return ladder owns it. The leave question and any recorded decision close as `superseded-by-reset`.
+
+The ladder, one step per tick (120s), with state in `<home>/provider-cap/return-<lane>.json` keyed by the reset epoch:
+
+1. Wait out `recovery.provider_outage_reset_grace_seconds` (default and floor 120) past the reset.
+2. Resume ONE canary: the first candidate by name (capped, not held, not spawn-confirmed into a successor).
+3. Hold a survive window of `canary_survive_minutes` (default 15).
+4. When the newest assistant entry postdates the resume and carries no new 429, the canary survived. `cap_unknown` or a missing member reads `unknown`. So does no turn since the resume. `unknown` blocks every further resume for that epoch, with one operator notice.
+5. In `ask` mode outside sleep hours, announce through `fno agents mail team --scope all` first. Then hold a 10-minute veto before anything else resumes. `fno agents provider-cap decide <lane> --answer wait` holds the rest for as long as the answer stands.
+6. Otherwise resume the remaining candidates one per tick until the journal reads `return: complete`.
+
+A canary that hits a new 429 reopens the lane. The quota lock gains a fresh future reset, and the leave ladder owns the new strand. The watchdog never wakes on a passed window. Its verdict reads `429 window passed; return owned by provider-cap` ([fleet-watchdog.md](fleet-watchdog.md)).
 
 ## Config
 
@@ -50,6 +61,8 @@ canary_survive_minutes = 15
 quorum = 2
 ```
 
+The return ladder's grace lives under `[recovery]`: `provider_outage_reset_grace_seconds` (default and floor 120).
+
 ## State
 
-`<agents home>/provider-cap/` holds `snapshot.json`, `decision-<lane>.json`, question markers, and the journals. Recorded in `docs/state-root-inventory.md`. Compaction stamps live in `<agents home>/compacting/<session>.json`. The `PreCompact` hook writes them best-effort via `fno-agents compaction mark`.
+`<agents home>/provider-cap/` holds `snapshot.json`, `decision-<lane>.json`, the per-epoch canary state `return-<lane>.json`, question markers, and the journals. Recorded in `docs/state-root-inventory.md`. Compaction stamps live in `<agents home>/compacting/<session>.json`. The `PreCompact` hook writes them best-effort via `fno-agents compaction mark`.
