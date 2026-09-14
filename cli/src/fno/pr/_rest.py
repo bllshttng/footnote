@@ -28,6 +28,7 @@ import stat
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Tuple
 
+from fno.pr import _quota
 from fno.pr._proc import run
 from fno.pr._ritual import _parse_origin_slug
 
@@ -318,6 +319,9 @@ def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] =
             " bucket could not be checked and this backs off rather than trust"
             " the wording"
         )
+        # This arm classifies GitHub's own refusal, so it is the one place a
+        # fleet backoff may open. The core arm records nothing.
+        _quota.record_refusal(text)
         return RestReason(
             base + " | this is the SECONDARY rate limit (request rate, not"
             f" budget: {budget}). Back off - retrying on a fixed interval"

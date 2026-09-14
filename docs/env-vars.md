@@ -85,6 +85,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_FLIGHT_BUDGET_S` | py | Overrides the seconds a live single-flight holder tolerates before its watchdog releases the flight and exits 124; the default trips a minute before the 30-minute TTL. |
 | `FNO_GLOBAL_SETTINGS_PATH` | py+rs | unclear: cli/src/fno/adapters/providers/loader.py:48 |
 | `FNO_GRAPH_JSON` | rs | unclear: crates/fno/src/backlog_view.rs:47 |
+| `FNO_GH_BUDGET_POINTS_PER_MIN` | rs | Overrides the fleet GitHub request budget cap in points per 60s window (default 450). |
 | `FNO_HARNESS` | py | unclear: cli/src/fno/king/state.py:268 |
 | `FNO_HEALTH_HISTORY` | py | unclear: cli/src/fno/graph/triage.py:2038 |
 | `FNO_HOME` | py+rs | unclear: cli/src/fno/paths.py:1723 |
@@ -133,7 +134,6 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_PLATFORM` | py | unclear: cli/src/fno/context_observation.py:62 |
 | `FNO_PROCESS_ADMISSION` | rs | unclear: crates/fno/src/bootstrap.rs:1721 |
 | `FNO_PROCESS_ADMISSION_MAX` | py+rs | unclear: cli/src/fno/agents/mux_spawn.py:1914 |
-| `FNO_PR_STATUS_BACKOFF_CAP` | py | unclear: cli/src/fno/pr/_cache.py:85 |
 | `FNO_PR_STATUS_CACHE_DIR` | py+rs | unclear: cli/src/fno/pr/_cache.py:92 |
 | `FNO_PR_STATUS_TTL` | py | unclear: cli/src/fno/pr/_cache.py:78 |
 | `FNO_PY` | rs | Overrides the resolved fno-py console script path (tests and nonstandard installs); empty falls through to the resolver legs. |

@@ -11,6 +11,24 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _quiet_gh_budget(monkeypatch):
+    """Keep every test off the real fleet GitHub request ledger.
+
+    `execute_graphql` and the gh proxy admit through `fno-agents gh-budget`
+    before each call, and a CI wheel bundles the binary - so an unstubbed test
+    run charges the machine-wide budget hundreds of times inside the 60s
+    window, trips the 450-point cap mid-shard, and every later test degrades
+    to its unknown arm (measured: smoke-pytest shard 8). Autouse, like the
+    decision-index sandbox: the write happens layers below any test that
+    triggers it. The budget's own tests re-stub `_quota._gh_budget` and restore
+    the real functions from import-time captures.
+    """
+    monkeypatch.setattr("fno.pr._quota.admit", lambda argv: None)
+    monkeypatch.setattr("fno.pr._quota.record_refusal", lambda stderr: None)
+    monkeypatch.setattr("fno.pr._quota.backoff_live", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def _sandbox_decision_index(tmp_path, monkeypatch):
     """Keep the machine-wide decision index out of the developer's ~/.fno.
 

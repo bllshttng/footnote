@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Callable, Optional, Sequence
 
 from fno.paths import github_cli_proxy_dir, graphql_quota_lock
 from fno.pr._proc import Result, run
+from fno.rust_binary import VerbUnavailable, verb_call
 from fno.setup.github_cli import PROXY_DEPTH_ENV, PROXY_EXEC_LINE, PROXY_IMPORT_LINE
 
 GRAPHQL_RESERVE = 200
@@ -313,6 +315,55 @@ def _refusal(args: Sequence[str], *, reset: Optional[int], unavailable: bool = F
     )
 
 
+def _gh_budget(payload: dict) -> dict:
+    # The budget ops ride the existing fleet-incident action as an argument
+    # (law d-fe66560a allows no new client action); the door is unchanged.
+    return verb_call("fleet-incident", payload, timeout=5)
+
+
+def admit(argv: Sequence[str]) -> Optional[str]:
+    """Ask the machine-wide budget before one real gh call leaves.
+
+    Returns None when admitted; a str is the refusal line the caller prints
+    (and exits 75 on). A budget that cannot answer admits: it protects the
+    fleet, it is not a stop - the operator's breaker is `fno agents incident`.
+    """
+    try:
+        answer = _gh_budget({"op": "admit", "argv": [str(a) for a in argv]})
+    except VerbUnavailable as exc:
+        print(f"gh budget: ledger unavailable, admitting: {exc}", file=sys.stderr)
+        return None
+    if answer.get("verdict") == "refused":
+        return answer.get("refusal") or "gh budget: fleet GitHub rate limit held locally"
+    return None
+
+
+def record_refusal(stderr: str) -> None:
+    """Record GitHub's refusal in the fleet ledger, opening its backoff.
+
+    Only stderr carrying HTTP 403/429 qualifies: the local `gh budget:`
+    refusal line deliberately says "rate limit" without either marker, so a
+    refusal this fleet manufactured can never be recorded as GitHub's. The
+    caller also gates on the live probe (never record a drained primary
+    bucket) before reaching here.
+    """
+    if "HTTP 403" not in stderr and "HTTP 429" not in stderr:
+        return
+    try:
+        _gh_budget({"op": "refused"})
+    except VerbUnavailable as exc:
+        print(f"gh budget: refusal not recorded: {exc}", file=sys.stderr)
+
+
+def backoff_live() -> bool:
+    """Whether the fleet ledger holds a live GitHub-refusal backoff."""
+    try:
+        answer = _gh_budget({"op": "status"})
+    except VerbUnavailable:
+        return False
+    return answer.get("backoff_remaining_s", 0) > 0
+
+
 def execute_graphql(
     purpose: str,
     gh_args: Sequence[str],
@@ -370,6 +421,18 @@ def execute_graphql(
                     return Result(REFUSED, "", _refusal(gh_args, reset=None, unavailable=True))
                 if remaining <= GRAPHQL_RESERVE:
                     return Result(REFUSED, "", _refusal(gh_args, reset=reset))
-            return runner([gh, *gh_args], cwd=cwd, timeout=timeout, env=env)
+            budget_refusal = admit(gh_args)
+            if budget_refusal:
+                return Result(REFUSED, "", budget_refusal)
+            result = runner([gh, *gh_args], cwd=cwd, timeout=timeout, env=env)
+            if (
+                result.returncode != 0
+                and "rate limit" in (result.stderr or "").lower()
+                and (remaining is None or remaining > 0)
+            ):
+                # Fail toward backoff, and never record a drained primary
+                # bucket - the same posture as refusal_is_secondary.
+                record_refusal(result.stderr)
+            return result
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)

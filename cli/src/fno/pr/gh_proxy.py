@@ -54,6 +54,10 @@ def classify(args: Sequence[str]) -> Action:
 
 def delegate(real: str, args: Sequence[str]) -> None:
     """Replace the proxy so untouched gh commands keep TTY and streaming semantics."""
+    refusal = _quota.admit(args)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        raise SystemExit(_quota.REFUSED)
     env = _quota.delegate_environment()
     env[_REENTRY_ENV] = str(os.getpid())
     os.execve(real, [real, *args], env)

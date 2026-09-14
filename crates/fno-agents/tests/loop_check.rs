@@ -428,12 +428,27 @@ fn fire(args: &[&str]) -> (i32, Decision) {
     // by the bash e2e harness, which controls HOME per case).
     args_owned.push("--global-settings".to_string());
     args_owned.push("/nonexistent/global-settings.yaml".to_string());
-    // Hermeticity, third door: recent_secondary_refusal reads global_events,
-    // which defaults to the developer's real ~/.fno/events.jsonl. This very
-    // suite runs under a live footnote session whose own stop-hook fires
-    // write secondary-refusal rows to that real file all session long, so an
-    // unisolated test silently inherits an unrelated stand-down. A case that
-    // wants to test the secondary-refusal path passes its own
+    // Hermeticity, third door: the fleet GitHub request budget ledger
+    // defaults to the developer's real ~/.fno/locks/github-request-budget.json.
+    // This suite runs under a live footnote session whose gh calls stamp that
+    // real ledger all session long, so an unisolated test inherits whatever
+    // backoff or window pressure the machine is actually under. Default to
+    // the case's own (absent) ledger beside its cwd; a case that wants a
+    // seeded budget passes `--gh-budget-ledger`, and this skips.
+    if !args.iter().any(|a| a.starts_with("--gh-budget-ledger")) {
+        let cwd = args
+            .iter()
+            .position(|a| *a == "--cwd")
+            .and_then(|p| args.get(p + 1))
+            .expect("every fire passes --cwd");
+        args_owned.push("--gh-budget-ledger".to_string());
+        args_owned.push(format!("{cwd}/.fno/gh-budget.json"));
+    }
+    // Hermeticity, fourth door: global_events defaults to the developer's
+    // real ~/.fno/events.jsonl. This very suite runs under a live footnote
+    // session whose own stop-hook fires write rows to that real file all
+    // session long, so an unisolated test silently inherits unrelated
+    // journal state. A case that wants real journal rows passes its own
     // `--global-events`, and this skips.
     if !args.iter().any(|a| a.starts_with("--global-events")) {
         args_owned.push("--global-events".to_string());
@@ -458,6 +473,7 @@ fn fire(args: &[&str]) -> (i32, Decision) {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 mod cancel_sentinel;
+mod gh_budget_gate;
 mod watch_lease_gate;
 
 /// AC1-HP: promise with green PR -> DonePRGreen, exit 0, termination event.
@@ -621,6 +637,10 @@ fn unparseable_local_settings_not_outranked_by_global_github_apps() {
         format!("--git-bin={}", mock.git.display()),
         "--global-settings".into(),
         global.to_str().unwrap().into(),
+        format!(
+            "--gh-budget-ledger={}",
+            cwd.join(".fno/gh-budget.json").display()
+        ),
     ];
     let (_code, json_str) = fno_agents::loopcheck::run_loop_check_capture(&args);
     let d: Decision = serde_json::from_str(&json_str).unwrap();
@@ -1929,6 +1949,10 @@ fn events_appended_to_both_project_and_global() {
         global_events.to_str().unwrap(),
         &format!("--gh-bin={}", mock.gh.display()),
         &format!("--git-bin={}", mock.git.display()),
+        &format!(
+            "--gh-budget-ledger={}",
+            cwd.join(".fno/gh-budget.json").display()
+        ),
     ]);
 
     assert!(
@@ -7766,158 +7790,6 @@ fn floor_stand_down_spends_no_graphql() {
             panic!("a stand-down fire must never be recorded as loop_check (breaks the fingerprint streak scan): {line}");
         }
     }
-}
-
-/// The primary floor is blind to GitHub's secondary (burst/concurrency)
-/// limit by construction: a live specimen showed core 4922/5000 and graphql
-/// 1392/5000 - both healthy - while a call was refused anyway. A fire must
-/// also stand down on an OBSERVED secondary refusal in the last 5 minutes,
-/// never only on advertised quota headroom.
-#[test]
-fn floor_stands_down_on_a_recent_secondary_refusal_even_with_healthy_quota() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let global_dir = tmp.path().join("global_fno");
-    fs::create_dir_all(cwd.join(".fno")).unwrap();
-    fs::create_dir_all(&global_dir).unwrap();
-    isolate_settings(cwd);
-    let manifest_path = cwd.join("target-state.md");
-    let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = project_events(&cwd);
-    let global_events_path = global_dir.join("events.jsonl");
-    fs::write(
-        &manifest_path,
-        new_manifest("sess-2ndary", "2026-06-05T00:00:00Z", true),
-    )
-    .unwrap();
-    fs::write(&transcript_path, transcript_empty()).unwrap();
-    // A prior fire's forensic trail: a secondary-limit refusal 90s ago, well
-    // inside the 5-minute window, on the MACHINE-WIDE log (`emit_to_both`'s
-    // destination for every session's rows, this session's included).
-    fs::write(
-        &global_events_path,
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "type": "loop_check_gh_error",
-                "ts": "2026-06-05T00:28:30Z",
-                "data": {
-                    "session_id": "sess-2ndary",
-                    "read": "pulls_comments",
-                    "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit",
-                    "rate_limit_class": "secondary"
-                }
-            })
-        ),
-    )
-    .unwrap();
-
-    // 4922 remaining, well above GRAPHQL_FLOOR (200): the primary floor alone
-    // would NOT trigger here. Only the observed refusal should.
-    let gh = quota_gh(cwd, 4922, false);
-    let git = MockBins::green().git;
-    let (code, d) = fire(&[
-        "loop-check",
-        "--state",
-        manifest_path.to_str().unwrap(),
-        "--transcript",
-        transcript_path.to_str().unwrap(),
-        "--cwd",
-        cwd.to_str().unwrap(),
-        "--now",
-        "2026-06-05T00:30:00Z",
-        &format!("--gh-bin={}", gh.display()),
-        &format!("--git-bin={}", git.display()),
-        "--events",
-        events_path.to_str().unwrap(),
-        "--global-events",
-        global_events_path.to_str().unwrap(),
-    ]);
-    assert_eq!(code, 0);
-    assert_eq!(d.decision, "block");
-    assert!(d.message.contains("standing down"), "got: {}", d.message);
-    assert!(
-        d.message.contains("secondary"),
-        "must name the secondary limit, not just the primary floor: {}",
-        d.message
-    );
-    let calls = fs::read_to_string(cwd.join("calls.log")).unwrap();
-    assert!(
-        !calls.contains("pr view"),
-        "no GraphQL spend on a secondary-refusal stand-down: {calls}"
-    );
-}
-
-/// The fleet-wide half of the same guard: the secondary limit is per-USER,
-/// so a refusal recorded by ANOTHER session on this machine must stand THIS
-/// session down too, not just one that refused itself. 29 live workers were
-/// on this machine the night the guard was designed; a per-session refusal
-/// record would have let 28 of them keep sending against a budget the 29th
-/// had already proven refused.
-#[test]
-fn floor_stands_down_on_another_sessions_secondary_refusal() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let global_dir = tmp.path().join("global_fno");
-    fs::create_dir_all(cwd.join(".fno")).unwrap();
-    fs::create_dir_all(&global_dir).unwrap();
-    isolate_settings(cwd);
-    let manifest_path = cwd.join("target-state.md");
-    let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = project_events(&cwd);
-    let global_events_path = global_dir.join("events.jsonl");
-    fs::write(
-        &manifest_path,
-        new_manifest("sess-quiet", "2026-06-05T00:00:00Z", true),
-    )
-    .unwrap();
-    fs::write(&transcript_path, transcript_empty()).unwrap();
-    // A DIFFERENT session's refusal, in the shared machine-wide log. This
-    // session's own project-local log has no such row.
-    fs::write(
-        &global_events_path,
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "type": "loop_check_gh_error",
-                "ts": "2026-06-05T00:28:30Z",
-                "data": {
-                    "session_id": "sess-loud",
-                    "read": "pulls_comments",
-                    "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit",
-                    "rate_limit_class": "secondary"
-                }
-            })
-        ),
-    )
-    .unwrap();
-
-    let gh = quota_gh(cwd, 4922, false);
-    let git = MockBins::green().git;
-    let (code, d) = fire(&[
-        "loop-check",
-        "--state",
-        manifest_path.to_str().unwrap(),
-        "--transcript",
-        transcript_path.to_str().unwrap(),
-        "--cwd",
-        cwd.to_str().unwrap(),
-        "--now",
-        "2026-06-05T00:30:00Z",
-        &format!("--gh-bin={}", gh.display()),
-        &format!("--git-bin={}", git.display()),
-        "--events",
-        events_path.to_str().unwrap(),
-        "--global-events",
-        global_events_path.to_str().unwrap(),
-    ]);
-    assert_eq!(code, 0);
-    assert_eq!(d.decision, "block");
-    assert!(
-        d.message.contains("secondary"),
-        "another session's refusal must stand this one down too: {}",
-        d.message
-    );
 }
 
 /// Item 4's other half: the floor belongs to the merge guard, so a
