@@ -2814,6 +2814,7 @@ def cmd_name(
     discriminator: str = typer.Option("", "--discriminator", help="Uniqueness token; never shaved."),
     source: str = typer.Option("", "--source", help="Dispatch source code (x-84b2); omit when attended."),
     verb: str = typer.Option("", "--verb", help="Verb code (t|bp|r|th|f) or a work verb the bridge maps."),
+    model: str = typer.Option("", "--model", help="Raw model string (x-57fe); the mint appends its short code."),
 ) -> None:
     """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
 
@@ -2838,6 +2839,7 @@ def cmd_name(
             discriminator=discriminator or None,
             source=source or None,
             verb=verb or None,
+            model=model or None,
         )
     except (BridgeUsageError, AgentNameError) as exc:
         typer.echo(f"error: {exc}", err=True)

@@ -76,13 +76,13 @@ def _flags(*pairs):
             out += [flag, value or ""]
     return out
 
-def agent_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=None):
+def agent_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=None, model=None):
     # The binary reads empty-everything as usage (exit 2); in-process producers
     # keep the naming-error contract, so this one refusal stays local.
     if not (prefix or "").strip() and not (node_id or "").strip():
         raise AgentNameError("an agent name needs a prefix or a node id; both were empty")
     return _mint(prefix, node_id, *_flags(("--slug", slug), ("--qualifier", qualifier),
-                                          ("--discriminator", discriminator)))
+                                          ("--discriminator", discriminator), ("--model", model)))
 
 def verb_code_for(word):
     v = (word or "").strip().removeprefix("/fno:").removeprefix("$fno:").lstrip("/") or "target"
@@ -91,7 +91,7 @@ def verb_code_for(word):
         raise AgentNameError(f"unknown dispatch verb {word!r}")
     return code
 
-def dispatch_agent_name(source, verb, identity, *, slug=None, qualifier=None, discriminator=None):
+def dispatch_agent_name(source, verb, identity, *, slug=None, qualifier=None, discriminator=None, model=None):
     # An identity longer than the runtime contract can never fit: refuse in
     # process, before any subprocess is spent on a guaranteed refusal.
     if len((identity or "").strip()) > MAX_LEN:
@@ -102,10 +102,11 @@ def dispatch_agent_name(source, verb, identity, *, slug=None, qualifier=None, di
     if (verb or "").strip() not in dispatch_verbs():
         raise AgentNameError(f"unknown dispatch verb {verb!r}")
     return _mint(*(_opt_pos(source, "--source")), "--verb", verb, identity,
-                 *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator)))
+                 *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator),
+                         ("--model", model)))
 
 def bridge_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=None,
-                source=None, verb=None):
+                source=None, verb=None, model=None):
     # Usage refusals (both forms, missing verb/prefix) are the binary's texts:
     # _mint maps its exit 2 to BridgeUsageError, exit 3 to AgentNameError. A
     # missing --verb is forwarded as absent so the binary names the refusal.
@@ -116,8 +117,10 @@ def bridge_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=Non
         # A positional prefix rides too: the binary refuses the both-forms pair.
         pos = [prefix, node_id] if (prefix or "").strip() else [node_id]
         return _mint(*args, *pos,
-                     *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator)))
-    return agent_name(prefix, node_id, slug=slug, qualifier=qualifier, discriminator=discriminator)
+                     *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator),
+                             ("--model", model)))
+    return agent_name(prefix, node_id, slug=slug, qualifier=qualifier, discriminator=discriminator,
+                      model=model)
 
 def _opt_pos(value, flag):
     return [flag, value] if (value or "").strip() else []
@@ -134,7 +137,46 @@ def parse_many(names):
             raise AgentNameError("name-parse produced an unparsable row: the fno-agents binary is stale")
         out.append(None if row.get("verb") is None else DispatchName(
             row["name"], row.get("source"), row["verb"], row.get("node"), row.get("tail") or ""))
+    _enrich_hex_nodes(out)
     return out
+
+
+def _enrich_hex_nodes(rows):
+    """Re-attach full node ids to bare-hex parse results (x-57fe).
+
+    The mint emits the node hex without its prefix; the graph is the only
+    place that knows the prefix. One load resolves the whole batch; a hex
+    with no unique `<prefix>-<hex>` id stays bare (never an invented id).
+    """
+    hexes = {}
+    for row in rows:
+        if row is None or not row.node or not re.fullmatch(r"[0-9a-f]+", row.node):
+            continue
+        hexes[row.node] = None
+    if not hexes:
+        return
+    try:
+        from fno.graph.load import load_graph
+
+        rows_all = load_graph()
+    except Exception:  # noqa: BLE001 - a graph read failure leaves hex bare
+        return
+    for entry in rows_all:
+        node_id = entry.get("id") if isinstance(entry, dict) else None
+        if not node_id or "-" not in node_id:
+            continue
+        prefix, _, hex_part = node_id.rpartition("-")
+        if hex_part in hexes and prefix:
+            if hexes[hex_part] is None:
+                hexes[hex_part] = node_id
+            elif hexes[hex_part] != node_id:
+                hexes[hex_part] = ""  # ambiguous: keep bare hex
+    for i, row in enumerate(rows):
+        if row is None or not row.node or row.node not in hexes:
+            continue
+        resolved = hexes[row.node]
+        if resolved:
+            rows[i] = row._replace(node=resolved)
 
 def parse_dispatch_agent_name(name):
     return parse_many([name])[0] if name else None
