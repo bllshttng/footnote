@@ -101,6 +101,7 @@ def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
     assert info == {
         "pr": 42,
         "url": "https://github.com/Owner/Repo/pull/42",
+        "body": "",
         "state": "OPEN",
         "head_sha": "abc123def",
         "head_ref": "feature/rest-info",
@@ -114,6 +115,40 @@ def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
         "auto_merge": None,
     }
     assert calls == [["gh", "api", "repos/Owner/Repo/pulls/42"]]
+
+
+def test_pr_info_carries_the_body_verbatim_for_the_binding_gate():
+    pulls = {
+        "html_url": "https://github.com/Owner/Repo/pull/42",
+        "state": "open",
+        "merged": False,
+        "head": {"sha": "abc123def", "ref": "feature/x-0001"},
+        "base": {"ref": "main"},
+        "body": "Summary.\n\nBacklog-Closure: x-0001\n",
+    }
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls)
+    )
+    assert reason == ""
+    assert info is not None
+    assert info["body"] == "Summary.\n\nBacklog-Closure: x-0001\n"
+
+
+def test_pr_info_reads_a_null_body_as_empty():
+    pulls = {
+        "html_url": "https://github.com/Owner/Repo/pull/42",
+        "state": "open",
+        "merged": False,
+        "head": {"sha": "abc123def", "ref": "feature/x-0001"},
+        "base": {"ref": "main"},
+        "body": None,
+    }
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls)
+    )
+    assert reason == ""
+    assert info is not None
+    assert info["body"] == ""
 
 
 def test_pr_info_carries_the_auto_merge_object_when_the_queue_owns_the_pr():

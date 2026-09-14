@@ -59,9 +59,14 @@ impl Probes for FakeGitHub {
             head_sha: self.head.borrow().clone(),
             head_ref: "feature/x-c676".to_string(),
             base_ref: "main".to_string(),
+            url: "https://github.com/o/r/pull/1042".to_string(),
+            body: Some("Backlog-Closure: x-c676\n".to_string()),
             state: self.state.borrow().clone(),
             armed: *self.armed.borrow(),
         })
+    }
+    fn node_binding(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
+        ProbeOutcome::Clear
     }
     fn dispatch_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
         ProbeOutcome::Clear

@@ -18,6 +18,11 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::backlog::api::{self as backlog_api, Store as GraphStore};
+use crate::backlog_ready::detect_project;
+use crate::king_board::prs::pr_binding_keys;
+use crate::paths::canonical_repo_root;
+
 /// What the caller wants to happen once the decision clears.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
@@ -219,6 +224,12 @@ pub struct PrFacts {
     pub head_sha: String,
     pub head_ref: String,
     pub base_ref: String,
+    /// The PR page URL, as the payload carried it.
+    pub url: String,
+    /// The PR body, the third binding key's source. `None` only when the
+    /// payload carried no body key at all, which is how an out-of-date
+    /// deployed `fno` looks; a null body reads as an empty string.
+    pub body: Option<String>,
     /// `OPEN`, `MERGED`, or `CLOSED`.
     pub state: String,
     /// GitHub's auto-merge queue already owns this PR. Rides the same pulls
@@ -230,6 +241,9 @@ pub struct PrFacts {
 /// The outside world, injectable so the decision is testable without a network.
 pub trait Probes {
     fn pr_facts(&self, cwd: &Path, pr: Option<u64>) -> Result<PrFacts, String>;
+    /// Does the graph see this PR? `Refused` when no binding key names a
+    /// node, `Inconclusive` when the graph or the body cannot be read.
+    fn node_binding(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     fn dispatch_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
     fn review_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
     fn base_lineage(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
@@ -277,6 +291,15 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
 
     if let Some(refusal) = authority_refusal(probes, cwd, request) {
         return Err(Outcome::Refused { reason: refusal });
+    }
+
+    // The graph must see the PR. An unbound PR is Refused (retrying without
+    // binding changes nothing, so Held would be a lie about the remedy); an
+    // unreadable graph is Unknown, never a bound-or-unbound verdict.
+    match probes.node_binding(cwd, &facts) {
+        ProbeOutcome::Clear => {}
+        ProbeOutcome::Refused(reason) => return Err(Outcome::Refused { reason }),
+        ProbeOutcome::Inconclusive(reason) => return Err(Outcome::Unknown { reason }),
     }
 
     if let Some(blocked) = probes.dispatch_hold(cwd, facts.number).fail_closed() {
@@ -591,6 +614,10 @@ impl Probes for RealProbes {
         parse_pr_facts(&payload)
     }
 
+    fn node_binding(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+        node_binding_probe(cwd, facts)
+    }
+
     fn dispatch_hold(&self, cwd: &Path, pr: u64) -> ProbeOutcome {
         match Self::fno(cwd, &["do", "pr", "hold-check", &pr.to_string()]) {
             Ok((code, stdout, stderr)) => classify_hold_probe(code == Some(0), &stdout, &stderr),
@@ -704,6 +731,66 @@ fn probe_detail(stdout: &[u8], stderr: &[u8]) -> String {
     }
 }
 
+/// The node-binding gate over the live graph. The scope is the canonical repo
+/// root: a repo whose graph names no node under it (a stock install that
+/// never used the backlog, an external-tracker project) has nothing to bind
+/// to and merges as before.
+fn node_binding_probe(cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+    let root = canonical_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let graph_path = crate::king_board::scope::graph_json_path(cwd);
+    let store = GraphStore::new(&graph_path);
+    match backlog_api::rows(&store) {
+        Err(e) => ProbeOutcome::Inconclusive(format!(
+            "graph unreadable ({}); refusing to assume bound",
+            e.0
+        )),
+        Ok(entries) => node_binding_from_entries(&root, &entries, facts),
+    }
+}
+
+/// The binding decision over already-read graph entries: the pure half of
+/// [`node_binding_probe`], so a unit test needs no filesystem. The three
+/// keys are the board classifier's own (`king_board::prs::pr_binding_keys`).
+fn node_binding_from_entries(root: &Path, entries: &[Value], facts: &PrFacts) -> ProbeOutcome {
+    if detect_project(entries, &root.to_string_lossy()).is_none() {
+        return ProbeOutcome::Clear;
+    }
+    let Some(body) = facts.body.as_deref() else {
+        return ProbeOutcome::Inconclusive(
+            "PR body was not in the fetch (deployed fno predates the body field; \
+             fno doctor update); refusing to assume bound"
+                .to_string(),
+        );
+    };
+    let keys = pr_binding_keys(
+        facts.number as i64,
+        &facts.head_ref,
+        Some(&facts.url),
+        Some(body),
+        entries,
+    );
+    if let Some(detail) = keys.unbound_detail() {
+        if facts.url.is_empty() {
+            // The backref key scopes by url; with none it was unevaluable,
+            // not empty, so the answer is Unknown rather than a refusal.
+            return ProbeOutcome::Inconclusive(
+                "PR carried no comparable url, so the graph back-pointer key \
+                 could not be scoped; refusing to assume unbound"
+                    .to_string(),
+            );
+        }
+        return ProbeOutcome::Refused(format!(
+            "PR {n} is unbound: {detail}. A merge the graph cannot see is refused. \
+             Bind it: pick or file the node (fno backlog idea \"...\"), run \
+             fno do pr closure-trailer <id>, append the printed line to the PR \
+             body, then retry. A revert or hotfix binds the same way; no flag \
+             bypasses this gate.",
+            n = facts.number
+        ));
+    }
+    ProbeOutcome::Clear
+}
+
 /// Parse `fno do pr info`. An error field, a missing number, or a missing head
 /// sha is a dead instrument, never a PR with no head.
 pub fn parse_pr_facts(payload: &Value) -> Result<PrFacts, String> {
@@ -738,6 +825,16 @@ pub fn parse_pr_facts(payload: &Value) -> Result<PrFacts, String> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
+        url: payload
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        // The body rides this same payload. `None` means the key was absent:
+        // an out-of-date deployed `fno`, not a bodyless PR.
+        body: payload
+            .get("body")
+            .map(|v| v.as_str().unwrap_or("").to_string()),
         state: payload
             .get("state")
             .and_then(Value::as_str)
@@ -928,6 +1025,8 @@ mod tests {
     struct Fake {
         facts: Option<PrFacts>,
         facts_error: Option<String>,
+        /// Answer for the binding probe alone; `None` (the default) reads Clear.
+        node_binding: Option<ProbeOutcome>,
         dispatch_hold: Option<ProbeOutcome>,
         review_hold: Option<ProbeOutcome>,
         lineage: Option<ProbeOutcome>,
@@ -950,6 +1049,8 @@ mod tests {
             head_sha: "abc123".to_string(),
             head_ref: "feature/x".to_string(),
             base_ref: "main".to_string(),
+            url: "https://github.com/o/r/pull/7".to_string(),
+            body: Some("Backlog-Closure: x-0001\n".to_string()),
             state: "OPEN".to_string(),
             armed: false,
         }
@@ -971,6 +1072,9 @@ mod tests {
                 return Err(error.clone());
             }
             self.facts.clone().ok_or_else(|| "no facts".to_string())
+        }
+        fn node_binding(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
+            self.node_binding.clone().unwrap_or(ProbeOutcome::Clear)
         }
         fn dispatch_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
             self.dispatch_hold.clone().unwrap_or(ProbeOutcome::Clear)
@@ -1039,6 +1143,103 @@ mod tests {
             assert!(outcome.detail().contains("review_in_flight"));
             assert!(fake.gh_calls.borrow().is_empty(), "{effect:?} ran gh");
         }
+    }
+
+    #[test]
+    fn an_unbound_pr_refuses_both_effects_and_calls_no_gh() {
+        // The merge the graph cannot see is refused before any hold or check
+        // read: retrying without binding changes nothing, so Held would name
+        // the wrong remedy.
+        for effect in [Effect::Merge, Effect::Arm] {
+            let fake = Fake {
+                node_binding: Some(ProbeOutcome::Refused(
+                    "PR 7 is unbound: branch names no node; no node carries this PR; \
+                     body carries no Backlog-Closure trailer. A merge the graph cannot \
+                     see is refused. Bind it: pick or file the node (fno backlog idea \
+                     \"...\"), run fno do pr closure-trailer <id>, append the printed \
+                     line to the PR body, then retry."
+                        .to_string(),
+                )),
+                ..clean()
+            };
+            let outcome = run(&fake, &request(effect));
+            assert_eq!(outcome.word(), "refused", "{effect:?}");
+            assert!(outcome.detail().contains("PR 7 is unbound"), "{effect:?}");
+            assert!(outcome.detail().contains("closure-trailer"), "{effect:?}");
+            assert!(fake.gh_calls.borrow().is_empty(), "{effect:?} ran gh");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_binding_reads_unknown_not_bound() {
+        // AC3-ERR: an instrument that cannot answer never becomes a verdict.
+        // Bound still flows: every other test runs the default Clear fake,
+        // which proves the gate reads the binding and refuses nothing else.
+        for effect in [Effect::Merge, Effect::Arm] {
+            let fake = Fake {
+                node_binding: Some(ProbeOutcome::Inconclusive(
+                    "graph unreadable; refusing to assume bound".to_string(),
+                )),
+                ..clean()
+            };
+            let outcome = run(&fake, &request(effect));
+            assert_eq!(outcome.word(), "unknown", "{effect:?}");
+            assert!(outcome.detail().contains("refusing to assume bound"));
+            assert!(fake.gh_calls.borrow().is_empty(), "{effect:?} ran gh");
+        }
+    }
+
+    #[test]
+    fn a_repo_with_no_node_under_it_is_never_refused() {
+        // AC4-HP: the scope. A graph whose nodes all live in other repos has
+        // nothing this PR could bind to, so the gate is silent there.
+        let entries = vec![json!({"id": "x-1a2b", "cwd": "/other/repo", "project": "other"})];
+        let outcome = node_binding_from_entries(Path::new("/this/repo"), &entries, &open_facts());
+        assert_eq!(outcome, ProbeOutcome::Clear);
+    }
+
+    #[test]
+    fn an_unreadable_body_or_graph_refuses_to_assume_bound() {
+        // AC4-ERR: a missing body key is an out-of-date deployed fno, never a
+        // bound PR; the remedy names the update.
+        let entries = vec![json!({"id": "x-1a2b", "cwd": "/this/repo", "project": "fno"})];
+        let facts = PrFacts {
+            body: None,
+            ..open_facts()
+        };
+        let outcome = node_binding_from_entries(Path::new("/this/repo"), &entries, &facts);
+        let ProbeOutcome::Inconclusive(reason) = outcome else {
+            unreachable!("a missing body is Inconclusive, never a verdict")
+        };
+        assert!(reason.contains("fno doctor update"));
+
+        // A repo-scoped PR with no binding key at all is the refusal, with
+        // the bind remedy.
+        let facts = PrFacts {
+            head_ref: "docs/crown-succeed-faq".to_string(),
+            body: Some(String::new()),
+            ..open_facts()
+        };
+        let outcome = node_binding_from_entries(Path::new("/this/repo"), &entries, &facts);
+        let ProbeOutcome::Refused(reason) = outcome else {
+            unreachable!("three missing keys refuse")
+        };
+        assert!(reason.contains("closure-trailer"));
+        assert!(reason.contains("no flag bypasses this gate"));
+
+        // No comparable url leaves the backref key unevaluable: Unknown, not
+        // a refusal on a PR that may be bound through the back-pointer.
+        let facts = PrFacts {
+            head_ref: "docs/crown-succeed-faq".to_string(),
+            url: String::new(),
+            body: Some(String::new()),
+            ..open_facts()
+        };
+        let outcome = node_binding_from_entries(Path::new("/this/repo"), &entries, &facts);
+        let ProbeOutcome::Inconclusive(reason) = outcome else {
+            unreachable!("an unscopeable backref key is Inconclusive")
+        };
+        assert!(reason.contains("could not be scoped"));
     }
 
     #[test]

@@ -431,6 +431,10 @@ def fetch_pr_info_rest(
         {
             "pr": int(pr),
             "url": url,
+            # The body rides THIS payload so the node-binding gate reads the
+            # same PR state the armed flag and the head came from; a second
+            # fetch could answer about a different body.
+            "body": pr_data.get("body") or "",
             "state": _map_pr_state(pr_data),
             "head_sha": sha,
             "head_ref": head_ref,

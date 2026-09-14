@@ -40,7 +40,7 @@
 pub(crate) mod budget;
 mod claims;
 mod classify;
-mod prs;
+pub(crate) mod prs;
 mod queues;
 pub(crate) mod scope;
 

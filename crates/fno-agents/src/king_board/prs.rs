@@ -356,43 +356,104 @@ fn trailer_node_ids(body: &str) -> Vec<String> {
     ids
 }
 
+/// The three binding keys of one PR, filtered to real graph ids. Shared by
+/// the board classifier and the merge owner (`authorized_merge`), so the
+/// board's untracked warning and a merge refusal cannot disagree about the
+/// same PR.
+pub(crate) struct PrBinding {
+    /// Delimiter-bounded node ids the head ref names (`branch_node_ids`).
+    pub branch: Vec<String>,
+    /// Node ids whose `(pr_number, pr_url)` back-pointer names this PR,
+    /// scoped by normalized URL because a pr_number is only unique within
+    /// one repository. Sorted.
+    pub backrefs: Vec<String>,
+    /// Node ids on the LAST exact `Backlog-Closure:` body line
+    /// (`trailer_node_ids`).
+    pub trailer: Vec<String>,
+}
+
+impl PrBinding {
+    /// The unbound detail when all three keys miss, else `None`.
+    pub(crate) fn unbound_detail(&self) -> Option<String> {
+        if self.branch.is_empty() && self.backrefs.is_empty() && self.trailer.is_empty() {
+            Some(
+                "branch names no node; no node carries this PR; body carries no Backlog-Closure \
+                 trailer"
+                    .to_string(),
+            )
+        } else {
+            None
+        }
+    }
+}
+
+/// Compute the three binding keys of one PR against graph `entries`. The one
+/// predicate behind both readers: the board's `pr_node_binding_untracked`
+/// warning and the merge owner's refusal.
+pub(crate) fn pr_binding_keys(
+    number: i64,
+    head_ref: &str,
+    url: Option<&str>,
+    body: Option<&str>,
+    entries: &[Value],
+) -> PrBinding {
+    let real_ids: HashSet<&str> = entries.iter().filter_map(|e| s_str(e, "id")).collect();
+    let branch: Vec<String> = branch_node_ids(head_ref)
+        .into_iter()
+        .filter(|nid| real_ids.contains(nid.as_str()))
+        .collect();
+    let trailer: Vec<String> = body
+        .map(trailer_node_ids)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|nid| real_ids.contains(nid.as_str()))
+        .collect();
+    // The graph's own back-pointer. An empty comparable URL answers nothing.
+    let key = url.map(normalized_pr_url).unwrap_or_default();
+    let mut backrefs: Vec<String> = Vec::new();
+    if !key.is_empty() {
+        for entry in entries {
+            let Some(nid) = s_str(entry, "id") else {
+                continue;
+            };
+            let hits = node_pr_refs(entry).iter().any(|(n, u)| {
+                *n == number
+                    && u.as_deref()
+                        .map(normalized_pr_url)
+                        .is_some_and(|u| u == key)
+            });
+            if hits {
+                backrefs.push(nid.to_string());
+            }
+        }
+    }
+    backrefs.sort_unstable();
+    PrBinding {
+        branch,
+        backrefs,
+        trailer,
+    }
+}
+
 /// Binding classification over already-fetched open-PR rows and graph
 /// entries: the pure half of `read_prs`, returns (bound node rows, warnings).
 /// Three keys, in order: delimiter-bounded branch matching; then - only when
 /// the branch names nothing - the graph's own `(pr_number, pr_url)`
 /// back-pointer, scoped by normalized URL because a pr_number is only unique
 /// within one repository; then the body's exact `Backlog-Closure:` trailer
-/// (mirrors _reconcile.classify_open_pr_bindings).
+/// (mirrors _reconcile.classify_open_pr_bindings). The keys come from
+/// [`pr_binding_keys`], the same predicate the merge owner reads.
 fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<String>) {
-    let real_ids: HashSet<&str> = entries.iter().filter_map(|e| s_str(e, "id")).collect();
     let node_by_id: HashMap<&str, &Value> = entries
         .iter()
         .filter_map(|e| s_str(e, "id").map(|i| (i, e)))
         .collect();
-    // (pr number, normalized url) -> node ids. The graph's own back-pointer,
-    // read when the branch names nothing.
-    let mut by_pr_ref: HashMap<(i64, String), Vec<&str>> = HashMap::new();
-    for entry in entries {
-        let Some(nid) = s_str(entry, "id") else {
-            continue;
-        };
-        for (num, url) in node_pr_refs(entry) {
-            let Some(key_url) = url
-                .as_deref()
-                .map(normalized_pr_url)
-                .filter(|u| !u.is_empty())
-            else {
-                continue;
-            };
-            by_pr_ref.entry((num, key_url)).or_default().push(nid);
-        }
-    }
     let mut warnings: Vec<String> = Vec::new();
     // First pass: which nodes have exactly one open PR. A trailer-resolved
     // row competes for its node like a branch-resolved one, so one node named
     // by a branch PR and a trailer PR reads ambiguous on both.
     let mut open_prs_by_node: HashMap<String, Vec<i64>> = HashMap::new();
-    let mut parsed: Vec<(i64, Option<String>, String, Vec<String>, Vec<String>)> = Vec::new();
+    let mut parsed: Vec<(i64, Option<String>, String, PrBinding)> = Vec::new();
     for row in rows {
         let Some(number) = s_i64(row, "number") else {
             continue;
@@ -401,78 +462,56 @@ fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<S
         if head.is_empty() {
             continue;
         }
-        let matched: Vec<String> = branch_node_ids(head)
-            .into_iter()
-            .filter(|nid| real_ids.contains(nid.as_str()))
-            .collect();
-        let trailer: Vec<String> = match row.get("body").and_then(Value::as_str) {
-            Some(body) => trailer_node_ids(body)
-                .into_iter()
-                .filter(|nid| real_ids.contains(nid.as_str()))
-                .collect(),
-            None => Vec::new(),
-        };
-        if matched.len() == 1 {
+        let keys = pr_binding_keys(
+            number,
+            head,
+            row.get("url").and_then(Value::as_str),
+            row.get("body").and_then(Value::as_str),
+            entries,
+        );
+        if keys.branch.len() == 1 {
             open_prs_by_node
-                .entry(matched[0].clone())
+                .entry(keys.branch[0].clone())
                 .or_default()
                 .push(number);
-        } else if matched.is_empty() {
+        } else if keys.branch.is_empty() && keys.backrefs.is_empty() && keys.trailer.len() == 1 {
             // Sibling guard: branch and back-pointer both miss and the
             // trailer names exactly one real node, so the row competes for
             // that node like a branch-resolved one.
-            let key = row
-                .get("url")
-                .and_then(Value::as_str)
-                .map(normalized_pr_url)
-                .unwrap_or_default();
-            let hits: Vec<&str> = if key.is_empty() {
-                Vec::new()
-            } else {
-                by_pr_ref.get(&(number, key)).cloned().unwrap_or_default()
-            };
-            if hits.is_empty() && trailer.len() == 1 {
-                open_prs_by_node
-                    .entry(trailer[0].clone())
-                    .or_default()
-                    .push(number);
-            }
+            open_prs_by_node
+                .entry(keys.trailer[0].clone())
+                .or_default()
+                .push(number);
         }
         parsed.push((
             number,
             row.get("url").and_then(Value::as_str).map(str::to_string),
             head.to_string(),
-            matched,
-            trailer,
+            keys,
         ));
     }
     let mut bound: Vec<Value> = Vec::new();
-    for (number, url, head, mut matched, trailer) in parsed {
+    for (number, url, head, keys) in parsed {
+        let unbound = keys.unbound_detail();
+        let mut matched = keys.branch;
         if matched.is_empty() {
-            let key = url.as_deref().map(normalized_pr_url).unwrap_or_default();
-            let mut hits: Vec<&str> = if key.is_empty() {
-                Vec::new()
-            } else {
-                by_pr_ref.get(&(number, key)).cloned().unwrap_or_default()
-            };
-            hits.sort_unstable();
-            match hits.as_slice() {
+            match keys.backrefs.as_slice() {
                 [] => {
-                    if trailer.is_empty() {
+                    if keys.trailer.is_empty() {
                         warnings.push(format!(
-                            "pr_node_binding_untracked: #{number} {head} (branch names no node; \
-                             no node carries this PR; body carries no Backlog-Closure trailer)"
+                            "pr_node_binding_untracked: #{number} {head} ({})",
+                            unbound.unwrap_or_default()
                         ));
                         continue;
                     }
-                    if trailer.len() > 1 {
+                    if keys.trailer.len() > 1 {
                         warnings.push(format!(
                             "pr_node_binding_ambiguous: #{number} -> {}",
-                            trailer.join(" ")
+                            keys.trailer.join(" ")
                         ));
                         continue;
                     }
-                    matched = trailer;
+                    matched = keys.trailer;
                 }
                 [only] => matched = vec![(*only).to_string()],
                 many => {
@@ -855,9 +894,55 @@ mod tests {
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
         assert!(bound.is_empty());
         // The verdict is unchanged (never binds cross-repo); since x-9588 the
-        // row is also named in the warnings instead of dropped silently.
+        // row is named in the warnings instead of dropped silently.
         assert!(warnings
             .iter()
             .any(|w| w.contains("pr_node_binding_untracked") && w.contains("#1476")));
+    }
+
+    #[test]
+    fn the_shared_predicate_reports_bound_through_each_of_the_three_keys() {
+        let entries = vec![json!({"id": "x-1a2b"})];
+        let url = "https://github.com/o/r/pull/5";
+        // Branch key: the head names a real node.
+        let keys = pr_binding_keys(5, "feature/x-1a2b", Some(url), None, &entries);
+        assert_eq!(keys.branch, vec!["x-1a2b".to_string()]);
+        assert_eq!(keys.unbound_detail(), None);
+        // Trailer key: a nodeless head, the node named on the body.
+        let keys = pr_binding_keys(
+            5,
+            "fix/descriptive",
+            Some(url),
+            Some("Backlog-Closure: x-1a2b"),
+            &entries,
+        );
+        assert_eq!(keys.trailer, vec!["x-1a2b".to_string()]);
+        assert_eq!(keys.unbound_detail(), None);
+        // Backref key: a nodeless head, the node carries the back-pointer.
+        let carrying = vec![json!({
+            "id": "x-1a2b", "pr_number": 5, "pr_url": url,
+        })];
+        let keys = pr_binding_keys(5, "fix/descriptive", Some(url), None, &carrying);
+        assert_eq!(keys.backrefs, vec!["x-1a2b".to_string()]);
+        assert_eq!(keys.unbound_detail(), None);
+    }
+
+    #[test]
+    fn the_shared_predicate_reports_unbound_when_all_three_keys_miss() {
+        // AC2-ERR: no node id on the branch, no carrying node, and a body
+        // that is absent or names only an id the graph does not have.
+        let entries = vec![json!({"id": "x-1a2b"})];
+        let url = "https://github.com/o/r/pull/5";
+        for body in [None, Some("Backlog-Closure: x-9999")] {
+            let keys = pr_binding_keys(5, "docs/crown-succeed-faq", Some(url), body, &entries);
+            assert_eq!(
+                keys.unbound_detail().as_deref(),
+                Some(
+                    "branch names no node; no node carries this PR; body carries no \
+                     Backlog-Closure trailer"
+                ),
+                "body {body:?}"
+            );
+        }
     }
 }

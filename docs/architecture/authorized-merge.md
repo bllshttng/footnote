@@ -33,22 +33,23 @@ The receipt keeps them apart. `Armed` is a queue entry, a promise GitHub keeps l
 | `Armed` | the queue owns it now | nothing; the queue merges on green |
 | `Authorized` | a `decide_only` pass cleared; nothing ran | its own pre-effect step, then ask again |
 | `Held` | retryable: a hold, a pending check, an already-armed PR | retry later |
-| `Refused` | needs an operator: no grant, below the floor, a stale base | escalate |
+| `Refused` | needs an operator: no grant, below the floor, a stale base, an unbound PR | escalate |
 | `HeadChanged` | the head moved between validation and the effect | re-evaluate |
 | `Unknown` | an instrument could not answer | retry; never read it as clear |
 | `Failed` | the effect ran and failed | report |
 
 ## The decision, in order
 
-1. **One guarded fetch.** `fno do pr info` gives the number, the head, the state, and whether GitHub's queue already owns the PR. The armed flag rides that same payload. A second `gh pr view` probe describes a different head.
+1. **One guarded fetch.** `fno do pr info` gives the number, the head, the state, the body, and whether GitHub's queue owns the PR. The armed flag rides that same payload. A second `gh pr view` probe describes a different head.
 2. **Terminal state.** A merged or closed PR holds before every other guard. The guards below protect a merge that has not happened yet. An "unreviewed" answer about a landed merge sends a caller hunting a defect that blocks nothing.
 3. **Authority.** A per-run refusal (`auto_merge_approved: false`) outranks every grant. An explicit per-run env grant (`auto_merge_source: env-target-auto-merge`) satisfies the standing arm on its own. Otherwise the LIVE config decides. A manifest snapshot never outlives an operator who flips the switch off mid-flight. Then the automerge posture floor.
-4. **The dispatch hold** (`fno do pr hold-check`), fail-closed.
-5. **The in-flight review hold** (`fno do pr review-hold check`), fail-closed. Coverage answers what verdicts EXIST for a head. It cannot say that a review runs right now with its findings uncommitted.
-6. **The pin.** The covered head comes from the caller's own coverage gate, or from the `review_coverage` journal. An unreadable head is `Unknown`. There is no unpinned fallback. A head that no longer matches the PR's is `HeadChanged`.
-7. **Base lineage** (`fno do pr base-lineage-check`), fail-open. A refusal on a gh hiccup makes auto-merge silently never work. That reads exactly like nobody opting in.
-8. **Merge result** (`fno do pr merge-result-check`), fail-open. The merge tree is computed locally and the repo-wide ruff + mypy step runs on it. When git joins hunks that never met on one machine, two green parents merge red. Held, not refused: the remedy is rebase, fix, push, retry.
-9. **Checks**. The caller asks for these or leaves them out. `--auto` IS the wait for the checks, so the arm path leaves them out and the queue enforces them server-side.
+4. **Node binding.** The graph must see the PR. Three keys decide, in order. A node id the branch names. A node whose own back-pointer carries the PR. A `Backlog-Closure:` line in the body. The same predicate answers the king board's untracked warning, so the board and the gate cannot disagree. When all three miss, the merge refuses. The remedy is to bind it: pick or file the node, write the closure trailer onto the body, retry. A revert or a hotfix binds the same way. There is no bypass flag. The team merges, and not only the operator. A bypass flag is one the agents pass to themselves. The gate stays silent where the repo keeps no backlog. A graph with no node under the canonical root has nothing to bind to. A graph or a body that cannot be read is `Unknown`, never a verdict.
+5. **The dispatch hold** (`fno do pr hold-check`), fail-closed.
+6. **The in-flight review hold** (`fno do pr review-hold check`), fail-closed. Coverage answers what verdicts EXIST for a head. It cannot say that a review runs right now with its findings uncommitted.
+7. **The pin.** The covered head comes from the caller's own coverage gate, or from the `review_coverage` journal. An unreadable head is `Unknown`. There is no unpinned fallback. A head that no longer matches the PR's is `HeadChanged`.
+8. **Base lineage** (`fno do pr base-lineage-check`), fail-open. A refusal on a gh hiccup makes auto-merge silently never work. That reads exactly like nobody opting in.
+9. **Merge result** (`fno do pr merge-result-check`), fail-open. The merge tree is computed locally and the repo-wide ruff + mypy step runs on it. When git joins hunks that never met on one machine, two green parents merge red. Held, not refused: the remedy is rebase, fix, push, retry.
+10. **Checks**. The caller asks for these or leaves them out. `--auto` IS the wait for the checks, so the arm path leaves them out and the queue enforces them server-side.
 
 ## The effect
 

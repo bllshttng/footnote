@@ -663,7 +663,7 @@ fn normalize_cwd(raw: &str) -> String {
 /// Detect the active project from candidate `cwd`s
 /// (`_intake.detect_project`): an exact-root node names the project
 /// outright; else the first node under the root does; else None.
-fn detect_project(entries: &[Value], repo_root: &str) -> Option<String> {
+pub(crate) fn detect_project(entries: &[Value], repo_root: &str) -> Option<String> {
     let norm_root = normalize_cwd(repo_root);
     let root_prefix = format!("{}/", norm_root.trim_end_matches('/'));
     let mut fallback: Option<String> = None;
