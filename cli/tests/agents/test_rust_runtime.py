@@ -815,6 +815,17 @@ def test_rust_client_verbs_match_client_rs() -> None:
         }
     )
 
+    # d-fe66560a keeps the binary's action list shrink-only, so these leaves
+    # have no `verb ==` arm of their own: the router rewrites each into an
+    # argument of the `status` action before the exec. They stay routable
+    # verbs, and the rewrite target's flag must exist in client.rs or the
+    # route dies as an unknown verb at the binary.
+    for leaf, flag in sorted(rr._STATUS_ARG_LEAVES.items()):
+        assert f'"{flag}"' in src, (
+            f"rewrite target {flag} for routed leaf {leaf} is missing from client.rs"
+        )
+    routable |= set(rr._STATUS_ARG_LEAVES)
+
     assert routable == set(rr.RUST_CLIENT_VERBS), (
         "RUST_CLIENT_VERBS is out of sync with client.rs routable verbs.\n"
         f"  only in client.rs: {sorted(routable - set(rr.RUST_CLIENT_VERBS))}\n"

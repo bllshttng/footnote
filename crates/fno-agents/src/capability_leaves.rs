@@ -1,8 +1,9 @@
 //! The two read leaves the dispatch-verb retirement left behind (x-3873
 //! change 2): `capabilities` reads the packaged harness capability table and
 //! `target-family` classifies a message against the merge-posture family
-//! table. Both are hidden Rust-only `fno agents` verbs that answer a question
-//! scripts ask; they direct-dispatch in client.rs and never touch the daemon.
+//! table. Both answer a question scripts ask through the Python router, which
+//! execs them as arguments of the `status` action (d-fe66560a keeps the
+//! binary's action list shrink-only); they never touch the daemon.
 
 use crate::merge_posture::is_target_family;
 use serde_json::Value;

@@ -1437,6 +1437,25 @@ def _is_output_format_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+#: d-fe66560a keeps the binary's action list shrink-only, so these read
+#: leaves have no action of their own: the router rewrites each into an
+#: argument of the `status` action before the exec.
+_STATUS_ARG_LEAVES = {
+    "capabilities": "--capabilities",
+    "target-family": "--target-family",
+}
+
+
+def _rust_leaf_argv(args: "list[str]") -> "list[str]":
+    """The binary argv for a routed leaf: plain passthrough, except a leaf in
+    :data:`_STATUS_ARG_LEAVES` becomes ``status <flag> ...``."""
+    if args:
+        flag = _STATUS_ARG_LEAVES.get(args[0])
+        if flag is not None:
+            return ["status", flag, *args[1:]]
+    return list(args)
+
+
 def route_to_rust(
     args: Sequence[str],
     *,
@@ -1488,7 +1507,7 @@ def route_to_rust(
     if env_pin:
         # Before the exec: the replacement inherits it; tests stubbing _exec never export.
         os.environ.update(env_pin)
-    argv = [str(binary), *args]
+    argv = [str(binary), *_rust_leaf_argv(args)]
     try:
         _exec(str(binary), argv)
     except OSError as exc:

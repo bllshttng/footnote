@@ -33,7 +33,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "backlog-note",
     "backlog-notes",
     "bash-census",
-    "capabilities",
     "blueprint-feed",
     "board",
     "claim",
@@ -126,7 +125,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "task-context-revalidate",
     "task-context-show",
     "task-context-stage",
-    "target-family",
     "territory-rows",
     "territory-verdict",
     "trace",
@@ -492,17 +490,6 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `capabilities` / `target-family` (x-3873 change 2): read-only leaves
     // over the packaged capability table and the merge-posture family table,
-    // successors to the retired dispatch query leaves (d-496680aa).
-    // Direct dispatch; no daemon RPC. Same `==` dispatch + ALL_CLIENT_ACTIONS
-    // registration as the other direct leaves, so the parity tests stay in
-    // sync.
-    if verb == "capabilities" {
-        return fno_agents::capability_leaves::run_capabilities(&args[1..]);
-    }
-    if verb == "target-family" {
-        return fno_agents::capability_leaves::run_target_family(&args[1..]);
-    }
-
     // `review-coverage`: standalone review_coverage producer (see its own doc
     // in loopcheck.rs). Direct dispatch like loop-check; no daemon RPC.
     if verb == "review-coverage" {
@@ -858,7 +845,38 @@ async fn run(args: Vec<String>) -> i32 {
         // `--json`/`-J` selects the machine payload; the default renders the
         // human arms table + daemon lines. Anything else is rejected rather
         // than silently ignored (Codex P3).
+        //
+        // d-fe66560a makes the action list shrink-only, so the x-3873 read
+        // leaves over the capability table and the merge-posture family ride
+        // `status` as arguments instead of actions of their own. The Python
+        // router rewrites `fno agents capabilities <h> ...` into
+        // `fno-agents status --capabilities <h> ...`. With neither flag the
+        // behavior is exactly the plain status read.
         let rest = &args[1..];
+        let has_cap = rest.iter().any(|a| a.as_str() == "--capabilities");
+        let has_family = rest.iter().any(|a| a.as_str() == "--target-family");
+        if has_cap && has_family {
+            eprintln!(
+                "fno-agents: status takes one of --capabilities or --target-family, not both"
+            );
+            return 2;
+        }
+        if has_cap {
+            let sub: Vec<String> = rest
+                .iter()
+                .filter(|a| a.as_str() != "--capabilities")
+                .cloned()
+                .collect();
+            return fno_agents::capability_leaves::run_capabilities(&sub);
+        }
+        if has_family {
+            let sub: Vec<String> = rest
+                .iter()
+                .filter(|a| a.as_str() != "--target-family")
+                .cloned()
+                .collect();
+            return fno_agents::capability_leaves::run_target_family(&sub);
+        }
         let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
         let extras: Vec<&str> = rest
             .iter()
