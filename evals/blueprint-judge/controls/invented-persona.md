@@ -13,7 +13,7 @@ Users love badges. Community managers have asked for badge customization constan
 ## Five questions
 
 1. Persona: users, who constantly ask for badges and deserve the best experience.
-2. Surface fit: none needed; badges are brand new.
+2. Surface fit: none needed. Badges are brand new.
 3. Uncovered case: none.
 4. Deletable: none.
 5. Duplication: none.
