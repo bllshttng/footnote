@@ -170,6 +170,81 @@ def test_torn_last_json_line_is_not_answered_by_an_older_line(monkeypatch, capsy
     assert "still not settled" in capsys.readouterr().err
 
 
+def test_conflicting_head_refuses_with_a_rebase_receipt(monkeypatch, capsys) -> None:
+    """A conflicting head can never settle: GitHub starts no checks on it, so
+    `settled` stays false forever. The wait refuses after ONE poll with exit 5
+    instead of sleeping out the deadline - under --until settled and --until
+    green alike."""
+    _fake_cached_status(
+        monkeypatch,
+        {
+            "pr": "9", "verdict": "unknown", "settled": False, "green": False,
+            "pr_state": "OPEN", "mergeable": "CONFLICTING", "head": "1f93dabf6789abcd",
+        },
+        3,
+    )
+    for until in ("settled", "green"):
+        slept: list[float] = []
+        rc = _wait.wait_status(
+            "9", until=until, timeout=120, interval=60,
+            sleeper=lambda s: slept.append(s), clock=_Clock(0, 100),
+        )
+        assert rc == 5, until
+        assert slept == [], until  # no sleep: the answer was known at tick one
+        err = capsys.readouterr().err
+        assert "CONFLICTING" in err and "1f93dabf" in err
+        assert "fno do pr rebase" in err
+
+
+def test_mergeable_head_keeps_todays_wait(monkeypatch, capsys) -> None:
+    """Control for the conflicting refusal: a MERGEABLE (or UNKNOWN) head with
+    no checks yet still waits - sleeps between polls, exits 2 at the deadline,
+    and never prints the rebase receipt."""
+    for mergeable in ("MERGEABLE", "UNKNOWN"):
+        _fake_cached_status(
+            monkeypatch,
+            {
+                "pr": "9", "verdict": "unknown", "settled": False, "green": False,
+                "pr_state": "OPEN", "mergeable": mergeable, "head": "b144e9e28",
+            },
+            2,
+        )
+        capsys.readouterr()
+        slept: list[float] = []
+        rc = _wait.wait_status(
+            "9", until="settled", timeout=120, interval=60,
+            sleeper=lambda s: slept.append(s), clock=_Clock(0, 10, 70),
+        )
+        assert rc == 2, mergeable
+        assert slept == [60], mergeable
+        assert "fno do pr rebase" not in capsys.readouterr().err
+
+
+def test_conflicting_refusal_skips_a_stale_serve_or_closed_pr(
+    monkeypatch, capsys
+) -> None:
+    """A degraded backoff serve cannot prove the head is still the conflicting
+    one, and a non-open PR is not a rebase errand: both keep today's wait."""
+    base = {
+        "pr": "9", "verdict": "unknown", "settled": False, "green": False,
+        "mergeable": "CONFLICTING", "head": "1f93dabf6789abcd",
+    }
+    for payload in (
+        {**base, "pr_state": "OPEN", "stale_reason": "secondary backoff"},
+        {**base, "pr_state": "CLOSED"},
+    ):
+        _fake_cached_status(monkeypatch, payload, 2)
+        capsys.readouterr()
+        slept: list[float] = []
+        rc = _wait.wait_status(
+            "9", until="settled", timeout=120, interval=60,
+            sleeper=lambda s: slept.append(s), clock=_Clock(0, 10, 70),
+        )
+        assert rc == 2
+        assert slept == [60]
+        assert "fno do pr rebase" not in capsys.readouterr().err
+
+
 def test_review_mode_wakes_when_count_grows(monkeypatch, capsys) -> None:
     """--until review exits 0 the moment the review count rises above the
     baseline captured at the first successful read."""
