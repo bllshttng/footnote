@@ -5,20 +5,21 @@
 
 use std::ffi::OsString;
 
-use super::{run_on_existing_server, take_common_flags, ControlVerb, EXIT_OK, EXIT_USAGE};
+use super::{run_on_existing_server, MuxCommon, ControlVerb, EXIT_OK, EXIT_USAGE};
 
 /// `fno mux rows [--json]` : the one row-set receipt. Prints the
 /// row set the server last derived, each row carrying the paint verdict.
 /// With no server, run_on_existing_server refuses naming the session
 /// (never an empty success that reads as zero rows).
 pub fn rows(args: &[OsString], env_session: Option<&str>) -> i32 {
-    let (session, json, rest) = match take_common_flags(args) {
+    let (common, rest) = match MuxCommon::take(args) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("fno mux rows: {e}");
             return EXIT_USAGE;
         }
     };
+    let (session, json) = (common.server.or(common.session), common.json);
     if let Some(verb) = rest.first() {
         eprintln!("fno mux rows: unknown argument {verb} (flags: --json, --server)");
         return EXIT_USAGE;

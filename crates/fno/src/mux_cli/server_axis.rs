@@ -74,27 +74,3 @@ pub fn flag_value(args: &[OsString], i: &mut usize, flag: &str) -> Result<String
         .map(str::to_string)
         .ok_or_else(|| format!("{flag} needs a value"))
 }
-
-/// Split off a leading `--session <s>` / `--json` prefix shared by the small
-/// `tab`/`layout` verbs, returning the rest for verb-specific parsing.
-pub fn take_common_flags(args: &[OsString]) -> Result<(Option<String>, bool, Vec<String>), String> {
-    let mut session = None;
-    let mut json = false;
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let tok = args[i]
-            .to_str()
-            .ok_or_else(|| "non-UTF-8 argument".to_string())?;
-        match tok {
-            "--json" => json = true,
-            "--server" | "--session" => {
-                note_server_flag(tok);
-                session = Some(flag_value(args, &mut i, tok)?)
-            }
-            other => rest.push(other.to_string()),
-        }
-        i += 1;
-    }
-    Ok((session, json, rest))
-}

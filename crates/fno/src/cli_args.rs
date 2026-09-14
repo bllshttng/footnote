@@ -462,3 +462,125 @@ mod tests {
         }
     }
 }
+
+/// The common mux verb flags: the server axis plus the machine-output flag
+/// every scriptable verb parses (x-861c). One declaration; the deprecation
+/// note fires here when the legacy `--session` spelling binds. Verb-specific
+/// tokens ride through in `rest`, order kept, so each verb's own grammar
+/// still refuses its unknowns.
+#[derive(Parser, Debug, Default, PartialEq, Eq)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+pub struct MuxCommon {
+    /// Server (socket session) this verb addresses
+    #[arg(long, value_name = "NAME")]
+    pub server: Option<String>,
+    /// Deprecated spelling of --server (warns)
+    #[arg(long, hide = true, value_name = "NAME")]
+    pub session: Option<String>,
+    /// Emit machine-readable JSON on stdout
+    #[arg(long)]
+    pub json: bool,
+}
+
+impl MuxCommon {
+    /// The known flag spellings this group owns.
+    pub const FLAGS: &'static [&'static str] = &["--server", "--session", "--json"];
+
+    /// Split the common flags out of a small verb's argv. Non-UTF-8 input is
+    /// the old refusal; a valueless server flag is the old `{flag} needs a
+    /// value` error; a repeated common flag is refused so the verb's own
+    /// grammar cannot disagree with this one.
+    pub fn take(toks: &[OsString]) -> Result<(MuxCommon, Vec<String>), String> {
+        let mut pairs: Vec<String> = Vec::new();
+        let mut rest = Vec::new();
+        let mut i = 0;
+        while i < toks.len() {
+            let tok = toks[i]
+                .to_str()
+                .ok_or_else(|| "non-UTF-8 argument".to_string())?;
+            if Self::FLAGS.contains(&tok) {
+                if tok != "--json" {
+                    if i + 1 >= toks.len() {
+                        return Err(format!("{tok} needs a value"));
+                    }
+                    let value = toks[i + 1]
+                        .to_str()
+                        .ok_or_else(|| "non-UTF-8 argument".to_string())?;
+                    pairs.push(tok.to_string());
+                    pairs.push(value.to_string());
+                    i += 2;
+                } else {
+                    pairs.push(tok.to_string());
+                    i += 1;
+                }
+                continue;
+            }
+            rest.push(tok.to_string());
+            i += 1;
+        }
+        let cmd = <Self as clap::CommandFactory>::command();
+        let matches = cmd
+            .try_get_matches_from(pairs)
+            .map_err(|e| refusal_line("fno mux", &e))?;
+        let session = matches.get_one::<String>("session").cloned();
+        if session.is_some() {
+            crate::mux_cli::note_server_flag("--session");
+        }
+        Ok((
+            MuxCommon {
+                server: matches.get_one::<String>("server").cloned(),
+                session,
+                json: matches.get_flag("json"),
+            },
+            rest,
+        ))
+    }
+}
+
+/// `fno mux thread <name>`'s flags (x-07c2/x-9b60): the portal reach and the
+/// placement trio, one typed declaration replacing the verb's scan and its
+/// flag-value macro.
+#[derive(Parser, Debug, Default, PartialEq, Eq)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+pub struct ThreadArgs {
+    /// Which portal to reach through: an index, or "new" for a dedicated portal in a new tab
+    #[arg(long)]
+    pub portal: Option<String>,
+    /// Workspace whose tab hosts the thread
+    #[arg(long, alias = "squad", short = 's', value_name = "NAME")]
+    pub workspace: Option<String>,
+    /// Split direction for a fresh open
+    #[arg(long, short = 'x')]
+    pub split: Option<String>,
+    /// Tab selector for a fresh open
+    #[arg(long)]
+    pub tab: Option<String>,
+    /// Anchor pane id for a fresh open
+    #[arg(long)]
+    pub at: Option<String>,
+    /// The agent name or attach id
+    pub name: Option<String>,
+}
+
+/// One command-qualified refusal line for a parse failure. The caller prints
+/// it to stderr and exits 2; clap's own multi-line usage block never reaches
+/// the operator.
+pub fn refusal_line(cmd: &str, err: &clap::Error) -> String {
+    let rendered = err.render().to_string();
+    let first = rendered
+        .lines()
+        .next()
+        .unwrap_or("invalid arguments")
+        .trim()
+        .trim_start_matches("error: ")
+        .trim();
+    format!("{cmd}: {first}")
+}

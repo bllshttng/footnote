@@ -4,6 +4,7 @@
 //! `resolve_session`, the timeout constants, the exit codes, the proto
 //! types, the selector parsers) in exactly one place.
 use super::*;
+use clap::Parser as _;
 
 /// `fno mux thread <name> [--portal N|new] [--tab SEL] [--split DIR]
 /// [--workspace NAME] [--at PANE]` (x-07c2, hidden): the outside-the-TUI
@@ -25,143 +26,91 @@ use super::*;
 /// has a live seat keeps its geometry (the server says so) - same contract
 /// the server holds for the TUI.
 pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
-    let (session_flag, _json, rest) = match take_common_flags(args) {
+    let (common, _) = match MuxCommon::take(args) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("fno mux thread: {e}");
             return EXIT_USAGE;
         }
     };
-    // Split `--portal N` and the placement flags out of the positionals
-    // before the one-name check, so a flag can sit on either side of the
-    // name.
-    let mut portal: Option<u8> = None;
+    let session_flag = common.server.or(common.session);
+    let parsed = match crate::cli_args::ThreadArgs::try_parse_from(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", crate::cli_args::refusal_line("fno mux thread", &e));
+            return EXIT_USAGE;
+        }
+    };
     let mut placement = PanePlacement::default();
-    let mut positionals: Vec<String> = Vec::new();
-    let mut it = rest.iter();
-    while let Some(arg) = it.next() {
-        let text = arg.as_str();
-        // Reads the flag's value off the iterator, naming the flag in every
-        // refusal.
-        macro_rules! flag_value {
-            ($flag:literal) => {
-                match it.next() {
-                    Some(v) => v.as_str().to_string(),
-                    None => {
-                        eprintln!("fno mux thread: {} needs a value", $flag);
-                        return EXIT_USAGE;
-                    }
-                }
-            };
-        }
-        if text == "--portal" {
-            let value = flag_value!("--portal");
-            match value.parse::<u8>() {
-                Ok(n) => {
-                    portal = Some(n);
-                    // Last --portal flag wins, so an explicit index clears a
-                    // `new` spelled earlier.
-                    placement.portal_new = false;
-                }
-                Err(_) if value == "new" => {
-                    placement.portal_new = true;
-                    portal = None;
-                }
-                Err(_) => {
-                    eprintln!("fno mux thread: --portal takes an index 0-255 or new");
-                    return EXIT_USAGE;
-                }
-            }
-            continue;
-        }
-        if let Some(value) = text.strip_prefix("--portal=") {
-            match value.parse::<u8>() {
-                Ok(n) => {
-                    portal = Some(n);
-                    placement.portal_new = false;
-                }
-                Err(_) if value == "new" => {
-                    placement.portal_new = true;
-                    portal = None;
-                }
-                Err(_) => {
-                    eprintln!("fno mux thread: --portal takes an index 0-255 or new");
-                    return EXIT_USAGE;
-                }
-            }
-            continue;
-        }
-        // (x-9b60) Same spellings the pane placement uses; a new vocabulary
-        // for the same concepts is the drift this repo keeps paying for.
-        match text {
-            "--workspace" | "--squad" | "-s" => {
-                let name = flag_value!("--workspace");
-                if name.trim().is_empty() {
-                    eprintln!("fno mux thread: --workspace/-s needs a nonblank workspace name");
-                    return EXIT_USAGE;
-                }
-                placement.target = PaneTarget::SquadName(name);
-            }
-            "--split" | "-x" => {
-                let value = flag_value!("--split");
-                match parse_dir(&value, "split/-x") {
-                    Ok(dir) => placement.split = Some(dir),
-                    Err(e) => {
-                        eprintln!("fno mux thread: {e}");
-                        return EXIT_USAGE;
-                    }
-                }
-            }
-            "--tab" => {
-                let value = flag_value!("--tab");
-                match parse_tab_sel(&value) {
-                    Ok(sel) => placement.tab = Some(sel),
-                    Err(e) => {
-                        eprintln!("fno mux thread: {e}");
-                        return EXIT_USAGE;
-                    }
-                }
-            }
-            "--at" => {
-                let value = flag_value!("--at");
-                if value == "current" {
-                    // `current` resolves a calling pane from FNO_PANE; this
-                    // verb's caller is a control client with no pane of its
-                    // own.
-                    eprintln!(
-                        "fno mux thread: --at takes a pane id; there is no calling \
-                         pane to resolve `current` from"
-                    );
-                    return EXIT_USAGE;
-                }
-                match parse_u64(&value, "--at") {
-                    Ok(at) => placement.at = Some(at),
-                    Err(e) => {
-                        eprintln!("fno mux thread: {e}");
-                        return EXIT_USAGE;
-                    }
-                }
-            }
-            t if t.starts_with("--") => {
-                // A typo'd flag must not read as the agent name.
-                eprintln!("fno mux thread: unknown flag: {t}");
-                return EXIT_USAGE;
-            }
-            _ => positionals.push(text.to_string()),
+    let mut portal: Option<u8> = None;
+    if let Some(value) = &parsed.portal {
+        // if/else, not a match: an inner `"word" =>` arm reads as a phantom
+        // verb to the Python parity parser's arm scan.
+        let is_new = value == "new";
+        if let Ok(n) = value.parse::<u8>() {
+            portal = Some(n);
+            // Last --portal flag wins, so an explicit index clears a `new`
+            // spelled earlier.
+            placement.portal_new = false;
+        } else if is_new {
+            placement.portal_new = true;
+            portal = None;
+        } else {
+            eprintln!("fno mux thread: --portal takes an index 0-255 or new");
+            return EXIT_USAGE;
         }
     }
-    let Some(name) = positionals
-        .first()
+    if let Some(ws) = &parsed.workspace {
+        if ws.trim().is_empty() {
+            eprintln!("fno mux thread: --workspace/-s needs a nonblank workspace name");
+            return EXIT_USAGE;
+        }
+        placement.target = PaneTarget::SquadName(ws.clone());
+    }
+    if let Some(v) = &parsed.split {
+        match parse_dir(v, "split/-x") {
+            Ok(dir) => placement.split = Some(dir),
+            Err(e) => {
+                eprintln!("fno mux thread: {e}");
+                return EXIT_USAGE;
+            }
+        }
+    }
+    if let Some(v) = &parsed.tab {
+        match parse_tab_sel(v) {
+            Ok(sel) => placement.tab = Some(sel),
+            Err(e) => {
+                eprintln!("fno mux thread: {e}");
+                return EXIT_USAGE;
+            }
+        }
+    }
+    if let Some(v) = &parsed.at {
+        if v == "current" {
+            // `current` resolves a calling pane from FNO_PANE; this verb's
+            // caller is a control client with no pane of its own.
+            eprintln!(
+                "fno mux thread: --at takes a pane id; there is no calling \
+                 pane to resolve `current` from"
+            );
+            return EXIT_USAGE;
+        }
+        match parse_u64(v, "--at") {
+            Ok(at) => placement.at = Some(at),
+            Err(e) => {
+                eprintln!("fno mux thread: {e}");
+                return EXIT_USAGE;
+            }
+        }
+    }
+    let Some(name) = parsed
+        .name
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     else {
         eprintln!("fno mux thread: needs an agent name or attach id");
         return EXIT_USAGE;
     };
-    if positionals.len() > 1 {
-        eprintln!("fno mux thread: takes exactly one name");
-        return EXIT_USAGE;
-    }
     // A paneless row owns no session routing: the operator's ambient server
     // (the flag, FNO_SERVER / FNO_SESSION, or the default) is the one whose
     // portal this drives. Flag and env stay separate so resolve_session can

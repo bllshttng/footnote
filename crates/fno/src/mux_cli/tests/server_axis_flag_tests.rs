@@ -43,18 +43,18 @@ fn server_axis_take_common_flags_accepts_server_alias_pair() {
         .iter()
         .map(OsString::from)
         .collect();
-    let (server, json, rest) = take_common_flags(&args).expect("--server parses");
-    assert_eq!(server.as_deref(), Some("s3"));
-    assert!(json);
+    let (common, rest) = MuxCommon::take(&args).expect("--server parses");
+    assert_eq!(common.server.as_deref(), Some("s3"));
+    assert!(common.json);
     assert!(rest.is_empty());
 
     let args: Vec<OsString> = ["--session", "s3", "--json"]
         .iter()
         .map(OsString::from)
         .collect();
-    let (server, json, rest) = take_common_flags(&args).expect("--session still parses");
-    assert_eq!(server.as_deref(), Some("s3"));
-    assert!(json);
+    let (common, rest) = MuxCommon::take(&args).expect("--session still parses");
+    assert_eq!(common.server.or(common.session).as_deref(), Some("s3"));
+    assert!(common.json);
     assert!(rest.is_empty());
 }
 

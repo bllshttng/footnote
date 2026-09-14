@@ -58,9 +58,9 @@ pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 mod server_axis;
 
+pub use crate::cli_args::MuxCommon;
 pub use server_axis::{
-    env_server, flag_value, note_server_flag, resolve_session, take_common_flags,
-    LEGACY_SERVER_ENV, SERVER_ENV,
+    env_server, flag_value, note_server_flag, resolve_session, LEGACY_SERVER_ENV, SERVER_ENV,
 };
 
 /// What one socket probe learned.
@@ -3292,22 +3292,25 @@ fn load_spec_file(path: &str) -> Result<crate::proto::LayoutSpec, String> {
 
 /// `fno mux layout get|apply ...` (get: x-d865; apply: x-c4d4).
 pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
-    let (session, json, rest) = match take_common_flags(args) {
+    let (common, rest) = match MuxCommon::take(args) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("fno mux layout: {e}");
             return EXIT_USAGE;
         }
     };
+    let session = common.server.or(common.session);
+    let json = common.json;
     if rest.first().map(String::as_str) == Some("apply") {
         return layout_apply_cli(session.as_deref(), env_session, json, &rest[1..]);
     }
     if rest.first().map(String::as_str) == Some("graft") {
         return layout_graft_cli(session.as_deref(), env_session, json, &rest[1..]);
     }
-    // Otherwise `get` (a bare `layout` also means get).
+    // Otherwise `get` (a bare `layout` also means get). The common flags
+    // already left in `take`, so the loop below sees only get's own flags.
     let flags = match rest.first().map(String::as_str) {
-        Some("get") | None => args,
+        Some("get") | None => rest,
         Some(other) => {
             eprintln!("fno mux layout: unknown verb {other} (get|apply|graft)");
             return EXIT_USAGE;
@@ -3317,21 +3320,24 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
     let mut tab_sel = None;
     let mut i = 0;
     while i < flags.len() {
-        let Some(tok) = flags[i].to_str() else {
-            eprintln!("fno mux layout: non-UTF-8 argument");
-            return EXIT_USAGE;
-        };
+        let tok = flags[i].as_str();
         let res = (|| -> Result<(), String> {
             match tok {
-                "get" | "--json" | "--server" | "--session" => {
-                    // A re-parse of flags the common prefix already consumed:
-                    // the note fired there, so this skip stays silent.
-                    if tok == "--server" || tok == "--session" {
-                        let _ = flag_value(flags, &mut i, tok)?;
-                    }
+                "get" => {}
+                "--workspace" | "--squad" | "-s" => {
+                    let Some(v) = flags.get(i + 1) else {
+                        return Err(format!("{tok} needs a value"));
+                    };
+                    squad = Some(v.clone());
+                    i += 1;
                 }
-                "--workspace" | "--squad" | "-s" => squad = Some(flag_value(flags, &mut i, tok)?),
-                "--tab" => tab_sel = Some(parse_tab_sel(&flag_value(flags, &mut i, "--tab")?)?),
+                "--tab" => {
+                    let Some(v) = flags.get(i + 1) else {
+                        return Err("--tab needs a value".into());
+                    };
+                    tab_sel = Some(parse_tab_sel(v)?);
+                    i += 1;
+                }
                 t => return Err(format!("unknown flag: {t}")),
             }
             Ok(())
@@ -4267,13 +4273,14 @@ fn resolve_row_or_location(
 /// selector that names no agent is retried as a tab LOCATION (x-1499).
 pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
     let verb = "fno mux view";
-    let (session_flag, json, rest) = match take_common_flags(args) {
+    let (common, rest) = match MuxCommon::take(args) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{verb}: {e}");
             return EXIT_USAGE;
         }
     };
+    let (session_flag, json) = (common.server.or(common.session), common.json);
     let (workspace, rest) = match take_workspace_flag(verb, rest) {
         Ok(t) => t,
         Err(code) => return code,
@@ -4373,13 +4380,14 @@ mod doctor_squads;
 pub fn where_(args: &[OsString], env_session: Option<&str>) -> i32 {
     // The caller's FNO_SESSION is irrelevant here: `where` resolves the HOST
     // session from the registry, so an explicit --session is the only override.
-    let (session_flag, json, rest) = match take_common_flags(args) {
+    let (common, rest) = match MuxCommon::take(args) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("fno mux where: {e}");
             return EXIT_USAGE;
         }
     };
+    let (session_flag, json) = (common.server.or(common.session), common.json);
     let (workspace, rest) = match take_workspace_flag("fno mux where", rest) {
         Ok(t) => t,
         Err(code) => return code,
