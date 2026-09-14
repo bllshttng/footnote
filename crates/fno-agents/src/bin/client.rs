@@ -2485,6 +2485,12 @@ async fn run_status(json_out: bool) -> i32 {
                         "arms".into(),
                         serde_json::to_value(&arms).unwrap_or(Value::Null),
                     );
+                    // The Rust-owned attention set beside the full list, so
+                    // every consumer reads the same verdict (x-6484).
+                    obj.insert(
+                        "arms_attention".into(),
+                        serde_json::to_value(arms_attention(&arms)).unwrap_or(Value::Null),
+                    );
                     // x-f188 change 4: the drift verdict as a field, so the
                     // census reads it from JSON instead of regex-parsing the
                     // stderr sentence.
@@ -2523,11 +2529,7 @@ async fn run_status(json_out: bool) -> i32 {
                 &fno_agents::tick_ledger::DaemonFacts::Down,
                 &trace,
             );
-            let payload = json!({
-                "schema_version": 1,
-                "daemon": null,
-                "arms": arms,
-            });
+            let payload = degraded_status_payload(&arms);
             if json_out {
                 println!(
                     "{}",
@@ -2549,11 +2551,7 @@ async fn run_status(json_out: bool) -> i32 {
                 &fno_agents::tick_ledger::DaemonFacts::Unknown,
                 &trace,
             );
-            let payload = json!({
-                "schema_version": 1,
-                "daemon": null,
-                "arms": arms,
-            });
+            let payload = degraded_status_payload(&arms);
             if json_out {
                 println!(
                     "{}",
@@ -2587,6 +2585,31 @@ fn arms_readout(
     let arms = fno_agents::tick_ledger::read_arms(&journals, now_unix);
     let trace = fno_agents::tick_ledger::read_tick_trace(&journals, now_unix);
     (arms, trace)
+}
+
+/// The Rust-owned attention set: rows needing operator attention (unobserved,
+/// stale, or failing), selected by the one predicate in `tick_ledger`. The
+/// Python doctor consumes this list as its `red` set and never re-derives the
+/// verdict from the legacy booleans (x-6484).
+fn arms_attention(
+    arms: &[fno_agents::tick_ledger::ArmStatus],
+) -> Vec<fno_agents::tick_ledger::ArmStatus> {
+    arms.iter()
+        .filter(|r| fno_agents::tick_ledger::needs_attention(r))
+        .cloned()
+        .collect()
+}
+
+/// The degraded status payload (daemon down or unreachable): the arms readout
+/// stands on its own, carrying both the full row list and the Rust-owned
+/// attention set, so a daemon's health never changes the payload schema.
+fn degraded_status_payload(arms: &[fno_agents::tick_ledger::ArmStatus]) -> Value {
+    json!({
+        "schema_version": 1,
+        "daemon": null,
+        "arms": arms,
+        "arms_attention": arms_attention(arms),
+    })
 }
 
 /// The human render: one owned line per arm (red rows first-class), then the

@@ -23,6 +23,7 @@ fn row(arm: &str) -> ArmStatus {
         skip_reason: None,
         detail: None,
         interval_s: 600,
+        producer_evidence: fno_agents::tick_ledger::ProducerEvidence::Observed,
         stale: false,
         failing: false,
         failing_for_s: None,
@@ -229,5 +230,51 @@ fn an_anchorless_failing_episode_pages_once_not_every_floor() {
     assert_eq!(second.acted, 0);
     assert_eq!(second.detail, "deduped");
     assert_eq!(sends, 1);
+    std::fs::remove_file(&store).ok();
+}
+
+/// An unobserved periodic arm pages with an UNOBSERVED body line, and the
+/// same set on a later tick dedupes: the constant 0 anchor holds the episode.
+#[test]
+fn an_unobserved_periodic_arm_pages_and_then_dedupes() {
+    let store = temp_store("unobserved");
+    let mut unobserved = row("king_wake");
+    unobserved.producer_evidence = fno_agents::tick_ledger::ProducerEvidence::Unobserved;
+    let rows = vec![unobserved];
+    let mut sends: Vec<(String, String)> = Vec::new();
+    let out = tick_arm_watch(&rows, 1800, &store, TS_UNIX, |title, body| {
+        sends.push((title.to_string(), body.to_string()));
+        true
+    });
+    assert_eq!(out.acted, 1, "first sight of a receipt-less arm pages");
+    assert!(sends[0].1.contains("UNOBSERVED"), "{}", sends[0].1);
+    assert!(!sends[0].1.contains("STALE"), "{}", sends[0].1);
+
+    let out2 = tick_arm_watch(&rows, 1800, &store, TS_UNIX + 900, |_, _| {
+        sends.push(("x".into(), "x".into()));
+        true
+    });
+    assert_eq!(out2.acted, 0);
+    assert_eq!(out2.detail, "deduped");
+    std::fs::remove_file(&store).ok();
+}
+
+/// An event-driven arm (interval 0) never pages from quiet: unobserved
+/// stop_hook is its designed idle, not a fault.
+#[test]
+fn an_unobserved_event_driven_arm_pages_nothing() {
+    let store = temp_store("unobserved-event");
+    let mut unobserved_stop_hook = row("stop_hook");
+    unobserved_stop_hook.producer_evidence = fno_agents::tick_ledger::ProducerEvidence::Unobserved;
+    unobserved_stop_hook.interval_s = 0;
+    let rows = vec![unobserved_stop_hook];
+    let mut sends = 0usize;
+    let out = tick_arm_watch(&rows, 1800, &store, TS_UNIX, |_, _| {
+        sends += 1;
+        true
+    });
+    assert_eq!(out.acted, 0);
+    assert_eq!(out.detail, "no arm past threshold");
+    assert_eq!(sends, 0);
     std::fs::remove_file(&store).ok();
 }
