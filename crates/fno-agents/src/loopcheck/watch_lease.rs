@@ -78,3 +78,118 @@ pub(super) fn without_arm_hint(reason: &str) -> String {
         None => reason.to_string(),
     }
 }
+
+/// Why a watch-lease renewal declined (x-b445). The first three are permanent
+/// for this session: arming another watcher cannot change them. `contended`
+/// (a peer held the recovery mutex, or the record answered nothing) and
+/// `write_failed` can succeed on the next stop.
+#[derive(Debug)]
+pub(super) enum RenewCause {
+    /// The claim lockfile is missing (released or reaped).
+    Gone,
+    /// The lockfile's holder differs from the manifest's recorded holder.
+    HeldByOther(String),
+    /// The holder matches but the status verdict reads stale.
+    Stale,
+    /// The holder matches, the verdict reads live/suspect, and renewal still
+    /// declined: a peer held the recovery mutex.
+    Contended,
+    /// `renew` returned Err.
+    WriteFailed,
+}
+
+impl RenewCause {
+    /// The `watch_refusal` event value for this cause (schema.yaml enum).
+    pub(super) fn as_str(&self) -> &'static str {
+        match self {
+            RenewCause::Gone => "gone",
+            RenewCause::HeldByOther(_) => "held_by_other",
+            RenewCause::Stale => "stale",
+            RenewCause::Contended => "contended",
+            RenewCause::WriteFailed => "write_failed",
+        }
+    }
+
+    pub(super) fn is_permanent(&self) -> bool {
+        matches!(
+            self,
+            RenewCause::Gone | RenewCause::HeldByOther(_) | RenewCause::Stale
+        )
+    }
+}
+
+/// The lead shared by every permanent-cause refusal. The transient refusals
+/// ("watch lease could not be renewed", harness, not-async) never carry it,
+/// which is what [`refusal_is_permanent`] matches on.
+const PERMANENT_REFUSAL_LEAD: &str = "watching ignored: this session's watch lease is dead:";
+
+/// The refusal for a cause, or `None` for a transient one: the caller keeps
+/// today's generic text and its arm hint, because a retry can succeed.
+pub(super) fn renewal_refusal(cause: &RenewCause) -> Option<String> {
+    let remedy = "Get the claim back with `fno do target start <node>` from inside this \
+worktree, then resume; or hand the PR to a session that holds the claim.";
+    match cause {
+        RenewCause::Gone => Some(format!(
+            "{PERMANENT_REFUSAL_LEAD} the node claim lockfile is gone (released or \
+reaped). Arming another watcher will not change that. {remedy}"
+        )),
+        RenewCause::HeldByOther(holder) => Some(format!(
+            "{PERMANENT_REFUSAL_LEAD} the node claim is held by {holder}, not this \
+session. Arming another watcher will not change that. {remedy}"
+        )),
+        RenewCause::Stale => Some(format!(
+            "{PERMANENT_REFUSAL_LEAD} the claim's holder reads dead (stale). Arming \
+another watcher will not change that. {remedy}"
+        )),
+        RenewCause::Contended | RenewCause::WriteFailed => None,
+    }
+}
+
+/// True for the no-claim refusal and every permanent-cause refusal: arming
+/// another watcher cannot help, so the block reason must not prescribe the
+/// ritual it just refused (x-b445 generalizes the [`NO_CLAIM_REFUSAL`] cut).
+pub(super) fn refusal_is_permanent(reason: &str) -> bool {
+    reason == NO_CLAIM_REFUSAL || reason.starts_with(PERMANENT_REFUSAL_LEAD)
+}
+
+/// Why `renew` did not answer Ok(true) for this session's own claim pair
+/// (x-b445). Reads the claim once and applies the same status verdict
+/// `fno agents claim status` prints, so a refusal names the answer the
+/// operator would see - never a second liveness opinion. `renew_error` is
+/// renew's Err payload when it errored; `root` mirrors renew's own root
+/// argument (production passes None).
+pub(super) fn renew_cause(
+    key: &str,
+    holder: &str,
+    renew_error: Option<&str>,
+    root: Option<&std::path::Path>,
+) -> RenewCause {
+    if renew_error.is_some() {
+        return RenewCause::WriteFailed;
+    }
+    let path = match crate::claims::claim_path(key, root) {
+        Ok(path) => path,
+        Err(_) => return RenewCause::WriteFailed,
+    };
+    match crate::claims::read_claim_file(&path) {
+        Err(crate::claims::ReadError::GoneAway) => RenewCause::Gone,
+        Err(crate::claims::ReadError::Corrupted(_)) => RenewCause::Contended,
+        Ok(rec) if rec.holder != holder => RenewCause::HeldByOther(rec.holder),
+        Ok(rec) => {
+            if crate::claim_verbs::status_verdict(&rec).0 == crate::claims::ClaimState::Stale {
+                RenewCause::Stale
+            } else {
+                RenewCause::Contended
+            }
+        }
+    }
+}
+
+/// Attach the watching refusal cause to a block `loop_check` event, but ONLY
+/// when the fire carried one: a non-watching block carries no `watch_refusal`
+/// key at all, so consumers read its ABSENCE, never a null (x-b445).
+pub(super) fn attach_watch_refusal(event: &mut serde_json::Value, kind: Option<&'static str>) {
+    if let Some(kind) = kind {
+        event["watch_refusal"] = serde_json::Value::String(kind.to_string());
+    }
+}

@@ -8687,6 +8687,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             // spend), so this idles on the tag + lease alone, only on a
             // harness that self-wakes, and the message says the state was not
             // verified. The watcher's exit re-evaluates with fresh quota.
+            let mut lease_note = String::new();
             if let Intent::Watching {
                 ref reason,
                 ref timeout,
@@ -8698,16 +8699,29 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     std::env::var("FNO_DRIVER_LIB").is_ok(),
                 ) {
                     let window_ms = watch_window_ms(timeout.as_deref());
-                    let renewed = match (
-                        scan_manifest_field(&manifest_content, "target_claim_key"),
-                        scan_manifest_field(&manifest_content, "target_claim_holder"),
-                    ) {
-                        (Some(key), Some(holder)) => matches!(
-                            crate::claims::renew(&key, &holder, window_ms, None),
-                            Ok(true)
-                        ),
-                        _ => false,
-                    };
+                    let claim = watch_lease::claim_pair(&manifest_content);
+                    let renew_outcome = claim
+                        .as_ref()
+                        .map(|(key, holder)| crate::claims::renew(key, holder, window_ms, None));
+                    let renewed = matches!(renew_outcome.as_ref(), Some(Ok(true)));
+                    if !renewed {
+                        lease_note = claim
+                            .as_ref()
+                            .zip(renew_outcome.as_ref())
+                            .map(|((key, holder), outcome)| {
+                                watch_lease::renew_cause(
+                                    key,
+                                    holder,
+                                    outcome.as_ref().err().map(String::as_str),
+                                    None,
+                                )
+                            })
+                            .filter(watch_lease::RenewCause::is_permanent)
+                            .map(|c| {
+                                format!(" {}", watch_lease::renewal_refusal(&c).unwrap_or_default())
+                            })
+                            .unwrap_or_default();
+                    }
                     if renewed {
                         // The tag's own `pr=`/`reason=` attributes are the only
                         // source here (the stand-down verifies nothing), so
@@ -8796,7 +8810,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                          review-thread read too, and REST shares the same secondary limit \
                          as GraphQL, so porting a read to REST alone does not escape a \
                          burst refusal). The next fire re-probes; a promise intent always \
-                         proceeds."
+                         proceeds.{lease_note}"
                     ),
                     0,
                     None,
@@ -9859,6 +9873,10 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
                     let blocker = if can_idle { observed_async_wait } else { None };
                     let claim = watch_lease::claim_pair(&manifest_content);
+                    // x-b445: capture renew's outcome, not just its truth, so a
+                    // refusal can name WHY the lease died instead of telling the
+                    // reader to arm the watcher it just refused.
+                    let mut lease_cause: Option<watch_lease::RenewCause> = None;
                     if let Some(blocker) = blocker {
                         // Extend the node claim to cover the watch window BEFORE
                         // idling, or the idle opens a dispatcher-stampede gap.
@@ -9866,10 +9884,10 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         // shrinks the lease to 1min) and MUST return Ok(true)
                         // (holder match); anything else blocks (AC3-ERR).
                         let window_ms = watch_window_ms(timeout.as_deref());
-                        let renewed = claim.as_ref().is_some_and(|(key, holder)| {
-                            matches!(crate::claims::renew(key, holder, window_ms, None), Ok(true))
+                        let renew_outcome = claim.as_ref().map(|(key, holder)| {
+                            crate::claims::renew(key, holder, window_ms, None)
                         });
-                        if renewed {
+                        if matches!(renew_outcome.as_ref(), Some(Ok(true))) {
                             emit(
                                 "loop_check_watch_idle",
                                 serde_json::json!({
@@ -9908,12 +9926,22 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                                 allow_output("allow", None, &msg, this_fire, Some(fingerprint)),
                             );
                         }
+                        lease_cause = claim.as_ref().zip(renew_outcome.as_ref()).map(
+                            |((key, holder), outcome)| {
+                                watch_lease::renew_cause(
+                                    key,
+                                    holder,
+                                    outcome.as_ref().err().map(String::as_str),
+                                    None,
+                                )
+                            },
+                        );
                         // renewal failed / holder mismatch -> fall through to the
                         // block below (AC3-ERR): never idle without a lease.
                     }
                     // Not an async-wait class, or a loop-run child: fall through
                     // with an explicit refusal before the real blocker.
-                    Some(if !can_idle {
+                    let refusal = if !can_idle {
                         watching_harness_refusal(author_harness.as_deref(), is_loop_run_child)
                     } else if blocker.is_none() && !pr_info.unaddressed_findings.is_empty() {
                         format!(
@@ -9924,9 +9952,26 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         "watching ignored: PR is not in an async wait class".to_string()
                     } else if claim.is_none() {
                         watch_lease::NO_CLAIM_REFUSAL.to_string()
+                    } else if let Some(cause) = lease_cause.as_ref().filter(|c| c.is_permanent()) {
+                        watch_lease::renewal_refusal(cause).unwrap_or_else(|| {
+                            "watching ignored: watch lease could not be renewed".to_string()
+                        })
                     } else {
                         "watching ignored: watch lease could not be renewed".to_string()
-                    })
+                    };
+                    let kind = if !can_idle {
+                        "harness"
+                    } else if blocker.is_none() {
+                        "not_async"
+                    } else if claim.is_none() {
+                        "no_claim"
+                    } else {
+                        lease_cause
+                            .as_ref()
+                            .map(|c| c.as_str())
+                            .unwrap_or("write_failed")
+                    };
+                    Some((refusal, kind))
                 } else {
                     None
                 };
@@ -10082,34 +10127,36 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     // The refusal already said no watcher can help here, so the
                     // hint the classifier appended would contradict it inside
                     // one message. Cut the hint, keep the blocker.
-                    Some(ref refusal) if refusal == watch_lease::NO_CLAIM_REFUSAL => {
+                    Some(ref refusal) if watch_lease::refusal_is_permanent(&refusal.0) => {
                         let rest = watch_lease::without_arm_hint(&block_reason);
-                        format!("{refusal}; {rest}")
+                        format!("{}; {rest}", refusal.0)
                     }
-                    Some(refusal) => format!("{refusal}; {block_reason}"),
+                    Some(ref refusal) => format!("{}; {}", refusal.0, block_reason),
                     None => block_reason,
                 };
                 let reason = crate::nudge::append_inbox_nudge(&block_reason, &cwd, &session_id);
-                emit(
-                    "loop_check",
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "fingerprint": fingerprint,
-                        "fires": this_fire,
-                        "consecutive_unchanged": consecutive_after,
-                        "streak_window_secs": streak_window,
-                        "decision": "block",
-                        "intent": if intent == Intent::Promise { "promise" } else { "none" },
-                        "intent_source": intent_source,
-                        "pr_state": pr_info.state.as_str(),
-                        "ci": pr_info.ci_conclusion.render(),
-                        "reviewed": pr_info.reviewed,
-                        "review_skipped": pr_info.review_skipped,
-                        "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                        "fp_read_failed": fp_read_failed,
-                        "done_probes": probe_results
-                    }),
+                let mut block_event = serde_json::json!({
+                    "session_id": session_id,
+                    "fingerprint": fingerprint,
+                    "fires": this_fire,
+                    "consecutive_unchanged": consecutive_after,
+                    "streak_window_secs": streak_window,
+                    "decision": "block",
+                    "intent": if intent == Intent::Promise { "promise" } else { "none" },
+                    "intent_source": intent_source,
+                    "pr_state": pr_info.state.as_str(),
+                    "ci": pr_info.ci_conclusion.render(),
+                    "reviewed": pr_info.reviewed,
+                    "review_skipped": pr_info.review_skipped,
+                    "unaddressed_blocking": pr_info.unaddressed_findings.len(),
+                    "fp_read_failed": fp_read_failed,
+                    "done_probes": probe_results
+                });
+                watch_lease::attach_watch_refusal(
+                    &mut block_event,
+                    watching_refusal.as_ref().map(|(_, kind)| *kind),
                 );
+                emit("loop_check", block_event);
                 return (
                     0,
                     allow_output("block", None, &reason, this_fire, Some(fingerprint)),
@@ -15392,6 +15439,132 @@ git_bounded();";
             watching_harness_refusal(Some("codex"), false),
             "watching ignored: harness codex cannot idle"
         );
+    }
+
+    // ── x-b445: a refused watch names its cause ─────────────────────────────
+
+    /// The manifest fields `claim_pair` scans, as `fno do target init` writes
+    /// them: AFTER the closing `---`, one `field: "value"` line each.
+    fn watch_manifest(holder: &str) -> String {
+        format!("target_claim_key: \"node:x-b445t\"\ntarget_claim_holder: \"{holder}\"\n")
+    }
+
+    /// A live holder-side fixture: the claim the test itself vouches for.
+    fn live_claim_opts(root: &tempfile::TempDir) -> crate::claims::AcquireOpts {
+        crate::claims::AcquireOpts {
+            root: Some(root.path().to_path_buf()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn held_by_other_refusal_names_the_holder_and_the_remedy_without_the_arm_hint() {
+        // AC3-HP: manifest names holder `a`, lockfile held by `b`.
+        let td = tempfile::TempDir::new().unwrap();
+        let _ = crate::claims::acquire("node:x-b445t", "target-session:b", live_claim_opts(&td));
+        let cause =
+            watch_lease::renew_cause("node:x-b445t", "target-session:a", None, Some(td.path()));
+        let refusal = watch_lease::renewal_refusal(&cause).expect("held-by-other is permanent");
+        assert!(refusal.contains("target-session:b"), "{refusal}");
+        assert!(refusal.contains("fno do target start <node>"), "{refusal}");
+        assert!(
+            !refusal.contains(watch_lease::ARM_HINT_LEAD),
+            "permanent refusal must not carry the arm hint: {refusal}"
+        );
+        assert!(watch_lease::refusal_is_permanent(&refusal));
+        // The cut composes refusal + hint-cut blocker the way the fire path does.
+        let blocker = format!(
+            "some blocker.{} continue watching",
+            watch_lease::ARM_HINT_LEAD
+        );
+        let composed = format!("{}; {}", refusal, watch_lease::without_arm_hint(&blocker));
+        assert!(
+            !composed.contains(watch_lease::ARM_HINT_LEAD),
+            "composed block reason must not re-arm: {composed}"
+        );
+    }
+
+    #[test]
+    fn contended_lease_keeps_the_arm_hint() {
+        // AC3-EDGE: holder matches and the verdict reads live, but a peer held
+        // the recovery mutex when renew ran, so renewal declined: keep the
+        // generic text (the next stop can succeed).
+        let td = tempfile::TempDir::new().unwrap();
+        let _ = crate::claims::acquire("node:x-b445t", "target-session:me", live_claim_opts(&td));
+        // A peer "holds" the recovery mutex: a fresh (non-stale) lock dir.
+        let path = crate::claims::claim_path("node:x-b445t", Some(td.path())).unwrap();
+        let recovery = path.with_file_name(format!(
+            "{}.recovery.d",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir(&recovery).unwrap();
+        let renewed = crate::claims::renew(
+            "node:x-b445t",
+            "target-session:me",
+            120_000,
+            Some(td.path()),
+        );
+        assert_eq!(renewed, Ok(false));
+        let cause =
+            watch_lease::renew_cause("node:x-b445t", "target-session:me", None, Some(td.path()));
+        assert!(
+            matches!(cause, watch_lease::RenewCause::Contended),
+            "{cause:?}"
+        );
+        assert!(watch_lease::renewal_refusal(&cause).is_none());
+        assert!(!watch_lease::refusal_is_permanent(
+            "watching ignored: watch lease could not be renewed"
+        ));
+    }
+
+    #[test]
+    fn gone_and_stale_refusals_are_permanent_and_name_the_remedy() {
+        let td = tempfile::TempDir::new().unwrap();
+        // gone: no lockfile at all.
+        let cause =
+            watch_lease::renew_cause("node:x-b445t", "target-session:me", None, Some(td.path()));
+        assert!(matches!(cause, watch_lease::RenewCause::Gone));
+        assert!(watch_lease::refusal_is_permanent(
+            &watch_lease::renewal_refusal(&cause).unwrap()
+        ));
+        // stale: dead-pid claim past its TTL with no session witness to heal it.
+        let mut o = live_claim_opts(&td);
+        o.pid = Some(999_999_999);
+        let _ = crate::claims::acquire("node:x-b445t", "target-session:me", o);
+        let claim_path = crate::claims::claim_path("node:x-b445t", Some(td.path())).unwrap();
+        let mut rec = crate::claims::read_claim_file(&claim_path).unwrap();
+        rec.session_id = None;
+        rec.expires_at = Some(crate::claims::now_ms() - 1);
+        crate::claims::atomic_replace(&claim_path, &crate::claims::serialize_claim(&rec).unwrap())
+            .unwrap();
+        let cause =
+            watch_lease::renew_cause("node:x-b445t", "target-session:me", None, Some(td.path()));
+        assert!(matches!(cause, watch_lease::RenewCause::Stale), "{cause:?}");
+        let refusal = watch_lease::renewal_refusal(&cause).unwrap();
+        assert!(refusal.contains("stale"), "{refusal}");
+        assert!(watch_lease::refusal_is_permanent(&refusal));
+    }
+
+    #[test]
+    fn write_failed_cause_from_renew_error() {
+        let cause =
+            watch_lease::renew_cause("node:x-b445t", "target-session:me", Some("boom"), None);
+        assert!(matches!(cause, watch_lease::RenewCause::WriteFailed));
+        assert!(!watch_lease::refusal_is_permanent(
+            "watching ignored: PR is not in an async wait class"
+        ));
+    }
+
+    #[test]
+    fn attach_watch_refusal_sets_the_key_only_when_some() {
+        // AC4-HP/EDGE: a watching fire's refusal rides the event; a
+        // non-watching block carries no `watch_refusal` key at all.
+        let mut event = serde_json::json!({"decision": "block"});
+        watch_lease::attach_watch_refusal(&mut event, Some("held_by_other"));
+        assert_eq!(event["watch_refusal"], serde_json::json!("held_by_other"));
+        let mut bare = serde_json::json!({"decision": "block"});
+        watch_lease::attach_watch_refusal(&mut bare, None);
+        assert!(bare.get("watch_refusal").is_none());
     }
 
     #[test]
