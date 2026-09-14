@@ -515,3 +515,53 @@ def test_a_non_mail_payload_is_verbatim_but_still_gated(monkeypatch, capsys):
     assert dispatch._deliver_live(_entry(), "run the ritual", "fno") is False
     assert "send" not in _verbs(calls), "a blocked pane must receive nothing"
     assert "auth_wall" in capsys.readouterr().err
+
+
+def test_a_failed_pane_send_plus_a_rebound_thread_delivers_over_the_daemon(
+    monkeypatch,
+):
+    """AC5-EDGE (x-4a68): a dead pane on a codex row whose thread is loaded
+    heals to the thread lane; the body rides _mail_inject_codex instead of
+    the durable queue."""
+    entry = SimpleNamespace(
+        mux={"session": "main", "pane_id": 2179},
+        harness="codex",
+        harness_session_id="019f0000-dead-4a68-b5c6-000000000001",
+        session_id=None,
+        cwd="/w",
+        status="live",
+        name="codexpane",
+        exited=False,
+    )
+    pane_calls = []
+    monkeypatch.setattr(
+        dispatch, "_mux_pane_send", lambda *a, **k: pane_calls.append(True) or False
+    )
+    monkeypatch.setattr(
+        dispatch, "_lane_heal", lambda sid: ("rebound-thread", None, None)
+    )
+    rebounded = SimpleNamespace(
+        mux=None,
+        harness="codex",
+        harness_session_id=entry.harness_session_id,
+        name="codexpane",
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.resolve_agent",
+        lambda _name: type("R", (), {"entry": rebounded})(),
+    )
+    daemon_calls = []
+    monkeypatch.setattr(
+        dispatch,
+        "_mail_inject_codex",
+        lambda session, text, **k: daemon_calls.append((session, text, k)) or True,
+    )
+    monkeypatch.setattr(
+        dispatch, "_delivery_policy_refusal", lambda _e: None, raising=False
+    )
+    assert dispatch._deliver_live(entry, "hello WRAPPED-BODY", "fno") is True
+    assert pane_calls
+    assert len(daemon_calls) == 1
+    session, text, _kwargs = daemon_calls[0]
+    assert session == entry.harness_session_id
+    assert text == "hello WRAPPED-BODY"
