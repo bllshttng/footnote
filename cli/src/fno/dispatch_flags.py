@@ -43,6 +43,7 @@ from __future__ import annotations
 import os
 from typing import Mapping, Optional
 
+from fno.config._dispatch_verbs import canonical_verb_key
 from fno.harness_identity import resolve_harness_identity
 
 # decision_source vocabulary surfaced in the spawn receipt so a dispatch's
@@ -155,12 +156,9 @@ def configured_dispatch_harness(
 
 
 def _stage_profile(settings: object, verb: str) -> tuple[object, str]:
-    """The stage-table profile row for VERB plus its normalized name (leading
-    slash, fno: namespace strip), one home for every reader. (None, "target")
-    when unset."""
-    profile_verb = (verb or "target").strip().lstrip("/")
-    if profile_verb.startswith("fno:"):
-        profile_verb = profile_verb[len("fno:"):] or "target"
+    """The stage-table profile row for VERB plus its canonical name, one home
+    for every reader. (None, "target") when unset."""
+    profile_verb = canonical_verb_key((verb or "target").strip()).lstrip("/")
     agents = getattr(settings, "agents", None)
     profiles = getattr(agents, "profiles", None) or {}
     return (profiles.get(profile_verb) if profile_verb else None), profile_verb
