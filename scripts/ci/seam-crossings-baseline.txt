@@ -5,10 +5,10 @@
 # stays the only Python file that execs fno-agents by literal name.
 crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/authorized_merge.rs	567	let out = Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	1630	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	1685	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	3118	match std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	4375	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
+crossing	crates/fno-agents/src/bin/client.rs	1647	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	1702	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	3135	match std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	4392	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
 crossing	crates/fno-agents/src/blueprint_judge.rs	69	return match Command::new("fno").args(["help", "--all"]).output() {
 crossing	crates/fno-agents/src/blueprint_judge.rs	165	let out = Command::new("fno")
 crossing	crates/fno-agents/src/client_verbs.rs	1279	let mut command = Command::new("fno");
@@ -31,7 +31,7 @@ crossing	crates/fno-agents/src/finalize.rs	2332	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2414	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2784	let out = match Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2804	let mut cmd = Command::new("fno");
-crossing	crates/fno-agents/src/gc.rs	884	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
+crossing	crates/fno-agents/src/gc.rs	889	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/king_checkin.rs	143	let mut argv = vec![fno_bin()];
 crossing	crates/fno-agents/src/loop_dispatch.rs	364	let out = Command::new("fno")
 crossing	crates/fno-agents/src/loopcheck.rs	3495	pub(crate) fn loopcheck_fno_bin() -> String {
