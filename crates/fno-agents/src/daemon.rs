@@ -31,6 +31,7 @@ use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership chec
 mod blocking_bound;
 mod rm_codex_rollback;
 mod rm_refusal_detail;
+mod rm_teardown;
 mod roster_death;
 mod stop_refusal_detail;
 pub(crate) use self::blocking_bound::directory_bytes;
@@ -5632,62 +5633,27 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
         // shared daemon owns the thread, so a turn that survives the bounded
         // settle keeps running there, and the report below says exactly that
         // rather than claiming a kill this verb cannot perform.
-        let handle = ctx.codex_threads.lock().await.get(&name).cloned();
-        let mut interrupt_report = "no-turn".to_string();
-        // Did the turn actually reach a terminal state? With a private child,
-        // `kill_on_drop` made every outcome terminal, so the answer was always
-        // yes. Against the shared daemon an unconfirmed interrupt leaves the
-        // turn RUNNING, and reporting a stop over it is the zombie shape this
-        // arm exists to avoid.
-        let mut settled = true;
-        if let Some(handle) = handle.as_ref() {
-            let outcome = match tokio::time::timeout(
-                crate::codex_thread::stop_settle_bound(),
-                handle.interrupt(),
-            )
-            .await
-            {
-                Ok(Ok(InterruptOutcome::NoTurnInFlight)) => "no-turn".to_string(),
-                Ok(Ok(InterruptOutcome::Interrupted(receipt))) => receipt.status,
-                Ok(Ok(InterruptOutcome::Timeout)) => {
-                    settled = false;
-                    "timeout-turn-still-running".to_string()
-                }
-                Ok(Err(error)) => {
-                    settled = false;
-                    format!("interrupt-failed-turn-still-running: {error}")
-                }
-                Err(_) => {
-                    settled = false;
-                    "interrupt-failed-turn-still-running: stop exchange timed out".to_string()
-                }
-            };
-            interrupt_report = outcome;
-            if settled {
-                // Shutdown acks only after the driver dropped, so the daemon
-                // connection is already closed before the row reads Exited.
-                let _ = handle.shutdown().await;
-            }
-        }
-        if !settled {
+        let interrupt_report = match rm_teardown::end_codex_thread(ctx, &name).await {
+            Ok(report) => report,
             // Keep the handle and leave the row non-terminal. The actor still
             // holds the interrupt handle for the live turn, so a retry can
             // reach it, and a terminal row would also make the thread
             // invisible to `codex_thread_recovery_candidate`.
-            let _ = ctx.emitter.emit(
-                "agent_stop_refused",
-                &json!({"name": name, "backend": "codex-thread", "interrupt": interrupt_report}),
-            );
-            return Response::ok(
-                req.id,
-                json!({
-                    "stopped": false,
-                    "backend": "codex-thread",
-                    "interrupt": interrupt_report,
-                }),
-            );
-        }
-        ctx.codex_threads.lock().await.remove(&name);
+            Err(interrupt_report) => {
+                let _ = ctx.emitter.emit(
+                    "agent_stop_refused",
+                    &json!({"name": name, "backend": "codex-thread", "interrupt": interrupt_report}),
+                );
+                return Response::ok(
+                    req.id,
+                    json!({
+                        "stopped": false,
+                        "backend": "codex-thread",
+                        "interrupt": interrupt_report,
+                    }),
+                );
+            }
+        };
         let stop_name = name.clone();
         if let Err(error) = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
             if let Some(entry) = registry.find_mut(&stop_name) {
@@ -6241,7 +6207,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
                 format!(
                     "agent {name} is claude but has no short id and no live process \
                      to stop. `rm` will refuse this row too while it is stored live, so \
-                     stop-then-rm has no exit here: the row can neither prove liveness \
+                     stopping has no exit here: the row can neither prove liveness \
                      nor be addressed. The override for that case is documented in \
                      `fno agents rm --help`, not here."
                 ),
@@ -6383,6 +6349,7 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
         req,
         &crate::claude_roster::read_all_agents_union,
         &run_claude_rm,
+        &rm_teardown::claude_stop_confirmed,
         &run_mux_pane_kill,
         &run_mux_pane_probe,
     )
@@ -6438,6 +6405,7 @@ async fn handle_rm_with(
     req: &Request,
     read_claude_agents: &(dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot + Sync),
     claude_rm: &(dyn Fn(&str) -> Result<(), String> + Sync),
+    claude_stop: &(dyn Fn(&str) -> bool + Sync),
     mux_pane_kill: &(dyn Fn(&str, u64) -> Result<bool, String> + Sync),
     mux_pane_probe: &(dyn Fn(&str, u64) -> PaneProbe + Sync),
 ) -> Response {
@@ -6471,7 +6439,7 @@ async fn handle_rm_with(
     // Computed once (self-review finding): every other reference in this
     // handler reuses this allocation instead of re-deriving the same short id.
     let harness_row_id = claude_row_id(&entry);
-    let claude_agents = if entry.harness_name() == "claude" {
+    let mut claude_agents = if entry.harness_name() == "claude" {
         Some(off_executor(read_claude_agents))
     } else {
         None
@@ -6488,12 +6456,42 @@ async fn handle_rm_with(
     // escape. One death verdict for the whole gate, shared with the reaper: a
     // merge cleanup whose stop cleared on it must not be refused by the very
     // next `fno agents rm`.
-    let provably_gone = claude_agents
+    let mut provably_gone = claude_agents
         .as_ref()
         .is_some_and(|snapshot| crate::gc_sweep::claude_death_reason(&entry, snapshot).is_some())
         || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
         || off_executor(|| pane_provably_absent(entry.mux.as_ref(), mux_pane_probe));
-    if entry.status == AgentStatus::Live && !force && !provably_gone {
+    // Law d-81c6da7e: remove needs no prior stop. rm owns the one exception's
+    // stop - the claude background thread - itself: run the bounded `claude
+    // stop`, then re-read the roster and recompute the death verdict. Every
+    // other live row is ended by the arms below; no caller composes a stop
+    // leg in front of this verb anymore.
+    if entry.status == AgentStatus::Live
+        && !force
+        && !provably_gone
+        && crate::gc_native::stop_precedes_removal(&entry)
+    {
+        let short = entry.transport_short().map(str::to_string).or_else(|| {
+            entry
+                .harness_session_id
+                .clone()
+                .filter(|session_id| !session_id.trim().is_empty())
+        });
+        if let Some(short) = short {
+            let _ = off_executor(|| claude_stop(&short));
+            let snapshot = off_executor(read_claude_agents);
+            provably_gone = crate::gc_sweep::claude_death_reason(&entry, &snapshot).is_some()
+                || claude_row_provably_absent(Some(&snapshot), harness_row_id.as_deref());
+            claude_agents = Some(snapshot);
+        }
+    }
+    // Only a claude background thread can still be refused here: every other
+    // live row falls through to the arms that end its process.
+    if entry.status == AgentStatus::Live
+        && !force
+        && !provably_gone
+        && crate::gc_native::stop_precedes_removal(&entry)
+    {
         let row = harness_row_id
             .clone()
             .unwrap_or_else(|| "(no harness row id)".into());
@@ -6510,14 +6508,29 @@ async fn handle_rm_with(
         let detail = rm_refusal_detail::live_row_refusal(
             &name,
             &row,
-            entry.harness_name(),
             harness_row_id.is_none(),
             roster_known,
             row_present,
             &warnings,
-            entry.mux.as_ref().map(|m| (m.session.as_str(), m.pane_id)),
         );
         return Response::err(req.id, ErrorCode::Busy, detail);
+    }
+    // rm owns the codex thread's process end (law d-81c6da7e): the interrupt,
+    // settle and actor drop happen HERE, before the harness cascade. A turn
+    // that does not settle leaves the row and the codex index entry
+    // untouched.
+    if is_codex_thread_entry(&entry) {
+        if let Err(interrupt_report) = rm_teardown::end_codex_thread(ctx, &name).await {
+            return Response::err(
+                req.id,
+                ErrorCode::Busy,
+                format!(
+                    "agent {name}: the codex thread's turn did not settle \
+                     ({interrupt_report}); the registry row and the codex index \
+                     entry are kept"
+                ),
+            );
+        }
     }
     let codex_index_capture = rm_codex_rollback::CodexIndexCapture::before_cascade(&entry);
     let harness_outcome = off_executor(|| {
@@ -6599,7 +6612,7 @@ async fn handle_rm_with(
     // HARNESS session is gone; this row's local worker.sock is a separate
     // process and can still be alive, so it needs the same confirmation.
     if entry.status == AgentStatus::Live
-        && (force || provably_gone)
+        && (force || provably_gone || !crate::gc_native::stop_precedes_removal(&entry))
         && !stop_worker_confirmed(ctx, &entry).await
     {
         return Response::err(
@@ -9031,6 +9044,7 @@ mod tests {
                 ])
             },
             &|_| Ok(()),
+            &|_| true,
             &|_, _| Ok(true),
             &|_, _| PaneProbe::Unknown,
         )
@@ -9074,6 +9088,7 @@ mod tests {
                 warnings: vec!["one malformed row".into()],
             },
             &|_| Ok(()),
+            &|_| true,
             &|_, _| Ok(true),
             &|_, _| PaneProbe::Unknown,
         )
@@ -9118,6 +9133,7 @@ mod tests {
             &request,
             &snapshots,
             &|_| Ok(()),
+            &|_| true,
             &|_, _| Err("permission denied".into()),
             &|_, _| PaneProbe::Unknown,
         )
@@ -9159,6 +9175,7 @@ mod tests {
                 ])
             },
             &|_| Err("claude rm exited 1".into()),
+            &|_| true,
             &|_, _| Ok(true),
             &|_, _| PaneProbe::Unknown,
         )
@@ -9191,6 +9208,7 @@ mod tests {
                 ])
             },
             &|_| Err("claude rm exited 1".into()),
+            &|_| true,
             &|_, _| Ok(true),
             &|_, _| PaneProbe::Unknown,
         )
@@ -9409,6 +9427,7 @@ mod tests {
                 .unwrap();
                 Ok(())
             },
+            &|_| true,
             &|_, _| Ok(true),
             &|_, _| PaneProbe::Unknown,
         )
@@ -9420,257 +9439,6 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_still_refuses_an_idle_claude_row() {
-        let home = short_home("rmidle");
-        let mut row = claude_rm_row(
-            "idle-worker",
-            "1d1e0001",
-            "1d1e0001-1111-2222-3333-444444444444",
-        );
-        row.status = AgentStatus::Live;
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "idle-worker"}));
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| {
-                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
-                    crate::claude_roster::ClaudeAgentRow::new("1d1e0001", Some("idle")),
-                ])
-            },
-            &|_| panic!("an idle row must not reach claude rm"),
-            &|_, _| panic!("an idle row must not reach mux kill"),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        assert!(response.error().unwrap().message.contains("still live"));
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_refuses_a_stored_live_row_when_the_roster_is_unknown() {
-        // AC2-EDGE: an Unknown snapshot (the shellout failed, timed out, or
-        // parsed badly) is not proof of anything; keep refusing.
-        let home = short_home("rmrosterunknown");
-        let mut row = claude_rm_row(
-            "maybe-live",
-            "aaaa9999",
-            "aaaa9999-1111-2222-3333-444444444444",
-        );
-        row.status = AgentStatus::Live;
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "maybe-live"}));
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| crate::claude_roster::ClaudeAgentsSnapshot::unknown("list timed out"),
-            &|_| panic!("an unknown roster must not reach claude rm"),
-            &|_, _| panic!("an unknown roster must not reach mux kill"),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        assert!(response.error().is_some());
-        {
-            // Positive markers (x-d19e): the unprovable case names the retry,
-            // states what forcing costs, and offers no override flag.
-            let message = &response.error().unwrap().message;
-            assert!(
-                message.contains("Retry once that read succeeds"),
-                "{}",
-                message
-            );
-            assert!(message.contains("resume handle"), "{}", message);
-            assert!(!message.contains("--force"), "{}", message);
-        }
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_refuses_a_row_the_roster_still_carries_and_names_no_force() {
-        // AC2-NEG + AC2-COV: the short id IS present in a known snapshot, so
-        // the row really is live. The refusal names the working incantation
-        // (claude takes the short id, not the agent name) and never --force,
-        // which a king previously read as the remedy and applied to five
-        // genuinely-live rows.
-        let home = short_home("rmstilllive");
-        let mut row = claude_rm_row(
-            "genuinely-live",
-            "bbbb8888",
-            "bbbb8888-1111-2222-3333-444444444444",
-        );
-        row.status = AgentStatus::Live;
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "genuinely-live"}));
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| {
-                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
-                    crate::claude_roster::ClaudeAgentRow::new("bbbb8888", Some("running")),
-                ])
-            },
-            &|_| panic!("a genuinely live row must not reach claude rm"),
-            &|_, _| panic!("a genuinely live row must not reach mux kill"),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        let message = &response.error().unwrap().message;
-        assert!(message.contains("claude agents --json --all"));
-        assert!(message.contains("fno agents stop"));
-        // Specimen guard (x-d19e): this branch is the landed bar - safe verb,
-        // self-proceeding command, and the hand-teardown cost named. A rewrite
-        // that drops any of the three must fail here, not in a king's reign.
-        assert!(message.contains("rm proceeds on its own"), "{}", message);
-        assert!(message.contains("spends the resume handle"), "{}", message);
-        // This refusal used to offer `claude stop <row>` then `claude rm <row>`
-        // as a by-hand alternative, and this test required it. Ruling
-        // d-1900e419 retired that pair: the harness row IS the resume handle,
-        // and dropping it by hand spends the handle for nothing rm has not
-        // already done. The refusal must not teach it back.
-        // retired-ok: asserts the retired pair is ABSENT from the refusal.
-        assert!(!message.contains("claude stop bbbb8888"));
-        // retired-ok: asserts the retired pair is ABSENT from the refusal.
-        assert!(!message.contains("claude rm bbbb8888"));
-        assert!(!message.contains("--force"));
-        assert!(!message.contains("-F"));
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_warns_that_forcing_orphans_a_live_process_and_the_text_is_pinned() {
-        // x-ad13 ships the row/worktree guard split; the epic pins rm's own
-        // live-process warning as a refusal that must survive it unchanged.
-        // This is the non-claude arm's wording (the claude arm is pinned by
-        // `rm_refuses_a_row_the_roster_still_carries_and_names_no_force`):
-        // the refusal warns what forcing would do and never suggests it.
-        let home = short_home("rmorphancodex");
-        let mut row = ask_row("live-codex", Some("2020-01-01T00:00:00Z"));
-        row.harness = Some("codex".into());
-        row.status = AgentStatus::Live;
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "live-codex"}));
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| panic!("a non-claude row never reads the claude roster"),
-            &|_| panic!("a live row must not reach claude rm"),
-            &|_, _| panic!("a live row must not reach mux kill"),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        let message = &response.error().unwrap().message;
-        assert!(
-            message.contains("Forcing it through orphans a live process"),
-            "{}",
-            message
-        );
-        assert!(
-            message.contains("fno agents stop live-codex"),
-            "{}",
-            message
-        );
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test]
-    async fn rm_refusal_on_a_claude_row_without_a_row_id_names_stop_not_force() {
-        // x-d19e: the no-row-id arm cannot check the roster, but the refusal
-        // still owes the reader the safe verb and the cost of forcing through,
-        // never the override flag itself.
-        let home = short_home("rmnorowid");
-        // short_id empty AND session id empty (a pid carries the handle
-        // invariant instead): claude_row_id answers None, which is the arm
-        // where the roster can never be consulted.
-        let mut row = ask_row("idless-live", Some("2020-01-01T00:00:00Z"));
-        row.harness = Some("claude".into());
-        row.harness_session_id = None;
-        row.pid = Some(4242);
-        row.pid_start_time = Some(123456);
-        row.status = AgentStatus::Live;
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "idless-live"}));
-
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
-            &|_| panic!("an unresolvable row must not reach claude rm"),
-            &|_, _| panic!("an unresolvable row must not reach mux kill"),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        let message = &response.error().expect("still live must refuse").message;
-        assert!(
-            message.contains("no resolvable harness row id"),
-            "{}",
-            message
-        );
-        assert!(
-            message.contains("fno agents stop idless-live"),
-            "{}",
-            message
-        );
-        assert!(message.contains("rm proceeds on its own"), "{}", message);
-        assert!(message.contains("resume handle"), "{}", message);
-        assert!(!message.contains("--force"), "{}", message);
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 

@@ -141,23 +141,6 @@ pub(super) async fn run_agent_action(verb: &str, name: &str) -> String {
     render_agent_verb(verb, name, &run_agent_verb(verb, name).await)
 }
 
-/// (x-f191) The sideline's REMOVE gesture, made one-press (scope b): stop
-/// then rm, one confirmed intent. A live row is stopped first - its registry
-/// flip is exactly what the rm leg reads - and a corpse whose stop no-ops
-/// still clears: rm's daemon-side gate probes the live harness roster and
-/// removes a provably-absent row (the CLI's "already absent" branch). The
-/// stored field decides nothing; the live probe behind rm's gate does.
-pub(super) async fn run_stop_or_remove(name: &str) -> String {
-    let stop = run_agent_verb("stop", name).await;
-    let stop_note = render_agent_verb("stop", name, &stop);
-    if stop.unavailable {
-        // No binary: the rm leg would fail the same way. Say so once.
-        return stop_note;
-    }
-    let rm = run_agent_verb("rm", name).await;
-    compose_stop_remove(&stop_note, name, &rm)
-}
-
 /// The daemon's own last non-empty stdout line, for notices that quote the
 /// verdict verbatim - "claude row already absent" is the fact that unstuck
 /// the operator when the CLI did this by hand. One extraction shared by
@@ -171,30 +154,14 @@ fn daemon_verdict(stdout: &str) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
-/// The combined stop+rm notice: the stop outcome first, then what the rm leg
-/// decided. Pure; the testable half of [`run_stop_or_remove`].
-fn compose_stop_remove(stop_note: &str, name: &str, rm: &AgentVerbResult) -> String {
-    if rm.ok {
-        match daemon_verdict(&rm.stdout) {
-            Some(v) => format!("{stop_note}; removed it ({v})"),
-            None => format!("{stop_note}; removed it"),
-        }
-    } else {
-        format!("{stop_note}; {}", render_agent_verb("rm", name, rm))
-    }
-}
-
-/// (x-b5d1) The measure-and-remove leg: rm only, no stop leg. An
-/// Unmeasured row's stop leg is the leg that times out - nothing answers
-/// it - and rm's daemon-side live gate IS the measurement: it probes the
-/// live roster, removes a provably-absent row, and refuses a live one
-/// with its reason. The verdict is quoted like the composed path does.
-pub(super) async fn run_measure_remove(name: &str) -> String {
+/// (x-a33f) The remove leg: rm alone. Since law d-81c6da7e the daemon's rm
+/// ends a live row's process itself, so the gesture never composes a stop.
+pub(super) async fn run_remove(name: &str) -> String {
     let rm = run_agent_verb("rm", name).await;
     measure_remove_notice(name, &rm)
 }
 
-/// Pure; the testable half of [`run_measure_remove`]. Both notice shapes
+/// Pure; the testable half of [`run_remove`]. Both notice shapes
 /// name the row, so the client's row stamp resolves against the notice.
 fn measure_remove_notice(name: &str, rm: &AgentVerbResult) -> String {
     if !rm.ok {
@@ -461,31 +428,16 @@ impl super::Core {
         });
     }
 
-    /// (x-b5d1) The measuring remove: rm only (the gate in the RemoveAgent
-    /// arm already refused a live row), off-loop like the sibling actions.
-    pub(super) fn remove_agent_action(&self, id: u64, name: String, measure: bool) {
+    /// (x-a33f) The remove gesture: rm alone, off-loop like the sibling
+    /// actions. The daemon's rm ends a live row's process itself.
+    pub(super) fn remove_agent_action(&self, id: u64, name: String) {
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice = if measure {
-                run_measure_remove(&name).await
-            } else {
-                run_stop_or_remove(&name).await
-            };
+            let notice = run_remove(&name).await;
             let _ = core_tx
                 .send(super::CoreMsg::DispatchResult { id, notice })
                 .await;
         });
-    }
-
-    /// (x-b5d1) The registry row's liveness, for the measuring-remove gate.
-    /// Resolution is by the resolved label; the resolver refused ambiguity,
-    /// so at most one non-external row answers.
-    pub(super) fn registry_liveness(&self, label: &str) -> Option<crate::agents_view::Liveness> {
-        self.agents
-            .iter()
-            .filter(|a| !a.external && a.name == label)
-            .map(|a| a.liveness)
-            .next()
     }
 }
 
@@ -493,13 +445,11 @@ impl super::Core {
 mod tests {
     use super::*;
 
-    // (x-f191 scope b) The old `remove_agent_live_row_refused_stop_first` is
+    // (x-a33f) The old `remove_agent_live_row_refused_stop_first` and the
 
-    // gone with the contract it pinned: RemoveAgent no longer refuses a
-
-    // stored-live row - it orchestrates stop-then-rm in one confirmed
-
-    // gesture, covered end to end by the fake-binary tests below.
+    // stop-then-rm composition tests are gone with the contracts they
+    // pinned: RemoveAgent shells rm alone, covered end to end by the
+    // fake-binary test below.
 
     // -- x-f191 corpse-safe stop + honest reap timeout -----------------------
 
@@ -537,48 +487,6 @@ mod tests {
     }
 
     #[test]
-
-    fn compose_stop_remove_reaches_the_already_absent_branch() {
-        // The operator's measured case: stop no-ops on the corpse, the rm leg
-
-        // removes it, and the notice quotes the daemon's own verdict.
-
-        let rm = verb_result(
-            true,
-            "removed: corpse (fno; claude row already absent)\n",
-            "",
-        );
-
-        let notice = compose_stop_remove("stop corpse: failed: no such session", "corpse", &rm);
-
-        assert!(
-            notice.contains("already absent"),
-            "quotes the verdict: {notice}"
-        );
-
-        assert!(
-            notice.starts_with("stop corpse: failed"),
-            "stop outcome leads: {notice}"
-        );
-
-        // A refusal is named, not swallowed: the row stays and says why.
-
-        let refused = verb_result(false, "", "agent corpse is still live - stop it first");
-
-        let notice = compose_stop_remove("stopped corpse", "corpse", &refused);
-
-        assert!(notice.contains("; rm corpse: failed: agent corpse is still live"));
-
-        // The ordinary one-gesture case: stopped, then removed.
-
-        let clean = verb_result(true, "", "");
-
-        let notice = compose_stop_remove("stopped corpse", "corpse", &clean);
-
-        assert_eq!(notice, "stopped corpse; removed it");
-    }
-
-    #[test]
     fn measure_remove_notice_quotes_the_daemon_verdict() {
         // (x-b5d1) rm ok with a daemon verdict: the notice quotes it
         // verbatim and names the row, so the client's row stamp resolves.
@@ -599,13 +507,17 @@ mod tests {
     fn measure_remove_notice_names_the_refusal() {
         // (x-b5d1) rm refused (the roster still lists the session): the
         // notice names the row and the reason, failure-marked, so the row
-        // stays stamped with why.
-        let rm = verb_result(false, "", "agent corpse is still live - stop it first");
-        let notice = measure_remove_notice("corpse", &rm);
-        assert_eq!(
-            notice,
-            "rm corpse: failed: agent corpse is still live - stop it first"
+        // stays stamped with why. The quoted reason is rm's own claude
+        // refusal shape (x-a33f): rm ran its stop, the roster still lists.
+        let rm = verb_result(
+            false,
+            "",
+            "agent corpse is still live. rm ran `claude stop`, and its harness row \
+             cccccccc is still present in `claude agents --json --all`",
         );
+        let notice = measure_remove_notice("corpse", &rm);
+        assert!(notice.starts_with("rm corpse: failed: "), "{notice}");
+        assert!(notice.contains("rm ran `claude stop`"), "{notice}");
     }
 
     #[test]
@@ -705,79 +617,40 @@ mod tests {
 
     #[tokio::test]
 
-    async fn stop_falls_through_to_rm_on_a_stored_live_corpse() {
-        // The operator's measured case, end to end: the registry says live,
-
-        // the harness says gone. Stop fails honestly; the rm leg reaches the
-
-        // already-absent branch and the notice quotes its verdict.
+    async fn remove_press_shells_rm_alone() {
+        // (x-a33f) AC5-HP: one remove press shells `fno-agents rm` exactly
+        // once and never `fno-agents stop` - the daemon's rm ends a live
+        // row's process itself, so no caller composes a stop leg.
 
         let _serial = fno_env_lock();
 
-        let tmp = std::env::temp_dir().join(format!("fno-x-f191-corpse-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("fno-x-a33f-rm-{}", std::process::id()));
 
         corpse_fixture(&tmp);
 
         write_fake_bin(
             &tmp.join("fake-agents.sh"),
             "#!/bin/bash\n\
-         if [ \"$1\" = \"stop\" ]; then\n\
-         echo \"claude stop corpse failed: agent not found\" >&2\n\
-         exit 1\n\
-         fi\n\
-         echo \"removed: corpse (fno; claude row already absent)\"\n\
-         exit 0\n",
-        );
-
-        let _env = PinnedAgentEnv::set(&tmp.join("fake-agents.sh"), &tmp);
-
-        let notice = run_stop_or_remove("corpse").await;
-
-        assert!(
-            notice.starts_with("stop corpse: failed: claude stop corpse failed"),
-            "stop outcome leads: {notice}"
-        );
-
-        assert!(
-            notice.contains("removed it (removed: corpse (fno; claude row already absent))"),
-            "rm verdict quoted: {notice}"
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[tokio::test]
-
-    async fn remove_orchestrates_stop_then_rm_on_a_live_row() {
-        // (x-f191 scope b) One confirmed gesture: the stop flips the row
-
-        // exited and the rm leg removes it in the same press.
-
-        let _serial = fno_env_lock();
-
-        let tmp = std::env::temp_dir().join(format!("fno-x-f191-live-{}", std::process::id()));
-
-        corpse_fixture(&tmp);
-
-        write_fake_bin(
-
-        &tmp.join("fake-agents.sh"),
-
-        "#!/bin/bash\n\
-         if [ \"$1\" = \"stop\" ]; then\n\
-         printf '{\"entries\":[{\"name\":\"corpse\",\"cwd\":\"/w\",\"status\":\"exited\"}]}' > \"$FNO_AGENTS_HOME/registry.json\"\n\
-         exit 0\n\
-         fi\n\
+         printf '%s\\n' \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
          echo \"removed: corpse\"\n\
          exit 0\n",
-
-    );
+        );
 
         let _env = PinnedAgentEnv::set(&tmp.join("fake-agents.sh"), &tmp);
 
-        let notice = run_stop_or_remove("corpse").await;
+        let notice = run_remove("corpse").await;
 
-        assert_eq!(notice, "stopped corpse; removed it (removed: corpse)");
+        assert_eq!(notice, "removed corpse (removed: corpse)");
+
+        let log = std::fs::read_to_string(tmp.join("argv.log")).unwrap_or_default();
+
+        let rm_calls = log.lines().filter(|l| l.trim() == "rm corpse").count();
+
+        let stop_calls = log.lines().filter(|l| l.trim() == "stop corpse").count();
+
+        assert_eq!(rm_calls, 1, "exactly one rm call: {log}");
+
+        assert_eq!(stop_calls, 0, "no stop call: {log}");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

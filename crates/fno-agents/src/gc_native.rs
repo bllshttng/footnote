@@ -92,6 +92,18 @@ pub(crate) fn stop_outcome_effect(confirmed: bool, detail: Option<String>) -> Ef
     }
 }
 
+/// The one exception to law d-81c6da7e (remove needs no prior stop): a claude
+/// background thread. Every other live row's process is ended by the removal
+/// itself; only here does a stop run first - and since x-a33f, `rm` runs that
+/// stop itself rather than asking a caller to compose one. A row with no
+/// substrate stamp counts: adopted claude rows carry none, and the claude
+/// roster lists background sessions only.
+pub(crate) fn stop_precedes_removal(e: &RegistryEntry) -> bool {
+    e.harness_name() == "claude"
+        && e.mux.is_none()
+        && !matches!(e.substrate.as_deref(), Some("pane") | Some("headless"))
+}
+
 /// Apply the ACTIVE-SURFACE removal for one row through the production
 /// seams (the daemon roster read and `claude rm`), returning the typed
 /// outcome the sweep records on the receipt. The roster read unions every
@@ -173,5 +185,59 @@ pub(crate) fn opencode_archive_outcome(
             "opencode session {sid} is still unarchived after an accepted archive write"
         )),
         Err(reason) => CascadeOutcome::Unverified(reason),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(
+        harness: &str,
+        substrate: Option<&str>,
+        mux: Option<crate::state::MuxRef>,
+    ) -> RegistryEntry {
+        RegistryEntry {
+            name: "w".into(),
+            harness: Some(harness.into()),
+            substrate: substrate.map(str::to_string),
+            mux,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stop_precedes_removal_names_only_the_claude_background_thread() {
+        // AC1-HP: the claude background thread is the one yes.
+        assert!(stop_precedes_removal(&row("claude", Some("thread"), None)));
+        assert!(!stop_precedes_removal(&row("codex", Some("thread"), None)));
+        assert!(!stop_precedes_removal(&row(
+            "codex",
+            Some("pane"),
+            Some(crate::state::MuxRef {
+                session: "main".into(),
+                pane_id: 1,
+            })
+        )));
+        assert!(!stop_precedes_removal(&row("claude", Some("pane"), None)));
+        assert!(!stop_precedes_removal(&row(
+            "claude",
+            Some("headless"),
+            None
+        )));
+    }
+
+    #[test]
+    fn an_unstamped_claude_row_counts_and_a_mux_ref_disqualifies() {
+        // AC1-EDGE: adopted claude rows carry no substrate stamp.
+        assert!(stop_precedes_removal(&row("claude", None, None)));
+        assert!(!stop_precedes_removal(&row(
+            "claude",
+            None,
+            Some(crate::state::MuxRef {
+                session: "main".into(),
+                pane_id: 2,
+            })
+        )));
     }
 }

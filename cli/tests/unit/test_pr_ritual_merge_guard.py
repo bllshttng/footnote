@@ -91,6 +91,7 @@ def test_reap_rows_refuses_when_not_merged(tmp_path: Path) -> None:
 
     assert seen == [("reap-rows", "skipped", "not-merged (state=OPEN)")]
     assert not any(c[:2] == ["agents", "stop"] for c in runner.calls)
+    assert not any(c[:2] == ["agents", "rm"] for c in runner.calls)
 
 
 def test_the_gh_call_actually_asks_for_state(tmp_path: Path) -> None:

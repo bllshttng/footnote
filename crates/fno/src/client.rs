@@ -15190,11 +15190,10 @@ async fn selector_keys(
                             attach_id: id,
                             name: name.clone(),
                         },
-                        // (x-f191 scope b) `x` states the intent ONCE: remove.
-                        // The server orchestrates stop-then-rm behind this one
-                        // confirm - a live row is stopped as part of its
-                        // removal, never as a second ceremony. Stop-only lives
-                        // on the row menu's Stop.
+                        // (x-a33f) `x` states the intent ONCE: remove. rm
+                        // alone is sent; the daemon's rm ends a live row's
+                        // process itself. Stop-only lives on the row menu's
+                        // Stop.
                         _ => ConfirmKind::RemoveAgent {
                             name: name.clone(),
                             sid: harness_session_id,

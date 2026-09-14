@@ -1712,12 +1712,13 @@ pub enum Command {
         pane_id: Option<u64>,
     },
     /// (v26, x-76ea) Remove an agent row in one gesture. Registry targets
-    /// stop-then-rm through the fno-agents verbs; a pane target (x-e763)
-    /// kills the child, releases the claim, and drops the pane. Same
-    /// fail-closed resolution as `StopAgent`.
-    /// (v74, x-b5d1) `measure` skips the stop leg: an Unmeasured row is
-    /// measured by rm's daemon-side live gate instead of paying a stop
-    /// that times out. Additive, default false; floor stays 58.
+    /// run through `fno-agents rm`, which since x-a33f ends a live row's
+    /// process itself; a pane target (x-e763) kills the child, releases
+    /// the claim, and drops the pane. Same fail-closed resolution as
+    /// `StopAgent`.
+    /// (v74, x-b5d1; unread since x-a33f) `measure` is protocol-floor
+    /// only: older servers measured by it, this server no longer reads
+    /// the flag. Additive, default false; floor stays 58.
     RemoveAgent {
         name: String,
         #[serde(default)]

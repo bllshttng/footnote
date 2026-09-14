@@ -30,6 +30,7 @@ async fn rm_cascades_claude_before_removing_the_registry_row() {
             called.lock().unwrap().push(short_id.to_string());
             Ok(())
         },
+        &|_| true,
         &|_, _| Ok(true),
         &|_, _| PaneProbe::Unknown,
     )
@@ -73,6 +74,7 @@ async fn rm_cleans_a_crowned_rows_scope_manifest_best_effort() {
         &request,
         &snapshots,
         &|_| Ok(()),
+        &|_| true,
         &|_, _| Ok(true),
         &|_, _| PaneProbe::Unknown,
     )
@@ -123,6 +125,7 @@ async fn rm_never_deletes_a_successors_re_armed_manifest() {
         &request,
         &snapshots,
         &|_| Ok(()),
+        &|_| true,
         &|_, _| Ok(true),
         &|_, _| PaneProbe::Unknown,
     )
@@ -154,6 +157,7 @@ async fn rm_removes_a_row_the_registry_actually_holds() {
         &request,
         &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
         &|_| Ok(()),
+        &|_| true,
         &|_, _| Ok(true),
         &|_, _| PaneProbe::Unknown,
     )
@@ -195,6 +199,7 @@ async fn rm_keeps_the_audit_event_compact_when_diagnostics_are_oversized() {
             ])
         },
         &|_| Err("x".repeat(crate::events::MAX_EVENT_PAYLOAD_BYTES * 2)),
+        &|_| true,
         &|_, _| Ok(true),
         &|_, _| PaneProbe::Unknown,
     )
@@ -226,6 +231,7 @@ async fn rm_falls_back_to_the_session_uuid_prefix() {
             called.lock().unwrap().push(short_id.to_string());
             Ok(())
         },
+        &|_| true,
         &|_, _| Ok(true),
         &|_, _| PaneProbe::Unknown,
     )
@@ -266,6 +272,7 @@ async fn rm_accepts_terminal_claude_rows_that_remain_in_the_roster() {
                 }
             },
             &|_| Ok(()),
+            &|_| true,
             &|_, _| Ok(true),
             &|_, _| PaneProbe::Unknown,
         )
@@ -304,6 +311,7 @@ async fn rm_unknown_claude_list_cascades_but_reports_unverified() {
             called.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         },
+        &|_| true,
         &|_, _| Ok(true),
         &|_, _| PaneProbe::Unknown,
     )
@@ -342,6 +350,7 @@ async fn rm_removes_a_stored_live_row_provably_gone_from_the_roster() {
         &request,
         &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
         &|_| panic!("row already absent from the roster must not reach claude rm"),
+        &|_| true,
         &|_, _| Ok(true),
         &|_, _| PaneProbe::Unknown,
     )
@@ -377,6 +386,7 @@ async fn rm_kills_a_mux_pane_before_removing_its_registry_row() {
         &request,
         &|| panic!("non-Claude row must not read the Claude list"),
         &|_| panic!("non-Claude row must not call claude rm"),
+        &|_| panic!("no claude stop may run in this test"),
         &|session, pane_id| {
             killed.lock().unwrap().push((session.to_string(), pane_id));
             Ok(true)
@@ -415,6 +425,7 @@ async fn rm_clears_a_stale_registry_row_after_the_mux_pane_is_already_absent() {
         &request,
         &|| panic!("non-Claude row must not read the Claude list"),
         &|_| panic!("non-Claude row must not call claude rm"),
+        &|_| panic!("no claude stop may run in this test"),
         &|_, _| Ok(false),
         &|_, _| PaneProbe::Unknown,
     )
@@ -458,6 +469,7 @@ async fn rm_clears_a_stored_live_pane_row_whose_pane_is_provably_absent() {
         &request,
         &|| panic!("non-Claude row must not read the Claude list"),
         &|_| panic!("non-Claude row must not call claude rm"),
+        &|_| panic!("no claude stop may run in this test"),
         &|session, pane_id| {
             assert_eq!((session, pane_id), ("main", 76));
             Ok(false)
@@ -476,6 +488,223 @@ async fn rm_clears_a_stored_live_pane_row_whose_pane_is_provably_absent() {
         response.result().unwrap()["pane_reason"],
         "mux pane already absent"
     );
+    assert!(state::load_registry(&home.registry_json())
+        .unwrap()
+        .entries
+        .is_empty());
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// AC4-HP: a live claude background thread is ended by rm's OWN claude stop
+/// (law d-81c6da7e), which runs BEFORE the harness cascade's claude rm, and
+/// the row is removed. The post-stop roster read shows the session in a
+/// terminal state, so the gate clears and the cascade still reaches
+/// `claude rm` (the row is present, just finished).
+#[tokio::test]
+async fn rm_stops_the_claude_thread_itself_before_the_cascade() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = short_home("rmselfstop");
+    let mut row = claude_rm_row(
+        "bg-thread",
+        "eeee7777",
+        "eeee7777-1111-2222-3333-444444444444",
+    );
+    row.status = AgentStatus::Live;
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "bg-thread"}));
+    let order = std::sync::Mutex::new(Vec::new());
+    let first = std::sync::atomic::AtomicBool::new(true);
+    let second = std::sync::atomic::AtomicBool::new(true);
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| {
+            if first.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("eeee7777", Some("running")),
+                ])
+            } else if second.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                // The post-stop re-read: the stop worked, the session reads
+                // finished, and the row is still listed (claude keeps
+                // finished agents).
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("eeee7777", Some("stopped")),
+                ])
+            } else {
+                // The cascade's post-removal read: the harness row is gone.
+                crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new())
+            }
+        },
+        &|short_id| {
+            order.lock().unwrap().push(format!("rm {short_id}"));
+            Ok(())
+        },
+        &|_| {
+            order.lock().unwrap().push("stop".to_string());
+            true
+        },
+        &|_, _| panic!("a background thread has no pane"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    assert_eq!(
+        order.into_inner().unwrap(),
+        vec!["stop".to_string(), "rm eeee7777".to_string()]
+    );
+    assert_eq!(response.result().unwrap()["removed"], true);
+    assert!(state::load_registry(&home.registry_json())
+        .unwrap()
+        .entries
+        .is_empty());
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// AC3-HP: a live pane-substrate row with a verifiable pid is ended by rm's
+/// own pane stop (the pid-proving helper), and the row is removed. The
+/// child is a real process so the precheck's ownership probe and the ESRCH
+/// confirmation are the production ones.
+#[cfg(unix)]
+#[tokio::test]
+async fn rm_ends_a_live_pane_row_through_its_own_pane_stop() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = short_home("rmpanestop");
+    let mut row = ask_row("pane-row", Some("2020-01-01T00:00:00Z"));
+    row.status = AgentStatus::Live;
+    row.substrate = Some("pane".into());
+    row.harness = Some("claude".into());
+    // The sleeper must NOT be this test's own child: an unreaped zombie
+    // still answers kill(0), so the ESRCH confirmation would never fire.
+    // A shell-detached sleeper is reparented, and its death reads as gone.
+    let sh = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("sleep 30 >/dev/null 2>&1 & echo $!")
+        .output()
+        .expect("test spawns a detached sleeper");
+    let pid: u32 = String::from_utf8_lossy(&sh.stdout)
+        .trim()
+        .parse()
+        .expect("the shell echoes the sleeper pid");
+    row.pid = Some(pid);
+    row.pid_start_time = crate::daemon::process_start_time(pid);
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "pane-row"}));
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+        &|_| panic!("rm must not reach claude rm for a pane row"),
+        &|_| panic!("no claude stop may run for a pane-substrate row"),
+        &|_, _| panic!("a pane-substrate row takes the pane arm, not the mux kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    assert!(
+        response.error().is_none(),
+        "pane rm refused: {:?}",
+        response.error().map(|e| e.message.clone())
+    );
+    assert_eq!(response.result().unwrap()["removed"], true);
+    assert!(state::load_registry(&home.registry_json())
+        .unwrap()
+        .entries
+        .is_empty());
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// AC2-HP: a live codex thread row with a hosted actor is removed by rm
+/// alone: the teardown interrupts and drops the actor (so the map empties)
+/// and no stop verb runs. The claude seams panic - a codex row must never
+/// reach them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_removes_a_hosted_codex_thread_and_drops_its_actor() {
+    let _guard = crate::path_test_guard();
+    let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+        crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-rm-actor"),
+    );
+    let home = short_home("rmthreadactor");
+    let cwd = tempfile::tempdir().unwrap();
+    let mut row = thread_entry("t-rm-actor", AgentStatus::Live, None);
+    row.cwd = cwd.path().to_string_lossy().into_owned();
+    row.project_root = row.cwd.clone();
+    row.harness_session_id = Some("thread-rm-actor".into());
+    row.codex_session_id = Some("thread-rm-actor".into());
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+    let entry = state::load_registry(&home.registry_json())
+        .unwrap()
+        .find("t-rm-actor")
+        .cloned()
+        .unwrap();
+    ensure_codex_thread_handle(&ctx, &entry)
+        .await
+        .expect("the fake daemon answers thread/resume");
+    let request = Request::new(1, "agent.rm", json!({"name": "t-rm-actor"}));
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("a codex row must not read the claude roster"),
+        &|_| panic!("rm must not reach claude rm"),
+        &|_| panic!("no claude stop may run for a codex row"),
+        &|_, _| panic!("a thread row has no mux ref to kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    assert!(
+        response.error().is_none(),
+        "{:?}",
+        response.error().map(|e| e.message.clone())
+    );
+    assert_eq!(response.result().unwrap()["removed"], true);
+    assert!(state::load_registry(&home.registry_json())
+        .unwrap()
+        .entries
+        .is_empty());
+    assert!(ctx.codex_threads.lock().await.is_empty());
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[tokio::test]
+async fn rm_ends_a_live_non_thread_codex_row_with_no_stop_leg() {
+    // Law d-81c6da7e: rm ends a live codex row itself (the widened
+    // worker-stop arm; this row is not a thread entry, so the worker
+    // socket decides). No roster read, no claude rm, no stop leg.
+    let home = short_home("rmorphancodex");
+    let mut row = ask_row("live-codex", Some("2020-01-01T00:00:00Z"));
+    row.harness = Some("codex".into());
+    row.status = AgentStatus::Live;
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "live-codex"}));
+
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| panic!("a non-claude row never reads the claude roster"),
+        &|_| panic!("a live row must not reach claude rm"),
+        &|_| panic!("no claude stop may run for a codex row"),
+        &|_, _| panic!("a mux-less codex row has no pane to kill"),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    assert!(
+        response.error().is_none(),
+        "{:?}",
+        response.error().map(|e| e.message.clone())
+    );
+    assert_eq!(response.result().unwrap()["removed"], true);
     assert!(state::load_registry(&home.registry_json())
         .unwrap()
         .entries

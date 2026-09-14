@@ -37,8 +37,11 @@ def _named_verbs() -> set[str]:
 
 def test_every_remedy_verb_named_by_an_rm_or_spawn_refusal_parses():
     verbs = _named_verbs()
-    # Positive control: the scan read the sources it claims to read.
-    assert {"stop", "adopt", "spawn"} <= verbs, verbs
+    # Positive control: the scan read the sources it claims to read. rm
+    # refusals stopped naming `stop` when rm began running its own claude
+    # stop (law d-81c6da7e); `rm` is the marker the rm-refusal source
+    # always carries now.
+    assert {"rm", "adopt", "spawn"} <= verbs, verbs
     unresolved = sorted(v for v in verbs if not _resolves(v))
     assert unresolved == [], f"refusal text names verbs the CLI lacks: {unresolved}"
 

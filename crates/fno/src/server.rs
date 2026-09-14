@@ -12213,36 +12213,21 @@ impl Core {
                 name,
                 harness_session_id,
                 pane_id,
-                measure,
+                measure: _,
             } => {
-                // (x-f191 scope b) The operator states the intent ONCE: remove.
-                // The server orchestrates stop-then-rm off-loop - a live row is
-                // stopped as part of its removal (the stop's registry flip is
-                // what the rm leg reads), and a stored-live corpse whose stop
-                // no-ops reaches the CLI's already-absent branch through rm's
-                // daemon-side live gate. Same resolution as StopAgent: the
-                // subprocess gets the resolved row's current label.
-                // (x-b5d1) `measure` widens the door to the Unmeasured row:
-                // rm runs without the stop leg, and rm's daemon-side live
-                // gate is the measurement. The gate re-checks against THIS
-                // registry now - a row that came alive between the client's
-                // arm and Enter is refused, never rm'd live.
+                // (x-a33f) The operator states the intent ONCE: remove. The
+                // server shells rm alone - the daemon's rm ends a live row's
+                // process itself (law d-81c6da7e), and its refusal text is
+                // what an unremovable row looks like. `measure` stays on the
+                // wire for the protocol floor; the server no longer reads it.
+                // Same resolution as StopAgent: the subprocess gets the
+                // resolved row's current label.
                 let resolved =
                     self.resolve_lifecycle_full(&name, harness_session_id.as_deref(), pane_id);
                 match resolved {
                     Err(msg) => self.notice(client_id, msg),
                     Ok(lifecycle_target::LifecycleTarget::Registry(owned)) => {
-                        if measure
-                            && self.registry_liveness(&owned)
-                                == Some(crate::agents_view::Liveness::Alive)
-                        {
-                            self.notice(
-                                client_id,
-                                format!("{owned} is still live - stop it first"),
-                            );
-                        } else {
-                            self.remove_agent_action(client_id, owned, measure);
-                        }
+                        self.remove_agent_action(client_id, owned);
                     }
                     Ok(lifecycle_target::LifecycleTarget::Pane(pid)) => {
                         return self.remove_pane_row(client_id, pid, &name)
@@ -22387,12 +22372,13 @@ mod tests {
         assert!(!name_has_node_token("a\u{3093}-54fa", "\u{3093}-54fa"));
     }
 
-    #[test]
-    fn measure_remove_on_an_alive_row_is_refused_before_any_spawn() {
-        // (x-b5d1) measure: true is a door for the Unmeasured row only. A
-        // row the registry reads Alive refuses on this server before any
-        // subprocess: a plain #[test] has no runtime, so reaching the
-        // spawn would panic - the clean refusal proves it never does.
+    #[tokio::test]
+    async fn remove_on_an_alive_row_is_not_refused_on_the_server() {
+        // (x-a33f) The measure gate is gone: an Alive row is not refused on
+        // this server - the command reaches the off-loop rm dispatch, whose
+        // daemon-side rm ends the process itself. The runtime absorbs the
+        // spawn; the outcome rides DispatchResult, which these unit tests
+        // do not pump. A refusal notice here would mean a gate grew back.
         let mut core = empty_core();
         core.agents = vec![bg_row("corpse", "/tmp", None)];
         let (c, mut rx) = client_with_rx(1);
@@ -22406,7 +22392,7 @@ mod tests {
                 measure: true,
             },
         );
-        assert!(drain_notice(&mut rx).unwrap().contains("is still live"));
+        assert!(drain_notice(&mut rx).is_none(), "no refusal notice");
     }
 
     /// A paneless registry row for the routing tests: `name`/`cwd`/`attach_id`

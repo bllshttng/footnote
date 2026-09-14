@@ -708,8 +708,8 @@ def test_recover_falls_through_to_gh(tmp_path, monkeypatch):
 
 # --- reap ACs (ported US1/US2/US3 from the shell harness) ----------------
 
-def test_reap_stop_precedes_rm_when_self_reap_on(tmp_path, capsys):
-    # US1: self_reap on, finished row -> stop THEN rm, naming the row.
+def test_reap_calls_rm_alone_when_self_reap_on(tmp_path, capsys):
+    # US1 (x-a33f): self_reap on, finished row -> one rm call, no stop.
 
     class _Rec(FakeRunner):
         def __init__(self):
@@ -730,7 +730,7 @@ def test_reap_stop_precedes_rm_when_self_reap_on(tmp_path, capsys):
     r = _bare(tmp_path, runner, node_ids=["x-1234"])
     r.ctx.pm = SimpleNamespace(sync_command=None, self_reap=True, parking_lot_path=None)
     r.leg_reap_rows()
-    assert runner.order == [("stop", "target-x-1234-slug"), ("rm", "target-x-1234-slug")]
+    assert runner.order == [("rm", "target-x-1234-slug")]
 
 
 def test_reap_self_reap_off_removes_nothing_prints_manual_cmd(tmp_path, capsys):
@@ -742,7 +742,7 @@ def test_reap_self_reap_off_removes_nothing_prints_manual_cmd(tmp_path, capsys):
     out = capsys.readouterr().out
     assert not any(len(c) > 1 and c[1] == "agents" and ("stop" in c or "rm" in c)
                    for c in runner.calls)
-    assert "fno agents stop target-x-1234-slug && fno agents rm target-x-1234-slug" in out
+    assert "fno agents rm target-x-1234-slug" in out
 
 
 def test_reap_live_row_untouched(tmp_path, capsys):
