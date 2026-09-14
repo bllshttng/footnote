@@ -207,8 +207,11 @@ def test_map_covers_current_surface_once():
     # x-83ca allocates `agents honesty-sweep`, the binary-direct
     # declared-vs-measured sweep verb (refs 0): 628 -> 629.
     # x-f743 allocates `backlog notes`, the verbatim forwarder to the native
-    # `backlog-notes` reader: 629 -> 630.
-    assert len(mapped) == 631, (
+    # `backlog-notes` reader: 629 -> 630. The graph cutover's flip verb
+    # allocates `doctor graph backend` (refs 0): counted from the merged
+    # file, 630 -> 631. Main's next fold adds one more verb of its own:
+    # counted from the merged file, 631 -> 632.
+    assert len(mapped) == 632, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

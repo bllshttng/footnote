@@ -76,12 +76,12 @@ _bash_targets_protected() {
     # Second arm: the manifest moved into the repo's space
     # (`~/.fno/spaces/<slug>[/worktrees/<name>]/target-state.md`); the old
     # checkout path stays matched so an edit to a stale copy is still refused.
-    local pp='([^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md)|[^[:space:];|&<>]*/spaces/[^[:space:];|&<>]*target-state\.md)([[:space:];|&<>"'\'']|$)'
+    local pp='([^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md|graph\.db(-wal|-shm)?)|[^[:space:];|&<>]*/spaces/[^[:space:];|&<>]*target-state\.md)([[:space:];|&<>"'\'']|$)'
     # A run of non-separator chars (stays inside one command clause), and a
     # clause tail that ends at a protected path. Kept in vars because an inline
     # `[^;|&]` breaks `[[ =~ ]]` parsing (`;`/`|` are shell-special there).
     local nosep='[^;|&]*'
-    local clause="${nosep}"'(\.fno/(graph\.json|target-state\.md)|/spaces/[^;|&]*target-state\.md)'
+    local clause="${nosep}"'(\.fno/(graph\.json|target-state\.md|graph\.db(-wal|-shm)?)|/spaces/[^;|&]*target-state\.md)'
     # redirect immediately targeting the path: >, >>, 2>, &>, >&, >|, >!
     # (bracket forms, not \>, to avoid the GNU word-boundary reading of \>).
     [[ "$cmd" =~ ([>]{1,2}|\&[>]|[>]\&|[>][|]|[>]!)[[:space:]]*$pp ]] && return 0
@@ -118,7 +118,7 @@ PAYLOAD=$(cat)
 # filename (codex P1). If NEITHER filename appears, the call cannot target a
 # protected file: approve fast without calling jq. Over-match is safe: the
 # precise parse + normalization below keys on the write TARGET.
-if [[ "$PAYLOAD" != *"graph.json"* && "$PAYLOAD" != *"target-state.md"* && "$PAYLOAD" != *".fno/artifacts/"* ]]; then
+if [[ "$PAYLOAD" != *"graph.json"* && "$PAYLOAD" != *"target-state.md"* && "$PAYLOAD" != *"graph.db"* && "$PAYLOAD" != *".fno/artifacts/"* ]]; then
     _approve
 fi
 
@@ -159,6 +159,7 @@ if [[ -z "$TOOL" ]]; then
 fi
 
 _GRAPH_REASON="graph.json must be mutated via \`fno backlog\` commands; direct write blocked. See \`fno backlog --help\` (add, idea, intake, update, done, defer, reconcile)."
+_DB_REASON="graph.db is the authoritative store once the backend flips; direct writes to it or its WAL files are blocked. Mutate via \`fno backlog\` commands."
 _MANIFEST_REASON="target-state.md is an immutable session manifest; direct Edit/Write is blocked. The only legal post-init write is first-fill of an empty plan_path via \`fno do state set --field plan_path\`. Use \`fno do state\` / \`fno do target\` verbs, not a hand edit."
 
 # ── 3. Tool-specific decision (keyed on the write TARGET) ──────────────────────
@@ -171,6 +172,12 @@ case "$TOOL" in
     fi
     if [[ "$FILE_PATH" == *".fno/graph.json" ]]; then
         _block "$_GRAPH_REASON"
+    fi
+    # The wildcard's tail also names the -wal and -shm siblings; the
+    # backups/ snapshots (backups/graph.db.<stamp>) never carry the
+    # `.fno/graph.db` substring and stay editable.
+    if [[ "$FILE_PATH" == *".fno/graph.db"* ]]; then
+        _block "$_DB_REASON"
     fi
     if [[ "$FILE_PATH" == *".fno/target-state.md" || "$FILE_PATH" == *"/.fno/spaces/"*"target-state.md" ]]; then
         # Finding c: block unconditionally (not drive-window-only). Emit the

@@ -516,9 +516,11 @@ pub fn export_status(graph: &Path) -> Result<(String, Option<String>), String> {
 pub fn export_now(graph: &Path) -> Result<String, String> {
     let entries = read_entries(graph)?;
     let version = content_version(&entries);
-    crate::graph_store::create_backup(graph);
     crate::graph_store::write_atomic(graph, &crate::graph_store::serialize_graph_file(&entries))
         .map_err(|error| error.to_string())?;
+    // Best-effort: the JSON write is the deliverable (AC21's exit code reads
+    // it); a failed snapshot still leaves graph.db itself (WAL) in place.
+    let _ = snapshot_db(graph, now_ms());
     let connection = open(graph)?;
     let stamped = now_ms().to_string();
     connection
@@ -538,22 +540,218 @@ pub fn export_now(graph: &Path) -> Result<String, String> {
     Ok(version)
 }
 
-pub fn export_if_due(graph: &Path, debounce: Duration) -> Result<bool, String> {
+/// Flip `graph_meta.backend` and stamp `backend_since_ms` on an actual
+/// change. The read, the write, and the stamp run in one IMMEDIATE
+/// transaction, so two concurrent flips serialize: the second sees the
+/// first's backend and keeps its since stamp. A re-run of the same backend
+/// keeps the original stamp: the clock the `--status` days count reads
+/// must not reset under an idempotent verb.
+pub fn flip_backend(graph: &Path, target: Backend) -> Result<(Backend, Option<u128>), String> {
+    let mut connection = open(graph)?;
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let previous = match meta(&transaction, "backend")? {
+        Some(value) if value == Backend::Sqlite.name() => Backend::Sqlite,
+        _ => Backend::Json,
+    };
+    stamp_meta(&transaction, "backend", target.name())?;
+    let since = if previous != target {
+        let stamp = now_ms();
+        stamp_meta(&transaction, "backend_since_ms", &stamp.to_string())?;
+        Some(stamp)
+    } else {
+        meta(&transaction, "backend_since_ms")?.and_then(|value| value.parse::<u128>().ok())
+    };
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok((previous, since))
+}
+
+/// When the current backend took over, in unix ms. A read-only probe: an
+/// absent db or key reads None, never creates.
+pub fn backend_since(graph: &Path) -> Result<Option<u128>, String> {
+    if !database_path(graph).exists() {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(
+        database_path(graph),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| error.to_string())?;
+    match meta(&connection, "backend_since_ms") {
+        Ok(Some(value)) => value
+            .parse::<u128>()
+            .map(Some)
+            .map_err(|error| format!("backend_since_ms is not an integer: {error}")),
+        Ok(None) => Ok(None),
+        Err(error) if error.contains("no such table") => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The soak evidence the flip needs, read from the journals the client
+/// names (the sampler wrote whichever journal its spawner carried, so the
+/// caller that knows the space layout names the candidates): one gap line
+/// per failed requirement, empty when the soak is clean. Each journal is
+/// read with its single rotation generation; a sample row carries
+/// `{ts, type|kind, data:{divergent, divergent_ids}}` (the retired flat
+/// shape reads too).
+pub fn soak_gaps(journals: &[PathBuf], now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
+    let mut rows: Vec<(chrono::DateTime<chrono::Utc>, i64, Vec<String>)> = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for journal in journals {
+        paths.push(journal.clone());
+        if let Some(name) = journal
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+        {
+            paths.push(journal.with_file_name(format!("{name}.1")));
+        }
+    }
+    if paths.is_empty() {
+        return vec!["no soak journal to read; the client named no candidate journals".into()];
+    }
+    for journal in &paths {
+        let Ok(text) = std::fs::read_to_string(journal) else {
+            continue;
+        };
+        for line in text.lines() {
+            if !line.contains("graph_parity_sample") {
+                continue;
+            }
+            let Ok(row) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let kind = row
+                .get("type")
+                .or_else(|| row.get("kind"))
+                .and_then(Value::as_str);
+            if kind != Some("graph_parity_sample") {
+                continue;
+            }
+            let data = match row.get("data") {
+                Some(data) if data.is_object() => data.clone(),
+                _ => row.clone(),
+            };
+            let Some(Ok(ts)) = row
+                .get("ts")
+                .and_then(Value::as_str)
+                .map(chrono::DateTime::parse_from_rfc3339)
+                .map(|parsed| parsed.map(chrono::DateTime::<chrono::Utc>::from))
+            else {
+                continue;
+            };
+            let divergent = data.get("divergent").and_then(Value::as_i64).unwrap_or(0);
+            let ids = data
+                .get("divergent_ids")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            rows.push((ts, divergent, ids));
+        }
+    }
+    if rows.is_empty() {
+        let named: Vec<String> = journals
+            .iter()
+            .map(|journal| journal.display().to_string())
+            .collect();
+        return vec![format!(
+            "no graph_parity_sample events found in {}; the soak sampler has not run",
+            named.join(", ")
+        )];
+    }
+    rows.sort_by_key(|(ts, _, _)| *ts);
+    let mut gaps = Vec::new();
+    let first = rows[0].0;
+    let age_days = (now - first).num_days();
+    if age_days < 7 {
+        gaps.push(format!(
+            "first sample {} is {age_days} day(s) old; the soak needs 7 days",
+            first.format("%Y-%m-%dT%H:%M:%SZ")
+        ));
+    }
+    let covered: std::collections::HashSet<chrono::NaiveDate> =
+        rows.iter().map(|(ts, _, _)| ts.date_naive()).collect();
+    let mut missing = Vec::new();
+    let mut day = first.date_naive();
+    while day <= now.date_naive() {
+        if !covered.contains(&day) {
+            missing.push(day.to_string());
+        }
+        day = day.succ_opt().unwrap_or(day);
+        if missing.len() > 64 {
+            break;
+        }
+    }
+    if !missing.is_empty() {
+        gaps.push(format!(
+            "no sample on {} day(s): {}",
+            missing.len(),
+            missing.join(", ")
+        ));
+    }
+    let divergent: Vec<&(chrono::DateTime<chrono::Utc>, i64, Vec<String>)> =
+        rows.iter().filter(|(_, count, _)| *count > 0).collect();
+    if let Some((ts, _, ids)) = divergent.first() {
+        gaps.push(format!(
+            "{} sample(s) with divergent rows, first at {}: {}",
+            divergent.len(),
+            ts.format("%Y-%m-%dT%H:%M:%SZ"),
+            ids.join(", ")
+        ));
+    }
+    gaps
+}
+
+/// At most one `graph.db.<stamp>` snapshot per hour in `backups/`, keeping
+/// the newest [`crate::graph_store::GRAPH_BACKUP_KEEP`]. Replaces the
+/// per-export graph.json copy (task 10.1): after the flip graph.json is an
+/// on-demand artifact and copying 14.6 MB per export recreates the write
+/// volume the flip deletes. VACUUM INTO also compacts; its target must not
+/// exist, so the microsecond stamp names it. The hour gate lives in
+/// `graph_meta.last_snapshot_ms`, not file mtimes, so a moved or inspected
+/// snapshot cannot skew the clock.
+fn snapshot_db(graph: &Path, now: u128) -> Result<(), String> {
     let connection = open(graph)?;
-    let current = meta(&connection, "version")?;
-    let exported = meta(&connection, "exported_version")?;
-    if current.is_none() || current == exported {
-        return Ok(false);
+    if let Some(last) = meta(&connection, "last_snapshot_ms")? {
+        let last: u128 = last
+            .parse()
+            .map_err(|error| format!("last_snapshot_ms is not an integer: {error}"))?;
+        if now.saturating_sub(last) < Duration::from_secs(3600).as_millis() {
+            return Ok(());
+        }
     }
-    let updated = meta(&connection, "updated_ms")?
-        .and_then(|value| value.parse::<u128>().ok())
-        .unwrap_or(0);
-    if now_ms().saturating_sub(updated) < debounce.as_millis() {
-        return Ok(false);
+    let parent = graph
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", graph.display()))?;
+    let dir = parent.join("backups");
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let target = dir.join(format!("graph.db.{}", crate::graph_store::backup_stamp()));
+    connection
+        .execute("VACUUM INTO ?1", params![target.display().to_string()])
+        .map_err(|error| format!("snapshot {}: {error}", target.display()))?;
+    stamp_meta(&connection, "last_snapshot_ms", &now.to_string())?;
+    let mut snaps: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|error| error.to_string())?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().starts_with("graph.db."))
+                .unwrap_or(false)
+        })
+        .collect();
+    snaps.sort();
+    if snaps.len() > crate::graph_store::GRAPH_BACKUP_KEEP {
+        for old in &snaps[..snaps.len() - crate::graph_store::GRAPH_BACKUP_KEEP] {
+            let _ = std::fs::remove_file(old);
+        }
     }
-    drop(connection);
-    export_now(graph)?;
-    Ok(true)
+    Ok(())
 }
 
 /// One parity sample: authoritative JSON vs the relational export.
@@ -666,8 +864,151 @@ mod tests {
     fn backend_reads_json_when_db_absent() {
         let (_dir, graph) = fixture("graph.json");
         assert_eq!(backend(&graph), Backend::Json);
-        // The probe is read-only: it never creates graph.db.
         assert!(!database_path(&graph).exists());
+    }
+
+    #[test]
+    fn soak_clean_seven_days_has_no_gaps() {
+        let dir = TempDir::new().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let now = chrono::Utc::now();
+        let mut lines = Vec::new();
+        for offset in (0..8).rev() {
+            lines.push(sample_row(now - chrono::Duration::days(offset)));
+        }
+        std::fs::write(&journal, lines.join("\n") + "\n").unwrap();
+        assert_eq!(soak_gaps(&[journal.clone()], now), Vec::<String>::new());
+        drop(dir);
+    }
+
+    #[test]
+    fn soak_too_young_missing_day_and_divergence_each_name_the_gap() {
+        let dir = TempDir::new().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let now = chrono::Utc::now();
+        // Two clean samples, three days apart: young AND a missing day.
+        std::fs::write(
+            &journal,
+            sample_row(now - chrono::Duration::days(4))
+                + "\n"
+                + &sample_row(now - chrono::Duration::days(1)),
+        )
+        .unwrap();
+        let gaps = soak_gaps(&[journal.clone()], now);
+        assert!(
+            gaps.iter().any(|gap| gap.contains("day(s) old")),
+            "{gaps:?}"
+        );
+        assert!(
+            gaps.iter().any(|gap| gap.contains("no sample on")),
+            "{gaps:?}"
+        );
+        // One divergent sample names its id.
+        std::fs::write(
+            &journal,
+            sample_row(now - chrono::Duration::days(4))
+                + "\n"
+                + &sample_row_divergent(now - chrono::Duration::days(1)),
+        )
+        .unwrap();
+        let gaps = soak_gaps(&[journal.clone()], now);
+        assert!(
+            gaps.iter()
+                .any(|gap| gap.contains("divergent") && gap.contains("x-bad")),
+            "{gaps:?}"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn soak_no_journal_and_empty_journal_name_the_gap() {
+        let dir = TempDir::new().unwrap();
+        let gaps = soak_gaps(&[], chrono::Utc::now());
+        assert!(gaps[0].contains("no soak journal"), "{gaps:?}");
+        let journal = dir.path().join("events.jsonl");
+        let gaps = soak_gaps(&[journal], chrono::Utc::now());
+        assert!(gaps[0].contains("sampler has not run"), "{gaps:?}");
+        drop(dir);
+    }
+
+    /// One clean sample row in the emitted `{ts, type, data}` shape.
+    fn sample_row(ts: chrono::DateTime<chrono::Utc>) -> String {
+        serde_json::json!({
+            "ts": ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            "type": "graph_parity_sample",
+            "source": "daemon",
+            "data": {"rows": 2, "divergent": 0, "divergent_ids": []},
+        })
+        .to_string()
+    }
+
+    fn sample_row_divergent(ts: chrono::DateTime<chrono::Utc>) -> String {
+        serde_json::json!({
+            "ts": ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            "type": "graph_parity_sample",
+            "source": "daemon",
+            "data": {"rows": 2, "divergent": 1, "divergent_ids": ["x-bad"]},
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn vacuum_snapshot_once_per_hour_and_prunes() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let now = now_ms();
+        let snaps = |d: &Path| -> Vec<PathBuf> {
+            let mut paths: Vec<PathBuf> = std::fs::read_dir(d)
+                .unwrap()
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().starts_with("graph.db."))
+                        .unwrap_or(false)
+                })
+                .collect();
+            paths.sort();
+            paths
+        };
+        let backup_dir = graph.parent().unwrap().join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        snapshot_db(&graph, now).unwrap();
+        snapshot_db(&graph, now + 60_000).unwrap();
+        assert_eq!(snaps(&backup_dir).len(), 1, "one snapshot per hour");
+        // After the hour gate a second lands; the stamp moves with it.
+        snapshot_db(&graph, now + 3_600_001).unwrap();
+        assert_eq!(snaps(&backup_dir).len(), 2);
+        // Plant stale snapshots past the retention cap; the next hourly
+        // snapshot prunes to GRAPH_BACKUP_KEEP.
+        for i in 0..(crate::graph_store::GRAPH_BACKUP_KEEP + 3) {
+            std::fs::write(backup_dir.join(format!("graph.db.old{i}")), b"x").unwrap();
+        }
+        snapshot_db(&graph, now + 2 * 3_600_002).unwrap();
+        assert_eq!(
+            snaps(&backup_dir).len(),
+            crate::graph_store::GRAPH_BACKUP_KEEP,
+            "retention prunes to GRAPH_BACKUP_KEEP"
+        );
+    }
+
+    #[test]
+    fn flip_backend_stamps_since_only_on_change() {
+        let (dir, graph) = fixture("graph.json");
+        // The probe is read-only: an absent db reads None and stays absent.
+        assert_eq!(backend_since(&graph).unwrap(), None);
+        assert!(!database_path(&graph).exists());
+        let (previous, since1) = flip_backend(&graph, Backend::Sqlite).unwrap();
+        assert_eq!(previous, Backend::Json);
+        let since1 = since1.expect("a real flip stamps since");
+        // An idempotent re-run keeps the original clock.
+        let (previous, since2) = flip_backend(&graph, Backend::Sqlite).unwrap();
+        assert_eq!(previous, Backend::Sqlite);
+        assert_eq!(since2, Some(since1));
+        // Rolling back stamps a NEW since.
+        let (_, since3) = flip_backend(&graph, Backend::Json).unwrap();
+        let since3 = since3.expect("a real flip stamps since");
+        assert!(since3 > since1, "rollback moves the clock forward");
+        drop(dir);
     }
 
     #[test]
