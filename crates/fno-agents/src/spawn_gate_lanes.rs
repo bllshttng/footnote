@@ -302,7 +302,7 @@ fn awaiting_operator(
         }
         let short = sid.get(..8).unwrap_or(sid).to_lowercase();
         // File order is journal order, so the first open ask is the oldest.
-        if let Some((qid, session, asker)) = asks
+        if let Some((qid, _, _)) = asks
             .iter()
             .find(|(_, q_session, q_asker)| match q_session {
                 Some(s) => s.eq_ignore_ascii_case(sid),
@@ -432,7 +432,7 @@ pub(crate) fn provider_live_count(
                 // and the pane probe settles everything else. An undecidable
                 // pid does NOT fault here - the pane gets the chance first,
                 // exactly as the Python counter ordered it.
-                if pid_liveness(pid as u32, None) == Ok(false) {
+                if pid_liveness(pid, None) == Ok(false) {
                     continue;
                 }
                 match pane_state(row)? {
@@ -451,7 +451,7 @@ pub(crate) fn provider_live_count(
                 continue;
             }
             // With a recorded start time, pid reuse fails closed.
-            if pid_liveness(pid as u32, row.pid_start_time)
+            if pid_liveness(pid, row.pid_start_time)
                 .map_err(|_| format!("process incarnation unreadable for {}", row.name))?
             {
                 count += 1;

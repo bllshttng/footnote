@@ -428,7 +428,45 @@ pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec
 /// Read-only; a registry read failure degrades to a 0 contribution with one
 /// warning line pushed to `warnings` (LD5, fail open).
 pub fn slot_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
-    live_rows(registry_path, warnings).len() + live_worker_slot_claims(warnings)
+    let (rows, claims) = slot_reading(registry_path, warnings);
+    rows.len() + claims
+}
+
+/// The slot count's two inputs, together: the live registry rows and the live
+/// `worker:<name>` headless reservations. `slot_count` is the sum; the
+/// refusal paths need the rows themselves to name them.
+pub(crate) fn slot_reading(
+    registry_path: &Path,
+    warnings: &mut Vec<String>,
+) -> (Vec<RegistryEntry>, usize) {
+    let rows = live_rows(registry_path, warnings);
+    let claims = live_worker_slot_claims(warnings);
+    (rows, claims)
+}
+
+/// The one slot-refusal sentence both print paths share, so a display can
+/// never quote a count the gate did not measure. Pure text; the caller adds
+/// its own tail (`refusing (--no-wait).`, or the queue line's advice). The
+/// rows are named by the probe's `slot_rows` field (`fno agents gate-status`),
+/// never by a second walk.
+fn slot_refusal_line(
+    slots: usize,
+    cap: usize,
+    rows: usize,
+    claims: usize,
+    waiting: usize,
+    tail: &str,
+) -> String {
+    let waiting_note = if waiting > 0 {
+        format!("; {waiting} of the rows wait on an operator question")
+    } else {
+        String::new()
+    };
+    format!(
+        "{slots} live worker slots >= max_live {cap} ({rows} registry rows, {claims} headless \
+         reservations{waiting_note}); every counted row: fno agents gate-status, field \
+         slot_rows; {tail}"
+    )
 }
 
 /// The territory (key, member node ids) a node belongs to, or `None` when the
@@ -1332,8 +1370,8 @@ pub fn run_gate(
                     }
                     if !hold_pause {
                         let mut warnings = Vec::new();
-                        let live = live_rows(registry_path, &mut warnings);
-                        let slots = live.len() + live_worker_slot_claims(&mut warnings);
+                        let (live, claims) = slot_reading(registry_path, &mut warnings);
+                        let slots = live.len() + claims;
                         last_slots = slots;
                         for w in &warnings {
                             eprintln!("{w}");
@@ -1414,11 +1452,21 @@ pub fn run_gate(
                         );
 
                         if flags.no_wait {
-                            eprintln!(
-                                "spawn-gate: {slots} live worker slots >= max_live {cap}; a quiet \
-                                 row still holds a slot (fno agents list --status quiet); \
-                                 refusing (--no-wait). See `fno agents top`."
+                            let row_refs: Vec<&RegistryEntry> = live.iter().collect();
+                            let waiting = spawn_gate_lanes::read_awaiting_operator(
+                                registry_path,
+                                &row_refs,
+                                &mut warnings,
                             );
+                            let line = slot_refusal_line(
+                                slots,
+                                cap,
+                                live.len(),
+                                claims,
+                                waiting.len(),
+                                "refusing (--no-wait).",
+                            );
+                            eprintln!("spawn-gate: {line}");
                             return Err(Refusal::with_receipt(
                                 EXIT_NO_WAIT,
                                 serde_json::json!({
@@ -1430,15 +1478,30 @@ pub fn run_gate(
                                     "max_live": cap,
                                     "count": slots,
                                     "current_count": slots,
+                                    "slot_rows": live.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+                                    "waiting_on_operator": waiting.iter().map(|(name, qid)| serde_json::json!({
+                                        "name": name,
+                                        "question_id": qid,
+                                    })).collect::<Vec<_>>(),
                                 }),
                             ));
                         }
                         if !announced {
-                            eprintln!(
-                                "spawn queued: {slots} live worker slots >= max_live {cap}; a quiet \
-                                 row still holds a slot (fno agents list --status quiet); waiting \
-                                 for a free slot (--no-wait to fail fast, --force to bypass)"
+                            let row_refs: Vec<&RegistryEntry> = live.iter().collect();
+                            let waiting = spawn_gate_lanes::read_awaiting_operator(
+                                registry_path,
+                                &row_refs,
+                                &mut warnings,
                             );
+                            let line = slot_refusal_line(
+                                slots,
+                                cap,
+                                live.len(),
+                                claims,
+                                waiting.len(),
+                                "waiting for a free slot (--no-wait to fail fast, --force to bypass)",
+                            );
+                            eprintln!("spawn queued: {line}");
                             announced = true;
                             last_progress = Instant::now();
                         } else if last_progress.elapsed() >= QUEUE_PROGRESS_EVERY {
@@ -2806,7 +2869,225 @@ MemAvailable:    8000000 kB\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The port of `test_king_at_share_refuses_under_cap`: a caller whose own
+    /// AC5-TEXT: the shared refusal sentence names the probe field that lists
+    /// every counted row, marks the operator-waiting share, and never again
+    /// blames a population its own recommended reader cannot see.
+    #[test]
+    fn slot_refusal_line_names_the_probe_and_marks_waiting_rows() {
+        let line = slot_refusal_line(3, 2, 3, 0, 1, "refusing (--no-wait).");
+        assert!(line.contains("fno agents gate-status"), "{line}");
+        assert!(line.contains("slot_rows"), "{line}");
+        assert!(
+            line.contains("1 of the rows wait on an operator question"),
+            "{line}"
+        );
+        assert!(!line.contains("--status quiet"), "{line}");
+        assert!(!line.contains("fno agents top"), "{line}");
+
+        let line = slot_refusal_line(3, 2, 3, 0, 0, "refusing (--no-wait).");
+        assert!(!line.contains("wait on an operator question"), "{line}");
+    }
+
+    /// AC5-HP: the --no-wait slot refusal carries the receipt naming every
+    /// counted row, so a king can act on rows instead of a bare number.
+    #[test]
+    fn no_wait_refusal_names_the_rows_it_counted() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        // Pin the CPU axis to an admit: it decides BEFORE the slot census, so
+        // a busy machine would refuse with 79 before the slot axis is reached.
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 2\nmin_free_gb = 0\n",
+        )
+        .unwrap();
+
+        // Three live workers (alive pids) against max_live 2.
+        let agents = dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let reg = agents.join("registry.json");
+        let me = std::process::id();
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":1,"entries":[
+                    {{"name":"w1","provider":"claude","cwd":"/tmp","status":"live","pid":{me},"created_at":"2026-01-01T00:00:00Z"}},
+                    {{"name":"w2","provider":"claude","cwd":"/tmp","status":"live","pid":{me},"created_at":"2026-01-01T00:00:00Z"}},
+                    {{"name":"w3","provider":"claude","cwd":"/tmp","status":"live","pid":{me},"created_at":"2026-01-01T00:00:00Z"}}]}}"#
+            ),
+        )
+        .unwrap();
+
+        let got = run_gate(
+            &dir,
+            &reg,
+            GateInput {
+                name: "w4".into(),
+                substrate: "bg".into(),
+                flags: GateFlags {
+                    force: false,
+                    no_wait: true,
+                },
+                ..Default::default()
+            },
+        );
+
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+
+        let refusal = got.err().expect("cap 2 with 3 live rows must refuse");
+        assert_eq!(refusal.exit_code, EXIT_NO_WAIT);
+        let receipt = refusal.receipt.expect("no_wait refusal carries a receipt");
+        assert_eq!(receipt["count"], 3);
+        let names: Vec<String> = receipt["slot_rows"]
+            .as_array()
+            .expect("slot_rows array")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        for expected in ["w1", "w2", "w3"] {
+            assert!(names.iter().any(|n| n == expected), "{names:?}");
+        }
+        assert_eq!(
+            receipt["waiting_on_operator"].as_array().map(Vec::len),
+            Some(0),
+            "no questions journal, nobody waits"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC5-WAIT: a counted row that waits on an open operator question keeps
+    /// its slot (RAM, not rows) but is named in the receipt with its question.
+    #[test]
+    fn no_wait_refusal_marks_the_rows_waiting_on_the_operator() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-wrows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+        let projects = dir.join("projects");
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, &projects);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 2\nmin_free_gb = 0\n",
+        )
+        .unwrap();
+
+        let a = "aaaaaaaa-0000-0000-0000-00000000000a";
+        std::fs::write(
+            dir.join("questions.jsonl"),
+            format!(
+                "{{\"type\":\"operator_question\",\"data\":{{\"question_id\":\"q-1\",\"session_id\":\"{a}\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        let proj = projects.join("-tmp-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let t = proj.join(format!("{a}.jsonl"));
+        std::fs::write(&t, b"{}\n").unwrap();
+        let old = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        std::fs::File::options()
+            .write(true)
+            .open(&t)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(old)),
+            )
+            .unwrap();
+
+        let agents = dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let reg = agents.join("registry.json");
+        let me = std::process::id();
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":1,"entries":[
+                    {{"name":"waiting","harness":"claude","harness_session_id":"{a}","provider":"zai","cwd":"/tmp","status":"live","pid":{me},"created_at":"2026-01-01T00:00:00Z"}},
+                    {{"name":"w2","provider":"claude","cwd":"/tmp","status":"live","pid":{me},"created_at":"2026-01-01T00:00:00Z"}},
+                    {{"name":"w3","provider":"claude","cwd":"/tmp","status":"live","pid":{me},"created_at":"2026-01-01T00:00:00Z"}}]}}"#
+            ),
+        )
+        .unwrap();
+
+        let got = run_gate(
+            &dir,
+            &reg,
+            GateInput {
+                name: "w4".into(),
+                substrate: "bg".into(),
+                flags: GateFlags {
+                    force: false,
+                    no_wait: true,
+                },
+                ..Default::default()
+            },
+        );
+
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+
+        let refusal = got.err().expect("cap 2 with 3 live rows must refuse");
+        assert_eq!(refusal.exit_code, EXIT_NO_WAIT);
+        let receipt = refusal.receipt.expect("no_wait refusal carries a receipt");
+        assert_eq!(receipt["count"], 3, "a waiting worker keeps its slot");
+        let waiting = receipt["waiting_on_operator"]
+            .as_array()
+            .expect("waiting_on_operator array");
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0]["name"], "waiting");
+        assert_eq!(waiting[0]["question_id"], "q-1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// workers hold its full share refuses exit 80 even with fleet slots free,
     /// because waiting cannot help while the caller's own workers hold it.
     #[test]
