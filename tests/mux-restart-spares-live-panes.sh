@@ -66,7 +66,7 @@ fi
 SIDECAR="$MUX_DIR/$SESSION.ver"
 printf '57\n' >"$SIDECAR"
 RESTART_RC=0
-RESTART_OUTPUT="$(uv run --project "$REPO_ROOT/cli" fno-py agents restart --no-revive --json 2>&1)" || RESTART_RC=$?
+RESTART_OUTPUT="$(uv run --project "$REPO_ROOT/cli" fno-py agents restart --json 2>&1)" || RESTART_RC=$?
 printf '%s\n' "$RESTART_OUTPUT"
 # A spared stale-wire server is a reported FAILURE, not success: the command
 # must exit 1 so exit-code automation sees the fleet is still skewed (the
