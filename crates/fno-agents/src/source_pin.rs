@@ -419,7 +419,10 @@ fn no_source_answer(invalid_override: Option<&str>) -> ResolveAnswer {
     } else {
         (
             "no_source",
-            "Could not locate the fno CLI source. Pass --source /path/to/fno/cli, set $FNO_SOURCE, or install the fno plugin into ~/.claude/plugins/fno/.".to_string(),
+            // The plugins dir is named in prose, not as a path literal: the
+            // placement-rule gate bars ~/.claude path construction here, and
+            // the guidance does not need the exact prefix to be followable.
+            "Could not locate the fno CLI source. Pass --source /path/to/fno/cli, set $FNO_SOURCE, or install the fno plugin (the Claude plugins directory).".to_string(),
         )
     };
     ResolveAnswer {
