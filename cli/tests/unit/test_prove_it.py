@@ -292,7 +292,7 @@ def test_the_gate_integration_names_where_an_ad_hoc_fail_lands():
     assert "fno-agents prove-it-verdicts" in gate, "the reader verb must be named"
     assert "fno inbox outstanding" in gate, "the surface must be named"
     assert "never reopens a done node" in gate
-    assert "A newer PASS record or a decision that names the report retires" in gate
+    assert "A newer PASS retires the FAIL only when its claim states the FAIL's claim" in gate
 
 
 def test_a_code_plan_without_probes_warns_advisory(tmp_path):

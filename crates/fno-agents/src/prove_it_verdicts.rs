@@ -12,16 +12,21 @@
 //! than a PASS and is the one the machine dropped: a PASS needs no routing, a
 //! FAIL means a node's claimed outcome did not hold.
 //!
-//! Contract: for every node with a `plan_path`, walk `<plan>.artifacts/` and
-//! take each file's LAST non-empty line (the same rule
-//! `skills/review/scripts/validate-prove-it.sh` applies -- a mid-file mention
-//! is not a record). Per node the newest record by mtime among PASS and FAIL
-//! wins; SKIP and BLOCKED carry no verdict, so they never retire a FAIL. A
-//! FAIL row is `open` until a ruling whose `text` names the report retires it
-//! (read from the machine-wide decision index). The verb never changes a
-//! node's status: an
-//! unverified auditor must not move doneness, a king rules. `--route` writes
-//! the one progress note that surfaces an open, unrouted FAIL on the node.
+//! Contract: for every node with a `plan_path`, the read walks
+//! `<plan>.artifacts/` and takes each file's LAST non-empty line (the same
+//! rule `skills/review/scripts/validate-prove-it.sh` applies -- a mid-file
+//! mention is not a record). SKIP and BLOCKED carry no verdict, so they never
+//! retire a FAIL and never headline. A FAIL row stays `open` until it is
+//! retired: a newer PASS whose claim STATES the FAIL claim (the full FAIL
+//! claim text inside the PASS claim; the record may scope this with a
+//! `retires` report path, which never replaces the claim match), or a ruling
+//! whose `text` names the report (read from the machine-wide decision
+//! index). Every unretired FAIL surfaces: a narrow re-run PASS cannot mute a
+//! broader claim it did not answer. The newest PASS/FAIL record is
+//! also emitted as the node's headline verdict. The verb never changes a
+//! node's status: an unverified auditor must not move doneness, a king
+//! rules. `--route` writes the one progress note that surfaces an open,
+//! unrouted FAIL on the node.
 
 use crate::graph_get::{default_graph_path, external_backend_selected};
 use crate::graph_store::{self, entry_id, s_str};
@@ -127,6 +132,10 @@ struct Report {
     path: String,
     verdict: String,
     claim: String,
+    /// Optional `retires` report path: the FAIL report this PASS declares it
+    /// answers. Scopes retirement to that report; the claim match is still
+    /// required.
+    retires: Option<String>,
     mtime: SystemTime,
 }
 
@@ -162,7 +171,7 @@ fn build_rows(entries: &[Value], unreadable: &mut Vec<Value>, rulings: &[Value])
                 Ok(text) => match terminal_record(&text) {
                     Err(err) => unreadable.push(json!({"node": node, "path": path, "error": err})),
                     Ok(None) => {}
-                    Ok(Some((verdict, claim))) => {
+                    Ok(Some((verdict, claim, retires))) => {
                         let mtime = std::fs::metadata(&f)
                             .and_then(|m| m.modified())
                             .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -170,20 +179,42 @@ fn build_rows(entries: &[Value], unreadable: &mut Vec<Value>, rulings: &[Value])
                             path,
                             verdict,
                             claim,
+                            retires,
                             mtime,
                         });
                     }
                 },
             }
         }
-        // Newest PASS/FAIL record wins. A >= on equal mtimes keeps the later
-        // walk order (paths are visited sorted), so the winner is stable.
-        let winner = reports
+        // Verdict-bearing records only, oldest first; ties break on path so
+        // the order is stable.
+        let mut scored: Vec<&Report> = reports
             .iter()
             .filter(|r| r.verdict == "PASS" || r.verdict == "FAIL")
-            .max_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.path.cmp(&b.path)));
-        let Some(win) = winner else { continue };
-        rows.push(row_for(node, entry, win, rulings));
+            .collect();
+        if scored.is_empty() {
+            continue;
+        }
+        scored.sort_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.path.cmp(&b.path)));
+        // A FAIL retires only through a newer PASS whose claim STATES the
+        // FAIL claim (the reader used to take the newest record by mtime and
+        // never compared claims, so a narrow re-run PASS muted a broader
+        // FAIL). Every unretired FAIL surfaces.
+        for (i, fail) in scored
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.verdict == "FAIL")
+        {
+            let retired = scored[i + 1..].iter().any(|pass| pass_retires(pass, fail));
+            if !retired {
+                rows.push(row_for(node, entry, fail, rulings));
+            }
+        }
+        // The newest PASS/FAIL record is still the node's headline verdict.
+        let newest = scored[scored.len() - 1];
+        if newest.verdict == "PASS" {
+            rows.push(row_for(node, entry, newest, rulings));
+        }
     }
     rows
 }
@@ -233,7 +264,7 @@ fn walk_md(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 /// record -- the negative control is the x-5aef plan, which quotes the marker
 /// mid-file). Err: a terminal line EXISTS but is not a legal record, which
 /// must surface in `unreadable` and never silently read as zero records.
-fn terminal_record(text: &str) -> Result<Option<(String, String)>, String> {
+fn terminal_record(text: &str) -> Result<Option<(String, String, Option<String>)>, String> {
     let Some(line) = text.lines().rev().find(|l| !l.trim().is_empty()) else {
         return Ok(None);
     };
@@ -258,7 +289,27 @@ fn terminal_record(text: &str) -> Result<Option<(String, String)>, String> {
         }
     }
     let claim = parsed.get("claim").and_then(Value::as_str).unwrap_or("");
-    Ok(Some((verdict.to_string(), claim.to_string())))
+    let retires = parsed
+        .get("retires")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(Some((verdict.to_string(), claim.to_string(), retires)))
+}
+
+/// A PASS retires a FAIL only when its claim STATES the FAIL's claim: the
+/// full FAIL claim text appears inside the PASS claim -- the across-reports
+/// twin of the validator's within-report rule that a narrower row cannot
+/// prove a broader claim. An empty FAIL claim matches nothing, so it never
+/// auto-retires. A present `retires` name scopes the retirement to that
+/// report; it never replaces the claim match.
+fn pass_retires(pass: &Report, fail: &Report) -> bool {
+    if fail.claim.trim().is_empty() || !pass.claim.contains(&fail.claim) {
+        return false;
+    }
+    match &pass.retires {
+        Some(named) => named == &fail.path,
+        None => true,
+    }
 }
 
 fn row_for(node: &str, entry: &Value, win: &Report, rulings: &[Value]) -> Value {
@@ -481,7 +532,7 @@ fn route_rows(rows: &[Value]) -> i32 {
         };
         let body = format!(
             "prove-it FAIL: {}. Report: {}. The node stays {}; a king rules. \
-Retire with a newer PASS record or fno inbox decide {} naming this report.",
+Retire with a newer PASS whose claim states this claim, or fno inbox decide {} naming this report.",
             row["claim"].as_str().unwrap_or(""),
             row["report"].as_str().unwrap_or(""),
             row["status"].as_str().unwrap_or("unknown"),
@@ -550,12 +601,28 @@ mod tests {
         )
     }
 
+    fn record_line_named(verdict: &str, claim: &str, retires: &str) -> String {
+        format!(
+            "fno-prove-it: {}",
+            serde_json::json!({"verdict": verdict, "claim": claim, "retires": retires})
+        )
+    }
+
     #[test]
     fn a_terminal_record_parses_and_a_midfile_mention_is_not_a_record() {
         let fail = format!("body\n\n{}", record_line("FAIL", "the claim"));
         assert_eq!(
             terminal_record(&fail).expect("parse"),
-            Some(("FAIL".to_string(), "the claim".to_string()))
+            Some(("FAIL".to_string(), "the claim".to_string(), None))
+        );
+        let named = record_line_named("PASS", "recheck", "/p/REPORT.md");
+        assert_eq!(
+            terminal_record(&named).expect("parse"),
+            Some((
+                "PASS".to_string(),
+                "recheck".to_string(),
+                Some("/p/REPORT.md".to_string())
+            ))
         );
         // Negative control: the marker quoted mid-file (the x-5aef plan shape).
         let mid = format!("fno-prove-it: quoted\ntrailing prose\n");
@@ -574,8 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_pass_retires_a_fail_and_a_newer_skip_does_not() {
-        // AC1-EDGE, on the full row assembly with a temp graph.
+    fn a_claim_stating_pass_retires_a_fail_and_a_newer_skip_does_not() {
+        // AC1-EDGE, on the full row assembly with a temp graph. The PASS
+        // retires only because its claim STATES the FAIL claim.
         let dir = tempfile::tempdir().expect("tempdir");
         let plans = dir.path().join("plans");
         std::fs::create_dir_all(&plans).expect("mkdir");
@@ -590,7 +658,7 @@ mod tests {
         let _pass_a = report(
             &dir.path(),
             "plans/a.md.artifacts/recheck/REPORT.md",
-            &record_line("PASS", "recheck"),
+            &record_line("PASS", "recheck: old fail"),
             SystemTime::now(),
         );
         let fail_b = report(
@@ -625,7 +693,10 @@ mod tests {
 
         assert_eq!(rows.len(), 2, "no PASS/FAIL record means no row: {rows:?}");
         let a = rows.iter().find(|r| r["node"] == "x-aaa").expect("row a");
-        assert_eq!(a["verdict"], "PASS", "newest PASS/FAIL wins");
+        assert_eq!(
+            a["verdict"], "PASS",
+            "a claim-stating PASS retires the FAIL"
+        );
         assert_eq!(a["open"], false);
         let b = rows.iter().find(|r| r["node"] == "x-bbb").expect("row b");
         assert_eq!(b["verdict"], "FAIL");
@@ -639,6 +710,155 @@ mod tests {
             rows.iter().all(|r| r["node"] != "x-ccc"),
             "a mid-file mention yields no row"
         );
+    }
+
+    #[test]
+    fn a_narrow_pass_after_a_broad_fail_leaves_the_fail_open() {
+        // The specimen: the re-run proved only the gate half and said
+        // so; the broad FAIL must stay open beside the narrow PASS.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plans = dir.path().join("plans");
+        std::fs::create_dir_all(&plans).expect("mkdir");
+        let broad = "the retirement done probe rejects incomplete evidence";
+        let fail = report(
+            &dir.path(),
+            "plans/a.md.artifacts/REPORT.md",
+            &record_line("FAIL", broad),
+            ago(200),
+        );
+        let narrow = report(
+            &dir.path(),
+            "plans/a.md.artifacts/recheck/REPORT.md",
+            &record_line(
+                "PASS",
+                "an isolated receipt with only active-surface exits 1",
+            ),
+            SystemTime::now(),
+        );
+        let entries = vec![
+            json!({"id": "x-aaa", "status": "in_progress", "plan_path": plans.join("a.md").display().to_string(), "cwd": dir.path().display().to_string()}),
+        ];
+        let mut unreadable = Vec::new();
+        let rows = build_rows(&entries, &mut unreadable, &[]);
+
+        assert_eq!(rows.len(), 2, "both rows surface: {rows:?}");
+        let f = rows
+            .iter()
+            .find(|r| r["verdict"] == "FAIL")
+            .expect("fail row");
+        assert_eq!(f["report"], fail, "the row names the failing report");
+        assert_eq!(f["claim"], broad);
+        assert_eq!(f["open"], true, "the broad FAIL stays open");
+        let p = rows
+            .iter()
+            .find(|r| r["verdict"] == "PASS")
+            .expect("pass row");
+        assert_eq!(p["report"], narrow);
+        assert_eq!(p["open"], false);
+    }
+
+    #[test]
+    fn a_named_retirement_still_needs_the_claim_match() {
+        // `retires` names the report a PASS answers; the claim match is still
+        // required, a name pointing elsewhere retires nothing, and an empty
+        // FAIL claim never auto-retires.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plans = dir.path().join("plans");
+        std::fs::create_dir_all(&plans).expect("mkdir");
+        let mk = |name: &str| plans.join(name).display().to_string();
+
+        let named_fail = report(
+            &dir.path(),
+            "plans/d.md.artifacts/REPORT.md",
+            &record_line("FAIL", "broad claim"),
+            ago(200),
+        );
+        let _other_fail = report(
+            &dir.path(),
+            "plans/e.md.artifacts/REPORT.md",
+            &record_line("FAIL", "broad claim"),
+            ago(200),
+        );
+        let _empty_fail = report(
+            &dir.path(),
+            "plans/f.md.artifacts/REPORT.md",
+            // Whitespace-only: matches nothing, the same as empty.
+            &record_line("FAIL", " "),
+            ago(200),
+        );
+        // Name without match retires nothing.
+        let _mismatch = report(
+            &dir.path(),
+            "plans/d.md.artifacts/recheck/REPORT.md",
+            &record_line_named("PASS", "narrow half only", &named_fail),
+            ago(100),
+        );
+        // Claim stated but the name points at another report: scoped away.
+        let _scoped_away = report(
+            &dir.path(),
+            "plans/e.md.artifacts/recheck/REPORT.md",
+            &record_line_named("PASS", "recheck: broad claim", "/nowhere/REPORT.md"),
+            ago(100),
+        );
+        // An empty FAIL claim matches nothing.
+        let _vacuous = report(
+            &dir.path(),
+            "plans/f.md.artifacts/recheck/REPORT.md",
+            &record_line("PASS", "recheck"),
+            ago(100),
+        );
+        // Claim stated, no name: retires the FAIL whose claim it states.
+        let _broad_pass = report(
+            &dir.path(),
+            "plans/g.md.artifacts/REPORT.md",
+            &record_line("FAIL", "broad claim"),
+            ago(300),
+        );
+        let _g_pass = report(
+            &dir.path(),
+            "plans/g.md.artifacts/recheck/REPORT.md",
+            &record_line("PASS", "recheck: broad claim"),
+            ago(50),
+        );
+
+        let entries: Vec<Value> = ["d", "e", "f", "g"]
+            .iter()
+            .map(|n| {
+                json!({"id": format!("x-{n}"), "status": "done", "plan_path": mk(&format!("{n}.md")), "cwd": dir.path().display().to_string()})
+            })
+            .collect();
+        let mut unreadable = Vec::new();
+        let rows = build_rows(&entries, &mut unreadable, &[]);
+
+        assert_eq!(
+            rows.len(),
+            7,
+            "d/e/f each surface FAIL+PASS, g one PASS: {rows:?}"
+        );
+        let d = rows
+            .iter()
+            .find(|r| r["node"] == "x-d" && r["verdict"] == "PASS")
+            .expect("row d");
+        assert_eq!(d["verdict"], "PASS", "the headline PASS still surfaces");
+        let d_fail = rows
+            .iter()
+            .filter(|r| r["node"] == "x-d")
+            .find(|r| r["verdict"] == "FAIL");
+        assert_eq!(
+            d_fail.expect("fail row stays")["open"],
+            true,
+            "a named-but-mismatched PASS retires nothing"
+        );
+        let e = rows.iter().find(|r| r["node"] == "x-e").expect("row e");
+        assert_eq!(
+            e["open"], true,
+            "a claim-stating PASS scoped to another report retires nothing"
+        );
+        let f = rows.iter().find(|r| r["node"] == "x-f").expect("row f");
+        assert_eq!(f["open"], true, "an empty FAIL claim never auto-retires");
+        let g: Vec<_> = rows.iter().filter(|r| r["node"] == "x-g").collect();
+        assert_eq!(g.len(), 1, "the claim-stating unnamed PASS retired: {g:?}");
+        assert_eq!(g[0]["verdict"], "PASS");
     }
 
     #[test]
@@ -727,6 +947,7 @@ mod tests {
             path: report_path.to_string(),
             verdict: "FAIL".to_string(),
             claim: "c".to_string(),
+            retires: None,
             mtime: SystemTime::now(),
         };
         let rulings: Vec<Value> = vec![json!({"decision_id": "d-2", "text": "unrelated"})];
