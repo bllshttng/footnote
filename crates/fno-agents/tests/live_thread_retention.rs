@@ -90,6 +90,8 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         branch_merged: None,
         planning: None,
         planning_closed: Vec::new(),
+        planning_plan_written: Vec::new(),
+        planning_released: false,
         confirm_hold: None,
         session_terminal: None,
         superseded_by_live_peer: None,

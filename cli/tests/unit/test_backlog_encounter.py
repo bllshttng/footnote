@@ -581,7 +581,7 @@ def test_encounters_live_only_in_the_graph_store_and_export(probe):
 
 
 
-# --- the note advisory (progress_notes stays uncapped) -----------------------
+# --- the note advisory (a long body warns and still lands) -------------------
 
 
 def test_a_long_note_warns_and_still_lands(probe):
@@ -590,8 +590,8 @@ def test_a_long_note_warns_and_still_lands(probe):
     result = probe("backlog", "note", "zz-0001", _words(400), "-q")
     assert result.returncode == 0, result.stderr
     assert "400" in result.stderr
-    notes = [e for e in _entries(probe) if e["id"] == "zz-0001"][0]["progress_notes"]
-    assert len(notes) == 1
+    state = [e for e in _entries(probe) if e["id"] == "zz-0001"][0]["current_state"]
+    assert len(state["body"].split()) == 400
 
 
 def test_an_ordinary_note_says_nothing(probe):

@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 pub(crate) use crate::territory::compile_scope_ids;
 pub(crate) use budget::{fno_py_cmd, now_secs_board, run_json, Budget, HAND_RUN_BUDGET_MS};
 pub(crate) use claims::read_claims;
-pub(crate) use classify::read_claimed_nodes;
+pub(crate) use classify::{entry_by_id, node_has_pr, read_claimed_nodes};
 pub(crate) use prs::read_prs;
 pub(crate) use queues::{
     build_board, parse_lane, queue_json, read_blocked_rows, BoardInputs, Queue,
@@ -86,9 +86,12 @@ pub(crate) const SRC_CLAIMS: &str = "fno agents claim list -J --include-stale --
 pub(crate) const SRC_DRIVERS: &str = "registry::load_registry (rows with node)";
 
 /// The roster feed's cap, mirroring MAX_CLAIMED_NODE_READS: a retained
-/// registry can outgrow what one probe batch may tax the board with. The
+/// registry can outgrow what one board read may tax the probe with. The
 /// truncated tail reads unmeasured (loud), never none.
 pub(crate) const MAX_DRIVER_ROWS: usize = 24;
+/// The open-PR listing's default read depth. 50 covers a 21-open-PR fleet
+/// with headroom; `--max-pr-reads` still overrides it.
+pub(crate) const DEFAULT_MAX_PR_READS: usize = 50;
 pub(crate) const SRC_PRS: &str =
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url";
 pub(crate) const SRC_PR_NODES: &str = "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url + fno backlog get <id>";
@@ -269,7 +272,7 @@ impl Default for BoardOpts {
     fn default() -> Self {
         BoardOpts {
             budget_ms: HAND_RUN_BUDGET_MS,
-            max_pr_reads: 20,
+            max_pr_reads: DEFAULT_MAX_PR_READS,
             state_path: None,
             cwd: None,
         }
@@ -416,31 +419,35 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // Its tokens join the ONE batched truth probe, so the roster's drivers
     // get the same transcript measurement the claim holders get.
     let s_drivers = budget.start(SRC_DRIVERS);
-    let (drivers, roster_tokens) = match s_drivers {
-        None => (SourceRead::err(budget.spent_error()), Vec::new()),
+    let (drivers, roster_tokens, driver_name_tokens) = match s_drivers {
+        None => (
+            SourceRead::err(budget.spent_error()),
+            Vec::new(),
+            HashMap::new(),
+        ),
         Some(_) => {
-            let mut read = read_driver_rows();
+            let (mut read, name_to_token) = read_driver_rows();
+            let mut tokens: Vec<String> = Vec::new();
             if let Some(rows) = read.payload.as_mut().and_then(Value::as_array_mut) {
+                // PR-bound non-terminal nodes ride first: the cap spends the
+                // probe on rows a queue can act on. The tail keeps its rows in
+                // the payload, so its nodes still read unmeasured (never none);
+                // only their probe tokens are withheld.
+                sort_driver_rows_pr_first(rows, entries.as_deref());
                 if rows.len() > MAX_DRIVER_ROWS {
                     warnings.push(format!(
                         "drivers: capped at {MAX_DRIVER_ROWS} of {} node-stamped rows; the unprobed tail reads unmeasured",
                         rows.len()
                     ));
-                    rows.truncate(MAX_DRIVER_ROWS);
+                }
+                for row in rows.iter().take(MAX_DRIVER_ROWS) {
+                    if let Some(t) = row.get("token").and_then(Value::as_str) {
+                        tokens.push(t.to_string());
+                    }
                 }
             }
             mark(&mut sources, "drivers", &read, false);
-            let tokens = read
-                .payload
-                .as_ref()
-                .and_then(Value::as_array)
-                .map(|rows| {
-                    rows.iter()
-                        .filter_map(|r| r.get("token").and_then(Value::as_str).map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            (read, tokens)
+            (read, tokens, name_to_token)
         }
     };
     for t in roster_tokens {
@@ -493,7 +500,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 (prs, pr_nodes, w, truncated)
             })
         });
-        let worked = match t_worked {
+        let mut worked = match t_worked {
             None => SourceRead::err(budget.spent_error()),
             Some(h) => h
                 .join()
@@ -501,6 +508,15 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         };
         mark(&mut sources, "worked", &worked, false);
         let worked_ids = worked_node_ids(&worked);
+        // The worked feed nominates candidates: map each listed row's worker
+        // labels to registry probe tokens before the batch spawns, so the
+        // probe, not the listing, answers whether the named worker is alive.
+        let worked_probe_tokens = enrich_worked_rows(&mut worked, &driver_name_tokens);
+        for t in worked_probe_tokens {
+            if !holders.contains(&t) {
+                holders.push(t);
+            }
+        }
         let t_ready = s_ready.map(|_slice| {
             let entries = entries_ref.map(|e| e.to_vec());
             let cwd = cwd_for_threads.clone();
@@ -928,16 +944,25 @@ pub fn read_board(opts: &BoardOpts) -> Value {
 /// read of the shared registry (`state::load_registry`); a missing file is an
 /// empty roster (a store with no workers is a positive empty answer, not a
 /// fault), a corrupt one is a failed read the consuming queues render loudly.
-fn read_driver_rows() -> SourceRead {
+/// Also returns a name-to-token map over EVERY registry entry, whatever its
+/// status: the worked feed's worker labels are names, and an orphaned row's
+/// transcript can still answer for the worker it names.
+fn read_driver_rows() -> (SourceRead, HashMap<String, String>) {
     let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
-        // No agents home declared (unit tests): the roster abstains, and the
-        // claim/worked verdicts stand, exactly as before this feed existed.
-        return SourceRead::ok(json!([]));
+        return (SourceRead::ok(json!([])), HashMap::new());
     };
     let path = home.registry_json();
     match crate::state::load_registry(&path) {
-        Ok(registry) => SourceRead::ok(Value::Array(
-            registry
+        Ok(registry) => {
+            let mut name_to_token: HashMap<String, String> = HashMap::new();
+            for e in &registry.entries {
+                name_to_token.entry(e.name.clone()).or_insert_with(|| {
+                    e.harness_session_id
+                        .clone()
+                        .unwrap_or_else(|| e.name.clone())
+                });
+            }
+            let rows = registry
                 .entries
                 .iter()
                 .filter(|e| is_live_driver_status(e.status))
@@ -949,9 +974,13 @@ fn read_driver_rows() -> SourceRead {
                         .unwrap_or_else(|| e.name.clone());
                     Some(json!({"name": e.name, "node": node, "token": token}))
                 })
-                .collect(),
-        )),
-        Err(e) => SourceRead::err(format!("registry unreadable: {e}")),
+                .collect();
+            (SourceRead::ok(Value::Array(rows)), name_to_token)
+        }
+        Err(e) => (
+            SourceRead::err(format!("registry unreadable: {e}")),
+            HashMap::new(),
+        ),
     }
 }
 
@@ -973,6 +1002,76 @@ fn is_live_driver_status(status: crate::AgentStatus) -> bool {
             | crate::AgentStatus::Live
             | crate::AgentStatus::Restarting
     )
+}
+
+/// Stable PR-first order over node-stamped roster rows: rows whose node is
+/// non-terminal and bound to a PR ride first, so the driver cap spends the
+/// probe on the rows a queue can act on. The rest keep registry order.
+fn sort_driver_rows_pr_first(rows: &mut [Value], entries: Option<&[Value]>) {
+    let is_pr_bound = |row: &Value| {
+        s_str(row, "node")
+            .and_then(|id| {
+                entry_by_id(entries.unwrap_or(&[]), id).map(|node| {
+                    !TERMINAL_RUNGS.contains(&s_str(node, "status").unwrap_or(""))
+                        && node.get("superseded_by").is_none()
+                        && node_has_pr(node)
+                })
+            })
+            .unwrap_or(false)
+    };
+    // Ascending sort: the NOT-PR rows carry the true (larger) key so the
+    // PR-bound rows ride first, registry order preserved on both sides.
+    rows.sort_by_key(|row| !is_pr_bound(row));
+}
+
+/// The worked feed nominates candidates, never decides. Each listed row's
+/// worker labels name registry workers; map each name to its probe token (a
+/// label's worker name is its first whitespace token) and attach the tokens
+/// to the row, so node_driver runs the shared candidate fold over them
+/// instead of trusting the listing. A name the registry never confirmed gets
+/// no token and flags the row `unmapped`, which reads unmeasured - never
+/// active. Returns the tokens to add to the probe batch.
+pub(crate) fn enrich_worked_rows(
+    worked: &mut SourceRead,
+    name_to_token: &HashMap<String, String>,
+) -> Vec<String> {
+    let Some(rows) = worked.payload.as_mut().and_then(Value::as_array_mut) else {
+        return Vec::new();
+    };
+    let mut fresh: Vec<String> = Vec::new();
+    for row in rows {
+        let names: Vec<&str> = row
+            .get("workers")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(|label| label.split_whitespace().next().unwrap_or(""))
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut row_tokens: Vec<String> = Vec::new();
+        let mut unmapped = false;
+        for name in &names {
+            match name_to_token.get(*name) {
+                Some(token) => {
+                    if !fresh.contains(token) {
+                        fresh.push(token.clone());
+                    }
+                    if !row_tokens.contains(token) {
+                        row_tokens.push(token.clone());
+                    }
+                }
+                None => unmapped = true,
+            }
+        }
+        row["tokens"] = json!(row_tokens);
+        if unmapped {
+            row["unmapped"] = json!(true);
+        }
+    }
+    fresh
 }
 
 /// The needs verb's default sources (needs.default_sources): project + global
@@ -1024,6 +1123,75 @@ mod tests {
     }
 
     #[test]
+    fn the_default_pr_read_depth_is_fifty() {
+        // The listing must read past a 21-open-PR fleet with headroom. The
+        // default opts and the termination reader spell the constant, never a
+        // literal 20 that re-shrinks under fleet growth.
+        assert_eq!(DEFAULT_MAX_PR_READS, 50);
+        assert_eq!(BoardOpts::default().max_pr_reads, DEFAULT_MAX_PR_READS);
+    }
+
+    #[test]
+    fn the_driver_cap_spends_the_probe_on_pr_bound_rows_first() {
+        // 25 live node-stamped rows whose 26th names a PR-bound non-terminal
+        // node: the sort rides that row into the probed head, whatever its
+        // registry order was.
+        let entries = vec![
+            json!({"id": "x-tail-pr", "status": "in_review", "pr_number": 1}),
+            json!({"id": "x-plain", "status": "in_progress"}),
+        ];
+        let mut rows: Vec<Value> = (0..MAX_DRIVER_ROWS + 1)
+            .map(|i| {
+                json!({"name": format!("w{i:02}"), "node": format!("x-n{i:02}"), "token": format!("t{i:02}")})
+            })
+            .collect();
+        rows.push(json!({"name": "w-pr", "node": "x-tail-pr", "token": "t-pr"}));
+        sort_driver_rows_pr_first(&mut rows, Some(&entries));
+
+        let probed: HashSet<String> = rows
+            .iter()
+            .take(MAX_DRIVER_ROWS)
+            .filter_map(|r| r.get("token").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(probed.contains("t-pr"));
+        // The PR row rode first, ahead of every plain row.
+        assert_eq!(s_str(&rows[0], "node"), Some("x-tail-pr"));
+    }
+
+    #[test]
+    fn the_driver_cap_keeps_its_tail_visible_and_unmeasured() {
+        // 25 plain rows, no PR binding: the 25th keeps its payload row (a
+        // candidate the probe never measured), loses only its probe token, and
+        // its node reads unmeasured - never none.
+        let rows: Vec<Value> = (0..MAX_DRIVER_ROWS + 1)
+            .map(|i| {
+                json!({"name": format!("w{i:02}"), "node": format!("x-n{i:02}"), "token": format!("t{i:02}")})
+            })
+            .collect();
+        let mut sorted = rows.clone();
+        sort_driver_rows_pr_first(&mut sorted, None);
+        assert_eq!(sorted, rows, "no PR rows: registry order stands");
+
+        let tail_token = "t24";
+        let probed: HashSet<String> = sorted
+            .iter()
+            .take(MAX_DRIVER_ROWS)
+            .filter_map(|r| r.get("token").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(!probed.contains(tail_token));
+        assert!(
+            sorted.iter().any(|r| s_str(r, "node") == Some("x-n24")),
+            "the tail row stays in the payload"
+        );
+        let verdict = super::classify::roster_verdict(
+            "x-n24",
+            &SourceRead::ok(Value::Array(sorted)),
+            &HashMap::new(),
+        );
+        assert_eq!(verdict, Some("unmeasured"));
+    }
+
+    #[test]
     fn worked_source_extracts_node_ids() {
         let read = SourceRead::ok(json!([{
             "id": "x-live",
@@ -1055,6 +1223,33 @@ mod tests {
         assert_eq!(queue["status"], "unreadable");
         assert!(queue["rows"].as_array().unwrap().is_empty());
         assert_eq!(queue["error"], "roster timeout");
+    }
+
+    #[test]
+    fn undriven_pr_names_a_p2_pr_node_at_any_priority() {
+        // A PR is finished work at any band: the p2 in_review node bound to an
+        // open PR, holding no claim, unlisted by the worked feed and unnamed by
+        // the roster, belongs in undriven_pr with its pr_number.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.pr_nodes = ok_read(json!([{
+            "id": "x-pr2",
+            "priority": "p2",
+            "status": "in_review",
+            "title": "p2 work",
+            "pr_number": 1895,
+        }]));
+        let board = build_board(&inputs);
+        let queue = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|queue| queue["name"] == "undriven_pr")
+            .unwrap();
+        assert_eq!(queue["status"], "ok");
+        let rows = queue["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "x-pr2");
+        assert_eq!(rows[0]["pr_number"], 1895);
     }
 
     #[test]
@@ -1914,10 +2109,16 @@ mod tests {
             registry.entries.push(exited_row);
         })
         .unwrap();
-        let read = read_driver_rows();
+        let (read, name_to_token) = read_driver_rows();
         std::env::remove_var("FNO_AGENTS_HOME");
         assert!(read.is_ok(), "{read:?}");
         let rows = read.payload.unwrap().as_array().unwrap().clone();
+        // The name map covers every registry entry, whatever its status: the
+        // exited row names a transcript that can still answer for its node.
+        assert_eq!(
+            name_to_token.get("t-done-worker").map(String::as_str),
+            Some("uuid-done")
+        );
         let nodes: Vec<&str> = rows
             .iter()
             .filter_map(|r| r.get("node").and_then(Value::as_str))

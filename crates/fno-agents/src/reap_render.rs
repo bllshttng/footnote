@@ -314,7 +314,8 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     }
     for (id, node) in &summary.kept_planning_unclosed {
         out.push_str(&format!(
-            "  kept {id} (planning assignment never closed by this session: {node})\n"
+            "  kept {id} (planning assignment not finished by this session: {node}){}\n",
+            hold_line(summary, id)
         ));
     }
     for (id, age_s) in &summary.kept_active {
@@ -1036,5 +1037,38 @@ mod tests {
         assert_eq!(row["id"], "bp-ebd2-verb-law");
         assert_eq!(row["held_s"], 7 * 3600);
         assert_eq!(row["nodes_done"], true);
+    }
+
+    /// d-81c6da7e AC4-HP: a held planner's line names the node, carries the
+    /// hold suffix, and once escalated names the release verb.
+    #[test]
+    fn a_held_planner_line_names_the_node_age_and_release() {
+        let mut s = summary(&[]);
+        s.kept_planning_unclosed
+            .push(("bp-x-861c".to_string(), "x-861c".to_string()));
+        s.holds.push(crate::gc_sweep::Hold {
+            id: "bp-x-861c".to_string(),
+            reason: "planning assignment not finished by this session",
+            detail: "x-861c ready: no close and no plan written by this session".to_string(),
+            age_s: Some(5401),
+            age_basis: "row created",
+            escalated: true,
+        });
+        s.hold_escalate_after_s = Some(5400);
+        let text = render_reap(&s, false, true);
+        let line = text
+            .lines()
+            .find(|l| l.contains("bp-x-861c"))
+            .expect("the planner line renders");
+        assert!(
+            line.contains("planning assignment not finished by this session: x-861c"),
+            "{line}"
+        );
+        assert!(line.contains("[held "), "{line}");
+        assert!(line.contains("row created]"), "{line}");
+        assert!(
+            line.contains("fno agents reap --release bp-x-861c"),
+            "{line}"
+        );
     }
 }
