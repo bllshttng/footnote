@@ -2687,6 +2687,32 @@ fn status_payload_publishes_the_rust_owned_arms_attention() {
 // x-1961: `resume` inside the client runtime must not panic
 // -----------------------------------------------------------------------
 
+/// Saves three process-global env vars and restores them on Drop, so a
+/// panic inside the test body (the pre-fix red this test guards) cannot
+/// leak the mutated environment to tests running after it.
+struct ResumeEnvGuard {
+    home: Option<std::ffi::OsString>,
+    codex_home: Option<std::ffi::OsString>,
+    path: Option<std::ffi::OsString>,
+}
+
+impl Drop for ResumeEnvGuard {
+    fn drop(&mut self) {
+        match &self.home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        match &self.codex_home {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        match &self.path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+}
+
 /// main block_ons `run`, and a codex thread row's wake builds its own
 /// runtime and block_ons again (`resume_wake.rs`). Drive the verb through
 /// the same entry main uses, inside a tokio runtime: it must refuse 16
@@ -2728,11 +2754,13 @@ fn resume_through_run_inside_a_runtime_refuses_16_without_panicking() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let saved_home = std::env::var_os("FNO_AGENTS_HOME");
-    let saved_codex = std::env::var_os("CODEX_HOME");
-    let saved_path = std::env::var_os("PATH");
+    let _restore = ResumeEnvGuard {
+        home: std::env::var_os("FNO_AGENTS_HOME"),
+        codex_home: std::env::var_os("CODEX_HOME"),
+        path: std::env::var_os("PATH"),
+    };
     let mut stub_path = std::ffi::OsString::from(&bin);
-    if let Some(previous) = &saved_path {
+    if let Some(previous) = std::env::var_os("PATH") {
         stub_path.push(":");
         stub_path.push(previous);
     }
@@ -2745,17 +2773,5 @@ fn resume_through_run_inside_a_runtime_refuses_16_without_panicking() {
         .build()
         .unwrap()
         .block_on(run(vec!["resume".into(), "w1".into()]));
-    match &saved_home {
-        Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
-        None => std::env::remove_var("FNO_AGENTS_HOME"),
-    }
-    match &saved_codex {
-        Some(v) => std::env::set_var("CODEX_HOME", v),
-        None => std::env::remove_var("CODEX_HOME"),
-    }
-    match &saved_path {
-        Some(v) => std::env::set_var("PATH", v),
-        None => std::env::remove_var("PATH"),
-    }
     assert_eq!(code, 16);
 }
