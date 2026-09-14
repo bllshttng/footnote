@@ -52,6 +52,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # Read the flat `config.toml` (x-8526 stage 3): the interactive server reads
 # `config.mux.*` directly (digest_overlay Pattern B) instead of shelling `fno`.
 toml = "0.8"
+# Native mux argv parsing (x-861c): one typed declaration per flag, so the
+# flag registry is structural rather than a hand-copied convention.
+clap = { version = "4", features = ["derive"] }
 # Popup chrome measures and paints in terminal columns (x-1b68): a fullwidth
 # glyph is one char and two cells. Already resolved transitively via
 # alacritty_terminal, so this adds no new build artifact.

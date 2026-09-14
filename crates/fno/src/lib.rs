@@ -13,6 +13,7 @@ pub mod backlog_view;
 pub mod board_reader;
 pub mod bootstrap;
 pub mod chrome;
+pub mod cli_args;
 pub mod client;
 pub mod clipboard;
 pub mod connections_view;
