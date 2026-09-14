@@ -124,6 +124,25 @@ pub(crate) fn stopgate_drain_timeout() -> std::time::Duration {
     })
 }
 
+/// What remains of this fire's aggregate budget at the moment of the call,
+/// in ms: the spend side of the drain instrumentation, captured when the
+/// drain starts. 0 when no fire is stamped, which only non-stop-gate
+/// callers see.
+pub(crate) fn stopgate_fire_remaining_ms() -> u64 {
+    STOPGATE_READS.with(|cell| match cell.borrow().1 {
+        Some(d) => d
+            .saturating_duration_since(std::time::Instant::now())
+            .as_millis() as u64,
+        None => 0,
+    })
+}
+
+/// The drain instrumentation's early-warning line: the reserved read spent
+/// at least half the reserve that was held back for it.
+pub(crate) fn drain_reserve_half_spent(elapsed: std::time::Duration) -> bool {
+    elapsed >= STOPGATE_DRAIN_RESERVE / 2
+}
+
 /// Clamp a configured read ceiling to this fire's budget deadline, so no
 /// single long read can spend more than the fire still has. The fidelity
 /// probe's separate 60s ceiling clamps through here - the budget is the
@@ -184,6 +203,28 @@ mod tests {
         });
         assert_eq!(stopgate_read_timeout(), STOPGATE_PRE_DRAIN_SPENT_BOUND);
         assert_eq!(stopgate_drain_timeout(), STOPGATE_BOUND_FLOOR);
+    }
+
+    #[test]
+    fn the_drain_row_fires_only_once_half_the_reserve_is_gone() {
+        let reserve_ms = STOPGATE_DRAIN_RESERVE.as_millis() as u64;
+        assert!(!drain_reserve_half_spent(std::time::Duration::from_millis(
+            reserve_ms / 2 - 1
+        )));
+        assert!(drain_reserve_half_spent(std::time::Duration::from_millis(
+            reserve_ms / 2
+        )));
+        assert!(drain_reserve_half_spent(STOPGATE_DRAIN_RESERVE));
+    }
+
+    #[test]
+    fn the_spend_side_reads_the_stamped_deadline() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        STOPGATE_READS.with(|cell| {
+            *cell.borrow_mut() = (0, Some(deadline), STOPGATE_DRAIN_RESERVE.as_millis() as u64);
+        });
+        let remaining = stopgate_fire_remaining_ms();
+        assert!(remaining <= 20_000 && remaining >= 19_000, "{remaining}");
     }
 
     #[test]

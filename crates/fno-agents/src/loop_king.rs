@@ -375,6 +375,40 @@ fn scope_undelivered_count_with_timeout(
         })
 }
 
+/// The stop-gate fire's drain read plus its reserve instrumentation: the
+/// reserve is silent by design, so when the drain spends at least half of it,
+/// emit the row that shows how close the fire's kill came - bound granted,
+/// elapsed measured, budget remaining when the drain started.
+pub(crate) fn scope_undelivered_with_reserve_watch(
+    fno_bin: &str,
+    cwd: &Path,
+    scope: &str,
+    session_id: &str,
+    emit: &impl Fn(&str, serde_json::Value),
+) -> (i64, Option<ScopeDrainError>) {
+    let bound = crate::loopcheck::stopgate_drain_timeout();
+    let remaining_budget_ms = crate::loopcheck::stopgate_fire_remaining_ms();
+    let started = std::time::Instant::now();
+    let result = scope_undelivered_count(fno_bin, cwd, scope);
+    let elapsed = started.elapsed();
+    if crate::loopcheck::drain_reserve_half_spent(elapsed) {
+        emit(
+            "king_drain_reserve",
+            crate::king_termination::drain_reserve_body(
+                session_id,
+                scope,
+                bound.as_millis() as u64,
+                elapsed.as_millis() as u64,
+                remaining_budget_ms,
+            ),
+        );
+    }
+    match result {
+        Ok(n) => (n, None),
+        Err(e) => (i64::MAX, Some(e)),
+    }
+}
+
 /// The per-invocation uniqueness carrier of a king-walk identity: a
 /// nanosecond clock truncated to 48 bits (sortable, wraps ~3.25 days) plus a
 /// 32-bit random suffix (the "never repeats" half). macOS reports
