@@ -1,11 +1,11 @@
 //! One PR listing, binding classification, mergeable filter (pr/_status).
-use super::budget::run_json;
+use super::budget::{fno_py_cmd, run_json, run_with_timeout};
 use super::queues::NODE_ID_BODY;
 use super::{s_i64, s_str, SourceRead, LEGACY_DEFER_PREFIX, TERMINAL_RUNGS};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
 pub(crate) const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = "fno/review-coverage-unavailable";
@@ -210,6 +210,80 @@ pub(crate) fn read_prs(
         }));
     }
     (SourceRead::ok(Value::Array(ready)), pr_nodes, warnings)
+}
+
+/// One candidate's merge-gate verdict: the payload `fno do pr status` prints
+/// as JSON, read even on a non-zero exit (that exit code is the CI verdict,
+/// so a PR that went red between the listing and the gate still answers with
+/// its full row instead of reading as a dead child).
+fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, String> {
+    let mut cmd = fno_py_cmd();
+    cmd.extend([
+        "do".to_string(),
+        "pr".to_string(),
+        "status".to_string(),
+        number.to_string(),
+    ]);
+    match run_with_timeout(&cmd, cwd, timeout) {
+        Err(f) => Err(f.message().to_string()),
+        Ok(stdout) => serde_json::from_slice::<Value>(&stdout)
+            .map_err(|e| format!("unparseable status payload: {e}")),
+    }
+}
+
+/// Ask the merge gate about every candidate the listing called green
+/// (x-b9e1: the queue's only evidence was that the PR is open; a live review
+/// hold or an uncovered head made it unfusable and nothing said so). One
+/// subprocess per candidate under ONE budgeted slice; a PR whose gate call
+/// fails or whose slice runs out is simply absent from the answer, and its
+/// warning names it - build renders an absent verdict as not-actionable,
+/// never as mergeable.
+pub(crate) fn read_pr_gates(
+    cwd: &Path,
+    numbers: &[i64],
+    slice: Option<Duration>,
+) -> (SourceRead, Vec<String>) {
+    let Some(slice) = slice else {
+        return (
+            SourceRead::err("merge gate not read: board budget exhausted before the source"),
+            Vec::new(),
+        );
+    };
+    let start = Instant::now();
+    let mut rows: Vec<Value> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for n in numbers {
+        let left = slice.saturating_sub(start.elapsed());
+        if left.is_zero() {
+            skipped.push(n.to_string());
+            continue;
+        }
+        match read_pr_gate(cwd, *n, left) {
+            Ok(payload) => match payload.get("ready").and_then(Value::as_bool) {
+                Some(ready) => rows.push(json!({
+                    "number": n,
+                    "ready": ready,
+                    "ready_blockers": payload
+                        .get("ready_blockers")
+                        .cloned()
+                        .unwrap_or(Value::Array(Vec::new())),
+                })),
+                None => warnings.push(format!(
+                    "merge gate answered no verdict for PR {n}: {}",
+                    s_str(&payload, "reason").unwrap_or("no ready field")
+                )),
+            },
+            Err(e) => warnings.push(format!("merge gate unreadable for PR {n}: {e}")),
+        }
+    }
+    if !skipped.is_empty() {
+        warnings.push(format!(
+            "merge gate read stopped at its slice; PR(s) {} unanswered",
+            skipped.join(", ")
+        ));
+    }
+    (SourceRead::ok(Value::Array(rows)), warnings)
 }
 
 /// A PR URL reduced to its comparable form: whitespace trimmed, query and
