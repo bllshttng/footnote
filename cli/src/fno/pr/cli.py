@@ -761,16 +761,21 @@ def hold(
     pr-watch. A ruled merge condition is `hold set`; the worker proves the
     condition and lifts it with `hold release --evidence`.
     """
-    from fno.pr._hold import HoldWriteError, hold_release, hold_set
+    from fno.pr._hold import HoldWriteError, hold_write
 
+    if action not in ("set", "release"):
+        typer.echo(f"unknown hold action: {action} (set|release)", err=True)
+        raise typer.Exit(code=2)
     try:
-        if action == "set":
-            receipt = hold_set(node, reason, release_when, set_by, review_on=review_on)
-        elif action == "release":
-            receipt = hold_release(node, evidence)
-        else:
-            typer.echo(f"unknown hold action: {action} (set|release)", err=True)
-            raise typer.Exit(code=2)
+        receipt = hold_write(
+            action,
+            node,
+            reason=reason,
+            release_when=release_when,
+            set_by=set_by,
+            review_on=review_on,
+            evidence=evidence,
+        )
     except HoldWriteError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=exc.exit_code)
