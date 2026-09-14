@@ -10156,13 +10156,19 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // GitHub reword cannot misread a stored refusal.
                 let secondary =
                     refusal_is_secondary(&failed_stderr, quota.as_ref(), is_graphql_read);
-                if secondary {
-                    // The ledger is the fleet's refusal memory now (the
-                    // journal scan that read the row below is gone), so a
-                    // refusal the GATE itself observes must open the same
-                    // backoff a Python REST read opens - or every later fire
-                    // re-probes and re-attempts the refused read. A no-op
-                    // while a backoff is already live.
+                // The ledger is the fleet's refusal memory now (the journal
+                // scan that read the row below is gone), so a refusal the
+                // GATE itself observes must open the same backoff a Python
+                // REST read opens - or every later fire re-probes and
+                // re-attempts the refused read. The gate obeys the same
+                // writer rule as _quota.record_refusal: only stderr carrying
+                // HTTP 403/429 records. The weaker wording-only verdict still
+                // fails this fire TOWARD backoff, but it never opens a
+                // machine-wide wall on evidence a mock, a proxy, or a reword
+                // could manufacture. A no-op while a backoff is already live.
+                if secondary
+                    && (failed_stderr.contains("HTTP 403") || failed_stderr.contains("HTTP 429"))
+                {
                     let _ =
                         crate::gh_budget::record_refusal(&budget_ledger, now.timestamp_millis());
                 }
