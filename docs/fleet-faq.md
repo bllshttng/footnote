@@ -78,6 +78,10 @@ When the old worker holds context you must otherwise pay to rebuild, prefer resu
 
 **Resume delivers the message, and the exit code says so.** Resume takes `-m/--message` to hand the session an instruction. On a claude session it wakes the worker headlessly, and exit 0 means the message is in the transcript. On a codex thread it hands the text to the codex daemon, and exit 0 means the daemon accepted it. Exit 16 means the message did not land, and the refusal names what is missing. A session already in a terminal state is never injected into. An explicit message on one refuses instead of reporting `Done -> Done` with the payload dropped.
 
+## A provider cap stranded my sessions: who brings them back?
+
+The provider-cap actor brings them back, not the watchdog and not a clock. Watch the lane with `fno agents provider-cap status`. When the quota lock's `rate_limited_until` passes and no member's 429 is newer, the lane reads `returning`. The actor resumes one canary and holds a survive window of `canary_survive_minutes` (default 15). Then it trickles the rest one per tick. In `ask` mode outside sleep hours it announces first and holds a 10-minute veto. `fno agents provider-cap decide <lane> --answer wait` holds them for as long as the answer stands. A canary that hits a new 429 reopens the lane for the leave ladder instead.
+
 ## My worker did real work and never reported it
 
 Read its transcript. A finished worker can print its report into its own transcript and stop without mailing anyone. Its roster row then reads `quiet` with `last_message_at` null, which looks identical to a worker that did nothing.

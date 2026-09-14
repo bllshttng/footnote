@@ -73,7 +73,12 @@ pub struct CapLane {
     pub lane: String,
     pub provider: String,
     pub account: String,
+    /// A quota lock still in the future; the leave ladder's trigger.
     pub reset_epoch: Option<i64>,
+    /// A quota lock at or before now. With no capped member newer than it,
+    /// the lane is `returning`: the strand is old, the return ladder owns it.
+    #[serde(default)]
+    pub reset_passed_epoch: Option<i64>,
     pub missing_reset_timezone: Vec<String>,
     pub state: String,
     pub members: Vec<CapMember>,
@@ -261,19 +266,9 @@ pub fn capped_tail(transcript: &Path) -> TailReading {
 // Reset + timezone audit
 // ---------------------------------------------------------------------------
 
-pub fn runtime_state_path() -> PathBuf {
-    if let Some(v) = std::env::var_os("FNO_RUNTIME_STATE_PATH") {
-        return PathBuf::from(v);
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".fno").join("runtime-state.json")
-}
-
 /// The quota lock the Python recovery sweep writes through record_quota_lock
 /// (the same file fallback_chain parses for rate_limited_until).
-fn health_reset_at(state_path: &std::path::Path, account: &str, now_f: f64) -> Option<i64> {
+fn health_reset_at(state_path: &std::path::Path, account: &str) -> Option<i64> {
     let raw = std::fs::read_to_string(state_path).ok()?;
     let v: Value = serde_json::from_str(&raw).ok()?;
     let rlu = v
@@ -281,7 +276,53 @@ fn health_reset_at(state_path: &std::path::Path, account: &str, now_f: f64) -> O
         .get(account)?
         .get("rate_limited_until")?
         .as_f64()?;
-    (rlu > now_f).then_some(rlu as i64)
+    Some(rlu as i64)
+}
+
+/// RFC3339 string to epoch seconds; None when unparseable.
+fn ts_epoch(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
+/// Pure core of the runtime-state resolution so tests never race process env.
+fn runtime_state_path_from(
+    env_path: Option<&std::ffi::OsStr>,
+    state_dir: Option<PathBuf>,
+    home: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    if let Some(v) = env_path {
+        return PathBuf::from(v);
+    }
+    if let Some(dir) = state_dir {
+        if dir.is_absolute() {
+            return dir.join("provider-runtime-state.json");
+        }
+    }
+    PathBuf::from(home.unwrap_or_else(|| std::ffi::OsStr::new(".")))
+        .join(".fno")
+        .join("provider-runtime-state.json")
+}
+
+/// Where the quota lock lives. Ports Python's `paths.runtime_state_json()`
+/// (paths.py:1108): `FNO_RUNTIME_STATE_PATH` when set; else the configured
+/// `state_dir` when its RAW value is absolute (a relative one falls back to
+/// `$HOME/.fno` in Python, never the cwd); else `$HOME/.fno`. Before x-6412
+/// this defaulted to `runtime-state.json`, a file nobody writes, so every
+/// reset read as unknown.
+pub fn runtime_state_path(cwd: &Path) -> PathBuf {
+    let raw = crate::agents_config::config_lookup(cwd, &["state_dir"])
+        .and_then(|v| v.as_str().map(str::to_string));
+    let dir = raw.map(|raw| match raw.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest)),
+        None => Some(PathBuf::from(&raw)),
+    });
+    runtime_state_path_from(
+        std::env::var_os("FNO_RUNTIME_STATE_PATH").as_deref(),
+        dir.flatten().filter(|d| d.is_absolute()),
+        std::env::var_os("HOME").as_deref(),
+    )
 }
 
 fn account_reset_timezones(candidates: &[PathBuf]) -> BTreeMap<String, String> {
@@ -340,7 +381,7 @@ pub fn default_scan(home: &AgentsHome, cwd: &Path) -> CapScan {
     CapScan {
         registry: home.registry_json(),
         projects_dir: crate::claude_drive::claude_projects_dir(),
-        runtime_state: runtime_state_path(),
+        runtime_state: runtime_state_path(cwd),
         settings_candidates: settings_candidates(cwd),
         compaction_home: home.root().to_path_buf(),
     }
@@ -422,9 +463,29 @@ pub fn snapshot_with(
     }
     let mut out: Vec<CapLane> = Vec::new();
     for ((provider, account), members) in lanes {
-        let reset = health_reset_at(&scan.runtime_state, &account, now_f);
-        let capped_n = members.iter().filter(|m| m.capped).count();
-        let state = if capped_n >= cfg.quorum as usize || (capped_n >= 1 && reset.is_some()) {
+        let reset_raw = health_reset_at(&scan.runtime_state, &account);
+        let reset_epoch = reset_raw.filter(|r| *r as f64 > now_f);
+        let reset_passed_epoch = reset_raw.filter(|r| *r as f64 <= now_f);
+        let capped: Vec<&CapMember> = members.iter().filter(|m| m.capped).collect();
+        let capped_n = capped.len();
+        // A capped member whose 429 is newer than the passed reset is a NEW
+        // strand, not a returning one; `newest_assistant` is RFC3339.
+        let new_strand_since = |r: i64| {
+            capped.iter().any(|m| {
+                m.newest_assistant
+                    .as_deref()
+                    .and_then(ts_epoch)
+                    .map(|t| t > r)
+                    == Some(true)
+            })
+        };
+        let state = if reset_epoch.is_none()
+            && reset_passed_epoch.is_some()
+            && capped_n >= 1
+            && !new_strand_since(reset_passed_epoch.unwrap())
+        {
+            "returning"
+        } else if capped_n >= cfg.quorum as usize || (capped_n >= 1 && reset_epoch.is_some()) {
             "open"
         } else {
             "closed"
@@ -438,7 +499,8 @@ pub fn snapshot_with(
             lane: format!("{provider}:{account}"),
             provider,
             account,
-            reset_epoch: reset,
+            reset_epoch,
+            reset_passed_epoch,
             missing_reset_timezone: missing,
             state: state.to_string(),
             members,
@@ -760,9 +822,446 @@ pub fn journal(home: &AgentsHome, lane: &str, epoch: i64, step: &Value) {
 }
 
 // ---------------------------------------------------------------------------
+// Returning (x-6412): one canary, a survive window, then a trickle.
+// ---------------------------------------------------------------------------
+
+/// The operator's veto window after the return announcement (a constant; no
+/// config key was asked for).
+pub const RETURN_VETO_S: i64 = 600;
+
+/// The canary/return state for one lane, keyed by the reset it belongs to.
+pub fn return_state_path(home: &AgentsHome, lane: &str) -> PathBuf {
+    lanes_dir(home).join(format!("return-{}.json", lane_file_token(lane)))
+}
+
+fn read_return_state(home: &AgentsHome, lane: &str) -> Option<Value> {
+    let raw = std::fs::read_to_string(return_state_path(home, lane)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_return_state(home: &AgentsHome, lane: &str, state: &Value) {
+    if let Some(dir) = return_state_path(home, lane).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(return_state_path(home, lane), state.to_string());
+}
+
+/// Members the leave ladder already moved: any `spawn-confirmed` step naming
+/// them in any journal for this lane. Matched by name, because a respawn can
+/// change the row's session id.
+fn moved_members(home: &AgentsHome, lane: &str) -> Vec<String> {
+    let token = lane_file_token(lane);
+    let prefix = format!("{token}-");
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(lanes_dir(home)) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !(name.starts_with(&prefix) && name.ends_with(".jsonl")) {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(e.path()) else {
+            continue;
+        };
+        for line in body.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if v.get("step").and_then(Value::as_str) == Some("spawn-confirmed") {
+                if let Some(m) = v.get("member").and_then(Value::as_str) {
+                    out.push(m.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The return candidates this tick: capped, not held, and not already moved
+/// by the leave ladder. Sorted by name; the first is the canary.
+fn return_candidates(home: &AgentsHome, lane: &CapLane) -> Vec<CapMember> {
+    let moved = moved_members(home, &lane.lane);
+    let mut out: Vec<CapMember> = lane
+        .members
+        .iter()
+        .filter(|m| m.capped && m.held.is_none() && !moved.contains(&m.name))
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Leaving: execution (x-7e05 wave 3). Deps are injected so the ladder runs
 // against fakes in tests and shells out to fno in the armed daemon path.
 // ---------------------------------------------------------------------------
+
+/// The one question-close shape: one `operator_question_closed` row, then
+/// drop the marker so a later strand can ask fresh. Every closer uses this.
+pub fn close_operator_question(
+    home: &AgentsHome,
+    lane: &str,
+    answer: &str,
+    closed_by: &str,
+    now_epoch: i64,
+) {
+    append_questions_row(
+        &questions_path(home),
+        &json!({
+            "ts": epoch_to_rfc3339(now_epoch),
+            "type": "operator_question_closed",
+            "source": "provider-cap",
+            "data": {
+                "question_id": format!("provider-cap:{lane}"),
+                "answer": answer,
+                "closed_by": closed_by,
+            },
+        }),
+    );
+    let _ = std::fs::remove_file(question_path(home, lane));
+}
+
+/// The leave question and any recorded decision answered the reset that
+/// passed, so the return ladder retires both.
+fn close_leave_question(home: &AgentsHome, lane: &CapLane, now_epoch: i64) {
+    if question_path(home, &lane.lane).exists() {
+        close_operator_question(
+            home,
+            &lane.lane,
+            "superseded-by-reset",
+            "return ladder",
+            now_epoch,
+        );
+    }
+    let _ = std::fs::remove_file(
+        lanes_dir(home).join(format!("decision-{}.json", lane_file_token(&lane.lane))),
+    );
+}
+
+/// An open lane whose return file still reads `pending` means the canary hit
+/// a new 429: journal the reopened verdict and flip the file, then the leave
+/// ladder owns the lane again. Returns true when a verdict was flipped.
+pub fn mark_reopened_if_pending(home: &AgentsHome, lane: &str, now_epoch: i64) -> bool {
+    let Some(state) = read_return_state(home, lane) else {
+        return false;
+    };
+    if state.get("verdict").and_then(Value::as_str) != Some("pending") {
+        return false;
+    }
+    journal(
+        home,
+        lane,
+        now_epoch,
+        &json!({"step": "canary-verdict", "verdict": "reopened"}),
+    );
+    let mut flipped = state;
+    flipped["verdict"] = json!("reopened");
+    write_return_state(home, lane, &flipped);
+    true
+}
+
+/// The wave-4 return ladder for one `returning` lane. State lives in
+/// `return-<lane>.json`, keyed by the reset it is for; a file for a different
+/// epoch is replaced. Every step journals; one the code cannot prove records
+/// `unknown` (trap 5). Order: grace, canary, survive window, announce +
+/// veto, then one trickle resume per tick.
+pub fn run_return_lane(
+    home: &AgentsHome,
+    lane: &CapLane,
+    cfg: &ProviderCapConfig,
+    now_epoch: i64,
+    deps: &LeaveDeps,
+) -> String {
+    let Some(epoch) = lane
+        .reset_passed_epoch
+        .filter(|_| lane.state == "returning")
+    else {
+        return "wait: not-returning".into();
+    };
+    // Step 1: grace. A lock stamped just before expiry is never trusted hot.
+    if now_epoch < epoch + cfg.reset_grace_seconds as i64 {
+        journal(
+            home,
+            &lane.lane,
+            now_epoch,
+            &json!({"step": "return-wait", "reason": "grace"}),
+        );
+        return "wait: grace".into();
+    }
+    let state = read_return_state(home, &lane.lane)
+        .filter(|s| s.get("epoch").and_then(Value::as_i64) == Some(epoch));
+    if state.is_none() {
+        // Step 2: fresh epoch. Retire the leave question and decision: they
+        // answered the reset that passed.
+        close_leave_question(home, lane, now_epoch);
+        let mut candidates = return_candidates(home, lane);
+        if candidates.is_empty() {
+            journal(
+                home,
+                &lane.lane,
+                now_epoch,
+                &json!({"step": "return", "outcome": "nothing-stranded"}),
+            );
+            return "nothing-stranded".into();
+        }
+        let canary = candidates.remove(0);
+        match (deps.resume)(&canary) {
+            Ok(()) => {
+                journal(
+                    home,
+                    &lane.lane,
+                    now_epoch,
+                    &json!({"step": "canary-resumed", "member": canary.name}),
+                );
+                write_return_state(
+                    home,
+                    &lane.lane,
+                    &json!({
+                        "epoch": epoch,
+                        "canary": canary.name,
+                        "resumed_at": now_epoch,
+                        "verdict": "pending",
+                        "resumed": [canary.name],
+                    }),
+                );
+                "canary-resumed".into()
+            }
+            Err(reason) => {
+                write_return_state(
+                    home,
+                    &lane.lane,
+                    &json!({
+                        "epoch": epoch,
+                        "canary": canary.name,
+                        "resumed_at": now_epoch,
+                        "verdict": "unknown",
+                        "reason": format!("resume-failed: {reason}"),
+                    }),
+                );
+                crate::operator_notice::notify_operator(
+                    "provider cap: canary resume failed",
+                    &format!(
+                        "lane {}: canary {} could not be resumed ({}). Run fno agents provider-cap status.",
+                        lane.lane, canary.name, reason
+                    ),
+                    Some("fno agents provider-cap status"),
+                );
+                journal(
+                    home,
+                    &lane.lane,
+                    now_epoch,
+                    &json!({"step": "unknown", "member": canary.name,
+                            "reason": format!("resume-failed: {reason}")}),
+                );
+                "wait: canary-unknown".into()
+            }
+        }
+    } else {
+        let state = state.unwrap();
+        let verdict = state.get("verdict").and_then(Value::as_str).unwrap_or("");
+        match verdict {
+            "pending" => return_tick_pending(home, lane, cfg, now_epoch, deps, state),
+            "survived" => return_tick_survived(home, lane, cfg, now_epoch, deps, state),
+            "unknown" => "wait: canary-unknown".into(),
+            "reopened" => "wait: canary-reopened".into(),
+            _ => "wait: return-state-unreadable".into(),
+        }
+    }
+}
+
+/// Steps 3-4: the survive window, then the verdict at its end, read from the
+/// canary member in THIS tick's lane (matched by name).
+fn return_tick_pending(
+    home: &AgentsHome,
+    lane: &CapLane,
+    cfg: &ProviderCapConfig,
+    now_epoch: i64,
+    deps: &LeaveDeps,
+    mut state: Value,
+) -> String {
+    let resumed_at = state.get("resumed_at").and_then(Value::as_i64).unwrap_or(0);
+    let survive_s = (cfg.canary_survive_minutes as i64) * 60;
+    // Step 3: still inside the survive window.
+    if now_epoch < resumed_at + survive_s {
+        journal(
+            home,
+            &lane.lane,
+            now_epoch,
+            &json!({"step": "return-wait", "reason": "survive-window"}),
+        );
+        return "wait: survive-window".into();
+    }
+    // Step 4: window end. Survived = newest assistant entry after the
+    // resume, and not a new 429.
+    let canary_name = state
+        .get("canary")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let member = lane.members.iter().find(|m| m.name == canary_name);
+    let (survived, reason) = match member {
+        None => (false, "canary-unreadable"),
+        Some(m) if m.cap_unknown.is_some() => (false, "canary-unreadable"),
+        Some(m) => match m.newest_assistant.as_deref().and_then(ts_epoch) {
+            None => (false, "canary-unreadable"),
+            Some(t) if t <= resumed_at => (false, "no-turn-since-resume"),
+            Some(_) if m.capped => (false, "canary-renewed-429"),
+            Some(_) => (true, ""),
+        },
+    };
+    if survived {
+        journal(
+            home,
+            &lane.lane,
+            now_epoch,
+            &json!({"step": "canary-verdict", "verdict": "survived"}),
+        );
+        state["verdict"] = json!("survived");
+        write_return_state(home, &lane.lane, &state);
+        return_tick_survived(home, lane, cfg, now_epoch, deps, state)
+    } else {
+        journal(
+            home,
+            &lane.lane,
+            now_epoch,
+            &json!({"step": "canary-verdict", "verdict": "unknown", "reason": reason}),
+        );
+        state["verdict"] = json!("unknown");
+        state["reason"] = json!(reason);
+        write_return_state(home, &lane.lane, &state);
+        crate::operator_notice::notify_operator(
+            "provider cap: canary unreadable",
+            &format!(
+                "lane {}: canary {} reads {} after the survive window. Run fno agents provider-cap status.",
+                lane.lane, canary_name, reason
+            ),
+            Some("fno agents provider-cap status"),
+        );
+        "wait: canary-unknown".into()
+    }
+}
+
+/// Steps 6-8: announcement with a 10-minute veto, then one trickle resume
+/// per tick. In `auto` or sleep hours the announce is skipped.
+fn return_tick_survived(
+    home: &AgentsHome,
+    lane: &CapLane,
+    cfg: &ProviderCapConfig,
+    now_epoch: i64,
+    deps: &LeaveDeps,
+    mut state: Value,
+) -> String {
+    let resumed: Vec<String> = state
+        .get("resumed")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let candidates = return_candidates(home, lane);
+    let remaining: Vec<&CapMember> = candidates
+        .iter()
+        .filter(|c| !resumed.contains(&c.name))
+        .collect();
+    // Step 6: announce once in ask mode outside sleep hours.
+    if state.get("announced_at").is_none() && cfg.mode != "auto" && !in_sleep_window(cfg, now_epoch)
+    {
+        let n = remaining.len();
+        let veto_at = now_epoch + RETURN_VETO_S;
+        let hhmm = chrono::DateTime::from_timestamp(veto_at, 0)
+            .unwrap_or_default()
+            .format("%H:%MZ")
+            .to_string();
+        let body = format!(
+            "{} is back. {} sessions resume one per tick after {}. To hold them, run: fno agents provider-cap decide {} --answer wait",
+            lane.lane, n, hhmm, lane.lane
+        );
+        match (deps.announce)(&body) {
+            Ok(()) => {
+                state["announced_at"] = json!(now_epoch);
+                state["veto_until"] = json!(veto_at);
+                write_return_state(home, &lane.lane, &state);
+                journal(
+                    home,
+                    &lane.lane,
+                    now_epoch,
+                    &json!({"step": "announced", "veto_until": veto_at}),
+                );
+            }
+            Err(reason) => {
+                journal(
+                    home,
+                    &lane.lane,
+                    now_epoch,
+                    &json!({"step": "unknown",
+                            "reason": format!("announce-failed: {reason}")}),
+                );
+                return "wait: announce-failed".into();
+            }
+        }
+    }
+    // Step 7: veto window, then an operator `wait` holds the trickle.
+    if let Some(veto_until) = state.get("veto_until").and_then(Value::as_i64) {
+        if now_epoch < veto_until {
+            journal(
+                home,
+                &lane.lane,
+                now_epoch,
+                &json!({"step": "return-wait", "reason": "veto-window"}),
+            );
+            return "wait: veto-window".into();
+        }
+        if read_decision(home, &lane.lane) == Some(OperatorAnswer::Wait) {
+            journal(
+                home,
+                &lane.lane,
+                now_epoch,
+                &json!({"step": "return-wait", "reason": "operator-wait"}),
+            );
+            return "wait: operator-wait".into();
+        }
+    }
+    // Step 8: one trickle resume per tick.
+    match remaining.into_iter().next() {
+        None => {
+            journal(
+                home,
+                &lane.lane,
+                now_epoch,
+                &json!({"step": "return", "outcome": "complete"}),
+            );
+            "complete".into()
+        }
+        Some(next) => match (deps.resume)(next) {
+            Ok(()) => {
+                let mut all = resumed.clone();
+                all.push(next.name.clone());
+                state["resumed"] = json!(all);
+                write_return_state(home, &lane.lane, &state);
+                journal(
+                    home,
+                    &lane.lane,
+                    now_epoch,
+                    &json!({"step": "trickle-resumed", "member": next.name}),
+                );
+                "trickle-resumed".into()
+            }
+            Err(reason) => {
+                journal(
+                    home,
+                    &lane.lane,
+                    now_epoch,
+                    &json!({"step": "unknown", "member": next.name,
+                            "reason": format!("resume-failed: {reason}")}),
+                );
+                "wait: trickle-unknown".into()
+            }
+        },
+    }
+}
 
 /// What the actor needs from the world to migrate one member.
 pub struct LeaveDeps {
@@ -775,6 +1274,12 @@ pub struct LeaveDeps {
     pub confirm: Box<dyn Fn(&str) -> bool>,
     /// Stop the old session and release its node claim.
     pub stop: Box<dyn Fn(&CapMember) -> Result<(), String>>,
+    /// Bring one stranded member back through the harness's own resume
+    /// path (x-6ac3: exit 0 is the confirmed receipt). The canary and the
+    /// trickle both resume through this leg.
+    pub resume: Box<dyn Fn(&CapMember) -> Result<(), String>>,
+    /// Announce the return, with the veto instruction in the body.
+    pub announce: Box<dyn Fn(&str) -> Result<(), String>>,
 }
 
 /// Run the leave ladder for one open lane and journal every step.
@@ -1061,6 +1566,7 @@ fn write_handoff_doc(
 mod tests {
     use super::*;
     use crate::agents_config::provider_cap_config;
+    use crate::provider_cap_verbs::run_armed_with;
 
     const FOUR29_LINE: &str = r#"{"parentUuid":"p1","isSidechain":false,"type":"assistant","timestamp":"2026-09-11T06:22:32.000Z","isApiErrorMessage":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-09-11 14:37:39][20260911143739fc56663065714c5e]"}]}}"#;
     const OK_LINE: &str = r#"{"type":"assistant","timestamp":"2026-09-13T10:00:00.000Z","message":{"role":"assistant","model":"glm-5.3-flash","content":[{"type":"text","text":"Running the tests now."}]}}"#;
@@ -1325,6 +1831,20 @@ mod tests {
                     Ok(())
                 }
             }),
+            resume: Box::new({
+                let calls = calls.clone();
+                move |m: &CapMember| {
+                    calls.borrow_mut().push(format!("resume:{}", m.name));
+                    Ok(())
+                }
+            }),
+            announce: Box::new({
+                let calls = calls.clone();
+                move |body: &str| {
+                    calls.borrow_mut().push(format!("announce:{}", body));
+                    Ok(())
+                }
+            }),
         }
     }
 
@@ -1334,6 +1854,7 @@ mod tests {
             provider: "zai".into(),
             account: "zai-main".into(),
             reset_epoch: reset,
+            reset_passed_epoch: None,
             missing_reset_timezone: vec![],
             state: "open".into(),
             members: vec![CapMember {
@@ -1499,6 +2020,439 @@ mod tests {
         assert!(
             confirmed_pos < stopped_pos,
             "spawn-confirmed before stopped"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 4 (x-6412): the reset reads the file Python writes, and a passed
+    // reset survives as `returning`.
+    // -----------------------------------------------------------------------
+
+    fn four29_line(ts: &str) -> String {
+        FOUR29_LINE.replace("2026-09-11T06:22:32.000Z", ts)
+    }
+
+    #[test]
+    fn ac4_path_default_scan_reads_the_file_python_writes() {
+        let root = std::env::temp_dir().join(format!("pc4p-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home_dir = root.join("home");
+        // Python's fallback path: $HOME/.fno/provider-runtime-state.json.
+        let state_path = home_dir.join(".fno").join("provider-runtime-state.json");
+        let projects = root.join("projects").join("-repo");
+        let registry = format!(
+            "[{}]",
+            [
+                four29_row(
+                    "glm-5.3-flash[1m]",
+                    "44444444-4444-4444-4444-444444444444",
+                    Some("zai-main")
+                ),
+                four29_row(
+                    "glm-5.3-flash[1m]",
+                    "22222222-2222-2222-2222-222222222222",
+                    Some("zai-main")
+                ),
+            ]
+            .join(",")
+        );
+        write(
+            &home_dir.join("registry.json"),
+            format!(r#"{{"schema_version":25,"agents":{registry}}}"#).as_str(),
+        );
+        for sid in [
+            "44444444-4444-4444-4444-444444444444",
+            "22222222-2222-2222-2222-222222222222",
+        ] {
+            write(
+                &projects.join(format!("{sid}.jsonl")),
+                &format!("{OK_LINE}\n{}\n", four29_line("2026-09-11T06:22:32.000Z")),
+            );
+        }
+        write(
+            &state_path,
+            r#"{"provider_health":{"zai-main":{"rate_limited_until":9999999999.0}}}"#,
+        );
+        // The pure resolution: env unset, the configured state_dir default
+        // ($HOME/.fno), HOME=$root/home -> the file Python writes.
+        let resolved = runtime_state_path_from(
+            None,
+            Some(home_dir.join(".fno")),
+            Some(std::ffi::OsStr::new(home_dir.to_str().unwrap())),
+        );
+        assert_eq!(resolved, state_path);
+        let snap = snapshot_with(
+            &scan(
+                home_dir.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                state_path,
+                home_dir,
+            ),
+            1_000_000_000,
+            &cfg(2),
+        )
+        .unwrap();
+        let lane = snap.lanes.iter().find(|l| l.provider == "zai").unwrap();
+        assert_eq!(lane.state, "open");
+        assert_eq!(lane.reset_epoch, Some(9_999_999_999));
+        assert_eq!(lane.reset_passed_epoch, None);
+    }
+
+    #[test]
+    fn ac4_passed_old_429s_read_returning_new_strand_reads_open() {
+        let root = std::env::temp_dir().join(format!("pc4r-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home_dir = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let state_path = root.join("provider-runtime-state.json");
+        let now = now_epoch_secs();
+        let passed_reset = now - 600;
+        // Two stranded members whose 429s are OLDER than the passed reset.
+        let registry = format!(
+            "[{},{}]",
+            four29_row(
+                "glm-5.3-flash[1m]",
+                "44444444-4444-4444-4444-444444444444",
+                Some("zai-main")
+            ),
+            four29_row(
+                "glm-5.3-flash[1m]",
+                "22222222-2222-2222-2222-222222222222",
+                Some("zai-main")
+            ),
+        );
+        write(
+            &home_dir.join("registry.json"),
+            format!(r#"{{"schema_version":25,"agents":{registry}}}"#).as_str(),
+        );
+        write(
+            &projects.join("44444444-4444-4444-4444-444444444444.jsonl"),
+            &format!("{OK_LINE}\n{}\n", four29_line("2026-09-11T06:22:32.000Z")),
+        );
+        write(
+            &projects.join("22222222-2222-2222-2222-222222222222.jsonl"),
+            &format!("{OK_LINE}\n{}\n", four29_line("2026-09-11T06:22:32.000Z")),
+        );
+        write(
+            &state_path,
+            format!(
+                r#"{{"provider_health":{{"zai-main":{{"rate_limited_until":{passed_reset}.0}}}}}}"#
+            )
+            .as_str(),
+        );
+        let snap = snapshot_with(
+            &scan(
+                home_dir.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                state_path.clone(),
+                home_dir.clone(),
+            ),
+            now,
+            &cfg(2),
+        )
+        .unwrap();
+        let lane = snap.lanes.iter().find(|l| l.provider == "zai").unwrap();
+        assert_eq!(lane.state, "returning");
+        assert_eq!(lane.reset_epoch, None);
+        assert_eq!(lane.reset_passed_epoch, Some(passed_reset));
+
+        // One member's 429 newer than the record: a NEW strand, so the lane
+        // falls back to the open/closed rule. Two capped members meet quorum.
+        let newer = four29_line(&epoch_to_rfc3339(now + 60));
+        write(
+            &projects.join("22222222-2222-2222-2222-222222222222.jsonl"),
+            &format!("{OK_LINE}\n{newer}\n"),
+        );
+        let snap = snapshot_with(
+            &scan(
+                home_dir.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                state_path.clone(),
+                home_dir.clone(),
+            ),
+            now,
+            &cfg(2),
+        )
+        .unwrap();
+        let lane = snap.lanes.iter().find(|l| l.provider == "zai").unwrap();
+        assert_eq!(lane.state, "open");
+        assert_eq!(lane.reset_epoch, None);
+    }
+    // -----------------------------------------------------------------------
+    // Wave 4 return ladder (x-6412): fake deps, real state files.
+    // -----------------------------------------------------------------------
+
+    fn member_fix(name: &str, ts: Option<i64>, capped: bool) -> CapMember {
+        CapMember {
+            name: name.into(),
+            session_id: None,
+            harness: "claude".into(),
+            provider: "zai".into(),
+            account: "zai-main".into(),
+            node: None,
+            cwd: None,
+            capped,
+            cap_unknown: None,
+            newest_assistant: ts.map(|t| epoch_to_rfc3339(t)),
+            held: None,
+            excerpt: None,
+        }
+    }
+
+    fn returning_lane_fixture(members: Vec<CapMember>, passed: i64) -> CapLane {
+        CapLane {
+            lane: "zai:zai-main".into(),
+            provider: "zai".into(),
+            account: "zai-main".into(),
+            reset_epoch: None,
+            reset_passed_epoch: Some(passed),
+            missing_reset_timezone: vec![],
+            state: "returning".into(),
+            members,
+        }
+    }
+
+    fn read_return_file(home: &AgentsHome) -> Value {
+        let raw =
+            std::fs::read_to_string(return_state_path(home, "zai:zai-main")).unwrap_or_default();
+        serde_json::from_str(&raw).unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn ac4_hp_canary_survives_then_trickles_one_per_tick() {
+        let home =
+            AgentsHome::at(std::env::temp_dir().join(format!("pc4h-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(home.root());
+        let base = 1_000_000_000i64;
+        let members: Vec<CapMember> = (1..=5)
+            .map(|i| member_fix(&format!("w-{i}"), Some(base - 3600), true))
+            .collect();
+        let lane = returning_lane_fixture(members, base);
+        let cfg = ProviderCapConfig {
+            mode: "auto".into(),
+            ..Default::default()
+        };
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let deps = rec_deps(calls.clone(), true);
+        // Tick 1: grace elapsed, canary resumes.
+        let out = run_return_lane(&home, &lane, &cfg, base + 121, &deps);
+        assert_eq!(out, "canary-resumed");
+        // Tick 2: inside the survive window nothing moves.
+        let out = run_return_lane(&home, &lane, &cfg, base + 500, &deps);
+        assert_eq!(out, "wait: survive-window");
+        // Tick 3: window end; the canary turned a non-capped assistant entry
+        // after the resume, so it survived, and auto mode trickles w-2.
+        let mut fresh = lane.clone();
+        fresh.members[0] = member_fix("w-1", Some(base + 200), false);
+        let out = run_return_lane(&home, &fresh, &cfg, base + 1021, &deps);
+        assert_eq!(out, "trickle-resumed");
+        let calls_vec = calls.borrow();
+        let resumes: Vec<&String> = calls_vec
+            .iter()
+            .filter(|c| c.starts_with("resume:"))
+            .collect();
+        assert_eq!(resumes.len(), 2, "canary + first trickle: {calls_vec:?}");
+        assert_eq!(resumes[0], "resume:w-1");
+        assert_eq!(resumes[1], "resume:w-2");
+        drop(calls_vec);
+        // Ticks 4-7: one per tick, then complete.
+        for i in 3..=5 {
+            let out = run_return_lane(&home, &lane, &cfg, base + 1021 + i, &deps);
+            assert_eq!(out, "trickle-resumed", "tick for w-{i}");
+        }
+        let out = run_return_lane(&home, &lane, &cfg, base + 1030, &deps);
+        assert_eq!(out, "complete");
+        let j = read_journal(&home);
+        assert!(j
+            .iter()
+            .any(|l| l.contains("\"verdict\": \"survived\"")
+                || l.contains("\"verdict\":\"survived\"")));
+        assert!(j
+            .iter()
+            .any(|l| l.contains("return") && l.contains("complete")));
+        let state = read_return_file(&home);
+        assert_eq!(state["resumed"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn ac4_err_canary_429_reopens_the_lane_for_the_leave_ladder() {
+        let home =
+            AgentsHome::at(std::env::temp_dir().join(format!("pc4e-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(home.root());
+        let base = 1_000_000_000i64;
+        // The canary hit a new 429, so the lane reads open again (a future
+        // reset from the fresh quota lock) and the return file still reads
+        // pending.
+        let lane = CapLane {
+            lane: "zai:zai-main".into(),
+            provider: "zai".into(),
+            account: "zai-main".into(),
+            reset_epoch: Some(base + 3600),
+            reset_passed_epoch: None,
+            missing_reset_timezone: vec![],
+            state: "open".into(),
+            members: vec![
+                member_fix("w-1", Some(base - 3600), true),
+                member_fix("w-2", Some(base - 3600), true),
+            ],
+        };
+        std::fs::create_dir_all(lanes_dir(&home)).unwrap();
+        std::fs::write(
+            return_state_path(&home, &lane.lane),
+            json!({
+                "epoch": base,
+                "canary": "w-1",
+                "resumed_at": base - 100,
+                "verdict": "pending",
+                "resumed": ["w-1"],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let snap = CapSnapshot {
+            lanes: vec![lane],
+            measured_at: epoch_to_rfc3339(base),
+            measured_at_epoch: base,
+        };
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let deps = rec_deps(calls.clone(), true);
+        let cfg = ProviderCapConfig::default();
+        let out = run_armed_with(&home, &scan_fixture(), &snap, &cfg, base, &deps);
+        let _ = out;
+        let calls_vec = calls.borrow();
+        assert!(
+            calls_vec.iter().all(|c| !c.starts_with("resume:")),
+            "no member resumes through a reopened lane: {calls_vec:?}"
+        );
+        drop(calls_vec);
+        let j = read_journal(&home);
+        assert!(
+            j.iter().any(|l| l.contains("reopened")),
+            "canary-verdict reopened journaled: {j:?}"
+        );
+        assert!(
+            question_path(&home, "zai:zai-main").exists(),
+            "leave ladder re-asked for the new strand"
+        );
+    }
+
+    #[test]
+    fn ac4_unk_unreadable_canary_blocks_the_trickle_for_the_epoch() {
+        let home =
+            AgentsHome::at(std::env::temp_dir().join(format!("pc4u-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(home.root());
+        let base = 1_000_000_000i64;
+        let mut lane = returning_lane_fixture(
+            vec![
+                member_fix("w-1", Some(base - 3600), true),
+                member_fix("w-2", Some(base - 3600), true),
+            ],
+            base,
+        );
+        let cfg = ProviderCapConfig::default();
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let deps = rec_deps(calls.clone(), true);
+        std::env::set_var("FNO_BIN", "/usr/bin/true");
+        let out = run_return_lane(&home, &lane, &cfg, base + 121, &deps);
+        assert_eq!(out, "canary-resumed");
+        // At window end the canary reads cap_unknown: unknown verdict, and
+        // the trickle never starts for this epoch.
+        let canary_unknown = member_fix("w-1", Some(base + 200), false);
+        let mut canary_unknown = canary_unknown;
+        canary_unknown.cap_unknown = Some("transcript-not-found".into());
+        lane.members[0] = canary_unknown;
+        let out = run_return_lane(&home, &lane, &cfg, base + 1021, &deps);
+        assert_eq!(out, "wait: canary-unknown");
+        let state = read_return_file(&home);
+        assert_eq!(state["verdict"], "unknown");
+        std::env::remove_var("FNO_BIN");
+        let out = run_return_lane(&home, &lane, &cfg, base + 2000, &deps);
+        assert_eq!(out, "wait: canary-unknown");
+        let calls_vec = calls.borrow();
+        assert_eq!(
+            calls_vec
+                .iter()
+                .filter(|c| c.starts_with("resume:"))
+                .count(),
+            1,
+            "only the canary ever resumed: {calls_vec:?}"
+        );
+        assert!(calls_vec.iter().all(|c| !c.starts_with("announce:")));
+        drop(calls_vec);
+        let j = read_journal(&home);
+        assert_eq!(
+            j.iter()
+                .filter(|l| l.contains("canary-verdict") && l.contains("unknown"))
+                .count(),
+            1,
+            "exactly one unknown verdict row: {j:?}"
+        );
+    }
+
+    #[test]
+    fn ac4_veto_announce_once_then_the_veto_and_the_wait_hold() {
+        let home =
+            AgentsHome::at(std::env::temp_dir().join(format!("pc4v-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(home.root());
+        let base = 1_000_000_000i64;
+        let lane = returning_lane_fixture(
+            vec![
+                member_fix("w-1", Some(base - 3600), true),
+                member_fix("w-2", Some(base - 3600), true),
+            ],
+            base,
+        );
+        let cfg = ProviderCapConfig {
+            mode: "ask".into(),
+            ..Default::default()
+        };
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let deps = rec_deps(calls.clone(), true);
+        std::env::set_var("FNO_BIN", "/usr/bin/true");
+        let out = run_return_lane(&home, &lane, &cfg, base + 121, &deps);
+        assert_eq!(out, "canary-resumed");
+        let mut fresh = lane.clone();
+        fresh.members[0] = member_fix("w-1", Some(base + 200), false);
+        let out = run_return_lane(&home, &fresh, &cfg, base + 1021, &deps);
+        // Survived in ask mode outside sleep hours: announce once, then the
+        // veto window holds.
+        assert_eq!(out, "wait: veto-window");
+        let state = read_return_file(&home);
+        assert_eq!(state["veto_until"], base + 1621);
+        let out = run_return_lane(&home, &fresh, &cfg, base + 1200, &deps);
+        assert_eq!(out, "wait: veto-window");
+        std::env::remove_var("FNO_BIN");
+        // An operator wait after the announcement holds past the veto.
+        std::fs::create_dir_all(lanes_dir(&home)).unwrap();
+        std::fs::write(
+            lanes_dir(&home).join("decision-zai_zai-main.json"),
+            r#"{"answer":"wait"}"#,
+        )
+        .unwrap();
+        let out = run_return_lane(&home, &fresh, &cfg, base + 2000, &deps);
+        assert_eq!(out, "wait: operator-wait");
+        // Dropping the wait lets the trickle move exactly one per tick.
+        std::fs::remove_file(lanes_dir(&home).join("decision-zai_zai-main.json")).unwrap();
+        let out = run_return_lane(&home, &fresh, &cfg, base + 2001, &deps);
+        assert_eq!(out, "trickle-resumed");
+        let out = run_return_lane(&home, &fresh, &cfg, base + 2002, &deps);
+        assert_eq!(out, "complete");
+        let calls_vec = calls.borrow();
+        assert_eq!(
+            calls_vec
+                .iter()
+                .filter(|c| c.starts_with("announce:"))
+                .count(),
+            1,
+            "announce fired exactly once: {calls_vec:?}"
+        );
+        assert_eq!(
+            calls_vec
+                .iter()
+                .filter(|c| c.starts_with("resume:"))
+                .count(),
+            2,
+            "canary + one trickle: {calls_vec:?}"
         );
     }
 }

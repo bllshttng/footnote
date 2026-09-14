@@ -33,7 +33,8 @@ Order is precedence. The top row wins.
 | `stale` | a wake-state row past the wake ceiling | `<state> <n>h old, past the 12h wake ceiling, needs a human` |
 | `spent` | a wake-state row past the wake ceiling whose evidence says finished work: its node reads done/superseded/deferred, or its own tail reads done | `node <id> <status>; quiet <n>h past the 12h wake ceiling; finished row, nothing to triage` |
 | `leave (cap)` | state `blocked`, the transcript tail carries a 429 whose reset window has not opened; the row reads `cap: owned by provider-cap` | `429 resets <utc>, <n>m out; cap: owned by provider-cap` |
-| `wake` | any of `working`, `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
+| `leave (cap, passed)` | a wake-state row whose newest 429 window passed: the return is the provider-cap actor's canary, never a clock-only wake | `429 window passed; return owned by provider-cap` |
+| `wake` | any of `working`, `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and NO 429 in the tail at all | `<state> <n>m silent, no 429 in tail` |
 | `leave` | everything else, including every healthy injectable row | `state <s>, last turn <n>m ago, no lane applies` |
 | `polling_settled` | a leave row whose tail asserts a PR `MERGED` or `CLOSED` and then issues two or more further PR-status reads, with the live state read confirming the PR terminal now | `<n> PR-status reads of #<pr> after the tail read it <state>` |
 | `silence` | a registry row scoped to THIS project (`origin: spawn`, no crown, `project_root` under a report root), an open node, and a transcript quiet past `recovery.idle_threshold_seconds` (default 900s) | `open node <id>, transcript quiet <n>m` |
