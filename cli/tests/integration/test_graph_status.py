@@ -837,6 +837,32 @@ def test_wave_append_refuses_when_write_does_not_land(tmp_graph, monkeypatch):
     assert not (node.get("progress_notes") or [])
 
 
+def test_wave_append_readback_read_failure_names_uncertainty(tmp_graph, monkeypatch):
+    """x-6a2c follow-up: a read-back that cannot answer refuses with the
+    uncertainty named - never asserting the note is (or is not) on disk."""
+    import fno.graph.store as gs
+
+    add = _invoke("--json", "backlog", "add", "Target work")
+    target_id = json.loads(add.stdout)["id"]
+
+    def unreadable(path):
+        raise gs.GraphUnreadableError("store read failed")
+
+    # Both reads must fail: the by-id fast path answers first when it works.
+    monkeypatch.setattr(gs, "read_nodes_by_ids", lambda path, tokens: None)
+    monkeypatch.setattr(gs, "read_graph_strict", unreadable)
+
+    found, error = gs.append_wave_note(
+        tmp_graph, target_id,
+        {"ts": "T1", "kind": "wave", "title": "t", "details": "d",
+         "difficulty": "low", "source": "s", "text": "d"},
+    )
+    assert found is False
+    assert error is not None
+    assert "could not confirm" in error
+    assert "did not land" not in error
+
+
 def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph):
     """AC6-ERR: invalid wave targets fail before any note or node mutation."""
     target = _invoke("--json", "backlog", "add", "Done work")
