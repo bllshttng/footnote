@@ -1270,27 +1270,11 @@ pub(crate) fn open_pr_numbers(pages: &[Value]) -> Vec<String> {
 
 // ── the drive loop (--all --apply) ───────────────────────────────────────────
 
-/// Node ids a PR head ref names, as delimiter-bounded segments. Parity with
-/// `branch_node_ids` in `cli/src/fno/pr/closure.py` (`NODE_ID_BODY`), whose
-/// delimiter-bounded rule exists so fixed-width hex can never make `x-5b66`
-/// count inside `x-5b667`. The Rust regex crate has no lookahead, so the
-/// Python pattern's `(?=$|[/-])` becomes explicit boundary checks on the
-/// characters either side of each match.
-pub(crate) fn branch_node_ids(head_ref: &str) -> Vec<String> {
-    let re = Regex::new(r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}").expect("static regex");
-    let mut out: Vec<String> = Vec::new();
-    for m in re.find_iter(head_ref) {
-        let before = &head_ref[..m.start()];
-        let before_ok = before.is_empty() || before.ends_with('/') || before.ends_with('-');
-        let after = &head_ref[m.end()..];
-        let after_ok = after.is_empty() || after.starts_with('/') || after.starts_with('-');
-        let id = m.as_str().to_string();
-        if before_ok && after_ok && !out.contains(&id) {
-            out.push(id);
-        }
-    }
-    out
-}
+/// Node ids a PR head ref names, as delimiter-bounded segments. Re-exported
+/// from the shared `king_board::prs` predicate, so the heal drive loop, the
+/// board, and the merge owner all read one rule (parity with
+/// `cli/src/fno/pr/closure.py`).
+pub(crate) use crate::king_board::prs::branch_node_ids;
 
 /// Every worktree of this checkout's repo, as (branch, path) pairs parsed
 /// from `git worktree list --porcelain`. Detached worktrees carry no `branch`
@@ -2570,7 +2554,7 @@ exit 0
     }
 
     #[test]
-    fn branch_node_ids_match_the_closure_producers_delimiter_rule() {
+    fn head_ref_node_ids_follow_the_closure_producers_delimiter_rule() {
         // Parity cases from the Python half and the CI gate: a plain branch
         // names nothing, a node branch names its node, and a trailing segment
         // never re-glues into a second, bogus candidate.
