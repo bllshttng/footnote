@@ -1,14 +1,12 @@
-//! `court-fold`: the crown scope fold for `fno agents court --nodes` and the
-//! local board's court section (x-52d2).
+//! `court-fold`: the crown scope fold for `fno agents court --nodes` (x-52d2).
 //!
 //! Python passes the crowns `gather_court` already adjudicated; this verb
 //! reads the graph store (in-process, `backlog::api::rows`) and the claims
 //! dir directly, compiles
 //! each crown's scope with the same rules `king_board/scope.rs` applies, and
-//! returns the per-scope fold as JSON or as the board's HTML section. The
-//! worker column names live/suspect claim holders through the same native
-//! verdict machinery `claim sweep` uses, so the two surfaces cannot disagree
-//! about who holds a node.
+//! returns the per-scope fold as JSON. The worker column names live/suspect
+//! claim holders through the same native verdict machinery `claim sweep`
+//! uses, so the two surfaces cannot disagree about who holds a node.
 
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -340,102 +338,6 @@ fn fold_one(
     })
 }
 
-/// One crown row of the HTML section: the summary carries scope, level,
-/// holder and the agree marker; a disagreement gets the marker class and its
-/// reason inline; the body is the fold's counts line and active rows.
-fn crown_html(crown: &Value, fold: &Value) -> String {
-    let agree = crown.get("agree").and_then(|a| a.as_bool());
-    let marker = match agree {
-        Some(true) => "yes",
-        Some(false) => "no",
-        None => "?",
-    };
-    let disagree = agree == Some(false);
-    let cls = if disagree { " court-disagree" } else { "" };
-    let scope = s_str(crown, "scope").unwrap_or("");
-    let level = crown
-        .get("level")
-        .map(|l| match l {
-            Value::Null => "None".to_string(),
-            other => other.to_string(),
-        })
-        .unwrap_or_else(|| "None".into());
-    let holder = s_str(crown, "holder").unwrap_or("");
-    let mut out = format!("<details class=\"crown{cls}\"><summary>");
-    out.push_str(&esc(&format!(
-        "{scope} · L{level} · {holder} · agree {marker}"
-    )));
-    if disagree {
-        if let Some(reason) = s_str(crown, "reason") {
-            out.push_str(&esc(&format!(" - {reason}")));
-        }
-    }
-    out.push_str("</summary>");
-    if fold.get("status").and_then(|s| s.as_str()) == Some("unresolved") {
-        let reason = s_str(fold, "reason").unwrap_or("");
-        out.push_str(&format!(
-            "<div class=\"crown-body\"><span class=\"crown-note\">{}</span></div>",
-            esc(&format!("scope fold: unresolved - {reason}"))
-        ));
-        out.push_str("</details>");
-        return out;
-    }
-    let mut counts = String::new();
-    if let Some(map) = fold.get("counts").and_then(|c| c.as_object()) {
-        let parts: Vec<String> = map.iter().map(|(k, v)| format!("{k} {}", v)).collect();
-        counts = parts.join(", ");
-    }
-    let total = fold.get("total").and_then(|t| t.as_i64()).unwrap_or(0);
-    let omitted = fold.get("omitted").and_then(|o| o.as_i64()).unwrap_or(0);
-    out.push_str("<div class=\"crown-body\">");
-    out.push_str(&format!(
-        "<div class=\"crown-counts\">{} nodes: {} ({} not listed)</div>",
-        esc(&total.to_string()),
-        esc(&counts),
-        esc(&omitted.to_string())
-    ));
-    out.push_str(
-        "<table class=\"crown-nodes\"><thead><tr><th>node</th><th>status</th><th>worker</th>\
-         <th>claim</th><th>age</th><th>pr</th><th>sessions</th></tr></thead><tbody>",
-    );
-    if let Some(rows) = fold.get("nodes").and_then(|n| n.as_array()) {
-        for r in rows {
-            let pr = r
-                .get("pr_number")
-                .and_then(|p| p.as_i64())
-                .map(|n| format!("#{n}"))
-                .unwrap_or_default();
-            let sessions = r
-                .get("sessions")
-                .and_then(|s| s.as_array())
-                .map(|list| {
-                    list.iter()
-                        .filter_map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            let age = r
-                .get("age_hours")
-                .and_then(|a| a.as_f64())
-                .map(|h| format!("{h:.1}h"))
-                .unwrap_or_default();
-            out.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                esc(s_str(r, "id").unwrap_or("")),
-                esc(s_str(r, "status").unwrap_or("")),
-                esc(s_str(r, "worker").unwrap_or("-")),
-                esc(s_str(r, "claim_state").unwrap_or("-")),
-                esc(&age),
-                esc(&pr),
-                esc(&sessions),
-            ));
-        }
-    }
-    out.push_str("</tbody></table></div></details>");
-    out
-}
-
 /// What is stuck across every crown, and what could not be answered.
 ///
 /// The counts say how much. This says whether anything needs a hand, which is
@@ -602,32 +504,12 @@ fn stuck_line(stuck: &Value) -> String {
     parts.join(", ")
 }
 
-/// The board section: the styles ride with the markup so the fragment is
-/// self-contained and `_DASHBOARD_CSS` never needs to know the section
-/// exists.
-fn section_css() -> &'static str {
-    "<style>section.court{margin-top:18px;display:flex;flex-direction:column;gap:6px}\
-section.court h2{margin:0;font-size:13px;color:var(--ink-2);text-transform:uppercase;letter-spacing:.04em}\
-details.crown{border:1px solid var(--line);border-radius:8px;background:var(--surface)}\
-details.crown summary{cursor:pointer;padding:8px 11px;font-size:12.5px;font-family:\"IBM Plex Mono\",ui-monospace,monospace;color:var(--ink-2)}\
-details.crown summary::marker{color:var(--muted)}\
-details.crown.court-disagree{border-color:var(--blocked)}\
-details.crown.court-disagree summary{color:var(--blocked)}\
-.crown-body{padding:0 11px 10px}.crown-counts{font-size:11.5px;color:var(--muted);margin-bottom:6px}\
-.crown-note{font-size:11.5px;color:var(--blocked)}\
-table.crown-nodes{width:100%;border-collapse:collapse;font-size:11.5px}\
-table.crown-nodes th{text-align:left;color:var(--muted);font-weight:500;padding:3px 8px 3px 0;border-bottom:1px solid var(--line)}\
-table.crown-nodes td{padding:3px 8px 3px 0;border-bottom:1px solid var(--surface-2);vertical-align:top;font-family:\"IBM Plex Mono\",ui-monospace,monospace;word-break:break-all}</style>"
-}
-
-/// The whole read: fold every crown, then answer as JSON or as the board
-/// section. `format` selects the answer; the fold is identical either way.
+/// The whole read: fold every crown, then answer as JSON.
 pub fn court_fold(
     graph_path: &PathBuf,
     cwd: &PathBuf,
     claims_dir: Option<&PathBuf>,
     crowns: &[Value],
-    format: &str,
 ) -> Result<Value, String> {
     let entries: Vec<Value> =
         crate::backlog::api::rows(&crate::backlog::api::Store::new(graph_path))
@@ -685,27 +567,12 @@ pub fn court_fold(
         refolded.insert(scope.to_string(), fold);
     }
     let folds = refolded;
-    if format == "html-section" {
-        let mut html = String::from("<section class=\"court\">");
-        html.push_str(section_css());
-        html.push_str("<h2>Court</h2>");
-        for crown in crowns {
-            let Some(scope) = s_str(crown, "scope") else {
-                continue;
-            };
-            let empty = json!({"status": "unresolved", "reason": "the row carried no fold"});
-            let fold = folds.get(scope).unwrap_or(&empty);
-            html.push_str(&crown_html(crown, fold));
-        }
-        html.push_str("</section>");
-        return Ok(json!({"section": html}));
-    }
     let stuck = stuck_verdict(&folds);
     let line = stuck_line(&stuck);
     Ok(json!({"scope_nodes": folds, "stuck": stuck, "stuck_line": line}))
 }
 
-/// `fno-agents court-fold`: print the fold JSON or the board section, exit 0.
+/// `fno-agents court-fold`: print the fold JSON, exit 0.
 pub fn run_court_fold(args: &[String]) -> i32 {
     let mut graph: Option<PathBuf> = None;
     let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -749,7 +616,7 @@ pub fn run_court_fold(args: &[String]) -> i32 {
                 eprintln!("fno-agents court-fold: unknown flag {other}");
                 eprintln!(
                     "fno-agents court-fold: --graph PATH [--cwd PATH] [--claims-dir PATH] \
-                     --crowns-json JSON [--format json|html-section]"
+                     --crowns-json JSON [--format json]"
                 );
                 return 2;
             }
@@ -759,11 +626,11 @@ pub fn run_court_fold(args: &[String]) -> i32 {
         eprintln!("fno-agents court-fold: --graph is required");
         return 2;
     };
-    if format != "json" && format != "html-section" {
-        eprintln!("fno-agents court-fold: --format must be json or html-section");
+    if format != "json" {
+        eprintln!("fno-agents court-fold: --format must be json");
         return 2;
     }
-    match court_fold(&graph, &cwd, claims_dir.as_ref(), &crowns, &format) {
+    match court_fold(&graph, &cwd, claims_dir.as_ref(), &crowns) {
         Ok(json) => {
             println!("{json}");
             0
@@ -863,37 +730,6 @@ mod tests {
         assert_eq!(fold["status"], "ok");
         assert_eq!(fold["total"], 2);
         assert_eq!(fold["nodes"][0]["id"], "a-1");
-    }
-
-    #[test]
-    fn crown_html_matches_the_dashboard_contract() {
-        let workers = BTreeMap::new();
-        let fold = fold_one(
-            "e-1",
-            Some(2),
-            &entries(),
-            &no_projects(),
-            &workers,
-            true,
-            0,
-        );
-        let crown = json!({
-            "scope": "e-1", "level": 2, "holder": "king-a", "agree": true,
-            "reason": Value::Null
-        });
-        let html = crown_html(&crown, &fold);
-        assert!(html.starts_with("<details class=\"crown\"><summary>"));
-        assert!(html.contains("agree yes"));
-        assert!(html.contains("class=\"crown-counts\""));
-        assert!(html.contains("class=\"crown-nodes\""));
-
-        let bad = json!({
-            "scope": "e-1", "level": 2, "holder": "king-b", "agree": false,
-            "reason": "'e-1' status is 'done' (terminal)"
-        });
-        let html = crown_html(&bad, &fold);
-        assert!(html.contains("court-disagree"));
-        assert!(html.contains("&#x27;"));
     }
 
     /// One swept row per node id, shaped as `claim_sweep_payload_from_records`
@@ -1181,29 +1017,6 @@ mod tests {
         assert_ne!(line, "");
     }
 
-    #[test]
-    fn the_board_section_shows_the_claim_and_the_age() {
-        let workers = swept(&[("x-1", "live", "worker-a")]);
-        let fold = fold_one(
-            "e-1",
-            Some(2),
-            &entries(),
-            &no_projects(),
-            &workers,
-            true,
-            0,
-        );
-        let crown = json!({
-            "scope": "e-1", "level": 2, "holder": "king-a", "agree": true,
-            "reason": Value::Null
-        });
-        let html = crown_html(&crown, &fold);
-        assert!(html.contains("<th>claim</th>"));
-        assert!(html.contains("<th>age</th>"));
-        assert!(html.contains("worker-a"));
-        assert!(html.contains("<td>live</td>"));
-    }
-
     /// The verb's graph read asks the store (`backlog::api::rows`), so a
     /// seeded store folds the same way a hand-written file did.
     #[test]
@@ -1223,7 +1036,7 @@ mod tests {
         .unwrap();
         let cwd = dir.path().to_path_buf();
         let crowns = vec![json!({"scope": "e-1", "level": 2})];
-        let fold = court_fold(&graph, &cwd, None, &crowns, "json").unwrap();
+        let fold = court_fold(&graph, &cwd, None, &crowns).unwrap();
         let nodes = fold["scope_nodes"]["e-1"]["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[1]["id"], "x-1");
