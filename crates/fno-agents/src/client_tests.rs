@@ -2613,3 +2613,60 @@ fn a_codex_thread_add_dir_leads_the_state_dirs() {
     attach_codex_thread_state_dirs(&mut bare);
     assert!(bare.get("state_dirs").is_none(), "{bare}");
 }
+
+// -----------------------------------------------------------------------
+// x-6484: the status payload's canonical arms_attention selection
+// -----------------------------------------------------------------------
+
+fn attention_row(
+    arm: &str,
+    evidence: fno_agents::tick_ledger::ProducerEvidence,
+) -> fno_agents::tick_ledger::ArmStatus {
+    fno_agents::tick_ledger::ArmStatus {
+        arm: arm.to_string(),
+        scheduler: None,
+        last_ts: None,
+        age_s: None,
+        acted: None,
+        skip_reason: None,
+        detail: None,
+        interval_s: 300,
+        producer_evidence: evidence,
+        stale: false,
+        failing: false,
+        failing_for_s: None,
+        cause: None,
+        line: String::new(),
+    }
+}
+
+/// AC1/AC2/AC4/AC5 at the payload seam: `arms_attention` is selected by the
+/// one Rust predicate - an unobserved arm is in it, an observed fresh no-op
+/// is not, an observed stale or failed arm is.
+#[test]
+fn status_payload_publishes_the_rust_owned_arms_attention() {
+    let unobserved = attention_row("a_unobserved", fno_agents::tick_ledger::ProducerEvidence::Unobserved);
+    let mut fresh_no_op = attention_row("a_fresh_no_op", fno_agents::tick_ledger::ProducerEvidence::Observed);
+    fresh_no_op.acted = Some(0);
+    fresh_no_op.skip_reason = Some("no_work".to_string());
+    let mut stale = attention_row("a_stale", fno_agents::tick_ledger::ProducerEvidence::Observed);
+    stale.stale = true;
+    let mut failing = attention_row("a_failing", fno_agents::tick_ledger::ProducerEvidence::Observed);
+    failing.failing = true;
+    let rows = vec![unobserved, fresh_no_op, stale, failing];
+
+    let payload = degraded_status_payload(&rows);
+    assert_eq!(payload["schema_version"], 1);
+    assert!(payload["daemon"].is_null());
+    assert_eq!(payload["arms"].as_array().map(Vec::len), Some(4));
+    let attention: Vec<&str> = payload["arms_attention"]
+        .as_array()
+        .expect("arms_attention array")
+        .iter()
+        .filter_map(|r| r["arm"].as_str())
+        .collect();
+    assert!(attention.contains(&"a_unobserved"), "{attention:?}");
+    assert!(!attention.contains(&"a_fresh_no_op"), "{attention:?}");
+    assert!(attention.contains(&"a_stale"), "{attention:?}");
+    assert!(attention.contains(&"a_failing"), "{attention:?}");
+}
