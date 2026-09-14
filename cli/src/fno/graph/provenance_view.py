@@ -34,17 +34,9 @@ def observed_model_of(row: dict) -> Optional[str]:
 def lifecycle_roster(
     sessions: list, status_index: "dict[str, str] | None" = None
 ) -> "tuple[list[str], dict]":
-    """Per-phase lifecycle roster: start, end, duration per row, and an honest
-    node total. Returns ``(human_lines, summary_dict)``.
-
-    Honesty is the acceptance criterion: a phase with no row renders 'not
-    recorded'; a row with an end but no start renders 'end only'; neither
-    renders as a duration, and the total states how many of the lifecycle
-    phases contributed a duration rather than summing silently over gaps.
-    Start reads ``started_at`` (canonical) with ``claimed_at`` as the legacy
-    fallback. When ``status_index`` is a mapping, each row is annotated with
-    its registry status (``reaped`` when the machine holds no row) and the
-    observed model it recorded.
+    """Per-phase roster (start/end/duration, honest gaps) as human lines and a
+    summary dict. When ``status_index`` is a mapping, rows are annotated with
+    their registry status and observed model.
     """
     from datetime import datetime
 
