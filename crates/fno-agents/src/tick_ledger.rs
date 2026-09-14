@@ -467,6 +467,10 @@ pub struct TickTrace {
     pub end_age_s: Option<u64>,
     pub end_phase: Option<String>,
     pub end_outcome: Option<String>,
+    /// Set when a stale launchd tier's registered plist lives outside the
+    /// installer's LaunchAgents path - the 2026-09-08 shape where a pytest
+    /// tempdir registration displaced the real pr-watcher.
+    pub foreign_plist: Option<String>,
 }
 
 /// Fold the newest `pr_watch_tick_attempt` / `pr_watch_tick_end` records out
@@ -517,6 +521,64 @@ pub fn read_tick_trace(journals: &[PathBuf], now_unix: u64) -> TickTrace {
     trace
 }
 
+/// The registered plist path from `launchctl print` output, when it is not the
+/// one the installer writes. The first `path = ` line is the job's plist; the
+/// `stdout path =` / `stderr path =` lines name the job's own log files and do
+/// not match the prefix. `None` means healthy or unreadable - both leave the
+/// existing cause rules in charge.
+pub fn foreign_plist_path(print_stdout: &str, home: &Path) -> Option<String> {
+    let label = SCHED_LAUNCHD
+        .strip_prefix("launchd:")
+        .unwrap_or(SCHED_LAUNCHD);
+    let expected = home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist"));
+    print_stdout.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("path = ")
+            .map(|p| p.trim().to_string())
+            .filter(|p| Path::new(p) != expected)
+    })
+}
+
+/// [`read_tick_trace`] plus one live launchd probe: when any launchd-scheduled
+/// arm is stale, read the registered plist path so the cause can name a
+/// foreign registration instead of a bare tick_overdue. macOS only; bounded to
+/// 2s; every failure mode (nonzero exit, kill, absent HOME) leaves the trace
+/// untouched. A healthy tier runs no exec at all.
+pub fn read_tick_trace_live(journals: &[PathBuf], rows: &[ArmStatus], now_unix: u64) -> TickTrace {
+    let mut trace = read_tick_trace(journals, now_unix);
+    let stale_launchd = rows
+        .iter()
+        .any(|r| r.stale && r.scheduler.as_deref() == Some(SCHED_LAUNCHD));
+    if !stale_launchd || !cfg!(target_os = "macos") {
+        return trace;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return trace;
+    };
+    let label = SCHED_LAUNCHD
+        .strip_prefix("launchd:")
+        .unwrap_or(SCHED_LAUNCHD);
+    // SAFETY: getuid reads a per-process kernel value; it cannot fail or race.
+    let uid = unsafe { libc::getuid() };
+    let cmd = vec![
+        "launchctl".to_string(),
+        "print".to_string(),
+        format!("gui/{uid}/{label}"),
+    ];
+    if let Ok(stdout) = crate::king_board::budget::run_with_timeout(
+        &cmd,
+        Path::new("."),
+        std::time::Duration::from_secs(2),
+    ) {
+        let text = String::from_utf8_lossy(&stdout);
+        trace.foreign_plist = foreign_plist_path(&text, &home);
+    }
+    trace
+}
+
 /// The cause token + hint for a stale launchd arm while pr_watch_merge is
 /// itself stale. `tick_overdue` (x-e3cc) is a state, never a cause: the
 /// reader measured only that no completed tick stamp landed. The tick records
@@ -525,6 +587,20 @@ pub fn read_tick_trace(journals: &[PathBuf], now_unix: u64) -> TickTrace {
 /// newest end record names the phase. Genuine silence states itself as "no
 /// tick stamp".
 fn tick_overdue_cause(pm_last_ts: Option<&str>, trace: Option<&TickTrace>) -> (String, String) {
+    // The foreign registration is the most specific fact on the table: a
+    // launchd tier can be stale because the job's plist was displaced by a
+    // registration from somewhere the installer would never write (x-63aa),
+    // and no journal-side rule can see that. Name it before the tick-state
+    // rules so the readout points at the actual cause.
+    if let Some(p) = trace.and_then(|t| t.foreign_plist.as_deref()) {
+        return (
+            "launchd_foreign_plist".to_string(),
+            format!(
+                "sh.fno.pr-watcher is registered from {p}, not the installer's \
+                 LaunchAgents path; run fno do pr watch refresh"
+            ),
+        );
+    }
     let pm_ts = pm_last_ts.and_then(parse_rfc3339_unix);
     let tick_ts = trace.and_then(|t| {
         [t.attempt_ts_unix, t.end_ts_unix]
@@ -1878,8 +1954,127 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The measured 2026-09-11 outage: the pr-watcher job unloaded at
-    /// 10:41Z and at 10:59Z the four launchd arms read 1114s, 1084s, 1123s
+    #[test]
+    fn a_foreign_registration_names_the_path_and_the_refresh_hint() {
+        // The x-63aa fault shape: the registered plist lives under a pytest
+        // tempdir instead of the installer's LaunchAgents path. The cause must
+        // name the foreign path and the refresh command, not a bare
+        // tick_overdue that reads as "stale install".
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:30:00Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    3,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-04T09:33:20Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+        let trace = TickTrace {
+            foreign_plist: Some(
+                "/private/var/folders/ch/.../T/pytest-of-bb16/pytest-142/\
+                 test_ac3hp_install_writes_file0/LaunchAgents/sh.fno.pr-watcher.plist"
+                    .to_string(),
+            ),
+            ..TickTrace::default()
+        };
+
+        let mut rows = read_arms(&[journal], now);
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        for arm in ["king_wake", "pr_watch_merge"] {
+            let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert_eq!(
+                row.cause.as_deref(),
+                Some("launchd_foreign_plist"),
+                "{arm}: line {}",
+                row.line
+            );
+            assert!(
+                row.line.contains("pytest-142"),
+                "{arm} must name the foreign path, line: {}",
+                row.line
+            );
+            assert!(
+                row.line.contains("fno do pr watch refresh"),
+                "{arm} must name the remedy, line: {}",
+                row.line
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_healthy_registration_keeps_tick_overdue() {
+        // The control: when the registered path IS the installer's, the trace
+        // holds no foreign plist and the stale rows keep the existing
+        // tick_overdue cause; an empty print output reads the same.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:30:00Z",
+                "pr_watch_merge",
+                SCHED_LAUNCHD,
+                3,
+                json!(null),
+                600,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+        let home = std::env::temp_dir();
+        let expected = home
+            .join("Library")
+            .join("LaunchAgents")
+            .join("sh.fno.pr-watcher.plist");
+        let healthy = format!("\tpath = {}\n", expected.display());
+        assert_eq!(foreign_plist_path(&healthy, &home), None);
+        assert_eq!(foreign_plist_path("", &home), None);
+
+        let mut rows = read_arms(&[journal], now);
+        let trace = TickTrace::default();
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let pm = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
+        assert_eq!(pm.cause.as_deref(), Some("tick_overdue"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn foreign_plist_path_parses_launchctl_print_output() {
+        // stdout path / stderr path name the job's log files, not the plist;
+        // the first bare `path = ` line wins. Empty output reads healthy.
+        let home = std::env::temp_dir();
+        let foreign = "/private/var/folders/ch/T/pytest-of-bb16/pytest-142/\
+                       test_ac3hp_install_writes_file0/LaunchAgents/sh.fno.pr-watcher.plist";
+        let out = format!(
+            "\tfirst exit code = 78\n\tpid = 0\n\tstdout path = /tmp/x/y.out\n\
+             \tstderr path = /tmp/x/y.err\n\tpath = {foreign}\n\tstate = not running\n"
+        );
+        assert_eq!(foreign_plist_path(&out, &home), Some(foreign.to_string()));
+        // A healthy first line short-circuits: None even with later noise.
+        let healthy_first = format!(
+            "\tpath = {}\n\tstdout path = /tmp/x/y.out\n",
+            home.join("Library/LaunchAgents/sh.fno.pr-watcher.plist")
+                .display()
+        );
+        assert_eq!(foreign_plist_path(&healthy_first, &home), None);
+    }
+
+    /// The measured 2026-09-11 outage: the pr-watcher job unloaded at    /// 10:41Z and at 10:59Z the four launchd arms read 1114s, 1084s, 1123s
     /// and 1113s against intervals 900, 600, 600 and 300. Three of the four
     /// pass the per-arm rule; the cross-arm verdict must still red them all.
     #[test]
