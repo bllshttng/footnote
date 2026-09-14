@@ -1661,6 +1661,10 @@ console.log("evictedRowCount: 18 cases ok");
         )
         .await;
         assert_eq!(denied.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("PRIVATE-BACKLOG-MARKER"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
