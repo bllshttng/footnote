@@ -8,7 +8,7 @@
 //! surface (`--stream`, `--watch`, ...) lands with its verbs in later waves.
 
 use clap::Parser as _;
-use fno_agents::cli_args::{refusal_line, RestartArgs};
+use fno_agents::cli_args::{refusal_line, RestartArgs, SpawnAxes};
 use fno_agents::client::resolve_daemon_bin;
 use fno_agents::client::{
     call, call_if_running, check_daemon_drift, drift_from_status, restart_daemon, ClientError,
@@ -3531,10 +3531,22 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         normalized.push(tok.clone());
     }
 
+    // x-861c: on spawn the head's axis flags parse ONCE through the shared
+    // SpawnAxes schema (the same parser the spawn-overlay verb runs), and the
+    // axis tokens leave the loop's input below. The values seed the same
+    // params and fields the old axis arms fed, after the loop.
+    let axes = if verb == "spawn" {
+        let (axes, fence) = SpawnAxes::scan(&normalized)?;
+        normalized = SpawnAxes::strip_axes(&normalized, fence);
+        Some(axes)
+    } else {
+        None
+    };
     // x-6de8: three orthogonal axes. --harness/-H names the CLI binary,
     // --provider/-P the model VENDOR, --model the model at that vendor. The vendor
     // is held aside so a harness name typed there fails closed after the loop
     // (the historical confusion) rather than launching the wrong binary.
+    // (Non-spawn verbs still collect --harness/--provider through the loop.)
     let mut harness_val: Option<String> = None;
     let mut vendor_val: Option<String> = None;
     let mut it = normalized.into_iter().peekable();
@@ -3882,6 +3894,49 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
     }
     if let Some(v) = harness_val {
         params.insert("provider".into(), Value::String(v));
+    }
+    if let Some(axes) = &axes {
+        if let Some(v) = &axes.provider {
+            let v = v.trim().to_string();
+            if KNOWN_PROVIDERS.contains(&v.as_str()) || v == "agy" || v == "opencode" {
+                return Err(format!(
+                    "{v} is a harness, not a provider; use --harness {v}"
+                ));
+            }
+            return Err(format!(
+                "--provider {v} names a model vendor; routing is applied by the fno \
+                 CLI (`fno agents spawn ... --provider {v} --model <m>`), not by \
+                 fno-agents directly"
+            ));
+        }
+        if let Some(h) = &axes.harness {
+            params.insert("provider".into(), Value::String(h.clone()));
+        }
+        if let Some(m) = &axes.model {
+            params.insert("model".into(), Value::String(m.clone()));
+        }
+        if let Some(e) = &axes.effort {
+            params.insert("effort".into(), Value::String(e.clone()));
+        }
+        if let Some(a) = &axes.account {
+            params.insert("account".into(), Value::String(a.clone()));
+        }
+        if let Some(sx) = &axes.substrate {
+            // if/else, not a match: an inner `"word" =>` arm reads as a
+            // phantom verb to the Python parity parser's arm scan.
+            if sx == "pane" || sx == "thread" || sx == "headless" {
+                params.insert("substrate".into(), Value::String(sx.clone()));
+            } else if sx == "bg" {
+                eprintln!(
+                    "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
+                );
+                params.insert("substrate".into(), Value::String("thread".into()));
+            } else {
+                return Err(format!(
+                    "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {sx})"
+                ));
+            }
+        }
     }
 
     if let Some(av) = argv {

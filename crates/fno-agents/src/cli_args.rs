@@ -96,6 +96,126 @@ pub struct ReviewSummaryArgs {
     pub head: String,
 }
 
+/// The spawn head's axis flags, parsed once and consumed by both the client's
+/// spawn dispatch and the spawn-overlay inspection verb (x-861c): route,
+/// provider, harness, model, effort, account, substrate. Tokens before the
+/// provider argv fence that are not axis flags belong to the rest of the
+/// spawn grammar and are ignored here; tokens after the fence are opaque
+/// provider payload and never parsed.
+#[derive(Parser, Debug, Default, PartialEq, Eq)]
+#[command(
+    name = "fno-agents spawn axes",
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+pub struct SpawnAxes {
+    /// Vendor/model route (vendor/model); the vendor pin outranks --provider
+    #[arg(long)]
+    pub route: Option<String>,
+    /// Model vendor (routing is applied by the fno CLI seam)
+    #[arg(short = 'P', long)]
+    pub provider: Option<String>,
+    /// CLI binary axis
+    #[arg(short = 'H', long)]
+    pub harness: Option<String>,
+    /// Model name handed to the provider CLI's own --model
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+    /// Reasoning effort for the spawned worker
+    #[arg(long)]
+    pub effort: Option<String>,
+    /// Per-spawn account selection
+    #[arg(long)]
+    pub account: Option<String>,
+    /// Session substrate (pane | thread | headless; bg is a deprecated alias)
+    #[arg(long)]
+    pub substrate: Option<String>,
+}
+
+impl SpawnAxes {
+    /// The axis flag spellings this schema owns, short aliases included.
+    pub const AXIS_FLAGS: &'static [&'static str] = &[
+        "--route",
+        "--provider",
+        "-P",
+        "--harness",
+        "-H",
+        "--model",
+        "-m",
+        "--effort",
+        "--account",
+        "--substrate",
+    ];
+
+    /// Parse the axis flags out of a spawn argv, stopping at the provider
+    /// argv fence (`--argv` or bare `--`). Non-axis tokens belong to the rest
+    /// of the spawn grammar and are ignored here, but the axes themselves are
+    /// strict: a valueless axis flag is an error in the voice the old cursor
+    /// parser used, and a repeated axis flag is refused so the client and the
+    /// overlay can never read different values from the same argv.
+    pub fn scan(toks: &[String]) -> Result<(SpawnAxes, usize), String> {
+        let fence = toks.iter().position(|t| t == "--argv" || t == "--");
+        let head_len = fence.unwrap_or(toks.len());
+        let head = &toks[..head_len];
+        // Collect only the axis flag/value pairs, so the strict clap parse
+        // never sees the non-axis flags the rest of the grammar owns.
+        let mut pairs: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < head.len() {
+            if Self::AXIS_FLAGS.contains(&head[i].as_str()) {
+                if i + 1 >= head.len() || Self::looks_like_flag(&head[i + 1]) {
+                    return Err(format!("{} needs a value", head[i]));
+                }
+                pairs.push(head[i].clone());
+                pairs.push(head[i + 1].clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        let cmd = <Self as clap::CommandFactory>::command();
+        let matches = cmd
+            .try_get_matches_from(pairs)
+            .map_err(|e| refusal_line("fno-agents spawn", &e))?;
+        let axes = SpawnAxes {
+            route: matches.get_one::<String>("route").cloned(),
+            provider: matches.get_one::<String>("provider").cloned(),
+            harness: matches.get_one::<String>("harness").cloned(),
+            model: matches.get_one::<String>("model").cloned(),
+            effort: matches.get_one::<String>("effort").cloned(),
+            account: matches.get_one::<String>("account").cloned(),
+            substrate: matches.get_one::<String>("substrate").cloned(),
+        };
+        Ok((axes, head_len))
+    }
+
+    fn looks_like_flag(tok: &str) -> bool {
+        tok.starts_with('-') && tok != "-"
+    }
+
+    /// Drop the axis flag/value pairs from `toks`, keeping the fence and the
+    /// provider payload byte-exact. `scan` must have accepted the same argv
+    /// first: every surviving axis flag is paired with its value.
+    pub fn strip_axes(toks: &[String], fence: usize) -> Vec<String> {
+        let mut out = Vec::with_capacity(toks.len());
+        let mut i = 0;
+        while i < toks.len() {
+            if i >= fence {
+                out.extend_from_slice(&toks[i..]);
+                break;
+            }
+            if Self::AXIS_FLAGS.contains(&toks[i].as_str()) {
+                i += 2; // flag plus value; scan refused a missing value already
+                continue;
+            }
+            out.push(toks[i].clone());
+            i += 1;
+        }
+        out
+    }
+}
+
 /// One command-qualified refusal line for a parse failure. The caller prints
 /// it to stderr and exits 2; clap's own multi-line usage block never reaches
 /// the operator.
@@ -255,5 +375,72 @@ mod tests {
         let err = RestartArgs::try_parse_from(["--force", "--force"])
             .expect_err("duplicate scalar refuses");
         assert!(refusal_line("fno-agents restart", &err).contains("--force"));
+    }
+
+    #[test]
+    fn spawn_axes_parse_all_supported_spellings() {
+        let toks: Vec<String> = ["--provider", "zai", "--model=glm", "-m", "luna"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (axes, fence) = SpawnAxes::scan(&toks).expect("mixed spellings parse");
+        assert_eq!(axes.provider.as_deref(), Some("zai"));
+        assert_eq!(axes.model.as_deref(), Some("luna"));
+        assert_eq!(fence, toks.len());
+    }
+
+    #[test]
+    fn spawn_axes_fence_keeps_provider_payload_opaque() {
+        let toks: Vec<String> = [
+            "--model", "luna", "--argv", "--", "claude", "--model", "sonnet",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (axes, fence) = SpawnAxes::scan(&toks).expect("fenced argv parses");
+        assert_eq!(axes.model.as_deref(), Some("luna"));
+        assert_eq!(fence, 2);
+        // strip_axes keeps the fence and the payload byte-exact.
+        let stripped = SpawnAxes::strip_axes(&toks, fence);
+        assert_eq!(
+            stripped,
+            ["--argv", "--", "claude", "--model", "sonnet"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn spawn_axes_missing_value_refuses() {
+        for bad in [
+            vec!["--model"],
+            vec!["--model", "--force"],
+            vec!["-P", "--argv", "--", "claude"],
+        ] {
+            let toks: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
+            let err = SpawnAxes::scan(&toks).expect_err("missing value refuses");
+            assert!(err.ends_with("needs a value"), "{err}");
+        }
+    }
+
+    #[test]
+    fn spawn_axes_ignores_non_axis_tokens() {
+        let toks: Vec<String> = [
+            "--name",
+            "wk",
+            "--portal",
+            "1",
+            "--provider",
+            "zai",
+            "--cwd",
+            "/x",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (axes, _) = SpawnAxes::scan(&toks).expect("non-axis tokens are ignored");
+        assert_eq!(axes.provider.as_deref(), Some("zai"));
+        assert_eq!(axes.model, None);
     }
 }
