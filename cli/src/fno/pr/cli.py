@@ -745,6 +745,38 @@ def hold_check(
     typer.echo(f"PR {pr_number}: no plan dispatch hold")
 
 
+@pr_app.command("hold")
+def hold(
+    action: str = typer.Argument(..., help="set or release."),
+    node: str = typer.Argument(..., help="Backlog node id or slug."),
+    reason: str = typer.Option("", "--reason", help="set: the merge condition."),
+    release_when: str = typer.Option("", "--release-when", help="set: the proof that lifts it."),
+    set_by: str = typer.Option("", "--set-by", help="set: who ruled."),
+    review_on: str = typer.Option("", "--review-on", help="set: review date YYYY-MM-DD (default today+7)."),
+    evidence: str = typer.Option("", "--evidence", help="release: the proof the condition held."),
+) -> None:
+    """Set or release a node plan's dispatch_hold, the merge hold every merge path reads.
+
+    A note reaches the worker; only the hold reaches `fno do pr merge` and
+    pr-watch. A ruled merge condition is `hold set`; the worker proves the
+    condition and lifts it with `hold release --evidence`.
+    """
+    from fno.pr._hold import HoldWriteError, hold_release, hold_set
+
+    try:
+        if action == "set":
+            receipt = hold_set(node, reason, release_when, set_by, review_on=review_on)
+        elif action == "release":
+            receipt = hold_release(node, evidence)
+        else:
+            typer.echo(f"unknown hold action: {action} (set|release)", err=True)
+            raise typer.Exit(code=2)
+    except HoldWriteError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=exc.exit_code)
+    typer.echo(json.dumps(receipt))
+
+
 @pr_app.command(
     "evidence-check",
     help=(
