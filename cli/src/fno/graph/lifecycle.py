@@ -29,6 +29,113 @@ def _door(task_id: str, args: List[str], graph_path: Callable[[], Path]):
     return native_update(task_id, args, graph_path=graph_path())
 
 
+#: The legacy cmd_update field flags that cannot ride one call with the door
+#: flags: the two write paths validate differently, and a mixed call could not
+#: say which rules it asked for. (flag spelling, unset sentinel)
+_LEGACY_UPDATE_FLAGS: List[tuple[str, object]] = [
+    ("locked_by", None),
+    ("locked_by_harness", None),
+    ("locked_by_harness_session", None),
+    ("has_brief", None),
+    ("plan_path", None),
+    ("pr_number", None),
+    ("pr_url", None),
+    ("repo", None),
+    ("priority", None),
+    ("blocks_everything", False),
+    ("title", None),
+    ("details", None),
+    ("details_file", None),
+    ("domain", None),
+    ("size", None),
+    ("difficulty", None),
+    ("model", None),
+    ("_model_tier_tombstone", None),
+    ("batch", None),
+    ("orphan_ok", None),
+    ("dispatch_verb", None),
+    ("dispatch_brief", None),
+    ("type_", None),
+    ("public", None),
+    ("project", None),
+    ("cwd", None),
+    ("source_node", None),
+    ("related", None),
+    ("blocked_by", None),
+    ("add_blocker", None),
+    ("remove_blocker", None),
+    ("acknowledge_collisions", None),
+    ("parent", None),
+    ("completion_note", None),
+    ("add_pr", None),
+    ("add_pr_url", None),
+    ("add_pr_note", None),
+    ("remove_pr", None),
+    ("caused_by", None),
+    ("fixes_pr", None),
+    ("reverted", None),
+    ("tag", None),
+    ("untag", None),
+    ("force", False),
+]
+
+_FLAG_SPELLING = {
+    "locked_by": "--locked-by",
+    "locked_by_harness": "--locked-by-harness",
+    "locked_by_harness_session": "--locked-by-harness-session",
+    "has_brief": "--has-brief",
+    "type_": "--type",
+    "_model_tier_tombstone": "--model-tier",
+    "add_blocker": "--add-blocker",
+    "remove_blocker": "--remove-blocker",
+    "acknowledge_collisions": "--acknowledge-collisions",
+    "completion_note": "--completion-note",
+    "add_pr": "--add-pr",
+    "add_pr_url": "--add-pr-url",
+    "add_pr_note": "--add-pr-note",
+    "remove_pr": "--remove-pr",
+    "caused_by": "--caused-by",
+    "fixes_pr": "--fixes-pr",
+    "blocks_everything": "--blocks-everything",
+    "details_file": "--details-file",
+    "dispatch_verb": "--dispatch-verb",
+    "dispatch_brief": "--dispatch-brief",
+    "orphan_ok": "--orphan-ok",
+    "source_node": "--source-node",
+}
+
+
+def forward_update_door(
+    task_id: str, door_args: List[str], graph_path: Path, values: dict
+) -> None:
+    """`cmd_update`'s forwarding half (x-665f): relay the door flags to the
+    native backlog-update action, refusing a mixed call. `values` is the
+    caller's `locals()` - the legacy flags' parsed values, screened here
+    against :data:`_LEGACY_UPDATE_FLAGS` so the over-budget cli.py only
+    carries the four-line handoff."""
+    legacy_flags = [
+        _FLAG_SPELLING.get(param, f"--{param.replace('_', '-')}")
+        for param, unset in _LEGACY_UPDATE_FLAGS
+        if values.get(param, unset) is not unset
+    ]
+    if legacy_flags:
+        typer.echo(
+            "Error: --status/--leave/--set cannot be mixed with the legacy field flags "
+            f"({', '.join(sorted(legacy_flags))}). Run two calls: one through the door, "
+            "one with the legacy flags.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    exit_code, _ = _door_text(task_id, door_args, graph_path)
+    raise typer.Exit(code=exit_code)
+
+
+def _door_text(task_id: str, args: List[str], graph_path: Path):
+    from fno.graph.note_cli import native_update
+
+    return native_update(task_id, args, graph_path=graph_path, json_out=False)
+
+
 def register_lifecycle_commands(
     cli: typer.Typer,
     expand_valid_ids: Callable[..., List[str]],
