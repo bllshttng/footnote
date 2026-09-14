@@ -27,6 +27,7 @@ EOF
 cat > "$TMP/bin/sccache" <<'EOF'
 #!/usr/bin/env bash
 printf '%s|%s\n' "${SCCACHE_CACHE_SIZE:-unset}" "$*" >> "$SCCACHE_LOG"
+printf '%s|%s|%s\n' "${CARGO_BUILD_BUILD_DIR-unset}" "${CARGO_BUILD_TARGET_DIR-unset}" "${CARGO_TARGET_DIR-unset}" >> "${CARGO_PATH_LOG:-/dev/null}"
 exec "$@"
 EOF
 chmod +x "$TMP/compiler" "$TMP/bin/sccache"
@@ -41,6 +42,11 @@ if [[ -x "$WRAPPER" ]]; then
 
   COMPILER_LOG="$TMP/logs/compiler-override" SCCACHE_LOG="$TMP/logs/sccache-override" SCCACHE_CACHE_SIZE=3G PATH="$TMP/bin:/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name override
   if grep -q '^3G|' "$TMP/logs/sccache-override"; then pass "operator sccache cap is preserved"; else fail "sccache override" "3G receipt missing"; fi
+
+  COMPILER_LOG="$TMP/logs/compiler-paths" SCCACHE_LOG="$TMP/logs/sccache-paths" CARGO_PATH_LOG="$TMP/logs/cargo-paths" CARGO_BUILD_BUILD_DIR="$TMP/bd" CARGO_BUILD_TARGET_DIR="$TMP/td" CARGO_TARGET_DIR="$TMP/td2" PATH="$TMP/bin:/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name shared-key
+  if grep -q '^unset|unset|unset$' "$TMP/logs/cargo-paths" && grep -q -- '--crate-name shared-key' "$TMP/logs/compiler-paths"; then pass "sccache key drops per-run cargo path vars"; else fail "cargo path vars in key" "sccache saw a per-run path or lost argv"; fi
+
+  if COMPILER_LOG="$TMP/logs/compiler-direct-paths" CARGO_BUILD_BUILD_DIR="$TMP/bd" CARGO_BUILD_TARGET_DIR="$TMP/td" CARGO_TARGET_DIR="$TMP/td2" PATH="/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name direct-paths && grep -q '^unset|--crate-name direct-paths$' "$TMP/logs/compiler-direct-paths"; then pass "direct fallback unaffected by cargo path vars"; else fail "direct fallback" "receipt or exit missing with cargo path vars set"; fi
 fi
 
 echo "== positive cross-worktree build overlap =="
