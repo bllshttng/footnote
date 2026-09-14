@@ -684,6 +684,37 @@ pub fn stale_sweep(
     if now.saturating_sub(last) < STALE_SWEEP_INTERVAL_SECS {
         return 0;
     }
+    // x-39f4: the sweep's only child is `agents stale-escalate --json`, so an
+    // effective dispatch pause suspends the sweep without consuming its
+    // cadence: no closure call, no stamp write, and a positive skip row so
+    // intentional silence cannot read as a dead arm. The row is paced by a
+    // SIDECAR stamp at the sweep's own interval - the real stamp stays
+    // untouched, so a due sweep stays due - because the idle tick reaches
+    // this arm every ~5s and an unpaced row would grow events.jsonl by
+    // ~17k rows/day for the length of the incident. On clear the next due
+    // tick runs normally. Serve-only liveness is NOT behind this gate - its
+    // call site sits before this arm and stays eligible while dispatch polls
+    // are held (AC3-LIVENESS).
+    let pause = crate::loops_pause::dispatch_pause();
+    if pause.is_paused() {
+        let skip_stamp = home.root().join("stale-escalate.skipstamp");
+        let last_skip = std::fs::read_to_string(&skip_stamp)
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        if now.saturating_sub(last_skip) >= STALE_SWEEP_INTERVAL_SECS {
+            let _ = emitter.emit(
+                "stale_sweep",
+                &json!({
+                    "outcome": "skipped",
+                    "reason": pause.skip_reason(),
+                    "detail": pause.detail(),
+                }),
+            );
+            let _ = std::fs::write(&skip_stamp, now.to_string());
+        }
+        return 0;
+    }
     let outcome = match run().as_deref().and_then(parse_stale_sweep) {
         Some(r) => {
             let _ = emitter.emit(
@@ -9810,59 +9841,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
-    fn stale_sweep_honours_its_own_6h_floor() {
-        let home = tmp_home("stale-sweep-floor");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let out = || {
-            Some(
-                r#"{"outcome": "asked", "question_id": "q-aa", "stale_count": 1, "oldest_h": 30, "summary": "Summary: 1 stale, outcome asked, oldest 30h"}"#
-                    .to_string(),
-            )
-        };
-        let now = 1_000_000;
-
-        assert_eq!(stale_sweep(&home, &emitter, now, &out), 1);
-        // Within the floor: skipped entirely, no second reading.
-        assert_eq!(stale_sweep(&home, &emitter, now + 60, &out), 0);
-        // Past the floor: fires again.
-        assert_eq!(
-            stale_sweep(&home, &emitter, now + STALE_SWEEP_INTERVAL_SECS + 1, &out),
-            1
-        );
-    }
-
-    #[test]
-    fn stale_sweep_emits_on_a_quiet_run() {
-        // A tick that stays silent when it finds nothing cannot be told from
-        // a tick that never ran, and this lane exists precisely to prove the
-        // sweep fires at all: outcome none still emits.
-        let home = tmp_home("stale-sweep-quiet");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let out = || {
-            Some(
-                r#"{"outcome": "none", "question_id": "", "stale_count": 0, "oldest_h": 0, "summary": "Summary: 0 stale, outcome none, oldest 0h"}"#
-                    .to_string(),
-            )
-        };
-
-        assert_eq!(stale_sweep(&home, &emitter, 1_000_000, &out), 1);
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-        assert!(log.contains("stale_sweep"));
-        assert!(log.contains("\"stale_count\":0"));
-    }
-
-    #[test]
-    fn stale_sweep_records_an_unreadable_summary_rather_than_inventing_zeros() {
-        let home = tmp_home("stale-sweep-unreadable");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-
-        assert_eq!(stale_sweep(&home, &emitter, 1_000_000, &|| None), 0);
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-        assert!(log.contains("unreadable-summary"));
-        assert!(!log.contains("\"stale_count\""));
-    }
-
-    #[test]
     fn stale_sweep_takes_no_apply_form() {
         // The lane routes information and changes no removal path: the fn
         // body may not carry an apply decision at all.
@@ -9935,6 +9913,10 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     mod rm_success;
     #[path = "stop_claims.rs"]
     mod stop_claims;
+    // The stale-sweep test family (x-39f4): same file-budget motion as the
+    // families above.
+    #[path = "incident_pause.rs"]
+    mod incident_pause;
 
     // The codex thread lane's spawn/registry/resume test family, moved
     // verbatim into its own module for the same reason as gc_receipts above:
