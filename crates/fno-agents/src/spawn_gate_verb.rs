@@ -194,7 +194,7 @@ mod probe {
                 }
             }
             if let Some(pct) = swap {
-                if pct >= swap_cap {
+                if swap_cap > 0.0 && pct >= swap_cap {
                     return refuse_with(
                         "swap_pressure",
                         format!(
@@ -469,8 +469,8 @@ fn ram_floor_row(avail: Option<f64>, floor_gb: f64, swap: Option<f64>, swap_cap:
     row.insert(
         "verdict".into(),
         json!(match (avail, swap) {
-            (Some(a), _) if a < floor_gb => "refuse",
-            (_, Some(s)) if s >= swap_cap => "refuse",
+            (Some(a), _) if floor_gb > 0.0 && a < floor_gb => "refuse",
+            (_, Some(s)) if swap_cap > 0.0 && s >= swap_cap => "refuse",
             (None, None) => "skipped: RAM and swap unreadable",
             _ => "pass",
         }),
@@ -632,4 +632,32 @@ fn lanes_answer(
         }
     }
     Ok(Value::Object(lanes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// x-8c8c: a disabled term (`<= 0`) never renders refuse, whatever the
+    /// machine reads.
+    #[test]
+    fn ram_floor_row_disabled_cap_never_refuses() {
+        for verdict in [
+            ram_floor_row(Some(35.0), 4.0, Some(40.0), 0.0)["verdict"]
+                .as_str()
+                .unwrap(),
+            ram_floor_row(None, 0.0, Some(5.0), 90.0)["verdict"]
+                .as_str()
+                .unwrap(),
+        ] {
+            assert_eq!(verdict, "pass");
+        }
+    }
+
+    /// x-8c8c: an enabled cap still refuses at the ceiling.
+    #[test]
+    fn ram_floor_row_refuses_at_the_ceiling() {
+        let row = ram_floor_row(Some(35.0), 4.0, Some(94.0), 90.0);
+        assert_eq!(row["verdict"].as_str().unwrap(), "refuse");
+    }
 }
