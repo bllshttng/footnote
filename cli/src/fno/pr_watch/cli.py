@@ -99,11 +99,8 @@ _BOUNCE_SIDECAR = "pr-watch-bounce.json"
 def _bounce_sender(window_s: float = 15.0) -> str:
     """The bounce that just sent this SIGTERM, from its receipt; else unrecorded.
 
-    A bounce writes ``pr-watch-bounce.json`` moments before ``bootout``; a
-    fresh sidecar names the caller, pid and parent that killed this tick. A
-    hand ``kill -TERM``, or a stale sidecar from an earlier bounce, reads
-    ``unrecorded`` rather than blaming the wrong cure. Never raises: a sender
-    name is evidence, not a gate.
+    A hand ``kill -TERM``, or a sidecar older than ``window_s`` from an earlier
+    bounce, reads ``unrecorded`` rather than blaming the wrong cure. Never raises.
     """
     try:
         import time

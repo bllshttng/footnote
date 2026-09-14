@@ -263,8 +263,7 @@ def _run_launchctl_timed(*args: str, timeout_s: float = _LAUNCHCTL_TIMEOUT_S) ->
 def _stdout_of(argv: list[str]) -> str:
     """stdout of ``argv``, or "" when the command is missing, hangs, or fails.
 
-    An unread answer never blocks a cure (fail-open, like the claim read it
-    replaced).
+    An unread answer never blocks a cure (fail-open, like the claim read it replaced).
     """
     try:
         result = subprocess.run(
@@ -293,12 +292,8 @@ def _etime_seconds(etime: str) -> Optional[int]:
 def _tick_in_flight(run: Optional[Callable[[list[str]], str]] = None) -> Optional[int]:
     """PID of a tick process younger than one StartInterval (600s), else None.
 
-    launchd owns this answer: while a tick runs, ``launchctl list`` names the
-    service's PID and ``ps -o etime=`` ages it. The old ``pr-watch:tick`` claim
-    read covered only the sweep phase and routed by cwd, so it read free while
-    a tick ran in merge, king_wake or recovery (x-09d8). A live tick older than
-    one StartInterval is hung and still bounces.
-    Contract: docs/architecture/pr-watch-merge-phase.md.
+    launchd owns this answer (x-09d8): the old cwd-routed ``pr-watch:tick``
+    claim covered only the sweep phase and read free while merge or recovery ran.
     """
     run = run or _stdout_of
     m = re.search(r'"PID" = (\d+);', run(["launchctl", "list", _LABEL]))
@@ -320,17 +315,9 @@ def _record_bounce(*, caller: str, deferred: bool, state_root: Optional[Path] = 
         "caller": caller,
         "pid": os.getpid(),
         "ppid": os.getppid(),
-        "parent": "",
+        "parent": _stdout_of(["ps", "-o", "command=", "-p", str(os.getppid())]).strip()[:160],
         "deferred": deferred,
     }
-    try:
-        data["parent"] = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(os.getppid())],
-            capture_output=True, text=True, check=False,
-            timeout=_LAUNCHCTL_TIMEOUT_S,
-        ).stdout.strip()[:160]
-    except Exception:  # noqa: BLE001 - a receipt never blocks a cure
-        pass
     if not deferred:
         try:
             root = state_root
@@ -399,8 +386,7 @@ def bounce(
     domain = f"gui/{uid}"
     target = f"{domain}/{label}"
 
-    # Receipt before bootout: the SIGTERM this bounce may send lands seconds
-    # from now, and only this sidecar joins that kill back to its sender.
+    # Receipt before bootout: only this sidecar joins the SIGTERM back to its sender.
     if label == _LABEL:
         _record_bounce(caller=caller, deferred=False)
 
