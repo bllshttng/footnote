@@ -2682,3 +2682,96 @@ fn status_payload_publishes_the_rust_owned_arms_attention() {
     assert!(attention.contains(&"a_stale"), "{attention:?}");
     assert!(attention.contains(&"a_failing"), "{attention:?}");
 }
+
+// -----------------------------------------------------------------------
+// x-1961: `resume` inside the client runtime must not panic
+// -----------------------------------------------------------------------
+
+/// Saves three process-global env vars and restores them on Drop, so a
+/// panic inside the test body (the pre-fix red this test guards) cannot
+/// leak the mutated environment to tests running after it.
+struct ResumeEnvGuard {
+    home: Option<std::ffi::OsString>,
+    codex_home: Option<std::ffi::OsString>,
+    path: Option<std::ffi::OsString>,
+}
+
+impl Drop for ResumeEnvGuard {
+    fn drop(&mut self) {
+        match &self.home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        match &self.codex_home {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        match &self.path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+}
+
+/// main block_ons `run`, and a codex thread row's wake builds its own
+/// runtime and block_ons again (`resume_wake.rs`). Drive the verb through
+/// the same entry main uses, inside a tokio runtime: it must refuse 16
+/// (`no-daemon`), never panic with "Cannot start a runtime from within a
+/// runtime".
+#[test]
+fn resume_through_run_inside_a_runtime_refuses_16_without_panicking() {
+    let temp = tempfile::tempdir().unwrap();
+    let home_dir = temp.path().join("agents-home");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    // The recorded cwd must exist: run_resume refuses exit 13 on a gone
+    // cwd before the wake route ever runs.
+    let cwd_dir = temp.path().join("cwd");
+    std::fs::create_dir_all(&cwd_dir).unwrap();
+    std::fs::write(
+        home_dir.join("registry.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "agents": [
+                {
+                    "name": "w1",
+                    "harness": "codex",
+                    "substrate": "thread",
+                    "cwd": cwd_dir.display().to_string(),
+                    "log_path": "w1.log",
+                    "harness_session_id": "01a09790-5bd4-7f70-af15-f4884e8dd554"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // The resume argv resolves before the wake route, so `codex` must be
+    // on PATH (the stub never executes on the thread-delivery arm).
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("codex");
+    std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _restore = ResumeEnvGuard {
+        home: std::env::var_os("FNO_AGENTS_HOME"),
+        codex_home: std::env::var_os("CODEX_HOME"),
+        path: std::env::var_os("PATH"),
+    };
+    let mut stub_path = std::ffi::OsString::from(&bin);
+    if let Some(previous) = std::env::var_os("PATH") {
+        stub_path.push(":");
+        stub_path.push(previous);
+    }
+    std::env::set_var("FNO_AGENTS_HOME", &home_dir);
+    // An empty CODEX_HOME has no daemon socket, so the delivery refuses.
+    std::env::set_var("CODEX_HOME", temp.path());
+    std::env::set_var("PATH", &stub_path);
+    let code = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run(vec!["resume".into(), "w1".into()]));
+    assert_eq!(code, 16);
+}
