@@ -65,6 +65,10 @@ scripts/lint-flock-pattern.sh :: lint flock-pattern
 scripts/ci/check-retired-command-strings.sh :: lint retired-commands
 scripts/ci/check-preamble-budget.sh :: lint preamble-budget
 
+# fno doctor lint internal-refs - the node-id leak guard (x-53d1); scans the
+# repo's tracked prose via the same _run_ci_gate wrapper as its siblings.
+scripts/ci/check-no-internal-refs.sh :: lint internal-refs
+
 # fno do plan fidelity - a plan with `carveouts: forbidden` runs the PR body through
 # the one body parser. The probe verb refuses on its missing plan. The absent-script
 # refusal ("carve-out check unreadable") is proven by a unit test in
