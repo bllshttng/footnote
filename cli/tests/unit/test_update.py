@@ -86,6 +86,11 @@ def _fake_pin(**overrides):
 
 
 def test_source_pin_call_parses_native_json(monkeypatch):
+    from fno import rust_binary
+
+    # Hermetic: pin the helper path so the test never depends on a locally
+    # installed binary (CI pytest shards ship none).
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: "/bin/fake-agents")
     proc = subprocess.CompletedProcess([], 0, stdout=json.dumps(_fake_pin()), stderr="")
     monkeypatch.setattr(update.subprocess, "run", lambda *a, **kw: proc)
     answer = update._source_pin_call(
@@ -98,6 +103,9 @@ def test_source_pin_call_parses_native_json(monkeypatch):
 def test_source_pin_call_none_when_helper_fails_or_lies(monkeypatch):
     import subprocess as sp
 
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: "/bin/fake-agents")
     fail = sp.CompletedProcess([], 2, stdout="", stderr="unknown flag")
     monkeypatch.setattr(update.subprocess, "run", lambda *a, **kw: fail)
     assert update._source_pin_call("resolve", runner=update.subprocess.run) is None
@@ -106,6 +114,13 @@ def test_source_pin_call_none_when_helper_fails_or_lies(monkeypatch):
     assert update._source_pin_call("resolve", runner=update.subprocess.run) is None
     boom = sp.CompletedProcess([], 0, stdout="[]", stderr="")
     monkeypatch.setattr(update.subprocess, "run", lambda *a, **kw: boom)
+    assert update._source_pin_call("resolve", runner=update.subprocess.run) is None
+
+
+def test_source_pin_call_none_without_any_helper(monkeypatch):
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
     assert update._source_pin_call("resolve", runner=update.subprocess.run) is None
 
 

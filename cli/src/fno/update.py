@@ -151,7 +151,11 @@ def _source_pin_call(
     try:
         from fno import rust_binary
 
-        binary = rust_binary.resolve_installed_binary()
+        # resolve_binary, not resolve_installed_binary: the narrower resolver
+        # deliberately ignores $FNO_AGENTS_BIN, which would strand the gate
+        # wherever a run pins the helper (the claim door and every shim honor
+        # the same env name).
+        binary = rust_binary.resolve_binary()
     except Exception:  # noqa: BLE001
         binary = None
     if not binary:
