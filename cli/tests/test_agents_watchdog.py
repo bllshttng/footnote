@@ -3632,21 +3632,38 @@ def test_ac5_clean_worktrees_do_not_emit():
     assert snap.dimensions[uw.KIND_DIRTY].state == uw.MEASURED
 
 
-# --- AC6: ownerless open PRs older than 24h -------------------------------
+# --- AC6: ownerless open PRs (an unknown owner read waits 24h) -------------
 
 
 def test_ac6_pr_age_boundary_and_verb():
+    # The owner question comes first: a PR whose owner set reads gone emits
+    # at any age, so the young gone-owner PR lands beside the old one and the
+    # 24h boundary now governs only the unknown-owner wait.
     old = _pr_obs(101, opened_epoch=NOW_1840 - 24 * 3600 - 1)
-    exact = _pr_obs(102, opened_epoch=NOW_1840 - 24 * 3600)
     young = _pr_obs(103, opened_epoch=NOW_1840 - 3600)
-    snap = uw.classify(_uw_obs(prs=[old, exact, young]))
+    snap = uw.classify(_uw_obs(prs=[old, young]))
 
-    [finding] = snap.findings
-    assert finding.kind == uw.KIND_PR
-    assert finding.pr_number == 101
-    assert finding.clear_command == "/fno:pr check 101"
-    assert "pull/101" in finding.basis
-    assert finding.age_s == pytest.approx(24 * 3600 + 1)
+    assert {finding.pr_number for finding in snap.findings} == {101, 103}
+    by_number = {finding.pr_number: finding for finding in snap.findings}
+    assert all(f.kind == uw.KIND_PR for f in snap.findings)
+    assert all(
+        f.clear_command == f"/fno:pr check {f.pr_number}" for f in snap.findings
+    )
+    assert "pull/101" in by_number[101].basis
+    assert by_number[101].age_s == pytest.approx(24 * 3600 + 1)
+
+
+def test_ac6_a_young_unknown_owner_waits_and_an_old_one_goes_unknown():
+    young_unknown = _pr_obs(110, opened_epoch=NOW_1840 - 3600, probes=[_probe()])
+    snap = uw.classify(_uw_obs(prs=[young_unknown]))
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_PR].state == uw.MEASURED
+
+    old_unknown = _pr_obs(111, opened_epoch=NOW_1840 - 25 * 3600, probes=[_probe()])
+    snap2 = uw.classify(_uw_obs(prs=[old_unknown]))
+    assert snap2.findings == ()
+    assert snap2.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+    assert "owner liveness unreadable for pr 111" in snap2.dimensions[uw.KIND_PR].warning
 
 
 def test_ac6_merged_live_owned_and_unreadable_prs_do_not_emit():
