@@ -396,7 +396,11 @@ def _attest_from_record(
 @review_app.command("classify", hidden=True)
 def classify(
     findings_file: Path = typer.Option(
-        ..., "--findings-file", help="JSON findings payload to classify."
+        ...,
+        "--findings-file",
+        help="JSON findings payload: a bare array of findings, or an object"
+        " {findings: [...], dispositions: [...]} when the round disposes"
+        " prior rounds' keys instead of raising new ones.",
     ),
     emit_record: bool = typer.Option(
         False, "--emit-record", help="Print the bounded attestation record as JSON."
