@@ -59,6 +59,8 @@ Provider-agnostic fallback: footnote tees each spawned agent's I/O to a per-agen
 
 `fno-agents mail-inject --session <uuid|short>` (`crates/fno-agents/src/mail_inject.rs`) is the one-shot claude live primitive `_deliver_live` shells out to. It reads the turn text from STDIN (sidestepping the argv size limit), resolves the recipient on the daemon roster, attaches to its `control.sock`, bracketed-pastes the text verbatim as raw keystrokes plus a wire-level CR, and confirms delivery by CONTENT (the injected turn's marker appearing in the recipient transcript after the inject, not mere transcript growth, because the growth proxy false-confirmed on a busy recipient whose transcript was already moving). It prints `{"delivered": bool, "reason": str}` and exits 0 when delivered. Every not-delivered reason (`not-injectable`, `no-transcript`, `attach-failed`, `not-confirmed`, ...) is a clean signal for Python to write the durable fallback.
 
+An unwrapped one-line payload rides verbatim. A payload that starts with `/fno:` or with `$fno:` names an fno verb. The verb rewrites that marker to the form of the receiving harness before delivery, so a verb typed in one harness's dialect lands in the recipient's native one.
+
 ### `not-injectable` is not a liveness verdict
 
 `not-injectable` means one thing: no roster entry for the session, or a roster entry with no control socket to write into.
@@ -77,7 +79,7 @@ For reachability ask `fno agents truth` or the `reachability` field on `fno agen
 `fno-agents mail-inject --probe --session <uuid|short>` runs resolution ONLY and prints `{"injectable": bool, "reason": str}`, exit 0 when injectable.
 No stdin read, no attach, no keystroke, no audit record.
 Both it and the real send resolve through one `resolve_target`, so the probe cannot say yes where the send would say no.
-It is claude-only: the codex lane submits a turn with no prompt line, so a slash payload never fires there and there is no keystroke path to probe.
+It is claude-only: the codex lane submits a turn with no prompt line, so there is no keystroke path to probe.
 
 The front door is `fno agents mail send '<payload>' --to-self --raw --check`, which additionally checks the preconditions Python owns (a registry row, a keystroke lane) and picks the right lane before probing.
 It answers on three exits, not two: 0 `injectable: <lane>`, 1 `not-injectable: <reason>`, 3 `unmeasurable: <reason>` when the evidence could not be read (an unreadable registry, or a `fno-agents` binary absent or too old to carry `--probe`).
