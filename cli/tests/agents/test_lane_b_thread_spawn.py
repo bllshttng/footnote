@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from fno.agents import dispatch as dispatch_mod
+from fno import rust_binary as rust_binary_mod
 from fno.agents.dispatch import (
     DispatchAskError,
     _lane_b_thread_spawn,
@@ -73,7 +74,7 @@ def _fake_keeper(monkeypatch, tmp_path):
     monkeypatch.setattr(dispatch_mod.subprocess, "Popen", _fake_popen)
     monkeypatch.setattr(dispatch_mod, "_keeper_identify", _fake_identify)
     monkeypatch.setattr(
-        dispatch_mod, "_lane_b_worker_binary", lambda: Path("/fake/fno-agents-worker")
+        rust_binary_mod, "lane_b_worker_binary", lambda: Path("/fake/fno-agents-worker")
     )
     return recorded
 
@@ -347,7 +348,7 @@ def test_lane_b_spawn_refuses_a_name_collision(lane_b_home, monkeypatch) -> None
 
 def test_lane_b_spawn_without_worker_binary_exits_13(lane_b_home, monkeypatch) -> None:
     """No fno-agents runtime -> the same exit-13 shape as the codex lane."""
-    monkeypatch.setattr(dispatch_mod, "_lane_b_worker_binary", lambda: None)
+    monkeypatch.setattr(rust_binary_mod, "lane_b_worker_binary", lambda: None)
     with pytest.raises(DispatchAskError) as exc_info:
         _lane_b_thread_spawn(name="wk-nobin", harness="pi", cwd=lane_b_home)
     assert exc_info.value.exit_code == 13
@@ -425,7 +426,7 @@ def _test_worker_bin() -> Path | None:
         built = repo / "crates" / "fno-agents" / "target" / profile / "fno-agents-worker"
         if built.is_file() and os.access(built, os.X_OK):
             return built
-    return dispatch_mod._lane_b_worker_binary()
+    return rust_binary_mod.lane_b_worker_binary()
 
 
 _worker_bin = _test_worker_bin()
