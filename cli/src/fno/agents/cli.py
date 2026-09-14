@@ -4636,17 +4636,18 @@ def cmd_rm(
     Your history is never removed here -- teardown drops the harness's
     index record, not the conversation. On teardown failure the registry
     row is kept so you can retry; ``--force`` drops it anyway and names
-    the orphan in the receipt. A live row is refused until the row is
-    provably gone: a non-claude pane worker is told to kill its pane and
-    re-run rm, and a claude row names what its roster read showed.
-    Terminal rows need
-    no separate stop first. Do not tear a session down by hand: the
-    harness session record IS the resume handle, and dropping it directly
-    spends that handle for nothing this command has not already done. If one
-    is already orphaned, use the retained full ``harness_session_id`` with
-    ``fno agents adopt``. A linked worktree is removed only when the shared
-    guarded predicate says it is clean, merged, and unowned; otherwise the
-    row is removed and the worktree receipt names the refusal.
+    the orphan in the receipt. rm needs no prior stop: it ends the
+    session's process itself as part of the removal. The one exception is
+    a claude background thread, where rm runs `claude stop` first - and
+    runs it itself, so no caller composes one. When the process end
+    cannot be confirmed, rm keeps the row and says why. Do not tear a
+    session down by hand: the harness session record IS the resume
+    handle, and dropping it directly spends that handle for nothing this
+    command has not already done. If one is already orphaned, use the
+    retained full ``harness_session_id`` with ``fno agents adopt``. A
+    linked worktree is removed only when the shared guarded predicate
+    says it is clean, merged, and unowned; otherwise the row is removed
+    and the worktree receipt names the refusal.
     """
     from fno import rust_binary
     from fno.agents.rust_runtime import refuse_without_binary, runtime_mode

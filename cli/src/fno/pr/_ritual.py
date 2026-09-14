@@ -987,15 +987,15 @@ class Ritual:
             self._emit("reap-rows", _OK, "no lingering rows")
             return
         if not reap_on:
-            cmds = "; ".join(f"fno agents stop {n} && fno agents rm {n}" for n in rows)
+            cmds = "; ".join(f"fno agents rm {n}" for n in rows)
             self._emit("reap-rows", _OK,
                        f"{len(rows)} row(s) linger; self_reap off - clear: {cmds}")
             return
-        # STOP before RM - `agents rm` on a live agent orphans its supervisor.
+        # rm alone (law d-81c6da7e): the daemon's rm ends a live row's
+        # process itself, so the reap leg runs no stop.
         removed = 0
         for name in rows:
             try:
-                self.runner([*fno_py_cmd(), "agents", "stop", name], timeout=30.0)
                 r = self.runner([*fno_py_cmd(), "agents", "rm", name], timeout=30.0)
                 if r.ok:
                     removed += 1
