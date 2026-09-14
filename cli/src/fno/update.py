@@ -1346,17 +1346,11 @@ def _await_binary(post_install: str, binary: Optional[str]) -> str:
 
 
 def _post_install_refresh_cmds(resolved: Path) -> tuple[list[list[str]], Optional[str]]:
-    """The best-effort commands chained after a successful install, plus the
-    binary a slow post-install step may await.
-
-    Every launchd agent fno installs embeds an absolute binary path and none
-    is re-rendered by the install, so each needs a refresh onto the new
-    binary; each verb self-gates, so listing one costs nothing on a machine
-    that does not use it. The Claude plugin stage ride-along (x-2b46): live
-    sessions exec hooks straight from the stage, so a restage IS the deploy;
-    ordered after the install so new hooks never call a verb the old install
-    lacks, and gated on the cargo binary because a machine without
-    fno-agents has no stage builder.
+    """Best-effort commands chained after a successful install, plus the
+    binary a slow post-install step may await. Each verb self-gates. The
+    plugin-stage restage rides last: live sessions exec hooks straight from
+    the stage, so a restage IS the deploy; gated on the cargo binary because
+    a machine without fno-agents has no stage builder.
     """
     refresh_cmds: list[list[str]] = []
     try:

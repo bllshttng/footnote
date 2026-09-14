@@ -702,10 +702,7 @@ def _known_marketplaces_path() -> Path:
 
 def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
     """One ``plugin-install --check`` probe (module-level so tests stub it).
-
-    Transport failures (missing binary, timeout) come back as exit -1 with
-    the reason in stderr rather than raising.
-    """
+    Transport failures come back as exit -1 with the reason, never raise."""
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
         return proc.returncode, proc.stdout, proc.stderr
@@ -718,10 +715,8 @@ def _stage_check_report() -> Optional[dict[str, Any]]:
 
     A directory marketplace never mints a ``gitCommitSha``, so for that
     install shape freshness is a byte comparison of the stage against source
-    HEAD, answered by ``fno-agents plugin-install --check --json``. Returns
-    None when this machine's install is not a directory marketplace; any
-    transport failure maps to ``unknown`` with the reason in ``detail``,
-    never ``fresh``.
+    HEAD. Returns None when this install is not a directory marketplace; any
+    transport failure maps to ``unknown`` in ``detail``, never ``fresh``.
     """
     try:
         data = json.loads(_known_marketplaces_path().read_text(encoding="utf-8"))
@@ -735,10 +730,7 @@ def _stage_check_report() -> Optional[dict[str, Any]]:
         return None
 
     def unknown(detail: str) -> dict[str, Any]:
-        return {
-            "status": "unknown", "sha": None, "installed_at": None,
-            "detail": detail, "kind": "stage", "stage": stage_path,
-        }
+        return {"status": "unknown", "sha": None, "installed_at": None, "detail": detail, "kind": "stage", "stage": stage_path}
 
     binary = _cargo_bin_path()
     src = _resolve_source(None)
@@ -758,10 +750,6 @@ def _stage_check_report() -> Optional[dict[str, Any]]:
         return unknown("plugin-install --check printed no JSON")
     if not isinstance(verdict, dict):
         return unknown("plugin-install --check printed a non-object")
-    status = verdict.get("status")
-    if status not in ("fresh", "stale", "absent", "unknown"):
-        status = "unknown"
-    verdict["status"] = status
     verdict["kind"] = "stage"
     verdict["sha"] = verdict.pop("source_head", None)
     verdict["installed_at"] = None
@@ -816,14 +804,10 @@ def _plugin_cache_report() -> dict[str, Any]:
         return report
     sha = entry.get("gitCommitSha")
     if not sha:
-        # A directory marketplace never writes the sha; Claude then executes
-        # the plugin straight from the stage, so freshness is a byte verdict
-        # against source HEAD, not a sha question.
-        stage = _stage_check_report()
-        if stage is not None:
-            return stage
-        report["detail"] = "installed_plugins.json carries no gitCommitSha"
-        return report
+        # No sha means a directory marketplace: the stage is the artifact.
+        return _stage_check_report() or report | {
+            "detail": "installed_plugins.json carries no gitCommitSha"
+        }
     report["sha"] = sha
     report["installed_at"] = entry.get("installedAt")
 
