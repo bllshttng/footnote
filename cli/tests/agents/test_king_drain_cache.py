@@ -97,6 +97,10 @@ def _invoke_drain() -> tuple[int, dict, float]:
     started = time.monotonic()
     result = CliRunner().invoke(agents_king_app, ["drain", SCOPE])
     elapsed = time.monotonic() - started
+    assert result.exit_code == 0, (
+        f"drain exited {result.exit_code}; output={result.output!r}; "
+        f"exception={result.exception!r}"
+    )
     payload = json.loads(result.output.strip().splitlines()[-1])
     return result.exit_code, payload, elapsed
 
