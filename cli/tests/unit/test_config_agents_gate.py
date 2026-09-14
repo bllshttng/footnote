@@ -69,6 +69,24 @@ def test_min_free_gb_unparseable_coerces_to_default():
     assert AgentsBlock(min_free_gb=True).min_free_gb == 4.0
 
 
+def test_max_swap_pct_default_and_passthrough():
+    # x-8c8c: the swap ceiling beside min_free_gb; default 90, checked on
+    # every spawn.
+    assert AgentsBlock().max_swap_pct == 90.0
+    assert AgentsBlock(max_swap_pct=75).max_swap_pct == 75.0
+
+
+def test_max_swap_pct_zero_is_valid_disable():
+    assert AgentsBlock(max_swap_pct=0).max_swap_pct == 0.0
+    assert AgentsBlock(max_swap_pct=-1).max_swap_pct == -1.0
+
+
+def test_max_swap_pct_unparseable_coerces_to_default():
+    assert AgentsBlock(max_swap_pct="banana").max_swap_pct == 90.0
+    assert AgentsBlock(max_swap_pct=None).max_swap_pct == 90.0
+    assert AgentsBlock(max_swap_pct=True).max_swap_pct == 90.0
+
+
 def test_worker_qos_unknown_coerces_to_utility():
     assert AgentsBlock(worker_qos="turbo").worker_qos == "utility"
     assert AgentsBlock(worker_qos=None).worker_qos == "utility"

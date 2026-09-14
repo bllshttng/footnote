@@ -268,6 +268,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "max_load_per_cpu",
         "pane_group_max",
         "min_free_gb",
+        "max_swap_pct",
         "orphan_reap_after_seconds",
         "profiles",
         "provider_limits",

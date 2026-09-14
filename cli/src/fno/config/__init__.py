@@ -2250,6 +2250,9 @@ class AgentsBlock(SweepKeys):
     # max_live caps the roster union as the BACKSTOP behind the RAM floor and
     # the CPU axis (x-7783 LD1); provider_limits caps lanes and fan-out.
     # min_free_gb is the RAM floor; nonpositive disables it.
+    # max_swap_pct is the swap ceiling beside it (x-8c8c): available RAM has no
+    # swap term, so the floor alone admits while the kernel pages to a full
+    # swap device; nonpositive disables it.
     # max_fleet_cpu_share decides admission on every spawn; an attribution gap
     # widens the share to an interval bounded above by the machine's CPU.
     # hard_max_load_per_cpu is the absolute backstop, read on the 15-minute
@@ -2263,6 +2266,7 @@ class AgentsBlock(SweepKeys):
     )
     pane_group_max: int = 4
     min_free_gb: float = 4.0
+    max_swap_pct: float = 90.0
     # Deprecated and ignored since 2026-09-09: admission decides on the
     # fleet's CPU share (max_fleet_cpu_share), never on a load trigger.
     max_load_per_cpu: float = 8.0
@@ -2442,6 +2446,16 @@ class AgentsBlock(SweepKeys):
         falls back to the default.
         """
         return _finite_or(v, 4.0)
+
+    @field_validator("max_swap_pct", mode="before")
+    @classmethod
+    def _coerce_max_swap_pct(cls, v: object) -> object:
+        """Coerce a non-numeric max_swap_pct to the default (90.0); never raise.
+
+        <= 0 is a VALID value (guard disabled), so only unparseable input
+        falls back to the default.
+        """
+        return _finite_or(v, 90.0)
 
     @field_validator("max_load_per_cpu", mode="before")
     @classmethod
