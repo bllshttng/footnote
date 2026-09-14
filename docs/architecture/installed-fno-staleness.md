@@ -19,7 +19,7 @@ The resolved local source checkout is the comparison boundary. Doctor does not f
 
 The source-checkout sync field is independent of installed-binary freshness. `source_checkout_sync.status` is `current`, `behind`, or `unknown`. A `behind` result carries the positive `behind` commit count plus both heads. Unknown source-sync evidence never invents a distance or changes the binary freshness fields.
 
-## Update source eligibility: the source-pin gate (x-bf5f)
+## Update source eligibility: the source-pin gate
 
 Source selection is itself a freshness hazard. The resolution cache stored a bare path. A linked worktree whose HEAD had diverged from the remote default branch was measured installing machine-wide twice (2026-09-09 and 2026-09-13). Every later `fno doctor update` re-installed that branch. The stale pin and the pin-relative freshness check were self-consistent and permanently wrong.
 
