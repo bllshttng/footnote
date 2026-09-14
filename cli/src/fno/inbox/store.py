@@ -137,12 +137,8 @@ def classify_durable_owner(
 
 
 def owner_ttl_hours(owner: DurableOwner | str) -> float:
-    """The unread horizon (hours) the sweep enforces for an owner class.
-
-    The receipt's drain-window clause (x-1602) quotes this same table, so a
-    window shown to a sender can never disagree with the bound the sweep
-    acts on. Unknown classes return 0 (no committed bound).
-    """
+    """The unread horizon (hours) the sweep enforces; the receipt's drain
+    window (x-1602) quotes this same table. Unknown classes return 0."""
     key = owner.value if isinstance(owner, DurableOwner) else owner
     return _OWNER_TTL_HOURS.get(key, 0.0)
 

@@ -4939,10 +4939,8 @@ class DispatchSendResult:
     # project (for the durable-queue and resolved-recipient stdout lines).
     recipient: Optional[str] = None
     to_project: Optional[str] = None
-    # The owner class this send's durable write was stamped with (x-1602), so
-    # the receipt quotes the same horizon the sweep enforces. None when no
-    # owner was stamped (hosted delivery, or a lock-timeout queue written
-    # before classification ran).
+    # Owner class the durable write was stamped with (x-1602), so the receipt
+    # quotes the same horizon the sweep enforces; None when none was stamped.
     durable_owner: Optional[str] = None
 
 
@@ -8097,9 +8095,7 @@ def dispatch_send(
             )
 
             return DispatchSendResult(
-                msg_id=msg_id,
-                delivery=delivery,
-                reason=live_miss_reason,
+                msg_id=msg_id, delivery=delivery, reason=live_miss_reason,
                 durable_owner=durable_owner if delivery == "durable" else None,
             )
 

@@ -61,14 +61,11 @@ def _is_live_lane_failure(reason: Optional[str]) -> bool:
 def durable_window_clause(owner: Optional[str]) -> str:
     """The drain-window clause every ``queued (durable)`` receipt carries (x-1602).
 
-    ``queued (durable)`` states a queue state and nothing about time, so a
-    reader who checks early cannot tell "not yet" from "never" -- the absence
-    misread that held a fleet-wide standing order an extra cycle on a working
-    lane. The clause quotes the owner-class horizon the stranded sweep itself
-    enforces (the one bound the machine already commits to), so a new owner
-    class in the sweep table gains its window automatically; an unknown class
-    prints no window rather than a guessed one, since a guessed constant here
-    is this defect wearing a friendlier sentence.
+    ``queued (durable)`` says nothing about time, so a reader cannot tell
+    "not yet" from "never" -- the absence misread that held a working lane
+    suspect an extra cycle. The clause quotes the owner-class horizon the
+    stranded sweep enforces (one bound, one table); an unknown class prints
+    no window, since a guessed constant is this defect in friendlier dress.
     """
     from fno.inbox.store import owner_ttl_hours
 
@@ -83,8 +80,7 @@ def durable_window_clause(owner: Optional[str]) -> str:
 
 
 def durable_window_tail(owner: Optional[str]) -> str:
-    """The clause as a receipt-line tail (`` - <clause>``), or empty when the
-    owner class carries no committed horizon."""
+    """The clause as a receipt-line tail (`` - <clause>``), or empty."""
     clause = durable_window_clause(owner)
     return f" - {clause}" if clause else ""
 
@@ -92,18 +88,43 @@ def durable_window_tail(owner: Optional[str]) -> str:
 def durable_leg_story(reason: Optional[str]) -> Optional[str]:
     """Positive stdout wording for a live-lane failure demotion (x-1602).
 
-    A live-inject miss followed by a successful durable enqueue is a normal,
-    fully-working outcome on this lane; rendering it with the raw failure
-    token (``io-error``, ``attach-failed``, ...) put an error string inside a
-    success receipt, and that is what read as a broken lane before any clock
-    was involved. The story names which leg missed and that the durable leg
-    holds; the precise token stays diagnostic (stderr advisory, bus record).
-    Returns None when the reason is not a live-lane failure, so callers keep
-    their existing wording.
+    A live-inject miss plus a durable success is a normal outcome; rendering
+    the raw token (``io-error``, ``attach-failed``, ...) put an error string
+    inside a success receipt, which is what read as a broken lane. Returns
+    None when the reason is not a live-lane failure, so callers keep their
+    own wording; the token stays diagnostic (stderr advisory, bus record).
     """
     if not _is_live_lane_failure(reason):
         return None
     return "live leg unconfirmed; durable leg holds"
+
+
+def demotion_receipt(
+    msg_id: str,
+    *,
+    reason: Optional[str],
+    owner: Optional[str],
+    target: Optional[str] = None,
+    project: Optional[str] = None,
+    age_target: Optional[str] = None,
+) -> str:
+    """The stdout line for a durable demotion (x-1904, refined by x-1602).
+
+    A live-lane failure renders as legs, never as an error token; a plain
+    live-miss keeps its transcript-age suffix (read for ``age_target``, the
+    recipient the miss concerns); the line ends in the drain window for the
+    owner class stamped on the send. Callers keep ``_warn_deferred`` on
+    stderr; this returns the line only.
+    """
+    token = durable_leg_story(reason)
+    if token is None:
+        token = reason or "live-miss"
+        if token == "live-miss":
+            token += _live_miss_age_suffix(age_target if age_target is not None else target)
+    where = f" for {target}" if target else ""
+    if project:
+        where += f" [project {project}]"
+    return f"{msg_id} queued (durable){where} [{token}]" + durable_window_tail(owner)
 
 
 def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] = None) -> None:

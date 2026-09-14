@@ -62,6 +62,7 @@ from fno.mail.codex_review_target import (
 from fno.mail.receipts import (
     _live_miss_age_suffix,
     _warn_deferred,
+    demotion_receipt,
     durable_leg_story,
     durable_window_tail,
 )
@@ -4106,19 +4107,13 @@ def cmd_send(
                 )
             else:
                 # The anycast lane reaches the SAME dispatch_send as the by-name
-                # lane, so it must carry the same cause. x-1602: the raw live-lane
-                # failure token stays diagnostic (stderr); stdout names the legs.
+                # lane, so it must carry the same cause.
                 _warn_deferred(result.recipient, reason=result.reason)
-                reason_tok = durable_leg_story(result.reason)
-                if reason_tok is None:
-                    reason_tok = result.reason or "live-miss"
-                    if reason_tok == "live-miss":
-                        reason_tok += _live_miss_age_suffix(result.recipient)
-                print(
-                    f"{result.msg_id} queued (durable) for {result.recipient} "
-                    f"[project {to_project}] [{reason_tok}]"
-                    + durable_window_tail(result.durable_owner)
-                )
+                print(demotion_receipt(
+                    result.msg_id,
+                    reason=result.reason, owner=result.durable_owner,
+                    target=result.recipient, project=to_project,
+                ))
         else:
             _warn_deferred(to_project, project=True)
             print(
@@ -4321,18 +4316,12 @@ def cmd_send(
         )
     else:
         # x-1602: a live-lane failure renders as legs on stdout; the raw token
-        # (io-error, attach-failed, ...) stays diagnostic on stderr, because an
-        # error string inside a success receipt reads as a broken lane.
-        reason_tok = durable_leg_story(result.reason)
-        if reason_tok is None:
-            reason_tok = result.reason or "live-miss"
-            if reason_tok == "live-miss":
-                reason_tok += _live_miss_age_suffix(name)
+        # (io-error, attach-failed, ...) stays diagnostic on stderr.
         _warn_deferred(name, reason=result.reason)
-        print(
-            f"{result.msg_id} queued (durable) [{reason_tok}]"
-            + durable_window_tail(result.durable_owner)
-        )
+        print(demotion_receipt(
+            result.msg_id, reason=result.reason, owner=result.durable_owner,
+            age_target=name,
+        ))
 
 
 def _team_sender_kind_and_from(from_name: Optional[str]) -> tuple[str, str]:
