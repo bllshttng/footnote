@@ -680,6 +680,15 @@ pub(crate) fn build_resume_argv_split(
     Some(argv)
 }
 
+/// The env(1) assignment tokens for one env pair set, prefixed ahead of the
+/// argv - the shape the mux verdict prefix prints and both resume print arms
+/// (claude's canonical plan, codex's masked route env) reuse.
+pub(crate) fn env_prefixed(env: &[(String, String)], argv: &[String]) -> Vec<String> {
+    let mut prefixed: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    prefixed.extend(argv.iter().cloned());
+    prefixed
+}
+
 /// The `fno-agents resume-argv` verb (x-eb79): render one harness's
 /// interactive-resume argv through the ONE builder the CLI verb lane uses,
 /// so the mux gesture consumes the same argv instead of re-deriving the

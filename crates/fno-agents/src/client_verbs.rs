@@ -2523,27 +2523,15 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             return crate::reentry::REENTRY_REFUSED_EXIT;
         }
         // x-d285: a claude row prints its CANONICAL plan argv - env prefix,
-        // session id, and the recorded --settings together - so the inspection
-        // form matches what `fno agents attach` and `recover --print-command`
-        // print for the same row. The dead arm's local argv equals the plan's;
-        // the live arm's bare attach line did not carry a recorded route.
-        // Paths and ids only; nothing from inside the route file is printed.
+        // session id, and the recorded --settings together, matching what
+        // `fno agents attach` and `recover --print-command` print. Paths and
+        // ids only; nothing from inside the route file is printed (AC5).
         let mut printed_argv: Vec<String> = match &reentry_plan {
-            Some(plan) => {
-                // Same shape the mux server's verdict prefix builds: env(1)
-                // assignments, then the provider argv.
-                let mut prefixed: Vec<String> =
-                    plan.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                prefixed.extend(plan.argv.iter().cloned());
-                prefixed
-            }
+            Some(plan) => crate::pane_relaunch::env_prefixed(&plan.env, &plan.argv),
             None => argv.clone(),
         };
-        // x-3954: a restored codex route prints its env pairs too, key masked.
         if let Some(Ok(Some(route))) = &codex_route_outcome {
-            let mut env_prefix = crate::codex_route::print_env_prefix(route);
-            env_prefix.extend(printed_argv.iter().cloned());
-            printed_argv = env_prefix;
+            printed_argv = crate::pane_relaunch::env_prefixed(&route.env_masked(), &printed_argv);
         }
         if let Some(session) = mux_session.as_deref() {
             // Pane form: `fno mux pane run ... -- claude ...`. Path only; nothing

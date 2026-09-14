@@ -282,15 +282,6 @@ pub fn resume_verdict(
     }
 }
 
-/// The `--print-command` env prefix: the route's env pairs, key masked.
-pub fn print_env_prefix(route: &CodexRoute) -> Vec<String> {
-    route
-        .env_masked()
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect()
-}
-
 /// Key precedence (twin of `_resolve_key`, `model_routing.py`): the env var
 /// named by `api_key_env` wins over the same name read from the
 /// `api_key_file` dotenv file. Never returns the empty string.
