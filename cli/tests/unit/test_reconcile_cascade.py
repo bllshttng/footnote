@@ -845,6 +845,7 @@ def test_dry_run_never_crashes_on_a_fallible_cascade(world, merged_pr, dispatche
     assert "cascade exploded" in payload["contained_errors"][0]["error"]
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_deferring_a_unit_preserves_its_contained_children(world, dispatches):
     """A reversible pause keeps the delivery unit folded as one unit."""
     from typer.testing import CliRunner

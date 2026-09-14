@@ -622,6 +622,7 @@ def test_health_stranded_section_always_runs(tmp_graph):
 # --- end-to-end recovery (#34, task 3.1) -----------------------------------
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_e2e_undefer_gives_fresh_slate(tmp_graph):
     # AC5-FR: auto-defer, undefer, then a SINGLE fresh failure -> NOT
     # re-deferred. The undefer reset the streak; it needs N fresh failures.

@@ -24,6 +24,10 @@ from fno.graph.store import locked_mutate_graph, read_graph
 
 runner = CliRunner()
 
+# x-665f: the kind-stamping verbs are transports over the native patch door,
+# so the module needs this checkout's fno-agents build pinned for every test.
+pytestmark = pytest.mark.usefixtures("native_backlog_door")
+
 DRAIN_REASON = "stale >30d, drained by maintain"
 
 

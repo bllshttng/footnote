@@ -135,6 +135,45 @@ def _receipt(stdout: str) -> Optional[dict]:
     return None
 
 
+def native_update(
+    node_id: str,
+    args: list[str],
+    *,
+    graph_path,
+    json_out: bool = True,
+) -> "tuple[int, Optional[dict]]":
+    """One native `backlog-update` invocation (x-665f): the patch door.
+
+    Returns `(exit, receipt)`; the receipt is parsed from the child's stdout
+    when `json_out` and the exit is 0. Without `json_out` the child's text
+    receipt streams to the caller's stdout verbatim. The child's stderr is
+    relayed either way - a refusal line is the answer, never a detail.
+    """
+    import sys
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("Error: the fno-agents binary is required for `fno backlog update`", err=True)
+        raise typer.Exit(code=1)
+    argv = [str(binary), "backlog-update", "--graph", str(graph_path), "--node", node_id]
+    if json_out:
+        argv.append("--json")
+    argv.extend(args)
+    proc = subprocess.run(argv, text=True, check=False, capture_output=True)
+    if json_out:
+        if proc.returncode != 0:
+            sys.stderr.write(proc.stderr or "")
+            return proc.returncode, None
+        return 0, _receipt(proc.stdout)
+    if proc.stdout:
+        typer.echo(proc.stdout.rstrip("\n"))
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr or "")
+    return proc.returncode, None
+
+
 def _write_state(
     node_id: str,
     text: str,

@@ -3023,8 +3023,15 @@ def cmd_demand(
 
 
 
-@cli.command("update")
+@cli.command(
+    "update",
+    # x-665f: --status/--leave/--set are the patch door's flags. The Python
+    # surface never declares them (the flag registry is shrink-only); they
+    # ride ctx.args straight to the native backlog-update action.
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
 def cmd_update(
+    ctx: typer.Context,
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     locked_by: Optional[str] = typer.Option(
         None, "--locked-by", help="Lock owner id ('null' to release)"
@@ -3208,6 +3215,77 @@ def cmd_update(
         ),
     ),
 ) -> None:
+    # The patch door first: --status/--leave/--set in ctx.args forward to the
+    # native backlog-update action. Mixing them with a legacy field flag
+    # refuses - one call, one door - because the two write paths validate
+    # differently and a mixed call could not say which rules it asked for.
+    door_tokens = {a for a in (ctx.args or []) if a in ("--status", "--leave", "--set")}
+    if door_tokens:
+        legacy_flags = [
+            name
+            for name, value in (
+                ("--locked-by", locked_by),
+                ("--locked-by-harness", locked_by_harness),
+                ("--locked-by-harness-session", locked_by_harness_session),
+                ("--has-brief", has_brief),
+                ("--plan-path", plan_path),
+                ("--pr-number", pr_number),
+                ("--pr-url", pr_url),
+                ("--repo", repo),
+                ("--priority", priority),
+                ("--blocks-everything", blocks_everything),
+                ("--title", title),
+                ("--details", details),
+                ("--details-file", details_file),
+                ("--domain", domain),
+                ("--size", size),
+                ("--difficulty", difficulty),
+                ("--model", model),
+                ("--model-tier", _model_tier_tombstone),
+                ("--batch", batch),
+                ("--orphan-ok", orphan_ok),
+                ("--dispatch-verb", dispatch_verb),
+                ("--dispatch-brief", dispatch_brief),
+                ("--type", type_),
+                ("--public", public),
+                ("--project", project),
+                ("--cwd", cwd),
+                ("--source-node", source_node),
+                ("--related", related),
+                ("--blocked-by", blocked_by),
+                ("--add-blocker", add_blocker),
+                ("--remove-blocker", remove_blocker),
+                ("--acknowledge-collisions", acknowledge_collisions),
+                ("--parent", parent),
+                ("--completion-note", completion_note),
+                ("--add-pr", add_pr),
+                ("--add-pr-url", add_pr_url),
+                ("--add-pr-note", add_pr_note),
+                ("--remove-pr", remove_pr),
+                ("--caused-by", caused_by),
+                ("--fixes-pr", fixes_pr),
+                ("--reverted", reverted),
+                ("--tag", tag),
+                ("--untag", untag),
+                ("--force", force),
+            )
+            if value is not None and value is not False
+        ]
+        if legacy_flags:
+            typer.echo(
+                "Error: --status/--leave/--set cannot be mixed with the legacy field flags "
+                f"({', '.join(legacy_flags)}). Run two calls: one through the door, one "
+                "with the legacy flags.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        from fno.graph.note_cli import native_update
+
+        exit_code, _ = native_update(
+            task_id, ctx.args, graph_path=_graph_path(), json_out=False
+        )
+        raise typer.Exit(code=exit_code)
+
     from fno._flag_aliases import refuse_retired_model_tier
     from fno.text_or_file import read_text_arg
     from fno.graph._constants import (

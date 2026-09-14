@@ -21,6 +21,10 @@ from fno.cli import app
 
 runner = CliRunner()
 
+# x-665f: the verbs are transports over the native patch door, so the module
+# needs this checkout's fno-agents build pinned for every test.
+pytestmark = pytest.mark.usefixtures("native_backlog_door")
+
 
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
@@ -231,12 +235,12 @@ def test_undefer_warns_when_not_deferred(tmp_graph, tmp_path):
     )
 
 
-def test_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
-    """Deferring an already-done node clears completed_at so the cascade flips to deferred.
-
-    Regression for Gemini external-review finding: without clearing
-    completed_at, the `done > deferred` precedence in recompute_statuses
-    would silently keep the row pinned to done.
+def test_defer_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path):
+    """x-665f: leaving done is `fno backlog reopen`'s door. The old behavior
+    (deferring a done node cleared completed_at inline) is retired: the
+    merged-PR cross-check and the parent cascade live in reopen, and a
+    parallel write path that skips them is exactly the false-receipt shape
+    the patch door exists to close.
     """
     node_id = _seed_with_plan(tmp_path, "Plan Done Then Defer")
     _invoke("backlog", "done", node_id, "--skip-stamp")
@@ -247,17 +251,12 @@ def test_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
     assert node.get("completed_at")
 
     r = _invoke("backlog", "defer", node_id, "--reason", "reopened, parking it")
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 2, r.output
+    assert "fno backlog reopen" in r.output
 
-    entries = _read_entries(tmp_graph)
-    node = next(e for e in entries if e["id"] == node_id)
-    assert node.get("completed_at") in (None, ""), (
-        f"completed_at must be cleared when deferring; got {node.get('completed_at')!r}"
-    )
-    assert node.get("deferred_at"), "deferred_at must be set"
-    assert node.get("status") == "deferred", (
-        f"cascade must flip to deferred after defer; got {node.get('status')!r}"
-    )
+    node = next(e for e in _read_entries(tmp_graph) if e["id"] == node_id)
+    assert node.get("completed_at"), "the done node must be untouched on refusal"
+    assert node.get("status") == "done"
 
 
 def test_triage_defer_after_done_transitions_to_deferred(tmp_graph, tmp_path):
@@ -528,27 +527,27 @@ def test_batch_defer_dedups_repeated_ids(tmp_graph, tmp_path):
     assert node.get("status") == "deferred"
 
 
-def test_batch_defer_enters_store_once(tmp_graph, tmp_path, monkeypatch):
-    """AC3-CON: a batch of N>1 ids performs exactly one store mutation.
-
-    The lock itself lives keeper-side now; the batch contract is one
-    commit_rows_via_store round for the whole batch, never one per node."""
-    import fno.graph.store as gs
+def test_batch_defer_walks_the_door_once_per_id(tmp_graph, tmp_path, monkeypatch):
+    """x-665f: a batch of N ids is N door rounds, after ONE batch-wide
+    pre-check. The pre-check (not a shared write) is what keeps the unknown-id
+    abort atomic; the door owns every write."""
+    import fno.graph.note_cli as note_cli
 
     ids = [_seed_with_plan(tmp_path, f"Lock {n}") for n in range(3)]
-    calls: list[int] = []
-    orig = gs.commit_rows_via_store
+    calls: list[tuple[str, list[str]]] = []
+    orig = note_cli.native_update
 
-    def spy(*args, **kwargs):
-        calls.append(1)
-        return orig(*args, **kwargs)
+    def spy(node_id, args, **kwargs):
+        calls.append((node_id, list(args)))
+        return orig(node_id, args, **kwargs)
 
-    monkeypatch.setattr(gs, "commit_rows_via_store", spy)
+    monkeypatch.setattr(note_cli, "native_update", spy)
 
     r = _invoke("backlog", "defer", *ids, "--reason", "stale")
     assert r.exit_code == 0, r.output
-    assert len(calls) == 1, f"batch must enter commit_rows_via_store once, got {len(calls)}"
-    # Delegation still mutated every node.
+    assert [c[0] for c in calls] == ids, f"one door round per id, got {calls}"
+    for _, args in calls:
+        assert "--status" in args and "deferred" in args
     by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
     assert all(by_id[nid].get("status") == "deferred" for nid in ids)
 
@@ -586,27 +585,22 @@ def test_batch_defer_requires_at_least_one_id(tmp_graph, tmp_path):
     )
 
 
-def test_batch_defer_mixed_done_and_idea(tmp_graph, tmp_path):
-    """AC7-EDGE: a done node and an idea node both flip to deferred in one batch.
-
-    Proves completed_at is cleared per node inside the loop; the done > deferred
-    precedence would otherwise pin the done node to done.
-    """
+def test_batch_defer_with_a_done_node_refuses_naming_reopen(tmp_graph, tmp_path):
+    """x-665f: the door refuses leaving done, so a batch naming a done node
+    (first) refuses before the other ids are written."""
     done_node = _seed_with_plan(tmp_path, "Batch Done")
     _invoke("backlog", "done", done_node, "--skip-stamp")
     idea_node = _seed_idea("Batch Idea")
 
     r = _invoke("backlog", "defer", done_node, idea_node, "--reason", "park")
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 2, r.output
+    assert "fno backlog reopen" in r.output
 
     by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
-    for nid in (done_node, idea_node):
-        node = by_id[nid]
-        assert node.get("completed_at") in (None, ""), (
-            f"{nid} completed_at must be cleared; got {node.get('completed_at')!r}"
-        )
-        assert node.get("deferred_at")
-        assert node.get("status") == "deferred", f"{nid} status={node.get('status')!r}"
+    assert by_id[done_node].get("status") == "done"
+    assert not by_id[idea_node].get("deferred_at"), (
+        "the door refused before reaching the later id"
+    )
 
 
 def test_batch_undefer_clears_all_and_emits_per_node(tmp_graph, tmp_path, monkeypatch):

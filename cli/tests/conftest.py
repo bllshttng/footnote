@@ -890,6 +890,25 @@ def clean_lock_dir(tmp_path: Path) -> Path:
             pass
 
 
+@pytest.fixture
+def native_backlog_door(monkeypatch):
+    """Pin the lifecycle tests' native door to THIS checkout's build (x-665f).
+
+    `defer`/`undefer`/`unsupersede` and `update --status/--set` shell the
+    `backlog-update` native action through `resolve_binary`, whose PATH hit
+    may be any installed copy. `$FNO_AGENTS_BIN` outranks all of it, so the
+    fixture pins the dev build - and skips when this checkout has none (the
+    smoke CI shard deletes it on purpose, the same contract
+    ``_store_keeper_absent`` implements for the keeper binary).
+    """
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+
+
 @pytest.fixture(autouse=True)
 def _no_review_coverage_recompute(monkeypatch):
     """Hermetic default for the coverage recompute (x-3a3f).

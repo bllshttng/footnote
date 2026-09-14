@@ -23,6 +23,10 @@ from fno.cli import app
 
 runner = CliRunner()
 
+# x-665f: supersede/unsupersede/defer are transports over the native patch
+# door, so the module needs this checkout's fno-agents build pinned.
+pytestmark = pytest.mark.usefixtures("native_backlog_door")
+
 
 @pytest.fixture
 def tmp_graph(tmp_path, monkeypatch) -> Path:
