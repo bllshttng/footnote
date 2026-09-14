@@ -8,6 +8,26 @@ import pytest
 from fno.pr import _quota
 from fno.pr._proc import Result
 
+# The autouse budget fixture below replaces these on the module; tests that
+# exercise the real functions restore them from these import-time captures.
+_REAL_ADMIT = _quota.admit
+_REAL_RECORD_REFUSAL = _quota.record_refusal
+
+
+@pytest.fixture(autouse=True)
+def quiet_budget(monkeypatch):
+    """Keep every execute_graphql test off the real fleet ledger.
+
+    execute_graphql now admits against `fno-agents gh-budget`; a test that
+    skipped the stub would charge the operator's machine-wide budget (or trip
+    over a live fleet backoff). Tests that exercise the budget re-stub admit
+    themselves.
+    """
+    refusals: list[str] = []
+    monkeypatch.setattr(_quota, "admit", lambda argv: None)
+    monkeypatch.setattr(_quota, "record_refusal", lambda stderr: refusals.append(stderr))
+    return refusals
+
 
 def _runner(remaining: int | None, calls: list[list[str]], command_result: Result | None = None):
     def run(cmd, **kwargs):
@@ -569,3 +589,141 @@ def test_a_real_gh_is_not_mistaken_for_a_console_script_shim(tmp_path):
 
     assert not _quota._is_proxy_shim(real)
     assert not _quota._is_proxy_shim(mention)
+
+
+# ---- the fleet request budget (admit before real gh, record on refusal) ----
+
+
+BUDGET_LINE = (
+    "gh budget: fleet GitHub rate limit held locally (budget: 450/450 points "
+    "in 60s | backoff 0s left); this command did not reach GitHub. Retry "
+    "after 1s. Ledger: fno-agents gh-budget status"
+)
+
+
+def test_a_budget_refusal_stops_the_command_before_real_gh(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+    monkeypatch.setattr(_quota, "admit", lambda argv: BUDGET_LINE)
+    result = _quota.execute_graphql(
+        "discretionary",
+        ["pr", "view", "930", "--json", "headRefOid"],
+        runner=_runner(5000, calls),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert result.returncode == _quota.REFUSED
+    assert result.stdout == ""
+    assert BUDGET_LINE in result.stderr
+    # The probe ran (it is exempt, 0 points); the real command never did.
+    assert calls == [["/real/gh", "api", "rate_limit"]]
+
+
+def test_a_rate_limited_command_records_the_refusal_once(tmp_path, quiet_budget):
+    result = _quota.execute_graphql(
+        "discretionary",
+        ["pr", "view", "930", "--json", "headRefOid"],
+        runner=_runner(
+            5000,
+            [],
+            Result(1, "", "API rate limit exceeded for user ID 1 (HTTP 403)"),
+        ),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert result.returncode == 1
+    assert len(quiet_budget) == 1
+    assert "HTTP 403" in quiet_budget[0]
+
+
+def test_a_drained_primary_bucket_records_nothing(tmp_path, quiet_budget):
+    # remaining == 0 is GitHub's primary quota drained; opening a SECONDARY
+    # backoff for it would mis-bin the refusal class. Coverage skips the
+    # reserve check, so the command actually runs and the gate is exercised.
+    _quota.execute_graphql(
+        "coverage",
+        ["pr", "view", "930", "--json", "reviews"],
+        runner=_runner(
+            0, [], Result(1, "", "API rate limit exceeded (HTTP 403)")
+        ),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert quiet_budget == []
+
+
+def test_an_ordinary_failure_records_nothing(tmp_path, quiet_budget):
+    _quota.execute_graphql(
+        "discretionary",
+        ["pr", "view", "930", "--json", "headRefOid"],
+        runner=_runner(5000, [], Result(1, "", "HTTP 500: server error")),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert quiet_budget == []
+
+
+def test_record_refusal_sends_only_githubs_markers(monkeypatch):
+    monkeypatch.setattr(_quota, "record_refusal", _REAL_RECORD_REFUSAL)
+    sent: list[dict] = []
+    monkeypatch.setattr(_quota, "_gh_budget", lambda payload: sent.append(payload))
+    _quota.record_refusal("gh: API rate limit exceeded (HTTP 403)")
+    _quota.record_refusal("gh: secondary limit hit (HTTP 429)")
+    _quota.record_refusal("gh budget: fleet GitHub rate limit held locally")
+    _quota.record_refusal("HTTP 500: server error")
+    assert [s["op"] for s in sent] == ["refused", "refused"]
+
+
+def test_record_refusal_survives_an_unavailable_verb(monkeypatch, capsys):
+    from fno.rust_binary import VerbUnavailable
+
+    monkeypatch.setattr(_quota, "record_refusal", _REAL_RECORD_REFUSAL)
+
+    def unavailable(payload):
+        raise VerbUnavailable("fno-agents binary not found")
+
+    monkeypatch.setattr(_quota, "_gh_budget", unavailable)
+    _quota.record_refusal("API rate limit exceeded (HTTP 403)")
+    assert "refusal not recorded" in capsys.readouterr().err
+
+
+def test_admit_returns_the_refusal_line_and_admits_on_none(monkeypatch):
+    monkeypatch.setattr(_quota, "admit", _REAL_ADMIT)
+    answers = iter(
+        [
+            {"verdict": "refused", "refusal": BUDGET_LINE},
+            {"verdict": "admitted"},
+        ]
+    )
+    monkeypatch.setattr(_quota, "_gh_budget", lambda payload: next(answers))
+    assert _quota.admit(["pr", "view", "1"]) == BUDGET_LINE
+    assert _quota.admit(["pr", "view", "1"]) is None
+
+
+def test_admit_fails_open_when_the_verb_is_unavailable(monkeypatch, capsys):
+    from fno.rust_binary import VerbUnavailable
+
+    monkeypatch.setattr(_quota, "admit", _REAL_ADMIT)
+
+    def unavailable(payload):
+        raise VerbUnavailable("no binary")
+
+    monkeypatch.setattr(_quota, "_gh_budget", unavailable)
+    assert _quota.admit(["pr", "view", "1"]) is None
+    assert "ledger unavailable, admitting" in capsys.readouterr().err
+
+
+def test_backoff_live_reads_the_status_answer(monkeypatch):
+    answers = iter([{"backoff_remaining_s": 42}, {"backoff_remaining_s": 0}])
+    monkeypatch.setattr(_quota, "_gh_budget", lambda payload: next(answers))
+    assert _quota.backoff_live() is True
+    assert _quota.backoff_live() is False
+
+
+def test_backoff_live_is_false_when_the_verb_is_unavailable(monkeypatch):
+    from fno.rust_binary import VerbUnavailable
+
+    def unavailable(payload):
+        raise VerbUnavailable("no binary")
+
+    monkeypatch.setattr(_quota, "_gh_budget", unavailable)
+    assert _quota.backoff_live() is False

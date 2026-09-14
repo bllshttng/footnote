@@ -513,6 +513,57 @@ def test_wrapper_warning_on_line_1_is_not_the_quoted_cause():
     assert reason.rate_limit_class == "secondary"
 
 
+# ---- the secondary arm records the refusal in the fleet budget ledger ----
+
+
+def test_a_secondary_classification_records_the_refusal_once(monkeypatch):
+    ops = []
+    monkeypatch.setattr(
+        "fno.pr._quota._gh_budget",
+        lambda payload: ops.append(payload.get("op")),
+    )
+    reason = _rest._rest_reason(
+        Result(1, "", _VERBATIM_403), runner=_rate_limit_runner(core_remaining=4980)
+    )
+    assert reason.rate_limit_class == "secondary"
+    assert ops == ["refused"]
+
+
+def test_a_core_classification_records_nothing(monkeypatch):
+    ops = []
+    monkeypatch.setattr(
+        "fno.pr._quota._gh_budget",
+        lambda payload: ops.append(payload.get("op")),
+    )
+    reason = _rest._rest_reason(
+        Result(1, "", "gh: API rate limit exceeded (HTTP 403)"),
+        runner=_rate_limit_runner(core_remaining=0),
+    )
+    assert reason.rate_limit_class == "core"
+    assert ops == []
+
+
+def test_the_local_budget_refusal_line_sends_no_refused_op(monkeypatch):
+    """The local `gh budget:` line says `rate limit` on purpose, so the
+    classifier reads it as secondary - but it carries neither HTTP 403 nor
+    HTTP 429, and the marker gate in record_refusal keys on those, so a
+    refusal this fleet manufactured is never recorded as GitHub's."""
+    ops = []
+    monkeypatch.setattr(
+        "fno.pr._quota._gh_budget",
+        lambda payload: ops.append(payload.get("op")),
+    )
+    local = (
+        "gh budget: fleet GitHub rate limit held locally (budget: 450/450 points"
+        " in 60s | backoff 0s left); this command did not reach GitHub."
+    )
+    reason = _rest._rest_reason(
+        Result(75, "", local), runner=_rate_limit_runner(core_remaining=4980)
+    )
+    assert reason.rate_limit_class == "secondary"
+    assert ops == [], "no refused op may reach the ledger for a local line"
+
+
 def test_matched_line_is_quoted_not_the_first_line():
     """A multi-line stderr where the classifier matches line 2: the quoted
     evidence is the matched line, not line 1 (the pre-fix code always quoted

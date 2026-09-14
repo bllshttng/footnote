@@ -178,6 +178,7 @@ def test_delegate_replaces_proxy_to_preserve_tty(monkeypatch):
     monkeypatch.setattr(
         "fno.pr.gh_proxy._quota.delegate_environment", lambda: {"PATH": "/real/bin"}
     )
+    monkeypatch.setattr("fno.pr.gh_proxy._quota.admit", lambda args: None)
     with __import__("pytest").raises(RuntimeError, match="exec sentinel"):
         delegate("/real/gh", ["auth", "status"])
     assert seen == {
@@ -277,11 +278,48 @@ def test_delegate_stamps_the_reentry_marker_into_the_exec_environment(monkeypatc
     monkeypatch.setattr(
         "fno.pr.gh_proxy._quota.delegate_environment", lambda: {"PATH": "/real/bin"}
     )
+    monkeypatch.setattr("fno.pr.gh_proxy._quota.admit", lambda args: None)
     with pytest.raises(RuntimeError, match="exec sentinel"):
         delegate("/real/gh", ["auth", "status"])
     # The successor execve creates keeps this pid, which is what makes the
     # marker mean "I am myself again" rather than "someone upstream ran gh".
     assert seen["env"]["FNO_GH_PROXY_DEPTH"] == str(os.getpid())
+
+
+BUDGET_LINE = (
+    "gh budget: fleet GitHub rate limit held locally (budget: 2/2 points "
+    "in 60s | backoff 0s left); this command did not reach GitHub. Retry "
+    "after 1s. Ledger: fno-agents gh-budget status"
+)
+
+
+def test_delegate_refused_by_the_budget_never_invokes_the_real_gh(monkeypatch, capsys):
+    called = []
+    monkeypatch.setattr("fno.pr.gh_proxy.os.execve", lambda *a, **k: called.append(a))
+    monkeypatch.setattr("fno.pr.gh_proxy._quota.admit", lambda args: BUDGET_LINE)
+    with pytest.raises(SystemExit) as exc:
+        delegate("/real/gh", ["api", "repos/o/r"])
+    # `.code`, never `match=`: `match` regex-searches the text and also pins 75.
+    assert exc.value.code == gh_proxy._quota.REFUSED
+    assert BUDGET_LINE in capsys.readouterr().err
+    assert called == [], "the real gh must never be exec'd under a budget refusal"
+
+
+def test_delegate_admits_before_replacing_itself(monkeypatch):
+    order = []
+    monkeypatch.setattr("fno.pr.gh_proxy._quota.admit", lambda args: order.append("admit"))
+    monkeypatch.setattr(
+        "fno.pr.gh_proxy._quota.delegate_environment", lambda: {"PATH": "/real/bin"}
+    )
+
+    def execve(path, argv, env):
+        order.append("execve")
+        raise RuntimeError("exec sentinel")
+
+    monkeypatch.setattr("fno.pr.gh_proxy.os.execve", execve)
+    with pytest.raises(RuntimeError, match="exec sentinel"):
+        delegate("/real/gh", ["auth", "status"])
+    assert order == ["admit", "execve"], "the admit must precede the exec"
 
 
 def test_main_turns_a_proxy_identity_failure_into_a_clean_refusal(monkeypatch, capsys):

@@ -113,6 +113,8 @@ def test_graphql_quota_lock_revalidates_inode_after_path_replacement(
     lock_path = tmp_path / "github-graphql-quota.lock"
     lock_path.touch()
     real_flock = _replace_path_on_first_flock(monkeypatch, _quota, lock_path)
+    monkeypatch.setattr(_quota, "admit", lambda argv: None)
+    monkeypatch.setattr(_quota, "record_refusal", lambda stderr: None)
     monkeypatch.setattr(_quota, "resolve_real_gh", lambda: "/usr/bin/gh")
     monkeypatch.setattr(_quota, "delegate_environment", lambda: {})
 
