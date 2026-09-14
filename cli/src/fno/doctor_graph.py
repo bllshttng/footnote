@@ -97,10 +97,9 @@ def _flip(target: str) -> None:
 
 @graph_app.command("backend")
 def graph_backend(
-    target: "str | None" = typer.Argument(None, help="sqlite or json: the backend to flip to."),
-    status: bool = typer.Option(False, "--status", help="Print backend, since date, days, and keeper backends."),
+    target: "str | None" = typer.Argument(None, help="sqlite, json, or status."),
 ) -> None:
-    if status:
+    if target == "status":
         from fno import paths
         from fno.graph.store import _client_for
 
@@ -117,5 +116,5 @@ def graph_backend(
         )
         return
     if target not in ("sqlite", "json"):
-        raise typer.BadParameter("backend takes 'sqlite' or 'json', or --status")
+        raise typer.BadParameter("backend takes 'sqlite', 'json', or 'status'")
     _flip(target)
