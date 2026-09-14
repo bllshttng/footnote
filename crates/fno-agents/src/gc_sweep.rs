@@ -2806,7 +2806,7 @@ pub(crate) fn stage_session_retirement(
             "the native active-surface removal did not confirm".into(),
         ));
     }
-    // Effect 3 (x-aafe): the MUX-MEMBER retirement through the shared mux
+    // Effect 3: the MUX-MEMBER retirement through the shared mux
     // squad store. A `failed` or `kept` outcome holds the row for retry,
     // the same shape as the active-surface hold above.
     let mux_outcome = mux_member(e);

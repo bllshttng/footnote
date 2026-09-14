@@ -139,7 +139,7 @@ pub(crate) fn apply_active_surface_removal(e: &RegistryEntry) -> CascadeOutcome 
 /// other mux calls (`crates/fno/src/proto.rs` `DEFAULT_SESSION`).
 pub(crate) const MUX_DEFAULT_SERVER: &str = "main";
 
-/// Apply the MUX-MEMBER retirement for one row (x-aafe): retire the row's
+/// Apply the MUX-MEMBER retirement for one row: retire the row's
 /// squad membership from the shared mux store through `fno mux
 /// retire-session`. The live-membership measurement is the squad store,
 /// never the registry `mux` ref: thread members carry no mux ref, so a ref

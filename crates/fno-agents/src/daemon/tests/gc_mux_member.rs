@@ -1,4 +1,4 @@
-//! x-aafe task 1.1: the `mux-member` effect inside `stage_session_retirement`.
+//! The `mux-member` effect inside `stage_session_retirement`.
 //! The effect lands after active-surface and before resume-evidence; a
 //! non-applied outcome rewrites the receipt and refuses, the same hold shape
 //! the active-surface removal uses.

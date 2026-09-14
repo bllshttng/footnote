@@ -410,7 +410,7 @@ struct RequestSeams<'a> {
     /// The native ACTIVE-SURFACE removal, typed: claude's agent list, codex's
     /// session index, cursor-agent's worker servers.
     surface_removal: &'a dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
-    /// The mux squad-member retirement, typed (x-aafe): `fno mux
+    /// The mux squad-member retirement, typed: `fno mux
     /// retire-session` for the row's live squad membership.
     mux_member: &'a dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     /// The ONE tree guard: true = unpushed work, hold.

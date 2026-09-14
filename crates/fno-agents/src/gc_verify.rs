@@ -10,11 +10,11 @@
 //! store, an unreadable receipt, a partial effect set: each is a named
 //! refusal with a nonzero exit - this verb must fail before its evidence
 //! exists, because it is the plan's done probe. The required set is what
-//! closes the x-5aef hole: the auditor's synthetic receipt carried one op
+//! closes the synthetic-receipt hole: the auditor's receipt carried one op
 //! and the gate certified it; a pass now means the promised outcome, not a
 //! nonempty list.
 //!
-//! The gate also derives its cohort (x-aafe): every in-window
+//! The gate also derives its cohort: every in-window
 //! `agent_row_reaped` event that does not carry `receipt_staged` names a
 //! session that must have a receipt file on disk, checked by existence, so
 //! a retirement that dropped a row without persisting its receipt is
@@ -66,7 +66,7 @@ pub struct VerifyReport {
     /// Expected sessions with no verified retirement (AC2-HP).
     pub missing: Vec<String>,
     /// In-window `agent_row_reaped` events the derived cohort examined
-    /// (x-aafe): a zero names itself, so "checked the log, found nothing"
+    /// A zero names itself, so "checked the log, found nothing"
     /// never reads as "the log was not read".
     pub reaped_events: usize,
 }
@@ -142,12 +142,12 @@ pub fn current_build() -> String {
     format!("fno-agents {version} rev {rev}{dirty}")
 }
 
-/// The ops every verified retirement must carry (x-5aef task 2.1, x-aafe
-/// task 1.2): a pass means the promised outcome, not a nonempty list. The
+/// The ops every verified retirement must carry: a pass means the promised
+/// outcome, not a nonempty list. The
 /// auditor's synthetic receipt carried `active-surface` alone and the old
 /// nonempty check certified it. `resume-evidence` is what makes the receipt
 /// a recovery record instead of an obituary: absent or failed, the gate
-/// refuses. `mux-member` is the squad-store half (x-aafe): a session still
+/// refuses. `mux-member` is the squad-store half: a session still
 /// held in the shared mux store is not retired, and `not-applicable` is the
 /// measured answer for a row with no membership.
 pub const REQUIRED_OPS: [&str; 4] = [
@@ -388,7 +388,7 @@ fn audit_cohort(report: &mut VerifyReport) {
     }
 }
 
-/// The derived cohort (x-aafe task 1.2), always on: every in-window
+/// The derived cohort, always on: every in-window
 /// `agent_row_reaped` event whose door did not stamp `receipt_staged`
 /// (roster-reap stamps it; the sweep and merge doors write the receipt
 /// before the row drop) names a session that must have a receipt FILE on
@@ -510,7 +510,7 @@ mod tests {
     }
 
     /// The full required op set, all confirmed: the shape a real retirement
-    /// stages since x-aafe task 1.1 (the mux-member op included).
+    /// stages since the mux-member effect landed (the op included).
     fn confirmed_effects() -> Vec<EffectRecord> {
         vec![
             effect("native-stop", "confirmed-removed"),
@@ -769,7 +769,7 @@ mod tests {
         );
     }
 
-    /// x-aafe AC2-HP: a current-build receipt carrying the pre-x-aafe op set
+    /// AC2-HP: a current-build receipt carrying the pre-gate op set
     /// (everything but mux-member) refuses, names the missing op, and the
     /// stale owner note is gone from the refusal.
     #[test]
@@ -799,7 +799,7 @@ mod tests {
         );
     }
 
-    /// x-aafe AC2-EDGE: all four ops with mux-member measured
+    /// AC2-EDGE: all four ops with mux-member measured
     /// not-applicable, and no events log: the gate passes.
     #[test]
     fn ac2_edge_not_applicable_mux_member_passes_with_no_events_log() {
@@ -818,7 +818,7 @@ mod tests {
         assert_eq!(report.reaped_events, 0, "no log read: zero names itself");
     }
 
-    /// x-aafe AC3-HP: an in-window reaped event with no `receipt_staged`
+    /// AC3-HP: an in-window reaped event with no `receipt_staged`
     /// stamp, for a session with no receipt file, fails the gate without
     /// anyone passing `--expect-sessions`.
     #[test]
@@ -856,7 +856,7 @@ mod tests {
         assert_eq!(report.reaped_events, 1);
     }
 
-    /// x-aafe AC3-EDGE: a `receipt_staged` event (roster-reap), an
+    /// AC3-EDGE: a `receipt_staged` event (roster-reap), an
     /// out-of-window event, and an event whose receipt exists but is
     /// stale-build add no derived-cohort problem.
     #[test]
