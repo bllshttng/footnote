@@ -157,9 +157,26 @@ start_server() {
     SERVER_PID=$!
     for _ in {1..100}; do
         if [[ -S "$SOCK" ]]; then
-            sleep 1
-            python3 "$ATTACH_CLIENT" "$SOCK" "$TMP_DIR/repo" >/dev/null 2>&1
-            return 0
+            # The socket file can appear before the accept loop serves: a
+            # control connect in that window resets (ECONNRESET on Linux).
+            # Poll a cheap control call until the server actually answers.
+            for _ in {1..50}; do
+                if "$MUX_BIN" mux pane ls --session "$SESSION" --json >/dev/null 2>&1; then
+                    break
+                fi
+                sleep 0.2
+            done
+            # An early-connect reset can also land in the attach itself;
+            # retry until the server takes one full non-passive attach.
+            local attempt
+            for attempt in 1 2 3 4 5; do
+                if python3 "$ATTACH_CLIENT" "$SOCK" "$TMP_DIR/repo" >/dev/null 2>&1; then
+                    return 0
+                fi
+                sleep 0.5
+            done
+            echo "FAIL: the attach never landed" >&2
+            exit 1
         fi
         sleep 0.1
     done
