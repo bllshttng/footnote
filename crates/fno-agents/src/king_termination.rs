@@ -134,6 +134,25 @@ pub(crate) fn king_undelivered_body(session_id: &str, undelivered: i64, shrank: 
     })
 }
 
+/// The drain-reserve journal row: what the fire's last, reserved read cost
+/// against the bound it was granted and the budget it started with. The
+/// reserve is silent by design; this row is its series.
+pub(crate) fn drain_reserve_body(
+    session_id: &str,
+    scope: &str,
+    bound_ms: u64,
+    elapsed_ms: u64,
+    remaining_budget_ms: u64,
+) -> Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "scope": scope,
+        "bound_ms": bound_ms,
+        "elapsed_ms": elapsed_ms,
+        "remaining_budget_ms": remaining_budget_ms,
+    })
+}
+
 pub(crate) fn read_king_board(
     fno_bin: &str,
     cwd: &Path,
@@ -451,6 +470,16 @@ mod tests {
         let top = parsed.top_row.unwrap();
         assert_eq!(top, "mergeable_pr:1702", "{top}");
         assert_eq!(parsed.actionable_ids, vec!["mergeable_pr:1702".to_string()]);
+    }
+
+    #[test]
+    fn the_drain_reserve_row_carries_the_pair_that_tells_starved_from_expensive() {
+        let body = drain_reserve_body("sess", "scope-b", 8000, 13_000, 900);
+        assert_eq!(body["scope"], "scope-b");
+        assert_eq!(body["session_id"], "sess");
+        assert_eq!(body["bound_ms"], 8000);
+        assert_eq!(body["elapsed_ms"], 13_000);
+        assert_eq!(body["remaining_budget_ms"], 900);
     }
 
     #[test]

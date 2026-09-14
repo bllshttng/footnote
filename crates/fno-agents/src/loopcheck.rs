@@ -10647,8 +10647,9 @@ fn run_bounded(
 mod read_bounds;
 
 pub(crate) use read_bounds::{
-    clamp_to_fire_deadline, stopgate_drain_reserve_ms, stopgate_drain_timeout,
-    stopgate_read_timeout, stopgate_stamp_fire, STOPGATE_BOUND_FLOOR, STOPGATE_FIRE_BUDGET,
+    clamp_to_fire_deadline, drain_reserve_half_spent, stopgate_drain_reserve_ms,
+    stopgate_drain_timeout, stopgate_fire_remaining_ms, stopgate_read_timeout, stopgate_stamp_fire,
+    STOPGATE_BOUND_FLOOR, STOPGATE_FIRE_BUDGET,
 };
 
 /// How an external stop-gate read failed. `TimedOut` is its own kind so a
@@ -11758,14 +11759,13 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         let (undelivered, drain_error) = if manifest.scope.is_empty() {
             (0, None)
         } else {
-            match crate::loop_king::scope_undelivered_count(
+            crate::loop_king::scope_undelivered_with_reserve_watch(
                 &parsed.fno_bin,
                 &parsed.cwd,
                 &manifest.scope,
-            ) {
-                Ok(n) => (n, None),
-                Err(e) => (i64::MAX, Some(e)),
-            }
+                &session_id,
+                &emit,
+            )
         };
         if undelivered == 0 {
             // x-c911: a floor count cannot see blind queues; refuse to certify.
