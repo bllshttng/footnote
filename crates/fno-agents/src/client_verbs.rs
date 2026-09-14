@@ -2899,11 +2899,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     }
 
     // Guard a session resume with the single-writer claim before launching
-    // (--print-command already returned above, so it never claims). The
-    // in-terminal exec keeps this pid, so a PID-only claim (ttl=None) lives
-    // as long as the exec'd CLI does. The mux path exits after pane dispatch,
-    // so it passes a TTL: without one the claim would go Stale on the dead
-    // holder and a second resumer would steal it before the resumed worker is
+    // (--print-command already returned above, so it never claims). The exec
+    // path claims with no TTL (it lives as long as this pid); the mux path
+    // claims with one, because it exits after dispatch and a dead holder
+    // would let a second resumer steal the claim before the worker is
     // probe-live.
     if let Some(uuid) = &claim_uuid {
         let ttl = if mux_session.is_some() {
