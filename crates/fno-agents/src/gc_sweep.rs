@@ -1514,6 +1514,7 @@ pub(crate) fn run(
     age_many: &dyn Fn(&[&state::RegistryEntry]) -> HashMap<String, Option<i64>>,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
+    mux_member: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     agents_read: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
     tree_probe: &dyn Fn(&state::RegistryEntry) -> (Option<bool>, Option<bool>),
     prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
@@ -1529,6 +1530,7 @@ pub(crate) fn run(
         age_many,
         stop_confirmed,
         surface_removal,
+        mux_member,
         agents_read,
         tree_probe,
         prune_tree,
@@ -1551,6 +1553,7 @@ pub(crate) fn run_with_release(
     age_many: &dyn Fn(&[&state::RegistryEntry]) -> HashMap<String, Option<i64>>,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
+    mux_member: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     agents_read: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
     tree_probe: &dyn Fn(&state::RegistryEntry) -> (Option<bool>, Option<bool>),
     prune_tree: &dyn Fn(&state::RegistryEntry) -> Option<crate::daemon::PruneOutcome>,
@@ -2353,6 +2356,7 @@ pub(crate) fn run_with_release(
             &stop_on_death,
             &crate::pane_stop::run_mux_pane_kill,
             surface_removal,
+            mux_member,
             &mut receipts,
         ) {
             Ok(staged) => staged,
@@ -2671,6 +2675,7 @@ pub(crate) fn stage_session_retirement(
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
     mux_kill: &dyn Fn(&str, u64) -> Result<bool, String>,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
+    mux_member: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
 ) -> Result<StagedRetirement, RetireRefusal> {
     let ledger = ledger_rows
@@ -2801,7 +2806,22 @@ pub(crate) fn stage_session_retirement(
             "the native active-surface removal did not confirm".into(),
         ));
     }
-    // Effect 3: the resumability evidence, measured off the receipt itself.
+    // Effect 3 (x-aafe): the MUX-MEMBER retirement through the shared mux
+    // squad store. A `failed` or `kept` outcome holds the row for retry,
+    // the same shape as the active-surface hold above.
+    let mux_outcome = mux_member(e);
+    let mux_applied = mux_outcome.satisfies_applied();
+    receipt
+        .effects
+        .push(mux_outcome.effect_record("mux-member"));
+    if !mux_applied {
+        let _ = write_reap_receipt(home, &receipt);
+        return Err(RetireRefusal::NativeRemoval(format!(
+            "the mux member retirement did not confirm: {}",
+            mux_outcome.detail().unwrap_or_default()
+        )));
+    }
+    // Effect 4: the resumability evidence, measured off the receipt itself.
     receipt.effects.push(resume_evidence_effect(&receipt));
     let _ = write_reap_receipt(home, &receipt);
     receipts.insert(e.name.clone(), receipt);
@@ -3902,6 +3922,7 @@ mod tests {
             &|_| None,
             &|_| std::collections::HashMap::new(),
             &|_| false,
+            &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
             &|_| (None, None),

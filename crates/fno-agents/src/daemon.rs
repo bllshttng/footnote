@@ -9921,6 +9921,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     // shrink).
     #[path = "gc_receipts.rs"]
     mod gc_receipts;
+    #[path = "gc_mux_member.rs"]
+    mod gc_mux_member;
     #[path = "keeper_sweep.rs"]
     mod keeper_sweep;
     #[path = "reap_holds.rs"]

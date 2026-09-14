@@ -24,6 +24,7 @@ use crate::daemon::{cascade_harness_session_result_with, CascadeOutcome};
 use crate::opencode_serve::ArchiveOutcome;
 use crate::receipt::EffectRecord;
 use crate::state::RegistryEntry;
+use std::time::Duration;
 
 impl CascadeOutcome {
     /// The effect-record vocabulary: `confirmed-removed`,
@@ -134,6 +135,139 @@ pub(crate) fn apply_active_surface_removal(e: &RegistryEntry) -> CascadeOutcome 
     )
 }
 
+/// The mux squad store's default host session, shared with the daemon's
+/// other mux calls (`crates/fno/src/proto.rs` `DEFAULT_SESSION`).
+pub(crate) const MUX_DEFAULT_SERVER: &str = "main";
+
+/// Apply the MUX-MEMBER retirement for one row (x-aafe): retire the row's
+/// squad membership from the shared mux store through `fno mux
+/// retire-session`. The live-membership measurement is the squad store,
+/// never the registry `mux` ref: thread members carry no mux ref, so a ref
+/// alone answers neither yes nor no.
+pub(crate) fn apply_mux_member_retirement(e: &RegistryEntry) -> CascadeOutcome {
+    mux_member_outcome_for_row(e, crate::gc_inventory::read_mux_members(), &|server| {
+        let harness = e.harness_name();
+        let sid = e.harness_session_id.clone().unwrap_or_default();
+        run_mux_retire_session(server, &harness, &sid)
+    })
+}
+
+/// The decision with the squad-store read result as an input, so every
+/// branch is testable without touching `HOME`.
+pub(crate) fn mux_member_outcome_for_row(
+    e: &RegistryEntry,
+    members: Result<Vec<(String, String)>, String>,
+    run: &dyn Fn(&str) -> Result<u64, String>,
+) -> CascadeOutcome {
+    let live = match members {
+        Ok(members) => {
+            let sid = e.harness_session_id.as_deref().unwrap_or("");
+            members
+                .iter()
+                .any(|(h, s)| h == e.harness_name() && s == sid)
+        }
+        Err(reason) => return CascadeOutcome::Failed(reason),
+    };
+    mux_member_outcome(
+        &e.harness_name(),
+        &e.harness_session_id.clone().unwrap_or_default(),
+        live,
+        e.mux.as_ref(),
+        run,
+    )
+}
+
+/// The pure decision behind [`apply_mux_member_retirement`]: a row with no
+/// live squad member and no mux ref is not-applicable; no live member WITH a
+/// ref is a measured absence; a live member retires through `run`, which
+/// answers the member count the store reported.
+pub(crate) fn mux_member_outcome(
+    harness: &str,
+    session_id: &str,
+    live_member: bool,
+    mux: Option<&crate::state::MuxRef>,
+    run: &dyn Fn(&str) -> Result<u64, String>,
+) -> CascadeOutcome {
+    if !live_member {
+        return match mux {
+            None => CascadeOutcome::NotApplicable,
+            Some(_) => CascadeOutcome::AlreadyAbsent(format!(
+                "no live squad member for {harness}:{session_id}"
+            )),
+        };
+    }
+    let server = mux
+        .map(|m| m.session.as_str())
+        .unwrap_or(MUX_DEFAULT_SERVER);
+    match run(server) {
+        Ok(n) if n >= 1 => CascadeOutcome::Removed,
+        Ok(_) => {
+            CascadeOutcome::AlreadyAbsent("the mux store retired 0 members for this session".into())
+        }
+        Err(detail) => CascadeOutcome::Failed(detail),
+    }
+}
+
+/// One bounded `fno mux retire-session` round: `Ok(n)` is the member count
+/// the store reported retired; `Err` names the exit and the first stderr
+/// line. Exit 20 (sent, unanswered) is a failure like any other - an
+/// outcome unknown is not an absence.
+fn run_mux_retire_session(server: &str, harness: &str, session_id: &str) -> Result<u64, String> {
+    let mut child = std::process::Command::new(crate::scrape::fno_bin())
+        .args([
+            "mux",
+            "retire-session",
+            server,
+            "--harness",
+            harness,
+            "--session-id",
+            session_id,
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("mux retire-session failed to start: {error}"))?;
+    let deadline = std::time::Instant::now() + crate::daemon::CASCADE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|error| format!("mux retire-session read failed: {error}"))?;
+                let reply: serde_json::Value = serde_json::from_slice(&output.stdout)
+                    .map_err(|error| format!("mux retire-session reply unparsable: {error}"))?;
+                let retired = reply
+                    .get("retired")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        "mux retire-session reply carried no retired count".to_string()
+                    })?;
+                return Ok(retired);
+            }
+            Ok(Some(status)) => {
+                let code = status.code().unwrap_or(-1);
+                let output = child.wait_with_output().ok();
+                let stderr = output
+                    .as_ref()
+                    .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
+                    .unwrap_or_default();
+                let first = stderr.lines().next().unwrap_or_default().trim();
+                return Err(format!("mux retire-session exited {code}: {first}"));
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("mux retire-session timed out".into());
+            }
+            Err(error) => return Err(format!("mux retire-session wait failed: {error}")),
+        }
+    }
+}
+
 /// opencode's active-surface removal, wired to the production seams: the
 /// recorded serve and the archive PATCH.
 fn apply_opencode_archive(e: &RegistryEntry) -> CascadeOutcome {
@@ -239,5 +373,86 @@ mod tests {
                 pane_id: 2,
             })
         )));
+    }
+
+    #[test]
+    fn mux_member_without_a_live_member_and_without_a_ref_is_not_applicable() {
+        // AC1-EDGE: neither branch runs the retire-session child.
+        let called = std::cell::Cell::new(false);
+        let outcome = mux_member_outcome("claude", "sess-a", false, None, &|_server| {
+            called.set(true);
+            Ok(1)
+        });
+        assert!(matches!(outcome, CascadeOutcome::NotApplicable));
+        assert!(!called.get(), "no live member and no ref: nothing to run");
+    }
+
+    #[test]
+    fn mux_member_without_a_live_member_but_with_a_ref_is_already_absent() {
+        // AC1-EDGE: the ref alone is not membership evidence; the store is.
+        let called = std::cell::Cell::new(false);
+        let mux = crate::state::MuxRef {
+            session: "main".into(),
+            pane_id: 1,
+        };
+        let outcome = mux_member_outcome("claude", "sess-a", false, Some(&mux), &|_server| {
+            called.set(true);
+            Ok(1)
+        });
+        match &outcome {
+            CascadeOutcome::AlreadyAbsent(detail) => {
+                assert!(detail.contains("claude:sess-a"), "{detail}");
+            }
+            other => panic!("expected AlreadyAbsent, got {other:?}"),
+        }
+        assert!(!called.get(), "no live member: nothing to run");
+    }
+
+    #[test]
+    fn mux_member_reads_the_server_from_the_mux_ref_and_the_default_otherwise() {
+        let mux = crate::state::MuxRef {
+            session: "aux".into(),
+            pane_id: 1,
+        };
+        let servers: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let live = |server: &str| -> Result<u64, String> {
+            servers.borrow_mut().push(server.to_string());
+            Ok(1)
+        };
+        let with_ref = mux_member_outcome("claude", "s", true, Some(&mux), &live);
+        assert!(matches!(with_ref, CascadeOutcome::Removed));
+        let without_ref = mux_member_outcome("claude", "s", true, None, &live);
+        assert!(matches!(without_ref, CascadeOutcome::Removed));
+        assert_eq!(
+            servers.into_inner(),
+            vec!["aux".to_string(), MUX_DEFAULT_SERVER.to_string()]
+        );
+    }
+
+    #[test]
+    fn mux_member_maps_the_run_answers_onto_the_effect_vocabulary() {
+        // AC1-EDGE: retired 0 is a measured absence; an error is a failure.
+        let run_zero = |_: &str| -> Result<u64, String> { Ok(0) };
+        let outcome = mux_member_outcome("claude", "s", true, None, &run_zero);
+        assert!(matches!(outcome, CascadeOutcome::AlreadyAbsent(_)));
+        let run_err = |_: &str| -> Result<u64, String> {
+            Err("mux retire-session exited 20: timed out waiting for reply".into())
+        };
+        let outcome = mux_member_outcome("claude", "s", true, None, &run_err);
+        assert!(matches!(outcome, CascadeOutcome::Failed(_)));
+    }
+
+    #[test]
+    fn mux_member_unreadable_store_is_failed_and_a_missing_one_is_not_a_failure() {
+        // AC1-EDGE: an unread store is not a measured absence. The missing
+        // store half is `read_mux_members`'s own contract; here the read
+        // fails and the row holds.
+        let e = row("claude", None, None);
+        let outcome = mux_member_outcome_for_row(
+            &e,
+            Err("squads.json unreadable: permission denied".into()),
+            &|_| Ok(1),
+        );
+        assert!(matches!(outcome, CascadeOutcome::Failed(_)));
     }
 }
