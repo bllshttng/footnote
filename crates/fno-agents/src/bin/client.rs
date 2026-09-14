@@ -61,6 +61,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "judge",
     "kill-check",
     "king-checkin",
+    "king-escalation-text",
     "king-history",
     "reign-ledger",
     "route-slot",
@@ -306,6 +307,16 @@ async fn run(args: Vec<String>) -> i32 {
     // advertised fno verb is added.
     if matches!(verb, "law-match") {
         return fno_agents::law_match::run_law_match(&args[1..]);
+    }
+
+    // `king-escalation-text` is the hidden binary-direct transport for the
+    // king escalation renderer (x-ff27): the question/mail text renderer
+    // ported out of `fno.king.escalate`. Python keeps the question fold and
+    // the liveness read; this side only renders. Same `matches!` treatment
+    // as `law-match` so the routable-verb parity guard does not see it - no
+    // advertised fno verb is added.
+    if matches!(verb, "king-escalation-text") {
+        return fno_agents::king_escalation::run_king_escalation_text(&args[1..]);
     }
 
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the
