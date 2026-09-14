@@ -17215,19 +17215,9 @@ mod tests {
         );
     }
 
-    /// A one-tab squad (id 1) whose single tab (id 5) holds one real spawned
-    /// shell pane, plus a scratch shell so template shell slots can spawn.
-    fn template_core() -> (Core, u64) {
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        core.next_pane_id = 100;
-        let p = core.spawn_pane(24, 80, "/a").unwrap();
-        core.session
-            .add_squad(1, vec!["/a".into()], Some("sq".into()), leaf_tab(5, p));
-        core.tab_areas.insert(5, (24, 80));
-        (core, p)
-    }
+    // ---- v41 (x-d865) layout script API server ops ----------------------
 
+    /// squad 1: tab 10 = panes [1,2] (H-split); tab 20 "bee" = pane [3].
     fn two_tab_core() -> Core {
         let mut core = empty_core();
         core.session.add_squad(
@@ -17256,10 +17246,27 @@ mod tests {
         core
     }
 
+    // ---- v42 (x-c4d4) declarative layout templates -----------------------
+
+    /// A registry row binding fno id `sess_id` to live `pane` in the test
+    /// session ("test"), so `resolve_local_pane` can find it.
     fn bound_agent(sess_id: &str, pane: u64) -> RegistryAgent {
         let mut a = agent_in("test", pane, None, false);
         a.session_id = Some(sess_id.into());
         a
+    }
+
+    /// A one-tab squad (id 1) whose single tab (id 5) holds one real spawned
+    /// shell pane, plus a scratch shell so template shell slots can spawn.
+    fn template_core() -> (Core, u64) {
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        core.next_pane_id = 100;
+        let p = core.spawn_pane(24, 80, "/a").unwrap();
+        core.session
+            .add_squad(1, vec!["/a".into()], Some("sq".into()), leaf_tab(5, p));
+        core.tab_areas.insert(5, (24, 80));
+        (core, p)
     }
 
     fn shell_spec(t: TemplateName, k: usize) -> LayoutSpec {

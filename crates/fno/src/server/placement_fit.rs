@@ -67,10 +67,9 @@ impl Core {
                 Err(tree::SplitError::TooSmall { .. }) => {
                     refused_with_room = true;
                 }
-                Err(e) => {
-                    self.reap_pane(pid);
-                    return Err((err_code::BAD_REQUEST, e.to_string()));
-                }
+                // A stale focus makes this tab unusable, not the spawn
+                // fatal: skip it, and the mint below still lands the pane.
+                Err(tree::SplitError::FocusNotFound(_)) => {}
             }
         }
         let tid = self.session.mint_tab_id();

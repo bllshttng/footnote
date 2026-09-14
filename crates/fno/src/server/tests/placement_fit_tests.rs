@@ -166,6 +166,44 @@ fn place_with_fit_too_small_everywhere_mints_with_fell_back() {
 }
 
 #[test]
+fn place_with_fit_stale_focus_skips_to_next_tab_with_room() {
+    // A tab whose focus pane is absent from its tree is unusable, never
+    // fatal: the walk moves on and the pane lands in the next tab with
+    // room, without a size-fallback signal.
+    let mut core = empty_core();
+    core.session
+        .add_squad(1, vec!["/a".into()], None, leaf_tab(10, 1));
+    core.session.squad_mut(1).unwrap().tabs[0].focus = 999;
+    core.session
+        .squad_mut(1)
+        .unwrap()
+        .tabs
+        .push(leaf_tab(20, 2));
+
+    let (_sid, tid, fell_back) = core
+        .place_with(
+            Some(1),
+            "/a",
+            9,
+            &PanePlacement {
+                fit: true,
+                max_panes: Some(4),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!fell_back);
+    assert_eq!(tid, 20);
+    let sq = core.session.squad(1).unwrap();
+    assert_eq!(
+        tree::leaves(&sq.tabs[0].root),
+        vec![1],
+        "stale tab untouched"
+    );
+    assert_eq!(tree::leaves(&sq.tabs[1].root), vec![2, 9]);
+}
+
+#[test]
 fn run_pane_refuses_fit_with_explicit_geometry() {
     // AC4-ERR: the server re-validates the CLI gate - fit plus any
     // explicit geometry is BAD_REQUEST before any pane exists.
