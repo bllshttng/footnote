@@ -792,7 +792,7 @@ def escalate_cmd(
     except Exception:  # noqa: BLE001 - an unresolvable session never blocks the ask
         session_id = None
     # The caller's own liveness, read not asserted: unknown reads as dead
-    # inside question_text, with the reason named.
+    # in the renderer, with the reason named.
     try:
         state = reign_state(session_id=session_id)
         live, unknown_reason = state.live, state.unknown_reason

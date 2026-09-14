@@ -950,8 +950,9 @@ fn king_escalate_bin(dir: &Path, payload: &str, log: &Path) -> PathBuf {
 
 /// Plan verification 7, first half: EVERY NoProgress terminal escalates.
 ///
-/// `king_decide` reaches NoProgress two ways: a board it could not read for
-/// the whole dry-fire run, and a board whose rows nothing cleared. Both route
+/// `king_decide` reaches NoProgress three ways: a board it could not read for
+/// the whole dry-fire run, a board whose rows nothing cleared, and a quiet
+/// board whose scope still holds undelivered nodes. All route
 /// through the shared `terminate` closure, so both escalate and a terminal
 /// added later is covered without anyone remembering to wire it. This drives
 /// both rather than asserting the helper they share, which would pin the
@@ -1027,10 +1028,75 @@ fn every_king_noprogress_terminal_escalates() {
         "the unreadable-board terminal escalates too: {blind_logged}"
     );
     assert!(
-        blind_calls[0].contains("--stalled  --reason NoProgress")
-            || blind_calls[0].contains("--stalled --reason"),
-        "with no rows to name it still escalates, got: {}",
+        blind_calls[0].contains("--stalled reading:board-unreadable"),
+        "the blind terminal names the reading it measured (x-ff27), got: {}",
         blind_calls[0]
+    );
+
+    // Terminal 3: a board the king READS fine, quiet, with a scope whose
+    // drain count still reads undelivered > 0. The old empty-set escalation
+    // rendered THIS board as "a board the king could not read" (q-f347e7bc):
+    // a healthy board must not assert the king went blind. The reading id
+    // carries the scope, so its commas ride as `+` (the escalate argv splits
+    // ids on `,`).
+    let quiet_tmp = TempDir::new().unwrap();
+    let quiet_cwd = quiet_tmp.path();
+    let quiet_log = quiet_cwd.join("escalations.log");
+    let quiet_state = quiet_cwd.join("king-state.md");
+    fs::write(
+        &quiet_state,
+        "---\nfno_id: k-quiet\ncreated_at: 2026-08-18T00:00:00Z\nscope: x-1111,x-2222\n\
+         harness: claude\n---\n",
+    )
+    .unwrap();
+    let quiet_events = quiet_cwd.join("events.jsonl");
+    let quiet_bin = king_quiet_drain_bin(bin_dir.path(), &[Some(3)], &quiet_log);
+    king_prepare_fixture(quiet_cwd, quiet_bin.parent().unwrap(), &quiet_bin);
+    // The crown's scope is the two epics x-1111 and x-2222; the fixture graph
+    // must carry them or the scope queue reads loud and the board never
+    // quiets. Their delivery state lives in the mocked drain verb, not here.
+    fs::write(
+        quiet_cwd.join("graph.json"),
+        serde_json::to_string(&serde_json::json!({"entries": [
+            {"id": "x-1111", "type": "epic", "status": "ready", "priority": "p1",
+             "plan_path": "/plans/p.md"},
+            {"id": "x-2222", "type": "epic", "status": "ready", "priority": "p1",
+             "plan_path": "/plans/p.md"},
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut quiet = (0, serde_json::Value::Null);
+    for _ in 0..3 {
+        quiet = king_spawn(
+            &quiet_state,
+            quiet_cwd,
+            &quiet_events,
+            quiet_bin.parent().unwrap(),
+        );
+    }
+    assert_eq!(
+        quiet.1["termination_reason"], "NoProgress",
+        "a quiet board with undelivered scope nodes must reach the NoProgress \
+         terminal: {:?}",
+        quiet.1
+    );
+    let quiet_logged = fs::read_to_string(&quiet_log).unwrap_or_default();
+    let quiet_calls: Vec<&str> = quiet_logged
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(
+        quiet_calls.len(),
+        1,
+        "the quiet-board terminal escalates: {quiet_logged}"
+    );
+    assert!(
+        quiet_calls[0].contains("--stalled reading:undelivered:x-1111+x-2222"),
+        "the quiet terminal names its undelivered reading with the scope, \
+         got: {}",
+        quiet_calls[0]
     );
 }
 
