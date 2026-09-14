@@ -20183,7 +20183,7 @@ mod tests {
             },
         );
         assert!(
-            drain_notice(&mut rx).unwrap().contains("not resumable"),
+            drain_notice(&mut rx).unwrap().contains("live pane"),
             "a row with a live pane is refused, never double-spawned"
         );
         assert_eq!(core.panes.len(), 1, "nothing was spawned by either refusal");
