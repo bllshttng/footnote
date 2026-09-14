@@ -25,7 +25,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno import doctor
-from fno.agents import mux_spawn
+from fno.agents import codex_pane, mux_spawn
 from fno.cli import app
 
 runner = CliRunner()
@@ -37,6 +37,8 @@ def _proc(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
 
 
 def _patch_common(monkeypatch, *, run_returncode: int = 0, pane_id_out: str = "7\n"):
+    from fno.agents import codex_pane
+
     monkeypatch.setattr(doctor, "_codex_version", lambda: "codex-cli 0.148.0")
     # build_pane_argv consults the installed codex version by exec'ing the
     # real binary; the provider-exec guard blocks that, so pin it like the
@@ -54,10 +56,22 @@ def _patch_common(monkeypatch, *, run_returncode: int = 0, pane_id_out: str = "7
         lambda session, pane_id, runner: (reaped.append((session, pane_id)), (True, ""))[1],
     )
     monkeypatch.setattr(
-        mux_spawn, "_codex_session_ids_loaded", lambda cwd, **_kw: set()
+        codex_pane, "_codex_session_ids_loaded", lambda cwd, **_kw: set()
     )
     monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: True)
     monkeypatch.setattr(mux_spawn, "_read_pane_tail", lambda *a, **k: "")
+    # x-a095: the canary starts the daemon from the capability form and stops
+    # it on every exit; both provider execs are faked here. Non-stop commands
+    # still reach the real subprocess.run captured before the rebinding.
+    monkeypatch.setattr(codex_pane, "ensure_codex_daemon", lambda *_a, **_k: None)
+    real_run = subprocess.run
+    monkeypatch.setattr(
+        doctor.subprocess,
+        "run",
+        lambda argv, *a, **k: _proc(0)
+        if list(argv)[:4] == ["codex", "app-server", "daemon", "stop"]
+        else real_run(argv, *a, **k),
+    )
     return reaped
 
 
@@ -66,7 +80,7 @@ def test_binds_via_the_fd_oracle_and_reports_it(monkeypatch) -> None:
     monkeypatch.setattr(
         mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID
     )
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: None)
 
     result = doctor._codex_bind_report()
 
@@ -93,7 +107,7 @@ def test_canary_uses_isolated_trusted_cwd_and_nonempty_prompt(
     monkeypatch.setattr(
         mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID
     )
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: None)
     seen: list[str] = []
     observed: dict[str, str] = {}
 
@@ -158,7 +172,7 @@ def test_canary_canonicalizes_scratch_path_for_trust_lookup(
     monkeypatch.setattr(
         mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID
     )
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: None)
     seen: list[str] = []
     observed: dict[str, str] = {}
 
@@ -186,8 +200,8 @@ def test_binds_via_the_daemon_oracle_when_the_fd_probe_misses(monkeypatch) -> No
     )
     # The stability gate needs the SAME candidate on two consecutive daemon
     # probes; a constant lambda satisfies that without a call counter.
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: SID)
-    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: SID)
+    monkeypatch.setattr(codex_pane, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
     monkeypatch.setattr(mux_spawn.time, "sleep", lambda *_a, **_k: None)
 
     result = doctor._codex_bind_report()
@@ -210,12 +224,12 @@ def test_daemon_oracle_uses_the_canary_codex_home(monkeypatch) -> None:
         homes.append(("candidate", codex_home))
         return SID
 
-    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", baseline)
+    monkeypatch.setattr(codex_pane, "_codex_session_ids_loaded", baseline)
     monkeypatch.setattr(
         mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None
     )
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", candidate)
-    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", candidate)
+    monkeypatch.setattr(codex_pane, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
     monkeypatch.setattr(mux_spawn.time, "sleep", lambda *_a, **_k: None)
 
     result = doctor._codex_bind_report()
@@ -234,7 +248,7 @@ def test_neither_oracle_binding_fails_named_and_reaps(monkeypatch) -> None:
     monkeypatch.setattr(
         mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None
     )
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: None)
 
     result = doctor._codex_bind_report()
 
@@ -249,7 +263,7 @@ def test_short_binding_candidate_cannot_pass_the_canary(monkeypatch) -> None:
     monkeypatch.setattr(
         mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID[:8]
     )
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: None)
 
     result = doctor._codex_bind_report()
 
@@ -336,3 +350,40 @@ def test_cli_exits_zero_on_a_bound_pane(monkeypatch) -> None:
     result = runner.invoke(app, ["doctor", "--codex-bind"])
     assert result.exit_code == 0
     assert "oracle=daemon" in result.output
+
+
+def _record_daemon_stops(monkeypatch) -> list[list[str]]:
+    stops: list[list[str]] = []
+    fallback = doctor.subprocess.run
+
+    def record(argv, *a, **k):
+        if list(argv)[:4] == ["codex", "app-server", "daemon", "stop"]:
+            stops.append(list(argv))
+            return _proc(0)
+        return fallback(argv, *a, **k)
+
+    monkeypatch.setattr(doctor.subprocess, "run", record)
+    return stops
+
+
+def test_canary_stops_its_private_daemon_on_the_bound_path(monkeypatch) -> None:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID)
+    stops = _record_daemon_stops(monkeypatch)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is True
+    assert len(stops) == 1
+    assert stops[0][:4] == ["codex", "app-server", "daemon", "stop"]
+
+
+def test_canary_stops_its_private_daemon_when_the_pane_run_fails(monkeypatch) -> None:
+    """The early return before any pane exists must not leak the daemon."""
+    _patch_common(monkeypatch, run_returncode=1)
+    stops = _record_daemon_stops(monkeypatch)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is False
+    assert len(stops) == 1

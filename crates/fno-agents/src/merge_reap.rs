@@ -68,21 +68,6 @@ pub(crate) struct MergeCleanupRequest {
     harness: Option<String>,
 }
 
-/// The pending set for one repo: every request minus the ones a tombstone
-/// already settled. `merge_cleanup_completed` / `_refused` / `_expired` all
-/// finish a request; a held request stays pending and is re-read every pass.
-/// One journal read per call; the reaper pass calls the `_all` variant once
-/// and partitions in memory, so N roots cost one read, not N.
-pub(crate) fn pending_merge_cleanup_requests(
-    home: &AgentsHome,
-    repo: &str,
-) -> Vec<MergeCleanupRequest> {
-    pending_merge_cleanup_requests_all(home)
-        .into_iter()
-        .filter(|request| request.repo == repo)
-        .collect()
-}
-
 /// Every pending request across repos, in one journal read spanning one
 /// rotation: the `.1` generation is read before the active file, so a request
 /// minted shortly before a rotation stays pending across it instead of
@@ -539,13 +524,16 @@ fn run_request(
             home,
             entry,
             ledger,
-            false,
+            crate::gc_sweep::RetireMode::Apply,
+            // The observation spares only a rehearsal a mutation; apply
+            // reads the stop gate from the stop itself.
+            crate::gc_sweep::StopObservation::Unproven,
             false,
             &stop,
             seams.surface_removal,
             &mut receipts,
         ) {
-            Ok(()) => {
+            Ok(crate::gc_sweep::StagedRetirement::Retired) => {
                 to_retire.insert(
                     entry.name.clone(),
                     crate::gc_sweep::RetireOrder {
@@ -566,6 +554,11 @@ fn run_request(
                     },
                 );
             }
+            // apply cannot produce Unverified; if a future path ever
+            // does, the row is kept and named, never retired on it.
+            Ok(crate::gc_sweep::StagedRetirement::Unverified(_)) => {
+                held_rows.push(format!("{}:dry_run_unverified", entry.name));
+            }
             Err(refusal) => held_rows.push(format!(
                 "{name}:{reason}",
                 name = entry.name,
@@ -575,6 +568,10 @@ fn run_request(
                         "native_removal_unconfirmed",
                     crate::gc_sweep::RetireRefusal::NoReceipt(_) => "no_receipt",
                     crate::gc_sweep::RetireRefusal::GraphObligation(_) => "open_do_row",
+                    // Both unreachable in apply mode; the match is
+                    // exhaustive so a future mode leak cannot retire a row.
+                    crate::gc_sweep::RetireRefusal::StopUnproven(_) => "stop_unproven",
+                    crate::gc_sweep::RetireRefusal::GraphUnreadable => "graph_unreadable",
                 }
             )),
         }
@@ -822,6 +819,22 @@ pub(crate) fn consume_merge_cleanup_requests(
         Some(&format!("requests={total_requests} held={held_requests}")),
         MERGE_REAP_INTERVAL_SECS,
     );
+}
+
+/// The pending set for one repo: every request minus the ones a tombstone
+/// already settled. `merge_cleanup_completed` / `_refused` / `_expired` all
+/// finish a request; a held request stays pending and is re-read every pass.
+/// One journal read per call; the reaper pass calls the `_all` variant once
+/// and partitions in memory, so N roots cost one read, not N.
+#[cfg(test)]
+pub(crate) fn pending_merge_cleanup_requests(
+    home: &AgentsHome,
+    repo: &str,
+) -> Vec<MergeCleanupRequest> {
+    pending_merge_cleanup_requests_all(home)
+        .into_iter()
+        .filter(|request| request.repo == repo)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1454,7 +1467,7 @@ mod tests {
             tree_holds: &|_wt| true,
             take_tree: &|_wt, _root| true,
         };
-        let (acted, held) = run_request(
+        let (acted, _held) = run_request(
             &home,
             &emitter,
             &request,
@@ -1766,7 +1779,7 @@ mod tests {
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_registry(&home, &[claude_row("t-1-writing-glm", false)]);
         let states = merged_states();
-        let mut request = settled_request("/no-such-worktree");
+        let request = settled_request("/no-such-worktree");
         let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let stop_calls = std::rc::Rc::clone(&calls);
         let seams = RequestSeams {

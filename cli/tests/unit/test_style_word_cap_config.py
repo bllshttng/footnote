@@ -128,9 +128,9 @@ def test_a_configured_cap_reads_back_per_surface(tmp_path, monkeypatch):
 
 
 def test_a_cap_below_one_is_refused_by_the_model(tmp_path, monkeypatch):
-    from pydantic import ValidationError
+    from fno.config._loader import SettingsRefused
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(SettingsRefused):
         _load(
             tmp_path,
             monkeypatch,

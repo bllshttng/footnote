@@ -15,12 +15,14 @@ import typing
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 #: An unknown table with more leaves than this reports as the table.
 _UNKNOWN_LEAF_CAP = 3
 #: A leaf name in more sections than this is a common word, not a near miss.
 _NEAR_MISS_CAP = 4
+#: Schema errors one refusal names before it points at the file for the rest.
+_REFUSAL_ERROR_CAP = 5
 #: Top-level blocks the walker must not judge: another reader owns `kanban`,
 #: and `providers` is the pre-rename spelling the loader still aliases across.
 _UNMODELED_BLOCKS = frozenset({"kanban", "providers"})
@@ -160,6 +162,76 @@ def check_unknown_keys() -> list[str]:
             hints = _near_miss_keys(key)
             tail = f"did you mean {' or '.join(hints)}?" if hints else "ignored"
             problems.append(f"{key} (set in {path}) is not a modeled config key; {tail}")
+    return problems
+
+
+_MISSING = object()
+
+
+def _holder_file(
+    layers: list[tuple[Path, dict[str, object]]], loc: tuple[object, ...]
+) -> str:
+    """First priority-ordered layer holding the key; one trailing segment may
+    drop, since legacy coercion derives a deeper key than the file stores."""
+    if not loc:
+        return "settings"
+    unwrap = _cfg()._unwrap_config_dict
+    for path, parsed in layers:
+        flat = unwrap(dict(parsed))
+        if _path_held(flat, loc) or _path_held(flat, loc[:-1]):
+            return str(path)
+    return "settings"
+
+
+def _path_held(node: Any, loc: tuple[object, ...]) -> bool:
+    for part in loc:
+        if isinstance(part, int) and isinstance(node, list):
+            node = node[part] if 0 <= part < len(node) else _MISSING
+        elif isinstance(node, dict):
+            node = node.get(part, _MISSING)
+        else:
+            return False
+    return node is not _MISSING
+
+
+def describe_config_failure(
+    exc: Any, layers: list[tuple[Path, dict[str, object]]]
+) -> str:
+    """One line per schema error, naming file, key, value and legal set.
+
+    Shared by the loader's ``SettingsRefused`` and the doctor's value check.
+    ``layers`` is the loader's priority-ordered (path, parsed) list.
+    """
+    errors = exc.errors()
+    lines = []
+    for err in errors[:_REFUSAL_ERROR_CAP]:
+        key = ".".join(str(part) for part in err.get("loc", ()))
+        expected = (err.get("ctx") or {}).get("expected") or err.get("msg", "invalid value")
+        holder = _holder_file(layers, err.get("loc", ()))
+        lines.append(f"{holder}: {key} = {err.get('input')!r}; {expected}")
+    if not lines:
+        return f"refusing to load settings: {exc}"
+    if len(errors) > _REFUSAL_ERROR_CAP:
+        lines.append(f"... and {len(errors) - _REFUSAL_ERROR_CAP} more")
+    return "refusing to load settings:\n  " + "\n  ".join(lines)
+
+
+def check_values() -> list[str]:
+    """Values the schema refuses (an out-of-enum string, a bad number), each
+    named with the file that holds it. Per layer, like check_unknown_keys: a
+    higher-priority file can mask the value today without disarming it."""
+    try:
+        from fno.config_io import _unwrap_config_dict
+
+        model = _cfg().SettingsModel
+    except Exception:  # noqa: BLE001 - a report, not the loader
+        return []
+    problems: list[str] = []
+    for path, parsed in _layers():
+        try:
+            model.model_validate(_unwrap_config_dict(dict(parsed)))
+        except ValidationError as exc:
+            problems.append(describe_config_failure(exc, [(path, parsed)]))
     return problems
 
 

@@ -19,7 +19,7 @@ import os
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
@@ -86,6 +86,8 @@ class TickResult:
     # The preflight RAN but the budget was unreadable: the tick proceeded on
     # an absent instrument rather than reading the absence as a low budget.
     quota_unknown: bool = False
+    # Durable-grant executions handed to the merge phase (see run_execute_queue).
+    execute_queue: list = field(default_factory=list)
 
 
 # Receipts chunk below the authoritative event ceiling (fno.events reads it
@@ -140,6 +142,15 @@ def _mark_handled(delivery_state: dict[str, dict], key: str, obs_state: str) -> 
     rec = rec if isinstance(rec, dict) else {}
     rec["handled"] = obs_state
     delivery_state[key] = rec
+
+
+def _notify_parked_pr(notify, pr: int, slug: str, retries: int, why: str) -> None:
+    """One operator notice for a retries-exhausted park; never raises."""
+    try:
+        notify(f"PR #{pr} ({slug}) parked after {retries} failed {why} attempts",
+               pr=pr, repo_slug=slug)
+    except Exception as exc:
+        log.warning("pr-watch: notify failed: %s", exc)
 
 
 def _finish_queue_merge(repo_dir: Path, pr: int, emit: Callable) -> None:
@@ -820,13 +831,12 @@ def _run_tick(
 
     acted = 0
     skipped = 0
-    # The merge-scan receipt (the completed tick's positive proof the grant
-    # scan RAN): eligible = OPEN candidates whose durable verdict granted,
-    # attempted = executions actually reserved. Integers, zero fine - a scan
-    # that saw nothing is still a scan that ran, which is the fact AC12-HP
-    # needs and a bare absence cannot prove.
+    # The merge-scan receipt: the completed tick's proof the grant scan RAN.
+    # attempted = executions handed to the merge phase; a scan that saw
+    # nothing is still a scan that ran (AC12-HP).
     merge_scan_eligible = 0
     merge_scan_attempted = 0
+    execute_queue: list[tuple[Any, str, dict[str, Any]]] = []
     # Rich reads completed: separates "the scan reached nothing" from "the
     # scan found nothing granted" (eligible=0 alone cannot).
     merge_scan_scanned = 0
@@ -1151,14 +1161,9 @@ def _run_tick(
                         else:
                             store.set(key, entry)
                         emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
-                        try:
-                            notify(
-                                f"PR #{pr} ({slug}) parked after {retries} failed dispatch attempts",
-                                pr=pr,
-                                repo_slug=slug,
-                            )
-                        except Exception as exc:
-                            log.warning("pr-watch: notify failed: %s", exc)
+                        _notify_parked_pr(
+                            notify, pr, slug, retries, "dispatch"
+                        )
 
             elif decision.kind in ("merge", "review"):
                 # No room for one bounded fire in the phase slice: skip the
@@ -1169,77 +1174,18 @@ def _run_tick(
                 skipped += 1
 
             elif decision.kind == "execute":
-                # The parked worker hands execution to the watcher: one
-                # attributable attempt under the per-PR lock held above. The
-                # canonical merge core owns every safety judgment (hold,
-                # in-flight review, coverage, posture, CI); this branch only
-                # attributes the attempt and classifies its verdict.
-                grant_fields: dict[str, Any] = {}
-                if grant_verdict is not None and isinstance(grant_verdict.grant, dict):
-                    grant_fields = {
-                        "source": grant_verdict.grant.get("source"),
-                        "recorded_by": grant_verdict.grant.get("recorded_by"),
-                        "recorded_at": grant_verdict.grant.get("recorded_at"),
-                    }
-                emit(
-                    "merge_grant_execution",
-                    {"phase": "reserved", "actor": "pr-watch", "pr": pr,
-                     "node_id": cand.node_id, **grant_fields},
-                )
-                merge_scan_attempted += 1
-                from fno.pr._merge import run_merge_for_durable_grant
+                # Queued, never run here: the merge phase owns the call (see
+                # run_execute_queue and the merge-phase doc).
+                grant = grant_verdict.grant if (
+                    grant_verdict is not None and isinstance(grant_verdict.grant, dict)
+                ) else {}
+                grant_fields = {
+                    k: grant.get(k) for k in ("source", "recorded_by", "recorded_at")}
 
-                try:
-                    rc = run_merge_for_durable_grant(pr, str(cand.repo_dir))
-                except Exception as exc:  # noqa: BLE001 - a crash is a failed attempt
-                    log.warning("pr-watch: durable-grant merge for PR #%d crashed: %s", pr, exc)
-                    rc = 1
-                if rc == 0:
-                    acted += 1
-                    entry["merge_dispatched"] = True
-                    entry["retries"] = 0
-                    store.set(key, entry)
-                    emit(
-                        "merge_grant_execution",
-                        {"phase": "executed", "actor": "pr-watch", "pr": pr,
-                         "node_id": cand.node_id, **grant_fields},
-                    )
-                elif rc == 2:
-                    # Held or skipped by a canonical guard: retryable, and it
-                    # consumes no failure budget - the refusing guard is a
-                    # state to wait out (CI, review in flight), not a watcher
-                    # defect. The next tick re-resolves and re-attempts.
-                    store.set(key, entry)
-                    emit(
-                        "merge_grant_execution",
-                        {"phase": "held", "actor": "pr-watch", "pr": pr,
-                         "node_id": cand.node_id, **grant_fields},
-                    )
-                else:
-                    try:
-                        retries = int(entry.get("retries") or 0) + 1
-                    except (TypeError, ValueError):
-                        retries = 1
-                    entry["retries"] = retries
-                    store.set(key, entry)
-                    emit(
-                        "merge_grant_execution",
-                        {"phase": "failed", "actor": "pr-watch", "pr": pr,
-                         "node_id": cand.node_id, "exit_code": rc, **grant_fields},
-                    )
-                    if retries >= max_retries:
-                        entry["parked"] = "retries-exhausted"
-                        store.set(key, entry)
-                        emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
-                        try:
-                            notify(
-                                f"PR #{pr} ({slug}) parked after {retries} failed "
-                                "durable-grant merge attempts",
-                                pr=pr,
-                                repo_slug=slug,
-                            )
-                        except Exception as exc:
-                            log.warning("pr-watch: notify failed: %s", exc)
+                execute_queue.append((cand, key, grant_fields))
+                merge_scan_attempted += 1
+                entry["last_polled_at"] = now_iso
+                store.set(key, entry)
 
             entry["last_seen_state"] = obs.state
             if obs.state in ("MERGED", "CLOSED"):
@@ -1294,7 +1240,98 @@ def _run_tick(
         skipped=skipped,
         sweep_failures=sweep_failures,
         quota_unknown=quota_unknown,
+        execute_queue=execute_queue,
     )
+
+
+def run_execute_queue(
+    result: TickResult,
+    *,
+    store_path: Optional[Path] = None,
+    emit: Callable[[str, dict], Optional[bool]],
+    notify: Callable,
+    max_retries: int,
+    claim: Any,
+) -> tuple[int, int]:
+    """Run the sweep's queued durable-grant merges; returns ``(executed,
+    skipped)``. Contract: docs/architecture/pr-watch-merge-phase.md."""
+    from fno.pr_watch._state import WatermarkStore
+
+    if not result.execute_queue:
+        return (0, 0)
+    holder = f"pr-watch-merge:{os.getpid()}"
+
+    def _grant(phase: str, pr: int, cand: Any, grant: dict, **extra: Any) -> None:
+        emit("merge_grant_execution",
+             {"phase": phase, "actor": "pr-watch", "pr": pr,
+              "node_id": cand.node_id, **extra, **grant})
+
+    store = WatermarkStore(path=store_path)
+    executed = 0
+    skipped = 0
+    for cand, key, grant_fields in result.execute_queue:
+        pr = cand.pr_number
+        pr_lock_key = f"pr-watch:{cand.repo_slug or 'unknown'}:{pr}"
+        try:
+            claim.acquire_pr_lock(pr_lock_key, holder)
+        except Exception:
+            log.debug("pr-watch: PR #%d already being merged, skipping", pr)
+            skipped += 1
+            continue
+        try:
+            entry = store.get(key)
+            if not isinstance(entry, dict) or entry.get("merge_dispatched"):
+                continue  # an overlapping tick already merged it (doc: contract)
+            left = phase_seconds_left()
+            if left is not None and left < _FIRE_FLOOR_S:
+                emit("pr_watch_skipped", {"pr": pr, "reason": "execute-budget"})
+                skipped += 1
+                continue
+            try:
+                prior_retries = int(entry.get("retries") or 0)
+            except (TypeError, ValueError):
+                prior_retries = 0
+            _grant("reserved", pr, cand, grant_fields)
+            # Spent BEFORE the call: set() persists per write, so an alarm
+            # cut mid-call counts as one failed attempt.
+            entry["retries"] = prior_retries + 1
+            store.set(key, entry)
+            set_tick_phase("merge:execute")
+            from fno.pr._merge import run_merge_for_durable_grant
+            try:
+                rc = run_merge_for_durable_grant(
+                    pr, str(cand.repo_dir), timeout_s=_ritual_timeout()
+                )
+            except Exception as exc:  # noqa: BLE001 - a crash is a failed attempt
+                log.warning("pr-watch: durable-grant merge for PR #%d crashed: %s", pr, exc)
+                rc = 1
+            if rc == 0:
+                executed += 1
+                entry["merge_dispatched"] = True
+                entry["retries"] = 0
+                store.set(key, entry)
+                _grant("executed", pr, cand, grant_fields)
+            elif rc == 2:
+                # Held by a canonical guard: retryable, no failure budget.
+                entry["retries"] = prior_retries
+                store.set(key, entry)
+                _grant("held", pr, cand, grant_fields)
+            else:
+                _grant("failed", pr, cand, grant_fields, exit_code=rc)
+                if prior_retries + 1 >= max_retries:
+                    entry["parked"] = "retries-exhausted"
+                    store.set(key, entry)
+                    emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
+                    _notify_parked_pr(
+                        notify, pr, cand.repo_slug, prior_retries + 1,
+                        "durable-grant merge",
+                    )
+        finally:
+            try:
+                claim.release_pr_lock(pr_lock_key, holder)
+            except Exception as exc:
+                log.warning("pr-watch: failed to release PR lock for #%d: %s", pr, exc)
+    return (executed, skipped)
 
 
 # ---------------------------------------------------------------------------

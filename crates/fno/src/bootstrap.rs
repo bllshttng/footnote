@@ -1218,7 +1218,7 @@ fn verify_ours(real: &Path) -> BootResult<()> {
 /// [`verify_ours`] for a target whose interpreter is NOT the sibling `python`:
 /// the packaged-console-script case, where the shebang names the venv python
 /// absolutely. Same probe, same identity rule, different interpreter path.
-fn verify_ours_with_python(real: &Path, venv_python: &Path) -> BootResult<()> {
+fn verify_ours_with_python(_real: &Path, venv_python: &Path) -> BootResult<()> {
     // Fall back to `Author-email` when `Author` is absent: a PEP 621 author
     // with an email (`{name, email}`) makes the build backend emit only
     // `Author-email: Jason Noah Choi <...>` and drop the bare `Author` field.

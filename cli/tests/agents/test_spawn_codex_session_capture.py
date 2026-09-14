@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.agents import mux_spawn
+from fno.agents import codex_pane, codex_rollout, mux_spawn
 from fno.agents.discover import codex_session_ids_started_in
 from fno.agents.mux_spawn import _backfill_codex_session_id
 
@@ -396,28 +396,28 @@ def test_rollout_scan_skips_files_older_than_since(tmp_path: Path) -> None:
 
 def test_daemon_bind_accepts_the_one_new_id_for_this_cwd(monkeypatch) -> None:
     monkeypatch.setattr(
-        mux_spawn,
+        codex_pane,
         "_codex_session_ids_loaded",
         lambda cwd: {SID_A, SID_B},
     )
-    assert mux_spawn._codex_daemon_candidate(Path("/w/proj"), {SID_B}) == SID_A
+    assert codex_pane._codex_daemon_candidate(Path("/w/proj"), {SID_B}) == SID_A
 
 
 def test_daemon_bind_refuses_two_new_ids_as_ambiguous(monkeypatch) -> None:
     monkeypatch.setattr(
-        mux_spawn,
+        codex_pane,
         "_codex_session_ids_loaded",
         lambda cwd: {SID_A, SID_B},
     )
-    assert mux_spawn._codex_daemon_candidate(Path("/w/proj"), set()) is None
+    assert codex_pane._codex_daemon_candidate(Path("/w/proj"), set()) is None
 
 
 def test_daemon_bind_returns_none_when_daemon_is_unavailable(monkeypatch) -> None:
     # None distinct from an empty set: the daemon could not answer, so the fd
     # oracle alone must decide - a false "nothing new" would be worse than no
     # answer at all.
-    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", lambda cwd: None)
-    assert mux_spawn._codex_daemon_candidate(Path("/w/proj"), set()) is None
+    monkeypatch.setattr(codex_pane, "_codex_session_ids_loaded", lambda cwd: None)
+    assert codex_pane._codex_daemon_candidate(Path("/w/proj"), set()) is None
 
 
 def test_session_ids_loaded_filters_by_cwd_and_distinguishes_none_from_empty(
@@ -426,7 +426,7 @@ def test_session_ids_loaded_filters_by_cwd_and_distinguishes_none_from_empty(
     from fno.agents import discover as _discover
 
     monkeypatch.setattr(_discover, "_codex_daemon_threads_raw", lambda: None)
-    assert mux_spawn._codex_session_ids_loaded(Path("/w/proj")) is None
+    assert codex_pane._codex_session_ids_loaded(Path("/w/proj")) is None
 
     monkeypatch.setattr(
         _discover,
@@ -436,9 +436,9 @@ def test_session_ids_loaded_filters_by_cwd_and_distinguishes_none_from_empty(
             {"session_id": SID_B, "cwd": "/w/other"},
         ],
     )
-    assert mux_spawn._codex_session_ids_loaded(Path("/w/proj")) == {SID_A}
-    assert mux_spawn._codex_session_ids_loaded(Path("/w/other")) == {SID_B}
-    assert mux_spawn._codex_session_ids_loaded(Path("/w/nothing-here")) == set()
+    assert codex_pane._codex_session_ids_loaded(Path("/w/proj")) == {SID_A}
+    assert codex_pane._codex_session_ids_loaded(Path("/w/other")) == {SID_B}
+    assert codex_pane._codex_session_ids_loaded(Path("/w/nothing-here")) == set()
 
 
 def test_session_ids_loaded_selects_the_requested_codex_home(monkeypatch) -> None:
@@ -452,7 +452,7 @@ def test_session_ids_loaded_selects_the_requested_codex_home(monkeypatch) -> Non
 
     monkeypatch.setattr(_discover, "_codex_daemon_threads_raw", threads)
 
-    assert mux_spawn._codex_session_ids_loaded(
+    assert codex_pane._codex_session_ids_loaded(
         Path("/w/proj"), codex_home=Path("/tmp/canary-home")
     ) == set()
     assert seen["codex_home"] == "/tmp/canary-home"
@@ -466,7 +466,7 @@ def test_session_ids_loaded_selects_the_requested_codex_home(monkeypatch) -> Non
 
 
 def _probe_kwargs(monkeypatch, **overrides):
-    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(codex_pane, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
     monkeypatch.setattr(
         mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None
     )
@@ -484,17 +484,17 @@ def _probe_kwargs(monkeypatch, **overrides):
 
 
 def test_daemon_candidate_is_not_trusted_on_first_observation(monkeypatch) -> None:
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: SID_A)
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: SID_A)
     monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: True)
-    probe = mux_spawn._make_codex_bind_probe(**_probe_kwargs(monkeypatch))
+    probe = codex_pane._make_codex_bind_probe(**_probe_kwargs(monkeypatch))
     assert probe() is None
 
 
 def test_daemon_candidate_binds_once_it_repeats_and_the_pane_is_alive(monkeypatch) -> None:
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: SID_A)
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: SID_A)
     monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: True)
     oracle_used: list = []
-    probe = mux_spawn._make_codex_bind_probe(
+    probe = codex_pane._make_codex_bind_probe(
         **_probe_kwargs(monkeypatch, oracle_used=oracle_used)
     )
     assert probe() is None
@@ -504,17 +504,144 @@ def test_daemon_candidate_binds_once_it_repeats_and_the_pane_is_alive(monkeypatc
 
 def test_daemon_candidate_changing_between_probes_never_binds(monkeypatch) -> None:
     seen = iter([SID_A, SID_B, SID_B])
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: next(seen))
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: next(seen))
     monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: True)
-    probe = mux_spawn._make_codex_bind_probe(**_probe_kwargs(monkeypatch))
+    probe = codex_pane._make_codex_bind_probe(**_probe_kwargs(monkeypatch))
     assert probe() is None  # SID_A observed, nothing to compare yet
     assert probe() is None  # SID_B != SID_A, restarts the stability count
     assert probe() == SID_B  # SID_B repeats, pane alive -> trusted
 
 
 def test_a_repeated_daemon_candidate_refuses_to_bind_a_dead_pane(monkeypatch) -> None:
-    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: SID_A)
+    monkeypatch.setattr(codex_pane, "_codex_daemon_candidate", lambda *a, **k: SID_A)
     monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: False)
-    probe = mux_spawn._make_codex_bind_probe(**_probe_kwargs(monkeypatch))
+    probe = codex_pane._make_codex_bind_probe(**_probe_kwargs(monkeypatch))
     assert probe() is None
     assert probe() is None
+
+
+# ---------------------------------------------------------------------------
+# The rollout witness (x-a409): a codex pane proves its own session id from
+# the rollout fd its tree holds open, with a fail-closed daemon fallback for
+# the post-x-a095 shape where the daemon holds the fd instead.
+# ---------------------------------------------------------------------------
+
+
+def test_codex_session_ids_for_pid_returns_every_distinct_id(tmp_path: Path) -> None:
+    """The set view of the tree scan: two rollouts in one tree surface both ids,
+    while the one-element wrapper still refuses an ambiguous tree (None)."""
+    from fno.agents.codex_rollout import _codex_session_id_for_pid, _codex_session_ids_for_pid
+
+    roll_a = _write_rollout_with_id(tmp_path / "a", SID_A, SID_A)
+    roll_b = _write_rollout_with_id(tmp_path / "b", SID_B, SID_B)
+    proc = _FakeProc([_FakeOpenFile(str(roll_a)), _FakeOpenFile(str(roll_b))])
+    psu = _FakePsutil(proc)
+    assert _codex_session_ids_for_pid(4242, psutil_mod=psu) == {SID_A, SID_B}
+    assert _codex_session_id_for_pid(4242, psutil_mod=psu) is None
+
+
+def test_codex_rollout_witness_skips_non_codex(monkeypatch) -> None:
+    """Only codex gets the rollout witness; nothing is probed for any other
+    harness (no psutil walk, no daemon round trip)."""
+    monkeypatch.setattr(
+        codex_rollout, "_codex_session_ids_for_pid",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("tree scanned")),
+    )
+    monkeypatch.setattr(
+        "fno.agents.discover._codex_daemon_threads_raw",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("daemon probed")),
+    )
+    assert codex_rollout.codex_rollout_witness("claude") == frozenset()
+
+
+def test_codex_rollout_witness_prefers_the_tree_scan(monkeypatch) -> None:
+    """A pid whose tree holds a rollout answers from the fd - the strong
+    oracle - and the daemon is never consulted."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: 4242
+    )
+    monkeypatch.setattr(
+        codex_rollout, "_codex_session_ids_for_pid", lambda pid: frozenset({SID_A})
+    )
+    monkeypatch.setattr(
+        "fno.agents.discover._codex_daemon_threads_raw",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("daemon probed")),
+    )
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset({SID_A})
+
+
+def test_codex_rollout_witness_daemon_fallback_unique_row(monkeypatch, tmp_path) -> None:
+    """Tree scan empty (the x-a095 shape): one daemon thread matching the
+    present CODEX_THREAD_ID at this exact cwd witnesses the id."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: None
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CODEX_THREAD_ID", SID_A)
+    monkeypatch.setattr(
+        "fno.agents.discover._codex_daemon_threads_raw",
+        lambda *_a, **_k: [{"session_id": SID_A, "cwd": str(tmp_path)}],
+    )
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset({SID_A})
+
+
+def test_codex_rollout_witness_daemon_unavailable_fails_closed(monkeypatch) -> None:
+    """None from the daemon oracle (down, timeout, bad JSON) witnesses nothing."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: None
+    )
+    monkeypatch.setenv("CODEX_THREAD_ID", SID_A)
+    monkeypatch.setattr(
+        "fno.agents.discover._codex_daemon_threads_raw", lambda *_a, **_k: None
+    )
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset()
+
+
+def test_codex_rollout_witness_daemon_cwd_mismatch_fails_closed(
+    monkeypatch, tmp_path
+) -> None:
+    """A daemon thread with the right id at ANOTHER cwd is a bystander: the
+    fallback carries no pid, so cwd is half its proof."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: None
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CODEX_THREAD_ID", SID_A)
+    monkeypatch.setattr(
+        "fno.agents.discover._codex_daemon_threads_raw",
+        lambda *_a, **_k: [{"session_id": SID_A, "cwd": "/somewhere/else"}],
+    )
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset()
+
+
+def test_codex_rollout_witness_daemon_ambiguous_fails_closed(
+    monkeypatch, tmp_path
+) -> None:
+    """Two daemon rows matching id and cwd cannot name one session: refuse."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: None
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CODEX_THREAD_ID", SID_A)
+    monkeypatch.setattr(
+        "fno.agents.discover._codex_daemon_threads_raw",
+        lambda *_a, **_k: [
+            {"session_id": SID_A, "cwd": str(tmp_path)},
+            {"session_id": SID_A.upper(), "cwd": str(tmp_path)},
+        ],
+    )
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset()
+
+
+def test_codex_rollout_witness_blank_thread_fails_closed(monkeypatch) -> None:
+    """No CODEX_THREAD_ID in env gives the fallback nothing to match; it never
+    guesses from cwd alone."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: None
+    )
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setattr(
+        "fno.agents.discover._codex_daemon_threads_raw",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("daemon probed")),
+    )
+    assert codex_rollout.codex_rollout_witness("codex") == frozenset()

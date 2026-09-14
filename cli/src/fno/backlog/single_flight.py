@@ -9,21 +9,29 @@ when the previous tick is still running.
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import json
 import os
+import signal
 import subprocess
+import sys
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, IO, Iterator, Optional
 
 import typer
 
-from fno.claims.io import claims_root_for
+from fno.claims.io import claim_path, claims_root_for
 from fno.rust_binary import resolve_binary
 
 # Twelve-minute reconcile runs are measured; 30 minutes bounds a lost holder.
 FLIGHT_TTL_MS = 30 * 60 * 1000
+
+# A live holder never outlives its own lease: the trip precedes the TTL.
+_FLIGHT_BUDGET_DEFAULT_S = FLIGHT_TTL_MS // 1000 - 60
 
 
 def advance_flight_key(epic: Optional[str]) -> str:
@@ -176,10 +184,58 @@ def reconcile_gate(*, dry_run: bool, node: Optional[str], json_out: bool, pr_num
             once()
 
 
+def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
+    """Bound a live holder (x-626f: LIVE at 0.0 pct CPU, invisible to a pid
+    probe): a SIGUSR1 stack file plus a thread that releases the flight and
+    exits when the budget trips or an opted-in parent dies. The thread stops
+    once the claim file is gone; os._exit is safe because graph writes commit
+    server-side and reconcile is idempotent."""
+    root = claims_root_for(flight.key) or Path.home()
+    stack_path = root / ".fno" / "flight" / f"stack-{os.getpid()}.txt"
+    fh = None
+    try:
+        stack_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(stack_path, "a", encoding="utf-8")
+        faulthandler.register(signal.SIGUSR1, file=fh, all_threads=True)
+    except OSError:
+        fh = None
+    budget_s = float(r) if (r := os.environ.get("FNO_FLIGHT_BUDGET_S", "")).replace(".", "", 1).isdigit() else _FLIGHT_BUDGET_DEFAULT_S
+    parent_pid = int(p) if (p := os.environ.get("FNO_DIE_WITH_PARENT", "")).isdigit() else None
+    start = time.monotonic()
+    claim_file = claim_path(flight.key, root=claims_root_for(flight.key))
+
+    def _watch() -> None:
+        while claim_file.exists():
+            elapsed = time.monotonic() - start
+            gone = parent_pid is not None and os.getppid() != parent_pid
+            if not gone and elapsed < budget_s:
+                time.sleep(1.0)
+                continue
+            with contextlib.suppress(Exception):
+                if fh is not None:
+                    faulthandler.dump_traceback(file=fh, all_threads=True)
+                    fh.flush()
+                sys.stderr.write(
+                    f"backlog {verb}: {'parent-gone' if gone else f'budget {int(budget_s)}s'} "
+                    f"after {int(elapsed)}s; flight {flight.key} released; stack at {stack_path}\n"
+                )
+            flight.release()
+            if os.getpgrp() == os.getpid():
+                # group leader (start_new_session spawners): the kill takes
+                # the awaited subtree with us, never our parent
+                with contextlib.suppress(OSError):
+                    os.killpg(os.getpid(), signal.SIGKILL)
+            os._exit(124)
+
+    threading.Thread(target=_watch, name=f"flight-watchdog-{os.getpid()}", daemon=True).start()
+    return fh
+
+
 @contextlib.contextmanager
 def _flight_scope(key: str, scope: str, verb: str, json_out: bool,
                   extra: Optional[dict]) -> Iterator[bool]:
     flight = acquire_flight(key, scope=scope)
+    watch_fh = _arm_flight_watchdog(flight, verb) if flight is not None and not flight.held else None
     try:
         if flight is not None and flight.held:
             _report_held(flight, verb, json_out=json_out, extra=extra)
@@ -187,5 +243,9 @@ def _flight_scope(key: str, scope: str, verb: str, json_out: bool,
         else:
             yield True
     finally:
+        if watch_fh is not None:
+            with contextlib.suppress(Exception):
+                faulthandler.unregister(signal.SIGUSR1)
+                watch_fh.close()
         if flight is not None and not flight.held:
             flight.release()

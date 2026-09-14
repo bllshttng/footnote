@@ -24,6 +24,14 @@ from typer.testing import CliRunner
 from fno import doctor
 from fno.cli import app
 
+# Forces the real `update_command` into the lazily-built `doctor update` Click
+# command NOW, before any test below monkeypatches `update.update_command`.
+# `doctor_cli.py` binds that reference once, at its own first import, so a
+# monkeypatch active during a LATER first import bakes the fake into the
+# command for the rest of this worker process - a cross-test poison, not a
+# module attribute a fresh read would pick up.
+import fno.doctor_cli  # noqa: F401
+
 runner = CliRunner()
 
 

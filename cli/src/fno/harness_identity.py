@@ -841,41 +841,46 @@ def resolve_owned_identity(
     if canonical_disposition == "contradiction":
         return OwnedHarnessIdentity(None, None, present, "contradiction")
     if canonical_disposition == "canonical":
-        if not identity.session_id or not identity.harness:
+        if not identity.harness:
             return OwnedHarnessIdentity(None, None, present, "ambiguous")
-        verdict = prove(identity.harness, identity.session_id) if prove else None
-        if verdict is True:
-            # PROOF is self, same as the marker loop below: a live row holding
-            # this id is the session's own row (spawn mints the stamp and the
-            # row in one act), not a foreign owner, so a proven marker is never
-            # decided by collision (x-6d6c).
-            return OwnedHarnessIdentity(
-                identity.session_id, identity.harness, present, "canonical"
-            )
-        if verdict is None and present:
-            # A silent prover is not a refusal: fall through to the marker
-            # loop below, which collides once per distinct id and answers by
-            # the same single-family elimination resolve_harness_identity
-            # gives the dominant case (x-0992 - the hard ambiguous here
-            # refused every pane-spawned worker). A contested id is rejected
-            # there, so a stamped id a live stranger owns still refuses,
-            # named.
-            pass
+        if identity.session_id is None:
+            # Proven family, no id (x-a409): settle by proof below if we can.
+            if prove is None or not present:
+                return OwnedHarnessIdentity(None, None, present, "ambiguous")
         else:
-            owner = collide(identity.harness, identity.session_id) if collide else None
-            if owner:
-                canonical_rejected = (
-                    {
-                        "harness": identity.harness,
-                        "session_id": identity.session_id,
-                        "reason": "owned_by_live_row",
-                        "owner": owner,
-                    },
-                )
+            verdict = prove(identity.harness, identity.session_id) if prove else None
+            if verdict is True:
+                # PROOF is self, same as the marker loop below: a live row holding
+                # this id is the session's own row (spawn mints the stamp and the
+                # row in one act), not a foreign owner, so a proven marker is never
+                # decided by collision (x-6d6c).
                 return OwnedHarnessIdentity(
-                    None, None, present, "ambiguous", canonical_rejected
+                    identity.session_id, identity.harness, present, "canonical"
                 )
-            return OwnedHarnessIdentity(None, None, present, "ambiguous")
+            if verdict is None and present:
+                # A silent prover is not a refusal: fall through to the marker
+                # loop below, which collides once per distinct id and answers by
+                # the same single-family elimination resolve_harness_identity
+                # gives the dominant case (x-0992 - the hard ambiguous here
+                # refused every pane-spawned worker). A contested id is rejected
+                # there, so a stamped id a live stranger owns still refuses,
+                # named.
+                pass
+            else:
+                owner = collide(identity.harness, identity.session_id) if collide else None
+                if owner:
+                    canonical_rejected = (
+                        {
+                            "harness": identity.harness,
+                            "session_id": identity.session_id,
+                            "reason": "owned_by_live_row",
+                            "owner": owner,
+                        },
+                    )
+                    return OwnedHarnessIdentity(
+                        None, None, present, "ambiguous", canonical_rejected
+                    )
+                return OwnedHarnessIdentity(None, None, present, "ambiguous")
     if not markers:
         return OwnedHarnessIdentity(None, None, (), "empty")
     distinct = {harness for _, harness, _ in markers}
@@ -937,9 +942,20 @@ def resolve_owned_identity(
                 value, family, present, "single" if len(distinct) == 1 else "proven", rejected_t
             )
         # Proven family but multiple DISTINCT ids: proof is harness-level, not
-        # id-level, so the specific id is unknown. Keep the proven harness (do
-        # not mislabel a proven-codex session as claude) and null the id, rather
-        # than pick by precedence and risk an inherited same-family stranger.
+        # id-level, so keep the proven harness and null the id rather than pick
+        # by precedence. One measured exception: codex sets CODEX_SESSION_ID to
+        # the ROOT session and CODEX_THREAD_ID per thread, so the thread id
+        # names this process (x-a409).
+        if family == "codex":
+            thread_rows = [p for p in proven if p[0] == "CODEX_THREAD_ID"]
+            if thread_rows:
+                return OwnedHarnessIdentity(
+                    thread_rows[0][2],
+                    family,
+                    present,
+                    "single" if len(distinct) == 1 else "proven",
+                    rejected_t,
+                )
         return OwnedHarnessIdentity(None, family, present, "ambiguous", rejected_t)
     if len(proven_by_family) > 1:
         return OwnedHarnessIdentity(None, None, present, "ambiguous", rejected_t)
@@ -1245,15 +1261,15 @@ OWNERSHIP_LIVE_STATUSES = frozenset(
 def live_thread_row_for_cwd(
     cwd: str, registry_path: Optional[Path] = None
 ) -> Optional[tuple[str, str]]:
-    """The ``(harness, session_id)`` of the ONE live thread row holding ``cwd``.
+    """The ``(harness, session_id)`` of the ONE live codex row holding ``cwd``.
 
-    A codex thread worker owns no process: N threads share one daemon pid, so
-    the walk cannot name a thread's session id. The spawn record can - the
-    daemon writes the row before the worker's first turn, keyed by the cwd fno
-    named at spawn (one worktree per worker), so a sibling's lookup returns its
-    own row. Exactly one ownership-live ``substrate: thread`` row with a
-    non-empty harness and session id answers; zero and two-plus matches return
-    None, as does an unreadable or absent registry (raise nothing).
+    A codex worker's process walk lands on the shared daemon (thread workers
+    share its pid; a remote pane's tool shell runs under it), so the
+    spawn record - written before the worker's first turn, keyed by the cwd
+    fno named at spawn - is what names the session. Exactly one
+    ownership-live ``thread`` or ``pane`` row with a non-empty harness and
+    session id answers; zero and two-plus matches return None, as does an
+    unreadable or absent registry (raise nothing).
     """
     if not cwd:
         return None
@@ -1273,7 +1289,7 @@ def live_thread_row_for_cwd(
                 continue
             if row.get("status") not in OWNERSHIP_LIVE_STATUSES:
                 continue
-            if row.get("substrate") != "thread":
+            if row.get("substrate") not in ("thread", "pane"):
                 continue
             harness = row.get("harness")
             session_id = row.get("harness_session_id")

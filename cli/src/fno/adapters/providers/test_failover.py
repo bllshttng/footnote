@@ -1085,13 +1085,12 @@ class TestManagedCandidateMaterializes:
     def test_materialize_managed_false_skips_pin_check_entirely(
         self, tmp_path: Path, fake_managed_slot, monkeypatch,
     ):
-        """recovery.py's _default_failover passes materialize_managed=False:
-        the candidate is a still-live exhausted worker that pins the slot
-        until _redispatch stops it AFTER this call returns, so attempt_swap
-        must route the pointer (accounts.active) without ever touching
-        managed.switch. A live pin here must NOT block the swap - if it did,
-        the sweep's SWAPPED->_redispatch->post-stop-materialize path could
-        never run for the (normal) case of a live pinning candidate."""
+        """materialize_managed=False skips the pin check entirely: the caller
+        defers slot materialization to a correctly-ordered later step, so
+        attempt_swap must route the pointer (accounts.active) without ever
+        touching managed.switch. A live pin here must NOT block the swap -
+        if it did, the route-then-materialize-later pattern could never run
+        for the (normal) case of a live pinning candidate."""
         from fno.adapters.providers import managed
         from fno.adapters.providers.failover import FailoverController, SwapDecision
         from fno.adapters.providers.error_taxonomy import normalize

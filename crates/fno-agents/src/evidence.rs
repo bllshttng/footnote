@@ -10,7 +10,9 @@
 use chrono::Utc;
 use regex::Regex;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};

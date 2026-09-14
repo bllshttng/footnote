@@ -1481,3 +1481,18 @@ def test_preamble_budget_wrapper_propagates_the_gate_verdict(tmp_path, monkeypat
     script.unlink()
     result = runner.invoke(app, ["preamble-budget"])
     assert result.exit_code == 2
+
+
+def test_style_lint_encounter_surface_enforces_the_word_cap() -> None:
+    # The encounter gate caps evidence bodies, so its own surface must be
+    # checkable here - a rule 7 refusal names this command as its rewrite check.
+    body = " ".join("word" for _ in range(81)) + "."
+    result = runner.invoke(app, ["style", "--stdin", "--surface", "encounter"], input=body)
+    assert result.exit_code == 1
+    assert "rule 7" in result.stderr
+
+
+def test_style_lint_still_rejects_an_unknown_surface() -> None:
+    body = "The fleet sent the report."
+    result = runner.invoke(app, ["style", "--stdin", "--surface", "nope"], input=body)
+    assert result.exit_code == 2

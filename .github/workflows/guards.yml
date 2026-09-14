@@ -74,6 +74,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # The flag ratchet diffs against the merge base (or the previous
+          # tip on push); depth 1 holds neither.
+          fetch-depth: 0
 
       - name: Python + uv
         if: ${{ !cancelled() }}
@@ -114,12 +118,17 @@ jobs:
           bash tests/ci/test_seam_crossings.sh
           (cd cli && uv run fno-py doctor lint seam-crossings)
 
-      # Flag + env-var registries (x-72fc): the flag surface is shrink-only
-      # (new flags are Rust/clap work), every env var read carries a doc row.
-      # Selftest first, so the checks are positive-controlled before trusted.
+      # Flag + env-var registries (x-72fc): the flag check measures the
+      # change against its own base (merge base on a PR, the previous tip on
+      # push), so two PRs from one base cannot race on a stored count; every
+      # env var read carries a doc row. Selftest first, so the checks are
+      # positive-controlled before trusted.
       - name: Flag and env registry ratchets (selftest, then check)
         if: ${{ !cancelled() }}
         timeout-minutes: 5
+        env:
+          PR_BASE_REF: ${{ github.base_ref || 'main' }}
+          FLAG_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: |
           set -euo pipefail
           python3 scripts/ci/check_flag_registry.py --selftest

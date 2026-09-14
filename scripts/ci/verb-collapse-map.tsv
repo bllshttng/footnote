@@ -1,5 +1,6 @@
 current-leaf	tier	post-collapse-typing	refs	reason-if-not-T1
 agents adopt	T1	agents adopt	6
+agents announce	T1	agents announce	0
 agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
 agents attach	T1	agents attach	13
 agents autonomy status	T1	agents autonomy status	9
@@ -14,10 +15,12 @@ agents claim release	T1	agents claim release	38
 agents claim session-pid	T1	agents claim session-pid	2
 agents claim status	T1	agents claim status	32
 agents codex-session-for-pid	T1	agents codex-session-for-pid	3
+agents compaction	T1	agents compaction	1
 agents court	T1	agents court	3
 agents court-orphans	T1	agents court-orphans	0
 agents court-fold	T1	agents court-fold	0
 agents route-slot	T1	agents route-slot	0
+agents blueprint-feed	T1	agents blueprint-feed	0
 agents spawn-overlay	T1	agents spawn-overlay	0
 agents spawn-axes	T1	agents spawn-axes	0
 agents fallback-chain	T1	agents fallback-chain	0
@@ -34,6 +37,7 @@ agents distress-scan	T1	agents distress-scan	0
 agents distress-verdicts	T1	agents distress-verdicts	0
 agents gate-status	T1	agents gate-status	0
 agents drive-authority	T1	agents drive-authority	9
+agents evals-macro	T1	agents evals-macro	0
 agents finalize	T1	agents finalize	26
 agents fleet-incident	T1	agents fleet-incident	0
 agents gate	T1	agents gate	6
@@ -44,6 +48,8 @@ agents incident	T1	agents incident	0
 agents judge	T1	agents judge	0
 agents kill-check	T1	agents kill-check	4
 agents king cancel	T1	agents king cancel	0
+agents king checkin	T1	agents king checkin	8
+agents king-checkin	T1	agents king-checkin	0
 agents king done	T1	agents king done	5
 agents king drain	T1	agents king drain	1
 agents king escalate	T1	agents king escalate	1
@@ -89,6 +95,7 @@ agents newest-assistant-text	T1	agents newest-assistant-text	6
 agents peek	T1	agents peek	29
 agents ping	T1	agents ping	3
 agents probe-run	T1	agents probe-run	3
+agents provider-cap	T1	agents provider-cap	3
 agents reap	T1	agents reap	15
 agents reconcile	T1	agents reconcile	12
 agents recover	T1	agents recover	0
@@ -378,6 +385,7 @@ doctor bundle check	T1	doctor bundle check	8
 doctor bundle lint	T1	doctor bundle lint	1
 doctor codemap	T1	doctor codemap	18
 doctor evals grade	T1	doctor evals grade	11
+doctor evals macro	T1	doctor evals macro	0
 doctor evals graduate	T1	doctor evals graduate	2
 doctor evals report	T1	doctor evals report	1
 doctor evals run	T1	doctor evals run	3
@@ -407,6 +415,7 @@ doctor test	T1	doctor test	107
 doctor update	T1	doctor update	109
 done	KEEP	done	48	single-leaf group
 evals grade	T1	evals grade	11
+evals macro	T1	evals macro	0
 evals graduate	T1	evals graduate	2
 evals report	T1	evals report	1
 evals run	T1	evals run	3

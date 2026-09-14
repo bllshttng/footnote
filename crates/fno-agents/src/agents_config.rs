@@ -554,6 +554,9 @@ pub fn state_reap_config(cwd: &Path) -> StateReapConfig {
 /// Default global cap on concurrent live worker processes (union of the fno
 /// registry and claude's daemon roster). Matches the Pydantic default.
 pub const DEFAULT_MAX_LIVE: u32 = 3;
+/// The per-territory team cap default (x-e221): max live node-working workers
+/// under ONE crown scope. The machine ceiling stays [`DEFAULT_MAX_LIVE`].
+pub const DEFAULT_MAX_LIVE_PER_TERRITORY: u32 = 4;
 /// Default available-RAM floor (GB) for spawn preflight. `<= 0` disables.
 pub const DEFAULT_MIN_FREE_GB: f64 = 4.0;
 /// Default share of CPU capacity the fleet may hold, checked on EVERY spawn
@@ -585,6 +588,17 @@ pub fn max_live(cwd: &Path) -> u32 {
     match resolve_agents_value(cwd, "max_live").and_then(|raw| raw.parse::<u32>().ok()) {
         Some(v) if v >= 1 => v,
         _ => DEFAULT_MAX_LIVE,
+    }
+}
+
+/// Resolve `agents.max_live_per_territory` (x-e221), default
+/// [`DEFAULT_MAX_LIVE_PER_TERRITORY`] — never 0, which would wall off a scope.
+pub fn territory_max_live(cwd: &Path) -> u32 {
+    match resolve_agents_value(cwd, "max_live_per_territory")
+        .and_then(|raw| raw.parse::<u32>().ok())
+    {
+        Some(v) if v >= 1 => v,
+        _ => DEFAULT_MAX_LIVE_PER_TERRITORY,
     }
 }
 
@@ -910,6 +924,87 @@ pub fn notify_on_blocked_enabled(cwd: &Path) -> bool {
 /// inside-leg hook).
 pub fn notify_on_done_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "notify_on_done", false)
+}
+
+// --- [provider_cap] (x-7e05). The cap actor's own arm, independent of
+// recovery.watchdog: the watchdog stays in report mode; this table alone
+// decides whether a provider usage cap may move sessions. Same precedence and
+// fail-open degrade as every reader above: an absent table means OFF, a
+// malformed value degrades to its default.
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderCapConfig {
+    pub enabled: bool,
+    /// `ask` (default: nothing moves until an operator answer is recorded) or
+    /// `auto` (members migrate without a question; sleep hours also auto).
+    pub mode: String,
+    /// A reset closer than this is waited out, never migrated (wave 3).
+    pub min_wait_minutes: u64,
+    /// "HH:MM-HH:MM" in `sleep_timezone` (empty = local); empty = never asleep.
+    pub sleep_hours: String,
+    pub sleep_timezone: String,
+    pub canary_survive_minutes: u64,
+    /// Members on one lane with a fresh capped tail needed to open it, or one
+    /// member plus the account's runtime-state quota lock.
+    pub quorum: u32,
+}
+
+impl Default for ProviderCapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: "ask".to_string(),
+            min_wait_minutes: 30,
+            sleep_hours: String::new(),
+            sleep_timezone: String::new(),
+            canary_survive_minutes: 15,
+            quorum: 2,
+        }
+    }
+}
+
+pub fn provider_cap_config(cwd: &Path) -> ProviderCapConfig {
+    let defaults = ProviderCapConfig::default();
+    let value = |key: &str| {
+        resolve(cwd, |t| {
+            t.get("provider_cap")?.as_table()?.get(key).cloned()
+        })
+    };
+    let as_bool = |v: Option<toml::Value>, default: bool| match v {
+        Some(v) => v.as_bool().unwrap_or(default),
+        None => default,
+    };
+    let as_u64 = |v: Option<toml::Value>, default: u64| match v {
+        Some(v) => v
+            .as_integer()
+            .and_then(|i| u64::try_from(i).ok())
+            .unwrap_or(default),
+        None => default,
+    };
+    let cfg = ProviderCapConfig {
+        enabled: as_bool(value("enabled"), defaults.enabled),
+        mode: value("mode")
+            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|m| matches!(m.as_str(), "ask" | "auto"))
+            .unwrap_or_else(|| defaults.mode.clone()),
+        min_wait_minutes: as_u64(value("min_wait_minutes"), defaults.min_wait_minutes),
+        sleep_hours: value("sleep_hours")
+            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+            .unwrap_or_default(),
+        sleep_timezone: value("sleep_timezone")
+            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+            .unwrap_or_default(),
+        canary_survive_minutes: as_u64(
+            value("canary_survive_minutes"),
+            defaults.canary_survive_minutes,
+        ),
+        quorum: value("quorum")
+            .and_then(|v| v.as_integer())
+            .and_then(|i| u32::try_from(i).ok())
+            .filter(|q| *q >= 1)
+            .unwrap_or(defaults.quorum),
+    };
+    cfg
 }
 
 /// Startup reconciliation is non-destructive by default. Operators may opt in

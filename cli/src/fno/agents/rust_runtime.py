@@ -245,6 +245,16 @@ RUST_CLIENT_VERBS = frozenset(
         # passes every journal paths.event_journals resolves, then invokes
         # the binary directly (not via `fno agents` routing).
         "king-history",
+        # Failure-pattern leaderboard fold for `fno doctor evals macro`:
+        # daemon-free read; Python resolves the journal list and forwards the
+        # flags, then invokes the binary directly (not via `fno agents`
+        # routing).
+        "evals-macro",
+        # The reign check-in beat for `fno agents king checkin`: daemon-free
+        # read; Python resolves the caller's crown scope and the paths Python
+        # owns, then invokes the binary directly (not via `fno agents`
+        # routing).
+        "king-checkin",
         # Reign ledger page renderer for `fno agents king ledger`: court JSON
         # and the graph in, one HTML page out; Python resolves the court and
         # the paths, then invokes the binary directly (not via `fno agents`
@@ -253,6 +263,9 @@ RUST_CLIENT_VERBS = frozenset(
         # The delivery-slot resolver: payload JSON in, the answer out; Python
         # calls it via fno.route_slot_client (keeps the parity test in sync).
         "route-slot",
+        # The territory feed (status/deliver/repair) the backlog supervisor's
+        # blueprinter tick shells; native to the binary's territory fact set.
+        "blueprint-feed",
         # The harness-keyed spawn-defaults resolver (x-8975): payload JSON in,
         # the answer out; Python calls it via fno.agents.spawn_overlay_client.
         "spawn-overlay",
@@ -273,6 +286,17 @@ RUST_CLIENT_VERBS = frozenset(
         # Durable fleet incident breaker (x-77db): direct dispatch in client.rs
         # (no daemon RPC); public surface `fno agents incident`. Parity-synced.
         "fleet-incident",
+        # Fleet announcements (one bus line, per-session cursor): direct
+        # dispatch in client.rs (no daemon RPC); the mail shim and the hook
+        # scripts invoke the binary directly. Parity-synced.
+        "announce",
+        # Provider-cap actor (x-7e05): status/decide/mark verbs over the
+        # daemon snapshot. Direct dispatch in client.rs (no daemon RPC for
+        # status; decide records the operator's answer). Parity-synced.
+        "provider-cap",
+        # PreCompact stamp writer/reader (x-7e05): the hook invokes the
+        # binary directly (`fno-agents compaction mark`). Parity-synced.
+        "compaction",
     }
 )
 
@@ -423,6 +447,11 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Pure Python: reads the registry + graph archive; no Rust client port, so
     # it must never auto-route to the daemon.
     "yard",
+    # The provider-cap relay (x-7e05): argv passthrough to the Rust client's
+    # provider-cap verbs (status/decide). No parsing in Python; the Rust side
+    # owns the snapshot, the decision ladder and the journal. Hidden on the
+    # help surface (menu cap), so it is registered but never advertised.
+    "provider-cap",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
@@ -484,14 +513,19 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
     "court-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json|html-section; invoked directly by `fno agents court`, not `fno agents` routing.",
     "king-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; invoked directly by `fno agents king history`, which passes every journal paths.event_journals resolves.",
+    "evals-macro": "The macro-eval failure-pattern leaderboard fold: --events <journal.jsonl> [--events ...] [--since 30d] [--topic TYPE:LABEL] [--window 20] [--all] [--json]; invoked directly by `fno doctor evals macro`, which resolves the journal defaults.",
+    "king-checkin": "One verb runs the reign check-in body: --scope <scope> --events-path <events.jsonl> [--events-path ...] --graph <graph.json> --handoffs-dir <dir> [--faqs-dir <dir>] [--board-state <manifest>] [--emit-path <events.jsonl>] [--no-emit] [--json]; invoked directly by `fno agents king checkin`, which resolves the crown and the paths.",
     "reign-ledger": "The reign ledger page renderer: --court-json <court.json> --graph <graph.json> --generated <ts> --out <reign.html>; invoked directly by `fno agents king ledger`, which resolves the court and the paths.",
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
+    "blueprint-feed": "Territory feed for the backlog supervisor's blueprinter tick: --scope <s> prints the standing worker + unfed ideas as JSON; --deliver mails the window; --repair <r> records a failed delivery.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
     "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; invoked by fno.agents.spawn_axes_client, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict (x-f188); invoked by fno.update.running_components, not `fno agents` routing.",
     "fleet-incident": "Durable fleet incident breaker (x-77db): stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it (exit 0 clear, 1 stopped or unavailable); check [--json] is the admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches.",
+    "announce": "Fleet announcements: send --scope S [--subject T] [--expires 24h] [--urgent] reads the body on stdin and appends ONE kind=announce bus line (operator or crowned agent, 6/hour); read --session-id ID --boundary B renders unseen standing announcements once per session; status ID [--json] reads the sender's receipts (audience/landed/pending/woken/unreachable/late). The public surface is `fno agents mail team`; hooks call the binary directly.",
+    "compaction": "Compaction stamps: mark --session <id> writes the PreCompact stamp the provider-cap actor reads (best-effort, always exits 0); status --session <id> reads the stamp against the transcript's own boundary. The hook calls the binary directly.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other
@@ -751,6 +785,31 @@ def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
         export_worker_writable_dirs(Path(cwd) if cwd else Path.cwd(), os.environ)
     except Exception:
         pass  # ponytail: a grant we cannot compute must never block the spawn
+
+def _worktree_policy_pin_at_seam(args: "Sequence[str]") -> dict:
+    """The worktree-policy pin for the Rust route, or ``{}``.
+
+    The caller hands it to :func:`route_to_rust`, which merges it into the env
+    right before the exec. Only an explicit ``--cwd`` can name a foreign repo."""
+
+    try:
+        if os.environ.get("FNO_WORKTREE_POLICY"):
+            return {}
+        from pathlib import Path
+
+        from fno.agents.spawn_defaults import _flag_value
+        from fno.worktree_paths import UNDECLARED_REPO_RECEIPT, undeclared_dispatch_pin
+
+        cwd = _flag_value(list(args), "--cwd", "-c")
+        if not cwd:
+            return {}
+        harness = _flag_value(list(args), "--harness", "-H") or None
+        pin = undeclared_dispatch_pin(Path(cwd), Path(os.getcwd()), harness)
+        if pin:
+            print(UNDECLARED_REPO_RECEIPT, file=sys.stderr)
+        return pin
+    except Exception:
+        return {}  # ponytail: a pin we cannot compute must never block the spawn
 
 def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` targeting the ``pane`` substrate (4a-G2).
@@ -1360,6 +1419,7 @@ def route_to_rust(
     args: Sequence[str],
     *,
     binary: Optional[Path] = None,
+    env_pin: Optional[dict] = None,
     _exec: Callable[..., None] = os.execv,
     _resolve: Callable[[], Optional[Path]] = rust_binary.resolve_binary,
     _stderr: Optional[IO[str]] = None,
@@ -1403,6 +1463,9 @@ def route_to_rust(
             file=err,
         )
         raise SystemExit(BIN_NOT_FOUND_EXIT)
+    if env_pin:
+        # Before the exec: the replacement inherits it; tests stubbing _exec never export.
+        os.environ.update(env_pin)
     argv = [str(binary), *args]
     try:
         _exec(str(binary), argv)
@@ -1589,14 +1652,16 @@ def make_agents_group_cls() -> type:
                 )
                 if mode == "rust" and not py_spawn:
                     _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
+                    _pin = _worktree_policy_pin_at_seam(args)
                     _scrub_ambient_identity_at_exec(verb)
-                    route_to_rust(_with_seam_marker(list(args), verb))  # execs; does not return
+                    route_to_rust(_with_seam_marker(list(args), verb), env_pin=_pin or None)  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     binary = rust_binary.resolve_installed_binary()
                     if binary is not None:
                         _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
+                        _pin = _worktree_policy_pin_at_seam(args)
                         _scrub_ambient_identity_at_exec(verb)
-                        route_to_rust(_with_seam_marker(list(args), verb), binary=binary)  # execs
+                        route_to_rust(_with_seam_marker(list(args), verb), binary=binary, env_pin=_pin or None)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
             return super().make_context(info_name, args, parent=parent, **extra)

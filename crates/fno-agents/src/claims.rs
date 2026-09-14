@@ -4759,6 +4759,7 @@ mod reservation_tests;
 #[cfg(test)]
 #[path = "claims_gate_tests.rs"]
 mod claims_gate_tests;
+#[cfg(test)]
 #[path = "claims_session_absence_tests.rs"]
 mod claims_session_absence_tests;
 

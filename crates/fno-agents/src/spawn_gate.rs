@@ -21,29 +21,42 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::agents_config;
 use crate::claims;
 use crate::claude_roster::ClaudeRoster;
 use crate::daemon::pid_is_ours;
-use crate::state::{load_registry, Registry};
+use crate::state::{load_registry, Registry, RegistryEntry};
 use crate::AgentStatus;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
-/// Exit codes, distinct from existing dispatch codes (2, 13, 14, 15, 18, 127).
+/// Exit codes, allocated by the shared table in
+/// `cli/src/fno/agents/spawn_gate.py` and kept unique across both trees by
+/// `cli/tests/unit/test_exit_code_allocation.py` (values >= 64 claim a number
+/// once). Distinct from the convention codes (2, 13, 14, 15, 18, 127).
 pub const EXIT_QUEUE_TIMEOUT: i32 = 75;
 pub const EXIT_NO_WAIT: i32 = 76;
+/// The per-territory team cap refused the spawn (x-e221), or its attribution
+/// was unreadable. The team cap is the one permanent, non-queueable machine
+/// refusal with its own number, so a caller never retries it as capacity.
+pub const EXIT_TERRITORY_CAP: i32 = 86;
 pub const EXIT_RAM_REFUSED: i32 = 77;
 /// The lane declares nothing about how it stands toward the fno state root
 /// (epic rule R3). NOT "declares no carrier": an unsandboxed lane needs none.
-pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 78;
+/// Rust-only concept: 78 is the Python gate's EXIT_PROVIDER_CAP, and a
+/// permanent refusal must never read as a transient capacity one.
+pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 84;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
 /// A durable fleet incident stop is active (x-77db) - refused before every
 /// bypass branch, `--force` and `FNO_SPAWN_GATE=0` included. In-flight
-/// workers are untouched; only new admission is refused.
-pub const EXIT_FLEET_STOP: i32 = 80;
+/// workers are untouched; only new admission is refused. Same number as the
+/// Python gate's EXIT_FLEET_STOP (byte-parity for the fleet pair).
+pub const EXIT_FLEET_STOP: i32 = 82;
 /// The incident state exists but cannot be read: fail closed, and say this is
 /// a CANNOT-TELL refusal, never a stop verdict.
-pub const EXIT_FLEET_STOP_UNAVAILABLE: i32 = 81;
+pub const EXIT_FLEET_STOP_UNAVAILABLE: i32 = 83;
 
 /// The first admission boundary of the native gate (x-77db): a durable
 /// incident stop or an unreadable incident state refuses before the
@@ -103,7 +116,7 @@ const KNOWN_UNROUTED_PROVIDER: &str = "__uncapped__";
 /// Registry statuses that can hold a live process (idle counts: an
 /// idle-but-unreaped process still holds RAM; a reaped pid drops out via the
 /// liveness check). Mirrors `spawn_gate.py::LIVE_STATUSES`.
-fn status_is_liveish(s: &AgentStatus) -> bool {
+pub(crate) fn status_is_liveish(s: &AgentStatus) -> bool {
     matches!(
         s,
         AgentStatus::Spawning
@@ -198,6 +211,61 @@ fn available_bytes() -> Option<u64> {
 // Layer 1: the worker-slot count
 // ---------------------------------------------------------------------------
 
+/// The node this spawn WORKS, from the calling process's `FNO_NODE` - the same
+/// provenance source the client-side ask lanes stamp onto the registry row, so
+/// the gate attributes a spawn exactly the way the row will be stamped.
+pub fn gate_node() -> Option<String> {
+    std::env::var("FNO_NODE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The liveness-filtered registry rows behind [`slot_count`], exposed so the
+/// per-territory cap (x-e221) can read the rows' worked NODES without a second
+/// liveness implementation.
+pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec<RegistryEntry> {
+    let live_roster_short_ids: std::collections::HashSet<String> =
+        match ClaudeRoster::load_default() {
+            Ok(roster) => roster
+                .workers_deduped()
+                .iter()
+                .filter(|w| w.pid.map(|p| pid_is_ours(p, w.proc_start)).unwrap_or(false))
+                .map(|w| w.short_id().to_string())
+                .collect(),
+            Err(e) => {
+                warnings.push(format!(
+                    "spawn-gate: claude roster unreadable ({e}); pid-less bg rows uncounted"
+                ));
+                Default::default()
+            }
+        };
+    let mut rows = Vec::new();
+    match load_registry(registry_path) {
+        Ok(Registry { entries, .. }) => {
+            for e in entries {
+                if !status_is_liveish(&e.status) {
+                    continue;
+                }
+                let alive = match e.pid {
+                    Some(p) => pid_is_ours(p, e.pid_start_time),
+                    None => e
+                        .transport_short()
+                        .map(|sid| live_roster_short_ids.contains(sid))
+                        .unwrap_or(false),
+                };
+                if alive {
+                    rows.push(e);
+                }
+            }
+        }
+        Err(e) => warnings.push(format!(
+            "spawn-gate: fno registry unreadable ({e}); slot count degraded to 0"
+        )),
+    }
+    rows
+}
+
 /// Count fno WORKER SLOTS in use for the `max_live` cap: liveness-filtered fno
 /// registry rows + live `worker:<name>` headless slot claims.
 ///
@@ -223,54 +291,229 @@ fn available_bytes() -> Option<u64> {
 /// Read-only; a registry read failure degrades to a 0 contribution with one
 /// warning line pushed to `warnings` (LD5, fail open).
 pub fn slot_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
-    // Live roster short_ids: the liveness oracle for pid-less fno bg rows only.
-    // A roster read failure degrades this to empty (bg rows then fall back to
-    // their local pid, i.e. uncounted) — fail open, never wedge.
-    let live_roster_short_ids: std::collections::HashSet<String> =
-        match ClaudeRoster::load_default() {
-            Ok(roster) => roster
-                .workers_deduped()
-                .iter()
-                .filter(|w| w.pid.map(|p| pid_is_ours(p, w.proc_start)).unwrap_or(false))
-                .map(|w| w.short_id().to_string())
-                .collect(),
-            Err(e) => {
-                warnings.push(format!(
-                    "spawn-gate: claude roster unreadable ({e}); pid-less bg rows uncounted"
-                ));
-                Default::default()
-            }
-        };
-    let mut count = 0usize;
+    live_rows(registry_path, warnings).len() + live_worker_slot_claims(warnings)
+}
+
+/// The territory (key, member node ids) a node belongs to, or `None` when the
+/// answer cannot be READ (unreadable graph, node absent, uncompilable live
+/// crown). Mirrors the Python `_territory_of_node`: membership is EXCLUSIVE
+/// and most-specific-first - a node under a live crown scope counts for that
+/// crown's territory; an uncrowned node counts for its project's loose
+/// territory (project nodes minus every crowned set), so one worker never
+/// consumes two territories' caps. AC9-HP parity: keep both sides agreeing.
+pub(crate) fn territory_of_node(
+    config_cwd: &Path,
+    registry_path: &Path,
+    node: &str,
+    warnings: &mut Vec<String>,
+) -> Option<(String, std::collections::HashSet<String>)> {
+    use crate::king_board::graph_json_path;
+    use crate::king_board::project_map;
+    use crate::territory::compile_territory;
+
+    let entries: Vec<Value> = {
+        let path = graph_json_path(config_cwd);
+        let raw = std::fs::read_to_string(&path).ok()?;
+        let parsed: Value = serde_json::from_str(&raw).ok()?;
+        if let Some(list) = parsed.get("entries").and_then(Value::as_array) {
+            list.clone()
+        } else if let Some(list) = parsed.as_array() {
+            list.clone()
+        } else {
+            return None;
+        }
+    };
+    let by_id: HashMap<String, &Value> = entries
+        .iter()
+        .filter_map(|e| {
+            let id = e.get("id").and_then(Value::as_str)?;
+            Some((id.to_string(), e))
+        })
+        .collect();
+    let row: Option<&Value> = by_id.get(node).copied();
+    if row.is_none() {
+        return None;
+    }
+
+    // Live crowns from the registry cache, canonical scope strings.
+    let mut crowns: Vec<String> = Vec::new();
     match load_registry(registry_path) {
-        Ok(Registry { entries, .. }) => {
-            for e in &entries {
-                if !status_is_liveish(&e.status) {
+        Ok(Registry { entries: rows, .. }) => {
+            for r in &rows {
+                let scope = r.crown_scope.as_deref().unwrap_or("").trim();
+                if scope.is_empty() || !status_is_liveish(&r.status) {
                     continue;
                 }
-                let alive = match e.pid {
-                    // Local pid: liveness by PID/start-time, same as claims.
-                    Some(p) => pid_is_ours(p, e.pid_start_time),
-                    // No local pid: a fno bg/adopted row whose process is the
-                    // claude daemon's — resolve liveness via the roster by its
-                    // jobId (in short_id since v9). (A row without either signal
-                    // is a disk-only ghost and stays uncounted.)
-                    None => e
-                        .transport_short()
-                        .map(|sid| live_roster_short_ids.contains(sid))
-                        .unwrap_or(false),
-                };
-                if alive {
-                    count += 1;
+                let mut members: Vec<String> = scope
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                members.sort();
+                members.dedup();
+                let canon = members.join(",");
+                if !canon.is_empty() && !crowns.contains(&canon) {
+                    crowns.push(canon);
                 }
             }
         }
-        Err(e) => warnings.push(format!(
-            "spawn-gate: fno registry unreadable ({e}); slot count degraded to 0"
-        )),
+        Err(e) => {
+            warnings.push(format!("territory: registry unreadable ({e}); refusing"));
+            return None;
+        }
     }
+    crowns.sort();
 
-    count + live_worker_slot_claims(warnings)
+    let projects = match project_map(config_cwd) {
+        Ok(m) => m,
+        Err(_) => HashMap::new(),
+    };
+    let mut crowned: HashSet<String> = HashSet::new();
+    for scope in &crowns {
+        let compiled = compile_territory(scope, &entries, &Ok(projects.clone()));
+        match compiled {
+            Ok((_, ids)) => {
+                if ids.contains(node) {
+                    return Some((scope.clone(), ids));
+                }
+                crowned.extend(ids);
+            }
+            Err(e) => {
+                warnings.push(format!("territory: crown {scope} uncompilable: {e}"));
+                return None;
+            }
+        }
+    }
+    let project = row
+        .and_then(|r| r.get("project").and_then(Value::as_str))
+        .unwrap_or("");
+    if project.is_empty() {
+        return None;
+    }
+    let mut loose: HashSet<String> = HashSet::new();
+    for e in &entries {
+        if let Some(id) = e.get("id").and_then(Value::as_str) {
+            let p = e.get("project").and_then(Value::as_str).unwrap_or("");
+            if p == project && !crowned.contains(id) {
+                loose.insert(id.to_string());
+            }
+        }
+    }
+    Some((format!("loose:{project}"), loose))
+}
+
+/// The per-territory team cap (x-e221). `Err` carries the refusal receipt the
+/// caller prints; `None` territory reads as UNKNOWN and refuses closed - the
+/// cap never counts an unknown as headroom. A spawn that works no node skips
+/// the check entirely: the team cap does not apply to it.
+pub(crate) fn check_territory_cap(
+    config_cwd: &Path,
+    registry_path: &Path,
+    node: &str,
+    live: &[RegistryEntry],
+    cap: u32,
+) -> Result<(), String> {
+    let mut warnings = Vec::new();
+    let state = territory_of_node(config_cwd, registry_path, node, &mut warnings);
+    for w in &warnings {
+        eprintln!("{w}");
+    }
+    let Some((scope, members)) = state else {
+        return Err(serde_json::json!({
+            "status": "refused",
+            "reason": "territory_unknown",
+            "node": node,
+            "max_live_per_territory": cap,
+        })
+        .to_string());
+    };
+    let count = live
+        .iter()
+        .filter(|r| {
+            r.node
+                .as_deref()
+                .map(|n| members.contains(n))
+                .unwrap_or(false)
+        })
+        .count();
+    if count as u32 >= cap {
+        return Err(serde_json::json!({
+            "status": "refused",
+            "reason": "territory_cap",
+            "territory": scope,
+            "count": count,
+            "current_count": count,
+            "max_live_per_territory": cap,
+        })
+        .to_string());
+    }
+    Ok(())
+}
+
+/// `fno-agents territory-verdict --node <id>`: the per-territory cap verdict
+/// for one node as JSON on stdout. The single counting leg: the Python gate
+/// passes the node through this door and recomputes nothing. Exit is 0 for
+/// every READABLE verdict (including a refusal - the verdict is the answer);
+/// only a malformed invocation exits non-zero.
+pub fn run_territory_verdict(args: &[String]) -> i32 {
+    let mut node: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        if a == "--node" {
+            node = iter.next().cloned();
+        }
+    }
+    let Some(node) = node else {
+        eprintln!("territory-verdict: --node is required");
+        return 2;
+    };
+    let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let registry_path = crate::paths::AgentsHome::from_env().registry_json();
+    let cap = agents_config::territory_max_live(&config_cwd);
+    let mut warnings = Vec::new();
+    let state = territory_of_node(&config_cwd, &registry_path, &node, &mut warnings);
+    let verdict = match state {
+        None => serde_json::json!({
+            "verdict": "territory_unknown",
+            "reason": "territory_unknown",
+            "node": node,
+            "max_live_per_territory": cap,
+        }),
+        Some((scope, members)) => {
+            let live = live_rows(&registry_path, &mut warnings);
+            let count = live
+                .iter()
+                .filter(|r| {
+                    r.node
+                        .as_deref()
+                        .map(|n| members.contains(n))
+                        .unwrap_or(false)
+                })
+                .count();
+            if count as u32 >= cap {
+                serde_json::json!({
+                    "verdict": "territory_cap",
+                    "reason": "territory_cap",
+                    "territory": scope,
+                    "count": count,
+                    "current_count": count,
+                    "max_live_per_territory": cap,
+                })
+            } else {
+                serde_json::json!({
+                    "verdict": "ok",
+                    "territory": scope,
+                    "current_count": count,
+                    "max_live_per_territory": cap,
+                })
+            }
+        }
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".to_string())
+    );
+    0
 }
 
 /// Live `worker:<name>` slot claims under the GLOBAL claims root. Headless
@@ -463,7 +706,9 @@ pub fn state_root_grant_gate(harness: &str, substrate: &str, roots: &[String]) -
     let contract = match crate::harness_capabilities::HarnessContract::packaged() {
         Ok(contract) => contract,
         Err(error) => {
-            eprintln!("refused: the harness capability contract is unreadable ({error})");
+            eprintln!(
+                "spawn-gate: refused: the harness capability contract is unreadable ({error})"
+            );
             eprintln!(
                 "  a state root resolves for this spawn and no lane can be verified to carry it."
             );
@@ -476,7 +721,7 @@ pub fn state_root_grant_gate(harness: &str, substrate: &str, roots: &[String]) -
     // R3: name the root. A refusal that says "denied" without saying WHICH
     // directory sends the reader back to the code to find out.
     eprintln!(
-        "refused: the {harness}/{substrate} lane does not declare how it stands \
+        "spawn-gate: refused: the {harness}/{substrate} lane does not declare how it stands \
          toward the state root"
     );
     for root in roots {
@@ -530,6 +775,25 @@ pub fn run_gate(
     };
 
     if flags.force {
+        // Force speaks for the machine being busy, never for one territory
+        // overrunning its team, so the per-territory cap stays enforced
+        // here (x-e221) - the one axis --force does not excuse.
+        if let Some(node) = gate_node() {
+            let mut warnings = Vec::new();
+            let live = live_rows(registry_path, &mut warnings);
+            if let Err(receipt) = check_territory_cap(
+                config_cwd,
+                registry_path,
+                &node,
+                &live,
+                agents_config::territory_max_live(config_cwd),
+            ) {
+                eprintln!("{receipt}");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                return Err(EXIT_TERRITORY_CAP);
+            }
+        }
         eprintln!("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)");
         if substrate == "headless" {
             acquire_worker_slot(&mut guard, name, &holder);
@@ -726,7 +990,8 @@ pub fn run_gate(
                     }
                     if !hold_pause {
                         let mut warnings = Vec::new();
-                        let slots = slot_count(registry_path, &mut warnings);
+                        let live = live_rows(registry_path, &mut warnings);
+                        let slots = live.len() + live_worker_slot_claims(&mut warnings);
                         last_slots = slots;
                         for w in &warnings {
                             eprintln!("{w}");
@@ -741,6 +1006,25 @@ pub fn run_gate(
                             // Stamped only once the floor actually answered, so a
                             // receipt never claims an axis it did not read.
                             axes_read.insert("ram".into(), serde_json::json!("ok"));
+                            // The per-territory team cap (x-e221): beside the machine cap,
+                            // never instead of it. Refuses (never queues) - waiting cannot
+                            // help while the node's own territory is full, and other
+                            // territories keep their headroom.
+                            if let Some(node) = gate_node() {
+                                if let Err(receipt) = check_territory_cap(
+                                    config_cwd,
+                                    registry_path,
+                                    &node,
+                                    &live,
+                                    agents_config::territory_max_live(config_cwd),
+                                ) {
+                                    guard.release();
+                                    eprintln!("{receipt}");
+                                    use std::io::Write;
+                                    let _ = std::io::stdout().flush();
+                                    return Err(EXIT_TERRITORY_CAP);
+                                }
+                            }
                             if substrate == "headless" {
                                 acquire_worker_slot(&mut guard, name, &holder);
                                 // Slot claim is visible to concurrent gates: the mutex has
@@ -917,7 +1201,10 @@ pub(crate) struct AdmissionPayload {
     capacity_cores: f64,
     #[serde(default)]
     ceiling: f64,
+    // read only through serde: kept so the admission payload still parses
+    // when the decider sends the gap the old verdict shape carried.
     #[serde(default)]
+    #[allow(dead_code)]
     gap: Option<String>,
     #[serde(default)]
     load_15m: Option<f64>,
@@ -978,6 +1265,7 @@ pub struct FootprintCausePayload {
     /// Kept only so an older admission-less payload still parses; the verdict
     /// comes from `admission` now, never from the gap's presence.
     #[serde(default)]
+    #[allow(dead_code)] // read only through serde: older-payload parse tolerance
     attribution_gap: Option<String>,
     /// The Claude Code background daemon's idle pre-warm pool, for the
     /// `fno agents status` machine line.
@@ -988,8 +1276,10 @@ pub struct FootprintCausePayload {
     /// 1-min load average, for the status line only. It decides nothing
     /// anywhere (x-7783 LD1).
     #[serde(default)]
+    #[allow(dead_code)] // read only through serde: display context, decides nothing
     load_1m: Option<f64>,
     #[serde(default)]
+    #[allow(dead_code)] // read only through serde: context on the payload, unused by the gate
     cpu_capacity_cores: f64,
     /// The `_emit_failure` shape: when footprint cannot measure at all it
     /// still answers, carrying this key and exit 4. Its words travel into
@@ -1050,6 +1340,7 @@ pub struct MachinePressurePayload {
     #[serde(default)]
     pub(crate) band: f64,
     #[serde(default)]
+    #[allow(dead_code)] // read only through serde: machine sizing context, no verdict reads it
     pub(crate) machine_cores: Option<f64>,
     #[serde(default)]
     pub(crate) capacity_cores: f64,
@@ -2118,5 +2409,111 @@ MemAvailable:    8000000 kB\n";
         }
         std::env::remove_var("FNO_CLAIMS_ROOT");
         std::env::remove_var("FNO_CLAUDE_DAEMON_DIR");
+    }
+    // --- the per-territory team cap fixture (x-e221 AC9) -------------------
+    // The scenarios were recorded when the Python gate was a second counting
+    // leg; the Python leg is deleted and these are the recorded contract now,
+    // checked honestly against the one remaining count.
+
+    #[test]
+    fn territory_cap_characterized_by_recorded_scenarios() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/tests/agents/fixtures/spawn_gate_territory_agreement.json");
+        let raw = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("read fixture {}: {e}", fixture_path.display()));
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let self_pid = std::process::id();
+        let resolve = |v: &serde_json::Value| -> Option<u32> {
+            match v.as_str() {
+                Some("self") => Some(self_pid),
+                _ => None,
+            }
+        };
+        let base = std::env::temp_dir().join(format!("fno-territory-agree-{self_pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        for (i, sc) in fixture["scenarios"].as_array().unwrap().iter().enumerate() {
+            let dir = base.join(format!("s{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+            let daemon = dir.join("daemon");
+            std::fs::create_dir_all(&daemon).unwrap();
+            std::env::set_var("FNO_CLAUDE_DAEMON_DIR", &daemon);
+            // The graph the territory read compiles, reachable via FNO_HOME.
+            std::fs::write(
+                dir.join("graph.json"),
+                serde_json::json!({ "entries": sc["graph"].clone() }).to_string(),
+            )
+            .unwrap();
+            std::env::set_var("FNO_HOME", &dir);
+            // The registry: live workers (+ the crown row when the scenario has one).
+            let mut entries: Vec<String> = Vec::new();
+            for row in sc["registry"].as_array().unwrap() {
+                let name = row["name"].as_str().unwrap();
+                let status = row["status"].as_str().unwrap();
+                let pidf = resolve(&row["pid"])
+                    .map(|p| format!(r#","pid":{p}"#))
+                    .unwrap_or_default();
+                let nodef = row["node"]
+                    .as_str()
+                    .map(|s| format!(r#","node":"{s}""#))
+                    .unwrap_or_default();
+                entries.push(format!(
+                    r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z"{pidf}{nodef}}}"#
+                ));
+            }
+            if !sc["crown_scope"].is_null() {
+                entries.push(format!(
+                    r#"{{"name":"fixture-king","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":{}}}"#,
+                    sc["crown_scope"]
+                ));
+            }
+            let reg = dir.join("registry.json");
+            std::fs::write(
+                &reg,
+                format!(
+                    r#"{{"schema_version":1,"entries":[{}]}}"#,
+                    entries.join(",")
+                ),
+            )
+            .unwrap();
+
+            let cap = sc["territory_cap"].as_u64().unwrap_or(4) as u32;
+            let node = sc["node"].as_str().unwrap_or_default();
+            let mut warnings = Vec::new();
+            let live = live_rows(&reg, &mut warnings);
+            let got = match territory_of_node(&dir, &reg, node, &mut warnings) {
+                None => "territory_unknown".to_string(),
+                Some((scope, members)) => {
+                    let count = live
+                        .iter()
+                        .filter(|r| {
+                            r.node
+                                .as_deref()
+                                .map(|n| members.contains(n))
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    if count >= cap as usize {
+                        "territory_cap".to_string()
+                    } else {
+                        format!("ok:{scope}:{count}")
+                    }
+                }
+            };
+            let want = sc["expect"]["verdict"].as_str().unwrap().to_string();
+            std::env::remove_var("FNO_CLAIMS_ROOT");
+            std::env::remove_var("FNO_CLAUDE_DAEMON_DIR");
+            std::env::remove_var("FNO_HOME");
+            assert_eq!(
+                got.split(':').next().unwrap(),
+                want,
+                "scenario {}: got {got}, want {want}",
+                sc["name"].as_str().unwrap_or("?")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

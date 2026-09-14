@@ -321,7 +321,7 @@ fn restore_skips_done_members_and_prunes_their_tree_leaves() {
             LayoutBinding::Fno(format!("worker:codex:{session}")),
         )
     };
-    let tree_for = |session: &str| crate::proto::LayoutTreeSpec::Slot("s0".into());
+    let tree_for = |_session: &str| crate::proto::LayoutTreeSpec::Slot("s0".into());
     crate::squad_store::set_tab_trees(
         "",
         &crate::squad_store::origin_key(&[origin_str.clone()]),
@@ -383,7 +383,7 @@ fn restore_skips_done_members_and_prunes_their_tree_leaves() {
     );
     // The live member's tree came back with its held pane bound.
     let held_pid = core.panes.keys().copied().next().unwrap();
-    let (sid, _ti) = core.session.find_pane(held_pid).unwrap();
+    let (_, _ti) = core.session.find_pane(held_pid).unwrap();
     let members: Vec<String> = core
         .squad_members
         .values()

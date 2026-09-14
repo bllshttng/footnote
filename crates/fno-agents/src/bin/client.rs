@@ -23,16 +23,22 @@ use std::io::IsTerminal;
 
 const ALL_CLIENT_ACTIONS: &[&str] = &[
     "--emit-schema",
+    "active-backlog-receipt",
     "adopt",
+    "announce",
+    "canonical-check",
     "ask",
     "attach",
     "authorized-merge",
     "bash-census",
+    "blueprint-feed",
     "board",
     "claim",
     "codex-assign-project",
     "codex-loaded-threads",
+    "compaction",
     "component-verdict",
+    "provider-cap",
     "court-orphans",
     "court-fold",
     "detect",
@@ -40,7 +46,9 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "distress-scan",
     "drive",
     "drive-authority",
+    "evals-macro",
     "evidence-gate",
+    "law-match",
     "finalize",
     "fleet-incident",
     "graph-get",
@@ -49,6 +57,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "host",
     "judge",
     "kill-check",
+    "king-checkin",
     "king-history",
     "reign-ledger",
     "route-slot",
@@ -105,6 +114,14 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "status",
     "stop",
     "subscribe",
+    "task-context-gate",
+    "task-context-payload",
+    "task-context-prepare",
+    "task-context-revalidate",
+    "task-context-show",
+    "task-context-stage",
+    "territory-rows",
+    "territory-verdict",
     "trace",
     "verify-evidence",
     "version",
@@ -231,6 +248,33 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::component_update::run_component_verdict(&args[1..]);
     }
 
+    // `task-context-prepare`/`-gate`/`-stage`/`-show`/`-revalidate`/`-payload`
+    // are the INTERNAL machine verbs behind the task-context execution binding
+    // (x-59b0): the doors (target init, resume receipt validate/show, spawn
+    // payload adapter) shell them so every enforced decision (validation,
+    // digest, stage monotonicity, live-source revalidation, declared-gate env
+    // semantics, bounded payload render) is native. stdin-JSON like
+    // evidence-gate, so the routable-verb parity sets never see them.
+    if matches!(verb, "task-context-prepare") {
+        return fno_agents::task_context::run_prepare(&args[1..]);
+    }
+    if matches!(
+        verb,
+        "task-context-gate"
+            | "task-context-stage"
+            | "task-context-show"
+            | "task-context-revalidate"
+            | "task-context-payload"
+    ) {
+        return match verb {
+            "task-context-gate" => fno_agents::task_context::run_gate(&args[1..]),
+            "task-context-stage" => fno_agents::task_context::run_stage(&args[1..]),
+            "task-context-show" => fno_agents::task_context::run_show(&args[1..]),
+            "task-context-payload" => fno_agents::task_context::run_payload(&args[1..]),
+            _ => fno_agents::task_context::run_revalidate(&args[1..]),
+        };
+    }
+
     // `evidence-gate` is the hidden binary-direct transport for the ruling and
     // note evidence gates: the checker + bounded read runner ported
     // out of the file-budget-gated Python `fno.decide.evidence` module. Reads
@@ -241,6 +285,14 @@ async fn run(args: Vec<String>) -> i32 {
     // added.
     if matches!(verb, "evidence-gate") {
         return fno_agents::evidence::run_evidence_gate(&args[1..]);
+    }
+
+    // `law-match` is the hidden binary-direct transport for the question-to-law
+    // matcher (x-cf6a). Same `matches!` treatment as `evidence-gate`: it stays
+    // out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard, so no
+    // advertised fno verb is added.
+    if matches!(verb, "law-match") {
+        return fno_agents::law_match::run_law_match(&args[1..]);
     }
 
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the
@@ -390,6 +442,25 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::fleet_incident::run_fleet_incident(&args[1..]);
     }
 
+    if verb == "compaction" {
+        return fno_agents::compaction::run_compaction(&args[1..]);
+    }
+
+    // `provider-cap`: the armed cap actor's read + decide verbs (x-7e05, see
+    // provider_cap.rs doc). Direct dispatch, no daemon RPC: a status read
+    // computes on demand when no fresh daemon snapshot exists, and a decision
+    // record must be writable when the daemon is the thing wedged.
+    if verb == "provider-cap" {
+        return fno_agents::provider_cap_verbs::run_provider_cap(&args[1..]);
+    }
+
+    // `announce`: fleet announcements (see announce.rs doc). Direct
+    // dispatch; no daemon RPC - a send is one locked bus append, a read is a
+    // scan + cursor write, and both must work when the daemon is wedged.
+    if verb == "announce" {
+        return fno_agents::announce::run_announce(&args[1..]);
+    }
+
     // `review-coverage`: standalone review_coverage producer (see its own doc
     // in loopcheck.rs). Direct dispatch like loop-check; no daemon RPC.
     if verb == "review-coverage" {
@@ -462,6 +533,13 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::publish_review::run_publish_review(&args[1..]);
     }
 
+    // `canonical-check` (x-a150): the canonical-sync divergence read. Direct
+    // dispatch; no daemon RPC. The Python post-merge sync sends one JSON
+    // payload and reads the answer back; binary-first like `publish-review`.
+    if verb == "canonical-check" {
+        return fno_agents::canonical_check::run_canonical_check(&args[1..]);
+    }
+
     // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
     // loop_reign.rs doc). Direct dispatch, daemon-free reads; the Python
     // `fno agents king shape` shell and escalate's client invoke the binary
@@ -507,6 +585,23 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "king-history" {
         return fno_agents::king_history::run_king_history(&args[1..]);
     }
+
+    // `king-checkin`: one verb runs the reign check-in body for
+    // `fno agents king checkin`. Daemon-free beat like king-history:
+    // Python resolves the caller's crown scope and the paths Python owns,
+    // the native side gathers, prints, diffs and journals the row, reusing
+    // the court-fold fold and the king-history scan in process.
+    if verb == "king-checkin" {
+        return fno_agents::king_checkin::run_king_checkin(&args[1..]);
+    }
+    // `evals-macro`: the macro-eval failure-pattern leaderboard for
+    // `fno doctor evals macro`. Daemon-free read, `==` dispatch like
+    // king-history: Python resolves the journal paths (identity and paths are
+    // Python-owned), the native side owns the fold so the file-budget
+    // Python-tree ratchet holds.
+    if verb == "evals-macro" {
+        return fno_agents::evals_macro::run_evals_macro(&args[1..]);
+    }
     // `reign-ledger`: the reign ledger page for `fno agents king ledger`.
     // Same split as king-history: Python resolves the court and the paths,
     // the native side owns the page assembly, and the fold's scope_nodes ride
@@ -533,6 +628,23 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if verb == "session-start-bytes" {
         return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);
+    }
+
+    // `territory-rows`/`blueprint-feed` (x-e221): the territory fact set's
+    // daemon-free reads and the standing blueprinter's feed actions. Direct
+    // dispatch like graph-get: the Python `fno config active-backlog-*`
+    // passthroughs and the supervisor's tick invoke the binary directly.
+    if verb == "territory-rows" {
+        return fno_agents::territory::run_territory_rows(&args[1..]);
+    }
+    if verb == "blueprint-feed" {
+        return fno_agents::territory::run_blueprint_feed(&args[1..]);
+    }
+    if verb == "active-backlog-receipt" {
+        return fno_agents::territory::run_active_backlog_receipt(&args[1..]);
+    }
+    if verb == "territory-verdict" {
+        return fno_agents::spawn_gate::run_territory_verdict(&args[1..]);
     }
 
     // `board` (x-25b8): the king board collector, read-only, daemon-free. Not a
@@ -2864,7 +2976,6 @@ fn run_node_route(rest: &[String]) -> i32 {
     if !pairs.is_empty() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
-        let now = fno_agents::daemon::now_epoch_secs();
         let mut store = fno_agents::gc_inventory::HarnessStoreIndex::default();
         for pair in &pairs {
             let Some((harness, sid)) = pair.split_once(':') else {

@@ -624,7 +624,6 @@ fn canonical_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use tempfile::TempDir;
 
     fn fixture(name: &str) -> (TempDir, PathBuf) {

@@ -152,7 +152,7 @@ fn a_reach_for_a_reseated_row_focuses_the_seat_not_a_second_viewer() {
 /// portals, and member state exactly as they were.
 #[test]
 fn reseat_refusals_mutate_nothing() {
-    let (mut core, client_id, w, _worker_tab, mut rx) = reseat_core("pane-worker", "deadbee1");
+    let (mut core, client_id, w, _worker_tab, _) = reseat_core("pane-worker", "deadbee1");
     let snapshot = |core: &Core| {
         (
             core.portals

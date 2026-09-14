@@ -783,6 +783,10 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # adding it to RUST_CLIENT_VERBS would mint a second surface for it.
     # `notify-watch` is the same shape: the pr-watch tick phase and the arms
     # readout are its only callers, both through resolve_binary.
+    # The three territory doors are the same shape: `active-backlog-receipt`
+    # and `territory-rows` are reached through the config passthroughs, and
+    # `territory-verdict` through the spawn gate's delegate - every caller
+    # uses resolve_binary directly, never `fno agents <verb>` routing.
     # `node-route` is shelled by the squad prune's cascade fold for a verdict
     # per unknown member; `roster-reap` is the roster sweep's own door. Both
     # are binary-first surfaces, never `fno` auto-routes.
@@ -792,9 +796,23 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # `publish-review` is the reviewer lane's bot-identity producer: the emit
     # chokepoint and the hidden `fno pr publish-review` verb shell it through
     # verb_call, never auto-route.
+    # `canonical-check` (x-a150) is the same shape: the post-merge sync shells
+    # it through verb_call with a stdin JSON payload; an argv route would break.
     routable = arms | (
         specials
-        - {"board", "notify-watch", "node-route", "roster-reap", "reclaim", "plugin-install", "publish-review"}
+        - {
+            "board",
+            "notify-watch",
+            "active-backlog-receipt",
+            "territory-rows",
+            "territory-verdict",
+            "node-route",
+            "roster-reap",
+            "reclaim",
+            "plugin-install",
+            "publish-review",
+            "canonical-check",
+        }
     )
 
     assert routable == set(rr.RUST_CLIENT_VERBS), (
@@ -1689,32 +1707,37 @@ def test_fleet_incident_journey_stop_gates_and_clear_reopens(tmp_path, monkeypat
     after_refusal = sorted(str(p) for p in claims_root.rglob("*")) if claims_root.exists() else []
     assert after_refusal == before_refusal, "a refused run must acquire no claim"
 
-    # 6. Mail still delivers while stopped (AC2-STOPPED): a team send through
-    # the ordinary core succeeds against the SAME stopped home.
-    from fno.agents import dispatch as dispatch_mod
-    from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.registry import AgentEntry, write_registry
-    from fno.mail.cli import mail_app
-
-    monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
-    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda recipient, text, **_k: True)
-    write_registry([
-        AgentEntry(
-            name="red",
-            harness="claude",
-            harness_session_id="abcd1234-1111-7222-8333-444455556666",
-            cwd="/tmp",
-            log_path="/tmp/red.log",
-            short_id="abcd1234",
-            status="live",
-        ),
-    ])
-    result = CliRunner().invoke(
-        mail_app, ["team", "--scope", "all", "still announcing", "--json"]
+    # 6. Announcements still deliver while stopped (AC2-STOPPED): the announce
+    # writer has no incident gate, so a send succeeds against the SAME stopped
+    # home. Direct invocation, isolated bus and registry, nothing mocked: the
+    # real writer runs and must not refuse.
+    bus_dir = tmp_path / "bus"
+    bus_dir.mkdir()
+    (home / "registry.json").write_text(json.dumps({
+        "schema_version": 1,
+        "agents": [{
+            "name": "red", "harness": "claude", "status": "live",
+            "harness_session_id": "abcd1234-1111-7222-8333-444455556666",
+            "cwd": "/tmp", "log_path": "/tmp/red.log",
+        }],
+    }))
+    announce_env = {
+        **os.environ,
+        "FNO_AGENTS_HOME": str(home),
+        "FNO_BUS_DIR": str(bus_dir),
+        "FNO_SPAWN_GATE": "0",
+    }
+    announced = subprocess.run(
+        [str(binary), "announce", "send", "--scope", "all", "--from", "op",
+         "--sender-kind", "operator", "--json"],
+        input="still announcing", capture_output=True, text=True,
+        env=announce_env, timeout=60,
     )
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout.strip().splitlines()[-1])
-    assert payload["sent"] == 1 and payload["failed"] == 0, result.stdout
+    assert announced.returncode == 0, announced.stderr + announced.stdout
+    payload = json.loads(announced.stdout.strip().splitlines()[-1])
+    assert payload.get("id") and payload["scope"] == "all", announced.stdout
+    lines = [json.loads(l) for l in (bus_dir / "messages.jsonl").read_text().splitlines()]
+    assert [m["kind"] for m in lines] == ["announce"], lines
 
     # 7. Clear is a positive record at the NEXT generation.
     cleared = _incident_run(binary, "clear", "--reason", "journey resolved", home=home)

@@ -986,6 +986,8 @@ def test_spawn_opencode_bg_delegates_to_serve_lane(workdir, monkeypatch) -> None
             "x-abcd",
             "--cwd",
             str(workdir),
+            "--session-phase",
+            "do",
             "run the node",
         ],
     )

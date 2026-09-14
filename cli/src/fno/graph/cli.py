@@ -772,14 +772,13 @@ def _stamp_ship_on_pr_link(node_id: str) -> None:
 
     The PR link is ship's START (the PR is open, awaiting review/merge), so the
     row carries started_at only - no ended_at, since merge is recorded elsewhere
-    or not at all, and the roster renders the row 'in progress' rather than
-    guessing an end. Every shipped node passes through a PR-link site regardless
-    of which worker or skill opened the PR, so the
-    row records the implementer's identity, not the merger's. ``fno do pr
-    bind-created`` is the second such site and calls this too. Best-effort: an
-    unresolvable identity or a graph failure skips with a named stderr reason and
-    never fails the update. Idempotent: append_session_record collapses a
-    re-stamp of the same (phase, harness, session_id).
+    or not at all. The row records whoever ran the link - a crown or an ambient
+    session can be that - not the implementer or the merger, and no terminal
+    ever closes it, so readers must treat it as a link event, never occupancy.
+    ``fno do pr bind-created`` is the second such site and calls this too.
+    Best-effort: an unresolvable identity or a graph failure skips with a named
+    stderr reason and never fails the update. Idempotent: append_session_record
+    collapses a re-stamp of the same (phase, harness, session_id).
     """
     from datetime import datetime, timezone
 
@@ -932,7 +931,7 @@ def _append_creation_encounter(path: Path, node_id: str, evidence: str) -> None:
                 word_cap=load_settings().style.word_cap.encounter,
             )
             if violations:
-                raise ValueError(style.format_violations(violations))
+                raise ValueError(style.format_violations(violations, surface="encounter"))
 
         try:
             identity = resolve_self_identity()
@@ -1424,11 +1423,10 @@ def _fold_candidates(
     # A live plan surface is an independent fold signal when the filing names
     # one of the same files. The claim holder comes from the lockfile, not the
     # graph snapshot's stale locked_by field.
-    import re
     from pathlib import Path
     from fno.graph.collision import parse_files_to_modify
 
-    incoming_files = set(re.findall(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", details or ""))
+    incoming_files = discovery.filing_paths(details or "")
     if incoming_files:
         known = {item["id"] for item in out}
         for node in entries:
@@ -2916,7 +2914,7 @@ def cmd_encounter(
         cap = load_settings().style.word_cap.encounter
         violations = style.check(evidence, surface="encounter", word_cap=cap)
         if violations:
-            typer.echo(style.format_violations(violations), err=True)
+            typer.echo(style.format_violations(violations, surface="encounter"), err=True)
             raise typer.Exit(code=4)
 
     record: dict[str, object] = {
@@ -3608,12 +3606,13 @@ def cmd_update(
         elif derived_pr_number is not None:
             node["pr_number"] = derived_pr_number
         # Ship provenance fires once on the unset->set transition. Every shipped
-        # node passes through this link regardless of which worker or skill
-        # opened the PR, so this is the choke point that records the implementer
-        # (not the merger). Detected inside the lock so two racing linkers see
-        # one transition; the stamp itself runs after the lock releases, because
-        # append_session_record takes its own lock and calling it here would
-        # deadlock. Best-effort + idempotent, never fails the update.
+        # node passes through this link, so this is the choke point that records
+        # whoever ran the link (a crown can be that). No terminal closes the
+        # row, so it is a link event, never occupancy. Detected inside the lock
+        # so two racing linkers see one transition; the stamp itself runs after
+        # the lock releases, because append_session_record takes its own lock
+        # and calling it here would deadlock. Best-effort + idempotent, never
+        # fails the update.
         if isinstance(node.get("pr_number"), int) and not isinstance(_pr_number_before, int):
             ship_stamp_node[0] = node["id"]
         if pr_url is not None:
@@ -8362,14 +8361,6 @@ def _canonical_post_close(
 # that happen to touch the same field.
 
 
-def _archived_entry(node_id: str) -> Optional[dict]:
-    """The archive lookup, kept as a name for reopen's call sites; the
-    question owns the module now (fno.graph._archive_lookup)."""
-    from fno.graph._archive_lookup import archived_entry
-
-    return archived_entry(node_id)
-
-
 def _evidence_pr_number(evidence, refs: list) -> Optional[int]:
     """The PR number that produced ``evidence``'s outcome, not merely the first ref.
 
@@ -8468,7 +8459,9 @@ def cmd_reopen(
     entries = read_graph(_graph_path())
     node = _find_node(entries, task_id)
     if not node:
-        archived = _archived_entry(task_id)
+        from fno.graph._archive_lookup import archived_entry
+
+        archived = archived_entry(task_id)
         if archived is not None:
             when = archived.get("completed_at") or archived.get("updated") or "unknown"
             typer.echo(
@@ -8630,6 +8623,7 @@ def cmd_advance(
     stop: bool = typer.Option(
         False, "--stop", help="With --epic: deactivate the mission (clear mission_active) and dispatch nothing.",
     ),
+    loose: bool = typer.Option(False, "--loose", help="With --project: drain the territory's loose ready nodes (x-e221)."),
     continuation: bool = typer.Option(
         False, "--continuation", hidden=True,
         help="With --epic: K2 daemon-drain mode - never (re)activate the mission; retire an already-inactive one (dispatches nothing, reports deactivated).",
@@ -8743,14 +8737,14 @@ def cmd_advance(
 
     from contextlib import nullcontext
 
-    from fno.backlog.advance import run_advance_epic
+    from fno.backlog.advance import run_advance_epic, run_advance_loose
     from fno.backlog.single_flight import advance_flight_scope
 
     # --epic routes to the epic-advance path; it is a distinct trigger from the
     # merge-advance --closed path (they never combine on one call).
     if epic is not None:
-        if closed is not None:
-            typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
+        if closed is not None or loose:
+            typer.echo("advance: --epic is mutually exclusive with --closed/--loose", err=True)
             raise typer.Exit(code=2)
         # One in flight per mission (x-ef2c); the key uses the CANONICAL id so
         # both spellings of an epic are one scope. --stop is a control action
@@ -8780,6 +8774,11 @@ def cmd_advance(
                 continuation=continuation,
                 source=source,
             )
+        return
+    if loose:
+        run_advance_loose(project, closed=closed, max_dispatch=max_dispatch,
+                          json_out=json_out, verbose=verbose, model=model,
+                          provider=provider)
         return
     if stop or max_dispatch is not None or continuation:
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)

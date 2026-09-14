@@ -10,7 +10,6 @@
 //! raise a hot verdict (LD2). The arm escalates, it never gates (LD1): the
 //! spawn gate keeps deciding admission.
 
-use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

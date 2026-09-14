@@ -128,10 +128,24 @@ def test_metadata_class_guards_external(external_store, contradictory_graph):
     """Reader class: footnote-minted metadata (slug / type / project /
     mission_active / session pins) raises under an external backend and every
     caller keeps its missing-data path - never a stale graph row."""
-    from fno.active_backlog import _active_missions
+    from fno.tracker import metadata
+
     from fno.agents.crown import _graph_entry
     from fno.relay.router import _default_node_resolver
     from fno.worktree import _slug_for_node
+
+    def _active_missions():
+        # The fail-safe shape every mission reader keeps: a guarded read that
+        # raised under the external backend reads as no missions.
+        try:
+            rows = metadata.read_entries("active_backlog")
+        except Exception:  # noqa: BLE001 - the guard IS the behavior under test
+            return []
+        return [
+            e
+            for e in rows
+            if isinstance(e, dict) and e.get("mission_active") is True
+        ]
 
     assert _active_missions() == []
     assert _graph_entry("N-1") is None
@@ -143,12 +157,18 @@ def test_metadata_class_reads_graph_backend(contradictory_graph, monkeypatch):
     """Graph-mode parity for the guarded reader class: the store's rows come
     through byte-for-byte (AC1) - slug, type, mission flags, session pins."""
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
-    from fno.active_backlog import _active_missions
+    from fno.tracker import metadata
+
     from fno.agents.crown import _graph_entry
     from fno.relay.router import _default_node_resolver
     from fno.worktree import _slug_for_node
 
-    assert [m["id"] for m in _active_missions()] == ["N-1"]
+    rows = metadata.read_entries("active_backlog")
+    assert [
+        e["id"]
+        for e in rows
+        if isinstance(e, dict) and e.get("mission_active") is True
+    ] == ["N-1"]
     assert _graph_entry("N-2")["type"] == "feature"
     assert _graph_entry("N-1")["project"] == "graph-proj"
     assert _slug_for_node("N-1") == "graph-slug-1"

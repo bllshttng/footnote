@@ -43,10 +43,19 @@ Success criteria must be **mechanical** (develop-tests discipline): a task with 
 |---|---|
 | `fno doctor evals run [--task ID] [--tier T] [--repeat K] [--provider P] [--variant NAME] [--ref REF] [--lane NAME] [--cohort ID]` | Run bank tasks in disposable worktrees, grade mechanically, append one history line per task-run. Confirms above 20 total runs (`--yes` skips). `--variant v1 --ref REF` scores a change (see Variants). `--lane NAME --cohort ID` qualifies a model lane (see Lanes). |
 | `fno doctor evals report [--since N] [--graduate] [--json] [--compare vN]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. `--compare vN` scores a variant against baseline. |
+| `fno doctor evals macro [--since 30d] [--topic TYPE:LABEL] [--window 20] [--all] [--json] [--events PATH]` | Fold existing event journals into a recurring failure-pattern leaderboard, or drill into one pattern. |
 | `fno doctor evals graduate <id>` | Retag a capability task's YAML to regression. |
 | `fno doctor evals grade --brief B --golden G` | Grade a research brief against a golden doc (three mechanical assertions); exit 0 green. |
 
 Each run executes the task in a disposable worktree via the headless spawn substrate (`fno agents spawn --substrate headless` - never bare `claude -p`, keeping provider rotation and the spawn cap in play), then removes the worktree after grading. A bank task never runs in your working copy. History appends to `~/.fno/evals-history.jsonl` (override via `config.paths.evals_history`).
+
+## Macro eval
+
+Macro eval reads the existing event journals offline, including retained rotations, so it uses no model and has zero per-run API cost. Use `fno doctor evals macro --since 90d` to find patterns across the evidence fno already produced, or pass `--events PATH` to inspect a fixture or selected journal.
+
+A pattern is a labelled event: `TYPE:LABEL`, where the label is the first present value from `reason`, `outcome`, `verdict`, or `termination_reason`. Healthy labels and routine noise are omitted by default. The command groups existing labels instead of clustering free text because the events already carry structured topics. `--all` includes the omitted rows.
+
+The suspect column shows patterns that commonly appeared in the preceding event window before a failure. Lift compares that co-occurrence with the suspect's overall event frequency, so a high value identifies an upstream lead for drilldown, not proof of root cause. Use `--topic TYPE:LABEL` to print recent sessions and their preceding event chains.
 
 ## Variants
 

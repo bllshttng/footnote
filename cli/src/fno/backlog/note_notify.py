@@ -219,6 +219,16 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
             None,
         )
         if entry is None:
+            from fno.graph._archive_lookup import archived_entry
+
+            archived = archived_entry(task_id)
+            if archived is not None:
+                aid = archived.get("id") or task_id
+                return Refused(
+                    f"Error: node {aid} is archived; run `fno backlog unarchive {aid}`"
+                    " to restore it before updating.",
+                    1,
+                )
             return Refused(f"Error: no node resolves to '{task_id}'", 1)
         index = {str(e.get("id")): e for e in rows if isinstance(e.get("id"), str)}
         readers = note_readers(

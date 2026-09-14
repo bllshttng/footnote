@@ -30,7 +30,7 @@ use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
 use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -297,7 +297,7 @@ pub(crate) fn trace_events_path(home: &AgentsHome) -> PathBuf {
 /// Parse an ISO8601 timestamp into a UTC instant, mirroring Python's
 /// `_parse_iso8601`: a trailing `Z` becomes `+00:00`, naive timestamps are
 /// assumed UTC. Returns `None` on unparseable input (the caller degrades open).
-fn parse_iso8601(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn parse_iso8601(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
     let raw = s.trim();
     let raw = match raw.strip_suffix('Z') {
@@ -1865,7 +1865,6 @@ pub(crate) use crate::codex_store::{codex_home, codex_rollout_index, codex_rollo
 
 // sessions_socket_index and the row_liveness family moved to
 // `claude_sessions.rs`; the re-export keeps every existing caller.
-pub(crate) use crate::claude_sessions::row_liveness_indexed;
 pub use crate::claude_sessions::{row_liveness, sessions_socket_index};
 
 /// Rung 4's freshness read against a prebuilt [`codex_rollout_index`]: any
@@ -2493,6 +2492,7 @@ fn should_delegate_claude_live_attach(
 /// fixture; on error it prints the same diagnostic `run_resume` used to print
 /// inline and returns the exit code to propagate.
 use crate::resume_args::parse_resume_args;
+use crate::resume_wake::{run_and_confirm_respawn, run_codex_thread_delivery};
 
 pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     let (name, print_command, message, cross_project, cwd_override, account) =
@@ -3005,6 +3005,16 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         );
     }
 
+    // x-6ac3: a codex row whose substrate is a thread delivers over the
+    // codex daemon, never a terminal exec. `codex resume <id>` needs a tty,
+    // and a headless caller (the watchdog's captured subprocess) has none -
+    // five wakes in the 2026-09-13 sweep refused with `stdin is not a
+    // terminal`. Same rule the claude arm holds: resume wakes headlessly;
+    // attach owns the terminal. A non-thread codex row keeps the exec.
+    if harness == "codex" && entry.get("substrate").and_then(Value::as_str) == Some("thread") {
+        return run_codex_thread_delivery(&name, session_id, message.as_deref(), cwd, home);
+    }
+
     // chdir BEFORE the emit so a stale cwd surfaces as exit 13 rather than a
     // misleading "agent_resumed" event followed by a failed exec.
     if let Err(exc) = std::env::set_current_dir(cwd) {
@@ -3049,90 +3059,6 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // exec only returns on failure.
     eprintln!("fno agents resume: failed to exec {}: {err}", argv[0]);
     1
-}
-
-/// Run a respawn plan as a child and confirm it actually revived the row.
-///
-/// `claude respawn` exits as soon as the job is relaunched, so this verb must
-/// NOT exec it (the exec convention the other arms use): the operator's shell
-/// would come back with nothing to show. And exit 0 is not proof - the
-/// receipt-can-lie shape `fno agents rm` already shipped once. The
-/// confirmation is the positive marker: `jobs/<short>/state.json` re-read
-/// after the respawn with an `updated_at` newer than the pre-respawn read.
-/// The state WORD is not evidence - the wake lane's confirm primitive exists
-/// because `working -> working` read the same for a landed and an unlanded
-/// message.
-fn run_and_confirm_respawn(
-    plan: &crate::reentry::ReentryPlan,
-    name: &str,
-    verb: &str,
-    event_kind: &str,
-    home: &AgentsHome,
-) -> i32 {
-    use crate::claude_ask::{read_state_json, ClaudeHome};
-
-    let claude_home = ClaudeHome::from_env();
-    let jobs_dir = claude_home.jobs_dir_for(&plan.short_id);
-    let before_updated_at = read_state_json(&jobs_dir).ok().and_then(|s| s.updated_at);
-
-    let mut command = std::process::Command::new(&plan.argv[0]);
-    command.args(&plan.argv[1..]).current_dir(&plan.cwd);
-    for (key, value) in &plan.env {
-        command.env(key, value);
-    }
-    let status = match command.status() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("fno agents {verb}: failed to run {}: {e}", plan.argv[0]);
-            return 1;
-        }
-    };
-    if !status.success() {
-        eprintln!(
-            "fno agents {verb}: {} for {name} exited {}",
-            plan.argv.join(" "),
-            status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string())
-        );
-        return 1;
-    }
-
-    let confirmed = match (before_updated_at, read_state_json(&jobs_dir)) {
-        (Some(before), Ok(s)) => s.updated_at.as_deref().is_some_and(|a| a > before.as_str()),
-        // No readable BEFORE stamp (the file the resolver just proved exists
-        // did not parse): an AFTER read carrying any stamp is the evidence
-        // left, and it is still content, never an exit code.
-        (None, Ok(s)) => s.updated_at.is_some(),
-        (_, Err(_)) => false,
-    };
-    if !confirmed {
-        eprintln!(
-            "fno agents {verb}: respawn for {name} reported success but {} did not \
-             advance; the row is NOT confirmed back in agent view. Check \
-             `claude agents` before retrying.",
-            jobs_dir.join("state.json").display()
-        );
-        return 16;
-    }
-
-    append_agents_event(
-        &trace_events_path(home),
-        event_kind,
-        &[
-            ("name", Value::String(name.to_string())),
-            ("provider", Value::String("claude".to_string())),
-            ("session_id", Value::String(plan.session_id.clone())),
-            ("cwd", Value::String(plan.cwd.clone())),
-        ],
-    );
-    eprintln!(
-        "{name} is live again under {} (same session id).",
-        plan.session_id
-    );
-    eprintln!("`fno agents attach {name}` to drop in.");
-    0
 }
 
 // ---------------------------------------------------------------------------

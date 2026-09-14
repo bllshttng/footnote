@@ -14,6 +14,7 @@ created: <YYYY-MM-DD>            # Required. The consolidation gate reads it to
 #                                 # the filename, then REFUSES the plan if
 #                                 # neither carries a date.
 difficulty: <low | medium | high> # Required for plans created after 2026-08-26.
+# carveouts: forbidden            # Set when the plan says one PR, no follow-up nodes; fno.plan.fidelity refuses a PR that declares an exclusion.
 #                                 # An intrinsic property of the work: expected
 #                                 # time, edge cases, unknowns, and what a
 #                                 # senior tech lead makes of the problem. Not

@@ -114,13 +114,20 @@ def test_map_covers_current_surface_once():
     # transcript read the loopcheck distress leg shells) and this branch adds
     # `agents friction-escalate` (the watchdog friction lane): 571 -> 573.
     # This branch also allocates `backlog requeue` its row: 573 -> 574.
-    # Upstream's cargo-offload rows (`agents workspace worktree cargo-offload`
-    # and the legacy `worktree cargo-offload`) took 574 -> 576 and the
-    # two-lane discovery branch allocated `backlog discover`: 576 -> 577. The
-    # routing branch allocates `agents route-slot`, the delivery-slot resolver
-    # the spawn seam's client invokes directly (hidden verb): 577 -> 578. The
+    # x-e221 allocates the hidden territory readout
+    # `config active-backlog-territories`: 574 -> 575, then retires its
+    # `agents worker blueprint-feed` (+ `worker` mirror) rows when the feed
+    # ported native to the binary: net -2 from 577. Upstream's cargo-offload
+    # rows (`agents workspace worktree cargo-offload` and the legacy
+    # `worktree cargo-offload`) took 574 -> 576, the two-lane discovery
+    # branch allocated `backlog discover`: 576 -> 577, and the routing
+    # branch allocates `agents route-slot`, the delivery-slot resolver the
+    # spawn seam's client invokes directly (hidden verb): 577 -> 578. The
     # harness-keyed-defaults branch allocates `agents spawn-overlay` and
     # `agents fallback-chain`, the two client verbs the spawn seam degrades
+    # This branch (x-e221) allocated `agents test-run`, `backlog worked`,
+    # and `agents blueprint-feed`; the retired `config
+    # active-backlog-territories` row left the map in the same change.
     # open around (hidden verbs): 578 -> 580. The one-authorized-merge branch
     # allocates `agents authorized-merge`, the merge/arm decision every merge
     # path asks through the single Python door (hidden verb): 580 -> 581.
@@ -164,20 +171,35 @@ def test_map_covers_current_surface_once():
     # branch allocates `backlog version`, the typed API's counter read
     # (hidden verb, 19 corpus callers): counted from the merged file,
     # 604 -> 605. `agents king ledger` and `agents reign-ledger`, the reign
-    # ledger page and its native renderer: 605 -> 607. x-e53e renames
+    # ledger page and its native renderer: 605 -> 607. This branch allocated
+    # `do resume receipt context-prepare` and its `resume` view (607 -> 609),
+    # then retired both rows when the prepare transport moved into the native
+    # `task-context-prepare` verb's own `out` path: 609 -> 607. x-e53e renames
     # `dispatch one` to `dispatch next` under both spellings (`one` stays as
     # a hidden deprecated alias), allocating +2 rows: 607 -> 609. `do pr
     # publish-review` and `pr publish-review`, the bot-identity backfill
-    # door and its forwarded spelling: 609 -> 611. This branch allocates
+    # door and its forwarded spelling: 609 -> 611. Upstream allocates
     # `agents prove-it-verdicts`, the terminal prove-it record reader
-    # (x-6d64): 611 -> 612. This branch allocates `backlog retract`, the
+    # (x-6d64): 611 -> 612. Upstream allocates `backlog retract`, the
     # one-act defer + retracted-kind stamp the blueprint consolidation gate
-    # halts on: 612 -> 613. `doctor observer judge` and `observer judge`,
-    # the blueprint five-question judge and its bare-form leaf (refs 2 and
-    # 0, swept): counted from the merged file, 613 -> 615. `agents judge`,
-    # the Rust-client help entry the judge port's RUST_ONLY_VERB_HELP
-    # registration surfaces under `fno agents --help` (refs 0): 615 -> 616.
-    assert len(mapped) == 616, (
+    # halts on: 612 -> 613. `agents announce`, the fleet-announcement
+    # writer/reader/status surface the binary dispatches directly: counted
+    # from the merged file, 613 -> 614. `agents king checkin`, the one verb
+    # that runs the reign check-in body and journals its row, plus its
+    # direct-dispatch alias `agents king-checkin` beside king-history's:
+    # 614 -> 616. `agents provider-cap`, the relay that reads and answers the
+    # provider-cap actor's questions: 616 -> 617. `agents compaction`, the
+    # hidden relay over the PreCompact stamp the hook writes: 617 -> 618.
+    # Counted from the merged file at the x-f33e fold: main carried 619
+    # (provider-cap and compaction among them) and this branch allocates
+    # `doctor evals macro`, its forwarded `evals macro` spelling, and the
+    # binary-first `agents evals-macro` action the dispatchers expose:
+    # 618 -> 622. `doctor observer judge` and `observer judge`, the
+    # blueprint five-question judge and its bare-form leaf (refs 2 and 0,
+    # swept): counted from the merged file, 622 -> 624. `agents judge`, the
+    # Rust-client help entry the judge port's RUST_ONLY_VERB_HELP
+    # registration surfaces under `fno agents --help` (refs 0): 624 -> 625.
+    assert len(mapped) == 625, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

@@ -1967,6 +1967,7 @@ mod tests {
             vec![("N1".to_string(), "done".to_string())],
         );
         let graph = std::cell::RefCell::new(Some(gc_sweep::GraphRead {
+            work_index: index.clone(),
             index,
             open_do: HashMap::new(),
             phases: HashMap::new(),
@@ -2004,10 +2005,18 @@ mod tests {
             !stopped.load(Ordering::SeqCst),
             "the stop seam fired in dry-run"
         );
+        // the row still classifies would-retire, but a dry run with
+        // no positive stop evidence holds it under needs_live_stop instead
+        // of promising the retirement.
         assert_eq!(
-            summary.retired.len(),
+            summary.needs_live_stop.len(),
             1,
-            "the row still classifies would-retire"
+            "the row still classifies would-retire: {summary:?}"
+        );
+        assert!(
+            summary.retired.is_empty() && summary.dry_run_unverified.is_empty(),
+            "a dry run promises nothing: {:?}",
+            (summary.retired, summary.dry_run_unverified)
         );
         assert!(
             crate::state::load_registry(&home.registry_json())
@@ -2069,6 +2078,7 @@ mod tests {
             vec![("N1".to_string(), "done".to_string())],
         );
         let graph = std::cell::RefCell::new(Some(gc_sweep::GraphRead {
+            work_index: index.clone(),
             index,
             open_do: HashMap::new(),
             phases: HashMap::new(),

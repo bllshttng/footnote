@@ -15,6 +15,10 @@
 //! is intentionally OUTSIDE the historical `loop*` control-plane glob so the
 //! delta stays minimal — `loopcheck.rs` only calls in.
 //!
+//! Fleet announcements ride the SAME boundary but read NATIVELY from
+//! `announce.rs`: they have their own bus line and cursor, so the addressed-mail
+//! shell-out below stays untouched.
+//!
 //! Fail-open by contract: a missing `fno`, a non-zero exit, or empty output
 //! leaves the base message untouched. The nudge fires only on a `block` return
 //! (never on allow/terminate), exactly once per message (the Python cursor).
@@ -32,6 +36,17 @@ pub fn append_inbox_nudge(base: &str, cwd: &Path, session_id: &str) -> String {
     if std::env::var_os("FNO_NUDGE_DISABLED").is_some() {
         return base.to_string();
     }
+    // The loop boundary is a delivery boundary for fleet
+    // announcements. Native read (own cursor), fail-open.
+    let mut out = String::from(base);
+    if let Some(paths) = crate::announce::AnnouncePaths::from_env_opt() {
+        if let Ok(Some(announce)) =
+            crate::announce::read_render(&paths, session_id, crate::announce::Boundary::Loop)
+        {
+            out.push_str("\n\n");
+            out.push_str(&announce);
+        }
+    }
     let output = Command::new("fno")
         .args(["agents", "nudge-peek", "--session-id", session_id, "--cwd"])
         .arg(cwd)
@@ -39,14 +54,14 @@ pub fn append_inbox_nudge(base: &str, cwd: &Path, session_id: &str) -> String {
         .output();
     let stdout = match output {
         Ok(o) if o.status.success() => o.stdout,
-        _ => return base.to_string(),
+        _ => return out,
     };
     let nudge = String::from_utf8_lossy(&stdout);
     let nudge = nudge.trim();
     if nudge.is_empty() {
-        base.to_string()
+        out
     } else {
-        format!("{base}\n\n{nudge}")
+        format!("{out}\n\n{nudge}")
     }
 }
 

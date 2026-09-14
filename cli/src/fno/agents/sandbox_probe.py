@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-EXIT_SANDBOX_UNREACHABLE = 82
+# Allocated by the table in fno/agents/spawn_gate.py; 82 was the Python gate's
+# EXIT_FLEET_STOP and a number that means two things cannot be read.
+EXIT_SANDBOX_UNREACHABLE = 85
 
 
 @dataclass(frozen=True)

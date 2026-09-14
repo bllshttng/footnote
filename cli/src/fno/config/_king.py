@@ -10,9 +10,10 @@ import re
 #: The texts a reign self-injects as native commands, module-level so the
 #: fail-safe validators return the same default the field was born with.
 KING_CHECKIN_TEXT = (
-    "reign check-in. Run the check-in body of the reign skill "
-    "(skills/reign/SKILL.md). Journal reign_checkin. When nothing changed "
-    "since the last check-in, print 'no change' and stop."
+    "reign check-in. Run fno agents king checkin: it gathers the check-in "
+    "readings, prints them, diffs the last beat, and journals reign_checkin. "
+    "Then act on the printout per the reign skill. When nothing changed and "
+    "coverage is full, print 'no change' and stop."
 )
 KING_GOAL_TEXT = (
     "reign goal. When every node in the crown scope reads done or "

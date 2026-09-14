@@ -86,6 +86,10 @@ def cmd_note(
         graph_cli._graph_path(), readers.node_id if readers is not None else task_id, note
     )
     if not found:
+        from fno.graph._archive_lookup import refuse_update_if_archived
+
+        if refuse_update_if_archived(task_id):
+            raise typer.Exit(code=1)
         typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
         raise typer.Exit(code=1)
     warn_if_note_is_long(text)

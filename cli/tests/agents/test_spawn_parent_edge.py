@@ -721,7 +721,7 @@ def test_the_launch_edge_stamp_is_wired_into_the_spawn(workdir_claude, monkeypat
     result = CliRunner().invoke(
         agents_cli.agents_app,
         ["spawn", "--name", "test-launch-wired", "-H", "claude", "--node", "x-1234",
-         "do something", "--substrate", "bg"],
+         "/fix something", "--substrate", "bg"],
         catch_exceptions=False,
     )
 

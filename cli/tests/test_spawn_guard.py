@@ -277,7 +277,7 @@ def test_direct_node_spawn_crosses_shared_guard_before_spawn(
 
     res = runner.invoke(
         agents_app,
-        ["spawn", "--name", "dead-worker", "--node", "x-dead", "--here", "work"],
+        ["spawn", "--name", "dead-worker", "--node", "x-dead", "--here", "/fix work"],
     )
 
     assert res.exit_code == 2
@@ -326,7 +326,7 @@ def test_direct_node_spawn_failure_releases_shared_reservation(
 
     res = runner.invoke(
         agents_app,
-        ["spawn", "--name", "failed-worker", "--node", "x-fail", "--here", "work", "--substrate", "pane"],
+        ["spawn", "--name", "failed-worker", "--node", "x-fail", "--here", "/fix work", "--substrate", "pane"],
     )
 
     assert res.exit_code == 7

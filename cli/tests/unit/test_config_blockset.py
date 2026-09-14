@@ -127,3 +127,49 @@ def test_ac3_ui_cli_confirms_block(tmp_path, monkeypatch):
     assert "config.review" in res.output
     assert "global" in res.output
     assert tomllib.loads((gpath.parent / "config.toml").read_text())["review"]["required_bots"] == ["x"]
+
+
+# --- an out-of-enum value cannot be stored ----------------------------------
+
+
+def test_out_of_enum_scalar_leaf_refused_exit2_unchanged(tmp_path):
+    set_config_value(
+        "config.recovery.watchdog.enabled", "true", scope="project", repo_root=tmp_path
+    )
+    before = (tmp_path / ".fno" / "config.toml").read_text()
+    with pytest.raises(ConfigSetError) as exc:
+        set_config_value(
+            "config.recovery.watchdog.mode", "on", scope="project", repo_root=tmp_path
+        )
+    assert exc.value.exit_code == 2
+    assert "'report', 'wake' or 'handoff'" in str(exc.value)
+    assert (tmp_path / ".fno" / "config.toml").read_text() == before
+
+
+def test_out_of_enum_block_replace_refused_unchanged(tmp_path):
+    set_config_value(
+        "config.recovery.watchdog.enabled", "true", scope="project", repo_root=tmp_path
+    )
+    before = (tmp_path / ".fno" / "config.toml").read_text()
+    with pytest.raises(ConfigSetError) as exc:
+        set_config_value(
+            "config.recovery.watchdog",
+            '{"enabled": true, "mode": "on"}',
+            scope="project",
+            repo_root=tmp_path,
+        )
+    assert exc.value.exit_code == 2
+    assert (tmp_path / ".fno" / "config.toml").read_text() == before
+
+
+def test_legacy_flat_watchdog_string_refused_unchanged(tmp_path):
+    set_config_value(
+        "config.recovery.watchdog.enabled", "true", scope="project", repo_root=tmp_path
+    )
+    before = (tmp_path / ".fno" / "config.toml").read_text()
+    with pytest.raises(ConfigSetError) as exc:
+        set_config_value(
+            "config.recovery.watchdog", "on", scope="project", repo_root=tmp_path
+        )
+    assert exc.value.exit_code == 2
+    assert (tmp_path / ".fno" / "config.toml").read_text() == before

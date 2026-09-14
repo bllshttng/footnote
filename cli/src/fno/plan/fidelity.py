@@ -21,7 +21,9 @@ from typing import Any, Optional
 __all__ = ["fidelity_refusal", "compute_plan_fidelity"]
 
 
-def fidelity_refusal(*, unjoined_rows: list[dict], carveouts: list[dict]) -> dict:
+def fidelity_refusal(
+    *, unjoined_rows: list[dict], carveouts: list[dict], forbidden: bool = False
+) -> dict:
     """The carveout-aware gate decision over the fidelity join's shortfall.
 
     Each unjoined planned row needs a covering carveout, or the gate refuses.
@@ -34,19 +36,23 @@ def fidelity_refusal(*, unjoined_rows: list[dict], carveouts: list[dict]) -> dic
     """
     shortfall = len(unjoined_rows)
     covering = len(carveouts)
-    covered = shortfall > 0 and covering >= shortfall
-    refused = shortfall > 0 and not covered
+    covered = shortfall > 0 and covering >= shortfall and not forbidden
+    refused = (shortfall > 0 and not covered) or (forbidden and covering > 0)
+    if forbidden and covering > 0:
+        reason = f"plan forbids carve-outs; {covering} carveout(s) filed by this plan's sessions"
+    elif refused:
+        reason = (
+            f"{shortfall} planned deliverable(s) unjoined with only "
+            f"{covering} covering carveout(s); a PR-body sentence is not a carveout"
+        )
+    else:
+        reason = None
     return {
         "refused": refused,
         "shortfall": shortfall,
         "carveouts": covering,
         "covered": covered,
-        "reason": (
-            f"{shortfall} planned deliverable(s) unjoined with only "
-            f"{covering} covering carveout(s); a PR-body sentence is not a carveout"
-            if refused
-            else None
-        ),
+        "reason": reason,
         "unjoined": unjoined_rows,
     }
 
@@ -68,7 +74,6 @@ def compute_plan_fidelity(
     exactly when the plan is missing.
     """
     from datetime import datetime
-    from pathlib import Path
 
     from fno import paths as _paths
     from fno.scoreboard.fold import _plan_key, build_plan_fidelity, load_ledger_rows
@@ -87,38 +92,27 @@ def compute_plan_fidelity(
         rows = []
     graph_nodes = _load_graph_nodes()
 
-    # Scope the join to this ONE plan before the fold ever runs (x-8ad8): the
-    # ledger is global (thousands of rows across every plan ever shipped), and
-    # the fold's fidelity scoring shells a real `gh pr diff` per joined
-    # delivery to score it. Folding the unfiltered ledger fired that network
-    # call once per joined row IN THE WHOLE LEDGER, serially, then threw away
-    # every result but this plan's - a single-plan query paying for the
-    # entire ledger's network fan-out, which is how it went from slow to
-    # "never returns". Reuse the SAME remote-slug derivation the ledger stamps
-    # row.project with (paths._slug_from_git_remote), not a checkout
-    # basename, so a worktree resolves to the repo's real project and not its
-    # worktree folder name; and the join is scoped to this repo since
-    # _plan_key's tail alone can match a foreign project's same-tail plan.
+    # Scope rows to this plan BEFORE the fold: it shells `gh pr diff` per joined
+    # row, so an unscoped global ledger never returns. The project is the remote
+    # slug the ledger stamps, never a worktree basename.
     project = _paths._slug_from_git_remote(Path(repo_root) if repo_root else None)
     target = _plan_key(plan_path, project)
     rows = [r for r in rows if _plan_key(r.get("plan_path"), r.get("project")) == target]
 
+    fm = _plan_frontmatter(plan_file)
+    # Any declared value but `allowed` is forbidden, so a typo fails closed.
+    forbidden = fm.get("carveouts") is not None and str(fm["carveouts"]).strip().lower() != "allowed"
+    node_id = fm.get("node") or fm.get("claims")
     pf = build_plan_fidelity(
         rows, graph_nodes, since_days=since_days, now=now, unmeasurable="refuse"
     )
     if pf.get("state") != "ok":
         # No planned rows in window: nothing to measure, nothing to refuse.
-        return _passthrough(planned=0, delivered=0)
+        decision = _passthrough(planned=0, delivered=0)
+        return _apply_body_leg(decision, forbidden, node_id, graph_nodes, repo_root)
 
-    # No re-check against `target` here: build_plan_fidelity's own internal
-    # join (shipped_by_plan, keyed by _plan_key on each INPUT row's own
-    # plan_path/project) only ever sees the rows we just pre-filtered, so
-    # every row in pf["results"] already belongs to this plan by construction.
-    # A re-check would in fact be WRONG - the fold's result dicts carry
-    # plan_path and session_id but never project (fold.py's `results.append`
-    # calls omit it), so filtering the output on `r.get("project")` compares
-    # every row's project against None and drops everything, silently
-    # zeroing planned/delivered/refused no matter what the ledger holds.
+    # No re-check against `target`: the fold saw only pre-filtered rows, and its
+    # results carry no `project`, so a re-check would silently drop every row.
     plan_rows = pf["results"]
     unjoined = [r for r in plan_rows if r.get("status") == "unjoined"]
     planned = len(plan_rows)
@@ -127,10 +121,36 @@ def compute_plan_fidelity(
     session_ids = {r.get("session_id") for r in plan_rows if r.get("session_id")}
     carveouts = _read_covering_carveouts(repo_root, session_ids)
 
-    decision = fidelity_refusal(unjoined_rows=unjoined, carveouts=carveouts)
+    decision = fidelity_refusal(
+        unjoined_rows=unjoined, carveouts=carveouts, forbidden=forbidden
+    )
     decision["planned"] = planned
     decision["delivered"] = delivered
     decision["plan_path"] = plan_path
+    return _apply_body_leg(decision, forbidden, node_id, graph_nodes, repo_root)
+
+
+def _apply_body_leg(
+    decision: dict, forbidden: bool, node_id: Any, graph_nodes: list[dict],
+    repo_root: Optional[str],
+) -> dict:
+    """A plan with `carveouts: forbidden` also refuses a PR body that declares
+    an exclusion section. check-oos-tracked.sh stays the one body parser."""
+    if not forbidden:
+        return decision
+    decision["carveouts_policy"] = "forbidden"
+    if decision["refused"]:
+        return decision
+    pr_number = next((n.get("pr_number") for n in graph_nodes if node_id and n.get("id") == node_id), None)
+    if not pr_number:
+        return decision  # no PR yet; the stop gate runs only after one is open
+    decision["carveouts_pr"] = pr_number
+    body = _read_pr_body(pr_number, repo_root)
+    reason = _body_carveout_refusal(body) if body is not None else (
+        "PR body unreadable; a gate degrades to refuse")
+    if reason:
+        decision["refused"] = True
+        decision["reason"] = reason
     return decision
 
 
@@ -171,6 +191,54 @@ def _read_covering_carveouts(repo_root: Optional[str], session_ids: set) -> list
         # only because the unreadable-plan case already refused above; a carveout
         # read failure must not be the hole that ships an uncovered shortfall.
         return []
+
+
+def _plan_frontmatter(plan_file: Path) -> dict:
+    from fno.plan._doc import _parse_frontmatter, _split_frontmatter
+
+    try:
+        return _parse_frontmatter(_split_frontmatter(plan_file.read_text(encoding="utf-8"))[0])
+    except Exception:  # noqa: BLE001 - unparseable frontmatter declares nothing
+        return {}
+
+
+def _read_pr_body(pr_number: int, repo_root: Optional[str]) -> Optional[str]:
+    """REST read, never `gh pr view` (the GraphQL reserve refuses it)."""
+    from fno import paths as _paths
+    from fno.pr._proc import run
+
+    try:
+        cwd = repo_root or str(_paths.resolve_repo_root())
+        res = run(
+            ["gh", "api", f"repos/{{owner}}/{{repo}}/pulls/{pr_number}", "--jq", ".body"],
+            cwd=cwd, timeout=30,
+        )
+    except Exception:  # noqa: BLE001 - any read failure is unreadable
+        return None
+    return res.stdout if res.ok else None
+
+
+def _body_carveout_refusal(pr_body: str) -> Optional[str]:
+    import os
+    import subprocess
+
+    from fno import paths as _paths
+
+    script = _paths.resolve_plugin_script("scripts/ci/check-oos-tracked.sh")
+    try:
+        proc = subprocess.run(
+            ["bash", str(script)],
+            env={**os.environ, "PR_BODY": pr_body, "PLAN_CARVEOUTS": "forbidden"},
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - timeout or missing bash
+        return f"carve-out check unreadable ({exc}); a gate degrades to refuse"
+    if proc.returncode == 0:
+        return None
+    first = (proc.stderr or "").strip().splitlines()
+    if proc.returncode == 1 and first:
+        return first[0]
+    return f"carve-out check unreadable (exit {proc.returncode}); a gate degrades to refuse"
 
 
 def _graph_json_path():

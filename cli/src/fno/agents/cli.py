@@ -2051,6 +2051,22 @@ def cmd_spawn(
         if launch_account_label:
             prov_env["FNO_ACCOUNT"] = launch_account_label
 
+    # An undeclared FOREIGN target (explicit --cwd only) pins `never`; an
+    # explicit ambient override rides the same overlay, else the pane wrapper
+    # strips what the operator set.
+    from fno.worktree_paths import UNDECLARED_REPO_RECEIPT, undeclared_dispatch_pin
+
+    _pin = (
+        undeclared_dispatch_pin(workdir, Path(os.getcwd()), harness) if cwd else {}
+    )
+    if _pin:
+        prov_env = dict(prov_env) if prov_env is not None else {}
+        prov_env.update(_pin)
+        print(UNDECLARED_REPO_RECEIPT, file=sys.stderr)
+    elif os.environ.get("FNO_WORKTREE_POLICY"):
+        prov_env = dict(prov_env) if prov_env is not None else {}
+        prov_env["FNO_WORKTREE_POLICY"] = os.environ["FNO_WORKTREE_POLICY"]
+
     # The loop gate, on the same message and for the same reason as the carrier
     # above. resolve_dispatch runs this check too, and the comment three lines
     # up is why it is not enough: a direct spawn never reaches that resolver, so
@@ -2063,15 +2079,12 @@ def cmd_spawn(
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # x-4342: the sessions row a node-bearing spawn opens. An explicit
-    # --session-phase is the operator's label and wins; empty infers from the
-    # work's own shape - a /target-family message names a do worker (whose
-    # claim-acquire stamp duplicate-fills the same row), a review verb names
-    # the reviewer, a blueprint or think verb names the planner. Arbitrary
-    # prose is a label this code cannot guess and never defaults to review: a
-    # review row is a retirement blocker for life, so an unlabeled task keeps
-    # no row rather than a lying one. Fail-closed on an unknown explicit
-    # value, like the guards above, before anything spawns.
+    # x-4342: the sessions row a node-bearing spawn opens. Explicit
+    # --session-phase wins; empty infers from the verb table
+    # (spawn_phase.toml). A --node spawn the table cannot label is refused
+    # fail-closed, like the guards above, before anything spawns: silently
+    # launching a worker nothing can bind to the node does not survive
+    # (x-007c).
     from fno.graph.types import SESSION_PHASES
 
     if session_phase:
@@ -2087,6 +2100,15 @@ def cmd_spawn(
         from fno.agents.spawn_phase import infer_phase
 
         stamp_phase = infer_phase(message)
+        if node is not None and not stamp_phase:
+            print(
+                f"refusing --node {node}: the message verb names no session "
+                f"phase, so no worker would be bound to the node. Pass "
+                f"--session-phase <one of {sorted(SESSION_PHASES)}>. "
+                "No worker launched.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
     # A resume may restore a recorded route inside dispatch_spawn. Resolve its
     # separately stored provider axis before admission so the gate judges the
     # destination the revived worker will actually use.
@@ -2132,17 +2154,16 @@ def cmd_spawn(
                 raise typer.Exit(code=2)
             route_provider = recorded_provider
 
-    # The node guard sits BELOW the resume-provider resolution on purpose.
-    # It acquires `dispatch:<id>` (and the handover `node:<id>`), and every
-    # exit above it is an exit that would strand those keys for their whole
-    # TTL with nothing launched. Taking the reservation after the launch is
-    # proven is one placement; a release bolted onto each exit is a guard on
-    # one of N paths, and the next exit added to that stretch leaks again.
-    # Below this point the next exit is `run_gate`, whose `except BaseException`
-    # releases both keys. Not the ONLY one: the TARGET_NO_MERGE set-or-clear
-    # block sits between a successful `run_gate` and the `try` whose `finally`
-    # releases, so an exception there still leaks both. Narrow, and named rather
-    # than papered over.
+    # The node guard sits BELOW the resume-provider resolution on purpose:
+    # it acquires `dispatch:<id>` (and the handover `node:<id>`), and every
+    # exit above it strands those keys for their whole TTL with nothing
+    # launched. Taking the reservation after the launch is proven is one
+    # placement; a release bolted onto each exit is a guard on one of N paths,
+    # and the next exit added to that stretch leaks again. Below this point
+    # the next exit is `run_gate`, whose `except BaseException` releases both
+    # keys. Not the ONLY one: the TARGET_NO_MERGE set-or-clear block sits
+    # between a successful `run_gate` and the `try` whose `finally` releases,
+    # so an exception there still leaks both - narrow, and named.
     node_reservation: tuple[str, str] | None = None
     node_claim: tuple[str, str] | None = None
     if node is not None:
@@ -2598,7 +2619,9 @@ def cmd_spawn(
         from fno.agents.mux_spawn import PROVENANCE_KEYS
 
         prov_prev.update({k: os.environ.get(k) for k in PROVENANCE_KEYS})
-        for _k in PROVENANCE_KEYS:
+        # The worktree-policy pin clears like the group but is not node provenance.
+        prov_prev["FNO_WORKTREE_POLICY"] = os.environ.get("FNO_WORKTREE_POLICY")
+        for _k in (*PROVENANCE_KEYS, "FNO_WORKTREE_POLICY"):
             os.environ.pop(_k, None)
         os.environ.update(prov_env)
         # TARGET_NO_MERGE was set-or-cleared above, before the substrate
@@ -4433,12 +4456,10 @@ def cmd_watchdog(
 
     lanes = "all" if apply_all else "wake"
     results = []
-    # One global provider rotation per sweep, shared across every row.
-    rotation = wd.RotationBudget()
     for v, row in pairs:
         try:
             outcome, detail = wd.apply_verdict(
-                v, lanes=lanes, cwd=row.cwd, node=row.node, rotation=rotation
+                v, lanes=lanes, cwd=row.cwd, node=row.node
             )
         except Exception as exc:  # noqa: BLE001 - one broken row never aborts the rest
             outcome, detail = "refused", f"{v.verdict} action crashed: {exc!r}"
@@ -4929,4 +4950,29 @@ def incident(ctx: typer.Context) -> None:
         )
         raise typer.Exit(code=1)
     proc = subprocess.run([str(binary), "fleet-incident", *ctx.args])
+    raise typer.Exit(code=proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)
+
+
+@agents_app.command(
+    "provider-cap",
+    hidden=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def provider_cap(ctx: typer.Context) -> None:
+    """The provider-cap actor.
+
+    status [--json] [--max-age-s N] | decide <lane> --answer all|some:<id,id>|wait.
+    """
+    import subprocess
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        typer.secho(
+            "fno agents provider-cap: fno-agents binary not found; `fno doctor update --rust` or set FNO_AGENTS_BIN",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    proc = subprocess.run([str(binary), "provider-cap", *ctx.args])
     raise typer.Exit(code=proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)

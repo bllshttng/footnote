@@ -1752,7 +1752,7 @@ fn outcome_json(outcome: &graph_store::MutateOutcome) -> Value {
     })
 }
 
-fn handle_read_archive(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
+fn handle_read_archive(_state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let archive = params
         .get("path")
         .and_then(Value::as_str)
@@ -3187,7 +3187,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(30));
         let reader_state = Arc::clone(&state);
         let (tx, rx) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let reply = handle_read(&reader_state, &json!({})).unwrap();
             let _ = tx.send(reply);
         });

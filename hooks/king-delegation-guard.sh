@@ -57,17 +57,16 @@ _approve() {
     exit 0
 }
 _deny_text() {
+    # The mechanism is a write-path allowlist, so the refusal names the write
+    # target and the allowed roots. Delegation advice would misstate it.
     printf '%s\n' \
-"king-delegation-guard: a crowned court session does not implement (directive point 5).
-Delegate it: fno agents spawn '/fno:target <id>' --node <id> --substrate thread
-Or hand the whole scope out: fno backlog advance --epic <scope>
-Unblock authority is yours and is allowed: claim release, mail, backlog levers, notes, plan writes.
-A subagent of this session is exempt: its tool calls carry the subagent's agent id, and this guard reads that marking. Your own main thread is never exempt."
+"king-delegation-guard: write target '$1' is outside the allowed roots for a crowned session.
+Allowed roots: the plans directory (${PLANS_DIR:-<unresolved>}) and the crown handoff doc (${HANDOFF_PATH:-<unresolved>})."
 }
 _block() {
     _guard_mark king-delegation-guard block 2>/dev/null || true
     local r
-    r="$(_deny_text)"
+    r="$(_deny_text "$1")"
     jq -n --arg r "$r" '{
         decision: "block",
         reason: $r,
@@ -171,13 +170,12 @@ if [[ "$REIGN_SHAPE" != "court" || "$REIGN_SID" != "$SID" ]]; then
 fi
 
 # ── 5. Knob: refuse (default) | warn | off. Unreadable or unknown degrades
-#      to refuse, the deliberate default. ─────────────────────────────────────
+#      to refuse, the deliberate default. warn defers to the decision point,
+#      where the denied path is known and the text can name it. ────────────────
 MODE="$(fno config get king.implementation_guard 2>/dev/null || true)"
 case "$MODE" in
   off)  _approve ;;
-  warn) _deny_text >&2
-        _approve ;;
-  *)    : ;;  # refuse, and any value that is not warn/off
+  *)    : ;;  # refuse, warn, and any value that is not warn/off
 esac
 
 # ── 6. Plans-directory carveout: writes that resolve inside the resolved
@@ -257,12 +255,13 @@ if [[ -n "$TRANSCRIPT" ]]; then
 fi
 
 # ── 7. Decision ───────────────────────────────────────────────────────────────
+DENIED=""
 case "$TOOL" in
   Edit|Write|NotebookEdit)
     if in_plans_dir "$FILE_PATH" || in_handoff "$FILE_PATH"; then
         _approve
     fi
-    _block
+    DENIED="$FILE_PATH"
     ;;
   Bash)
     # Floor of shell write operators, tokenized the way the shell sees them:
@@ -359,15 +358,22 @@ sys.stdout.write("\n".join(t for t in targets if t))
         fi
         if ! in_plans_dir "$p"; then
             ALLOW=0
+            DENIED="$p"
             break
         fi
     done <<< "$WRITTEN"
     if [[ "$ALLOW" -eq 1 ]]; then
         _approve
     fi
-    _block
     ;;
   *)
     _approve
     ;;
 esac
+
+# ── 8. Posture: warn names the path on stderr and allows; refuse blocks. ─────
+if [[ "$MODE" == "warn" ]]; then
+    _deny_text "$DENIED" >&2
+    _approve
+fi
+_block "$DENIED"

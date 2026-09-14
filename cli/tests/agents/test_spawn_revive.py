@@ -211,7 +211,7 @@ def test_spawn_resume_fork_explicit_node_wins(workdir_claude, monkeypatch) -> No
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "wake-pinned", "-H", "claude", "--resume", DEAD_UUID,
-         "--node", "x-other", "--substrate", "bg", "hi"],
+         "--node", "x-other", "--substrate", "bg", "/fix hi"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output

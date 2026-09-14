@@ -2,7 +2,6 @@
 //! keeper is found by the ps walk, classified by its build self-report, and
 //! its row carries the sock the restart leg cycles.
 
-use base64::Engine as _;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;

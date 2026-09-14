@@ -7,8 +7,6 @@ use std::path::Path;
 pub(crate) struct KingBoard {
     pub(crate) actionable: i64,
     pub(crate) top_row: Option<String>,
-    pub(crate) unreadable: i64,
-    pub(crate) over_budget: i64,
     /// x-c911: any queue on this board failed to read. The quiet branch
     /// refuses to certify a quiet board while this is true, instead of
     /// trusting a count that cannot see the blind queues.
@@ -30,14 +28,6 @@ fn row_identity(queue: &str, row: &Value) -> String {
 
 pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
     let actionable = value.get("actionable")?.as_i64()?;
-    let unreadable = value
-        .get("unreadable")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let over_budget = value
-        .get("over_budget")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
     let mut top_row = None;
     let mut actionable_ids: Vec<String> = Vec::new();
     let mut operator_question_sessions: Vec<String> = Vec::new();
@@ -94,8 +84,6 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
     Some(KingBoard {
         actionable,
         top_row,
-        unreadable,
-        over_budget,
         unreadable_sources,
         actionable_ids,
         operator_question_sessions,
@@ -262,7 +250,7 @@ pub(crate) fn capacity_gate(
     cwd: &Path,
     session_id: &str,
     dry: u64,
-    emit: &dyn Fn(&str, Value),
+    _emit: &dyn Fn(&str, Value),
 ) -> Option<CapacityGate> {
     let probe = match board.top_row.as_deref() {
         Some(top) if top.starts_with("undispatched:") => {
@@ -363,8 +351,6 @@ mod tests {
     fn board_with_queues(queues: Value) -> Value {
         json!({
             "actionable": 0,
-            "unreadable": 1,
-            "over_budget": 1,
             "queues": queues,
         })
     }
@@ -414,20 +400,6 @@ mod tests {
         ]));
         let parsed = parse_king_board_value(&board).unwrap();
         assert!(!parsed.unreadable_sources);
-    }
-
-    #[test]
-    fn the_two_kinds_count_apart() {
-        let board = board_with_queues(json!([
-            {"name": "claims", "status": "unreadable", "error": "torn registry read",
-             "actionable": true, "rows": []},
-            {"name": "undispatched", "status": "over_budget",
-             "error": "killed at its 28.5s slice of the board budget",
-             "actionable": true, "rows": []},
-        ]));
-        let parsed = parse_king_board_value(&board).unwrap();
-        assert_eq!(parsed.unreadable, 1);
-        assert_eq!(parsed.over_budget, 1);
     }
 
     #[test]

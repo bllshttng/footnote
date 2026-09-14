@@ -5,7 +5,9 @@
 //! and its tests are the bulk of what it costs. Keeping it here lets the
 //! dispatcher stay a dispatcher.
 
-use crate::gc_sweep::{GcSummary, StateFilesReapSummary, StateReapFamilySummary, UnresolvedHold};
+#[cfg(test)]
+use crate::gc_sweep::UnresolvedHold;
+use crate::gc_sweep::{GcSummary, StateFilesReapSummary, StateReapFamilySummary};
 use serde_json::{json, Value};
 
 /// Render the file-only reap receipt independently from row retirement.
@@ -219,6 +221,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_live_descendants": pair(&summary.kept_live_descendants),
                 "stop_refused": pair(&summary.stop_refused),
                 "needs_live_stop": pair(&summary.needs_live_stop),
+                "dry_run_unverified": pair(&summary.dry_run_unverified),
                 "kept_no_receipt": pair(&summary.kept_no_receipt),
                 "expired_receipts": summary.expired_receipts,
                 "kept_receipts": pair(&summary.kept_receipts),
@@ -372,6 +375,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!(
             "  held {id} (needs live stop: {reason}){}\n",
             hold_line(summary, id)
+        ));
+    }
+    for (id, gate) in &summary.dry_run_unverified {
+        out.push_str(&format!(
+            "  held {id} (dry-run did not evaluate: {gate}; apply may still refuse)\n"
         ));
     }
     for refused in &summary.release_refused {
@@ -616,6 +624,7 @@ mod tests {
             "kept_live_descendants",
             "stop_refused",
             "needs_live_stop",
+            "dry_run_unverified",
             "kept_no_receipt",
             "expired_receipts",
             "kept_receipts",
@@ -845,7 +854,7 @@ mod tests {
 
     #[test]
     fn the_ran_state_names_the_tabs_it_closed_with_their_labels() {
-        for (dry, count) in [(false, 2), (true, 0)] {
+        for (dry, _count) in [(false, 2), (true, 0)] {
             let out =
                 render_reap_with_inventory(&summary(&[]), None, Some(&ran_receipt()), true, dry);
             let v: Value = serde_json::from_str(out.trim()).expect("valid json");

@@ -371,18 +371,30 @@ def test_inert_grid_says_why_in_the_receipt(monkeypatch):
 
 def test_crown_profile_key_reaches_non_verb_seeds():
     """AC15-HP: a seed with no leading slash-verb - every king seed - resolves
-    the profile key `crown`, so [agents.profiles.crown] applies to crown spawns."""
+    the profile key `crown`, so [agents.profiles.crown] applies to crown spawns.
+    A king verb resolves `crown` too, over both sigils; target stays target."""
     from fno.agents.spawn_defaults import _profile_key
 
     assert _profile_key("king: shrink the board") == "crown"
     assert _profile_key("") == "crown"
     assert _profile_key("/fno:target x") == "target"
     assert _profile_key("/absolute/path/to/thing") == "crown"
+    for verb in ("reign", "king-for-a-day", "fno-me"):
+        assert _profile_key(f"$fno:{verb} x-a792") == "crown"
+        assert _profile_key(f"/fno:{verb} x-a792") == "crown"
 
 
 def test_crown_profile_injects_on_a_non_verb_seed():
     result = _inject(
         ["spawn", "--name", "k", "king: shrink the board"],
+        profiles={"crown": {"model": "crown-model"}},
+    )
+    assert "crown-model" in result
+
+
+def test_crown_profile_injects_on_a_reign_seed():
+    result = _inject(
+        ["spawn", "--name", "k", "$fno:reign x-a792"],
         profiles={"crown": {"model": "crown-model"}},
     )
     assert "crown-model" in result

@@ -18,8 +18,8 @@ use std::path::PathBuf;
 
 use crate::proto::{BacklogCard, CardState};
 
-/// Real `derive_queue` invocations this process made, test-only: the memo
-/// test counts derivations, not ticks. Resets via [`reset_derive_queue_calls`].
+// Real `derive_queue` invocations this process made, test-only: the memo
+// test counts derivations, not ticks. Resets via [`reset_derive_queue_calls`].
 #[cfg(test)]
 thread_local! {
     static DERIVE_QUEUE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

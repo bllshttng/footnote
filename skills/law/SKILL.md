@@ -32,6 +32,8 @@ fno inbox law set "<subject>" "<decision>" --rationale "<why>" [--supersedes d-x
 
 The command prints the `d-` id on stdout. Report that id and the subject.
 
+5. Read stderr. Each `law: d-... may answer open q-...` line names an open question. Read the question and the law together, and judge whether the law answers it. For each question it answers, run the mail command the line prints. Report which askers you told. Do not close a question yourself: an agent session cannot answer it, and a withdrawal notifies nobody.
+
 ## What this store does and does not reach
 
 This store is machine-local. A stranger who clones the repository must obey some rules. Those rules do not reach that person from here. Land them in the code, a doc, or a gate, in a PR. When the operator wants the rule recalled by subject, record it here as well.

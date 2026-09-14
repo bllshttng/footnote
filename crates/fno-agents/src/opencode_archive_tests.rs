@@ -7,7 +7,6 @@
 //! prove nothing.
 
 use super::*;
-use std::io::{Read as _, Write as _};
 use std::sync::{Arc, Mutex};
 
 /// How the fake serve behaves for one test.

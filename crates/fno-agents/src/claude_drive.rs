@@ -81,11 +81,16 @@ fn is_session_uuid(s: &str) -> bool {
 /// Mirrors `doctor.py`: the filename is the uuid, so we never need the lossy
 /// cwd-encoding. Returns `None` for a malformed uuid or when no transcript exists.
 pub fn find_transcript(session_uuid: &str) -> Option<PathBuf> {
+    find_transcript_in(&claude_projects_dir(), session_uuid)
+}
+
+/// Same discovery under an explicit projects base, for callers that resolve
+/// the root themselves (tests, or the cap actor's injected scan).
+pub fn find_transcript_in(base: &Path, session_uuid: &str) -> Option<PathBuf> {
     if !is_session_uuid(session_uuid) {
         return None;
     }
-    let base = claude_projects_dir();
-    let entries = std::fs::read_dir(&base).ok()?;
+    let entries = std::fs::read_dir(base).ok()?;
     for entry in entries.flatten() {
         let candidate = entry.path().join(format!("{session_uuid}.jsonl"));
         if candidate.exists() {

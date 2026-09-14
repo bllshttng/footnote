@@ -90,6 +90,10 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # comparison matching Python's `datetime.fromisoformat`. Parsing only -- no
 # system clock needed, so the `clock` default feature is dropped.
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
+# IANA zone resolution for [provider_cap] sleep_timezone (x-7e05): a wrong-by-
+# eight-hours reset is the measured cost, so sleep hours must resolve the
+# operator's zone, not guess an offset.
+chrono-tz = "0.10"
 # Grid (ab-3c063856): client-side TUI compositor that tiles N watcher panes and
 # promotes one to driver on Enter. Crossterm gives raw-mode, key events, cursor
 # moves, and a SIGWINCH-aware resize event.

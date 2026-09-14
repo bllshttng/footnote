@@ -1,0 +1,1 @@
+[{"cwd":"<fixture>","failure_limit":3,"interval_seconds":300,"kingless":true,"max_concurrent":2,"members":["alpha"],"mission":null,"project":"alpha","rung":1,"scope":"alpha"},{"cwd":"<fixture>","failure_limit":3,"interval_seconds":300,"kingless":false,"max_concurrent":2,"members":["e-1"],"mission":"e-1","project":"alpha","rung":2,"scope":"e-1"}]

@@ -1,23 +1,19 @@
-"""Active-backlog drain-target resolution.
+"""Active-backlog state helpers that stay Python-side.
 
-Resolves which ACTIVE MISSIONS the always-on backlog dispatcher daemon should
-drain (x-a4dc K2): one target per epic with ``mission_active=true``, from the
-graph plus the workspace project->path map, gated by ``config.active_backlog``.
-The daemon is a per-user global process with no inherent project, so it shells
-``fno config active-backlog --json`` once on entering Serving to learn its drain
-targets (mission epic + cwd + cadence + failure limit) - keeping all config logic
-in Python, the single source of truth, exactly like the rest of the daemon's
-config-ish reads. It drains each mission by shelling K1's converge core
-(``advance --epic``); the legacy per-project interval drain is deleted.
+The territory fact set, the drain-target receipt, and the blueprinter record
+store are native to ``crates/fno-agents/src/territory.rs`` (the x-e221 port);
+``fno config active-backlog*`` prints the binary's receipt. What survives here
+is the wake-nudge sentinel the graph writers touch and the status-fanout
+target resolver (x-2057), which is a separate supervisor with its own
+enablement contract.
 
-Pure + best-effort: a malformed settings file or graph yields no targets rather
-than raising, so the daemon never crashes on an operator config typo.
+Pure + best-effort: a malformed settings file yields no targets rather than
+raising, so the daemon never crashes on an operator config typo.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 # The wake nudge sentinel filename under the state dir. The daemon watches this
 # file's mtime; a backlog mutation / advance dispatch touches it to wake the
@@ -50,28 +46,7 @@ def touch_nudge() -> None:
         pass
 
 
-@dataclass(frozen=True)
-class DrainTarget:
-    """One active mission the daemon should continuously drain (x-a4dc K2).
-
-    ``mission`` is the epic id the daemon converges (``advance --epic``); ``project``/
-    ``cwd`` are the epic's own project, rooting the loop's journal + close/defer reads
-    (all node-global operations - a mission fans out across projects at dispatch time).
-    """
-
-    project: str
-    cwd: str
-    interval_seconds: int
-    failure_limit: int
-    mission: Optional[str]
-    #: Global ceiling on concurrent converge runs across ALL missions, not a
-    #: per-mission budget. Every target carries the same value because the
-    #: daemon holds one gate for the whole drain; it rides on the target only
-    #: because the target list is the daemon's one config channel.
-    max_concurrent: int = 1
-
-
-def _workspace_paths(*, strict: bool = False) -> dict[str, str]:
+def _workspace_paths() -> dict[str, str]:
     """project name -> normalized absolute path, from the workspace map.
 
     Reuses ``graph.maintain.load_workspaces`` so this resolver cannot drift from
@@ -82,127 +57,7 @@ def _workspace_paths(*, strict: bool = False) -> dict[str, str]:
 
         return load_workspaces()
     except Exception:
-        if strict:
-            raise
         return {}
-
-
-def _active_missions(*, strict: bool = False) -> list[dict]:
-    """Epic nodes with ``mission_active=true`` (K1's durable activation record),
-    across all projects. The field ``fno backlog advance --epic`` sets/clears;
-    a store read fault (or an external backend selection, which can never carry
-    a footnote-set activation flag) yields none by default. Strict callers raise
-    on the same read failures so a receipt can distinguish unknown from empty."""
-    try:
-        from fno.tracker.metadata import read_entries
-
-        entries = read_entries("active_backlog")
-        if not isinstance(entries, list):
-            if strict:
-                raise ValueError("active mission read returned a non-list")
-            return []
-        # Require str id + project: a non-str id would pass a truthy check but
-        # raise when resolve_drain_targets sorts by id, which would disable ALL
-        # target resolution on one malformed record (fail-safe: skip it instead).
-        return [
-            e
-            for e in entries
-            if isinstance(e, dict)
-            and e.get("mission_active") is True
-            and isinstance(e.get("id"), str)
-            and isinstance(e.get("project"), str)
-        ]
-    except Exception:  # noqa: BLE001 - a graph read/iterate fault yields no missions
-        if strict:
-            raise
-        return []
-
-
-@dataclass(frozen=True)
-class DrainReading:
-    """What the drain resolver saw: targets, mission count, and which zero hit."""
-
-    targets: list[DrainTarget]
-    missions: int
-    skip_reason: Optional[str]
-
-
-def resolve_drain_reading(*, strict: bool = False) -> DrainReading:
-    """The reason channel beside :func:`resolve_drain_targets`' bare list.
-
-    A disabled drain and a drain with no missions are different facts with
-    different remedies, and both resolved to the same empty list before
-    (x-338c). ``skip_reason`` names the zero-path in the order checked:
-    ``config_unreadable``, ``drain_disabled``, ``bad_interval``, ``no_missions``,
-    ``project_disabled``, ``no_workspace_path``; ``None`` when targets resolved.
-    Missions are counted BEFORE the config gates so ``missions`` is the truth
-    even when the drain is off. Mixed per-mission drops report the most common
-    drop, ties to the order above. A strict mission-read fault raises.
-    """
-    missions = _active_missions(strict=True) if strict else _active_missions()
-    try:
-        from fno.config import load_settings
-
-        cfg = load_settings().active_backlog
-    except Exception:
-        if strict:
-            raise
-        return DrainReading([], len(missions), "config_unreadable")
-
-    # The master switch, read apart from the interval: any_enabled() folds the
-    # two, which would make an off switch and a bad interval indistinguishable.
-    en = cfg.enabled
-    switch_on = any(en.values()) if isinstance(en, dict) else bool(en)
-    if not switch_on:
-        return DrainReading([], len(missions), "drain_disabled")
-    interval = cfg.interval_seconds()
-    if interval is None:
-        return DrainReading([], len(missions), "bad_interval")
-    if not missions:
-        return DrainReading([], 0, "no_missions")
-
-    paths = _workspace_paths(strict=True) if strict else _workspace_paths()
-    targets: list[DrainTarget] = []
-    disabled = missing_path = 0
-    for epic in sorted(missions, key=lambda e: e["id"]):
-        project = epic["project"]
-        # Respect the per-project enable contract: with enabled={proj: bool} an
-        # explicitly-disabled project's mission does not drain, even though
-        # the switch is on for the daemon as a whole.
-        if not cfg.is_enabled_for(project):
-            disabled += 1
-            continue
-        cwd = paths.get(project)
-        if not cwd:
-            missing_path += 1
-            continue
-        targets.append(
-            DrainTarget(
-                project=project,
-                cwd=cwd,
-                interval_seconds=interval,
-                failure_limit=cfg.failure_limit,
-                mission=epic["id"],
-                max_concurrent=cfg.max_concurrent,
-            )
-        )
-    if not targets:
-        reason = "project_disabled" if disabled >= missing_path else "no_workspace_path"
-        return DrainReading([], len(missions), reason)
-    return DrainReading(targets, len(missions), None)
-
-
-def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
-    """One drain target per ACTIVE mission, in epic-id order (x-a4dc K2).
-
-    A mission is an epic with ``mission_active=true``; the daemon drains each
-    by shelling ``advance --epic`` (the epic id rides on ``mission``).
-    ``config.active_backlog`` stays the master switch: an unenabled config or
-    invalid interval yields no targets, and a mission whose epic project has
-    no workspace path is skipped. Fail-safe throughout. Callers that must tell
-    the zero-paths apart read :func:`resolve_drain_reading` instead.
-    """
-    return resolve_drain_reading(strict=strict).targets
 
 
 @dataclass
@@ -251,29 +106,3 @@ def fanout_targets_as_dicts() -> list[dict]:
         {"project": t.project, "cwd": t.cwd, "interval_seconds": t.interval_seconds}
         for t in resolve_fanout_targets()
     ]
-
-
-def drain_reading_as_dict() -> dict:
-    """JSON-serializable receipt of :func:`resolve_drain_reading` for the daemon.
-
-    The bare target list this replaces could not say WHY it was empty, so a
-    disabled drain printed as ``no_missions`` (x-338c). The mission drain
-    shells ``advance --epic``, which resolves each child project's ``batch`` /
-    ``max_lanes`` itself - so, unlike the deleted per-project arm, the target
-    carries no per-repo dispatch config."""
-    reading = resolve_drain_reading()
-    return {
-        "targets": [
-            {
-                "project": t.project,
-                "cwd": t.cwd,
-                "interval_seconds": t.interval_seconds,
-                "failure_limit": t.failure_limit,
-                "mission": t.mission,
-                "max_concurrent": t.max_concurrent,
-            }
-            for t in reading.targets
-        ],
-        "missions": reading.missions,
-        "skip_reason": reading.skip_reason,
-    }

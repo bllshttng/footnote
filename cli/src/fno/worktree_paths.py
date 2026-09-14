@@ -196,7 +196,7 @@ class WorktreePolicy:
     policy: str   # one of VALID_WORKTREE_POLICIES (post harness degradation)
     base: Path    # target worktrees base (informational for a `never` result)
     project: str  # resolved project id (for the receipt line)
-    source: str   # "per-project" | "global" | "default"
+    source: str   # "per-project" | "global" | "default" | "env"
     requested_policy: str  # pre-degradation policy, for truthful receipts
     degraded: bool  # requested harness-native but substrate cannot allocate it
     note: str = ""  # advisory the caller should surface (deprecations)
@@ -289,14 +289,15 @@ def resolve_worktree_policy(
 ) -> WorktreePolicy:
     """Resolve the worktree policy for ``repo_root`` under ``harness``.
 
-    Precedence: per-project ``work.workspaces.<slug>.projects[].worktree`` >
-    global ``worktree.policy`` > built-in ``harness-native``. A config file that
-    exists but fails to parse RAISES (fail closed); an absent key is not an
-    error. ``harness-native`` degrades to ``external`` when the harness has no
-    native mechanism (anything but claude), when ``paths.worktrees_base`` is
-    explicitly set (x-f96e: the key alone relocates; setting it AND
-    ``worktree.policy`` is no longer required), and under the deprecated
-    ``worktree.use_conductor_canonical``.
+    Precedence: ``FNO_WORKTREE_POLICY`` (how a dispatcher pins an undeclared
+    target's child) > per-project
+    ``work.workspaces.<slug>.projects[].worktree`` > global ``worktree.policy`` >
+    built-in ``harness-native``. A config file that exists but fails to parse
+    RAISES (fail closed); an absent key is not an error. ``harness-native``
+    degrades to ``external`` when the harness has no native mechanism (anything
+    but claude), when ``paths.worktrees_base`` is explicitly set (x-f96e: the
+    key alone relocates; setting it AND ``worktree.policy`` is no longer
+    required), and under the deprecated ``worktree.use_conductor_canonical``.
     """
     repo_root = repo_root.resolve()
     from fno.config_io import _deep_merge
@@ -335,6 +336,10 @@ def resolve_worktree_policy(
             source = "global"
     if raw_policy is None:
         raw_policy = "harness-native"
+    # The env override sits above every config layer; the SAME validation below refuses it.
+    env_policy = os.environ.get("FNO_WORKTREE_POLICY")
+    if env_policy:
+        raw_policy, source = env_policy, "env"
 
     if not isinstance(raw_policy, str) or raw_policy not in VALID_WORKTREE_POLICIES:
         raise WorktreePolicyError(
@@ -377,6 +382,49 @@ def resolve_worktree_policy(
         degraded=policy != raw_policy,
         note=note,
     )
+
+
+def _repo_identity(path: Path) -> Optional[tuple[Path, Path]]:
+    """``(top, common dir)``; None outside a git repo. Config reads the top; identity is the common dir."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel", "--git-common-dir"],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return None
+    outs = proc.stdout.split()
+    top = Path(outs[0]).resolve()
+    common = Path(outs[1])
+    common = common if common.is_absolute() else top / common
+    return top, common.resolve()
+
+
+UNDECLARED_REPO_RECEIPT = (
+    "worktree=never (undeclared repo; declare work.workspaces.<slug>.projects[].worktree)"
+)
+
+
+def undeclared_dispatch_pin(
+    target_cwd: Path, caller_cwd: Path, harness: Optional[str]
+) -> dict[str, str]:
+    """The env a dispatcher exports for a spawn into an UNDECLARED repo.
+
+    Identity is the git common dir, so the caller's own worktree is not
+    foreign. ``source == "default"`` means nothing anywhere named the target
+    repo; pin ``never`` rather than write config into somebody else's project.
+    """
+    target = _repo_identity(target_cwd)
+    caller = _repo_identity(caller_cwd)
+    if target is None or caller is None or target[1] == caller[1]:
+        return {}
+    try:
+        pol = resolve_worktree_policy(target[0], harness)
+    except Exception:  # noqa: BLE001 - undecidable target keeps the ambient posture
+        return {}
+    if pol.source != "default":
+        return {}
+    return {"FNO_WORKTREE_POLICY": "never"}
 
 
 def _worktrees_base_from(merged: dict) -> Path:

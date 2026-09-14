@@ -29,8 +29,20 @@ from fno.agents.row_contradiction import project_row
 from fno.footprint import Admission
 from fno.harness_identity import claude_transport_short_id
 
-# Exit codes, distinct from existing dispatch codes (2, 13, 14, 15, 18, 127)
-# and byte-parity with the Rust gate.
+# THE exit-code allocation table for the gate band across both trees (this
+# file and crates/fno-agents/src/spawn_gate.rs). A value >= 64 claims its
+# number once; cli/tests/unit/test_exit_code_allocation.py fails any
+# duplicate. The convention band stays outside the claim: small ints 0-5 and
+# 13-25 repeat per verb by design, and 124/127/137/143 mirror the standard
+# timeout/signal codes.
+#   75-77, 79   capacity refusals, both gates (queue, no-wait, RAM, load)
+#   78          Python gate: provider cap. Rust never emits 78.
+#   80, 81      Python gate: king share, registry schema. Rust never emits these.
+#   82, 83      fleet incident stop pair, both gates (byte-parity)
+#   84          Rust gate only: state root ungranted (mirrored here so callers
+#               classify without reading Rust). Permanent until a human grants.
+#   85          Python sandbox probe: sandbox unreachable.
+#   90, 91      Rust fleet-incident check verb (fleet_incident.rs).
 EXIT_QUEUE_TIMEOUT = 75
 EXIT_NO_WAIT = 76
 EXIT_RAM_REFUSED = 77
@@ -38,10 +50,11 @@ EXIT_PROVIDER_CAP = 78
 EXIT_LOAD_REFUSED = 79
 EXIT_KING_SHARE = 80
 EXIT_REGISTRY_SCHEMA = 81
-# Fleet incident stop (x-77db): 80/81 are taken in this table, so the fleet
-# codes sit at 82/83; the NAME in the refusal is the cross-gate contract.
 EXIT_FLEET_STOP = 82
 EXIT_FLEET_STOP_UNAVAILABLE = 83
+# Rust gate only (crates/fno-agents/src/spawn_gate.rs): the lane declares
+# nothing about how it stands toward the fno state root.
+EXIT_STATE_ROOT_UNGRANTED = 84
 
 
 def _fleet_incident_gate() -> None:
@@ -470,6 +483,9 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
             claim_alive = True
         else:
             claim_alive = False
+        # The row's own name dedups its slot claim below (a revived row does
+        # not pay twice for the claim that spawned it).
+        live_registry_names.add(row.name)
         # A live fno row is fno work: it holds a slot regardless of the display
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
@@ -477,7 +493,6 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
         # x-5283: a crowned row divides the cap and pays no per-king tax.
         if row.crown_level is None:
             out.worker_rows.setdefault(row.spawned_by_session, []).append(row.name)
-        live_registry_names.add(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
             # Already shown as its roster row in the display union. That roster

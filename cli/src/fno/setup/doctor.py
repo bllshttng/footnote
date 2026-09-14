@@ -368,6 +368,7 @@ def run_doctor() -> int:
 
     from fno import paths
     from fno.config import _candidate_paths, load_settings, loaded_from
+    from fno.config._loader import SettingsRefused
 
     # Imported HERE, never at module level: a static fno.config edge from this
     # module forms a mypy SCC in which graph._constants' lazy __getattr__
@@ -377,6 +378,7 @@ def run_doctor() -> int:
         check_config_files_read,
         check_enabled_with_empty_population,
         check_unknown_keys,
+        check_values,
         contributing_files,
         source_note,
     )
@@ -405,6 +407,10 @@ def run_doctor() -> int:
     # Handle load errors gracefully (AC4-FR)
     try:
         s = load_settings()
+    except SettingsRefused as exc:
+        # The refusal names file, key, value and legal set; print verbatim.
+        print(f"[doctor] {exc}")
+        return 1
     except Exception as exc:
         print(f"[doctor] error: could not load settings.yaml: {exc}")
         print(f"[doctor] settings source: {found_path}")
@@ -487,6 +493,11 @@ def run_doctor() -> int:
             "unknown config key(s)",
             check_unknown_keys(),
             "An unknown key is ignored for forward compatibility, so it sets nothing.",
+        ),
+        (
+            "config value(s) the schema refuses",
+            check_values(),
+            "Each line names its file, key, offending value and legal set.",
         ),
         (
             "switch(es) enabled with an empty population",

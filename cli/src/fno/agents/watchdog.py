@@ -25,10 +25,8 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
-import hashlib
 import logging
 import re
-import shutil
 import subprocess
 import time
 from collections import Counter, namedtuple
@@ -67,7 +65,6 @@ TailFacts = namedtuple(
 )
 
 GHOST = "ghost"
-REROUTE = "reroute"
 WAKE = "wake"
 STALE = "stale"
 LEAVE = "leave"
@@ -100,7 +97,7 @@ SPENT = "spent"
 #: a hand-copied tuple in the CLI - the copy went stale the moment a verdict
 #: was added (`--only unclaimed` once exited 2 on a live verdict).
 VERDICTS = frozenset({
-    GHOST, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
+    GHOST, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
     CONTENDED, POLLING_SETTLED, SANDBOX_BLOCKED, SILENCE, SPENT,
 })
 
@@ -660,11 +657,6 @@ def lane_armed(settings: Any) -> bool:
     return _armed(settings, None)
 
 
-def handoff_armed(settings: Any) -> bool:
-    """Return true only for the explicit cross-provider action level."""
-    return _armed(settings, "handoff")
-
-
 def wake_armed(settings: Any) -> bool:
     """Return true only for the level that may resume a stalled session."""
     return _armed(settings, "wake")
@@ -929,11 +921,12 @@ def _verdict_one(
         and facts.last_event_epoch is not None
     ):
         if in_quorum_breaker:
+            # The cap actor owns every cap move now (x-7e05): the watchdog
+            # reports the strand and leaves the row alone.
             return _verdict(
-                row, REROUTE,
-                "429 terminal for this session; provider quorum already "
-                "confirmed by a separate breaker row",
-                "redispatch",
+                row, LEAVE,
+                "429 terminal for this session; cap: owned by provider-cap",
+                "none",
             )
         return _verdict(
             row, LEAVE,
@@ -1800,427 +1793,6 @@ def provider_outage_lines(report: Optional[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def supervise_provider_handoffs(
-    provider_outages: dict[str, Any], rows: list[Row], *, settings: Any,
-    now_s: float,
-    candidate_for: Optional[Callable[[dict[str, Any], Row, float], Any]] = None,
-    handoff_fn: Optional[Callable[..., Any]] = None,
-    deps_factory: Optional[Callable[[], Any]] = None,
-    decision_fn: Optional[Callable[..., Any]] = None,
-    journal_root: Optional[Path] = None,
-) -> list[dict[str, Any]]:
-    """Run at most one proved cross-provider transaction per source row."""
-    if not handoff_armed(settings):
-        return []
-    instrument = provider_outages.get("instrument")
-    if instrument != "measured":
-        # Armed but blind: a config that wants handoff got no evidence to act
-        # on this tick, for reasons that can be transient (a lock timeout, a
-        # torn journal write) as easily as durable. Returning [] here reads
-        # identically to "measured, nothing broken" - one named outcome tells
-        # the difference apart instead of both going quiet the same way.
-        return [{
-            "phase": "refused",
-            "reason": "provider_outage_instrument_unmeasured",
-            "detail": f"instrument={instrument!r}; no handoff evidence this tick",
-            "count": 1,
-        }]
-    from fno.agents.outage_handoff import (
-        HandoffRequest,
-        production_handoff_dependencies,
-    )
-    from fno.agents.provider_outage import OutagePolicy, select_healthy_destination
-    from fno.recovery import recover_provider_outage
-
-    if candidate_for is None:
-        candidate_for = production_handoff_candidate
-    handoff_fn = handoff_fn or (
-        lambda request, deps, journal_root: recover_provider_outage(
-            request, deps=deps, journal_root=journal_root, settings=settings
-        )
-    )
-    deps_factory = deps_factory or production_handoff_dependencies
-    if decision_fn is None:
-        from fno.decide import record_decision
-
-        decision_fn = record_decision
-    root = journal_root or (sweep_path().parent / "recovery" / "transactions")
-    policy = OutagePolicy.from_settings(settings)
-    by_id = {row.row_id: row for row in rows}
-    outcomes: list[dict[str, Any]] = []
-    for breaker in provider_outages.get("breakers") or []:
-        if not isinstance(breaker, dict):
-            continue
-        broken_provider = str(breaker.get("provider") or "")
-        for row_id in breaker.get("row_ids") or []:
-            row = by_id.get(str(row_id))
-            if row is None or not row.node:
-                outcomes.append({
-                    "phase": "refused", "reason": "unknown_source_node",
-                    "source_row_id": str(row_id), "count": 1,
-                    "outage_epoch": str(breaker.get("outage_epoch") or ""),
-                    "provider": broken_provider,
-                    "account": str(breaker.get("account") or ""),
-                })
-                continue
-            try:
-                candidate = (
-                    production_handoff_candidate(
-                        breaker, row, now_s, settings=settings
-                    )
-                    if candidate_for is production_handoff_candidate
-                    else candidate_for(breaker, row, now_s)
-                )
-                selected = select_healthy_destination(
-                    [candidate] if candidate is not None else [],
-                    broken_provider=broken_provider,
-                    now_s=now_s,
-                    policy=policy,
-                )
-                if selected is None or not selected.model:
-                    outcomes.append({
-                        "phase": "refused", "reason": "no_fresh_destination_canary",
-                        "source_row_id": row.row_id, "node": row.node, "count": 1,
-                        "outage_epoch": str(breaker.get("outage_epoch") or ""),
-                        "provider": broken_provider,
-                        "account": str(breaker.get("account") or ""),
-                    })
-                    continue
-                request = HandoffRequest(
-                    node=row.node,
-                    outage_epoch=str(breaker.get("outage_epoch") or ""),
-                    source_row_id=row.row_id,
-                    destination_harness=str(selected.harness),
-                    destination_provider=str(selected.provider),
-                    destination_model=selected.model,
-                    destination_account=str(selected.record_id),
-                    source_provider=broken_provider,
-                    source_account=str(breaker.get("account") or ""),
-                    evidence_fingerprints=tuple(
-                        str(item) for item in (breaker.get("fingerprints") or [])
-                    ),
-                    destination_account_env=selected.account_env or {},
-                    quorum_evidence_count=len(breaker.get("fingerprints") or []),
-                )
-                result = handoff_fn(
-                    request, deps=deps_factory(), journal_root=Path(root)
-                )
-                outcome = result.to_dict()
-                outcome.update({
-                    "provider": selected.provider,
-                    "account": selected.record_id,
-                    "source_provider": broken_provider,
-                    "source_account": str(breaker.get("account") or ""),
-                    "count": max(1, sum(result.counts.values())),
-                })
-                outcomes.append(outcome)
-                contended = (
-                    result.failed_phase == "observed"
-                    and result.counts.get("lease_contention", 0) > 0
-                )
-                if (
-                    result.phase in {"committed", "parked"}
-                    and not result.replayed
-                    and not contended
-                ):
-                    decision_fn(
-                        subject=row.node,
-                        decision=(
-                            f"provider outage handoff {result.phase} for "
-                            f"{broken_provider} to {selected.provider}"
-                        ),
-                        decided_by="provider-outage-supervisor",
-                        authority_source="daemon-automation",
-                        rationale=result.reason or "terminal provider-outage transaction",
-                        source="daemon",
-                    )
-            except Exception as exc:  # noqa: BLE001 - one row's crash must not stall its siblings
-                outcomes.append({
-                    "phase": "refused", "reason": "handoff_supervision_crashed",
-                    "source_row_id": row.row_id, "node": row.node, "count": 1,
-                    "outage_epoch": str(breaker.get("outage_epoch") or ""),
-                    "provider": broken_provider,
-                    "account": str(breaker.get("account") or ""),
-                    "detail": f"{type(exc).__name__}: {exc}",
-                })
-    return outcomes
-
-
-def production_handoff_candidate(
-    breaker: dict[str, Any], row: Row, now_s: float, *,
-    settings: Any = None,
-    entries_provider: Optional[Callable[[], list[Any]]] = None,
-    route_policy_provider: Optional[Callable[[Row], tuple[list[str], dict[str, str]]]] = None,
-    account_env_for: Optional[Callable[[str, Path], dict[str, str]]] = None,
-    route_env_for: Optional[Callable[[Any], dict[str, str]]] = None,
-    runtime_exhausted_fn: Optional[Callable[[str, Path], bool]] = None,
-    harness_installed_fn: Optional[Callable[[str], bool]] = None,
-    pane_occupancy_fn: Optional[Callable[[str], int]] = None,
-    canary_fn: Optional[Callable[[Any, Row, float], Any]] = None,
-    open_breakers_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
-    configured_routes_provider: Optional[Callable[[str, list[str]], list[Any]]] = None,
-):
-    """Walk configured route policy and return the first proved destination."""
-    from fno.agents.provider_outage import (
-        CanaryProof,
-        HEALTH_MARKER,
-        OutagePolicy,
-        RouteCandidate,
-        run_health_canary,
-    )
-    policy = OutagePolicy.from_settings(settings) if settings is not None else OutagePolicy()
-
-    # Candidate route discovery is intentionally conservative: only a route
-    # already stamped on a registry row is eligible. Missing explicit model,
-    # provider, or account identity refuses instead of deriving one axis from
-    # the harness or model label.
-    try:
-        from fno.adapters.providers.dispatch import dispatch_env
-        from fno.agents.model_routing import read_route_settings
-        from fno.agents.registry import load_registry
-
-        entries_provider = entries_provider or load_registry
-        route_policy_provider = route_policy_provider or _production_route_policy
-        account_env_for = account_env_for or (
-            lambda account, root: dispatch_env(account, repo_root=root)
-        )
-        route_env_for = route_env_for or (
-            lambda entry: read_route_settings(entry.route_settings_path)
-            if getattr(entry, "route_settings_path", None) else {}
-        )
-        runtime_exhausted_fn = runtime_exhausted_fn or _runtime_exhausted
-        harness_installed_fn = harness_installed_fn or (
-            lambda harness: shutil.which(harness) is not None
-        )
-        pane_occupancy_fn = pane_occupancy_fn or _production_pane_occupancy
-        open_breakers_provider = open_breakers_provider or _persisted_open_breakers
-        ordered_accounts, pins = route_policy_provider(row)
-        broken_provider = str(breaker.get("provider") or "")
-        broken_account = str(breaker.get("account") or "")
-        if any(str(value) in {broken_provider, broken_account} for value in pins.values()):
-            return None
-        if configured_routes_provider is None:
-            from fno.agents.autonomous_route import configured_outage_routes
-
-            def configured_routes_provider(cwd: str, ordered: list[str]) -> list[Any]:
-                return configured_outage_routes(cwd, ordered_record_ids=ordered)
-        configured_by_account = {
-            route.record_id: route
-            for route in configured_routes_provider(row.cwd, ordered_accounts)
-        }
-        entries_by_account: dict[str, list[Any]] = {}
-        for registered in entries_provider():
-            account = str(getattr(registered, "account_record_id", "") or "")
-            if account:
-                entries_by_account.setdefault(account, []).append(registered)
-        open_routes = {
-            (str(item.get("provider") or ""), str(item.get("account") or ""))
-            for item in open_breakers_provider()
-            if isinstance(item, dict)
-        }
-
-        for account in ordered_accounts:
-            configured = configured_by_account.get(account)
-            if configured is not None:
-                harness = str(configured.harness)
-                provider = str(configured.provider)
-                model = str(configured.model)
-                account_env = dict(configured.account_env)
-                route_env = dict(configured.route_env)
-            else:
-                # A live row may supplement a legacy configured record that
-                # predates explicit model axes, but it is never the candidate
-                # denominator: only ids from ordered_accounts reach this loop.
-                observations = entries_by_account.get(account, [])
-                identities = {
-                    (
-                        str(getattr(item, "harness", "") or ""),
-                        str(getattr(item, "route_provider_id", "") or ""),
-                        str(getattr(item, "model_name", "") or ""),
-                    )
-                    for item in observations
-                }
-                if len(identities) != 1:
-                    continue
-                harness, provider, model = next(iter(identities))
-                if not all((harness, provider, model)):
-                    continue
-                entry = observations[0]
-                root = Path(row.cwd)
-                account_env = account_env_for(account, root)
-                route_env = route_env_for(entry)
-            pin_provider = str(pins.get("provider") or "")
-            if pin_provider and pin_provider not in {account, harness, provider}:
-                continue
-            if pins.get("harness") and str(pins["harness"]) != harness:
-                continue
-            if pins.get("model") and str(pins["model"]) != model:
-                continue
-            root = Path(row.cwd)
-            candidate = RouteCandidate(
-                record_id=account,
-                harness=harness,
-                provider=provider,
-                model=model,
-                account=account,
-                account_env=account_env,
-                route_env=route_env,
-                canary=None,
-                breaker_open=(provider, account) in open_routes,
-                runtime_exhausted=runtime_exhausted_fn(account, root),
-                harness_installed=harness_installed_fn(harness),
-                pane_supported=harness in {"codex", "opencode", "agy"},
-                pane_count=pane_occupancy_fn(harness),
-            )
-            if (
-                provider == broken_provider
-                or candidate.breaker_open
-                or candidate.runtime_exhausted
-                or not candidate.harness_installed
-                or not candidate.pane_supported
-                or candidate.pane_count >= 4
-            ):
-                continue
-
-            if canary_fn is not None:
-                proof = canary_fn(candidate, row, now_s)
-                if proof is not None:
-                    return RouteCandidate(**{**candidate.__dict__, "canary": proof})
-                continue
-
-            from fno import _subprocess_util, paths
-            from fno.agents.mux_spawn import _mux_pane_alive
-
-            canary_cwd = paths.state_dir() / "recovery" / "canary-work"
-            canary_cwd.mkdir(parents=True, exist_ok=True)
-
-            def collect(spawned: Any) -> CanaryProof | None:
-                deadline = time.monotonic() + 30
-                while time.monotonic() < deadline:
-                    proc = subprocess.run(
-                        [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
-                         "--server", spawned.session, str(spawned.pane_id),
-                         "--lines", "20"],
-                        capture_output=True, text=True, timeout=5, check=False,
-                    )
-                    lines = [line.strip() for line in proc.stdout.splitlines()]
-                    if HEALTH_MARKER in lines:
-                        observed = time.time()
-                        proof_path = paths.state_dir() / "recovery" / "provider-canaries"
-                        proof_path.mkdir(parents=True, exist_ok=True)
-                        digest = hashlib.sha256(
-                            f"{candidate.record_id}\0{spawned.pane_id}".encode()
-                        ).hexdigest()[:20]
-                        from fno.state.io import atomic_write
-
-                        atomic_write(proof_path / f"{digest}.json", json.dumps({
-                            "provider": candidate.provider,
-                            "account": candidate.record_id,
-                            "pane_id": str(spawned.pane_id),
-                            "observed_at": observed,
-                            "content": HEALTH_MARKER,
-                        }, sort_keys=True))
-                        return CanaryProof(
-                            source="pane", content=HEALTH_MARKER,
-                            observed_at=observed, persisted=True,
-                            assistant_role=False, pane_id=str(spawned.pane_id),
-                        )
-                    time.sleep(0.25)
-                return None
-
-            def stop(spawned: Any) -> bool:
-                subprocess.run(
-                    [*_subprocess_util.fno_py_cmd(), "mux", "pane", "kill",
-                     "--server", spawned.session, str(spawned.pane_id)],
-                    capture_output=True, text=True, timeout=10, check=False,
-                )
-                stopped = _mux_pane_alive({
-                    "session": spawned.session, "pane_id": spawned.pane_id,
-                }) is False
-                if stopped:
-                    from fno.agents.registry import update_registry
-
-                    update_registry(lambda entries: [
-                        item for item in entries
-                        if not (
-                            item.name == spawned.name
-                            and item.mux == {
-                                "session": spawned.session,
-                                "pane_id": spawned.pane_id,
-                            }
-                        )
-                    ])
-                return stopped
-
-            proof = run_health_canary(
-                candidate,
-                canary_cwd=canary_cwd,
-                node_cwd=Path(row.cwd),
-                now_s=now_s,
-                collect_proof=collect,
-                stop=stop,
-                policy=policy,
-            )
-            if proof is not None:
-                return RouteCandidate(**{**candidate.__dict__, "canary": proof})
-    except Exception as exc:  # noqa: BLE001 - a crash here must not masquerade as "no candidate"
-        logging.getLogger(__name__).warning(
-            "watchdog: candidate discovery crashed for %s: %s", row.row_id, exc
-        )
-        return None
-    return None
-
-
-def _production_route_policy(row: Row) -> tuple[list[str], dict[str, str]]:
-    from fno.adapters.providers.loader import load_combos, load_providers
-    from fno.agents.dispatch_target import resolve_dispatch_target
-
-    root = Path(row.cwd)
-    index = _graph_index()
-    if isinstance(index, _Unreadable):
-        index = {}
-    node = index.get(str(row.node), {}) if row.node else {}
-    pins = {
-        key: str(node.get(key) or "")
-        for key in ("provider", "harness", "model")
-        if str(node.get(key) or "").strip()
-    }
-    target = resolve_dispatch_target(
-        "provider-outage-handoff", repo_root=root, env={}
-    )
-    if target.provider_id:
-        return [target.provider_id], pins
-    if target.combo_name:
-        combo = load_combos(repo_root=root).get(target.combo_name)
-        return (list(combo.providers) if combo is not None else []), pins
-    config = load_providers(repo_root=root)
-    return ([config.active] if config.active else []), pins
-
-
-def _runtime_exhausted(account: str, root: Path) -> bool:
-    from fno.adapters.providers.loader import load_quota_config
-    from fno.adapters.providers.runtime_state import HeadroomState, headroom
-
-    quota = load_quota_config(repo_root=root)
-    return headroom(
-        account,
-        ttl_seconds=quota.probe_ttl_seconds,
-        threshold_pct=quota.defer_threshold_pct,
-        repo_root=root,
-    ).state is HeadroomState.EXHAUSTED
-
-
-def _persisted_open_breakers() -> list[dict[str, Any]]:
-    from fno.agents.provider_outage import journal_path
-
-    try:
-        value = json.loads(journal_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
-        return []
-    breakers = value.get("breakers") if isinstance(value, dict) else None
-    return [item for item in (breakers or []) if isinstance(item, dict)]
-
-
 def _production_pr_state(cwd: str, pr_number: int) -> Optional[str]:
     """Current PR state via the routed reader in the row's own checkout;
     None is UNKNOWN and the polling lane stays silent on it."""
@@ -2239,52 +1811,6 @@ def _production_pr_state(cwd: str, pr_number: int) -> Optional[str]:
     except ValueError:
         return None
     return str(state) if state else None
-
-
-def _production_pane_occupancy(harness: str) -> int:
-    """Live pane count for ONE harness in the resolved mux session, joined
-    off each pane's ``harness_session_id`` - never a cwd or title guess;
-    panes with no harness session count toward nothing. An unreadable
-    listing answers 4, the at-capacity value: the route gate skips a
-    candidate it could not measure (fail-closed - counting an unreadable
-    mux as empty overfills the session with recovery spawns).
-    """
-    from fno import _subprocess_util
-    from fno.agents.mux_spawn import resolve_mux_session
-
-    session = resolve_mux_session(None)
-    proc = subprocess.run(
-        [*_subprocess_util.fno_py_cmd(), "mux", "pane", "ls",
-         "--server", session, "--json"],
-        capture_output=True, text=True, timeout=10, check=False,
-    )
-    if proc.returncode != 0:
-        return 4
-    try:
-        panes = json.loads(proc.stdout or "")
-    except (TypeError, ValueError):
-        return 4
-    if not isinstance(panes, list):
-        return 4
-    session_ids = [
-        sid
-        for sid in (
-            str(item.get("harness_session_id") or "")
-            for item in panes
-            if isinstance(item, dict)
-        )
-        if sid
-    ]
-    if not session_ids:
-        return 0
-    from fno.agents.registry import load_registry
-
-    harness_by_sid: dict[str, str] = {}
-    for entry in load_registry():
-        sid = str(getattr(entry, "harness_session_id", "") or "")
-        if sid:
-            harness_by_sid[sid] = str(getattr(entry, "harness", "") or "")
-    return sum(1 for sid in session_ids if harness_by_sid.get(sid) == harness)
 
 
 def run_sweep(
@@ -2944,7 +2470,7 @@ def _confirm_once(
 #: new id, the operator's call).
 LANES = {
     "wake": frozenset({WAKE, SILENCE}),
-    "all": frozenset({WAKE, REROUTE, SANDBOX_BLOCKED, SILENCE}),
+    "all": frozenset({WAKE, SANDBOX_BLOCKED, SILENCE}),
 }
 
 #: The one silent outcome: the verdict was outside the lane the caller asked
@@ -2969,16 +2495,6 @@ def outcome_event(outcome: str) -> str:
     return _OUTCOME_EVENTS.get(outcome, "watchdog_refused")
 
 
-class RotationBudget:
-    """One global provider rotation per sweep: ``_default_failover`` mutates
-    the ACTIVE provider and its storm cap is keyed per row, so N reroute
-    rows would rotate N times and walk the account queue to queue-exhausted
-    (the same one-shot guard ``fno.recovery.run_recovery_sweep`` holds)."""
-
-    def __init__(self) -> None:
-        self.rotated = False
-
-
 def apply_verdict(
     v: Verdict,
     *,
@@ -2986,22 +2502,17 @@ def apply_verdict(
     cwd: str = "",
     agent: Optional[str] = None,
     runner=subprocess.run,
-    failover_fn: Optional[Callable[[Any, Any], str]] = None,
-    rotation: Optional[RotationBudget] = None,
     node: Optional[str] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"); only ``SKIPPED`` is
     silent. wake/silence resume with ``cwd`` set; the transcript reads run under
-    the row's own harness (``agent or v.agent``); reroute uses recovery._redispatch."""
+    the row's own harness (``agent or v.agent``). Cap moves are owned by the
+    provider-cap actor (x-7e05), so no reroute arm exists here."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return SKIPPED, f"{v.verdict} outside {lanes} lane"
     try:
         if v.verdict in (WAKE, SILENCE):
             return _apply_wake(v, cwd=cwd, runner=runner, agent=agent or v.agent)
-        if v.verdict == REROUTE:
-            return _apply_reroute(
-                v, cwd=cwd, failover_fn=failover_fn, rotation=rotation
-            )
         if v.verdict == SANDBOX_BLOCKED:
             return _apply_sandbox_blocked(v, cwd=cwd, node=node, runner=runner)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -3060,93 +2571,26 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str) -> tuple[
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return "refused", f"resume exit {proc.returncode}: {tail[-1] if tail else ''}"
+    if agent != "claude":
+        # Resume's own exit code is the receipt on every non-claude harness
+        # (x-6ac3): a codex thread row exits 0 only when the daemon accepted
+        # the turn - the same receipt mail delivery trusts - and every exec
+        # arm cannot exit 0 under a captured stdin at all. The transcript
+        # marker is the claude contract; re-checking it here would read a
+        # lagging rollout write as a refusal on a delivered wake.
+        return "applied", f"woke {v.name}; resume exit 0 is the delivery receipt ({agent})"
     if not confirm_wake_landed(v.row_id, cwd, WAKE_MESSAGE, before_epoch, agent=agent):
+        # Carry resume's own last line into the refusal: exit 0 is exactly
+        # the receipt that lied here (x-6ac3), so its before -> after line
+        # is what the next operator needs without re-running anything.
+        # Empty output keeps today's text with no trailing separator.
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return (
             "refused",
             f"resume reported success but {WAKE_MESSAGE!r} is not in the "
-            f"transcript after the wake",
+            f"transcript after the wake"
+            + (f": {tail[-1]}" if tail else ""),
         )
     return "applied", f"woke {v.name}; message confirmed in transcript"
 
 
-def _apply_reroute(
-    v: Verdict,
-    *,
-    cwd: str,
-    failover_fn: Optional[Callable[[Any, Any], str]],
-    rotation: Optional[RotationBudget] = None,
-) -> tuple[str, str]:
-    """Reroute through the FULL failover, not a bare respawn: a bare
-    ``_redispatch`` lands the replacement on the SAME capped account and
-    loops. ``_default_failover`` rotates and redispatches as one unit; with
-    no alternate armed it returns ``queue-exhausted`` and this lane refuses,
-    naming it, rather than looping the fleet on the dead account."""
-    from fno.recovery import Candidate, _default_failover, classify_session_error
-
-    if rotation is not None and rotation.rotated:
-        return (
-            "held",
-            f"reroute held: the active provider already rotated this sweep "
-            f"({v.basis}). Re-run after the swap settles",
-        )
-    if not cwd:
-        return "refused", "reroute refused: no recorded worktree to respawn into"
-    if not _is_linked_worktree(cwd):
-        # `_redispatch` re-derives the node from `.fno/target-state.md` under
-        # this cwd - the shared-manifest read `fleet_rows` refuses to trust
-        # for identity, because on a canonical checkout every session reads
-        # the same node. Acting on it force-releases a claim a DIFFERENT live
-        # session may hold and then spawns a duplicate /target onto it.
-        return (
-            "refused",
-            f"reroute refused: {cwd} is not a linked worktree, so the node "
-            f"it respawns is read from a manifest other sessions share. "
-            f"Rotate the provider and respawn this row by hand",
-        )
-    facts = tail_facts(v.row_id, cwd, agent=v.agent)
-    err = classify_session_error(facts.tail_text if facts is not None else "")
-    if err is None or not getattr(err, "triggers_swap", False):
-        return "refused", f"reroute refused: tail is not swap-class ({v.basis})"
-    fn = failover_fn or _default_failover
-    # The lifecycle address is the SESSION ID, not the display name: a
-    # registry-less row's ``name`` is claude's friendly label with no registry
-    # row behind it, so ``fno agents stop <name>`` cannot fall back to the
-    # session store and the reroute ends rotated-no-worker.
-    candidate = Candidate(
-        short_id=v.row_id[:8], sock_path="", jobs_dir=None,
-        cwd=cwd, name=v.row_id,
-    )
-    outcome = fn(candidate, err)
-    if rotation is not None and outcome in (
-        "swapped", "rotated-no-worker", "notified",
-    ):
-        # Every one of these rotated the global active provider, whether or
-        # not a replacement started.
-        rotation.rotated = True
-    if outcome == "swapped":
-        return "applied", f"failover swapped ({v.basis})"
-    if outcome == "notified":
-        # The revive path failed and only a human ping fired: nothing was
-        # delivered, so this is never an applied. It is not a "reported"
-        # either - that word is the lane skip, and callers drop it. The
-        # provider HAS rotated, which a reader must see.
-        return (
-            PARTIAL,
-            f"failover rotated, replacement not spawned, human notified ({v.basis})",
-        )
-    if outcome == "rotated-no-worker":
-        # The receipt must not claim the session is untouched: on this path
-        # the stop and the node-claim force-release may ALREADY have run
-        # before the spawn failed. Name what is certain and what to check.
-        # PARTIAL, not refused: the provider rotated, so the fleet changed.
-        return (
-            PARTIAL,
-            f"failover rotated but no replacement spawned ({v.basis}). The "
-            "old session may already be stopped and its claim force-released. "
-            "Re-check the row before acting on it",
-        )
-    return (
-        "refused",
-        f"reroute refused: failover outcome {outcome!r}, no alternate armed "
-        f"({v.basis}). Nothing rotated and the session is left as-is",
-    )

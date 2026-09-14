@@ -8500,7 +8500,7 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
 /// AC5-HP: a ready outcome puts the update row above keybinds.
 #[test]
 fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
-    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+    let outcome = UpdateOutcome::Ok(crate::client::update_menu::UpdateReadiness {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
@@ -8733,7 +8733,7 @@ async fn peek_footer_esc_close_click_closes_and_the_rest_falls_through() {
 /// AC5-HP: the overlay carries the version pair, changelog, and guidance.
 #[test]
 fn update_modal_renders_version_pair_changelog_and_guidance() {
-    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+    let outcome = UpdateOutcome::Ok(crate::client::update_menu::UpdateReadiness {
         update_ready: true,
         installed_rev: Some("aaa1111".into()),
         source_rev: Some("bbb2222".into()),
@@ -8795,7 +8795,7 @@ fn update_readiness_deserializes_the_real_payload_shape() {
             "guidance": "update ready bbb2222 - WIRE BUMP v47 -> v48 - ends 14 shells",
             "degraded": null
         }"#;
-    let r: UpdateReadiness = serde_json::from_str(json).unwrap();
+    let r: crate::client::update_menu::UpdateReadiness = serde_json::from_str(json).unwrap();
     assert!(r.update_ready);
     assert_eq!(r.installed_rev.as_deref(), Some("aaa1111"));
     assert_eq!(r.source_rev.as_deref(), Some("bbb2222"));
@@ -14955,7 +14955,7 @@ fn needs_overlay_lines_mark_selection_and_tag_focus_only() {
 // overlay (AC4-EDGE), and states the true total when the cap trims (footer).
 #[test]
 fn needs_overlay_lines_empty_and_capped_footers() {
-    let empty_projection = NeedsProjection {
+    let empty_projection = crate::client::needs_view::NeedsProjection {
         rows: Vec::new(),
         mine_shown: 0,
         mine_total: 0,
@@ -14976,7 +14976,7 @@ fn needs_overlay_lines_empty_and_capped_footers() {
         squad: Some(1),
         tab: None,
     };
-    let one_projection = NeedsProjection {
+    let one_projection = crate::client::needs_view::NeedsProjection {
         rows: vec![NeedsOverlayRow::Need(one_row.clone())],
         mine_shown: 0,
         mine_total: 0,
@@ -14988,7 +14988,7 @@ fn needs_overlay_lines_empty_and_capped_footers() {
     assert!(degraded
         .iter()
         .any(|l| l.contains("events fold unavailable")));
-    let capped_projection = NeedsProjection {
+    let capped_projection = crate::client::needs_view::NeedsProjection {
         rows: vec![NeedsOverlayRow::Need(one_row)],
         mine_shown: 0,
         mine_total: 0,

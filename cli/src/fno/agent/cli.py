@@ -79,7 +79,7 @@ def _foreign_identity_line() -> Optional[str]:
     the ambiguity refusal read, so the remedy cannot drift from what is actually
     consulted. Returns None when the env is clean, which is the normal case.
     """
-    from fno.claims.self_identity import resolve_self_identity
+    from fno.agents.self_stamp import resolve_self_identity
     from fno.harness_identity import (
         AMBIENT_IDENTITY_FAMILY,
         ambient_identity_strip_flags,

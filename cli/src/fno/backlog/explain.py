@@ -588,10 +588,22 @@ def render_report(report: dict) -> str:
                 why = sel["why"].get(asked["dropped_by"], "")
                 out.append(f"ASKED  {asked['id']}: dropped by {asked['dropped_by']} - {why}")
         elif asked.get("never_a_candidate"):
-            out.append(
-                f"ASKED  {asked['id']}: never a candidate "
-                f"(status {asked.get('status')}, not ready and not cold-dispatchable)"
-            )
+            if asked.get("status") == "in_review":
+                # The PR is the work: no status change is wanted, the driver
+                # adopts the open PR through target init (worktree ensure
+                # continues origin/feature/<node>). Both command spellings:
+                # codex reserves / for harness commands.
+                out.append(
+                    f"ASKED  {asked['id']}: never a candidate (in_review: its open PR is "
+                    f"the work; dispatch /fno:target {asked['id']} (codex: $fno:target "
+                    f"{asked['id']}), whose init adopts the PR on feature/<node>; "
+                    "undriven ones list under undriven_pr on fno inbox board)"
+                )
+            else:
+                out.append(
+                    f"ASKED  {asked['id']}: never a candidate "
+                    f"(status {asked.get('status')}, not ready and not cold-dispatchable)"
+                )
         else:
             out.append(f"ASKED  {asked['id']}: eligible, ranked {asked['rank'] + 1}")
 

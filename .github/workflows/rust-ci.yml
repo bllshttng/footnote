@@ -27,6 +27,7 @@ on:
       - cli/src/fno/agents/harness_capabilities.toml
       - crates/fno/src/harness_capabilities.toml
       - cli/src/fno/agents/merge_posture.toml
+      - cli/src/fno/agents/spawn_phase.toml
       - crates/fno-agents/src/events_limits.toml
       - docs/harnesses/capability-matrix.md
       - cli/src/fno/agents/registry_schema.toml
@@ -95,6 +96,52 @@ jobs:
       - name: cargo fmt --check (fno)
         working-directory: crates/fno
         run: cargo "+$RUSTFMT_TOOLCHAIN" fmt --all --check
+
+  warnings:
+    name: cargo check --all-targets (deny warnings)
+    # The ratchet the node asked for: rustc warnings fail CI, so the count can
+    # never climb back. A dedicated job, not RUSTFLAGS on the `test` job - a
+    # flag change re-fingerprints every dependency, and sharing that job's
+    # cache key would rebuild its whole dep tree on every run. `cargo check`
+    # here (no codegen, no test execution), so the failure means exactly one
+    # thing: a warning.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/build
+            crates/fno-agents/target
+            crates/fno/target
+          # Key prefix deliberately OUTSIDE the `test` job's `cargo-` restore
+          # prefix (same rule the `stressonly` key records below): this job
+          # builds check-only artifacts that the big job must never restore.
+          # It still WARMS from the big cache via its own restore-keys - the
+          # asymmetry is the point.
+          key: ${{ runner.os }}-warncheck-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-warncheck-
+            ${{ runner.os }}-cargo-
+
+      - name: cargo check --all-targets (fno-agents)
+        working-directory: crates/fno-agents
+        run: cargo check --all-targets --locked
+
+      - name: cargo check --all-targets (fno)
+        working-directory: crates/fno
+        run: cargo check --all-targets --locked
 
   test:
     name: cargo test + schema parity
@@ -241,6 +288,7 @@ jobs:
             cli/src/fno/agents/harness_capabilities.toml \
             crates/fno/src/harness_capabilities.toml \
             cli/src/fno/agents/merge_posture.toml \
+            cli/src/fno/agents/spawn_phase.toml \
             crates/fno-agents/src/events_limits.toml \
             cli/src/fno/agents/registry_schema.toml \
             docs/harnesses/capability-matrix.md

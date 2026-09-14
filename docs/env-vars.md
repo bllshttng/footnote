@@ -25,6 +25,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `CODEX_HOME` | py+rs | unclear: cli/src/fno/adapters/providers/managed.py:211 |
 | `CODEX_PLUGIN_ROOT` | py | unclear: cli/src/fno/agent/state.py:143 |
 | `CODEX_SESSION_ID` | py | unclear: cli/src/fno/adapters/hermes.py:142 |
+| `CODEX_THREAD_ID` | py | The codex thread id: codex sets it per thread in child tool env (the root session keeps CODEX_SESSION_ID), never in its own process env. The rollout witness matches it against a daemon row at this cwd to complete a name_only pane's own identity. |
 | `COLORTERM` | rs | unclear: crates/fno/src/mux_cli.rs:1508 |
 | `CRON_JOB` | py | unclear: cli/src/fno/agents/context.py:94 |
 | `DATABASE_URL` | py | unclear: cli/src/fno/codemap_cli/db-schema.py:208 |
@@ -47,7 +48,6 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_AGENT_ROW_PENDING` | py | unclear: cli/src/fno/agents/register_session.py:200 |
 | `FNO_AGENT_SELF` | py+rs | unclear: cli/src/fno/agent/cli.py:363 |
 | `FNO_AGENT_SESSION` | py | unclear: cli/src/fno/agents/context.py:237 |
-| `FNO_CARGO_TARGETS_BASE` | py | Overrides the managed cargo build base the removal-time reclaim deletes under; test escape hatch. |
 | `FNO_AUTO_MEMORY_DIR` | py | unclear: cli/src/fno/inbox/drain.py:407 |
 | `FNO_BG` | py | unclear: cli/src/fno/target/orient.py:254 |
 | `FNO_BIN` | py+rs | Overrides the Python fno porcelain path at the Rust/Python seam. |
@@ -58,11 +58,14 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_BUS_RETAIN` | py | unclear: cli/src/fno/bus/log.py:62 |
 | `FNO_CAPABILITY_PARITY_DIR` | rs | unclear: crates/fno/src/agents_view.rs:3316 |
 | `FNO_CAPABILITY_PARITY_JSON` | rs | unclear: crates/fno/src/agents_view.rs:3318 |
+| `FNO_CARGO_TARGETS_BASE` | py | Overrides the managed cargo build base the removal-time reclaim deletes under; test escape hatch. |
 | `FNO_CC_DAEMON_RV_ROOT` | py | unclear: cli/src/fno/agents/session_procs.py:40 |
 | `FNO_CLAIMS_ROOT` | py+rs | unclear: cli/src/fno/agents/account_env.py:158 |
 | `FNO_CLAUDE_DAEMON_DIR` | py+rs | unclear: cli/src/fno/agents/discover.py:2353 |
+| `FNO_CLAUDE_PROJECTS_DIR` | rs | Overrides the claude transcript projects root the announce status scan reads. |
 | `FNO_CODEX_ASK_WAIT_MS` | rs | unclear: crates/fno-agents/src/codex_thread.rs:56 |
 | `FNO_CODEX_INTERRUPT_BOUND_MS` | rs | unclear: crates/fno-agents/src/codex_thread.rs:80 |
+| `FNO_CODEX_SESSIONS_DIR` | rs | Overrides the codex sessions root the announce status scan reads. |
 | `FNO_CONFIG` | py+rs | unclear: cli/src/fno/adapters/providers/loader.py:436 |
 | `FNO_CONFIG_SEARCH_ROOT` | py | unclear: cli/src/fno/config_io.py:66 |
 | `FNO_CONTEXT_OBSERVATION_DIR` | py | unclear: cli/src/fno/context_observation.py:120 |
@@ -70,6 +73,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_CURSOR_AGENT_MODEL` | py+rs | unclear: cli/src/fno/agents/harnesses/cursor_agent.py:326 |
 | `FNO_CURSOR_AGENT_PROVIDER` | py+rs | unclear: cli/src/fno/agents/harnesses/cursor_agent.py:321 |
 | `FNO_DEBUG` | py | unclear: cli/src/fno/agents/mux_spawn.py:1854 |
+| `FNO_DIE_WITH_PARENT` | py | Names the spawner pid a flight-holder watchdog compares getppid() against; when the spawner is gone the holder releases its flight and exits, so a killed parent never orphans the child. Opt-in: unset means never trip on parent death. |
 | `FNO_DISPATCH_ACCOUNT_ENV` | py | unclear: cli/src/fno/agents/cli.py:1905 |
 | `FNO_DRIVER_LIB` | rs | unclear: crates/fno-agents/src/finalize.rs:849 |
 | `FNO_DRIVER_LIB_DIR` | rs | unclear: crates/fno-agents/src/loop_target.rs:616 |
@@ -78,6 +82,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_E2E_DROP_PTY_EXIT` | rs | unclear: crates/fno/src/pty.rs:1862 |
 | `FNO_E2E_PTY_OUTPUT_DELAY_MS` | rs | unclear: crates/fno/src/pty.rs:1873 |
 | `FNO_EVENTS_PATH` | py+rs | unclear: cli/src/fno/agents/spawn_defaults.py:1830 |
+| `FNO_FLIGHT_BUDGET_S` | py | Overrides the seconds a live single-flight holder tolerates before its watchdog releases the flight and exits 124; the default trips a minute before the 30-minute TTL. |
 | `FNO_GLOBAL_SETTINGS_PATH` | py+rs | unclear: cli/src/fno/adapters/providers/loader.py:48 |
 | `FNO_GRAPH_JSON` | rs | unclear: crates/fno/src/backlog_view.rs:47 |
 | `FNO_HARNESS` | py | unclear: cli/src/fno/king/state.py:268 |
@@ -141,7 +146,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_ROUTE_PROVIDER` | py | unclear: cli/src/fno/agent/cli.py:303 |
 | `FNO_ROUTE_SETTINGS_DIR` | rs | unclear: crates/fno-agents/src/claude_adopt.rs:112 |
 | `FNO_ROUTE_SLOT_DEBUG` | py | unclear: cli/src/fno/rust_binary.py:224 |
-| `FNO_RUNTIME_STATE_PATH` | py | unclear: cli/src/fno/adapters/providers/runtime_state.py:186 |
+| `FNO_RUNTIME_STATE_PATH` | py+rs | Overrides the provider runtime-state file (quota locks, usage); the default is ~/.fno/runtime-state.json. |
 | `FNO_RUST_FRONT` | py | unclear: cli/src/fno/lint_verb_ratchet.py:674 |
 | `FNO_SERVER` | py | Names the target mux server. |
 | `FNO_SESSION` | py+rs | Deprecated alias of FNO_SERVER; the Rust pane-send audit row also reads it as the calling session the send came from. |
@@ -156,6 +161,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_STORE_KEEPER_DRIFT_CHECK_SECS` | rs | unclear: crates/fno-agents/src/graph_keeper.rs:654 |
 | `FNO_STORE_KEEPER_IDLE_SECS` | rs | unclear: crates/fno-agents/src/graph_keeper.rs:115 |
 | `FNO_STYLE_ENFORCE` | py | unclear: cli/src/fno/graph/cli.py:926 |
+| `FNO_TASK_CONTEXT_FILE` | py | Absolute path to the executing attempt's bound task-context binding; a declared value gates `fno do target init`, embeds into written handoff receipts, and rides spawn payloads (rendered natively). |
 | `FNO_TEST_HERMETIC` | py+rs | unclear: cli/src/fno/hermetic.py:557 |
 | `FNO_TEST_MARKER_HOLD_MS` | rs | unclear: crates/fno/src/proto/startup_guard.rs:97 |
 | `FNO_TEST_MODE` | py | unclear: cli/src/fno/setup/doctor.py:229 |
@@ -172,6 +178,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_VERIFY_GIT_BIN` | rs | unclear: crates/fno-agents/src/verify_evidence.rs:906 |
 | `FNO_WORKER_ADD_DIRS` | rs | unclear: crates/fno-agents/src/claude_ask.rs:687 |
 | `FNO_WORKER_NAME` | py | unclear: cli/src/fno/agents/cli.py:2314 |
+| `FNO_WORKTREE_POLICY` | py | Overrides the resolved worktree policy from env, above every config layer; the dispatcher sets it to never for a spawn into an undeclared repo. |
 | `GEMINI_PROJECT_DIR` | py | unclear: cli/src/fno/agent/state.py:145 |
 | `GEMINI_SANDBOX` | rs | unclear: crates/fno-agents/src/gemini_ask.rs:103 |
 | `GITHUB_ACTIONS` | py | unclear: cli/src/fno/test_cmd.py:1859 |

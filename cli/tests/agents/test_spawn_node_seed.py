@@ -116,7 +116,7 @@ def test_typed_message_wins_over_the_node(monkeypatch, runner):
         "fno.graph.load.load_graph",
         lambda: (_ for _ in ()).throw(AssertionError("node must not be read")),
     )
-    result = _invoke(runner, "--node", "x-1", "say hi directly", "--here", "--substrate", "pane")
+    result = _invoke(runner, "--node", "x-1", "--session-phase", "do", "say hi directly", "--here", "--substrate", "pane")
     assert result.exit_code == 0, result.output
     assert received["message"] == "say hi directly"
     assert "TARGET_BRIEF" not in received["provenance"]

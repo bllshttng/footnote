@@ -824,3 +824,4 @@ def test_staleness_clamps_a_future_marker_to_zero(claims_root):
 )
 def test_due_fires_only_past_the_threshold(freshness, due):
     assert G.groom_is_due(freshness) is due
+

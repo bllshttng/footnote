@@ -352,6 +352,7 @@ kind: quick-plan
 created: <YYYY-MM-DD>      # required; the consolidation gate reads it
 difficulty: <low|medium|high> # required for plans created after 2026-08-26
 join: <manual|auto>        # who hands out the remaining waves; the join-posture gate asks
+# carveouts: forbidden     # set when the plan says one PR, no follow-up nodes; fno.plan.fidelity refuses a PR that declares an exclusion
 # claims: ab-XXXXXXXX      # only when the input was an ab-id
 # executor: tdd            # transcribed from a Locked Decision, if any
 consolidation:             # step 2d, exactly one outcome (see 2d above)
