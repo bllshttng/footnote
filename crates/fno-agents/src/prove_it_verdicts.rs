@@ -22,7 +22,7 @@
 //! `retires` report path, which never replaces the claim match), or a ruling
 //! whose `text` names the report (read from the machine-wide decision
 //! index). Every unretired FAIL surfaces: a narrow re-run PASS cannot mute a
-//! broader claim it did not answer (x-9362). The newest PASS/FAIL record is
+//! broader claim it did not answer. The newest PASS/FAIL record is
 //! also emitted as the node's headline verdict. The verb never changes a
 //! node's status: an unverified auditor must not move doneness, a king
 //! rules. `--route` writes the one progress note that surfaces an open,
@@ -197,9 +197,9 @@ fn build_rows(entries: &[Value], unreadable: &mut Vec<Value>, rulings: &[Value])
         }
         scored.sort_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.path.cmp(&b.path)));
         // A FAIL retires only through a newer PASS whose claim STATES the
-        // FAIL claim (x-9362: the reader used to take the newest record by
-        // mtime and never compared claims, so a narrow re-run PASS muted a
-        // broader FAIL). Every unretired FAIL surfaces.
+        // FAIL claim (the reader used to take the newest record by mtime and
+        // never compared claims, so a narrow re-run PASS muted a broader
+        // FAIL). Every unretired FAIL surfaces.
         for (i, fail) in scored
             .iter()
             .enumerate()
@@ -303,7 +303,7 @@ fn terminal_record(text: &str) -> Result<Option<(String, String, Option<String>)
 /// auto-retires. A present `retires` name scopes the retirement to that
 /// report; it never replaces the claim match.
 fn pass_retires(pass: &Report, fail: &Report) -> bool {
-    if fail.claim.is_empty() || !pass.claim.contains(&fail.claim) {
+    if fail.claim.trim().is_empty() || !pass.claim.contains(&fail.claim) {
         return false;
     }
     match &pass.retires {
@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn a_claim_stating_pass_retires_a_fail_and_a_newer_skip_does_not() {
         // AC1-EDGE, on the full row assembly with a temp graph. The PASS
-        // retires only because its claim STATES the FAIL claim (x-9362).
+        // retires only because its claim STATES the FAIL claim.
         let dir = tempfile::tempdir().expect("tempdir");
         let plans = dir.path().join("plans");
         std::fs::create_dir_all(&plans).expect("mkdir");
@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn a_narrow_pass_after_a_broad_fail_leaves_the_fail_open() {
-        // The x-9362 specimen: the re-run proved only the gate half and said
+        // The specimen: the re-run proved only the gate half and said
         // so; the broad FAIL must stay open beside the narrow PASS.
         let dir = tempfile::tempdir().expect("tempdir");
         let plans = dir.path().join("plans");
@@ -782,7 +782,8 @@ mod tests {
         let _empty_fail = report(
             &dir.path(),
             "plans/f.md.artifacts/REPORT.md",
-            &record_line("FAIL", ""),
+            // Whitespace-only: matches nothing, the same as empty.
+            &record_line("FAIL", " "),
             ago(200),
         );
         // Name without match retires nothing.
