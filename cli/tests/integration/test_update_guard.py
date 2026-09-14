@@ -771,4 +771,4 @@ def test_ac6_hp_explicit_source_warns_and_records_the_pin(
     assert "Would run:" in (result.output or "")
     assert warning in (result.output or "")
     assert calls["exec"] == 0, "dry run executes nothing"
-    assert len(calls["record"]) == 1, "dry run records complete pin evidence"
+    assert calls["record"] == [], "a dry run writes no pin and no companion record"

@@ -1537,7 +1537,8 @@ def update_command(
         # what the exec below actually runs, and a receipt that understates it
         # sends an operator back into the unretried failure.
         typer.echo(f"Would run: {install_sh or shlex.join(cmd)}")
-        _cache_source_path(pin)
+        # A dry run writes NOTHING: no source-path, no companion record, no
+        # pin. "Would run" states the plan; only a real install records it.
         return
 
     _cache_source_path(pin)
