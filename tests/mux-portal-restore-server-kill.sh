@@ -152,6 +152,19 @@ cleanup() {
 trap cleanup EXIT
 
 alive() { kill -0 "$1" 2>/dev/null; }
+# A control call can land while the server is still re-initializing after a
+# kill: the read then resets. Retry the call instead of racing it.
+retry_ctl() {
+    local tries="$1"; shift
+    local i=1
+    until "$@" 2>/dev/null; do
+        i=$((i + 1))
+        if [ "$i" -gt "$tries" ]; then
+            return 1
+        fi
+        sleep 0.5
+    done
+}
 start_server() {
     "$MUX_BIN" mux server --session "$SESSION" >>"$TMP_DIR/server.log" 2>&1 &
     SERVER_PID=$!
@@ -227,7 +240,7 @@ alive "$CHILD_PID" || { echo "FAIL: pane worker $CHILD_PID died with the server"
 echo "[after kill 1] pane worker child $CHILD_PID is ALIVE (keeper-held)"
 
 start_server
-"$MUX_BIN" mux workspace restore --session "$SESSION" --json >"$TMP_DIR/restore1.json"
+retry_ctl 10 "$MUX_BIN" mux workspace restore --session "$SESSION" --json >"$TMP_DIR/restore1.json"
 python3 - "$TMP_DIR/restore1.json" "$TMP_DIR" <<'PY'
 import json, sys
 doc = json.load(open(sys.argv[1]))
@@ -285,7 +298,7 @@ alive "$CHILD_PID" || { echo "FAIL: pane worker $CHILD_PID died on the second ki
 echo "[after kill 2] pane worker child $CHILD_PID still ALIVE"
 
 start_server
-"$MUX_BIN" mux workspace restore --session "$SESSION" --json >"$TMP_DIR/restore2.json"
+retry_ctl 10 "$MUX_BIN" mux workspace restore --session "$SESSION" --json >"$TMP_DIR/restore2.json"
 CHILD_PID_NOW="$("$MUX_BIN" mux pane ls --session "$SESSION" --json | python3 -c '
 import json,sys
 rows=json.load(sys.stdin)
