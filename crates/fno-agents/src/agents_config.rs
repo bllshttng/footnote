@@ -575,6 +575,10 @@ pub const DEFAULT_MAX_LIVE: u32 = 3;
 pub const DEFAULT_MAX_LIVE_PER_TERRITORY: u32 = 4;
 /// Default available-RAM floor (GB) for spawn preflight. `<= 0` disables.
 pub const DEFAULT_MIN_FREE_GB: f64 = 4.0;
+/// Default swap-pressure ceiling (percent used) for spawn preflight: available
+/// RAM can read six times its floor while the kernel is paging to a nearly
+/// full swap device (x-8c8c). `<= 0` disables.
+pub const DEFAULT_MAX_SWAP_PCT: f64 = 90.0;
 /// Default share of CPU capacity the fleet may hold, checked on EVERY spawn
 /// (x-7783): an attribution gap widens the share to an interval bounded above
 /// by the machine's measured CPU. Matches the Pydantic default.
@@ -624,6 +628,14 @@ pub fn min_free_gb(cwd: &Path) -> f64 {
     resolve_agents_value(cwd, "min_free_gb")
         .and_then(|raw| raw.parse::<f64>().ok())
         .unwrap_or(DEFAULT_MIN_FREE_GB)
+}
+
+/// Resolve `agents.max_swap_pct` (x-8c8c). `<= 0` is a VALID value (guard
+/// disabled); an unparseable value falls back to [`DEFAULT_MAX_SWAP_PCT`].
+pub fn max_swap_pct(cwd: &Path) -> f64 {
+    resolve_agents_value(cwd, "max_swap_pct")
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .unwrap_or(DEFAULT_MAX_SWAP_PCT)
 }
 
 /// Resolve `agents.max_fleet_cpu_share`. Unparseable coerces to the default.
@@ -1410,6 +1422,24 @@ mod tests {
         assert_eq!(ml, 7);
         assert_eq!(mf, 0.0, "min_free_gb: 0 is valid (guard disabled)");
         assert!(!qos);
+    }
+
+    #[test]
+    fn swap_cap_knob_reads_valid_and_disabled() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let f = write_file("swap-cap-valid", "[agents]\nmax_swap_pct = 75\n");
+        std::env::set_var("FNO_CONFIG", &f);
+        let cwd = std::env::temp_dir();
+        let cap = max_swap_pct(&cwd);
+        clear_config_env();
+        assert_eq!(cap, 75.0);
+        let f2 = write_file("swap-cap-disabled", "[agents]\nmax_swap_pct = 0\n");
+        std::env::set_var("FNO_CONFIG", &f2);
+        let cwd = std::env::temp_dir();
+        let disabled = max_swap_pct(&cwd);
+        clear_config_env();
+        assert_eq!(disabled, 0.0, "max_swap_pct: 0 is valid (guard disabled)");
     }
 
     #[test]

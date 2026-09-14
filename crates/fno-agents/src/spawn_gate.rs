@@ -259,6 +259,91 @@ fn available_bytes() -> Option<u64> {
     None
 }
 
+/// Parse macOS `sysctl vm.swapusage`
+/// (`total = 18432.00M  used = 17080.75M  free = 1351.25M  (encrypted)`) to
+/// percent used. `None` when the line does not parse or total is 0.
+pub fn parse_swapusage(text: &str) -> Option<f64> {
+    let mut total_m = None;
+    let mut used_m = None;
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    for i in 0..tokens.len().saturating_sub(1) {
+        // "total = 18432.00M": label, "=", numeric-with-unit.
+        let num = |tok: Option<&&str>| -> Option<f64> {
+            tok.and_then(|v| {
+                v.chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect::<String>()
+                    .parse()
+                    .ok()
+            })
+        };
+        match tokens[i] {
+            "total" => total_m = num(tokens.get(i + 2)),
+            "used" => used_m = num(tokens.get(i + 2)),
+            _ => {}
+        }
+    }
+    let (total, used) = (total_m?, used_m?);
+    if total <= 0.0 {
+        return None;
+    }
+    Some(used / total * 100.0)
+}
+
+/// Swap percent used beside [`available_ram_gb`] (x-8c8c): available counts
+/// reclaimable pages and has no swap term, so a machine paging at 93% swap can
+/// read six times its RAM floor. `None` = unreadable or no swap configured
+/// (the guard skips, fail open like the RAM floor).
+#[cfg(target_os = "macos")]
+pub fn swap_used_pct() -> Option<f64> {
+    sysctl_swapusage_pct()
+}
+
+#[cfg(target_os = "linux")]
+pub fn swap_used_pct() -> Option<f64> {
+    meminfo_swap_pct()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn swap_used_pct() -> Option<f64> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn sysctl_swapusage_pct() -> Option<f64> {
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "vm.swapusage"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_swapusage(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(target_os = "linux")]
+fn meminfo_swap_pct() -> Option<f64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let field = |name: &str| -> Option<u64> {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name))
+            .and_then(|rest| {
+                rest.trim_start_matches(':')
+                    .trim()
+                    .split_whitespace()
+                    .next()?
+                    .parse()
+                    .ok()
+            })
+    };
+    let total = field("SwapTotal")?;
+    let free = field("SwapFree")?;
+    if total == 0 {
+        return None;
+    }
+    Some((total - free) as f64 / total as f64 * 100.0)
+}
+
 // ---------------------------------------------------------------------------
 // Layer 1: the worker-slot count
 // ---------------------------------------------------------------------------
@@ -863,6 +948,7 @@ pub fn run_gate(
     }
     let cap = agents_config::max_live(config_cwd) as usize;
     let floor_gb = agents_config::min_free_gb(config_cwd);
+    let swap_cap = agents_config::max_swap_pct(config_cwd);
     // x-7783 AC7: the retired trigger (max_load_per_cpu) is not read here;
     // the CPU axis consumes the payload's admission, which the Python decider
     // computed from its own config read.
@@ -1257,7 +1343,7 @@ pub fn run_gate(
                                 .inspect_err(|_| guard.release())?;
                             // Slot free. RAM recheck happens NOW (at dequeue too — a spawn
                             // that queued 5 minutes must not dispatch into a tight machine).
-                            check_ram_floor(floor_gb).inspect_err(|_| guard.release())?;
+                            check_ram_floor(floor_gb, swap_cap).inspect_err(|_| guard.release())?;
                             // Stamped only once the floor actually answered, so a
                             // receipt never claims an axis it did not read.
                             axes_read.insert("ram".into(), serde_json::json!("ok"));
@@ -1413,34 +1499,73 @@ pub fn run_gate(
     }
 }
 
-/// RAM floor check (Layer 2): refuse below `floor_gb` (never queue — low RAM
-/// with an under-cap worker count means something ELSE is eating the machine).
-/// `<= 0` disables; unreadable RAM skips with a warning (fail open).
-fn check_ram_floor(floor_gb: f64) -> Result<(), Refusal> {
-    if floor_gb <= 0.0 {
-        return Ok(());
+/// The decision core of the memory check, pure so both terms are testable
+/// without the machine happening to sit in a given state. Available is named
+/// first: under BOTH terms failing, the receipt names the floor an operator
+/// tunes first.
+fn ram_floor_term(
+    avail: Option<f64>,
+    floor_gb: f64,
+    swap: Option<f64>,
+    max_swap_pct: f64,
+) -> Option<(&'static str, String)> {
+    if floor_gb > 0.0 && avail.is_some_and(|a| a < floor_gb) {
+        return Some((
+            "ram_floor",
+            format!(
+                "available RAM {:.1}GB is below the min_free_gb floor {floor_gb:.1}GB",
+                avail.unwrap()
+            ),
+        ));
     }
-    match available_ram_gb() {
-        Some(avail) if avail >= floor_gb => Ok(()),
-        Some(avail) => {
-            eprintln!(
-                "spawn-gate: available RAM {avail:.1}GB is below the min_free_gb floor \
-                 {floor_gb:.1}GB; refusing to spawn (--force to bypass)"
-            );
+    if max_swap_pct > 0.0 && swap.is_some_and(|s| s >= max_swap_pct) {
+        return Some((
+            "swap_pressure",
+            format!(
+                "swap {:.1}% used is at or above the max_swap_pct cap {max_swap_pct:.0}%",
+                swap.unwrap()
+            ),
+        ));
+    }
+    None
+}
+
+/// Memory check (Layer 2), two terms (x-8c8c): refuse below the `floor_gb`
+/// available-RAM floor OR at/above the `max_swap_pct` swap ceiling - available
+/// has no swap term, so a machine paging at 93% swap can read six times its
+/// floor. Never queues: low RAM means something ELSE is eating the machine.
+/// `<= 0` disables a term; an unreadable term skips (fail open, as before).
+/// Both readings ride every verdict: a floor that only speaks on refusal
+/// cannot be audited, and a passing gate must not look like a healthy box.
+fn check_ram_floor(floor_gb: f64, max_swap_pct: f64) -> Result<(), Refusal> {
+    let avail = (floor_gb > 0.0).then(available_ram_gb).flatten();
+    let swap = (max_swap_pct > 0.0).then(swap_used_pct).flatten();
+    if floor_gb > 0.0 || max_swap_pct > 0.0 {
+        eprintln!(
+            "spawn-gate: ram readings: available {} (floor {floor_gb:.1}GB), swap {} (cap {max_swap_pct:.0}%)",
+            avail
+                .map(|v| format!("{v:.1}GB"))
+                .unwrap_or_else(|| "unreadable".into()),
+            swap.map(|v| format!("{v:.1}%"))
+                .unwrap_or_else(|| "unreadable".into()),
+        );
+    }
+    match ram_floor_term(avail, floor_gb, swap, max_swap_pct) {
+        Some((reason, term)) => {
+            eprintln!("spawn-gate: {term}; refusing to spawn (--force to bypass)");
             Err(Refusal::with_receipt(
                 EXIT_RAM_REFUSED,
                 serde_json::json!({
                     "status": "refused",
-                    "reason": "ram_floor",
+                    "reason": reason,
                     "available_gb": avail,
                     "min_free_gb": floor_gb,
+                    "swap_used_pct": swap,
+                    "max_swap_pct": max_swap_pct,
                 }),
             ))
         }
-        None => {
-            eprintln!("spawn-gate: could not read available RAM; skipping the floor check");
-            Ok(())
-        }
+        None => Ok(()),
     }
 }
 
@@ -2131,6 +2256,61 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
 mod tests {
     use super::*;
 
+    /// x-8c8c: the receipt names swap when the ceiling fires.
+    #[test]
+    fn ram_floor_term_names_swap_at_the_ceiling() {
+        let term = ram_floor_term(Some(24.0), 4.0, Some(92.6), 90.0);
+        assert_eq!(term.as_ref().map(|(r, _)| *r), Some("swap_pressure"));
+        assert!(
+            term.unwrap().1.contains("swap"),
+            "the failing term must be named"
+        );
+    }
+
+    /// x-8c8c: under BOTH terms failing, available is named (the floor an
+    /// operator tunes first).
+    #[test]
+    fn ram_floor_term_names_available_under_both_terms() {
+        let term = ram_floor_term(Some(1.0), 4.0, Some(95.0), 90.0);
+        assert_eq!(term.as_ref().map(|(r, _)| *r), Some("ram_floor"));
+        assert!(term.unwrap().1.contains("available"));
+    }
+
+    /// x-8c8c: plenty of RAM, low swap: no term.
+    #[test]
+    fn ram_floor_term_passes_with_headroom() {
+        assert_eq!(ram_floor_term(Some(24.0), 4.0, Some(30.0), 90.0), None);
+    }
+
+    /// x-8c8c: an unreadable swap read skips its term (fail open), while a
+    /// failing available term still refuses.
+    #[test]
+    fn ram_floor_term_skips_unreadable_swap() {
+        assert_eq!(ram_floor_term(Some(24.0), 4.0, None, 90.0), None);
+        assert_eq!(
+            ram_floor_term(Some(1.0), 4.0, None, 90.0).map(|(r, _)| r),
+            Some("ram_floor")
+        );
+    }
+
+    /// x-8c8c: the swap ceiling disabled (`<= 0`) never fires, whatever the
+    /// machine reads.
+    #[test]
+    fn ram_floor_term_disabled_swap_cap_never_fires() {
+        assert_eq!(ram_floor_term(Some(24.0), 4.0, Some(100.0), 0.0), None);
+    }
+
+    /// x-8c8c: the macOS swapusage line parses to percent used; a malformed
+    /// line and a zero total both read as unreadable.
+    #[test]
+    fn parse_swapusage_reads_the_sysctl_line() {
+        let line = "total = 18432.00M  used = 17080.75M  free = 1351.25M  (encrypted)";
+        let pct = parse_swapusage(line).unwrap();
+        assert!((pct - 17080.75 / 18432.0 * 100.0).abs() < 0.01);
+        assert_eq!(parse_swapusage("banana"), None);
+        assert_eq!(parse_swapusage("total = 0.00M  used = 0.00M"), None);
+    }
+
     const ROOTS: [&str; 1] = ["/Users/x/.fno"];
 
     fn roots() -> Vec<String> {
@@ -2502,7 +2682,7 @@ MemAvailable:    8000000 kB\n";
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(
             fnodir.join("config.toml"),
-            "[agents]\nmax_live = 999\nmin_free_gb = 0\n",
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n",
         )
         .unwrap();
 
@@ -2588,7 +2768,7 @@ MemAvailable:    8000000 kB\n";
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(
             fnodir.join("config.toml"),
-            "[agents]\nmax_live = 1\nmin_free_gb = 0\n",
+            "[agents]\nmax_live = 1\nmin_free_gb = 0\nmax_swap_pct = 0\n",
         )
         .unwrap();
 
@@ -2645,7 +2825,7 @@ MemAvailable:    8000000 kB\n";
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(
             fnodir.join("config.toml"),
-            "[agents]\nmax_live = 4\nmin_free_gb = 0\n",
+            "[agents]\nmax_live = 4\nmin_free_gb = 0\nmax_swap_pct = 0\n",
         )
         .unwrap();
 

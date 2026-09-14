@@ -2246,14 +2246,11 @@ class AgentsBlock(SweepKeys):
     state_reap: StateReapBlock = Field(default_factory=StateReapBlock)
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
-    # Spawn-gate scalars degrade to safe defaults.
-    # max_live caps the roster union as the BACKSTOP behind the RAM floor and
-    # the CPU axis (x-7783 LD1); provider_limits caps lanes and fan-out.
-    # min_free_gb is the RAM floor; nonpositive disables it.
-    # max_fleet_cpu_share decides admission on every spawn; an attribution gap
-    # widens the share to an interval bounded above by the machine's CPU.
-    # hard_max_load_per_cpu is the absolute backstop, read on the 15-minute
-    # load; max_load_per_cpu is deprecated and ignored (x-7783 LD2).
+    # Spawn-gate scalars degrade to safe defaults: max_live caps the roster
+    # union as the BACKSTOP behind the RAM floor (min_free_gb) and the CPU
+    # axis (x-7783 LD1); provider_limits caps lanes and fan-out; admission
+    # decides on max_fleet_cpu_share every spawn; hard_max_load_per_cpu is the
+    # absolute backstop on 15-minute load (max_load_per_cpu: deprecated LD2).
     max_live: int = 3
     max_live_per_territory: int = 4  # x-e221 team cap; contract in the registry
     provider_limits: dict[str, ProviderBudget] = Field(
@@ -2263,6 +2260,8 @@ class AgentsBlock(SweepKeys):
     )
     pane_group_max: int = 4
     min_free_gb: float = 4.0
+    # x-8c8c: swap ceiling (percent used) beside min_free_gb; <= 0 disables.
+    max_swap_pct: float = 90.0
     # Deprecated and ignored since 2026-09-09: admission decides on the
     # fleet's CPU share (max_fleet_cpu_share), never on a load trigger.
     max_load_per_cpu: float = 8.0
@@ -2433,15 +2432,13 @@ class AgentsBlock(SweepKeys):
             )
         return self
 
-    @field_validator("min_free_gb", mode="before")
+    @field_validator("min_free_gb", "max_swap_pct", mode="before")
     @classmethod
-    def _coerce_min_free_gb(cls, v: object) -> object:
-        """Coerce a non-numeric min_free_gb to the default (4.0); never raise.
-
+    def _coerce_ram_floor_terms(cls, v: object, info: ValidationInfo) -> object:
+        """Coerce a non-numeric RAM-floor term to its default; never raise.
         <= 0 is a VALID value (guard disabled), so only unparseable input
-        falls back to the default.
-        """
-        return _finite_or(v, 4.0)
+        falls back to the default (4.0 floor, 90.0 swap ceiling)."""
+        return _finite_or(v, 4.0 if info.field_name == "min_free_gb" else 90.0)
 
     @field_validator("max_load_per_cpu", mode="before")
     @classmethod
