@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -81,6 +82,36 @@ from fno.agents.crown import (
     journal_spawn_crown,
     settle_spawn_crown,
 )
+
+
+def pane_placement_conflict(pane: int | None, **placements) -> str | None:
+    if pane is None:
+        return None
+    labels = {"workspace": "--workspace", "split": "--split", "at": "--at", "tab": "--tab", "bounded": "--bounded-placement", "tab_id": "--tab-id"}
+    flag = next((labels[name] for name, value in placements.items() if value is not None and value is not False), None)
+    return f"--pane cannot be combined with {flag}; it targets an already-placed pane" if flag else None
+
+
+def resolve_existing_pane(session: str, pane_id: int, rows: list[dict]) -> dict:
+    if pane_id < 1:
+        raise DispatchAskError(f"--pane needs a positive pane id, got {pane_id}", exit_code=2)
+    row = next((item for item in rows if item.get("pane_id") == pane_id), None)
+    if row is None:
+        raise DispatchAskError(f"--pane {pane_id} was not found in mux session {session!r}", exit_code=2)
+    if row.get("fno_id"):
+        raise DispatchAskError(f"--pane {pane_id} is occupied by worker {row['fno_id']!r}", exit_code=2)
+    if row.get("pristine_idle_shell") is not True:
+        raise DispatchAskError(f"--pane {pane_id} is not a confirmed pristine idle shell", exit_code=2)
+    return row
+
+
+def start_existing_pane(session: str, pane_id: int, cwd: str, wrapped: list[str], run_mux: Callable[..., subprocess.CompletedProcess[str]], runner: Callable[..., subprocess.CompletedProcess[str]]) -> subprocess.CompletedProcess[str]:
+    text = "cd -- " + shlex.quote(cwd) + " && exec " + shlex.join(wrapped)
+    proc = run_mux(["mux", "pane", "send", "--server", session, str(pane_id), "--text", text, "--submit", "--raw", "--guarded"], runner)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise DispatchAskError(f"existing pane {pane_id} rejected the worker start in session {session!r}: {detail or 'no output'}", exit_code=1)
+    return proc
 #: Bound on the `pane run` / `pane ls` subprocesses. `pane run` includes a
 #: possible server self-spawn + squad git resolve (~2s worst case), so this is
 #: generous next to reality, tight next to a wedged mux.
@@ -3336,6 +3367,7 @@ def dispatch_spawn_pane(
     split: Optional[str] = None,
     at: Optional[str] = None,
     tab: Optional[str] = None,
+    pane: Optional[int] = None,
     # Internal stable-id lane: bounded placement passes id:<n> after it has
     # selected the tab itself. Not a user flag - the user surface is --tab.
     tab_id: Optional[str] = None,
@@ -3393,6 +3425,12 @@ def dispatch_spawn_pane(
         )
         if grant_problem is not None:
             raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
+
+    conflict = pane_placement_conflict(
+        pane, workspace=squad, split=split, at=at, tab=tab, tab_id=tab_id,
+    )
+    if conflict:
+        raise DispatchAskError(conflict, exit_code=2)
 
     # The pane half of the crowned-spawn typing: `pane` is the DEFAULT
     # substrate, so typing only on the bg lane left the common case improvising.
@@ -3561,6 +3599,17 @@ def dispatch_spawn_pane(
     message, _payload_measures = prepare_spawn_payload(message)
 
     session = resolve_mux_session(session)
+    existing_pane = None
+    if pane is not None:
+        existing_pane = resolve_existing_pane(
+            session,
+            pane,
+            _strict_json_list(
+                ["mux", "pane", "ls", "--server", session, "--json"],
+                runner,
+                noun="pane listing",
+            ),
+        )
     tab_selector: Optional[str] = None
     pane_group: Optional[str] = None
     if tab:
@@ -3789,31 +3838,27 @@ def dispatch_spawn_pane(
         # become the sole backfill candidate, stamping this row with the
         # sibling's id. Sampling here keeps the bound as tight as the pane run.
         spawn_started_ms = int(time.time() * 1000)
-        run_args = [
-            "mux",
-            "pane",
-            "run",
-            "--claim",
-            "--server",
-            session,
-            "--cwd",
-            str(cwd),
-            # (x-5f7f) The registry name of the worker this pane hosts: the
-            # server records the pane as a squad member joined to that row by
-            # name, so it survives a mux restart as an idle, resumable row.
-            # Both pane producers cross this argv (this spawn lane and the
-            # dispatch porcelain that calls it), so one flag covers both.
-            "--worker",
-            name,
-            *placement_args,
-        ]
-        # Exact placement answers --json so the server authors the receipt
-        # (anchor/direction/fallback); Python never synthesizes those from the
-        # requested flags (AC1-UI). Legacy spawns keep the plain pane-id stdout.
-        json_receipt = bool(at or tab_id)
-        if json_receipt:
-            run_args.append("--json")
-        run_args += ["--", *wrapped]
+        if existing_pane is not None:
+            run_args = []
+            json_receipt = False
+        else:
+            run_args = [
+                "mux",
+                "pane",
+                "run",
+                "--claim",
+                "--server",
+                session,
+                "--cwd",
+                str(cwd),
+                "--worker",
+                name,
+                *placement_args,
+            ]
+            json_receipt = bool(at or tab_id)
+            if json_receipt:
+                run_args.append("--json")
+            run_args += ["--", *wrapped]
         # x-42c5: pop FNO_SPAWN_TRIGGER BEFORE this env snapshot, mirroring the
         # bg_create ordering fix in dispatch.py. `{**os.environ, ...}` here
         # seeds the pane-run transport (and, at server birth, the mux server
@@ -3834,7 +3879,10 @@ def dispatch_spawn_pane(
         pane_env["FNO_MUX_SHELL_INTEGRATION"] = _shell_integration()
         pane_env["FNO_PROCESS_ADMISSION_MAX"] = str(_process_admission_max())
         pane_env["FNO_MUX_PANE_GROUP_MAX"] = str(_pane_group_max())
-        if provider == "pi" and session_uuid:
+        if existing_pane is not None:
+            assert pane is not None
+            proc = start_existing_pane(session, pane, str(cwd), wrapped, _run_mux, runner)
+        elif provider == "pi" and session_uuid:
             # (x-c198) Launching pi on an id is a CREATE when that id has no
             # session yet, and concurrent creates on one id are unserialised
             # and SILENT: four at once produced four sessions, every process
@@ -3893,7 +3941,9 @@ def dispatch_spawn_pane(
             proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None
         recovered = False
-        if proc.returncode == _MUX_CONTROL_UNANSWERED:
+        if existing_pane is not None:
+            pane_id = pane
+        elif proc.returncode == _MUX_CONTROL_UNANSWERED:
             # The verb reached the server; only the reply did not come back
             # (LD2). Reconcile instead of asserting no pane was created - the
             # reconcile itself never retries the run (LD1).
@@ -3947,6 +3997,7 @@ def dispatch_spawn_pane(
                     exit_code=1,
                 ) from exc
 
+        assert pane_id is not None
         if pane_group is not None:
             try:
                 place_pane_in_group_tab(session, pane_id, pane_group, runner)

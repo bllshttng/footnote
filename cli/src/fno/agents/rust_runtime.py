@@ -1626,13 +1626,18 @@ def make_agents_group_cls() -> type:
             return None
 
         def make_context(self, info_name, args, parent=None, **extra):  # type: ignore[no-untyped-def]
+            existing_pane = None
             if args and args[0] not in ("-h", "--help"):
                 verb = args[0]
                 if verb == "spawn" or verb in _WORKER_DIR_VERBS:
                     if verb == "spawn":
-                        from fno.agents.spawn_defaults import inject_spawn_defaults
+                        from fno.agents.spawn_defaults import extract_existing_pane, inject_spawn_defaults
 
-                        args = inject_spawn_defaults(args)
+                        try:
+                            args, existing_pane = extract_existing_pane(inject_spawn_defaults(args))
+                        except ValueError as exc:
+                            print(f"fno agents spawn: {exc}", file=sys.stderr)
+                            raise SystemExit(2) from exc
                         _refuse_codex_code_spawn_without_git_grant(args)
                         _refuse_seedless_thread_spawn(args)
                         _refuse_lost_verb_payload(args)
@@ -1649,7 +1654,8 @@ def make_agents_group_cls() -> type:
 
                 mode = runtime_mode()
                 py_spawn = (
-                    _is_role_bearing_spawn(verb, args)
+                    existing_pane is not None
+                    or _is_role_bearing_spawn(verb, args)
                     or _is_crown_bearing_spawn(verb, args)
                     or _is_monitor_bearing_spawn(verb, args)
                     or _is_route_bearing_spawn(verb, args)
@@ -1675,6 +1681,9 @@ def make_agents_group_cls() -> type:
                         route_to_rust(_with_seam_marker(list(args), verb), binary=binary, env_pin=_pin or None)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
-            return super().make_context(info_name, args, parent=parent, **extra)
+            context = super().make_context(info_name, args, parent=parent, **extra)
+            if args and args[0] == "spawn":
+                context.meta["fno_spawn_existing_pane"] = existing_pane
+            return context
 
     return _AgentsRuntimeGroup
