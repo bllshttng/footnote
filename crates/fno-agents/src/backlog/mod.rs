@@ -293,6 +293,11 @@ pub fn api_version(graph: &Path) -> Result<i64, String> {
             .parse::<i64>()
             .map_err(|error| format!("api_version is not an integer: {error}")),
         Ok(None) => Ok(0),
+        // A db created but not yet committed (another thread or process is
+        // inside open()'s DDL) has no graph_meta yet: the probe reads 0, the
+        // same answer an absent db gives, and the creator's commit lands on
+        // the next read.
+        Err(error) if error.contains("no such table") => Ok(0),
         Err(error) => Err(error),
     }
 }
