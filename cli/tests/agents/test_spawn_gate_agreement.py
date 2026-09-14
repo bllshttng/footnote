@@ -36,6 +36,12 @@ def _isolated_world(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-root"))
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    # Memory terms are machine state too: the Rust gate reads the HOST swap,
+    # so an "under cap" scenario refuses on any box paging near full swap.
+    # Pin both terms off; the scenario roster stays the variable under test.
+    cfg = tmp_path / "agents.toml"
+    cfg.write_text("[agents]\nmin_free_gb = 0\nmax_swap_pct = 0\n", encoding="utf-8")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
     # x-7783: the gate takes a footprint reading on EVERY spawn, so the
     # fixture pins an idle one; the getloadavg pin below now feeds only the
     # 15-minute backstop input (the third element). The scenario roster stays

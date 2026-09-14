@@ -83,6 +83,12 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-root"))
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    # Memory terms are machine state too: the Rust gate reads the HOST swap,
+    # so pin both off for the scenario under test (mirrors the agreement
+    # fixture).
+    cfg = tmp_path / "agents.toml"
+    cfg.write_text("[agents]\nmin_free_gb = 0\nmax_swap_pct = 0\n", encoding="utf-8")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
     # Hermetic defaults: the real footprint read is a ps snapshot against this
     # box (seconds under load), the real lsof scan reads 38 sockets, and the
     # real census reads the live registry. All three are pinned idle.
