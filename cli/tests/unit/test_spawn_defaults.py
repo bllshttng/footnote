@@ -419,6 +419,44 @@ def test_is_verb_seed_is_the_first_token_fire_test_over_both_sigils():
     assert is_verb_seed("/fno:target x-caf8") is True
     assert is_verb_seed("do a /fno:blueprint") is False
     assert is_verb_seed("/absolute/path/to/thing") is False
+    assert is_verb_seed("review /fno:target x-1") is False
+
+
+def test_parse_verb_token_reads_both_sigils_and_namespaces():
+    """x-c976: the one parser reads /fno:, $fno:, / and $ alike and reports
+    whether the token carried the fno namespace."""
+    from fno.config._dispatch_verbs import parse_verb_token
+
+    assert parse_verb_token("/fno:target") == ("target", True)
+    assert parse_verb_token("$fno:target") == ("target", True)
+    assert parse_verb_token("/target") == ("target", False)
+    assert parse_verb_token("$target") == ("target", False)
+
+
+def test_parse_verb_token_rejects_paths_prose_and_bad_shapes():
+    from fno.config._dispatch_verbs import parse_verb_token
+
+    for tok in ("/Users/bb16/plan.md", "$HOME/x", "//fno:x", "/Target", "review", "/fno:"):
+        assert parse_verb_token(tok) is None
+
+
+def test_canonical_verb_key_accepts_both_sigils():
+    """x-c976: the resolver's canonical answer no longer depends on which
+    sigil named the verb."""
+    from fno.config._dispatch_verbs import canonical_verb_key
+
+    assert canonical_verb_key("$fno:target") == "/target"
+    assert canonical_verb_key("/fno:target") == "/target"
+    assert canonical_verb_key("target") == "/target"
+    assert canonical_verb_key("$target") == "/target"
+
+
+def test_canonical_verb_key_keeps_legacy_output_for_unparsed_keys():
+    from fno.config._dispatch_verbs import canonical_verb_key
+
+    assert canonical_verb_key("/Users/x") == "/Users/x"
+    assert canonical_verb_key("fno:target") == "/target"
+    assert canonical_verb_key("") == ""
 
 
 def test_prose_verb_resolves_profile_but_stays_a_conversation():
