@@ -2211,19 +2211,10 @@ fn should_delegate_claude_live_attach(
     harness == "claude" && claim_uuid.is_none() && mux_session.is_none()
 }
 
-/// `fno-agents resume <name> [--print-command]` -- resume an agent in its
-/// recorded cwd via the provider's resume CLI (`os.execvp` equivalent), or
-/// print the shell snippet with `--print-command`. Mirrors Python `resume_logic`.
-/// Pure parse of `resume`'s argv: `NAME [--print-command] [--message|-m VALUE]`.
-/// `--message`/`-m` (Python's `cmd_resume`) only matters on the claude
-/// live-attach delegation in `run_resume`, but it must be ACCEPTED here or
-/// every `fno agents resume <name> --message ...` invocation dies with exit 2
-/// before that delegation is ever reached -- resume auto-routes to this
-/// binary by default (`RUST_CLIENT_VERBS`), so this parser is the only door.
-/// Extracted as a pure function (mirrors `should_delegate_claude_live_attach`)
-/// so the flag grammar is unit-testable without an `AgentsHome`/registry
-/// fixture; on error it prints the same diagnostic `run_resume` used to print
-/// inline and returns the exit code to propagate.
+/// Pure parse of `resume`'s argv (`NAME [--print-command] [--message|-m VALUE]`),
+/// extracted so the flag grammar is unit-testable without a registry fixture;
+/// `--message` must be ACCEPTED here or a `--message` resume dies at argv
+/// before the claude live-attach delegation that consumes it is ever reached.
 use crate::resume_args::parse_resume_args;
 use crate::resume_wake::{
     acquire_resume_session_claim, run_and_confirm_respawn, MUX_RESUME_CLAIM_TTL_MS,
@@ -2540,24 +2531,13 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         if let Some(Ok(Some(route))) = &codex_route_outcome {
             printed_argv = crate::pane_relaunch::env_prefixed(&route.env_masked(), &printed_argv);
         }
-        if let Some(session) = mux_session.as_deref() {
-            // Pane form: `fno mux pane run ... -- claude ...`. Path only; nothing
-            // from inside the route file reaches the printed command (AC5).
-            let pane = mux_pane_run_argv(session, cwd, &printed_argv, &identity, Some(&row_name));
-            let pane_q = pane
-                .iter()
-                .map(|a| shlex_quote(a))
-                .collect::<Vec<_>>()
-                .join(" ");
-            println!("fno {pane_q}");
-        } else {
-            let argv_q = printed_argv
-                .iter()
-                .map(|a| shlex_quote(a))
-                .collect::<Vec<_>>()
-                .join(" ");
-            println!("cd {} && exec {}", shlex_quote(cwd), argv_q);
-        }
+        crate::pane_relaunch::print_relaunch_command(
+            mux_session.as_deref(),
+            cwd,
+            &printed_argv,
+            &identity,
+            &row_name,
+        );
         return 0;
     }
 
@@ -2592,38 +2572,18 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // and `fno-agents resume` still printing "Attaching..." and exiting,
     // which is the guard-on-one-of-N-paths trap this repo already tracks.
     if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
-        // No claim acquired here (unlike the dead-relaunch arm below):
-        // acquiring it unconditionally, before knowing whether the row is
-        // even skip-eligible (already Working/Idle/Done, needing no wake at
-        // all), raced two concurrent no-op resumes into a spurious "held by
-        // another writer" on a lock that guards a pty write neither was
-        // making. That skip decision requires the live-status truth-read
-        // this arm deliberately does not duplicate (see above); re-deriving
-        // it here just to gate the claim would be the same duplicate-truth
-        // problem this delegation exists to avoid. `resume_cli.py`'s own
-        // `_resume_claude_wake` acquires the identical `resume-attach:
-        // {short_id}` key itself, gated on that same skip check, once exec'd
-        // below -- the wake this arm delegates to stays guarded either way,
-        // whether reached through this Rust delegation or as the standalone
-        // Python entrypoint (FNO_AGENTS_RUNTIME=python, no Rust binary
-        // installed), which never runs this arm at all.
-        // Route through `fno` (the wrapper every install puts on PATH, which
-        // resolves the `fno-py` console script by absolute path -- see
-        // crates/fno/src/bootstrap.rs), not a bare `fno-py`: that fails on a
-        // cargo-only install where only the mux (`fno`) is on PATH. Where
-        // even `fno` is off PATH, scrape::fno_py resolves directly (the
-        // twin of _subprocess_util.py's fno_py_cmd()). `FNO_AGENTS_RUNTIME=python` pins the child to Python
-        // dispatch, mirroring `crate::lifecycle_child::token_helper_output` --
-        // without it,
-        // `resume` (in RUST_CLIENT_VERBS) would auto-route straight back into
-        // this same binary and loop.
-        //
-        // exec(), not status(): this REPLACES the process rather than
-        // spawning a child, matching every other `Command::new("fno")...exec()`
-        // delegation in this crate (`bin/client.rs:523-534`, `:544-554`) --
-        // same exit-127-on-failure convention, and it sidesteps process-group
-        // signal-propagation questions a spawned child would raise, since
-        // there is no separate child to propagate a signal to.
+        // No claim here: acquiring one before the skip-eligibility read raced
+        // two no-op resumes on a pty-write lock neither was taking. The
+        // delegated wake (resume_cli.py `_resume_claude_wake`) acquires the
+        // identical `resume-attach: {short_id}` key under its own skip check,
+        // so the wake stays guarded through either entrypoint.
+        // Route via `fno`, never a bare `fno-py` (a cargo-only install has
+        // only the mux on PATH; see crates/fno/src/bootstrap.rs), and pin
+        // FNO_AGENTS_RUNTIME=python: `resume` is a RUST_CLIENT_VERBS entry, so
+        // without the pin this exec re-enters this same binary and loops.
+        // exec(), not status(): the process is replaced - the same
+        // exit-127-on-failure convention as bin/client.rs, and no child
+        // process group to propagate signals to.
         use std::os::unix::process::CommandExt;
         let mut command = std::process::Command::new("fno");
         command

@@ -689,6 +689,34 @@ pub(crate) fn env_prefixed(env: &[(String, String)], argv: &[String]) -> Vec<Str
     prefixed
 }
 
+/// The `--print-command` tail: the pane form when the row has a mux ref, else
+/// the in-terminal exec form. Inspection only - shell-quoted paths and ids;
+/// any key-masked env already rides `argv` as tokens.
+pub(crate) fn print_relaunch_command(
+    session: Option<&str>,
+    cwd: &str,
+    argv: &[String],
+    identity: &[String],
+    worker: &str,
+) {
+    if let Some(session) = session {
+        let pane = mux_pane_run_argv(session, cwd, argv, identity, Some(worker));
+        let quoted = pane
+            .iter()
+            .map(|a| shlex_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("fno {quoted}");
+    } else {
+        let quoted = argv
+            .iter()
+            .map(|a| shlex_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("cd {} && exec {}", shlex_quote(cwd), quoted);
+    }
+}
+
 /// The `fno-agents resume-argv` verb (x-eb79): render one harness's
 /// interactive-resume argv through the ONE builder the CLI verb lane uses,
 /// so the mux gesture consumes the same argv instead of re-deriving the
