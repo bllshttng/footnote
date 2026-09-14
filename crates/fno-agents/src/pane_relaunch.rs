@@ -920,6 +920,390 @@ mod tests {
         );
     }
 
+    // ---- relaunch_on_pane (AC5-AC8) ------------------------------------
+
+    use super::{mux_pane_run_failure_message, relaunch_on_pane, relaunch_on_pane_with};
+    use crate::state::{self, MuxRef};
+    use crate::{paths::AgentsHome, AgentStatus};
+    use std::fs;
+
+    const SESSION: &str = "01a09bcd-8b5f-7391-83f8-d9ed91b00ac5";
+    const VERB: &str = "resume";
+
+    /// A codex pane row for `session` on pane `pane_id`, minted through the
+    /// typed struct so the registry write carries a valid row.
+    fn pane_row(name: &str, session: &str, pane_id: u64) -> state::RegistryEntry {
+        let mut row = state::RegistryEntry {
+            name: name.to_string(),
+            harness: Some("codex".into()),
+            harness_session_id: Some(SESSION.into()),
+            codex_session_id: Some(SESSION.into()),
+            cwd: "/tmp".into(),
+            substrate: Some("pane".into()),
+            status: AgentStatus::Live,
+            mux: Some(MuxRef {
+                session: session.to_string(),
+                pane_id,
+            }),
+            ..Default::default()
+        };
+        row.created_at = "2026-09-13T00:00:00Z".into();
+        row
+    }
+
+    /// A fake `fno` whose pane verbs answer from scripted files, and whose
+    /// `pane run` prints `pane_out`. Returns the PATH value to restore.
+    /// Callers hold PATH_TEST_MUTEX + test_env_lock.
+    fn stub_fno(
+        dir: &std::path::Path,
+        pane_out: &str,
+        listing: &str,
+        read_text: &str,
+        wait_exit: &str,
+    ) {
+        let script = format!(
+            "#!/bin/sh\ncase \"$3\" in\nrun) printf '%s\\n' '{pane_out}' ;;\nwait) exit {wait_exit} ;;\nls) printf '%s\\n' '{listing}' ;;\nread) printf '%s\\n' '{read_text}' ;;\nesac\n"
+        );
+        let stub = dir.join("fno");
+        fs::write(&stub, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = fs::metadata(&stub).unwrap().permissions();
+            p.set_mode(0o755);
+            fs::set_permissions(&stub, p).unwrap();
+        }
+    }
+
+    /// Run `relaunch_on_pane` with a zero window against a temp home, the
+    /// stub on PATH, and the row already in the registry. `expected` is the
+    /// mux ref the caller claims the row still carries.
+    fn run_relaunch(dir: &std::path::Path, home: &AgentsHome, expected: Option<&MuxRef>) -> i32 {
+        relaunch_on_pane_with(
+            Duration::ZERO,
+            Duration::ZERO,
+            VERB,
+            "repro",
+            "codex",
+            SESSION,
+            "/tmp",
+            "main",
+            &["mux".to_string(), "pane".into(), "run".into()],
+            &[],
+            expected,
+            ("agent_resumed", "agent_resume_failed"),
+            home,
+        )
+    }
+
+    fn events_of(home: &AgentsHome) -> String {
+        let p = crate::client_verbs::trace_events_path(home);
+        fs::read_to_string(p).unwrap_or_default()
+    }
+
+    #[test]
+    fn relaunch_on_pane_rebinds_the_row_when_the_worker_proves_live() {
+        // AC5-HP: pane run prints 4242; the listing shows 4242 with this test
+        // process as the child pid; zero window. The verb exits 0, rebinds
+        // the row (pane 4242, this pid, a start time, Live), and records ONE
+        // agent_resumed whose name is the ROW name, never the caller token.
+        let _path_guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = AgentsHome::at(dir.path().join("agents"));
+        home.ensure_root().unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(pane_row("repro", "main", 2179))
+        })
+        .unwrap();
+        stub_fno(
+            dir.path(),
+            "4242",
+            &format!(
+                "[{{\"pane_id\":4242,\"child_pid\":{}}}]",
+                std::process::id()
+            ),
+            "{\"text\":\"codex 5.0\"}",
+            "11",
+        );
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", crate::path_with(dir.path()));
+        let expected = MuxRef {
+            session: "main".into(),
+            pane_id: 2179,
+        };
+        let code = run_relaunch(dir.path(), &home, Some(&expected));
+        match old_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert_eq!(code, 0, "expected exit 0 on a live proof");
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let row = &reg.entries[0];
+        assert_eq!(row.mux.as_ref().unwrap().pane_id, 4242);
+        assert_eq!(row.mux.as_ref().unwrap().session, "main");
+        assert_eq!(row.pid, Some(std::process::id()));
+        assert!(row.pid_start_time.is_some(), "start time recorded");
+        assert!(matches!(row.status, AgentStatus::Live));
+        let events = events_of(&home);
+        let resumed: Vec<&str> = events
+            .lines()
+            .filter(|l| l.contains("\"agent_resumed\""))
+            .collect();
+        assert_eq!(resumed.len(), 1, "{events}");
+        assert!(resumed[0].contains("\"name\":\"repro\""), "{events}");
+        assert!(resumed[0].contains("\"pane_id\":4242"), "{events}");
+    }
+
+    #[test]
+    fn relaunch_on_pane_reports_death_with_tail_and_releases_the_claim() {
+        // AC6-ERR: the listing lacks the new pane (only pane 7 exists), the
+        // pane read shows the exit reason, wait errors. Exit 16, ONE
+        // agent_resume_failed (reason pane-exited), NO agent_resumed, the row
+        // untouched, and the session claim released. The tail's presence in
+        // the receipt is pinned by the pane_death_receipt test.
+        let _path_guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = AgentsHome::at(dir.path().join("agents"));
+        home.ensure_root().unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(pane_row("repro", "main", 2179))
+        })
+        .unwrap();
+        // Pre-acquire the claim the verb would hold, so the release is
+        // observable. FNO_CLAIMS_ROOT routes the global key into the tempdir.
+        let claims_root = dir.path().join("claims-root");
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let pre = crate::claims::acquire(
+            &format!("session:{SESSION}"),
+            &format!("resume:{}", std::process::id()),
+            crate::claims::AcquireOpts::default(),
+        );
+        assert!(matches!(pre, crate::claims::AcquireOutcome::Acquired(_)));
+
+        stub_fno(
+            dir.path(),
+            "4242",
+            "[{\"pane_id\":7}]",
+            r#"{"text":"boom: route missing"}"#,
+            "1",
+        );
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", crate::path_with(dir.path()));
+        let expected = MuxRef {
+            session: "main".into(),
+            pane_id: 2179,
+        };
+        let code = run_relaunch(dir.path(), &home, Some(&expected));
+        match old_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+
+        assert_eq!(code, 16, "death is exit 16");
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let row = &reg.entries[0];
+        assert_eq!(row.mux.as_ref().unwrap().pane_id, 2179, "row untouched");
+        let events = events_of(&home);
+        let failed: Vec<&str> = events
+            .lines()
+            .filter(|l| l.contains("\"agent_resume_failed\""))
+            .collect();
+        assert_eq!(failed.len(), 1, "{events}");
+        assert!(failed[0].contains("\"reason\":\"pane-exited\""), "{events}");
+        assert!(failed[0].contains("\"pane_id\":4242"), "{events}");
+        assert!(!events.contains("\"agent_resumed\""), "{events}");
+        let (st, rec) = crate::claims::status(&format!("session:{SESSION}"), None);
+        assert!(
+            matches!(st, crate::claims::ClaimState::Free),
+            "claim must be released: {st:?} {rec:?}"
+        );
+    }
+
+    #[test]
+    fn relaunch_on_pane_skips_the_rebind_when_the_row_was_rehomed() {
+        // AC7-EDGE: the worker proves live but the row's mux ref no longer
+        // matches the ref read before launch (a concurrent re-home). The row
+        // is NOT overwritten, agent_resumed is still appended (the worker IS
+        // live), and the verb exits 16 naming both pane ids.
+        let _path_guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = AgentsHome::at(dir.path().join("agents"));
+        home.ensure_root().unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(pane_row("repro", "main", 3000))
+        })
+        .unwrap();
+        stub_fno(
+            dir.path(),
+            "4242",
+            &format!(
+                "[{{\"pane_id\":4242,\"child_pid\":{}}}]",
+                std::process::id()
+            ),
+            "{\"text\":\"codex 5.0\"}",
+            "11",
+        );
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", crate::path_with(dir.path()));
+        // The pre-launch ref the caller holds names pane 2179; the row now
+        // carries 3000, so the compare-and-set must skip.
+        let expected = MuxRef {
+            session: "main".into(),
+            pane_id: 2179,
+        };
+        let code = run_relaunch(dir.path(), &home, Some(&expected));
+        match old_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert_eq!(code, 16);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let row = &reg.entries[0];
+        assert_eq!(row.mux.as_ref().unwrap().pane_id, 3000, "not overwritten");
+        let events = events_of(&home);
+        assert!(events.contains("\"agent_resumed\""), "{events}");
+    }
+
+    #[test]
+    fn relaunch_rebind_keeps_every_specimen_registry_key() {
+        // AC8-EDGE: RegistryEntry has no serde catch-all, so a rebind write
+        // must keep every key a real codex pane row carries. The specimen is
+        // deserialized from the raw JSON shape, rebound, and every key is
+        // asserted on the written file. (Load-derived aliases like
+        // codex_session_id are skip_serializing by design: harness_session_id
+        // is the sole persisted id and backfill re-derives them on load.)
+        let specimen = serde_json::json!({
+            "name": "specimen",
+            "aliases": ["old-name"],
+            "provider": "zai",
+            "model": "glm-5.3-flash",
+            "model_basis": "requested",
+            "effort": "high",
+            "liveness": "dead",
+            "liveness_measured_at": "2026-09-13T22:25:14Z",
+            "harness": "codex",
+            "harness_session_id": SESSION,
+            "codex_session_id": SESSION,
+            "launch_account": "default",
+            "launch_account_source": "caller",
+            "related_session_id": "11111111-2222-3333-4444-555566667777",
+            "node": "x-2bd5",
+            "requested_model": "glm-5.3-flash[1m]",
+            "requested_provider": "zai",
+            "requested_effort": "high",
+            "host_mode": "interactive",
+            "cwd": "/tmp",
+            "status": "live",
+            "created_at": "2026-09-13T00:00:00Z",
+            "pid": 78665,
+            "mux": {"session": "main", "pane_id": 2179},
+            "substrate": "pane",
+            "log_path": "/tmp/specimen.log",
+            "last_reconciled_at": "2026-09-13T22:20:00Z",
+            "crown_level": 1,
+            "crown_scope": "footnote",
+            "crown_grantor": "operator",
+            "fno_id": "905e16b3-96fc-47ee-8158-2aa4b6e99551",
+            "origin": "spawn",
+            "route_settings_path": "/route/<sha16>.json",
+            "inside_leg": {"state": "done", "seq": 3, "received_at": "2026-09-13T22:00:00Z"},
+        });
+        let row: state::RegistryEntry = serde_json::from_value(specimen).unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = AgentsHome::at(dir.path().join("agents"));
+        home.ensure_root().unwrap();
+        state::update_registry(&home.registry_json(), |r| r.entries.push(row)).unwrap();
+
+        // The same rebind the Live branch performs, verbatim.
+        let child_pid = std::process::id();
+        let new_mux = MuxRef {
+            session: "main".into(),
+            pane_id: 4242,
+        };
+        let expected = MuxRef {
+            session: "main".into(),
+            pane_id: 2179,
+        };
+        state::update_registry(&home.registry_json(), |reg| {
+            let r = reg
+                .entries
+                .iter_mut()
+                .find(|r| r.name == "specimen")
+                .unwrap();
+            if r.mux.as_ref() != Some(&expected) {
+                panic!("CAS miss in test setup");
+            }
+            r.mux = Some(new_mux.clone());
+            r.pid = Some(child_pid);
+            r.pid_start_time = crate::daemon::process_start_time(child_pid);
+            r.status = AgentStatus::Live;
+        })
+        .unwrap();
+
+        let written = fs::read_to_string(home.registry_json()).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let back = &raw["agents"][0];
+        for key in [
+            "aliases",
+            "provider",
+            "model",
+            "model_basis",
+            "effort",
+            "liveness",
+            "liveness_measured_at",
+            "harness",
+            "harness_session_id",
+            "launch_account",
+            "launch_account_source",
+            "related_session_id",
+            "node",
+            "requested_model",
+            "requested_provider",
+            "requested_effort",
+            "host_mode",
+            "cwd",
+            "pid",
+            "mux",
+            "substrate",
+            "log_path",
+            "last_reconciled_at",
+            "crown_level",
+            "crown_scope",
+            "crown_grantor",
+            "fno_id",
+            "origin",
+            "route_settings_path",
+            "inside_leg",
+        ] {
+            assert!(
+                back.get(key).map(|v| !v.is_null()).unwrap_or(false),
+                "key {key} was dropped by the rebind write: {written}"
+            );
+        }
+        assert_eq!(back["mux"]["pane_id"], 4242);
+        // Rebind-updated fields carry the new facts.
+        assert_eq!(back["pid"], serde_json::json!(child_pid));
+        assert!(back["pid_start_time"].is_u64(), "start time written");
+    }
+
     #[test]
     fn mux_pane_run_argv_fences_the_resumed_command() {
         // x-b84f D3 + x-0345 W1: the one-verb form of the manual recovery now
@@ -1025,5 +1409,41 @@ mod tests {
         assert_eq!(a, vec!["FNO_AGENT_SELF=ok", "FNO_AGENT_HARNESS=claude"]);
         let b = mesh_identity_assignments("ok", "", None).unwrap();
         assert_eq!(b, vec!["FNO_AGENT_SELF=ok"]);
+    }
+
+    #[test]
+    fn mux_pane_run_failure_message_names_unanswered_not_absent() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+        // exit 20 (EXIT_CONTROL_UNANSWERED): the verb reached the server, so
+        // the message must say a pane MAY have started - never the blanket
+        // "(no pane started)" the other codes get. Parameterized by verb: the
+        // recover arm's twin no longer prints the resume prefix.
+        let msg = mux_pane_run_failure_message(
+            "resume",
+            "worker-A",
+            "main",
+            ExitStatus::from_raw(20 << 8),
+        );
+        assert!(msg.contains("MAY have started"), "{msg}");
+        assert!(msg.contains("pane ls --session main"), "{msg}");
+        assert!(!msg.contains("no pane started"), "{msg}");
+        assert!(msg.starts_with("fno agents resume:"), "{msg}");
+        let msg = mux_pane_run_failure_message(
+            "recover",
+            "worker-A",
+            "main",
+            ExitStatus::from_raw(20 << 8),
+        );
+        assert!(msg.starts_with("fno agents recover:"), "{msg}");
+
+        // Every other non-zero code keeps the original, stronger claim.
+        let msg = mux_pane_run_failure_message(
+            "resume",
+            "worker-A",
+            "main",
+            ExitStatus::from_raw(1 << 8),
+        );
+        assert!(msg.contains("no pane started"), "{msg}");
     }
 }

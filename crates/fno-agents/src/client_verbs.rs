@@ -2430,42 +2430,6 @@ pub(crate) fn read_registry_entries(path: &Path) -> Result<Vec<Value>, String> {
 // resume
 // ---------------------------------------------------------------------------
 
-/// `fno mux pane run` exit code when the mux never answered the control read
-/// (crates/fno `EXIT_CONTROL_UNANSWERED`). Duplicated here rather than
-/// imported: this crate does not depend on `fno`, and `fno mux pane run` is
-/// invoked as a subprocess, not a library call.
-const MUX_CONTROL_UNANSWERED: i32 = 20;
-
-/// Map a failed `fno mux pane run` (the resume launcher's subprocess) to its
-/// stderr message. Kept pure so the exit-code split is mechanically testable
-/// without mutating PATH or shelling out (parse_heal_token_output's pattern).
-///
-/// `EXIT_CONTROL_UNANSWERED` gets the truthful "may have started" message:
-/// the verb REACHED the server, so "(no pane started)" is false for this
-/// code alone. Adoption stays in the Python spawn path's
-/// `_reconcile_unanswered_run` (one place owns candidate matching); this
-/// launcher only names the inspect command, on the same reasoning.
-fn mux_pane_run_failure_message(
-    name: &str,
-    session: &str,
-    status: std::process::ExitStatus,
-) -> String {
-    if status.code() == Some(MUX_CONTROL_UNANSWERED) {
-        return format!(
-            "fno agents resume: the mux never answered the run for {name}; a pane \
-             MAY have started. Check `fno mux pane ls --session {session}` before \
-             retrying."
-        );
-    }
-    format!(
-        "fno agents resume: mux pane run for {name} exited {} (no pane started)",
-        status
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "signal".to_string())
-    )
-}
-
 /// True for the one `claude_resume_argv_with_truth` arm that returns
 /// `(["claude", "attach", short_id], None)`: a live, short_id-addressable
 /// claude row with no mux ref. `claim_uuid` is `Some` only on the dead-relaunch
@@ -2942,51 +2906,42 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
 
     // Pane relaunch: the mux owns the cwd (--cwd) and the pane, and this
     // process returns after the launch so the operator's terminal stays free.
-    // stdin is null'd so a mux pane run that reads stdin cannot stall against
-    // this terminal. The claim above carries a TTL (not a pid) on this path,
-    // so it stays Live across the launch-to-probe-live window; once the
-    // resumed worker is probe-live the truth probe (not the claim) stops a
-    // second relaunch. Emit only on a successful launch so a failed pane start
-    // does not record a misleading agent_resumed.
+    // The claim above carries a TTL (not a pid) on this path, so it stays
+    // Live across the launch-to-proof window. The launch then PROVES the
+    // worker stayed up before claiming success - a pane run exit 0 proves a
+    // pane was created, never that the worker lived - rebinds the row to the
+    // new pane on a live proof, and prints the pane's last output on a death.
     if let Some(session) = pane_target {
         let pane = mux_pane_run_argv(session, cwd, &argv, &identity, Some(&row_name));
-        let mut pane_command = std::process::Command::new("fno");
-        pane_command.args(&pane).stdin(std::process::Stdio::null());
         // x-d285: the account namespace rides the pane relaunch. The mux CLI
         // forwards its environment to the pane child; the server-side
         // canonical resolution lands with the mux gestures (wave 2.2).
-        if let Some(plan) = &reentry_plan {
-            for (key, value) in &plan.env {
-                pane_command.env(key, value);
-            }
-        }
-        match pane_command.status() {
-            Ok(s) if s.success() => {
-                // session_id is the transport short_id, empty on a pane row;
-                // the resumed session's id is the uuid (claim_uuid).
-                let resumed_id = claim_uuid.as_deref().unwrap_or(session_id);
-                append_agents_event(
-                    &trace_events_path(home),
-                    "agent_resumed",
-                    &[
-                        ("name", Value::String(name.clone())),
-                        ("provider", Value::String(harness.to_string())),
-                        ("session_id", Value::String(resumed_id.to_string())),
-                        ("cwd", Value::String(cwd.to_string())),
-                    ],
-                );
-                eprintln!("fno agents resume: {name} relaunched on mux session {session}");
-                return 0;
-            }
-            Ok(s) => {
-                eprintln!("{}", mux_pane_run_failure_message(&name, session, s));
-                return 1;
-            }
-            Err(e) => {
-                eprintln!("fno agents resume: failed to launch {name} on a mux pane: {e}");
-                return 1;
-            }
-        }
+        let plan_env: Vec<(String, String)> = reentry_plan
+            .as_ref()
+            .map(|p| p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        let expected_mux = entry.get("mux").and_then(|m| {
+            Some(crate::state::MuxRef {
+                session: m.get("session")?.as_str()?.to_string(),
+                pane_id: m.get("pane_id")?.as_u64()?,
+            })
+        });
+        // session_id is the transport short_id, empty on a pane row; the
+        // resumed session's id is the uuid (claim_uuid).
+        let resumed_id = claim_uuid.as_deref().unwrap_or(session_id);
+        return crate::pane_relaunch::relaunch_on_pane(
+            "resume",
+            &row_name,
+            harness,
+            resumed_id,
+            cwd,
+            session,
+            &pane,
+            &plan_env,
+            expected_mux.as_ref(),
+            ("agent_resumed", "agent_resume_failed"),
+            home,
+        );
     }
 
     // Dead-arm respawn: the plan's mechanism says `claude respawn`, which
@@ -3181,7 +3136,9 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
 
     // The recorded mux destination wins when there is one: the pane relaunch
     // returns after the launch so the operator's terminal stays free, and the
-    // account namespace rides the child environment.
+    // account namespace rides the child environment. The launch proves the
+    // worker stayed up before claiming success, and rebinds the row on a live
+    // proof (same contract as the resume pane arm).
     if let Some(mux_ref) = plan.mux.as_ref() {
         // x-0345 W1: same wrapper the resume arm carries. `which_on_path`
         // above deliberately read the UNWRAPPED plan.argv[0]; the wrap
@@ -3200,41 +3157,24 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
             &identity,
             Some(&plan.name),
         );
-        let mut pane_command = std::process::Command::new("fno");
-        pane_command.args(&pane).stdin(std::process::Stdio::null());
-        for (key, value) in &plan.env {
-            pane_command.env(key, value);
-        }
-        match pane_command.status() {
-            Ok(s) if s.success() => {
-                append_agents_event(
-                    &trace_events_path(home),
-                    "agent_recovered",
-                    &[
-                        ("name", Value::String(name.clone())),
-                        ("provider", Value::String("claude".to_string())),
-                        ("session_id", Value::String(plan.session_id.clone())),
-                        ("cwd", Value::String(plan.cwd.clone())),
-                    ],
-                );
-                eprintln!(
-                    "fno agents recover: {} relaunched on mux session {}",
-                    name, mux_ref.session
-                );
-                return 0;
-            }
-            Ok(s) => {
-                eprintln!(
-                    "{}",
-                    mux_pane_run_failure_message(&name, &mux_ref.session, s)
-                );
-                return 1;
-            }
-            Err(e) => {
-                eprintln!("fno agents recover: failed to launch {name} on a mux pane: {e}");
-                return 1;
-            }
-        }
+        let plan_env: Vec<(String, String)> = plan
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        return crate::pane_relaunch::relaunch_on_pane(
+            "recover",
+            &plan.name,
+            "claude",
+            &plan.session_id,
+            &plan.cwd,
+            &mux_ref.session,
+            &pane,
+            &plan_env,
+            Some(mux_ref),
+            ("agent_recovered", "agent_recover_failed"),
+            home,
+        );
     }
 
     // Respawn mechanism: run and confirm (see run_and_confirm_respawn). A
@@ -5780,27 +5720,6 @@ mod tests {
         // terminated by a different signal (SIGTERM=15) is not a clean Ctrl-C;
         // there is no exit code so it falls through to 1.
         assert_eq!(follow_exit_code(ExitStatus::from_raw(libc::SIGTERM)), 1);
-    }
-
-    #[test]
-    fn mux_pane_run_failure_message_names_unanswered_not_absent() {
-        use std::os::unix::process::ExitStatusExt;
-        use std::process::ExitStatus;
-        // exit 20 (EXIT_CONTROL_UNANSWERED): the verb reached the server, so
-        // the message must say a pane MAY have started - never the blanket
-        // "(no pane started)" the other codes get.
-        let msg = mux_pane_run_failure_message(
-            "worker-A",
-            "main",
-            ExitStatus::from_raw(MUX_CONTROL_UNANSWERED << 8),
-        );
-        assert!(msg.contains("MAY have started"), "{msg}");
-        assert!(msg.contains("pane ls --session main"), "{msg}");
-        assert!(!msg.contains("no pane started"), "{msg}");
-
-        // Every other non-zero code keeps the original, stronger claim.
-        let msg = mux_pane_run_failure_message("worker-A", "main", ExitStatus::from_raw(1 << 8));
-        assert!(msg.contains("no pane started"), "{msg}");
     }
 
     #[test]
