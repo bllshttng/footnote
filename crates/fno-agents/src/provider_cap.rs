@@ -307,12 +307,20 @@ fn runtime_state_path_from(
 
 /// Where the quota lock lives. Ports Python's `paths.runtime_state_json()`
 /// (paths.py:1108): `FNO_RUNTIME_STATE_PATH` when set; else the configured
-/// absolute `state_dir`; else `$HOME/.fno`. Before x-6412 this defaulted to
-/// `runtime-state.json`, a file nobody writes, so every reset read as unknown.
+/// `state_dir` when its RAW value is absolute (a relative one falls back to
+/// `$HOME/.fno` in Python, never the cwd); else `$HOME/.fno`. Before x-6412
+/// this defaulted to `runtime-state.json`, a file nobody writes, so every
+/// reset read as unknown.
 pub fn runtime_state_path(cwd: &Path) -> PathBuf {
+    let raw = crate::agents_config::config_lookup(cwd, &["state_dir"])
+        .and_then(|v| v.as_str().map(str::to_string));
+    let dir = raw.map(|raw| match raw.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest)),
+        None => Some(PathBuf::from(&raw)),
+    });
     runtime_state_path_from(
         std::env::var_os("FNO_RUNTIME_STATE_PATH").as_deref(),
-        crate::agents_config::state_dir(cwd),
+        dir.flatten().filter(|d| d.is_absolute()),
         std::env::var_os("HOME").as_deref(),
     )
 }
@@ -889,24 +897,42 @@ fn return_candidates(home: &AgentsHome, lane: &CapLane) -> Vec<CapMember> {
 // against fakes in tests and shells out to fno in the armed daemon path.
 // ---------------------------------------------------------------------------
 
+/// The one question-close shape: one `operator_question_closed` row, then
+/// drop the marker so a later strand can ask fresh. Every closer uses this.
+pub fn close_operator_question(
+    home: &AgentsHome,
+    lane: &str,
+    answer: &str,
+    closed_by: &str,
+    now_epoch: i64,
+) {
+    append_questions_row(
+        &questions_path(home),
+        &json!({
+            "ts": epoch_to_rfc3339(now_epoch),
+            "type": "operator_question_closed",
+            "source": "provider-cap",
+            "data": {
+                "question_id": format!("provider-cap:{lane}"),
+                "answer": answer,
+                "closed_by": closed_by,
+            },
+        }),
+    );
+    let _ = std::fs::remove_file(question_path(home, lane));
+}
+
 /// The leave question and any recorded decision answered the reset that
-/// passed, so the return ladder retires both (the cap_decide pattern).
+/// passed, so the return ladder retires both.
 fn close_leave_question(home: &AgentsHome, lane: &CapLane, now_epoch: i64) {
     if question_path(home, &lane.lane).exists() {
-        append_questions_row(
-            &questions_path(home),
-            &json!({
-                "ts": epoch_to_rfc3339(now_epoch),
-                "type": "operator_question_closed",
-                "source": "provider-cap",
-                "data": {
-                    "question_id": format!("provider-cap:{}", lane.lane),
-                    "answer": "superseded-by-reset",
-                    "closed_by": "return ladder",
-                },
-            }),
+        close_operator_question(
+            home,
+            &lane.lane,
+            "superseded-by-reset",
+            "return ladder",
+            now_epoch,
         );
-        let _ = std::fs::remove_file(question_path(home, &lane.lane));
     }
     let _ = std::fs::remove_file(
         lanes_dir(home).join(format!("decision-{}.json", lane_file_token(&lane.lane))),

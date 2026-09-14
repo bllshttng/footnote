@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::agents_config::provider_cap_config;
 use crate::paths::AgentsHome;
-use crate::provider_cap::{append_questions_row, questions_path, read_persisted_snapshot};
+use crate::provider_cap::read_persisted_snapshot;
 use crate::provider_cap::{
     epoch_to_rfc3339, lane_file_token, lanes_dir, now_epoch_secs, snapshot, CapSnapshot,
     PROVIDER_CAP_INTERVAL_S,
@@ -169,22 +169,15 @@ fn cap_decide(args: &[String]) -> i32 {
         eprintln!("provider-cap decide: cannot write {}: {e}", path.display());
         return 1;
     }
-    append_questions_row(
-        &questions_path(&home),
-        &json!({
-            "ts": epoch_to_rfc3339(now_epoch_secs()),
-            "type": "operator_question_closed",
-            "source": "provider-cap",
-            "data": {
-                "question_id": format!("provider-cap:{lane}"),
-                "answer": verdict,
-                "closed_by": "provider-cap decide",
-            },
-        }),
-    );
     // The answer consumes the open question: drop the marker so a later
     // strand on the same lane can ask fresh instead of being suppressed.
-    let _ = std::fs::remove_file(dir.join(format!("question-{}.json", lane_file_token(lane))));
+    crate::provider_cap::close_operator_question(
+        &home,
+        lane,
+        &verdict,
+        "provider-cap decide",
+        now_epoch_secs(),
+    );
     println!("recorded: {} -> {verdict}", path.display());
     0
 }
