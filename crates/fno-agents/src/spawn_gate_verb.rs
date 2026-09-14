@@ -711,7 +711,10 @@ mod tests {
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(
             fnodir.join("config.toml"),
-            "[agents]\nmax_live = 28\nmin_free_gb = 0\n",
+            // max_swap_pct 0 disables the swap term: the machine this runs on
+            // may genuinely sit above the default 90 percent cap (x-8c8c),
+            // which would refuse the probe before the assertions.
+            "[agents]\nmax_live = 28\nmin_free_gb = 0\nmax_swap_pct = 0\n",
         )
         .unwrap();
         let prior_config = std::env::var_os("FNO_CONFIG");
