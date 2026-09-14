@@ -54,7 +54,7 @@ pub(crate) use crate::territory::compile_scope_ids;
 pub(crate) use budget::{fno_py_cmd, now_secs_board, run_json, Budget, HAND_RUN_BUDGET_MS};
 pub(crate) use claims::read_claims;
 pub(crate) use classify::{entry_by_id, node_has_pr, read_claimed_nodes};
-pub(crate) use prs::read_prs;
+pub(crate) use prs::{read_pr_gates, read_prs};
 pub(crate) use queues::{
     build_board, parse_lane, queue_json, read_blocked_rows, BoardInputs, Queue,
 };
@@ -94,6 +94,9 @@ pub(crate) const DEFAULT_MAX_PR_READS: usize = 50;
 pub(crate) const SRC_PRS: &str =
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url";
 pub(crate) const SRC_PR_NODES: &str = "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url + fno backlog get <id>";
+/// x-b9e1: the mergeable_pr queue asks the gate, not just the listing.
+pub(crate) const SRC_PR_GATE: &str =
+    "fno do pr status <n> (ready + ready_blockers per mergeable candidate)";
 pub(crate) const SRC_QUESTIONS: &str = "fno inbox outstanding --json";
 pub(crate) const SRC_NEEDS: &str = "fno agents needs --json";
 pub(crate) const SRC_DISTRESS: &str =
@@ -334,6 +337,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let s_undispatched = budget.start("backlog undispatched");
     let s_claims = budget.start("agents claim list");
     let s_prs = budget.start(SRC_PRS);
+    let s_pr_gate = budget.start(SRC_PR_GATE);
     let s_stalled = budget.start("stalled_holder lookups");
     let s_ready = budget.start(SRC_READY);
     let s_worked = budget.start(SRC_WORKED);
@@ -467,6 +471,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let (
         prs,
         pr_nodes,
+        pr_gates,
         pr_warnings,
         prs_truncated,
         worked,
@@ -494,10 +499,21 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         });
         let t_prs = s_prs.map(|slice| {
             let cwd = cwd_for_threads.clone();
+            let gate_slice = s_pr_gate;
             s.spawn(move || {
-                let (prs, pr_nodes, w) = read_prs(&cwd, slice, opts.max_pr_reads, entries_ref);
+                let (prs, pr_nodes, mut w) = read_prs(&cwd, slice, opts.max_pr_reads, entries_ref);
+                // The gate read rides the same thread: its input is the
+                // listing's own narrowed candidates, so there is nothing to
+                // overlap until the listing lands (x-b9e1).
+                let candidates: Vec<i64> = prs
+                    .rows()
+                    .iter()
+                    .filter_map(|r| r.get("number").and_then(Value::as_i64))
+                    .collect();
+                let (pr_gates, gate_w) = read_pr_gates(&cwd, &candidates, gate_slice);
+                w.extend(gate_w);
                 let truncated = w.iter().any(|x| x.contains("hit its"));
-                (prs, pr_nodes, w, truncated)
+                (prs, pr_nodes, w, truncated, pr_gates)
             })
         });
         let mut worked = match t_worked {
@@ -625,14 +641,15 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             })
         });
 
-        let (prs, pr_nodes, pr_warnings, prs_truncated) = match t_prs {
+        let (prs, pr_nodes, pr_warnings, prs_truncated, pr_gates) = match t_prs {
             None => {
                 let err = budget.spent_error();
                 (
                     SourceRead::err(err.clone()),
-                    SourceRead::err(err),
+                    SourceRead::err(err.clone()),
                     Vec::new(),
                     true,
+                    SourceRead::err(err),
                 )
             }
             Some(h) => h.join().unwrap_or_else(|_| {
@@ -641,9 +658,11 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                     SourceRead::err("undriven_pr: reader panicked"),
                     Vec::new(),
                     false,
+                    SourceRead::err("merge gate: reader panicked"),
                 )
             }),
         };
+        mark(&mut sources, "pr_gate", &pr_gates, false);
         let ready = match t_ready {
             None => SourceRead::err(budget.spent_error()),
             Some(h) => h
@@ -692,6 +711,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         (
             prs,
             pr_nodes,
+            pr_gates,
             pr_warnings,
             prs_truncated,
             worked,
@@ -922,6 +942,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         holder_activity_error,
         prs,
         pr_nodes,
+        pr_gates,
         outstanding,
         needs,
         lane,
@@ -1109,6 +1130,7 @@ mod tests {
             holder_activity_error: None,
             prs: ok_read(Value::Array(Vec::new())),
             pr_nodes: ok_read(Value::Array(Vec::new())),
+            pr_gates: ok_read(Value::Array(Vec::new())),
             outstanding: ok_read(json!({})),
             needs: ok_read(Value::Array(Vec::new())),
             blocked_child: ok_read(Value::Array(Vec::new())),

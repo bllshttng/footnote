@@ -73,6 +73,12 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
                 .and_then(|v| v.as_array())
                 .unwrap_or(&vec![])
             {
+                // Row-level veto (x-b9e1): a mergeable_pr row the merge gate
+                // found not-ready carries `actionable: false` and names no
+                // next action, however green the listing called it.
+                if row.get("actionable").and_then(|v| v.as_bool()) == Some(false) {
+                    continue;
+                }
                 let identity = row_identity(name, row);
                 if top_row.is_none() {
                     top_row = Some(identity.clone());
@@ -426,6 +432,25 @@ mod tests {
         ]));
         let parsed = parse_king_board_value(&board).unwrap();
         assert!(!parsed.unreadable_sources);
+    }
+
+    #[test]
+    fn a_not_ready_mergeable_row_names_no_next_action() {
+        // x-b9e1: the stop hook offered mergeable_pr:1709 on four
+        // consecutive stops while the merge gate refused that exact head.
+        // The not-ready row names no next action.
+        let board = board_with_queues(json!([
+            {"name": "mergeable_pr", "status": "ok", "actionable": true,
+             "count": 0, "rows": [
+                {"number": 1709, "title": "green but held", "ready": false,
+                 "actionable": false, "ready_blockers": ["review_in_flight"]},
+                {"number": 1702},
+            ]},
+        ]));
+        let parsed = parse_king_board_value(&board).unwrap();
+        let top = parsed.top_row.unwrap();
+        assert_eq!(top, "mergeable_pr:1702", "{top}");
+        assert_eq!(parsed.actionable_ids, vec!["mergeable_pr:1702".to_string()]);
     }
 
     #[test]

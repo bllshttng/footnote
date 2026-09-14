@@ -1,11 +1,11 @@
 //! One PR listing, binding classification, mergeable filter (pr/_status).
-use super::budget::run_json;
+use super::budget::{fno_py_cmd, run_json, run_with_timeout};
 use super::queues::NODE_ID_BODY;
 use super::{s_i64, s_str, SourceRead, LEGACY_DEFER_PREFIX, TERMINAL_RUNGS};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
 pub(crate) const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = "fno/review-coverage-unavailable";
@@ -210,6 +210,111 @@ pub(crate) fn read_prs(
         }));
     }
     (SourceRead::ok(Value::Array(ready)), pr_nodes, warnings)
+}
+
+/// One candidate's merge-gate verdict: the payload `fno do pr status` prints
+/// as JSON on stdout. A non-zero exit (the exit code is the CI verdict) reads
+/// as an unanswered gate, not a verdict: the runner keeps only the error text,
+/// so a PR that went red between the listing and the gate renders
+/// not-actionable with a warning naming the exit, never as mergeable.
+fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, String> {
+    let mut cmd = fno_py_cmd();
+    cmd.extend([
+        "do".to_string(),
+        "pr".to_string(),
+        "status".to_string(),
+        number.to_string(),
+    ]);
+    match run_with_timeout(&cmd, cwd, timeout) {
+        Err(f) => Err(f.message().to_string()),
+        Ok(stdout) => serde_json::from_slice::<Value>(&stdout)
+            .map_err(|e| format!("unparseable status payload: {e}")),
+    }
+}
+
+/// Ask the merge gate about every candidate the listing called green
+/// (x-b9e1: the queue's only evidence was that the PR is open; a live review
+/// hold or an uncovered head made it unfusable and nothing said so). The
+/// candidates read four at a time under ONE budgeted slice; a PR whose gate
+/// call fails or whose slice runs out is simply absent from the answer, and
+/// its warning names it - build renders an absent verdict as not-actionable,
+/// never as mergeable.
+pub(crate) fn read_pr_gates(
+    cwd: &Path,
+    numbers: &[i64],
+    slice: Option<Duration>,
+) -> (SourceRead, Vec<String>) {
+    let Some(slice) = slice else {
+        return (
+            SourceRead::err("merge gate not read: board budget exhausted before the source"),
+            Vec::new(),
+        );
+    };
+    // Bounded fan-out: one fno-py cold start per candidate is the price of
+    // asking the gate, but every candidate at once would spend the fleet's
+    // shared gh quota faster than any slice can police.
+    const GATE_FANOUT: usize = 4;
+    let deadline = Instant::now() + slice;
+    let mut rows: Vec<Value> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for chunk in numbers.chunks(GATE_FANOUT) {
+        // Spawn the whole chunk, then join: every member of the chunk runs
+        // concurrently, and a panicked reader lands as Err, never unwinds.
+        let answers: Vec<(i64, Option<Result<Value, String>>)> = std::thread::scope(|s| {
+            let mut pending: Vec<(
+                i64,
+                Option<std::thread::ScopedJoinHandle<Result<Value, String>>>,
+            )> = Vec::new();
+            for n in chunk {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let cwd = cwd.to_path_buf();
+                if left.is_zero() {
+                    pending.push((*n, None));
+                } else {
+                    let h = s.spawn(move || read_pr_gate(&cwd, *n, left));
+                    pending.push((*n, Some(h)));
+                }
+            }
+            pending
+                .into_iter()
+                .map(|(n, h)| {
+                    let answer = h.map(|h| {
+                        h.join()
+                            .unwrap_or_else(|_| Err("gate reader panicked".to_string()))
+                    });
+                    (n, answer)
+                })
+                .collect()
+        });
+        for (n, answer) in answers {
+            match answer {
+                None => skipped.push(n.to_string()),
+                Some(Ok(payload)) => match payload.get("ready").and_then(Value::as_bool) {
+                    Some(ready) => rows.push(json!({
+                        "number": n,
+                        "ready": ready,
+                        "ready_blockers": payload
+                            .get("ready_blockers")
+                            .cloned()
+                            .unwrap_or(Value::Array(Vec::new())),
+                    })),
+                    None => warnings.push(format!(
+                        "merge gate answered no verdict for PR {n}: {}",
+                        s_str(&payload, "reason").unwrap_or("no ready field")
+                    )),
+                },
+                Some(Err(e)) => warnings.push(format!("merge gate unreadable for PR {n}: {e}")),
+            }
+        }
+    }
+    if !skipped.is_empty() {
+        warnings.push(format!(
+            "merge gate read stopped at its slice; PR(s) {} unanswered",
+            skipped.join(", ")
+        ));
+    }
+    (SourceRead::ok(Value::Array(rows)), warnings)
 }
 
 /// A PR URL reduced to its comparable form: whitespace trimmed, query and
@@ -465,6 +570,21 @@ pub(crate) fn derived_status(entry: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_spent_budget_reads_the_gate_source_unreadable() {
+        let (read, warnings) = read_pr_gates(Path::new("."), &[1709], None);
+        assert!(!read.is_ok());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn no_candidates_reads_the_gate_ok_and_empty() {
+        let (read, warnings) = read_pr_gates(Path::new("."), &[], Some(Duration::from_secs(1)));
+        assert!(read.is_ok());
+        assert!(read.rows().is_empty());
+        assert!(warnings.is_empty());
+    }
 
     #[test]
     fn a_budget_killed_pr_listing_keeps_the_over_budget_verdict_in_both_queues() {

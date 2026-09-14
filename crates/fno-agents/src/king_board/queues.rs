@@ -4,8 +4,8 @@ use super::prs::derived_status;
 use super::scope::operator_lane_path;
 use super::{
     as_int, s_str, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX, SRC_CLAIMS,
-    SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS, SRC_READY,
-    SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
+    SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_GATE, SRC_PR_NODES, SRC_QUESTIONS,
+    SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
@@ -370,6 +370,11 @@ pub(crate) struct BoardInputs {
     pub(crate) holder_activity_error: Option<String>,
     pub(crate) prs: SourceRead,
     pub(crate) pr_nodes: SourceRead,
+    /// The merge gate's verdict per candidate: `fno do pr status`'s
+    /// `ready` + `ready_blockers`, one row per PR the listing called green
+    /// (x-b9e1). A candidate absent from here has no gate answer; build
+    /// renders it not-actionable rather than trusting the listing alone.
+    pub(crate) pr_gates: SourceRead,
     pub(crate) outstanding: SourceRead,
     pub(crate) needs: SourceRead,
     pub(crate) lane: SourceRead,
@@ -894,6 +899,20 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             }
         }
     }
+    // The gate verdict per candidate: the listing proves open+green, the
+    // gate proves fusable (x-b9e1). A candidate absent from the gate read
+    // (its call failed, or the slice ran out) carries `ready: null` and is
+    // NOT actionable: a reader that cannot say what it did not read must not
+    // offer a merge. Rows stay visible with their blockers rendered beside
+    // them, so the row teaches instead of nags.
+    let gate_rows = inputs.pr_gates.rows();
+    let gate_by_pr: HashMap<i64, &Value> = gate_rows
+        .iter()
+        .filter_map(|g| {
+            let n = g.get("number").and_then(Value::as_i64)?;
+            Some((n, g))
+        })
+        .collect();
     let pr_rows: Vec<Value> = inputs
         .prs
         .rows()
@@ -905,8 +924,31 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 .unwrap_or(Value::Null);
             in_scope("mergeable_pr", false, &node_id, r, &mut out_of_scope)
         })
-        .map(|r| json!({"number": r.get("number"), "title": r.get("title")}))
+        .map(|r| {
+            let n = r.get("number").and_then(Value::as_i64).unwrap_or(-1);
+            let (ready, blockers) = match gate_by_pr.get(&n) {
+                Some(g) => (
+                    g.get("ready").cloned().unwrap_or(Value::Null),
+                    g.get("ready_blockers").cloned().unwrap_or(json!([])),
+                ),
+                None => (Value::Null, json!([])),
+            };
+            let row_ready = ready == Value::Bool(true);
+            json!({
+                "number": r.get("number"),
+                "title": r.get("title"),
+                "ready": ready,
+                "ready_blockers": blockers,
+                // Row-level veto the termination reader honors: a not-ready
+                // row stays visible but names no next action.
+                "actionable": row_ready,
+            })
+        })
         .collect();
+    let mergeable_count = pr_rows
+        .iter()
+        .filter(|r| r.get("actionable").and_then(Value::as_bool) == Some(true))
+        .count() as i64;
 
     // Undriven PR: the complement of stalled_holder, the second half of ONE
     // predicate. Fail CLOSED on an unreadable claim list: every node would
@@ -914,6 +956,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     let mergeable_numbers: HashSet<i64> = if inputs.autonomous_merge {
         pr_rows
             .iter()
+            .filter(|r| r.get("actionable").and_then(Value::as_bool) == Some(true))
             .filter_map(|r| r.get("number").and_then(Value::as_i64))
             .collect()
     } else {
@@ -1253,7 +1296,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         ),
         queue(
             "mergeable_pr",
-            SRC_PRS.to_string(),
+            format!("{SRC_PRS} + {SRC_PR_GATE}"),
             &inputs.prs,
             pr_rows,
             inputs.autonomous_merge,
@@ -1263,7 +1306,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 "report-only: merging is outward and hard to reverse, so it waits on config.king.autonomous_merge".to_string()
             },
             "",
-            None,
+            Some(mergeable_count),
         ),
         queue(
             "stale_claim",
@@ -1413,6 +1456,7 @@ mod tests {
             holder_activity_error: None,
             prs: SourceRead::ok(prs),
             pr_nodes: SourceRead::ok(pr_nodes),
+            pr_gates: SourceRead::ok(json!([])),
             outstanding: empty.clone(),
             needs: empty.clone(),
             lane: empty.clone(),
@@ -1464,6 +1508,102 @@ mod tests {
                 .any(|r| r["id"] == "x-out" && r["queue"] == "mergeable_pr"),
             "cross-territory nomination vanished from the board: {out:?}"
         );
+    }
+
+    #[test]
+    fn a_review_hold_renders_its_blockers_and_reads_not_actionable() {
+        // x-b9e1: the listing called the PR green and mergeable; the gate
+        // holds it. The row stays visible, names its blockers, and the
+        // termination reader gets no next-action from it.
+        let mut inputs = pr_board_inputs(
+            json!([
+                {"number": 1709, "title": "green but held"},
+            ]),
+            json!([{"id": "x-in", "pr_number": 1709}]),
+        );
+        inputs.pr_gates = SourceRead::ok(json!([
+            {"number": 1709, "ready": false,
+             "ready_blockers": ["review_in_flight", "review_coverage_uncovered"]},
+        ]));
+
+        let board = build_board(&inputs);
+
+        let mergeable = queue_rows(&board, "mergeable_pr");
+        assert_eq!(
+            mergeable.len(),
+            1,
+            "the row must stay visible: {mergeable:?}"
+        );
+        assert_eq!(mergeable[0]["ready"], json!(false));
+        assert_eq!(
+            mergeable[0]["ready_blockers"],
+            json!(["review_in_flight", "review_coverage_uncovered"])
+        );
+        assert_eq!(mergeable[0]["actionable"], json!(false));
+        let q = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["name"] == "mergeable_pr")
+            .unwrap();
+        assert_eq!(
+            q["count"],
+            json!(0),
+            "not-ready rows are not actionable: {q}"
+        );
+    }
+
+    #[test]
+    fn a_pr_without_a_gate_verdict_is_not_actionable() {
+        // Fail closed: absent verdict means unknown, and unknown is never
+        // offered as a merge.
+        let inputs = pr_board_inputs(
+            json!([
+                {"number": 1711, "title": "gate never answered"},
+            ]),
+            json!([{"id": "x-in", "pr_number": 1711}]),
+        );
+
+        let board = build_board(&inputs);
+
+        let mergeable = queue_rows(&board, "mergeable_pr");
+        assert_eq!(mergeable.len(), 1, "the row stays visible: {mergeable:?}");
+        assert_eq!(mergeable[0]["ready"], Value::Null);
+        assert_eq!(mergeable[0]["actionable"], json!(false));
+        let q = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["name"] == "mergeable_pr")
+            .unwrap();
+        assert_eq!(q["count"], json!(0), "{q}");
+    }
+
+    #[test]
+    fn a_gate_ready_pr_stays_actionable_mergeable() {
+        let mut inputs = pr_board_inputs(
+            json!([
+                {"number": 101, "title": "actually ready"},
+            ]),
+            json!([{"id": "x-in", "pr_number": 101}]),
+        );
+        inputs.pr_gates = SourceRead::ok(json!([
+            {"number": 101, "ready": true, "ready_blockers": []},
+        ]));
+
+        let board = build_board(&inputs);
+
+        let mergeable = queue_rows(&board, "mergeable_pr");
+        assert_eq!(mergeable.len(), 1);
+        assert_eq!(mergeable[0]["ready"], json!(true));
+        assert_eq!(mergeable[0]["actionable"], json!(true));
+        let q = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["name"] == "mergeable_pr")
+            .unwrap();
+        assert_eq!(q["count"], json!(1), "{q}");
     }
 
     #[test]
