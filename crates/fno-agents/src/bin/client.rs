@@ -735,7 +735,18 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::client_verbs::run_ping(&args[1..]);
     }
     if verb == "resume" {
-        return fno_agents::client_verbs::run_resume(&args[1..], &AgentsHome::from_env());
+        // resume_wake's wake arms build their own runtimes and block_on them;
+        // on this thread that panics inside the ambient runtime. A fresh
+        // thread is legal in both contexts (gc_sweep::stop_row_process is
+        // the same shape).
+        let rest = args[1..].to_vec();
+        let home = AgentsHome::from_env();
+        return match std::thread::spawn(move || fno_agents::client_verbs::run_resume(&rest, &home))
+            .join()
+        {
+            Ok(code) => code,
+            Err(payload) => std::panic::resume_unwind(payload),
+        };
     }
     if verb == "adopt" {
         return fno_agents::client_verbs::run_adopt(&args[1..], &AgentsHome::from_env());
