@@ -106,7 +106,7 @@ Three autonomous entry points consume it, so identical node, config, and quota f
 
 - `backlog advance` (the active backlog and the merge trigger route through it) calls the selector directly.
 - `fno agents dispatch` calls it directly.
-- `skills/target/scripts/dispatch-node.sh` (which backs `/target bg`) is a shell rung and cannot import Python, so it hands the node to `fno agents spawn --node` and the door's own resolver answers the seam (x-3873).
+- `skills/target/scripts/dispatch-node.sh` (which backs `/target bg`) is a shell rung and cannot import Python, so it hands the node to `fno agents spawn --node` and the door's own resolver answers the seam.
 
 That flag is the whole reason the shell rung is not a fourth, divergent policy.
 A bare harness read is pure - it answers "which harness is configured", never "does that harness have quota left" - so a dispatcher that consulted only the harness would sit on a walled account while an idle harness waited.

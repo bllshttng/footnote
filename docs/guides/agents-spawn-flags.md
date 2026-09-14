@@ -32,7 +32,7 @@ Every placement flag implies `--substrate pane`.
 
 `--account` pins ONE worker to a registered claude account. The daemon-wide active `~/.claude` slot stays untouched. An account with its own config_dir sets `CLAUDE_CONFIG_DIR`, which bills right. A managed account that IS the active occupant rides the shared slot. Any other managed account is refused, with a pointer to config-dir registration: the setup-token env lane bills the wrong account. claude only, fail-closed.
 
-`--dispatch-account` carries a provider RECORD id for the spawn's account overlay (x-c33e). Its dispatch env rides for ANY harness, which is what a claude-to-codex cutover needs. The record id travels on argv. Its credentials never do. An unknown or unstageable record spawns nothing.
+`--dispatch-account` carries a provider RECORD id for the spawn's account overlay. Its dispatch env rides for ANY harness, which is what a claude-to-codex cutover needs. The record id travels on argv. Its credentials never do. An unknown or unstageable record spawns nothing.
 
 ## Session shape
 
