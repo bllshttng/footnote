@@ -410,6 +410,9 @@ struct RequestSeams<'a> {
     /// The native ACTIVE-SURFACE removal, typed: claude's agent list, codex's
     /// session index, cursor-agent's worker servers.
     surface_removal: &'a dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
+    /// The mux squad-member retirement, typed: `fno mux
+    /// retire-session` for the row's live squad membership.
+    mux_member: &'a dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     /// The ONE tree guard: true = unpushed work, hold.
     tree_holds: &'a dyn Fn(&str) -> bool,
     /// Forced tree removal; true = gone (the caller emits and prunes).
@@ -533,6 +536,7 @@ fn run_request(
             &stop,
             &crate::pane_stop::run_mux_pane_kill,
             seams.surface_removal,
+            seams.mux_member,
             &mut receipts,
         ) {
             Ok(crate::gc_sweep::StagedRetirement::Retired) => {
@@ -781,6 +785,7 @@ pub(crate) fn consume_merge_cleanup_requests(
                     stop_harness_confirmed(home, entry, agents)
                 },
                 surface_removal: &crate::gc_native::apply_active_surface_removal,
+                mux_member: &crate::gc_native::apply_mux_member_retirement,
                 tree_holds: &tree_unreachable_from_origin_main,
                 take_tree: &remove_tree,
             };
@@ -1102,6 +1107,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1146,6 +1152,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1188,6 +1195,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1346,6 +1354,7 @@ mod tests {
                     .push(format!("surface:{}", entry.name));
                 crate::daemon::CascadeOutcome::Removed
             },
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| {
                 tree_calls.borrow_mut().push("take_tree".to_string());
@@ -1419,6 +1428,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1466,6 +1476,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1508,6 +1519,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| true,
             take_tree: &|_wt, _root| true,
         };
@@ -1564,6 +1576,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1627,6 +1640,7 @@ mod tests {
             surface_removal: &|_entry| {
                 crate::daemon::CascadeOutcome::Unverified("roster unreadable".into())
             },
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1713,6 +1727,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1772,6 +1787,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1833,6 +1849,7 @@ mod tests {
                 Ok("abc123".to_string())
             },
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1881,6 +1898,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1918,6 +1936,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1949,6 +1968,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -1980,6 +2000,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };
@@ -2010,6 +2031,7 @@ mod tests {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
             surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            mux_member: &|_entry| crate::daemon::CascadeOutcome::NotApplicable,
             tree_holds: &|_wt| false,
             take_tree: &|_wt, _root| true,
         };

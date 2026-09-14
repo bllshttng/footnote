@@ -330,10 +330,16 @@ fn read_claude_listing() -> Result<Vec<(String, Option<String>)>, String> {
 }
 
 /// `(harness, session id)` for every non-tombstoned mux member carrying a
-/// native session id.
-fn read_mux_members() -> Result<Vec<(String, String)>, String> {
+/// native session id. A missing store reads as no members (a machine that
+/// never ran a squad measured an absence); any other read failure returns,
+/// because an unread store is not a measured absence.
+pub(crate) fn read_mux_members() -> Result<Vec<(String, String)>, String> {
     let path = squads_path();
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("squads.json unreadable: {e}"))?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("squads.json unreadable: {e}")),
+    };
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| format!("squads.json malformed: {e}"))?;
     let mut out = Vec::new();
