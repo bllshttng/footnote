@@ -638,6 +638,10 @@ def test_explicit_model_skips_the_band_grid(tmp_path, monkeypatch):
     caller's default lane and the model rides every spawn."""
     calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
     receipt = join_node("x-8d1d", 5, model="my-model")
+    # A pinned model now really resolves through the slot, so the recorder
+    # also catches the resolver's own subprocesses; keep only the spawns
+    # this test counts.
+    calls = [c for c in calls if "spawn" in c["cmd"]]
     assert len(calls) == 3
     for call in calls:
         assert call["cmd"][call["cmd"].index("--model") + 1] == "my-model"

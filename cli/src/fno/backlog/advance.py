@@ -1622,10 +1622,11 @@ def _grid_lane_for(
     terminal = str(chain[-1]) if chain else "grid=no-reason-recorded"
     if candidate is None:
         return None, None, None, None, terminal
-    if not candidate.get("pin_row"):
+    if model is not None and not candidate.get("pin_row"):
         # A pinned model the rows do not declare dispatches on today's
         # default; the spawn's --node vendor refusal catches a mismatched
         # pairing there, and a lane/grid pick was never this caller's answer.
+        # An UNPINNED call keeps the lane/grid pick it always returned.
         return None, None, None, None, terminal
     # Placement retains the resolver's complete decision: the candidate
     # carries the capacity verdict that selected it, and the resolver already
