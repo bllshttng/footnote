@@ -346,7 +346,12 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
   fi
 fi
 
-MANIFEST="$CWD/.fno/target-state.md"
+# The manifest lives in the repo space's worktree slice; resolve it through the
+# owning verb so this hook never spells the path. Degraded fallback for an fno
+# predating the verb: the legacy checkout-relative path (same contract as
+# target-stop-hook.sh).
+MANIFEST="$(fno-agents state path target-state 2>/dev/null || true)"
+[[ -z "$MANIFEST" ]] && MANIFEST="$CWD/.fno/target-state.md"
 [[ -f "$MANIFEST" ]] || exit 0   # no target session here -> nothing to refresh
 
 # graph_node_id lives in the manifest BODY; session_id in the frontmatter.

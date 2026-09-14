@@ -103,6 +103,24 @@ esac
 exit 0
 EOF
   chmod +x "${bindir}/fno"
+
+  # The heartbeat resolves the manifest through `fno-agents state path
+  # target-state`; stub that binary too so tests never invoke the real one.
+  # Knobs: STUB_STATE_PATH (path to print; unset prints none), STUB_STATE_PATH_RC
+  # (exit code, default 0). Calls go to $AGENTSLOG so $CALLLOG stays about fno
+  # claim traffic only.
+  AGENTSLOG="${TMP_DIR}/fno-agents-calls.log"
+  : > "$AGENTSLOG"
+  cat > "${bindir}/fno-agents" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "${AGENTSLOG}"
+if [[ "\${1:-} \${2:-} \${3:-}" == "state path target-state" ]]; then
+  [[ -n "\${STUB_STATE_PATH:-}" ]] && printf '%s\n' "\${STUB_STATE_PATH}"
+  exit "\${STUB_STATE_PATH_RC:-0}"
+fi
+exit 0
+EOF
+  chmod +x "${bindir}/fno-agents"
   export PATH="${bindir}:${PATH}"
 }
 
@@ -111,6 +129,7 @@ teardown_env() {
   unset STUB_HOLDER STUB_STATE STUB_STATUS_JSON STUB_STATUS_RC STUB_REFRESH_RC
   unset STUB_HOLDER_AFTER STUB_STATE_AFTER STUB_EXPIRES_BEFORE STUB_EXPIRES_AFTER
   unset STUB_BIND_OUTPUT STUB_BIND_RC STUB_BIND_SLEEP STUB_REFRESH_JSON
+  unset STUB_STATE_PATH STUB_STATE_PATH_RC
 }
 
 mtime_of() {
@@ -930,6 +949,54 @@ if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=refresh_unverified$' "$
   pass "T52 receipt disagrees with the store -> unverified, no deadline stamped"
 else
   fail "T52 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err]"
+fi
+teardown_env
+
+# ── T53: AC1-SPACE - shared-space manifest (no local copy) renews ──────────
+setup_env
+SHARED_DIR="${TMP_DIR}/shared"
+mkdir -p "$SHARED_DIR"
+mv "${CWD}/.fno/target-state.md" "${SHARED_DIR}/target-state.md"
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+export STUB_STATE_PATH="${SHARED_DIR}/target-state.md"
+export STUB_EXPIRES_BEFORE=100 STUB_EXPIRES_AFTER=200
+run_hook >/dev/null 2>&1
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if grep -q "claim refresh node:x-a166 --holder target-session:20260707T203700Z-cl55246-f3fe72 --ttl 2h" "$CALLLOG" \
+      && [[ -f "$stamp" ]] && grep -q '^outcome=renewed$' "$stamp" \
+      && grep -q '^expires_at=200$' "$stamp"; then
+  pass "T53 state-path-resolved shared manifest renews the claim"
+else
+  fail "T53 shared-space renewal wrong: calls=$(cat "$CALLLOG") ledger=$(cat "$stamp" 2>/dev/null || echo missing)"
+fi
+teardown_env
+
+# ── T54: AC2-FALLBACK - resolver unavailable -> legacy local path renews ───
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+export STUB_STATE_PATH_RC=1
+export STUB_EXPIRES_BEFORE=100 STUB_EXPIRES_AFTER=200
+run_hook >/dev/null 2>&1
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if grep -q "claim refresh node:x-a166" "$CALLLOG" \
+      && [[ -f "$stamp" ]] && grep -q '^outcome=renewed$' "$stamp"; then
+  pass "T54 resolver failure falls back to the checkout-local manifest"
+else
+  fail "T54 fallback renewal wrong: calls=$(cat "$CALLLOG") ledger=$(cat "$stamp" 2>/dev/null || echo missing)"
+fi
+teardown_env
+
+# ── T55: AC3-NONTARGET - resolved path also manifest-less -> safe no-op ────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export STUB_STATE_PATH="${TMP_DIR}/elsewhere/target-state.md"
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1; rc=$?
+if [[ "$rc" -eq 0 && ! -s "$CALLLOG" \
+      && -f "${LIVE_DIR}/182b29c8-owner-uuid" ]]; then
+  pass "T55 resolved-but-missing manifest -> activity stamped, no fno call"
+else
+  fail "T55 rc=$rc calls=$(cat "$CALLLOG") stamp=$(test -f "${LIVE_DIR}/182b29c8-owner-uuid" && echo yes || echo no)"
 fi
 teardown_env
 
