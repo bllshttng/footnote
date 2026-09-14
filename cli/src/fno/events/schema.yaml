@@ -4918,6 +4918,31 @@ event_types:
         pid:
           type: integer
           description: "OS pid of the tick process."
+        sender:
+          type: string
+          description: "On why=killed only: the bounce that sent the SIGTERM, '<caller> pid <pid> via <parent>' when pr-watch-bounce.json was written within 15s of the kill, else unrecorded (a hand kill, or a sidecar the handler could not read)."
+
+  - name: pr_watch_bounce
+    description: "A bounce (bootout/bootstrap/kickstart) of the real pr-watcher agent, written by bounce() just before bootout so a killed tick's sender row can name the cure that sent its SIGTERM (x-09d8). The defer path emits too, with deferred true and no sidecar, so deferrals are countable. Bounces of other agents (groom's own label) write nothing."
+    sources: [daemon]
+    data:
+      required: [caller, pid, deferred]
+      properties:
+        caller:
+          type: string
+          description: "The verb that ordered the bounce: heal, refresh, doctor-fix, install; unknown names a call site that forgot to identify itself."
+        pid:
+          type: integer
+          description: "OS pid of the bouncing process."
+        ppid:
+          type: integer
+          description: "Parent pid of the bouncing process."
+        parent:
+          type: string
+          description: "First 160 characters of the bouncing process's parent command line."
+        deferred:
+          type: boolean
+          description: "True when the bounce stood down because a tick was in flight; this path writes no sidecar."
 
   - name: pr_heal_tick
     description: "CI heal drive loop (x-974c): one row per pr-heal --all --apply invocation carrying the per-cycle counts. Emitted even when every PR is skipped, so a quiet cycle cannot read as a loop that never ran. Rust-emitted into the global journal; the tick's own phase only gates the invocation."
