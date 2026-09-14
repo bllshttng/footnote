@@ -92,6 +92,7 @@ FOLDED_AGENT_SUBCOMMANDS: dict = {
 #: drift fails CI rather than silently mis-routing.
 RUST_CLIENT_VERBS = frozenset(
     {
+        "loops",
         "spawn",
         "ask",
         "list",
