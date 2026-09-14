@@ -855,14 +855,10 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     if verb == "restart" {
-        let force = match &args[1..] {
-            [] => false,
-            [f] if f == "--force" => true,
-            _ => {
-                eprintln!(
-                    "fno-agents: restart takes no arguments besides --force (got: {})",
-                    args[1..].join(" ")
-                );
+        let force = match fno_agents::restart_args::parse_restart_args(&args[1..]) {
+            Ok(force) => force,
+            Err(msg) => {
+                eprintln!("{msg}");
                 return 2;
             }
         };
