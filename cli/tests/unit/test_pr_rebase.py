@@ -100,7 +100,7 @@ def _make_conflict(tmp_path: Path, conflict_file: str = "base.txt") -> Path:
 
 
 def test_conflict_needs_resolver_exits_42(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(_rebase, "_conflict_resolution", lambda: "opus")
+    monkeypatch.setattr(_rebase, "_conflict_resolution", lambda _repo: "opus")
     work = _make_conflict(tmp_path)
     rc = _rebase.run_rebase(["--base=origin/main"], cwd=str(work))
     assert rc == 42
@@ -114,7 +114,7 @@ def test_conflict_needs_resolver_exits_42(tmp_path, capsys, monkeypatch):
 
 
 def test_conflict_resolution_fail_exits_1(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(_rebase, "_conflict_resolution", lambda: "fail")
+    monkeypatch.setattr(_rebase, "_conflict_resolution", lambda _repo: "fail")
     work = _make_conflict(tmp_path)
     rc = _rebase.run_rebase(["--base=origin/main"], cwd=str(work))
     assert rc == 1
@@ -124,7 +124,7 @@ def test_conflict_resolution_fail_exits_1(tmp_path, capsys, monkeypatch):
 
 
 def test_guardrail_lockfile_refuses_exit_1(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(_rebase, "_conflict_resolution", lambda: "opus")
+    monkeypatch.setattr(_rebase, "_conflict_resolution", lambda _repo: "opus")
     work = _make_conflict(tmp_path, conflict_file="uv.lock")
     rc = _rebase.run_rebase(["--base=origin/main"], cwd=str(work))
     assert rc == 1
@@ -134,7 +134,7 @@ def test_guardrail_lockfile_refuses_exit_1(tmp_path, capsys, monkeypatch):
 
 
 def test_phase_b_continue_resolves_exit_0(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(_rebase, "_conflict_resolution", lambda: "opus")
+    monkeypatch.setattr(_rebase, "_conflict_resolution", lambda _repo: "opus")
     work = _make_conflict(tmp_path)
     # Phase A leaves an in-progress rebase at exit 42.
     assert _rebase.run_rebase(["--base=origin/main"], cwd=str(work)) == 42
@@ -152,7 +152,7 @@ def test_phase_b_continue_more_conflicts_exits_42(tmp_path, capsys, monkeypatch)
     """AC3-EDGE / gemini HIGH on #524: in a multi-commit rebase, --continue
     exits non-zero when it pauses on a NEW conflict in a later commit; the
     port must report needs_resolver (42), not failed (1)."""
-    monkeypatch.setattr(_rebase, "_conflict_resolution", lambda: "opus")
+    monkeypatch.setattr(_rebase, "_conflict_resolution", lambda _repo: "opus")
     bare = tmp_path / "origin.git"
     subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True)
     work = tmp_path / "work"

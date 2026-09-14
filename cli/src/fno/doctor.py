@@ -1559,7 +1559,7 @@ def _auto_merge_review_gap(
     about a hypothetical code payload - a doctor-side recount of its lane
     logic would be the same bug one level up, the reason the predicate already
     mirrors loopcheck.rs. The pairing reads the two layers the merge path
-    reads: global ``auto_merge.enabled`` (``_load_auto_merge``) and the
+    reads: repo-resolved ``auto_merge.enabled`` (``_load_auto_merge``) and the
     INVOKING project's repo-resolved review config (the same cwd-to-toplevel
     resolution ``fno do pr status`` uses), never the fno source checkout. A
     config the predicate cannot read fail-closes to True inside it, so a

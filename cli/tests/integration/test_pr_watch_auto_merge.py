@@ -95,7 +95,7 @@ def _arm_world(
             }
         ),
     )
-    monkeypatch.setattr(merge_mod, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))
+    monkeypatch.setattr(merge_mod, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(merge_mod.shutil, "which", lambda _x: "/usr/bin/gh")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     # The journey is about grant/claim/CI sequencing, not the coverage
