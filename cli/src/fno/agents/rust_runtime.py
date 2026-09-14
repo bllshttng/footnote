@@ -1448,7 +1448,7 @@ _STATUS_ARG_LEAVES = {
 }
 
 
-def _rust_leaf_argv(args: "list[str]") -> "list[str]":
+def _rust_leaf_argv(args: "Sequence[str]") -> "list[str]":
     """The binary argv for a routed leaf: plain passthrough, except a leaf in
     :data:`_STATUS_ARG_LEAVES` becomes ``status <flag> ...``."""
     if args:
