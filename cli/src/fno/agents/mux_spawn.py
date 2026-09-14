@@ -3204,39 +3204,6 @@ def _strict_json_list(
     return value
 
 
-def _select_or_create_bounded_tab(
-    session: str,
-    workspace: str | None,
-    runner: Callable[..., "subprocess.CompletedProcess[str]"],
-) -> int:
-    args = ["mux", "tab", "ls", "--server", session, "--json"]
-    if workspace:
-        args += ["--workspace", workspace]
-    tabs = _strict_json_list(args, runner, noun="tab listing")
-    for tab in tabs:
-        tab_id = tab.get("tab_id")
-        pane_ids = tab.get("pane_ids")
-        if isinstance(tab_id, int) and isinstance(pane_ids, list) and len(pane_ids) < 4:
-            return tab_id
-    create_args = ["mux", "tab", "create", "--server", session, "--json"]
-    if workspace:
-        create_args += ["--workspace", workspace]
-    proc = _run_mux(create_args, runner)
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
-        raise DispatchAskError(
-            f"tab creation failed: {detail or 'no output'}", exit_code=1
-        )
-    try:
-        created = json.loads(proc.stdout or "")
-        tab_id = created["tab_id"]
-    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise DispatchAskError("tab creation receipt was unreadable", exit_code=1) from exc
-    if not isinstance(tab_id, int):
-        raise DispatchAskError("tab creation receipt had no stable tab id", exit_code=1)
-    return tab_id
-
-
 def dispatch_spawn_bounded_pane(
     *,
     workspace: str | None = None,
@@ -3279,26 +3246,15 @@ def dispatch_spawn_bounded_pane(
             f"placement lease held by {live_holder}; no pane spawned", exit_code=2
         ) from exc
     try:
-        explicit_geometry = any(
-            spawn_kwargs.get(key) is not None
-            for key in ("split", "at", "tab_id", "tab")
-        )
-        if explicit_geometry:
-            return dispatch_spawn_pane(
-                session=session,
-                squad=workspace,
-                runner=runner,
-                enforce_tab_capacity=True,
-                **spawn_kwargs,
-            )
-        for geometry_key in ("split", "at", "tab_id"):
-            spawn_kwargs.pop(geometry_key, None)
-        tab_id = _select_or_create_bounded_tab(session, workspace, runner)
+        # (x-ae47) The bounded lane forwards every placement directive to the
+        # server: `pane run --fit` picks the tab (first below max-panes, else
+        # a new one) where the Python pre-read used to, so a bare isolated
+        # server with no squad answers instead of refusing at `tab ls`.
         return dispatch_spawn_pane(
             session=session,
             squad=workspace,
-            tab_id=f"id:{tab_id}",
             runner=runner,
+            enforce_tab_capacity=True,
             **spawn_kwargs,
         )
     finally:
@@ -3807,6 +3763,12 @@ def dispatch_spawn_pane(
             # The bounded-placement lane's stable id rides the same transport
             # flag as a caller tab; the id: shape is enforced at the gate.
             placement_args += ["--tab", tab_id.strip()]
+        if enforce_tab_capacity and not (split or at or tab or tab_id):
+            # (x-ae47) The bounded lane with no geometry asks the SERVER to
+            # pick the tab: first below max-panes, else a new one. The raw
+            # `tab` check keeps a pane-group --tab <name> on its
+            # new-tab-then-join path.
+            placement_args.append("--fit")
         # Same reasoning as the spawn-clock stamp below, snapshotted first: a
         # sibling pane starting during the lock-wait or argv-build above would
         # otherwise widen the daemon oracle's candidate set. Gated to codex

@@ -360,6 +360,7 @@ pub(crate) async fn attach_place_keys(
                     max_panes: None,
                     thread_pane: false,
                     portal: None,
+                    fit: false,
                 },
             }),
         )

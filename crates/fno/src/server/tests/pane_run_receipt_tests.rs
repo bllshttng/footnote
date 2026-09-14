@@ -29,6 +29,7 @@ fn run_pane_places_at_named_tab_and_anchor() {
                 fallback: PlacementFallback::NewTab,
                 max_panes: None,
                 thread_pane: false,
+                fit: false,
             },
             None,
         )
@@ -65,6 +66,7 @@ fn run_pane_places_at_named_tab_and_anchor() {
                 fallback: PlacementFallback::NewTab,
                 max_panes: None,
                 thread_pane: false,
+                fit: false,
             },
             None,
         )
@@ -104,6 +106,7 @@ fn pane_run_receipt_reports_committed_tab_for_selector_placements() {
             fallback: PlacementFallback::NewTab,
             max_panes: None,
             thread_pane: false,
+            fit: false,
         },
         worker: None,
         reply: tx,
@@ -139,6 +142,7 @@ fn pane_run_receipt_reports_committed_tab_for_selector_placements() {
             fallback: PlacementFallback::NewTab,
             max_panes: None,
             thread_pane: false,
+            fit: false,
         },
         worker: None,
         reply: tx,

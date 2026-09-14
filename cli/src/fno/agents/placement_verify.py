@@ -78,12 +78,3 @@ def verify_bounded_placement(
             f"{expected_tab_id}{redirected}",
             exit_code=1,
         )
-    in_tab = [
-        item for item in listed
-        if isinstance(item, dict) and item.get("tab_id") == expected_tab_id
-    ]
-    if len(in_tab) > 4:
-        raise DispatchAskError(
-            "bounded placement verification failed: fifth pane",
-            exit_code=1,
-        )

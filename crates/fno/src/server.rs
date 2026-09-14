@@ -69,6 +69,7 @@ pub(crate) mod lifecycle_target;
 mod pane_close;
 mod pane_identity;
 mod pane_reseat;
+pub(crate) mod placement_fit;
 mod portal_reach;
 mod resume_argv;
 mod retire_session;
@@ -3769,6 +3770,9 @@ impl Core {
                 ));
             }
         }
+        if let Some(refusal) = placement_fit::refuse_fit_with_geometry(&placement) {
+            return Err(refusal);
+        }
         // Create-if-absent lives ONLY here on the script path (Locked 7, x-9f75): a `pane run --squad
         // <name>` for a not-yet-existing squad mints one so lanes group by project; AttachAgent / UI targets
         // stay fail-closed. Only an UNKNOWN name is creatable (blank / unknown id still error). Resolved
@@ -3887,6 +3891,11 @@ impl Core {
         pid: u64,
         placement: &PanePlacement,
     ) -> Result<(u64, TabId, bool), (u32, String)> {
+        if placement.fit {
+            // (x-ae47) Server-chosen tab; the tab/at/split combination is
+            // refused in run_pane, so the strict-anchor branch is unreachable.
+            return self.place_with_fit(dest, squad_key, pid, placement);
+        }
         // Strict origin placement (--at current, fallback=Refuse): locate the
         // anchor pane, infer its squad+tab, refuse a conflicting explicit
         // selector, and never fall back to a new tab. Handled before the
@@ -18157,6 +18166,10 @@ mod tests {
     #[path = "pane_run_receipt_tests.rs"]
     mod pane_run_receipt_tests;
 
+    // The fit placement tests (x-ae47) moved out for the same reason.
+    #[path = "placement_fit_tests.rs"]
+    mod placement_fit_tests;
+
     #[test]
     fn exact_current_refuses_conflicting_tab_selector() {
         // AC1-EDGE: --at current pins pane 1 (tab 10); an explicit --tab id:20
@@ -18173,16 +18186,12 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
-                    portal_new: false,
-                    portal: None,
                     target: PaneTarget::SquadId(1),
                     split: Some(Dir::Down),
-                    here: false,
                     tab: Some(TabSel::Id(20)),
                     at: Some(1),
                     fallback: PlacementFallback::Refuse,
-                    max_panes: None,
-                    thread_pane: false,
+                    ..Default::default()
                 },
                 None,
             )
@@ -19872,16 +19881,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    tab: None,
-                    at: None,
                     target: PaneTarget::SquadName("work".into()),
-                    split: None,
-                    here: false,
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
+                    ..Default::default()
                 },
                 Some("probe-x5f7f".into()),
             )
@@ -19927,16 +19928,8 @@ mod tests {
             80,
             false,
             PanePlacement {
-                portal_new: false,
-                portal: None,
-                tab: None,
-                at: None,
                 target: PaneTarget::SquadName("work".into()),
-                split: None,
-                here: false,
-                fallback: PlacementFallback::NewTab,
-                max_panes: None,
-                thread_pane: false,
+                ..Default::default()
             },
             None,
         )
@@ -19971,16 +19964,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    tab: None,
-                    at: None,
                     target: PaneTarget::SquadName("work".into()),
-                    split: None,
-                    here: false,
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
+                    ..Default::default()
                 },
                 Some("a;rm -rf".into()),
             )
@@ -21171,16 +21156,8 @@ mod tests {
             Command::AttachAgent {
                 id: "deadbee1".into(),
                 placement: PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    tab: None,
-                    at: None,
                     target: PaneTarget::SquadName("ghost".into()),
-                    split: None,
-                    here: false,
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
+                    ..Default::default()
                 },
             },
         );
@@ -22126,16 +22103,8 @@ mod tests {
             Command::AttachAgent {
                 id: "deadbee2".into(),
                 placement: PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    tab: None,
-                    at: None,
-                    target: PaneTarget::CurrentRoute,
                     split: Some(Dir::Right),
-                    here: false,
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
+                    ..Default::default()
                 },
             },
         );
@@ -24771,16 +24740,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    tab: None,
-                    at: None,
                     target: PaneTarget::SquadName("review".into()),
-                    split: None,
-                    here: false,
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
+                    ..Default::default()
                 },
                 None,
             )
@@ -24830,16 +24791,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    tab: None,
-                    at: None,
                     target: PaneTarget::SquadName("readyrule".into()),
-                    split: None,
-                    here: false,
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
+                    ..Default::default()
                 },
                 None,
             )
@@ -24892,16 +24845,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    tab: None,
-                    at: None,
                     target: PaneTarget::SquadName("   ".into()),
-                    split: None,
-                    here: false,
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
+                    ..Default::default()
                 },
                 None,
             )

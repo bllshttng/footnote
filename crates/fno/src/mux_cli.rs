@@ -2637,6 +2637,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut at = None;
         let mut at_current = false;
         let mut max_panes = None;
+        let mut fit = false;
         let mut i = 1;
         while i < args.len() {
             let tok = args[i]
@@ -2687,12 +2688,8 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 // (x-d865) exact placement: land in a named tab, adjacent to an
                 // anchor pane.
                 "--tab" => tab = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
-                // Bare "at" mirrors the "split" alias above: the outer
-                // pane-run transport (mux_spawn.py placement_args) sends
-                // placement directives unprefixed, and this arm's absence
-                // used to fall through to `_ => break`, folding "at" and
-                // everything after it into the spawned process's own argv
-                // instead of the placement it named.
+                // Bare "at" mirrors bare "split" above: mux_spawn.py's
+                // placement_args sends directives unprefixed (x-d865).
                 "--at" | "at" => {
                     let v = flag_value(args, &mut i, "--at")?;
                     if v == "current" {
@@ -2711,6 +2708,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     }
                     max_panes = Some(parsed);
                 }
+                "--fit" => fit = true,
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
                 _ => break, // first bare token begins the command argv
             }
@@ -2749,6 +2747,21 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             at = Some(fno_pane);
             fallback = PlacementFallback::Refuse;
         }
+        let placement = PanePlacement {
+            target: squad
+                .map(PaneTarget::SquadName)
+                .unwrap_or(PaneTarget::CurrentRoute),
+            split,
+            tab,
+            at,
+            fallback,
+            max_panes,
+            fit,
+            ..Default::default()
+        };
+        if let Some((_, msg)) = crate::server::placement_fit::refuse_fit_with_geometry(&placement) {
+            return Err(msg);
+        }
         return Ok(ParsedPane {
             session,
             json,
@@ -2757,20 +2770,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 argv,
                 claim,
                 worker,
-                placement: PanePlacement {
-                    portal_new: false,
-                    target: squad
-                        .map(PaneTarget::SquadName)
-                        .unwrap_or(PaneTarget::CurrentRoute),
-                    split,
-                    here: false,
-                    tab,
-                    at,
-                    fallback,
-                    max_panes,
-                    thread_pane: false,
-                    portal: None,
-                },
+                placement,
             },
         });
     }
