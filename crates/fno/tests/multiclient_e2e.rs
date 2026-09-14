@@ -879,7 +879,7 @@ fn tab_close_renumbers_the_strip_on_the_client_that_did_not_issue_it() {
     b.wait_screen(15, |s| !s.trim().is_empty());
 
     let strip = |s: &str| s.lines().next().unwrap_or("").to_string();
-    let a_row = strip(&a.screen());
+    let a_row = a.wait_screen(15, |s| strip(s).contains(" 3]"));
     assert!(
         a_row.contains(" 3]"),
         "a shows three tabs before the close; strip: {a_row:?}"
