@@ -67,6 +67,7 @@ agents list	KEEP	agents list	81	deliberate readability slack for a high-traffic 
 agents logs	KEEP	agents logs	73	deliberate readability slack for a high-traffic distinct operation
 agents loop	KEEP	agents loop	61	deliberate readability slack for a high-traffic distinct operation
 agents loop-check	KEEP	agents loop-check	61	deliberate readability slack for a high-traffic distinct operation
+agents loops	T1	agents loops	0
 agents mail ack	T1	agents mail ack	10
 agents mail drain	T1	agents mail drain	10
 agents mail drain-self	T1	agents mail drain-self	6
