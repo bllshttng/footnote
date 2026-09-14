@@ -259,7 +259,7 @@ pub fn turn_start_request_json_with_effort(
 /// Additive and order-stable: the posture's own roots come first and a root it
 /// already names is not repeated, so the turn widens the policy and narrows
 /// nothing.
-fn sandbox_policy_with_roots(resolved: Option<&Value>, state_dirs: &[String]) -> Value {
+pub(crate) fn sandbox_policy_with_roots(resolved: Option<&Value>, state_dirs: &[String]) -> Value {
     let mut policy = resolved.cloned().unwrap_or_else(
         || json!({"type": "workspaceWrite", "writableRoots": Vec::<String>::new()}),
     );
