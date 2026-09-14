@@ -75,7 +75,7 @@ prefix = "fno"
 [graph]
 # Graph mutation payload: rows uses row-scoped conflicts; whole restores the legacy whole-graph commit path (default rows).
 commit_mode = "rows"
-# Authoritative graph reader: json or the shadow SQLite row store (default json).
+# Authoritative graph backend: json or sqlite. Owned by `fno doctor graph backend`; do not set by hand.
 read_source = "json"
 
 [obsidian]
