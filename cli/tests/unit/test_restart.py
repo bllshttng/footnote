@@ -203,6 +203,35 @@ def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:
     assert "exited 3" in result.output
 
 
+def test_restart_daemon_failure_renders_stderr_once(monkeypatch) -> None:
+    """The adapter's one line carries the failure detail; the raw daemon
+    stderr is never double-echoed (x-67b8: the duplicate echo claimed the
+    internal --json came from the operator)."""
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(
+        restart.subprocess,
+        "run",
+        lambda cmd, **k: types.SimpleNamespace(
+            returncode=2, stdout="", stderr="fno-agents restart: unexpected argument '--bogus'"
+        ),
+    )
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 1
+    assert "exited 2" in result.output
+    # The refusal detail reaches the operator only inside the adapter's own
+    # prefixed lines (the failure line and the FAILED verdict); the raw
+    # daemon stderr is never echoed as a standalone line (x-67b8: the old
+    # echo claimed the internal --json came from the operator).
+    offenders = [
+        line
+        for line in result.output.splitlines()
+        if "unexpected argument" in line and not line.startswith("fno agents restart:")
+    ]
+    assert offenders == []
+
+
 def test_restart_json_summary(monkeypatch) -> None:
     _fake_daemon_binary(monkeypatch)
     monkeypatch.setattr(

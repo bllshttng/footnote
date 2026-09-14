@@ -7,6 +7,8 @@
 //! minimum that exercises every Wave 3 daemon verb end-to-end; the rich flag
 //! surface (`--stream`, `--watch`, ...) lands with its verbs in later waves.
 
+use clap::Parser as _;
+use fno_agents::cli_args::{refusal_line, RestartArgs};
 use fno_agents::client::resolve_daemon_bin;
 use fno_agents::client::{
     call, call_if_running, check_daemon_drift, drift_from_status, restart_daemon, ClientError,
@@ -944,14 +946,14 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     if verb == "restart" {
-        let force = match fno_agents::restart_args::parse_restart_args(&args[1..]) {
-            Ok(force) => force,
-            Err(msg) => {
-                eprintln!("{msg}");
+        let parsed = match RestartArgs::try_parse_from(&args[1..]) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", refusal_line("fno-agents restart", &e));
                 return 2;
             }
         };
-        return run_restart(force).await;
+        return run_restart(parsed.force, parsed.json.json).await;
     }
 
     // `reap` is the manual dead-row GC (x-b1aa): the SAME sweep the daemon runs
@@ -3244,13 +3246,24 @@ fn render_restart(
 /// from the current binary. SIGTERM the running daemon (graceful drain; PTY
 /// workers survive), wait for the socket to clear, lazy-start fresh. With
 /// `force`, SIGKILL the lockfile holder first and lazy-start fresh (x-3498).
-async fn run_restart(force: bool) -> i32 {
+/// With `json`, stdout carries ONE machine line (the keepers summary the
+/// Python adapter parses); every human receipt moves to stderr.
+async fn run_restart(force: bool, json: bool) -> i32 {
     let home = AgentsHome::from_env();
     let daemon_bin = resolve_daemon_bin();
     let outcome = restart_daemon(&home, &daemon_bin, force).await;
     let (out, err, code) = render_restart(&outcome);
+    // In --json mode stdout stays parseable: the keepers line is the machine
+    // surface, so human receipts land on stderr beside the errors.
+    let say = |line: &str| {
+        if json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
     if let Some(line) = out {
-        println!("{line}");
+        say(&line);
     }
     if let Some(line) = err {
         eprintln!("{line}");
@@ -3266,11 +3279,11 @@ async fn run_restart(force: bool) -> i32 {
     let (cycled, stale_panes) = fno_agents::census::cycle_stale_store_keepers().await;
     for c in &cycled {
         if c.result == "cycled" {
-            println!(
+            say(&format!(
                 "fno agents restart: store keeper {} pid {:?} shut down (stale build; respawns on next read).",
                 c.graph.as_deref().unwrap_or("unknown graph"),
                 c.old_pid
-            );
+            ));
         } else {
             eprintln!(
                 "fno agents restart: store keeper {} {}; it was NOT refreshed.",
@@ -3280,9 +3293,9 @@ async fn run_restart(force: bool) -> i32 {
         }
     }
     if stale_panes > 0 {
-        println!(
+        say(&format!(
             "fno agents restart: {stale_panes} pane keeper(s) run an older build; kept with their panes, current when each pane ends."
-        );
+        ));
     }
     // The pr-watch LaunchAgent embeds an absolute binary path that a daemon
     // swap never re-renders (`fno agents restart` reaches no launchd job);
@@ -3302,9 +3315,9 @@ async fn run_restart(force: bool) -> i32 {
             };
             let said = said.trim();
             if said.is_empty() {
-                println!("fno agents restart: pr-watch refreshed.");
+                say("fno agents restart: pr-watch refreshed.");
             } else {
-                println!("fno agents restart: {said}");
+                say(&format!("fno agents restart: {said}"));
             }
         }
         Ok(out) => eprintln!(

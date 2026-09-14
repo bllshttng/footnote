@@ -79,15 +79,15 @@ pub struct ReportArgs {
     pub json: JsonOnly,
 }
 
-/// `fno-agents review-summary`: the reviewed-at display line's inputs. All
-/// three are required; the caller turns a parse failure into the verb's
-/// deliberate silence (print nothing, exit 0), never into a claim.
+/// `fno-agents review-summary`: the reviewed-at display line's inputs.
+/// Branch and head are required; the caller turns a parse failure into the
+/// verb's deliberate silence (print nothing, exit 0), never into a claim.
 #[derive(Parser, Debug)]
 #[command(name = "fno-agents review-summary", no_binary_name = true)]
 pub struct ReviewSummaryArgs {
     /// Path to the .fno/events.jsonl ledger to read
     #[arg(long, value_name = "PATH")]
-    pub events: PathBuf,
+    pub events: Option<PathBuf>,
     /// Branch name the attestation must match
     #[arg(long, value_name = "BRANCH")]
     pub branch: String,
@@ -234,7 +234,7 @@ mod tests {
             "abc1234",
         ])
         .expect("all three parse, equals form included");
-        assert_eq!(a.events, PathBuf::from("e.jsonl"));
+        assert_eq!(a.events, Some(PathBuf::from("e.jsonl")));
         assert_eq!(a.branch, "feature/x");
         assert_eq!(a.head, "abc1234");
         for partial in [

@@ -8,6 +8,7 @@
 //! exits 0, so a PR that arrives unreviewed carries no claim. A display line
 //! can never clear a gate; the gate keeps its own read.
 
+use clap::Parser as _;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -20,18 +21,6 @@ struct AttestationRow {
     findings: u64,
 }
 
-fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    for (idx, a) in args.iter().enumerate() {
-        if let Some(v) = a.strip_prefix(&format!("{flag}=")) {
-            return Some(v.to_string());
-        }
-        if a == flag {
-            return args.get(idx + 1).map(|v| v.to_string());
-        }
-    }
-    None
-}
-
 /// The journal `--events` defaults to when a caller omits it: the global
 /// state root's `events.jsonl`, the mirror every attestation emission writes.
 /// An external worktree cannot name its journal as `.fno/events.jsonl` -
@@ -40,19 +29,6 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 fn default_events_path() -> PathBuf {
     crate::scratch::fno_state_root().join("events.jsonl")
 }
-
-fn parse_args(args: &[String]) -> Option<(PathBuf, String, String)> {
-    // A caller that cannot name branch and head gets silence, not a guess:
-    // the verb's only output is a claim about a specific (branch, head) pair.
-    Some((
-        flag_value(args, "--events")
-            .map(PathBuf::from)
-            .unwrap_or_else(default_events_path),
-        flag_value(args, "--branch")?,
-        flag_value(args, "--head")?,
-    ))
-}
-
 /// Prefix sha match on the shorter side, minimum 7 hex chars, the tolerance
 /// `attestation_in_scope` callers use when a display surface hands a short
 /// sha. Shorter than 7 demands exact equality.
@@ -138,15 +114,17 @@ pub fn summary_line(events_text: &str, branch: &str, head: &str) -> Option<Strin
 /// `fno-agents review-summary` entry: prints the line or nothing, exit 0
 /// either way. A missing or unreadable events file is an EMPTY ledger, not
 /// an error - the PR opens without the section and the gate still reads the
-/// ledger at merge time.
+/// ledger at merge time. A parse failure is the same deliberate silence: the
+/// caller converts the refusal into "no claim", never a usage error.
 pub fn run_review_summary(args: &[String]) -> i32 {
-    let Some((events_path, branch, head)) = parse_args(args) else {
+    let Ok(parsed) = crate::cli_args::ReviewSummaryArgs::try_parse_from(args) else {
         return 0;
     };
+    let events_path = parsed.events.unwrap_or_else(default_events_path);
     let Ok(events_text) = std::fs::read_to_string(events_path) else {
         return 0;
     };
-    if let Some(line) = summary_line(&events_text, &branch, &head) {
+    if let Some(line) = summary_line(&events_text, &parsed.branch, &parsed.head) {
         println!("{line}");
     }
     0
@@ -228,7 +206,6 @@ mod tests {
     #[test]
     fn missing_file_prints_nothing_and_exits_zero() {
         let code = run_review_summary(&[
-            "review-summary".to_string(),
             "--events".to_string(),
             "/nonexistent/fno-review-summary-test/events.jsonl".to_string(),
             "--branch".to_string(),
@@ -241,29 +218,17 @@ mod tests {
 
     #[test]
     fn missing_args_print_nothing_and_exit_zero() {
-        assert_eq!(run_review_summary(&["review-summary".to_string()]), 0);
+        assert_eq!(run_review_summary(&[]), 0);
         assert_eq!(
-            run_review_summary(&[
-                "review-summary".to_string(),
-                "--events".to_string(),
-                "e.jsonl".to_string(),
-            ]),
+            run_review_summary(&["--events".to_string(), "e.jsonl".to_string()]),
             0
         );
     }
 
     #[test]
     fn omitted_events_defaults_to_the_global_state_root_journal() {
-        let args = vec![
-            "review-summary".to_string(),
-            "--branch".to_string(),
-            "feature/x".to_string(),
-            "--head".to_string(),
-            "abc1234".to_string(),
-        ];
-        let (events, _, _) = parse_args(&args).expect("branch and head alone parse");
         assert_eq!(
-            events,
+            default_events_path(),
             crate::scratch::fno_state_root().join("events.jsonl")
         );
     }

@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
+use clap::Parser as _;
 use regex::Regex;
 use serde_json::json;
 
@@ -1236,44 +1237,31 @@ fn repo_root_of_cwd() -> PathBuf {
     )
 }
 
-fn flag_value(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-}
-
-fn has_flag(args: &[String], name: &str) -> bool {
-    args.iter().any(|a| a == name)
-}
-
 /// Entry for the binary-direct `scratch` verb (client.rs). Never lazy-starts
-/// a daemon; reads files and prints state words.
+/// a daemon; reads files and prints state words. A present flag with a
+/// missing or malformed value is a refusal (exit 2), never a silent default.
 pub fn run_cli(args: &[String]) -> i32 {
-    let Some(sub) = args.first() else {
-        eprintln!("usage: fno-agents scratch <sweep|report> [--since-days N] [--threshold N] [--jobs-dir <path>] [--dry-run] [--json]");
-        return 2;
+    let parsed = match crate::cli_args::ScratchArgs::try_parse_from(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                crate::cli_args::refusal_line("fno-agents scratch", &e)
+            );
+            return 2;
+        }
     };
-    let window: i64 = flag_value(args, "--since-days")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_WINDOW_DAYS);
-    match sub.as_str() {
-        "sweep" => {
-            let jobs_dir = flag_value(args, "--jobs-dir")
-                .map(PathBuf::from)
-                .or_else(default_jobs_dir);
+    match parsed.cmd {
+        crate::cli_args::ScratchCmd::Sweep(s) => {
+            let jobs_dir = s.jobs_dir.or_else(default_jobs_dir);
             let Some(jobs_dir) = jobs_dir else {
                 println!("insufficient: no jobs dir resolved (set --jobs-dir)");
                 return 0;
             };
             let repo_root = repo_root_of_cwd();
             let (cfg_threshold, cfg_window) = load_evals_config(&repo_root);
-            let threshold = flag_value(args, "--threshold")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(cfg_threshold);
-            let window_days = flag_value(args, "--since-days")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(cfg_window);
+            let threshold = s.threshold.unwrap_or(cfg_threshold);
+            let window_days = s.since_days.unwrap_or(cfg_window);
             let fixtures = std::env::var_os("FNO_AGENTS_FIXTURES")
                 .map(PathBuf::from)
                 .or_else(|| {
@@ -1290,7 +1278,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             let opts = SweepOpts {
                 threshold,
                 window_days,
-                dry_run: has_flag(args, "--dry-run"),
+                dry_run: s.dry_run,
             };
             // The one seam crossing: `fno` launches for node birth + the
             // hidden-leaf probe. The caller does not own the decision the
@@ -1315,7 +1303,7 @@ pub fn run_cli(args: &[String]) -> i32 {
             let emit = (!opts.dry_run)
                 .then(|| crate::events::EventEmitter::new(paths.journal.clone(), "agents"));
             let lines = run_sweep(&paths, &opts, emit.as_ref(), &mut fno);
-            if has_flag(args, "--json") {
+            if s.json.json {
                 println!(
                     "{}",
                     serde_json::to_string(&lines).unwrap_or_else(|_| "[]".into())
@@ -1327,14 +1315,11 @@ pub fn run_cli(args: &[String]) -> i32 {
             }
             0
         }
-        "report" => {
+        crate::cli_args::ScratchCmd::Report(r) => {
             let journal = fno_state_root().join("events.jsonl");
-            print!("{}", run_report(&journal, window, has_flag(args, "--json")));
+            let window = r.since_days.unwrap_or(DEFAULT_WINDOW_DAYS);
+            print!("{}", run_report(&journal, window, r.json.json));
             0
-        }
-        other => {
-            eprintln!("fno-agents scratch: unknown subcommand {other:?} (sweep|report)");
-            2
         }
     }
 }
