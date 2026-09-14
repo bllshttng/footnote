@@ -6307,7 +6307,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
 /// What a read-only look at the pane referent proved. `Unknown` is the
 /// fail-closed posture: a probe that cannot prove absence changes nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PaneProbe {
+pub enum PaneProbe {
     Present,
     Absent,
     Unknown,
@@ -6317,7 +6317,7 @@ pub(crate) enum PaneProbe {
 /// touching it: a one-line `pane read` against that session. The absence
 /// vocabulary is the same `mux_pane_is_absent` set the kill cascade trusts, so
 /// "absent" means the mux layer itself said the pane is gone.
-fn run_mux_pane_probe(session: &str, pane_id: u64) -> PaneProbe {
+pub(crate) fn run_mux_pane_probe(session: &str, pane_id: u64) -> PaneProbe {
     let pane = pane_id.to_string();
     let mut child = match std::process::Command::new("fno")
         .args([

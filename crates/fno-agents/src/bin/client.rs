@@ -61,6 +61,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "kill-check",
     "king-checkin",
     "king-history",
+    "lane-heal",
     "reign-ledger",
     "route-slot",
     "list",
@@ -239,6 +240,17 @@ async fn run(args: Vec<String>) -> i32 {
 
     if matches!(verb, "codex-loaded-threads") {
         return fno_agents::codex_inject::run_loaded_thread_discovery().await;
+    }
+
+    // `lane-heal` is the hidden verdict verb for a dead mux-pane binding
+    // (x-4a68): probe the pane, read the codex loaded-thread list, and on a
+    // dead pane with a loaded thread rebind the row to the thread lane. One
+    // JSON verdict line, exit 0 for every verdict - data, never a process
+    // error. Same `matches!` treatment as `codex-loaded-threads` so it stays
+    // out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard - no
+    // advertised fno verb is added.
+    if matches!(verb, "lane-heal") {
+        return fno_agents::lane_heal::run_lane_heal(&args[1..]).await;
     }
 
     // `component-verdict` is the HIDDEN decision verb for deployed-component
