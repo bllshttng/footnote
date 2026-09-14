@@ -234,10 +234,10 @@ fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, Str
 
 /// Ask the merge gate about every candidate the listing called green
 /// (x-b9e1: the queue's only evidence was that the PR is open; a live review
-/// hold or an uncovered head made it unfusable and nothing said so). One
-/// subprocess per candidate under ONE budgeted slice; a PR whose gate call
-/// fails or whose slice runs out is simply absent from the answer, and its
-/// warning names it - build renders an absent verdict as not-actionable,
+/// hold or an uncovered head made it unfusable and nothing said so). The
+/// candidates read four at a time under ONE budgeted slice; a PR whose gate
+/// call fails or whose slice runs out is simply absent from the answer, and
+/// its warning names it - build renders an absent verdict as not-actionable,
 /// never as mergeable.
 pub(crate) fn read_pr_gates(
     cwd: &Path,
@@ -250,32 +250,62 @@ pub(crate) fn read_pr_gates(
             Vec::new(),
         );
     };
-    let start = Instant::now();
+    // Bounded fan-out: one fno-py cold start per candidate is the price of
+    // asking the gate, but every candidate at once would spend the fleet's
+    // shared gh quota faster than any slice can police.
+    const GATE_FANOUT: usize = 4;
+    let deadline = Instant::now() + slice;
     let mut rows: Vec<Value> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
-    for n in numbers {
-        let left = slice.saturating_sub(start.elapsed());
-        if left.is_zero() {
-            skipped.push(n.to_string());
-            continue;
-        }
-        match read_pr_gate(cwd, *n, left) {
-            Ok(payload) => match payload.get("ready").and_then(Value::as_bool) {
-                Some(ready) => rows.push(json!({
-                    "number": n,
-                    "ready": ready,
-                    "ready_blockers": payload
-                        .get("ready_blockers")
-                        .cloned()
-                        .unwrap_or(Value::Array(Vec::new())),
-                })),
-                None => warnings.push(format!(
-                    "merge gate answered no verdict for PR {n}: {}",
-                    s_str(&payload, "reason").unwrap_or("no ready field")
-                )),
-            },
-            Err(e) => warnings.push(format!("merge gate unreadable for PR {n}: {e}")),
+    for chunk in numbers.chunks(GATE_FANOUT) {
+        // Spawn the whole chunk, then join: every member of the chunk runs
+        // concurrently, and a panicked reader lands as Err, never unwinds.
+        let answers: Vec<(i64, Option<Result<Value, String>>)> = std::thread::scope(|s| {
+            let mut pending: Vec<(
+                i64,
+                Option<std::thread::ScopedJoinHandle<Result<Value, String>>>,
+            )> = Vec::new();
+            for n in chunk {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let cwd = cwd.to_path_buf();
+                if left.is_zero() {
+                    pending.push((*n, None));
+                } else {
+                    let h = s.spawn(move || read_pr_gate(&cwd, *n, left));
+                    pending.push((*n, Some(h)));
+                }
+            }
+            pending
+                .into_iter()
+                .map(|(n, h)| {
+                    let answer = h.map(|h| {
+                        h.join()
+                            .unwrap_or_else(|_| Err("gate reader panicked".to_string()))
+                    });
+                    (n, answer)
+                })
+                .collect()
+        });
+        for (n, answer) in answers {
+            match answer {
+                None => skipped.push(n.to_string()),
+                Some(Ok(payload)) => match payload.get("ready").and_then(Value::as_bool) {
+                    Some(ready) => rows.push(json!({
+                        "number": n,
+                        "ready": ready,
+                        "ready_blockers": payload
+                            .get("ready_blockers")
+                            .cloned()
+                            .unwrap_or(Value::Array(Vec::new())),
+                    })),
+                    None => warnings.push(format!(
+                        "merge gate answered no verdict for PR {n}: {}",
+                        s_str(&payload, "reason").unwrap_or("no ready field")
+                    )),
+                },
+                Some(Err(e)) => warnings.push(format!("merge gate unreadable for PR {n}: {e}")),
+            }
         }
     }
     if !skipped.is_empty() {
@@ -540,6 +570,21 @@ pub(crate) fn derived_status(entry: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_spent_budget_reads_the_gate_source_unreadable() {
+        let (read, warnings) = read_pr_gates(Path::new("."), &[1709], None);
+        assert!(!read.is_ok());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn no_candidates_reads_the_gate_ok_and_empty() {
+        let (read, warnings) = read_pr_gates(Path::new("."), &[], Some(Duration::from_secs(1)));
+        assert!(read.is_ok());
+        assert!(read.rows().is_empty());
+        assert!(warnings.is_empty());
+    }
 
     #[test]
     fn a_budget_killed_pr_listing_keeps_the_over_budget_verdict_in_both_queues() {
