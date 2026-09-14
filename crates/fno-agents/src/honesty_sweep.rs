@@ -55,7 +55,6 @@ const NEGATIVE: [&str; 8] = [
     "{}",
 ];
 const SOURCE_DIRS: [&str; 2] = ["cli/src", "crates"];
-const CANON: &str = "crates/fno-agents/src/harness_capabilities.toml";
 
 /// Segments that name the SHAPE of a field rather than the capability it is
 /// about. Pairing on these would match everything and find nothing.
@@ -164,23 +163,15 @@ fn git_root() -> Option<PathBuf> {
 /// compiled-in-table guard so it needs no repo on disk.
 fn rows_from_toml(text: &str) -> Result<Vec<Row>, String> {
     let table: toml::Value =
-        toml::from_str(text).map_err(|e| format!("cannot parse {CANON}: {e}"))?;
+        toml::from_str(text).map_err(|e| format!("cannot parse the capability table: {e}"))?;
     table_to_rows(&table)
-}
-
-/// The capability table's rows, read from disk the way the ported script did.
-fn read_harness_rows(root: &Path) -> Result<Vec<Row>, String> {
-    let path = root.join(CANON);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    rows_from_toml(&text)
 }
 
 fn table_to_rows(table: &toml::Value) -> Result<Vec<Row>, String> {
     let rows = table
         .get("harness")
         .and_then(|h| h.as_table())
-        .ok_or_else(|| format!("{CANON} has no [harness] table"))?;
+        .ok_or_else(|| "the capability table has no [harness] table")?;
     let mut out = Vec::new();
     for (name, row) in rows {
         let value =
@@ -753,9 +744,13 @@ pub fn run_honesty_sweep(args: &[String]) -> i32 {
         let (name, read) = match spec {
             PopSpec::HarnessCapabilities => (
                 "harness-capabilities",
-                root.as_ref()
-                    .ok_or_else(|| "no git root".to_string())
-                    .and_then(|root| read_harness_rows(root)),
+                // The compiled-in table is the canonical copy; the freshness
+                // probe gates the generated copies against it, so a disk read
+                // would measure nothing the build did not already pin.
+                match root {
+                    Some(_) => rows_from_toml(crate::harness_capabilities::CAPABILITY_TOML),
+                    None => Err("no git root; passes 3 and 4 cannot scan sources".to_string()),
+                },
             ),
             PopSpec::KingManifests => ("king-manifests", read_king_rows()),
             PopSpec::RowsJson { name, .. } => (name.as_str(), read_rows_json(spec)),
