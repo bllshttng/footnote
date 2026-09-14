@@ -429,12 +429,16 @@ pub fn dispatch_opencode_once(
 
     // spawn allows an empty initial message; default to "hello" (Python parity -
     // only the empty string, not whitespace).
-    let effective_message = if message.is_empty() { "hello" } else { message };
-    // A footnote slash command (`/fno:verb ...`) is a command dispatch, not a
-    // conversational message: send it WITHOUT the `[from:]` envelope so it rides
-    // `opencode run --command` (an envelope would demote it to prose no-op). A
-    // prose message keeps the courtesy envelope (x-de43).
-    let full_prompt = if effective_message.starts_with('/') {
+    let effective_message = crate::provider::render_verb_seed(
+        if message.is_empty() { "hello" } else { message },
+        "opencode",
+    );
+    // A footnote verb seed (`/fno:verb ...`, either sigil) is a command
+    // dispatch, not a conversational message: send it WITHOUT the `[from:]`
+    // envelope so it rides `opencode run --command` (an envelope would demote
+    // it to prose no-op). A prose message keeps the courtesy envelope (x-de43).
+    let first = effective_message.split_whitespace().next().unwrap_or("");
+    let full_prompt = if crate::provider::parse_verb_token(first).is_some() {
         effective_message.to_string()
     } else {
         format!("[from: {}]\n\n{}", from_name, effective_message)

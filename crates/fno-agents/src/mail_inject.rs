@@ -1064,24 +1064,15 @@ fn single_line_decision(text: &str) -> Option<i32> {
     None
 }
 
-/// Rewrite a leading fno-verb marker to the form of the receiving harness
-/// (operator, 2026-09-14): `/fno:review` and `$fno:review` both name the same
-/// verb, so a raw send typed in one harness's dialect lands in the recipient's
-/// native one. Everything else rides verbatim. The marker is matched only at
-/// payload start - one marker char plus `fno:` - so prose like `see /fno:docs`
-/// and lookalikes like `//fno:x` are untouched.
-fn normalize_verb_marker(text: &str, harness: MailInjectHarness) -> String {
-    let native = match harness {
-        MailInjectHarness::Codex => '$',
-        MailInjectHarness::Claude | MailInjectHarness::Opencode | MailInjectHarness::Keeper => '/',
-    };
-    let Some(rest) = text
-        .strip_prefix(['/', '$'])
-        .and_then(|r| r.strip_prefix("fno:"))
-    else {
-        return text.to_string();
-    };
-    format!("{native}fno:{rest}")
+/// The capability row a mail recipient renders through: the row name the
+/// shared renderer answers for. The keeper lane hosts a claude pane, so it
+/// takes the claude row.
+fn recipient_capability_row(harness: MailInjectHarness) -> &'static str {
+    match harness {
+        MailInjectHarness::Codex => "codex",
+        MailInjectHarness::Opencode => "opencode",
+        MailInjectHarness::Claude | MailInjectHarness::Keeper => "claude",
+    }
 }
 /// Mirrors the current origin trailer template in Python, placeholders
 /// included, so the Python renderer and Rust validator cannot drift.
@@ -1436,12 +1427,12 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         return code;
     }
 
-    // The verb marker is bidirectional: rewrite it to the receiving harness's
+    // The verb seed is bidirectional: render it to the receiving harness's
     // native form BEFORE the audit, so the record names what was delivered.
-    // Framed envelopes are relayed content and skip the rewrite: the marker
+    // Framed envelopes are relayed content and skip the rewrite: the verb
     // inside a wrapped body is the sender's words, not this door's payload.
     if !is_framed_envelope(&text) {
-        text = normalize_verb_marker(&text, args.harness);
+        text = crate::provider::render_verb_seed(&text, recipient_capability_row(args.harness));
     }
 
     // Forged-envelope predicate on UNWRAPPED bodies (x-4ce4): a single-line
@@ -1808,44 +1799,48 @@ mod tests {
     #[test]
     fn verb_marker_is_rewritten_to_the_receiving_harness_form() {
         // Operator, 2026-09-14: the marker is bidirectional. A verb typed in
-        // either dialect lands in the recipient's native form.
+        // either dialect lands in the recipient's native form, through the
+        // shared renderer (x-c976).
         assert_eq!(
-            normalize_verb_marker("$fno:review medium", MailInjectHarness::Claude),
+            crate::provider::render_verb_seed("$fno:review medium", "claude"),
             "/fno:review medium"
         );
         assert_eq!(
-            normalize_verb_marker("/fno:review medium", MailInjectHarness::Codex),
+            crate::provider::render_verb_seed("/fno:review medium", "codex"),
             "$fno:review medium"
         );
         // A payload already in the native form passes through byte-identical.
         assert_eq!(
-            normalize_verb_marker("$fno:reign x-4d9b", MailInjectHarness::Codex),
+            crate::provider::render_verb_seed("$fno:reign x-4d9b", "codex"),
             "$fno:reign x-4d9b"
         );
         assert_eq!(
-            normalize_verb_marker("/fno:review", MailInjectHarness::Claude),
+            crate::provider::render_verb_seed("/fno:review", "claude"),
             "/fno:review"
         );
         // The keeper lane hosts a claude pane, so it takes the slash form.
         assert_eq!(
-            normalize_verb_marker("$fno:fix x-1", MailInjectHarness::Keeper),
+            crate::provider::render_verb_seed(
+                "$fno:fix x-1",
+                recipient_capability_row(MailInjectHarness::Keeper)
+            ),
             "/fno:fix x-1"
         );
         // Non-verb payloads, mid-line markers, and lookalikes ride verbatim.
         assert_eq!(
-            normalize_verb_marker("hello there", MailInjectHarness::Claude),
+            crate::provider::render_verb_seed("hello there", "claude"),
             "hello there"
         );
         assert_eq!(
-            normalize_verb_marker("see /fno:docs", MailInjectHarness::Codex),
+            crate::provider::render_verb_seed("see /fno:docs", "codex"),
             "see /fno:docs"
         );
         assert_eq!(
-            normalize_verb_marker("/compact", MailInjectHarness::Codex),
+            crate::provider::render_verb_seed("/compact", "codex"),
             "/compact"
         );
         assert_eq!(
-            normalize_verb_marker("//fno:x", MailInjectHarness::Codex),
+            crate::provider::render_verb_seed("//fno:x", "codex"),
             "//fno:x"
         );
     }

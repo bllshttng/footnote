@@ -658,8 +658,12 @@ fn dispatch_opencode_serve_inner(
     };
 
     // Session minted on the shared serve, bound to the worker cwd.
-    let effective_message = if message.is_empty() { "hello" } else { message };
-    let full_prompt = if effective_message.starts_with('/') {
+    let effective_message = crate::provider::render_verb_seed(
+        if message.is_empty() { "hello" } else { message },
+        "opencode",
+    );
+    let first = effective_message.split_whitespace().next().unwrap_or("");
+    let full_prompt = if crate::provider::parse_verb_token(first).is_some() {
         effective_message.to_string()
     } else {
         format!("[from: {from_name}]\n\n{effective_message}")
@@ -1227,10 +1231,12 @@ pub fn ask_registered_session(
             13,
         );
     }
-    let full_prompt = if message.starts_with('/') {
-        message.to_string()
+    let rendered = crate::provider::render_verb_seed(message, "opencode");
+    let first = rendered.split_whitespace().next().unwrap_or("");
+    let full_prompt = if crate::provider::parse_verb_token(first).is_some() {
+        rendered
     } else {
-        format!("[from: {from_name}]\n\n{message}")
+        format!("[from: {from_name}]\n\n{rendered}")
     };
     let serve = match ensure_serve(home) {
         Ok(serve) => serve,

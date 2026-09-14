@@ -3481,8 +3481,7 @@ def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
     process still running. Nothing about that population lacks a transport id,
     which is why the old scoping of this function -- "the last resort after
     ``stop_agent`` finds no ``short_id``" -- meant it never ran for the exact
-    workers it saves. A docstring that scopes a capability out of its real
-    population is a capability nobody has.
+    workers it saves.
 
     It is also still the arm for a row carrying a live process and no transport
     id at all, which the spawn receipt sometimes never yields; refusing there
