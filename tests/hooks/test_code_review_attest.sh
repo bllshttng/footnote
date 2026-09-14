@@ -179,13 +179,15 @@ STUB
 chmod +x "$BIN/fno-stub"
 
 HOOK_STDOUT="$TMP/hook-stdout.txt"
+HOOK_STDERR="$TMP/hook-stderr.txt"
 
 run_hook() {
   # $1 = payload JSON on stdin
   : > "$EMITTED"
   : > "$CLASSIFY_MARKER"
   : > "$HOOK_STDOUT"
-  printf '%s' "$1" | FNO="$BIN/fno-stub" bash "$HOOK" >"$HOOK_STDOUT" 2>/dev/null
+  : > "$HOOK_STDERR"
+  printf '%s' "$1" | FNO="$BIN/fno-stub" bash "$HOOK" >"$HOOK_STDOUT" 2>"$HOOK_STDERR"
 }
 
 attested() { [[ -s "$EMITTED" ]]; }
@@ -215,6 +217,16 @@ expect_silent() {
 expect_silent_noclassify() {
   if attested; then fail "$1: attested (must not)"; return; fi
   if classified; then fail "$1: silent but the classifier ran"; else pass "$1: silent, classifier never ran"; fi
+}
+
+# Codex Stop stdout must be one JSON object or nothing; the attestation
+# status line lives on stderr, so an attesting run leaves stdout empty.
+expect_stop_stdout_empty() {
+  if [[ -s "$HOOK_STDOUT" ]]; then
+    fail "$1: stdout not empty (Codex Stop requires JSON or nothing): $(cat "$HOOK_STDOUT")"
+  else
+    pass "$1: stdout empty"
+  fi
 }
 
 post_tool_use() {
@@ -363,15 +375,16 @@ grep -q '"findings_nonblocking":1' "$EMITTED" \
 [[ "$(grep -c '"stage":"started"' "$EMITTED" || true)" == "1" ]] \
   && pass "ac3hp one reviewer observation row" \
   || fail "ac3hp emitted $(grep -c '"stage":"started"' "$EMITTED" || true) reviewer rows"
-grep -q 'classified 2 finding(s): 1 blocking, 1 non-blocking' "$HOOK_STDOUT" \
-  && pass "ac3hp stdout carries the classification line" \
-  || fail "ac3hp classification line missing: $(cat "$HOOK_STDOUT")"
+grep -q 'classified 2 finding(s): 1 blocking, 1 non-blocking' "$HOOK_STDERR" \
+  && pass "ac3hp stderr carries the classification line" \
+  || fail "ac3hp classification line missing: $(cat "$HOOK_STDERR")"
 
 echo "== Codex Stop: exact-turn structured review evidence =="
 CODEX_TURN="turn-clean"
 CODEX_CLEAN_ITEM="$(codex_item_completed "$CODEX_TURN" '{"findings":[]}')"
 run_hook "$(codex_stop "$CODEX_CLEAN_ITEM" "$CODEX_TURN" "no findings")"
 expect_attest_verdict "codex-stop-empty-findings" pass
+expect_stop_stdout_empty "codex-stop-empty-findings"
 
 CODEX_DIRECT_CLEAN="$(codex_exited_review_mode "$CODEX_TURN" '{"findings":[]}')"
 run_hook "$(codex_stop "$CODEX_DIRECT_CLEAN" "$CODEX_TURN" "no findings")"
@@ -380,6 +393,7 @@ expect_attest_verdict "codex-stop-direct-empty-findings" pass
 CODEX_DIRTY_ITEM="$(codex_item_completed "$CODEX_TURN" '{"findings":[{"file":"a.py","summary":"boom"}]}')"
 run_hook "$(codex_stop "$CODEX_DIRTY_ITEM" "$CODEX_TURN" "no findings")"
 expect_attest_verdict "codex-stop-nonempty-findings" fail
+expect_stop_stdout_empty "codex-stop-nonempty-findings"
 
 CODEX_DIRECT_DIRTY="$(codex_exited_review_mode "$CODEX_TURN" '{"findings":[{"file":"a.py","summary":"boom"}]}')"
 run_hook "$(codex_stop "$CODEX_DIRECT_DIRTY" "$CODEX_TURN" "no findings")"
@@ -528,12 +542,12 @@ expect_attest_verdict "header-opens-message" pass
 PARTIAL_FINDINGS=$'## Review findings\n\n```json\n[{"file":"a.py","summary":"boom","failure_scenario":"the review lost its completion path"}]\n```'
 run_hook "$(forked_skill_stop "$PARTIAL_FINDINGS" "code-review")"
 expect_attest_verdict "subagent-nonempty-findings" fail
-grep -q "classified 1 finding(s): 1 blocking, 0 non-blocking" "$HOOK_STDOUT" \
+grep -q "classified 1 finding(s): 1 blocking, 0 non-blocking" "$HOOK_STDERR" \
   && pass "subagent partial receipt carries finding count" \
-  || fail "subagent partial receipt lost finding count: $(cat "$HOOK_STDOUT")"
-grep -q "reviewed head $WORK_HEAD" "$HOOK_STDOUT" \
+  || fail "subagent partial receipt lost finding count: $(cat "$HOOK_STDERR")"
+grep -q "reviewed head $WORK_HEAD" "$HOOK_STDERR" \
   && pass "subagent partial receipt carries reviewed head" \
-  || fail "subagent partial receipt lost reviewed head: $(cat "$HOOK_STDOUT")"
+  || fail "subagent partial receipt lost reviewed head: $(cat "$HOOK_STDERR")"
 
 : > "$HOOK_STDOUT"
 : > "$TMP/hook-stderr.txt"

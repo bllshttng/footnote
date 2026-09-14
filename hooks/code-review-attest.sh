@@ -333,9 +333,11 @@ fi
 # The one positive line naming what was classified: a run where the
 # classifier never fired is visibly different from one that classified zero.
 if [[ "$unparseable" == "1" ]]; then
-  echo "code-review-attest: review output was not machine-readable (no json fence, not \"(none)\"); attesting verdict=fail output_contract=prose_unparseable; reviewed head $reviewed_head"
+  # Status goes to stderr: a Codex Stop handler's stdout must be one JSON
+  # object or nothing, and this hook runs first in that group.
+  echo "code-review-attest: review output was not machine-readable (no json fence, not \"(none)\"); attesting verdict=fail output_contract=prose_unparseable; reviewed head $reviewed_head" >&2
 else
-  echo "code-review-attest: classified $total finding(s): $blocking blocking, $nonblocking non-blocking; reviewed head $reviewed_head; findings held"
+  echo "code-review-attest: classified $total finding(s): $blocking blocking, $nonblocking non-blocking; reviewed head $reviewed_head; findings held" >&2
 fi
 
 if bash "$script_dir/../skills/review/scripts/emit-attestation.sh" code-review "$verdict" \
