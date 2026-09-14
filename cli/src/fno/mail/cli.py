@@ -2090,7 +2090,6 @@ def _name_lane_send(
     msg-id. Exits 12 on a durable-floor write failure."""
     from fno.agents.dispatch import (
         BUS_ONLY_POLICY,
-        _lane_heal,
         _mail_inject_claude,
         _mail_inject_codex,
         _mail_inject_keeper,
