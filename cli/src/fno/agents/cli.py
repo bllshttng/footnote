@@ -1192,7 +1192,7 @@ def cmd_spawn(
         None,
         "--model",
         "-m",
-        help="Forwarded as --model <m> to the provider's own CLI. Unset = provider default.",
+        help="Forwarded as --model <m> to the harness CLI. With no -H, the routing.models row that declares <m> names the harness; unset = provider default.",
     ),
     permission_mode: str | None = typer.Option(
         None,
