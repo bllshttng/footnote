@@ -35,7 +35,7 @@ Migration per member, journalled to `<home>/provider-cap/<lane>-<epoch>.jsonl`:
 
 ## Returning
 
-The actor reads the quota lock from `provider-runtime-state.json`, the file Python's recovery sweep writes. Before x-6412 it defaulted to `runtime-state.json`, a file nobody writes. When the lock's `rate_limited_until` passes and no member's 429 is newer, the lane reads `returning`, not open. The return ladder owns it. The leave question and any recorded decision close as `superseded-by-reset`.
+The actor reads the quota lock from `provider-runtime-state.json`, the file Python's recovery sweep writes. Before this change it defaulted to `runtime-state.json`, a file nobody writes. When the lock's `rate_limited_until` passes and no member's 429 is newer, the lane reads `returning`, not open. The return ladder owns it. The leave question and any recorded decision close as `superseded-by-reset`.
 
 The ladder, one step per tick (120s), with state in `<home>/provider-cap/return-<lane>.json` keyed by the reset epoch:
 
