@@ -35,12 +35,6 @@ def _record_run(calls: list) -> object:
     return _run
 
 
-def _rows_seq(monkeypatch, seq: list[list[dict]]) -> None:
-    """_agents_rows returns each list in `seq` in turn (last one repeats)."""
-    it = iter(seq)
-    monkeypatch.setattr(restart, "_agents_rows", lambda: next(it, seq[-1]))
-
-
 def test_restart_restarts_daemon_and_reports_mux(monkeypatch) -> None:
     """Default: restart the daemon, REPORT (not kill) live mux sessions."""
     _fake_daemon_binary(monkeypatch)
@@ -294,155 +288,6 @@ def test_restart_wedged_row_fails_and_names_session_and_log(monkeypatch) -> None
     assert "/tmp/mux/stuck.log" in result.output
 
 
-def _revive_setup(monkeypatch, calls: list) -> None:
-    _fake_daemon_binary(monkeypatch)
-    monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
-    monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
-    monkeypatch.setattr(restart, "_REVIVE_SETTLE_SECS", 0)
-    monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "main", "state": "live"}])
-
-
-def test_restart_mux_revives_orphaned_claude_workers(monkeypatch) -> None:
-    """After --mux kills a server, a claude worker that died with it is respawned
-    onto its recorded session; a worker still live after the kill (bg substrate)
-    is left alone."""
-    calls: list = []
-    _revive_setup(monkeypatch, calls)
-    orphan = {
-        "name": "worker1",
-        "status": "writing",
-        "harness": "claude",
-        "session_id": "uuid-1",
-        "cwd": "/w1",
-    }
-    survivor = {
-        "name": "bgw",
-        "status": "writing",
-        "harness": "claude",
-        "session_id": "uuid-2",
-        "cwd": "/w2",
-    }
-    _rows_seq(
-        monkeypatch,
-        [[orphan, survivor], [dict(orphan, status="exited"), survivor]],
-    )
-
-    result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
-    assert result.exit_code == 0
-    assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
-    # x-84b2: the revived worker is ro-t-session-<short> (the orphan row name
-    # is not a canonical dispatch name, so the identity is the typed session).
-    assert [
-        "/cargo/bin/fno", "agents", "spawn", "--name", "ro-t-session-uuid-1",
-        "--harness", "claude", "--substrate", "bg", "--resume", "uuid-1", "--cwd", "/w1",
-    ] in calls
-    assert not any("spawn" in c and "bgw" in c for c in calls), "survivor must not be respawned"
-    payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
-    assert payload["agents_revived"] == ["ro-t-session-uuid-1"]
-
-
-def test_restart_no_revive_flag_skips_revival(monkeypatch) -> None:
-    calls: list = []
-    _revive_setup(monkeypatch, calls)
-    monkeypatch.setattr(restart, "_agents_rows", lambda: [{"name": "w", "status": "live"}])
-
-    result = runner.invoke(app, ["agents", "restart", "--mux", "--no-revive"])
-    assert result.exit_code == 0
-    assert not any("spawn" in c or "reconcile" in c for c in calls)
-
-
-def test_restart_config_disabled_skips_revival_without_the_flag(monkeypatch) -> None:
-    """x-aaaf wave 2 (AC4-HP): config.restart.enabled=false stops revival even
-    with no --no-revive flag passed."""
-    calls: list = []
-    _revive_setup(monkeypatch, calls)
-    monkeypatch.setattr(restart, "_agents_rows", lambda: [{"name": "w", "status": "live"}])
-    monkeypatch.setattr(restart, "_revive_enabled", lambda: False)
-
-    result = runner.invoke(app, ["agents", "restart", "--mux"])
-    assert result.exit_code == 0
-    assert not any("spawn" in c or "reconcile" in c for c in calls)
-
-
-def test_restart_explicit_revive_flag_wins_over_config_disabled(monkeypatch) -> None:
-    """An explicit --revive always outranks the config default (mirrors the
-    env>config precedence pattern elsewhere in x-aaaf)."""
-    calls: list = []
-    _revive_setup(monkeypatch, calls)
-    monkeypatch.setattr(
-        restart, "_agents_rows",
-        lambda: [{"name": "w", "status": "writing"}],
-    )
-    monkeypatch.setattr(restart, "_revive_enabled", lambda: False)
-
-    result = runner.invoke(app, ["agents", "restart", "--mux", "--revive"])
-    assert result.exit_code == 0
-    assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
-
-
-def test_revive_enabled_defaults_true_matching_prior_ungated_behavior(
-    tmp_path, monkeypatch
-) -> None:
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
-    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "nonexistent.yaml"))
-    from fno import config as config_mod
-
-    assert restart._revive_enabled() is True
-
-
-def test_restart_revive_skips_worker_without_resumable_session(monkeypatch) -> None:
-    """A dead worker with no claude session (or a non-claude provider) is
-    reported as skipped, never spawned blind."""
-    calls: list = []
-    _revive_setup(monkeypatch, calls)
-    row = {"name": "codexw", "status": "writing", "harness": "codex", "session_id": None}
-    _rows_seq(monkeypatch, [[row], [dict(row, status="exited")]])
-
-    result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
-    assert result.exit_code == 0
-    assert not any("spawn" in c for c in calls)
-    payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
-    assert payload["agents_revive_skipped"] == ["codexw"]
-
-
-def test_restart_revive_failure_reported_not_fatal(monkeypatch) -> None:
-    """A failed revive names the worker and the manual fallback but does not fail
-    the restart (which already succeeded)."""
-    calls: list = []
-    _revive_setup(monkeypatch, calls)
-
-    def _run(cmd, **kwargs):
-        calls.append(list(cmd))
-        parts = [str(part) for part in cmd]
-        if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
-            return _REAL_RUN(cmd, **kwargs)
-        rc = 1 if "spawn" in cmd else 0
-        return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
-
-    monkeypatch.setattr(restart.subprocess, "run", _run)
-    row = {"name": "worker1", "status": "writing", "harness": "claude", "session_id": "uuid-1"}
-    _rows_seq(monkeypatch, [[row], [dict(row, status="exited")]])
-
-    result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
-    assert result.exit_code == 0
-    assert "fno agents resume worker1" in result.output
-    payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
-    assert payload["agents_revive_failed"] == ["worker1"]
-    assert payload["ok"] is True
-
-
-def test_agents_rows_tolerates_non_dict_non_list_json(monkeypatch) -> None:
-    """`fno agents list --json` returning a scalar (string/int/null) must yield []
-    not an AttributeError crash (gemini medium on PR #454)."""
-    monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
-    monkeypatch.setattr(
-        restart.subprocess,
-        "run",
-        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout='"a string"', stderr=""),
-    )
-    assert restart._agents_rows() == []
-
-
 def test_restart_wedged_row_not_killed_and_json_ok_false(monkeypatch) -> None:
     """The floor reports + fails but does NOT reap a wedged server (no kill-server
     call); the JSON summary carries it under mux_wedged with ok:false."""
@@ -465,18 +310,6 @@ def test_restart_wedged_row_not_killed_and_json_ok_false(monkeypatch) -> None:
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
     assert payload["mux_wedged"] == ["stuck"]
     assert payload["ok"] is False
-
-
-def test_is_revivable_predicate() -> None:
-    """The extracted predicate matches `_revive_orphans`'s inline decision
-    exactly - a claude harness with a recorded session_id, and nothing else.
-    `fno.update.update_readiness` imports this same function to count what
-    `--revive` would attempt, so the two callers cannot drift."""
-    assert restart.is_revivable({"harness": "claude", "session_id": "uuid-1"}) is True
-    assert restart.is_revivable({"harness": "codex", "session_id": "uuid-1"}) is False
-    assert restart.is_revivable({"harness": "claude", "session_id": None}) is False
-    assert restart.is_revivable({"harness": "claude"}) is False
-    assert restart.is_revivable({}) is False
 
 
 def _quiet_keeper_leg(monkeypatch) -> None:
@@ -584,13 +417,3 @@ def test_restart_spared_store_keeper_fails_the_verb(monkeypatch) -> None:
     assert lines[-1].startswith("fno agents restart: FAILED - "), lines[-1]
 
 
-def test_ac5_a_refused_row_is_revivable():
-    """x-e594 AC5: a usage-capped worker reads `refused` and is live - its
-    process just cannot get a turn until the reset. It must survive a restart
-    and resume afterwards, so the shared revivable scope includes it and the
-    per-row predicate accepts it. update.py counts through the same constant
-    (one scope, three sites), so pinning it pins every collector."""
-    assert "refused" in restart.REVIVABLE_STATUSES
-    assert restart.is_revivable(
-        {"harness": "claude", "session_id": "sess-1", "status": "refused"}
-    )

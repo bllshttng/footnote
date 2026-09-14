@@ -5932,17 +5932,6 @@ impl Core {
         }
     }
 
-    pub(crate) fn no_pane_reason_text(reason: AgentNoPaneReason) -> &'static str {
-        match reason {
-            AgentNoPaneReason::LivePaneless => "session is live elsewhere",
-            AgentNoPaneReason::MissingHarness => "harness is missing",
-            AgentNoPaneReason::MissingSessionId => "session id is missing",
-            AgentNoPaneReason::UnsupportedHarness => "harness cannot resume sessions",
-            AgentNoPaneReason::BackendNotLive => "backend liveness is unconfirmed",
-            AgentNoPaneReason::LivenessUnmeasured => "liveness was never measured",
-        }
-    }
-
     /// (x-d401) The session-aware twin used where the sideline renders: the
     /// pane join can answer LivePaneless where the registry alone would have
     /// printed a dead-backend verdict.
@@ -6182,7 +6171,7 @@ impl Core {
         let journal = scan_spawn_journal();
         let (fresh_receipts, receipt_error) = (journal.receipts, journal.error);
         let mut row_name: Option<String> = None;
-        let facts = {
+        let (facts, refusal) = {
             let candidates: Vec<&RegistryAgent> = self
                 .agents
                 .iter()
@@ -6209,8 +6198,19 @@ impl Core {
             let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
                 self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
             });
-            if live_pane || !self.row_resumable_in_session(a) {
-                None // refused; reason below
+            // (x-a6b9) The refusal names its evidence, never the bare line.
+            let refusal = if live_pane {
+                let pane = a.mux.as_ref().map(|(_, p)| *p).expect("live_pane checked");
+                Some(format!("session already has a live pane {pane}"))
+            } else if let RowResumeDisposition::NoPane(reason) =
+                self.row_resume_disposition_in_session(a)
+            {
+                Some(Self::no_pane_reason_text(reason).to_string())
+            } else {
+                None
+            };
+            let facts = if refusal.is_some() {
+                None // refused; reason carried in `refusal`
             } else {
                 // (x-d285) The live registry name is the resolver's
                 // key; it outranks the display name the facts carry.
@@ -6224,14 +6224,15 @@ impl Core {
                             receipt
                         })
                 })
-            }
+            };
+            (facts, refusal)
         };
         let Some(mut facts) = facts else {
             if let Some(error) = receipt_error {
                 return ResumeOutcome::Refused { reason: error };
             }
             return ResumeOutcome::Refused {
-                reason: "agent is not resumable".into(),
+                reason: refusal.unwrap_or_else(|| "agent is not resumable".into()),
             };
         };
         if let Some(worker) = stored_member
@@ -6385,25 +6386,14 @@ impl Core {
             .filter(|(_, m)| m.harness.as_deref() == Some("claude"))
             .map(|(name, _)| name)
             .collect();
-        if claude_names.is_empty() {
+        let portal_names = portal_reach::portals_needing_claude_plan(self);
+        if claude_names.is_empty() && portal_names.is_empty() {
             self.workspace_restore_apply(false, harness, HashMap::new(), reply);
             return;
         }
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let mut set = tokio::task::JoinSet::new();
-            for name in claude_names {
-                set.spawn(async move {
-                    let verdict = run_reentry_plan(&name, "resume").await;
-                    (name, verdict)
-                });
-            }
-            let mut plans = HashMap::new();
-            while let Some(joined) = set.join_next().await {
-                if let Ok((name, verdict)) = joined {
-                    plans.insert(name, verdict);
-                }
-            }
+            let plans = agent_actions::resolve_restore_plans(claude_names, portal_names).await;
             let _ = core_tx
                 .send(CoreMsg::WorkspaceRestoreApply {
                     dry_run,
@@ -6428,7 +6418,7 @@ impl Core {
         mut plans: HashMap<String, Result<ReentryVerdict, String>>,
         reply: ControlReply,
     ) {
-        const RESTORE_CLIENT: u64 = u64::MAX;
+        use self::portal_reach::RESTORE_CLIENT;
         let candidates = self.restore_candidates(harness.as_deref());
         // A worker NAME the store holds more than once (distinct sessions,
         // one display name - a supported state) refuses up front instead of
@@ -6453,6 +6443,7 @@ impl Core {
                     member: name,
                     harness: member.harness.clone(),
                     squad: 0,
+                    portal: None,
                     outcome: "refused".into(),
                     pane: None,
                     tab: None,
@@ -6466,6 +6457,7 @@ impl Core {
                     member: name,
                     harness: member.harness.clone(),
                     squad: 0,
+                    portal: None,
                     outcome: "refused".into(),
                     pane: None,
                     tab: None,
@@ -6490,6 +6482,7 @@ impl Core {
                             member: name,
                             harness: harness_name,
                             squad: 0,
+                            portal: None,
                             outcome: "refused".into(),
                             pane: None,
                             tab: None,
@@ -6503,6 +6496,7 @@ impl Core {
                             member: name,
                             harness: harness_name,
                             squad: 0,
+                            portal: None,
                             outcome: "refused".into(),
                             pane: None,
                             tab: None,
@@ -6541,6 +6535,7 @@ impl Core {
                     member: name,
                     harness: harness_name,
                     squad,
+                    portal: None,
                     outcome: "resumed".into(),
                     pane: Some(pane),
                     tab: Some(tab),
@@ -6551,6 +6546,7 @@ impl Core {
                     member: name,
                     harness: harness_name,
                     squad,
+                    portal: None,
                     outcome: "focused".into(),
                     pane: Some(pane),
                     tab: Some(tab),
@@ -6561,6 +6557,7 @@ impl Core {
                     member: name,
                     harness: harness_name,
                     squad: 0,
+                    portal: None,
                     outcome: "refused".into(),
                     pane: None,
                     tab: None,
@@ -6575,6 +6572,7 @@ impl Core {
                     member: name,
                     harness: harness_name,
                     squad: 0,
+                    portal: None,
                     outcome: "refused".into(),
                     pane: None,
                     tab: None,
@@ -6587,6 +6585,7 @@ impl Core {
                     member: name,
                     harness: harness_name,
                     squad: 0,
+                    portal: None,
                     outcome: "planned".into(),
                     pane: None,
                     tab: None,
@@ -6596,6 +6595,7 @@ impl Core {
             };
             rows.push(row);
         }
+        rows.extend(portal_reach::portal_restore_rows(self, dry_run, &mut plans));
         let resumed = rows.iter().filter(|r| r.outcome == "resumed").count();
         if resumed > 0 {
             self.push_layout(true);
@@ -20132,7 +20132,7 @@ mod tests {
             },
         );
         assert!(
-            drain_notice(&mut rx).unwrap().contains("not resumable"),
+            drain_notice(&mut rx).unwrap().contains("live pane"),
             "a row with a live pane is refused, never double-spawned"
         );
         assert_eq!(core.panes.len(), 1, "nothing was spawned by either refusal");

@@ -2435,52 +2435,6 @@ def test_update_readiness_downgrade_wire_is_a_bump(monkeypatch, tmp_path) -> Non
     assert "ends 14" in result["guidance"]
 
 
-def test_update_readiness_wire_bump_names_ended_and_revivable(monkeypatch, tmp_path) -> None:
-    """AC2-HP: differing wire_version -> bump, guidance names ended shells and
-    revivable worker count."""
-    _readiness_env(monkeypatch, tmp_path, source_wire=48)
-    monkeypatch.setattr(update, "running_components", lambda runner: [])
-    runner = _make_runner(
-        mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
-        agent_rows=[
-            {"name": "w1", "harness": "claude", "session_id": "s1", "status": "writing"},
-            {"name": "w2", "harness": "claude", "session_id": "s2", "status": "writing"},
-            {"name": "w3", "harness": "codex", "session_id": "s3", "status": "writing"},
-            {"name": "w4", "harness": "claude", "session_id": None, "status": "writing"},
-        ],
-    )
-
-    result = update.update_readiness(runner=runner)
-
-    assert result["wire"]["bump"] is True
-    assert result["shells"] == 14
-    assert result["shells_ended"] == 14
-    assert result["revivable"] == 2
-    assert "WIRE BUMP" in result["guidance"]
-    assert "14" in result["guidance"]
-    assert "2" in result["guidance"]
-
-
-def test_update_readiness_revivable_excludes_non_live_rows(monkeypatch, tmp_path) -> None:
-    """P2 (codex on PR #881): a claude worker with a resumable session but a
-    non-live registry status was never actually orphaned by a restart, so it
-    must not inflate the `--revive` count - same candidate scope as
-    `_revive_orphans`' `pre_live` snapshot in restart.py."""
-    _readiness_env(monkeypatch, tmp_path, source_wire=48)
-    monkeypatch.setattr(update, "running_components", lambda runner: [])
-    runner = _make_runner(
-        mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
-        agent_rows=[
-            {"name": "w1", "harness": "claude", "session_id": "s1", "status": "writing"},
-            {"name": "w2", "harness": "claude", "session_id": "s2", "status": "exited"},
-        ],
-    )
-
-    result = update.update_readiness(runner=runner)
-
-    assert result["revivable"] == 1
-
-
 def test_update_readiness_not_ready_when_revs_match(monkeypatch, tmp_path) -> None:
     """AC3-HP: installed_rev == source_rev -> update_ready False."""
     _readiness_env(monkeypatch, tmp_path, installed_rev="same", source_rev="same")
@@ -2509,33 +2463,6 @@ def test_update_readiness_degraded_when_mux_ls_fails(monkeypatch, tmp_path) -> N
     assert result["guidance"].strip()
     assert "survive" not in result["guidance"]
     assert "unknown number of live shells" in result["guidance"]
-
-
-def test_update_readiness_degraded_when_agents_list_fails(monkeypatch, tmp_path) -> None:
-    """AC4-EDGE: `fno agents list --json` failing names an unknown revivable
-    count, not a false zero, even though mux ls itself succeeded.
-
-    P2 (codex on PR #881): the wire itself was read successfully and matches
-    (source_wire=47 == the one live row's wire_version), so `wire.bump` is
-    correctly False - the degraded-input wording must say "wire unchanged",
-    not the "unknown, treated as a bump" line reserved for a genuinely
-    unreadable wire. A degraded `agents list` is unrelated to the wire."""
-    _readiness_env(monkeypatch, tmp_path, source_wire=47)
-    monkeypatch.setattr(update, "running_components", lambda runner: [])
-    runner = _make_runner(
-        mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
-        agent_rc=1,
-    )
-
-    result = update.update_readiness(runner=runner)
-
-    assert result["degraded"] is not None
-    assert "agents list" in result["degraded"]
-    assert result["wire"]["bump"] is False
-    assert "unknown number of workers" in result["guidance"]
-    assert "14 live shell(s)" in result["guidance"]
-    assert "wire unchanged" in result["guidance"]
-    assert "treated as a wire bump" not in result["guidance"]
 
 
 def test_update_readiness_degraded_when_source_wire_unreadable(monkeypatch, tmp_path) -> None:
@@ -2645,21 +2572,20 @@ def test_update_readiness_not_ready_ignores_unrelated_degraded_input(monkeypatch
     assert "wire bump" not in result["guidance"].lower()
 
 
-def test_update_readiness_shells_and_revivable_none_when_unknown(monkeypatch, tmp_path) -> None:
+def test_update_readiness_shells_none_when_unknown(monkeypatch, tmp_path) -> None:
     """Regression (AC4-EDGE): the structured JSON fields must carry the same
     "unknown, not zero" honesty as the guidance prose - a consumer reading
-    `shells`/`revivable` directly (not parsing `guidance`) must not see a false
+    `shells` directly (not parsing `guidance`) must not see a false
     zero for a count that was never fetched."""
     _readiness_env(monkeypatch, tmp_path)
     monkeypatch.setattr(update, "running_components", lambda runner: [])
-    runner = _make_runner(mux_rc=1, agent_rc=1)
+    runner = _make_runner(mux_rc=1)
 
     result = update.update_readiness(runner=runner)
 
     assert result["shells"] is None
     assert result["shells_ended"] is None
     assert result["sessions"] is None
-    assert result["revivable"] is None
 
 
 # ---------------------------------------------------------------------------

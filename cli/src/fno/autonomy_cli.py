@@ -248,22 +248,6 @@ def _groom_status(project_root: Optional[Path]) -> SpawnerStatus:
         )
 
 
-def _restart_status(project_root: Optional[Path]) -> SpawnerStatus:
-    try:
-        armed, rank = _gate_with_master(
-            project_root, lambda: _settings_for(project_root).restart.enabled
-        )
-        return SpawnerStatus(
-            "restart (_revive_orphans)", "orphan sweep (fno agents restart --mux)",
-            "config.restart.enabled", armed, rank,
-        )
-    except Exception:  # noqa: BLE001
-        return SpawnerStatus(
-            "restart (_revive_orphans)", "orphan sweep (fno agents restart --mux)",
-            "config.restart.enabled", False, "default",
-        )
-
-
 def _evals_status(project_root: Optional[Path]) -> SpawnerStatus:
     try:
         armed, rank = _gate_with_master(
@@ -322,7 +306,6 @@ def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
         # x-aaaf wave 2: previously ungated, now gated - see GroomBlock /
         # RestartBlock / EvalsBlock in fno.config.
         _groom_status(project_root),
-        _restart_status(project_root),
         _evals_status(project_root),
         _king_loop_status(project_root),
     ]

@@ -8732,7 +8732,6 @@ fn update_readiness_deserializes_the_real_payload_shape() {
             "installed_rev": "aaa1111", "source_rev": "bbb2222",
             "wire": {"running": [47], "source": 48, "bump": true},
             "shells": 14, "shells_ended": 14, "sessions": 2,
-            "revivable": 9,
             "changelog": ["fix(bootstrap): thing"],
             "guidance": "update ready bbb2222 - WIRE BUMP v47 -> v48 - ends 14 shells",
             "degraded": null

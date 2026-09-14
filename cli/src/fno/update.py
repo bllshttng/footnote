@@ -545,37 +545,6 @@ def _live_mux_rows(
     return [r for r in rows if isinstance(r, dict) and r.get("state") == "live"]
 
 
-def _live_agent_rows(
-    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
-) -> Optional[list[dict]]:
-    """Rows from ``fno agents list --json``, or None on any failure - same
-    "unavailable vs empty" distinction as :func:`_live_mux_rows`, so a revivable
-    count of 0 always means "asked and got zero", never "could not ask"."""
-    fno = _cargo_installed_mux() or shutil.which("fno")
-    if not fno:
-        return None
-    try:
-        proc = runner(
-            [str(fno), "agents", "list", "--json"],
-            capture_output=True, text=True, check=False, timeout=15,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        data = json.loads(proc.stdout or "[]")
-    except (ValueError, TypeError):
-        return None
-    if isinstance(data, list):
-        rows = data
-    elif isinstance(data, dict):
-        rows = data.get("agents", [])
-    else:
-        return None
-    return [r for r in rows if isinstance(r, dict)]
-
-
 def _changelog_subjects(
     installed_rev: str,
     source: Path,
@@ -618,19 +587,17 @@ def _build_update_guidance(
     shells: int,
     shells_ended: int,
     shells_known: bool,
-    revivable: int,
-    revivable_known: bool,
     degraded_reason: Optional[str],
     stale_rows: "list[dict]" | None = None,
 ) -> str:
     """The one guidance line, computed rather than authored. Three
     branches - no bump, bump, degraded - and no fourth. Every branch names a
     count and a positive outcome; the degraded branch treats an unknown wire as
-    a bump and, when the shell/worker count itself could not be read (a failed
-    `mux ls`/`agents list`, not just an unreadable wire), says "unknown" rather
+    a bump and, when the shell count itself could not be read (a failed
+    `mux ls`, not just an unreadable wire), says "unknown" rather
     than a false zero - a count fno never fetched is not evidence of an empty
-    fleet (AC4-EDGE). A degraded input unrelated to the wire (e.g. `agents
-    list` failing) must not override an actually-known wire status with
+    fleet (AC4-EDGE). A degraded input unrelated to the wire must not override
+    an actually-known wire status with
     "unknown, treated as a bump" - that both contradicts the JSON payload's own
     `wire.bump` field and, when the wire is known safe, wrongly tells the
     operator a restart is destructive (P2, codex on PR #881)."""
@@ -641,7 +608,7 @@ def _build_update_guidance(
     restartable = sum(str(r.get("on_restart", "")).startswith(("restarts", "cycles")) for r in stale_rows)
     pane_kept = sum(r.get("component") in ("pane-keeper", "thread-keeper") for r in stale_rows)
 
-    # A degraded input (mux ls, agents list, wire) never overrides a *confidently*
+    # A degraded input (mux ls, wire) never overrides a *confidently*
     # known not-ready state - if both revs were read and match, there is no update
     # to warn about, regardless of what else failed to fetch. Only take the
     # degraded branch when readiness itself is uncertain (a rev is unreadable) or
@@ -654,7 +621,6 @@ def _build_update_guidance(
 
     if degraded_reason:
         shells_label = f"{shells} live shell(s)" if shells_known else "an unknown number of live shells"
-        revivable_label = f"{revivable} worker(s)" if revivable_known else "an unknown number of workers"
         wire_label = (
             (f"WIRE BUMP {_wire_label(running_wires)} -> {source_label}" if wire_bump else "wire unchanged")
             if wire_known
@@ -662,14 +628,14 @@ def _build_update_guidance(
         )
         return (
             f"update check degraded ({degraded_reason}) - {wire_label}; "
-            f"{shells_label} at risk, --revive respawns {revivable_label}"
+            f"{shells_label} at risk"
         )
 
     if wire_bump:
         return (
             f"update ready {rev_label} - WIRE BUMP {_wire_label(running_wires)} -> "
             f"{source_label} - `fno doctor update && fno agents restart --mux` ends {shells_ended} "
-            f"shell(s); --revive respawns {revivable} worker(s)"
+            f"shell(s)"
         )
 
     return (
@@ -690,7 +656,6 @@ def update_readiness(
     than raising, so a broken environment still gets a non-empty, honest
     guidance line (AC4-EDGE)."""
     from fno import doctor
-    from fno.restart import REVIVABLE_STATUSES, is_revivable
 
     degraded: list[str] = []
 
@@ -761,22 +726,6 @@ def update_readiness(
     )
     shells_ended = shells if wire_bump else 0
 
-    agent_rows = _live_agent_rows(runner)
-    revivable_known = agent_rows is not None
-    if agent_rows is None:
-        degraded.append("fno agents list --json failed")
-        agent_rows = []
-    # Same candidate scope as `_revive_orphans`' `pre_live` snapshot
-    # (restart.py): only a worker that is actually live now can be orphaned by
-    # a restart, so an exited or already-dead row never counts toward
-    # `--revive` even when `is_revivable` alone would accept it (P2, codex on
-    # PR #881).
-    revivable = sum(
-        1
-        for r in agent_rows
-        if r.get("status") in REVIVABLE_STATUSES and is_revivable(r)
-    )
-
     changelog: list[str] = []
     if resolved_source is not None and installed_rev and source_rev:
         changelog = _changelog_subjects(installed_rev, resolved_source, runner)
@@ -806,8 +755,6 @@ def update_readiness(
             shells=shells,
             shells_ended=shells_ended,
             shells_known=shells_known,
-            revivable=revivable,
-            revivable_known=revivable_known,
             degraded_reason=degraded_reason,
             stale_rows=running_rows,
         )
@@ -848,7 +795,6 @@ def update_readiness(
         "shells": shells if shells_known else None,
         "shells_ended": shells_ended if shells_known else None,
         "sessions": sessions if shells_known else None,
-        "revivable": revivable if revivable_known else None,
         "changelog": changelog,
         "guidance": guidance,
         "degraded": degraded_reason,

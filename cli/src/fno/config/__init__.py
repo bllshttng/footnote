@@ -2503,8 +2503,8 @@ class AgentsBlock(SweepKeys):
 
 
 def _coerce_bool_default_true(v: object) -> bool:
-    """Shared body for the four wave-2/3 "never opt-in" gates below
-    (AutonomyBlock, GroomBlock, RestartBlock, EvalsBlock): a garbage value
+    """Shared body for the wave-2/3 "never opt-in" gates below
+    (AutonomyBlock, GroomBlock, EvalsBlock): a garbage value
     fails safe to True (each block's own default), since these spawners ran
     unconditionally before their gate existed and a malformed config value
     must not silently disable one. A config that fails to LOAD at all still
@@ -2980,27 +2980,6 @@ class GroomBlock(BaseModel):
     could not be turned off. Default ``True`` matches the spawner's CURRENT
     effective behavior (it always ran) - shipping this gate changes nothing
     for an existing user until they explicitly disable it.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    enabled: bool = True
-
-    @field_validator("enabled", mode="before")
-    @classmethod
-    def _coerce_enabled(cls, v: object) -> bool:
-        return _coerce_bool_default_true(v)
-
-
-class RestartBlock(BaseModel):
-    """`fno agents restart` worker-revival settings (nested under 'config.restart').
-
-    x-aaaf wave 2: `_revive_orphans` (restart.py:90) - respawning claude
-    workers orphaned by a killed mux server - previously had only a per-run
-    `--revive/--no-revive` CLI flag and no durable config gate, so it could
-    not be turned off once and forgotten. Default ``True`` matches the
-    spawner's CURRENT effective behavior: a legitimately unconditional
-    trigger (crash recovery) still gets a gate, it just defaults on.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -4024,7 +4003,6 @@ class ConfigBlock(BaseModel):
     auto_heal: AutoHealBlock = Field(default_factory=AutoHealBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
     groom: GroomBlock = Field(default_factory=GroomBlock)
-    restart: RestartBlock = Field(default_factory=RestartBlock)
     evals: EvalsBlock = Field(default_factory=EvalsBlock)
     recovery: RecoveryBlock = Field(default_factory=RecoveryBlock)
     health_monitor: HealthMonitorBlock = Field(default_factory=HealthMonitorBlock)
@@ -5051,7 +5029,7 @@ def autonomy_master_enabled(project_root: Optional[Path] = None) -> bool:
 
     Every spawner-specific resolver (``auto_continue_enabled``,
     ``think_spawn_enabled``, ``keep_going_enabled``, ``groom_enabled``,
-    ``_revive_enabled``, ``evals_enabled``, and the post-merge / pr_watch
+    ``evals_enabled``, and the post-merge / pr_watch
     config reads) calls this FIRST, before its own env
     override even - a panic switch that something else can still bypass is
     not a panic switch. Callers that skip because of this return rank

@@ -313,18 +313,15 @@ fn default_true() -> bool {
 /// v75 (x-7649): `ControlVerb::RetireSession` + `ServerMsg::SessionRetired`,
 /// the exact-session retirement op; floor stays 58.
 /// v76 : `ControlVerb::AgentRowsGet` + `ServerMsg::AgentRowsReceipt`
-/// + `AgentRowReceipt`, the row-set receipt behind `fno mux rows`; floor
-/// stays 58.
-/// v77 : `AgentRow.liveness_age_s` (a per-second server-computed age) is
-/// replaced by `liveness_measured_at`, the measurement instant; the client
-/// derives the age at render. Same decode both ways; floor stays 58.
+/// + `AgentRowReceipt`, the row-set receipt behind `fno mux rows`; floor 58.
+/// v77 : `liveness_age_s` replaced by `liveness_measured_at`, the instant;
+/// the client derives the age at render. Same decode both ways; floor 58.
 /// v78 : `ControlVerb::ServerStats` + `ServerMsg::ServerStats`, the
 /// scoreboard's read-only emission-failure counter read; floor stays 58.
-/// v79 : `ServerMsg::Layout.missions` carries the active-mission headers, so
-/// `squads` holds only real workspaces; additive, floor stays 58.
-/// v80 : `PanePlacement.fit`, serde(default) - the server picks the tab; floor
-/// stays 58.
-pub const PROTO_VERSION: u32 = 80;
+/// v79 : `Layout.missions` carries the active-mission headers; floor stays 58.
+/// v80 : `PanePlacement.fit` serde(default), the server picks the tab; floor 58.
+/// v81 (x-a6b9): `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
+pub const PROTO_VERSION: u32 = 81;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -547,8 +544,9 @@ pub use placement::{PanePlacement, PaneTarget, PlacementFallback, ResolvedPlacem
 /// (v60, x-7b5e) One member's line of a workspace-restore report. `outcome`
 /// is `resumed` | `focused` | `refused` | `planned`; `reason` is set exactly
 /// on `refused` (a member that cannot resume is NAMED, never silently
-/// dropped), `pane` on `resumed`/`focused`, `tab` on both, and `notice`
-/// carries the vanished-cwd fallback note on a resumed member.
+/// dropped), `pane` on `resumed`/`focused`, `tab` on both, `notice` the
+/// vanished-cwd fallback note, and (v81, x-a6b9) `portal` the seat index,
+/// `member` the portal's row key; `None`: a squad member row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RestoreRow {
     pub member: String,
@@ -556,6 +554,8 @@ pub struct RestoreRow {
     pub harness: Option<String>,
     pub squad: u64,
     pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4129,7 +4129,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 80);
+        assert_eq!(PROTO_VERSION, 81);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

@@ -1598,6 +1598,322 @@ fn workspace_restore_names_every_refused_member_and_restores_the_rest() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+// ---- (x-a6b9) the restore verb answers for portals ----
+
+/// One squad tab whose single leaf is a held portal seat for `key` at
+/// portal index `idx`, plus a live paneless registry row that answers the
+/// key. Returns (seat pane, tab id).
+fn portal_restore_fixture(
+    core: &mut Core,
+    tag: &str,
+    idx: u8,
+    key: &str,
+    harness: &str,
+) -> (u64, u64) {
+    let cwd = std::env::temp_dir().join(format!("fno-portal-restore-{tag}"));
+    std::fs::create_dir_all(&cwd).unwrap();
+    let seat = core
+        .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+        .unwrap();
+    core.session.add_squad(
+        7,
+        vec![cwd.to_string_lossy().into_owned()],
+        None,
+        Tab {
+            name: Some("watch".into()),
+            id: 70,
+            root: Node::Leaf(seat),
+            focus: seat,
+        },
+    );
+    core.portals.insert(
+        idx,
+        crate::thread_viewer::Portal {
+            row_key: key.into(),
+            seat,
+            tab: 70,
+        },
+    );
+    core.agents.push(RegistryAgent {
+        attach_id: Some(key.into()),
+        harness: Some(harness.into()),
+        name: key.into(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        ..Default::default()
+    });
+    (seat, 70)
+}
+
+fn portal_row<'a>(rows: &'a [RestoreRow], idx: u8) -> &'a RestoreRow {
+    rows.iter()
+        .find(|r| r.portal == Some(idx))
+        .unwrap_or_else(|| panic!("no portal {idx} row in {rows:?}"))
+}
+
+#[test]
+fn workspace_restore_fills_a_held_claude_portal_from_its_plan() {
+    // AC1-HP: the verb fills a held portal from the staged attach verdict;
+    // the seat pane runs the row's Drive argv and the row reads resumed.
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (seat, tab) = portal_restore_fixture(&mut core, "claude-fill", 1, "t-portal-one", "claude");
+    let plans: HashMap<String, Result<ReentryVerdict, String>> = [(
+        "portal:t-portal-one".to_string(),
+        Ok::<_, String>(ReentryVerdict {
+            argv: vec!["/bin/cat".into()],
+            env: vec![],
+            config_dir: None,
+        }),
+    )]
+    .into();
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.handle(CoreMsg::WorkspaceRestoreApply {
+        dry_run: false,
+        harness: None,
+        plans,
+        reply: tx,
+    });
+    let rows = match rx.blocking_recv().expect("a reply") {
+        ServerMsg::WorkspaceRestored { rows } => rows,
+        other => panic!("expected WorkspaceRestored, got {other:?}"),
+    };
+    let row = portal_row(&rows, 1);
+    assert_eq!(row.outcome, "resumed", "{rows:?}");
+    assert_ne!(row.pane, Some(seat), "the fill respawns in a new pane");
+    let new_seat = row.pane.expect("the fill names its pane");
+    assert_eq!(row.tab, Some(tab), "the fill stays in the seat's tab");
+    let entry = core.panes.get(&new_seat).expect("the new pane exists");
+    assert!(entry.cmd.is_some(), "the new pane runs the row's viewer");
+    assert!(
+        !core.panes.contains_key(&seat),
+        "the stand-in was reaped by the repoint"
+    );
+    core.reap_pane(new_seat);
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-portal-restore-claude-fill"));
+}
+
+#[test]
+fn workspace_restore_names_a_held_portal_that_answers_no_row() {
+    // AC2-ERR: the refusal names the key and the seat keeps running no
+    // command - a silent skip would read as a fill that has not landed yet.
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (seat, _) = portal_restore_fixture(&mut core, "no-row", 0, "ghost-key", "claude");
+    // No live row answers: mark the fixture's row exited.
+    core.agents[0].exited = true;
+    let rows = run_workspace_restore(&mut core, false);
+    let row = portal_row(&rows, 0);
+    assert_eq!(row.outcome, "refused", "{rows:?}");
+    let reason = row.reason.as_deref().expect("the refusal names a reason");
+    assert!(reason.contains("ghost-key"), "the key is named: {reason}");
+    let entry = core.panes.get(&seat).expect("seat pane exists");
+    assert!(entry.cmd.is_none(), "the seat stays held");
+    core.reap_pane(seat);
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-portal-restore-no-row"));
+}
+
+#[test]
+fn workspace_restore_dry_run_plans_held_portals_without_filling() {
+    // AC3-EDGE: a held portal reports planned and no pane starts.
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (seat, _) = portal_restore_fixture(&mut core, "dry", 2, "t-portal-two", "claude");
+    let rows = run_workspace_restore(&mut core, true);
+    let row = portal_row(&rows, 2);
+    assert_eq!(row.outcome, "planned", "{rows:?}");
+    let entry = core.panes.get(&seat).expect("seat pane exists");
+    assert!(entry.cmd.is_none(), "the dry run spawned nothing");
+    core.reap_pane(seat);
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-portal-restore-dry"));
+}
+
+#[test]
+fn workspace_restore_names_the_ambiguous_and_the_already_shown_portals() {
+    // Two rows answer the key: refuse, never pick. A seat that already
+    // runs a viewer reports focused, not resumed.
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (seat, tab) = portal_restore_fixture(&mut core, "ambig", 3, "dup-key", "claude");
+    core.agents.push(RegistryAgent {
+        attach_id: Some("dup-key".into()),
+        harness: Some("claude".into()),
+        name: "dup-key-alias".into(),
+        ..Default::default()
+    });
+    let rows = run_workspace_restore(&mut core, false);
+    let row = portal_row(&rows, 3);
+    assert_eq!(row.outcome, "refused", "{rows:?}");
+    let reason = row.reason.as_deref().expect("the refusal names a reason");
+    assert!(reason.contains("ambiguous"), "{reason}");
+
+    // The focused classification: the seat already runs a viewer.
+    if let Some(entry) = core.panes.get_mut(&seat) {
+        entry.cmd = Some("/bin/cat".into());
+    }
+    let rows = run_workspace_restore(&mut core, false);
+    let row = portal_row(&rows, 3);
+    assert_eq!(row.outcome, "focused", "{rows:?}");
+    assert_eq!(row.pane, Some(seat));
+    assert_eq!(row.tab, Some(tab));
+    core.reap_pane(seat);
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-portal-restore-ambig"));
+}
+
+#[test]
+fn workspace_restore_names_a_portal_whose_claude_plan_never_resolved() {
+    // The plan map is empty (the batch failed or never ran): the portal
+    // row is refused with the named cause, never silent.
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (seat, _) = portal_restore_fixture(&mut core, "noplan", 4, "t-portal-four", "claude");
+    let rows = run_workspace_restore(&mut core, false);
+    let row = portal_row(&rows, 4);
+    assert_eq!(row.outcome, "refused", "{rows:?}");
+    let reason = row.reason.as_deref().expect("the refusal names a reason");
+    assert!(
+        reason.contains("re-entry plan unresolved"),
+        "the missing plan is named: {reason}"
+    );
+    let entry = core.panes.get(&seat).expect("seat pane exists");
+    assert!(entry.cmd.is_none(), "no fill without a plan");
+    core.reap_pane(seat);
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-portal-restore-noplan"));
+}
+
+#[test]
+fn workspace_restore_fills_a_locate_tier_portal_and_names_the_tier() {
+    // A Locate-tier row (no attach id, no peek reader) fills through the
+    // inline argv and its row CARRIES the notice - a fill that cannot show
+    // the thread must not read as a Drive fill that shows nothing.
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    set_attach_program(&["/bin/cat"]);
+    let (_, _) = portal_restore_fixture(&mut core, "locate", 5, "agy-row", "agy");
+    core.agents[0].attach_id = None;
+    let rows = run_workspace_restore(&mut core, false);
+    let row = portal_row(&rows, 5);
+    assert_eq!(row.outcome, "resumed", "{rows:?}");
+    let notice = row.notice.as_deref().expect("the tier is named");
+    assert!(notice.contains("agy"), "{notice}");
+    assert!(notice.contains("Locate"), "{notice}");
+    let new_seat = row.pane.expect("the fill names its pane");
+    let entry = core.panes.get(&new_seat).expect("the new pane exists");
+    assert!(entry.cmd.is_some(), "the seat runs the viewer");
+    core.reap_pane(new_seat);
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-portal-restore-locate"));
+}
+
+#[test]
+fn restore_refusal_names_the_missing_session_id() {
+    // AC8-ERR: a registry row with a harness and no session id is refused
+    // with the classification, never the bare resumable line.
+    let _guard = ResumeProgramGuard;
+    set_resume_program(&["/bin/cat"]);
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["nosid"]);
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let cwd = std::env::temp_dir().join("fno-restore-nosid");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let shell = core
+        .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+        .unwrap();
+    core.session.add_squad(
+        7,
+        vec![cwd.to_string_lossy().into_owned()],
+        None,
+        Tab {
+            name: None,
+            id: 70,
+            root: Node::Leaf(shell),
+            focus: shell,
+        },
+    );
+    core.agents = vec![RegistryAgent {
+        harness: Some("codex".into()),
+        name: "nosid".into(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        ..Default::default()
+    }];
+    core.squad_members.insert(
+        7u64,
+        vec![stored_worker(
+            "nosid",
+            "codex",
+            "",
+            cwd.to_string_lossy().as_ref(),
+        )],
+    );
+    let rows = run_workspace_restore(&mut core, false);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].outcome, "refused", "{rows:?}");
+    assert_eq!(
+        rows[0].reason.as_deref(),
+        Some("session id is missing"),
+        "{rows:?}"
+    );
+    core.reap_pane(shell);
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn restore_refusal_names_the_live_pane() {
+    // AC9-ERR: a row whose pane is already live in this session names the
+    // pane in its refusal.
+    let _guard = ResumeProgramGuard;
+    set_resume_program(&["/bin/cat"]);
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["live-one"]);
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let cwd = std::env::temp_dir().join("fno-restore-livepane");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let shell = core
+        .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+        .unwrap();
+    core.session.add_squad(
+        7,
+        vec![cwd.to_string_lossy().into_owned()],
+        None,
+        Tab {
+            name: None,
+            id: 70,
+            root: Node::Leaf(shell),
+            focus: shell,
+        },
+    );
+    core.agents = vec![RegistryAgent {
+        harness: Some("codex".into()),
+        name: "live-one".into(),
+        harness_session_id: Some("sid-live".into()),
+        cwd: cwd.to_string_lossy().into_owned(),
+        mux: Some(("main".into(), shell)),
+        ..Default::default()
+    }];
+    core.squad_members.insert(
+        7u64,
+        vec![stored_worker(
+            "live-one",
+            "codex",
+            "sid-live",
+            cwd.to_string_lossy().as_ref(),
+        )],
+    );
+    let rows = run_workspace_restore(&mut core, false);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].outcome, "refused", "{rows:?}");
+    let reason = rows[0]
+        .reason
+        .as_deref()
+        .expect("the refusal names a reason");
+    assert!(
+        reason.contains("live pane") && reason.contains(&shell.to_string()),
+        "the pane is named: {reason}"
+    );
+    core.reap_pane(shell);
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
 #[test]
 fn restore_merges_unnamed_lane_into_home_squad() {
     // Operator decision: an unnamed lane persists and comes back. Because
