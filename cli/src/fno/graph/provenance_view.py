@@ -1,9 +1,8 @@
 """Read-side projections for `fno backlog provenance`.
 
-``cli/src/fno/graph/cli.py`` is over its line budget and shrink-only, so the
-lifecycle roster renderer lives here, extended with the two columns the
-one-call answer was still missing: the registry status of each session row
-(live, exited, ... reaped) and the observed model the row recorded.
+graph/cli.py is shrink-only, so the roster renderer lives here, extended with
+the two columns the one-call answer was still missing: each session row's
+registry status (live, exited, ... reaped) and its observed model.
 """
 from __future__ import annotations
 
@@ -15,10 +14,9 @@ _LIFECYCLE_PHASES = ("think", "blueprint", "do", "review", "ship")
 def registry_status_index() -> "dict[str, str] | None":
     """Map ``harness_session_id`` -> registry status word for one machine.
 
-    ``None`` means the registry could not be read at all: the caller then
-    omits liveness rather than reading every row as reaped. An empty mapping
-    is a real answer (no live-or-retained rows on this machine), so a row
-    with no entry reads ``reaped``.
+    ``None`` means the registry could not be read: the caller then omits
+    liveness rather than reading every row as reaped. An empty mapping is a
+    real answer, so a row with no entry reads ``reaped``.
     """
     try:
         from fno.agents.registry import load_registry
