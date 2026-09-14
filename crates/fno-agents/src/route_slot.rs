@@ -60,6 +60,38 @@ fn row_value<'a>(row: &'a Value, key: &str) -> String {
         .to_string()
 }
 
+/// Validate a row-declared effort against the harness's effort surface and,
+/// when it survives, record it on the candidate. An effort with no surface on
+/// the harness is dropped with a chain line. The grid and pin legs both call
+/// this so the rule lives once.
+fn validated_effort(
+    out: &mut Map<String, Value>,
+    harness: &str,
+    effort: &str,
+    effort_ok: &Value,
+    chain: &mut Vec<Value>,
+    label: &str,
+) {
+    let mut effort = effort.to_string();
+    if !effort.is_empty() {
+        let valid = effort_ok
+            .get(harness)
+            .and_then(|m| m.get(&effort))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !valid {
+            chain.push(json!(format!(
+                "{label} effort omitted (no surface on {harness})"
+            )));
+            effort = String::new();
+        }
+    }
+    if !effort.is_empty() {
+        out.insert("effort".into(), json!(effort));
+        chain.push(json!(format!("{label} effort({effort})")));
+    }
+}
+
 /// Fold the raw lane list to `(plan, rows, fields_by_rung)` against the
 /// declared rows; a fault returns its config-terminal line.
 #[allow(clippy::type_complexity)]
@@ -600,25 +632,14 @@ fn grid_leg(payload: &Value, _rung_base: &str, chain: &mut Vec<Value>) -> Value 
         if !account.is_empty() {
             out.insert("account".into(), json!(account));
         }
-        let mut effort = row.effort.clone();
-        if !effort.is_empty() {
-            let valid = effort_ok
-                .get(&row.harness)
-                .and_then(|m| m.get(&effort))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if !valid {
-                chain.push(json!(format!(
-                    "grid effort omitted (no surface on {})",
-                    row.harness
-                )));
-                effort = String::new();
-            }
-        }
-        if !effort.is_empty() {
-            out.insert("effort".into(), json!(effort));
-            chain.push(json!(format!("grid effort({effort})")));
-        }
+        validated_effort(
+            &mut out,
+            &row.harness,
+            &row.effort,
+            &effort_ok,
+            chain,
+            "grid",
+        );
         return json!({
             "status": "pick",
             "candidate": Value::Object(out),
@@ -1237,6 +1258,110 @@ fn resolve_slot_walk(payload: &Value) -> Value {
         || explicit_route_name.is_some()
         || explicit_vendor_name.is_some()
     {
+        // A typed --model whose routing.models row declares exactly one
+        // harness resolves that row instead of falling through to a
+        // config-scalar harness (x-8fb6): the row IS the model's own
+        // declaration. A typed --route or -P, or a typed -H (payload
+        // explicit_lane), keeps the plain override - the operator already
+        // named those axes. Zero row matches also keep it: no vendor
+        // inference here.
+        let model_only =
+            explicit_route_name.is_none() && explicit_vendor_name.is_none() && !explicit_lane;
+        let matched: Vec<(String, Value)> = if model_only {
+            let model = explicit_model_name.as_deref().unwrap_or("");
+            payload
+                .get("declared_rows")
+                .and_then(Value::as_object)
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|(_, row)| row_value(row, "model") == model)
+                        .map(|(name, row)| (name.clone(), row.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let declared_harnesses: Vec<String> = matched
+            .iter()
+            .map(|(_, row)| row_value(row, "harness"))
+            .filter(|h| !h.is_empty())
+            .collect();
+        let harness_set: std::collections::BTreeSet<String> =
+            declared_harnesses.iter().cloned().collect();
+        if model_only && harness_set.len() > 1 {
+            let model = explicit_model_name.as_deref().unwrap_or("");
+            let list = matched
+                .iter()
+                .map(|(name, row)| format!("{} (harness {})", name, row_value(row, "harness")))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            let remedies = {
+                let mut hs: Vec<&str> = declared_harnesses.iter().map(|s| s.as_str()).collect();
+                hs.sort();
+                hs.dedup();
+                hs.iter()
+                    .map(|h| format!("-H {h}"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            };
+            chain.push(json!(
+                "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"
+            ));
+            chain.push(json!(format!(
+                "slot=strict-refusal --model {model} matches routing.models rows {list}; pass {remedies}"
+            )));
+            return refused_decision(
+                chain,
+                "pin-model-ambiguous-harness",
+                "the typed model's declared rows name different harnesses",
+            );
+        }
+        if model_only && harness_set.len() == 1 {
+            let (row_name, row) = &matched[0];
+            let harness = declared_harnesses[0].clone();
+            let mut out = Map::new();
+            out.insert("harness".into(), json!(harness));
+            out.insert("model".into(), json!(explicit_model_name.clone().unwrap()));
+            out.insert("pin_row".into(), json!(row_name));
+            let route_set: std::collections::BTreeSet<String> = matched
+                .iter()
+                .map(|(_, row)| row_value(row, "route"))
+                .filter(|s| !s.is_empty())
+                .collect();
+            if route_set.len() == 1 {
+                out.insert(
+                    "route".into(),
+                    json!(route_set.iter().next().unwrap().to_string()),
+                );
+            }
+            let account_set: std::collections::BTreeSet<String> = matched
+                .iter()
+                .map(|(_, row)| row_value(row, "account"))
+                .filter(|s| !s.is_empty())
+                .collect();
+            if account_set.len() == 1 {
+                let account = account_set.iter().next().unwrap().clone();
+                out.insert("account".into(), json!(account));
+            }
+            let effort_ok = payload.get("effort_ok").cloned().unwrap_or(json!({}));
+            validated_effort(
+                &mut out,
+                &harness,
+                &row_value(row, "effort"),
+                &effort_ok,
+                &mut chain,
+                "pin",
+            );
+            chain.push(json!(format!(
+                "slot=operator-pin-override row={row_name} harness={harness} (the typed model's declared row names its harness)"
+            )));
+            return json!({
+                "status": "pick",
+                "candidate": Value::Object(out),
+                "chain": chain,
+            });
+        }
         chain.push(json!(
             "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"
         ));
@@ -3389,6 +3514,103 @@ mod tests {
             .any(|l| l.contains("slot=operator-pin-override")));
     }
 
+    #[test]
+    fn pin_model_resolves_its_declared_row_harness() {
+        // x-8fb6: the row IS the model's own declaration, so the pin takes
+        // the row's harness instead of a config-scalar default.
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "work_verb": "blueprint",
+            "declared_rows": {
+                "codex-astra": {"name": "codex-astra", "harness": "codex",
+                                "model": "gpt-6-astra"},
+            },
+            "explicit_model_value": "gpt-6-astra",
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["harness"], "codex");
+        assert_eq!(out["candidate"]["model"], "gpt-6-astra");
+        assert_eq!(out["candidate"]["pin_row"], "codex-astra");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=operator-pin-override row=codex-astra harness=codex")));
+    }
+
+    #[test]
+    fn pin_model_candidate_carries_route_account_effort() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "work_verb": "blueprint",
+            "declared_rows": {
+                "zai-flash": {"name": "zai-flash", "harness": "claude",
+                              "model": "glm-5.3-flash[1m]",
+                              "route": "zai/glm-5.3-flash[1m]", "account": "zai",
+                              "effort": "high"},
+            },
+            "capacity": {"claude": {"state": "ok", "window": "w", "accounts": {"zai": "ok"},
+                                    "evidence": {}, "resets": {}}},
+            "effort_ok": {"claude": {"high": true}},
+            "explicit_model_value": "glm-5.3-flash[1m]",
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["harness"], "claude");
+        assert_eq!(out["candidate"]["route"], "zai/glm-5.3-flash[1m]");
+        assert_eq!(out["candidate"]["account"], "zai");
+        assert_eq!(out["candidate"]["effort"], "high");
+    }
+    #[test]
+    fn pin_model_on_rows_with_different_harnesses_refuses() {
+        // AC6: two rows declare the same model under different harnesses;
+        // the slot refuses instead of guessing. The text names both rows
+        // and both -H values.
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "work_verb": "blueprint",
+            "declared_rows": {
+                "row-a": {"name": "row-a", "harness": "claude", "model": "m"},
+                "row-b": {"name": "row-b", "harness": "codex", "model": "m"},
+            },
+            "explicit_model_value": "m",
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(out["refusal"], "pin-model-ambiguous-harness");
+        let chain = chain_of(&out);
+        assert!(chain
+            .iter()
+            .any(|l| l.contains("rows row-a (harness claude) and row-b (harness codex)")));
+        assert!(chain
+            .iter()
+            .any(|l| l.contains("pass -H claude or -H codex")));
+    }
+    #[test]
+    fn pin_with_typed_vendor_or_lane_skips_the_row_lookup() {
+        // AC10: a typed -P keeps the plain pin override - no row lookup,
+        // no candidate. A typed -H (explicit_lane) with a model pin: same.
+        let rows = r#"{"zai-flash": {"name": "zai-flash", "harness": "claude", "model": "glm"}}"#;
+        let row_val: serde_json::Value = serde_json::from_str(rows).unwrap();
+        let mut p1 = strict_payload(json!({
+            "work_verb": "blueprint",
+        }));
+        p1["declared_rows"] = row_val.clone();
+        p1["explicit_vendor_value"] = json!("zai");
+        p1["explicit_model_value"] = json!("glm");
+        let out = resolve_slot_payload(&p1);
+        assert_eq!(out["status"], "none");
+        assert!(out["candidate"].is_null());
+        let c1 = chain_of(&out);
+        assert!(c1.iter().any(|l| l.contains(
+            "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"
+        )));
+        assert!(!c1.iter().any(|l| l.contains("row=")));
+        let mut p2 = strict_payload(json!({
+            "work_verb": "blueprint",
+        }));
+        p2["declared_rows"] = row_val;
+        p2["explicit_lane"] = json!(true);
+        p2["explicit_model_value"] = json!("glm");
+        let out = resolve_slot_payload(&p2);
+        let c2 = chain_of(&out);
+        assert_eq!(out["status"], "none");
+        assert!(c2.iter().any(|l| l.contains("outranks the lanes)")));
+        assert!(!c2.iter().any(|l| l.contains("row=")));
+    }
     #[test]
     fn strict_explicit_vendor_pin_overrides_the_lanes_even_when_one_matches() {
         // The pin branch returns before the lane walk runs at all, so it
