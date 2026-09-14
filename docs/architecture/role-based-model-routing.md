@@ -317,7 +317,7 @@ A routed codex worker reaches its endpoint through three inline `-c` config toke
 
 `fno agents resume` and the headless followup (`fno agents ask`) restore the route. They own the child env. The mux ResumeAgent gesture and `fno mux workspace restore` refuse a routed codex row. They name `fno agents resume <row>`, because a pane spawn has one env channel: an argv prefix visible in `ps`. A refusal names the row and the provider. Nothing launches. A loaded codex thread still wakes over the app-server first. That door needs no route.
 
-A provider named `openai` is refused at resolve time. It is the sentinel every unrouted codex row already stamps. A relaunch cannot tell a restored route from a default-endpoint launch. When a routed row's provider is deleted from config, every relaunch door refuses by name. The same applies when the protocol stops being `openai`, or when the key no longer resolves. The doors never relaunch on codex's default provider. A default-provider relaunch reads as success and bills the wrong account.
+A provider named `openai` is refused at resolve time. It is the sentinel every unrouted codex row already stamps. A relaunch cannot tell a restored route from a default-endpoint launch. Every relaunch door refuses by name when the provider is deleted from config. The same refusal applies to a protocol that is not `openai` and to a key that no longer resolves. The doors never relaunch on codex's default provider. A default-provider relaunch reads as success and bills the wrong account.
 
 ## Scope and deferrals
 
