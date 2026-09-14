@@ -6845,7 +6845,7 @@ fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
     };
     crate::provider::AgentEntry {
         name: e.name.clone(),
-        provider: e.harness_name().to_string(),
+        provider: e.harness_name().to_string(), substrate: e.substrate.clone(),
         session_id,
         cwd: PathBuf::from(&e.cwd),
     }

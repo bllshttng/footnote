@@ -171,6 +171,20 @@ def _build_attach_argv(short_id: str) -> Optional[list[str]]:
         return None
 
 
+def _build_opencode_steer_argv(name: str, message: str, cwd: str) -> list[str]:
+    """Use fno's serve steering entry point for a thread row.
+
+    ``opencode --session`` only opens the provider's interactive client and
+    cannot receive an unattended prompt. The Rust ``ask`` client owns the
+    attach-writer plus serve readback, so resume must invoke that one primitive.
+    """
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_installed_binary()
+    executable = str(binary) if binary is not None else "fno-agents"
+    return [executable, "ask", name, message, "--cwd", cwd]
+
+
 _DEFAULT_WAKE_MESSAGE = "continue"
 _WAKE_ATTEMPTS = 2
 _WAKE_ATTEMPT_TIMEOUT_SEC = 60.0
@@ -983,11 +997,16 @@ def resume_logic(
         if (exact or harness != "claude")
         else "interactive_attach"
     )
-    try:
-        resume_form = capabilities(harness or "?")["resume_strategy"]["forms"][form_lane]
-        resume_supported = resume_form["kind"] != "unsupported"
-    except (DispatchResolveError, KeyError, TypeError):
-        resume_supported = False
+    is_opencode_serve = harness == "opencode" and getattr(entry, "substrate", None) == "thread"
+    if is_opencode_serve:
+        argv = _build_opencode_steer_argv(name, message, cwd)
+        resume_supported = True
+    else:
+        try:
+            resume_form = capabilities(harness or "?")["resume_strategy"]["forms"][form_lane]
+            resume_supported = resume_form["kind"] != "unsupported"
+        except (DispatchResolveError, KeyError, TypeError):
+            resume_supported = False
     if not resume_supported:
         return ResumeResult(
             exit_code=13,
@@ -1008,7 +1027,7 @@ def resume_logic(
 
     if harness == "claude" and not exact:
         argv = _build_attach_argv(getattr(entry, "short_id", "") or "")
-    else:
+    elif not is_opencode_serve:
         argv = _build_resume_argv(harness or "?", session_id, cwd)
     if argv is None:
         return ResumeResult(

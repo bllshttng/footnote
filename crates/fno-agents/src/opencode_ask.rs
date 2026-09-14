@@ -1,17 +1,18 @@
 //! Client interceptor for the `ask` verb on an opencode target (x-51f6), plus
 //! the headless one-shot dispatch (`dispatch_opencode_once`).
 //!
-//! opencode is hosted two ways: an interactive PTY pane (the `ask` resume path,
-//! which stays refused - no stateful client-side resume in v1) and a headless
+//! opencode is hosted two ways: a serve thread (the `ask` resume path) and an
+//! interactive PTY pane (which stays refused - no stateful client-side resume)
+//! plus a headless
 //! one-shot `opencode run --dangerously-skip-permissions "<prompt>"` (this module's `dispatch_opencode_once`,
 //! substrate `headless`). The one-shot is STATELESS like agy: plain-text stdout,
 //! no session id minted here, no registry row, no `--continue` resume from this
 //! path. It reuses the shared `subprocess_ask` primitives (stdin `/dev/null`,
 //! watchdog, process-group SIGINT) rather than duplicating agy's error taxonomy.
 //!
-//! `ask` (resume-by-name) still refuses: it names the real limitation instead of
-//! falling through to `bin/client.rs`'s `unresolvable_ask_exit` "provider is
-//! required for new agent" text (wrong - the agent exists - and a dead end).
+//! `ask` (resume-by-name) routes serve rows through the shared attach writer;
+//! other opencode rows still receive the explicit refusal instead of falling
+//! through to `bin/client.rs`'s generic "provider is required" text.
 //! Mirrors [`crate::agy_ask::maybe_run_agy_ask`]'s shape.
 
 /// The refusal text. A pointer that stops at `--text <prompt>` is a remedy that
@@ -28,8 +29,9 @@ const ASK_REFUSAL: &str = "fno-agents: opencode has no stateful 'ask' resume \
     once the payload is large enough to render as a pasted block) or the prompt \
     sits there unsent.";
 
-/// Returns `None` for a non-opencode target (fall through to the next
-/// provider's ask hook), or `Some(2)` after printing the refusal.
+/// Returns `None` for a non-opencode target, or a client exit code for an
+/// opencode target. Serve rows receive a read-back reply; other shapes keep the
+/// historical refusal.
 pub fn maybe_run_opencode_ask(
     home: &crate::paths::AgentsHome,
     params: &serde_json::Value,
@@ -47,10 +49,36 @@ pub fn maybe_run_opencode_ask(
             return Some(12);
         }
     };
-    let existing_provider = registry.find(name).map(|e| e.harness_name());
+    let existing = registry.find_name_or_full_session_id(name);
+    let existing_provider = existing.map(|e| e.harness_name());
     let resolved = existing_provider.or(provider_param);
     if resolved != Some("opencode") {
         return None; // not an opencode target; fall through
+    }
+    if existing.is_some_and(|entry| {
+        entry.harness_name() == "opencode" && entry.substrate.as_deref() == Some("thread")
+    }) {
+        let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let from_name = params
+            .get("from_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("fno");
+        let model = params.get("model").and_then(|v| v.as_str());
+        let timeout = params
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(Duration::from_secs(600));
+        let outcome = crate::opencode_serve::ask_registered_session(
+            home, name, message, from_name, model, timeout,
+        );
+        if !outcome.stderr.is_empty() {
+            eprint!("{}", outcome.stderr);
+        }
+        if !outcome.stdout.is_empty() {
+            print!("{}", outcome.stdout);
+        }
+        return Some(outcome.exit_code);
     }
     eprintln!("{ASK_REFUSAL}");
     Some(2)

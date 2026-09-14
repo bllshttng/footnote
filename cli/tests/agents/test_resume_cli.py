@@ -27,6 +27,7 @@ class _FakeAgentEntry:
     log_path: str = "/tmp/log.jsonl"
     short_id: Optional[str] = None
     harness_session_id: Optional[str] = None
+    substrate: Optional[str] = None
 
 
 def _allow_all_path(_bin: str) -> bool:
@@ -1028,6 +1029,30 @@ def test_opencode_argv_attaches_the_tui_by_session() -> None:
         "opencode", "--session", "ses_09679f284ffeJv7NdBAoLQLnLZ",
     ]
     assert "run" not in res.exec_argv
+
+
+def test_opencode_serve_thread_resume_routes_through_fno_ask() -> None:
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="oc-thread",
+        harness="opencode",
+        cwd="/cwd",
+        harness_session_id="ses_09679f284ffeJv7NdBAoLQLnLZ",
+        substrate="thread",
+    )
+    res = resume_logic(
+        name="oc-thread",
+        message="continue the work",
+        print_command=True,
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        execvp=_no_exec,
+    )
+    assert res.exit_code == 0
+    assert res.exec_argv[1:4] == ["ask", "oc-thread", "continue the work"]
+    assert res.exec_argv[-2:] == ["--cwd", "/cwd"]
 
 
 def test_resume_argv_delegates_identity_to_capability_contract(monkeypatch) -> None:
