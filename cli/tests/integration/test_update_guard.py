@@ -53,14 +53,20 @@ def _isolate(
     from fno.paths import resolve_repo_root
 
     # Stub the real install so tests never execute uv/pip.
-    # We patch _discover_source to return a sentinel Path, and os.execvp + subprocess.run
-    # to be no-ops. Monkeypatch BEFORE invoking the command (memory: feedback_default_arg_breaks_monkeypatch_isolation).
+    # We patch the native source-pin seam to allow a sentinel source, and
+    # os.execvp + subprocess.run to be no-ops. Monkeypatch BEFORE invoking the
+    # command (memory: feedback_default_arg_breaks_monkeypatch_isolation).
     import fno.update as update_mod
 
     monkeypatch.setattr(
         update_mod,
-        "_discover_source",
-        lambda override=None: tmp_path / "fake-source",
+        "_resolve_source_pin",
+        lambda override=None: {
+            "decision": "allow",
+            "path": str(tmp_path / "fake-source"),
+            "warning": None,
+            "refusal": None,
+        },
     )
     monkeypatch.setattr(update_mod.os, "execvp", lambda *a, **kw: None)
     import subprocess as subprocess_mod
@@ -536,9 +542,18 @@ def test_doctor_fix_python_stale_delegates_to_real_update_command(
     """
     from fno import doctor, update
 
-    # Make a minimal fno source so _discover_source succeeds.
+    # Make a minimal fno source so the native source-pin seam resolves it.
     src = _make_fno_source(tmp_path)
-    monkeypatch.setattr(update, "_discover_source", lambda override=None: src)
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda override=None: {
+            "decision": "allow",
+            "path": str(src),
+            "warning": None,
+            "refusal": None,
+        },
+    )
     monkeypatch.setattr(update, "_target_in_progress", lambda: False)
     monkeypatch.setattr(update, "_INSTALLED_REV_FILE", tmp_path / "installed-rev")
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")

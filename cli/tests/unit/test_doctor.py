@@ -173,59 +173,57 @@ def test_ac1_err_missing_verb_reports_skew_and_exits_nonzero(
     assert "fno doctor update" in result.stdout
 
 
-def test_source_checkout_sync_reports_positive_origin_main_distance(
+def _fake_native_sync(payload):
+    """Capture the sync argv and answer with the given native payload."""
+    captured: dict = {}
+
+    def fake(subcommand, extra=None, runner=None, input_text=None):
+        captured["sub"] = subcommand
+        captured["extra"] = list(extra or [])
+        return payload
+
+    return fake, captured
+
+
+def test_source_checkout_sync_maps_native_payload(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from fno import update
+
     source = tmp_path / "cli"
     source.mkdir()
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        calls.append(list(cmd))
-        if cmd[-2:] == ["rev-parse", "HEAD"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="local\n", stderr="")
-        if cmd[-3:] == ["rev-parse", "--verify", "origin/main^{commit}"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="remote\n", stderr="")
-        if cmd[-4:] == ["merge-base", "--is-ancestor", "HEAD", "origin/main"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        if cmd[-3:] == ["rev-list", "--count", "HEAD..origin/main"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="117\n", stderr="")
-        raise AssertionError(f"unexpected git command: {cmd}")
-
-    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
-
-    report = doctor._source_checkout_sync(source)
-
-    assert report == {
+    payload = {
         "status": "behind",
         "behind": 117,
         "source_head": "local",
         "remote_head": "remote",
         "detail": "",
     }
-    assert not any("fetch" in call for call in calls)
+    fake, captured = _fake_native_sync(payload)
+    monkeypatch.setattr(update, "_source_pin_call", fake)
+
+    report = doctor._source_checkout_sync(source)
+
+    assert report == {"status": "behind", "behind": 117, "source_head": "local", "remote_head": "remote", "detail": ""}
+    assert captured["sub"] == "sync"
+    assert captured["extra"] == ["--source", str(source)]
 
 
-def test_source_checkout_sync_degrades_unknown_without_origin_main(
+def test_source_checkout_sync_degrades_without_native_answer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from fno import update
+
     source = tmp_path / "cli"
     source.mkdir()
-
-    def fake_run(cmd, *args, **kwargs):
-        if cmd[-2:] == ["rev-parse", "HEAD"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="local\n", stderr="")
-        return subprocess.CompletedProcess(
-            cmd, 128, stdout="", stderr="unknown revision"
-        )
-
-    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+    fake, _captured = _fake_native_sync(None)
+    monkeypatch.setattr(update, "_source_pin_call", fake)
 
     report = doctor._source_checkout_sync(source)
 
     assert report["status"] == "unknown"
     assert report["behind"] is None
-    assert "origin/main" in report["detail"]
+    assert "source-pin helper" in report["detail"]
 
 
 def test_source_checkout_behind_is_a_doctor_blocker() -> None:

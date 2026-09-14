@@ -27,8 +27,8 @@ import re
 import shlex
 import shutil
 import subprocess
+
 import sys
-import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, Optional
@@ -128,83 +128,85 @@ class SourceNotFoundError(Exception):
     """Raised when the fno source path cannot be located."""
 
 
-def _looks_like_fno_source(path: Path) -> bool:
-    """True if path contains a pyproject.toml declaring ``[project] name = "fno"``.
+# Fail-closed text for update when the native source-pin authority cannot
+# answer (helper missing, pre-source-pin build, or malformed transport): the
+# legacy Python classifier must NOT reopen the unsafe cache path.
+_SOURCE_PIN_UNAVAILABLE = (
+    "the deployed fno-agents could not answer source-pin "
+    "(missing, pre-source-pin, or malformed); re-run the update with an "
+    "explicit --source pointing at the canonical checkout, or rebuild the "
+    "rust bins from it, so a stale helper cannot reopen the unsafe cache path"
+)
 
-    Parses the TOML rather than substring-matching so a stray ``name = "fno"``
-    outside the ``[project]`` table (in a dependency list, a tool subsection, etc.)
-    cannot false-match. Returns False for any read/parse failure - this is a
-    "looks like" check, not a validator.
-    """
-    pyproject = path / "pyproject.toml"
-    if not pyproject.is_file():
-        return False
+_COMPANION_FILE = _CACHE_FILE.parent / "source-pin.json"
+
+
+def _source_pin_call(
+    subcommand: str,
+    extra: Optional[list[str]] = None,
+    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
+    input_text: Optional[str] = None,
+) -> Optional[dict]:
+    """One native `fno-agents source-pin` invocation; None = cannot answer."""
     try:
-        with pyproject.open("rb") as f:
-            data = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError):
-        return False
-    project = data.get("project") if isinstance(data, dict) else None
-    if not isinstance(project, dict):
-        return False
-    return project.get("name") == "fno"
+        from fno import rust_binary
+
+        binary = rust_binary.resolve_installed_binary()
+    except Exception:  # noqa: BLE001
+        binary = None
+    if not binary:
+        return None
+    cmd = [str(binary), "source-pin", subcommand, *(extra or [])]
+    try:
+        result = runner(cmd, capture_output=True, text=True, check=False, timeout=30.0, input=input_text)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        _log.warning("source-pin %s exited %s: %s", subcommand, result.returncode, (result.stderr or "").strip()[:200])
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _resolve_source_pin(override: Optional[Path] = None) -> Optional[dict]:
+    """One native resolution: path, eligibility evidence, allow/refuse, warning."""
+    extra: list[str] = []
+    if override is not None:
+        extra += ["--override", str(override.expanduser().resolve())]
+    env_source = os.environ.get("FNO_SOURCE")
+    if env_source:
+        extra += ["--env-source", str(Path(env_source).expanduser().resolve())]
+    extra += ["--cache", str(_CACHE_FILE)]
+    for c in _CANDIDATE_PATHS:
+        extra += ["--candidate", str(c.expanduser().resolve())]
+    return _source_pin_call("resolve", extra)
 
 
 def _discover_source(override: Optional[Path] = None) -> Path:
-    """Locate the fno CLI source directory.
+    """Locate the fno CLI source directory via the native source-pin authority.
 
-    The override path (``--source``) is trusted-but-validated: if the user
-    explicitly points us at a directory, we surface a precise error when that
-    directory doesn't look right, rather than silently falling through to
-    other candidates.
+    A refused-but-resolved pin still returns its path here: `fno doctor`
+    probes the resolved checkout for staleness evidence regardless of the
+    update gate; `fno doctor update` enforces the refusal itself.
     """
-    if override is not None:
-        path = override.expanduser().resolve()
-        if not _looks_like_fno_source(path):
-            raise SourceNotFoundError(
-                f"--source {path} does not contain a pyproject.toml with "
-                "name = 'fno'. Pass a path to the fno CLI source directory."
-            )
-        return path
-
-    candidates: list[Path] = []
-
-    env_source = os.environ.get("FNO_SOURCE")
-    if env_source:
-        candidates.append(Path(env_source).expanduser().resolve())
-
-    if _CACHE_FILE.is_file():
-        try:
-            cached = _CACHE_FILE.read_text(encoding="utf-8").strip()
-            if cached:
-                candidates.append(Path(cached).expanduser().resolve())
-        except OSError:
-            pass
-
-    candidates.extend(p.expanduser().resolve() for p in _CANDIDATE_PATHS)
-
-    seen: set[Path] = set()
-    for path in candidates:
-        if path in seen:
-            continue
-        seen.add(path)
-        if _looks_like_fno_source(path):
-            return path
-
-    raise SourceNotFoundError(
-        "Could not locate the fno CLI source. Pass --source /path/to/fno/cli, "
-        "set $FNO_SOURCE, or install the fno plugin into "
-        "~/.claude/plugins/fno/."
-    )
+    pin = _resolve_source_pin(override)
+    if pin is None:
+        raise SourceNotFoundError(_SOURCE_PIN_UNAVAILABLE)
+    if pin.get("path"):
+        return Path(pin["path"])
+    raise SourceNotFoundError(pin.get("refusal") or "source checkout not resolvable")
 
 
-def _cache_source_path(source: Path) -> None:
-    """Write the resolved source to the cache. Best-effort; failures are silent."""
-    try:
-        _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _CACHE_FILE.write_text(f"{source}\n", encoding="utf-8")
-    except OSError:
-        pass
+def _cache_source_path(pin: dict) -> None:
+    """Record both pins natively (companion + legacy path file). Best-effort."""
+    if not isinstance(pin, dict) or not pin.get("path"):
+        return
+    extra = ["--cache", str(_CACHE_FILE), "--companion", str(_COMPANION_FILE)]
+    if _source_pin_call("record", extra, input_text=json.dumps(pin)) is None:
+        _log.warning("source-pin record failed; the previous pin stands")
 
 
 def _source_rev(source: Path) -> Optional[str]:
@@ -1423,6 +1425,8 @@ def update_command(
     rust = rust is True
     no_rust = no_rust is True
     check = check is True
+    if not isinstance(source, Path):
+        source = None
 
     if check:
         if dry_run or rust or force:
@@ -1440,11 +1444,16 @@ def update_command(
         typer.echo(_GUARD_MSG, err=True)
         raise typer.Exit(1)
 
-    try:
-        resolved = _discover_source(source)
-    except SourceNotFoundError as exc:
-        typer.echo(str(exc), err=True)
+    pin = _resolve_source_pin(source)
+    if pin is None:
+        typer.echo(_SOURCE_PIN_UNAVAILABLE, err=True)
         raise typer.Exit(1)
+    if pin.get("decision") == "refuse":
+        typer.echo(pin.get("refusal") or "source checkout refused", err=True)
+        raise typer.Exit(1)
+    if pin.get("warning"):
+        typer.echo(pin["warning"], err=True)
+    resolved = Path(pin["path"])
 
     typer.echo(f"Reinstalling fno from {resolved}")
 
@@ -1504,10 +1513,10 @@ def update_command(
         # what the exec below actually runs, and a receipt that understates it
         # sends an operator back into the unretried failure.
         typer.echo(f"Would run: {install_sh or shlex.join(cmd)}")
-        _cache_source_path(resolved)
+        _cache_source_path(pin)
         return
 
-    _cache_source_path(resolved)
+    _cache_source_path(pin)
 
     # Rev we are about to install, recorded so `fno doctor` can later detect
     # installed-vs-source skew. None when the source is not a readable git
