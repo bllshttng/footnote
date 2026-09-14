@@ -17,6 +17,10 @@ fn worker_bin() -> &'static str {
     env!("CARGO_BIN_EXE_fno-agents-worker")
 }
 
+fn daemon_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_fno-agents-daemon")
+}
+
 fn alive(pid: u32) -> bool {
     // SAFETY: signal 0 is the existence probe; no signal is delivered.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
@@ -197,6 +201,143 @@ fn graph_keeper_dies_within_5s_of_its_test_owner() {
             })
             .is_err(),
         "a reaped graph keeper's socket must refuse connections"
+    );
+}
+
+#[test]
+fn daemon_dies_within_8s_of_its_test_owner() {
+    let dir = scratch_dir("daemon");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let stderr_path = dir.join("daemon.stderr");
+    let stderr_file = std::fs::File::create(&stderr_path).unwrap();
+    let (owner, owner_pid, owner_birth) = OwnerProcess::spawn();
+
+    let mut daemon = Command::new(daemon_bin())
+        .env("FNO_AGENTS_HOME", &home)
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_EVENTS_PATH", home.join(".fno/events.jsonl"))
+        .env("FNO_AGENTS_NO_STARTUP_RECONCILE", "1")
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+        .env("FNO_TEST_OWNER_PID", owner_pid.to_string())
+        .env("FNO_TEST_OWNER_BIRTH", owner_birth.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .expect("daemon spawns");
+    let daemon_pid = daemon.id();
+    let _guard = KillGuard(daemon_pid);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !home.join("supervisor.sock").exists() {
+        assert!(Instant::now() < deadline, "daemon socket never appeared");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read_to_string(home.join("events.jsonl"))
+        .unwrap_or_default()
+        .contains("daemon_started")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "daemon started event never appeared"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+
+    owner.kill_and_reap();
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        match daemon.try_wait().expect("daemon is waitable") {
+            Some(_) => break,
+            None => {}
+        }
+        if Instant::now() >= deadline {
+            let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap_or_default();
+            panic!("daemon {daemon_pid} was still unreaped 8s after SIGKILL; stderr={stderr:?}; events={events:?}");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let _ = daemon.wait();
+    let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    assert!(
+        stderr.contains("test_owner_reaped"),
+        "daemon stderr must identify owner reaping; stderr={stderr:?}"
+    );
+    assert!(
+        std::fs::read_to_string(home.join("events.jsonl"))
+            .unwrap_or_default()
+            .contains(r#""type":"daemon_exited""#),
+        "daemon event log must carry a positive exit marker"
+    );
+}
+
+#[test]
+fn daemon_refuses_a_dead_owner_at_start() {
+    let dir = scratch_dir("daemon-dead-owner");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let (owner, owner_pid, owner_birth) = OwnerProcess::spawn();
+    owner.kill_and_reap();
+
+    let mut daemon = Command::new(daemon_bin())
+        .env("FNO_AGENTS_HOME", &home)
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_TEST_OWNER_PID", owner_pid.to_string())
+        .env("FNO_TEST_OWNER_BIRTH", owner_birth.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("daemon spawns");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        match daemon.try_wait().expect("daemon is waitable") {
+            Some(status) => break status,
+            None => {
+                assert!(Instant::now() < deadline, "daemon served a dead owner");
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
+    let output = daemon
+        .wait_with_output()
+        .expect("daemon output is waitable");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(status.code(), Some(3), "stderr={stderr:?}");
+    assert!(!home.join("supervisor.sock").exists());
+    assert!(stderr.contains(&owner_pid.to_string()), "stderr={stderr:?}");
+}
+
+#[test]
+fn every_triad_spawning_test_file_declares_its_owner() {
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let exempt = ["retirement_e2e.rs", "test_run_lifecycle.rs"];
+    let mut matched = Vec::new();
+    for entry in std::fs::read_dir(&tests_dir).expect("read tests directory") {
+        let entry = entry.expect("read test entry");
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let source = std::fs::read_to_string(&path).expect("read test source");
+        let spawns_triad = source.contains("CARGO_BIN_EXE_fno-agents\"")
+            || source.contains("CARGO_BIN_EXE_fno-agents-daemon\"");
+        if !spawns_triad || exempt.contains(&name.as_str()) {
+            continue;
+        }
+        matched.push(name.clone());
+        assert!(
+            source.contains("self_owner_env"),
+            "{name} names a client or daemon bin without self_owner_env"
+        );
+    }
+    assert!(
+        matched.iter().any(|name| name == "daemon_e2e.rs"),
+        "positive control: daemon_e2e.rs must be scanned"
     );
 }
 

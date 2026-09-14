@@ -26,7 +26,9 @@ fn codex_available() -> bool {
 
 fn run(env: &[(String, String)], args: &[&str]) -> Output {
     let mut command = Command::new(CLIENT);
-    command.args(args);
+    command
+        .envs(fno_agents::test_run::self_owner_env())
+        .args(args);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -36,6 +38,7 @@ fn run(env: &[(String, String)], args: &[&str]) -> Output {
 fn run_without_capture(env: &[(String, String)], args: &[&str]) -> bool {
     let mut command = Command::new(CLIENT);
     command
+        .envs(fno_agents::test_run::self_owner_env())
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());

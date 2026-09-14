@@ -144,6 +144,7 @@ fn king_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
 
 fn run_king(dir: &TempDir, lib_dir: &Path, bin_dir: &Path) -> Output {
     Command::new(LOOP_BINARY)
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "loop",
             "run",

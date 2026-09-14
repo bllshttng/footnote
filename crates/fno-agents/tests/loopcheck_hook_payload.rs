@@ -143,6 +143,7 @@ fn fixture() -> Fixture {
 fn spawn_loop_check(fx: &Fixture, stdin_payload: Option<&str>) -> (i32, serde_json::Value) {
     let bin = env!("CARGO_BIN_EXE_fno-agents");
     let mut cmd = Command::new(bin);
+    cmd.envs(fno_agents::test_run::self_owner_env());
     cmd.arg("loop-check")
         .arg("--state")
         .arg(&fx.manifest)

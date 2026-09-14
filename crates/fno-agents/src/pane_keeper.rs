@@ -479,7 +479,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     // `run_pane_with_worker` at crates/fno/src/server.rs:20282). A
     // production pane (no such env) is unaffected - this thread never
     // spawns for one.
-    if let Some((owner_pid, owner_birth)) = crate::test_run::owner_from_env() {
+    if let Some((owner_pid, owner_birth)) = crate::test_run::declared_owner_from_env() {
         crate::test_run::spawn_owner_watchdog(
             owner_pid,
             owner_birth,

@@ -180,6 +180,7 @@ pub fn start_daemon(home: &fno_agents::paths::AgentsHome) -> DaemonChild {
         fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
     let mut cmd = std::process::Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
+        .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
         // The claim-audit journal resolves through this pin before the
         // repo-root fallback (claim_events_path), so the daemon's claim

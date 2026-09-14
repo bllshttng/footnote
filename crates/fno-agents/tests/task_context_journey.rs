@@ -20,6 +20,9 @@ const CONSTRAINT: &str = "Do not widen scope beyond the plan";
 fn run_verb(verb: &str, payload: &Value) -> (i32, Value) {
     let mut child = Command::new(VERB_BIN)
         .arg(verb)
+        // The client lazy-starts a daemon that inherits this env, so the
+        // daemon dies with this test run instead of idling an hour (x-5533).
+        .envs(fno_agents::test_run::self_owner_env())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
