@@ -80,6 +80,7 @@ impl Scratch {
             )
             .env("FNO_E2E", "1")
             .env("FNO_PROCESS_ADMISSION_MAX", "512");
+        pin_checkout_worker(cmd);
     }
 
     fn isolate_pty_command(&self, cmd: &mut CommandBuilder) {
@@ -564,6 +565,20 @@ impl Drop for ServerProc {
     }
 }
 
+/// The done-read rides the store keeper, so the spawned servers need a
+/// resolvable worker binary: pin THIS checkout's build (the fno-agents
+/// workspace builds it first in CI), never the installed one.
+fn pin_checkout_worker(cmd: &mut std::process::Command) {
+    for profile in ["debug", "release"] {
+        let worker = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../fno-agents/target/{profile}/fno-agents-worker"));
+        if worker.is_file() {
+            cmd.env("FNO_AGENTS_WORKER", worker);
+            return;
+        }
+    }
+}
+
 /// Spawn the real server binary headless on `sock`, with `envs` overriding
 /// the inherited environment (SHELL, PATH for the git-stub cases, ...).
 #[allow(dead_code)]
@@ -577,8 +592,22 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
     cmd.args(["--server"])
         .arg(sock)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::null());
+    // A server that dies on startup must leave its reason in the scratch:
+    // a null stderr turns "never bound its socket" into an unexplained timeout.
+    let server_log = sock
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("server.log");
+    if let Ok(log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&server_log)
+    {
+        cmd.stderr(log);
+    } else {
+        cmd.stderr(std::process::Stdio::null());
+    }
     // Reap the server if this test process dies without running Drop (SIGKILL,
     // panic=abort, cargo-test timeout) — x-4e30. A test that needs a specific
     // grace (or none) overrides via `envs`, which is applied after.
@@ -615,6 +644,7 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
     // why it reads as a flake, and a clean CI home hides it entirely. The path
     // deliberately does not exist: no graph means an empty lane and no missions.
     cmd.env("FNO_GRAPH_JSON", iso.join("iso-graph.json"));
+    pin_checkout_worker(&mut cmd);
     // Isolated-account rosters are discovered via the provider config
     // (isolated_account_dirs -> $PWD/.fno/config.toml, else this override's
     // sibling config.toml, else ~/.fno/config.toml). Point the override at an

@@ -106,15 +106,16 @@ fn done_session_ids_in(entries: &[serde_json::Value]) -> HashSet<(String, String
     done
 }
 
-/// The live done set, read through the store keeper (`store_client::nodes`),
+/// The live done set, read through the store keeper (`store_client::rows`),
 /// never the file: after the flip graph.json freezes, so a file read would
-/// assert a done set that stopped growing. An unreachable store reads as
-/// EMPTY, not as "nothing is done" being asserted positively - restore keeps
-/// every worker (today's behavior) when the instrument cannot read (fail
-/// open, x-9052 AC2-EDGE).
+/// assert a done set that stopped growing. The TOTAL fold, not the typed
+/// `nodes` read, so a legacy row the model would reject still counts. An
+/// unreachable store reads as EMPTY, not as "nothing is done" being asserted
+/// positively - restore keeps every worker (today's behavior) when the
+/// instrument cannot read (fail open, x-9052 AC2-EDGE).
 pub fn done_session_ids() -> HashSet<(String, String)> {
-    match crate::store_client::nodes(&graph_path(), serde_json::json!({}), None, None, true, None) {
-        Ok(conn) => done_session_ids_in(&conn.nodes),
+    match crate::store_client::rows(&graph_path()) {
+        Ok(rows) => done_session_ids_in(&rows),
         Err(_) => HashSet::new(),
     }
 }
