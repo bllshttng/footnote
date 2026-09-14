@@ -146,6 +146,16 @@ fn stale_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
     );
     let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
     assert!(log.contains("\"outcome\":\"skipped\"") && log.contains("fleet_stop"));
+    // The idle tick reaches this arm every ~5s: the skip row is paced by the
+    // sidecar stamp at the sweep's own interval, so a second due tick inside
+    // the window stays silent (and still consumes no cadence).
+    assert_eq!(stale_sweep(&home, &emitter, now + 60, &run), 0);
+    let rows = std::fs::read_to_string(home.events_jsonl())
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("\"outcome\":\"skipped\""))
+        .count();
+    assert_eq!(rows, 1, "one skip row per window, not one per tick");
 
     // Positive control: in the SAME paused state, the recovery observer
     // (liveness planner) still reconciles a reachable Orphaned row. The

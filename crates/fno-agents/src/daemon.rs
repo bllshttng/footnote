@@ -687,16 +687,32 @@ pub fn stale_sweep(
     // x-39f4: the sweep's only child is `agents stale-escalate --json`, so an
     // effective dispatch pause suspends the sweep without consuming its
     // cadence: no closure call, no stamp write, and a positive skip row so
-    // intentional silence cannot read as a dead arm. On clear the next due
+    // intentional silence cannot read as a dead arm. The row is paced by a
+    // SIDECAR stamp at the sweep's own interval - the real stamp stays
+    // untouched, so a due sweep stays due - because the idle tick reaches
+    // this arm every ~5s and an unpaced row would grow events.jsonl by
+    // ~17k rows/day for the length of the incident. On clear the next due
     // tick runs normally. Serve-only liveness is NOT behind this gate - its
     // call site sits before this arm and stays eligible while dispatch polls
     // are held (AC3-LIVENESS).
     let pause = crate::loops_pause::dispatch_pause();
     if pause.is_paused() {
-        let _ = emitter.emit(
-            "stale_sweep",
-            &json!({"outcome": "skipped", "reason": pause.skip_reason(), "detail": pause.detail()}),
-        );
+        let skip_stamp = home.root().join("stale-escalate.skipstamp");
+        let last_skip = std::fs::read_to_string(&skip_stamp)
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        if now.saturating_sub(last_skip) >= STALE_SWEEP_INTERVAL_SECS {
+            let _ = emitter.emit(
+                "stale_sweep",
+                &json!({
+                    "outcome": "skipped",
+                    "reason": pause.skip_reason(),
+                    "detail": pause.detail(),
+                }),
+            );
+            let _ = std::fs::write(&skip_stamp, now.to_string());
+        }
         return 0;
     }
     let outcome = match run().as_deref().and_then(parse_stale_sweep) {

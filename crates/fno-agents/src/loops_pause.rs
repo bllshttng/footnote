@@ -165,12 +165,14 @@ pub fn dispatch_pause() -> DispatchPause {
 /// and the incident generation/reason or unavailable detail when present.
 /// The Python adapter reads only `paused`, so the added fields stay additive.
 fn paused_json() -> Value {
-    match dispatch_pause() {
+    // One read feeds both the verdict and the manual fields: a second read
+    // could straddle a resume and print paused:false for a sentinel this
+    // same call just saw paused.
+    let manual = read_state();
+    match combine(&manual, crate::fleet_incident::verdict()) {
         DispatchPause::Clear => json!({"paused": false, "source": "none", "state": "clear"}),
         DispatchPause::Manual { .. } => {
-            // Re-read keeps the manual fields (who/paused_at/expires_at)
-            // verbatim from the sentinel's own shape.
-            let mut v = read_state().json();
+            let mut v = manual.json();
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("source".into(), json!("manual"));
             }
