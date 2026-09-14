@@ -809,35 +809,10 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 }
             });
     }
-    if state.backend() == Backend::Sqlite {
-        let export_state = Arc::clone(&state);
-        let export_shutdown = Arc::clone(&shutdown);
-        let _ = std::thread::Builder::new()
-            .name("fno-store-export".into())
-            .spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(1));
-                if export_shutdown.load(Ordering::SeqCst) == 1 {
-                    break;
-                }
-                let gate = export_state
-                    .gate
-                    .write()
-                    .unwrap_or_else(|error| error.into_inner());
-                let result =
-                    crate::backlog::export_if_due(&export_state.graph, Duration::from_secs(60));
-                drop(gate);
-                if let (Err(error), Some(path)) = (result, &export_state.events) {
-                    let emitter = crate::events::EventEmitter::new(path, "daemon");
-                    let _ = emitter.emit(
-                        "graph_export_failed",
-                        &json!({
-                            "graph": export_state.graph.display().to_string(),
-                            "error": error,
-                        }),
-                    );
-                }
-            });
-    }
+    // The background export thread is deleted (task 10.1): after the flip
+    // graph.json is written only by `fno doctor graph export --now`, and a
+    // reader left on graph.json must see it freeze rather than a 60 s stale
+    // copy (Risk 5).
     if state.canonical {
         // The ONE render path (task 8.3): a 1 s tick checks whether the
         // store moved since the last render and the last write settled, and
@@ -1259,6 +1234,9 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "commit" => handle_commit(state, &params),
         "export_now" => handle_export_now(state),
         "export_status" => handle_export_status(state),
+        "set_backend" => handle_set_backend(state, &params),
+        "backend_gate" => handle_backend_gate(state),
+        "backend_status" => handle_backend_status(state),
         "parity" => handle_parity(state),
         "op" => handle_op(state, &params),
         "api" => handle_api(state, &params),
@@ -1668,6 +1646,61 @@ fn handle_export_status(state: &StoreState) -> Result<Value, StoreError> {
         "stale": exported.as_deref() != Some(current.as_str()),
         "version": current,
         "exported_version": exported,
+    }))
+}
+
+/// The flip verb's write side: stamp `graph_meta.backend` (and
+/// `backend_since_ms` on an actual change) under the shared gate, so the
+/// flip cannot interleave with a mutation. Idempotent by design: a re-run
+/// of the same backend keeps the original since stamp.
+fn handle_set_backend(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
+    let name = params
+        .get("backend")
+        .and_then(Value::as_str)
+        .ok_or_else(|| StoreError::Invalid("set_backend needs a backend name".into()))?;
+    let backend = match name {
+        "json" => Backend::Json,
+        "sqlite" => Backend::Sqlite,
+        other => {
+            return Err(StoreError::Invalid(format!(
+                "unknown backend {other:?}; names are json and sqlite"
+            )))
+        }
+    };
+    let _gate = state
+        .gate
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    let (previous, since) =
+        crate::backlog::flip_backend(&state.graph, backend).map_err(StoreError::Sqlite)?;
+    Ok(json!({
+        "backend": backend.name(),
+        "previous": previous.name(),
+        "since_ms": since.map(|v| v.to_string()),
+    }))
+}
+
+/// The flip gate's soak half: the sampler's own journal read by the keeper
+/// that wrote it, one gap line per failed requirement. The source-tree
+/// half (census, writer ratchet, ownership test, negative control) runs
+/// from scripts/ci/check-graph-flip-gates.sh; the verb unions both.
+fn handle_backend_gate(state: &StoreState) -> Result<Value, StoreError> {
+    Ok(json!({
+        "backend": state.backend().name(),
+        "gaps": crate::backlog::soak_gaps(
+            state.events.as_deref(),
+            chrono::Utc::now(),
+        ),
+    }))
+}
+
+/// `--status`'s read side: the named backend plus when it took over.
+fn handle_backend_status(state: &StoreState) -> Result<Value, StoreError> {
+    Ok(json!({
+        "backend": state.backend().name(),
+        "since_ms": crate::backlog::backend_since(&state.graph)
+            .map_err(StoreError::Sqlite)?
+            .map(|v| v.to_string()),
     }))
 }
 

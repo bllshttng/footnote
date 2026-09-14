@@ -556,7 +556,7 @@ pub fn now_isoformat() -> String {
 }
 
 /// Python `strftime("%Y%m%dT%H%M%S%f")` in UTC, the backup filename stamp.
-fn backup_stamp() -> String {
+pub(crate) fn backup_stamp() -> String {
     chrono::Utc::now().format("%Y%m%dT%H%M%S%f").to_string()
 }
 
