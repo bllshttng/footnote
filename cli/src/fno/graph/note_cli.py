@@ -171,6 +171,7 @@ def _write_state(
 
 @cli.command(
     "notes",
+    hidden=True,  # the advertised backlog menu caps at 12; `fno backlog note` help names this reader
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     add_help_option=False,
 )
