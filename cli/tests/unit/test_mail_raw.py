@@ -1342,7 +1342,7 @@ def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):
 
 
 def test_run_mail_inject_lets_crate_stderr_reach_the_sender(mailbox, monkeypatch, capsys):
-    """AC1-HP (x-8f6d, ruling on 1a5328246): the crate authors the route hint
+    """AC1-HP: the crate authors the route hint
     on stderr for an unconfirmed thread-row inject; the runner inherits stderr
     so it reaches the sender beside the receipt."""
     import subprocess as sp
