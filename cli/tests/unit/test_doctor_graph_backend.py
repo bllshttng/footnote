@@ -128,7 +128,7 @@ def test_rollback_exports_first_then_flips(world):
 def test_status_prints_the_status_line(world, capsys):
     doctor_graph._flip("sqlite")
     capsys.readouterr()
-    doctor_graph.graph_backend(None, True)
+    doctor_graph.graph_backend("status")
     out = capsys.readouterr().out
     assert out.startswith("backend=sqlite since=")
     assert " days=0 keepers=" in out
