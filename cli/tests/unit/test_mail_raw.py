@@ -1341,6 +1341,33 @@ def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):
     assert not durable, "AC30: unconfirmed never queues durable"
 
 
+def test_run_mail_inject_lets_crate_stderr_reach_the_sender(mailbox, monkeypatch, capsys):
+    """AC1-HP (x-8f6d, ruling on 1a5328246): the crate authors the route hint
+    on stderr for an unconfirmed thread-row inject; the runner inherits stderr
+    so it reaches the sender beside the receipt."""
+    import subprocess as sp
+    from fno.agents.dispatch import _run_mail_inject
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return sp.CompletedProcess(
+            argv,
+            1,
+            stdout=json.dumps({"delivered": False, "reason": "not-confirmed"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr("fno.agents.dispatch.subprocess.run", fake_run)
+    recorded = []
+    ok = _run_mail_inject(["mail-inject"], "x", 5.0, recorded.append)
+    assert ok is False
+    assert seen.get("stdout") == sp.PIPE, "stdout is the parsed verdict channel"
+    assert "capture_output" not in seen, "capturing stderr would swallow the crate's hint"
+    assert "stderr" not in seen, "stderr inherits so the hint reaches the sender"
+
+
 def test_raw_refuses_self_send_without_self_flag(mailbox, monkeypatch, capsys):
     """The self-send refusal is a redirect, not a prohibition: a caller who
     addressed this own session positionally is told the --to-self retry line.
