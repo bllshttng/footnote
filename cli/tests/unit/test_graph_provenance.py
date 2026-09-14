@@ -1550,6 +1550,94 @@ def test_cli_session_close_leaves_foreign_holder_claim_intact(tmp_path, monkeypa
     assert status["holder"] == "target-session:successor-sess"
 
 
+def test_cli_session_close_releases_handover_claim_via_registry_row(tmp_path, monkeypatch):
+    """FNO_NODE_CLAIM_HOLDER is unset in a daemon-forked worker, so the close
+    resolves the worker name the registry binds to this session and releases
+    exactly that spawn-handover holder."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import acquire_claim, claim_status
+    from fno.graph.store import read_graph
+
+    holder = "spawn-handover:target-x-close007-bp"
+    g = _make_graph(tmp_path, [{"id": "x-close007", "title": "t", "plan_path": "p.md"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close7")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+    monkeypatch.setattr(
+        "fno.paths.agents_registry_path", lambda: tmp_path / "registry.json"
+    )
+    (tmp_path / "registry.json").write_text(
+        json.dumps({
+            "schema_version": 19,
+            "agents": [
+                {"name": "target-x-close007-bp", "harness_session_id": "sess-close7"}
+            ],
+        }),
+        encoding="utf-8",
+    )
+    acquire_claim("node:x-close007", holder, ttl_ms=60_000)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-close007",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-close007",
+        "--json",
+    ])
+
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["claim_released"] is True
+    assert out["claim_holder"] == holder
+    assert claim_status("node:x-close007")["state"] == "free"
+    assert read_graph(g)[0].get("dispatch_verb") == "/fno:target"
+
+
+def test_cli_session_close_leaves_foreign_handover_claim_intact_without_env(tmp_path, monkeypatch):
+    """With the env unset, a handover holder whose worker name does not map to
+    this session stays held and the close answers claim_released false."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import acquire_claim, claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-close008", "title": "t", "plan_path": "p.md"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close8")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+    monkeypatch.setattr(
+        "fno.paths.agents_registry_path", lambda: tmp_path / "registry.json"
+    )
+    (tmp_path / "registry.json").write_text(
+        json.dumps({
+            "schema_version": 19,
+            "agents": [
+                {"name": "target-x-close008-bp", "harness_session_id": "sess-close8"}
+            ],
+        }),
+        encoding="utf-8",
+    )
+    acquire_claim(
+        "node:x-close008", "spawn-handover:target-x-close008-other", ttl_ms=60_000
+    )
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-close008",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-close008",
+        "--json",
+    ])
+
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output.strip().splitlines()[-1])["claim_released"] is False
+    status = claim_status("node:x-close008")
+    assert status["state"] == "live"
+    assert status["holder"] == "spawn-handover:target-x-close008-other"
+
+
 def test_cli_session_close_repoints_dispatch_verb_from_launch(tmp_path, monkeypatch):
     """The close writes the launch verb so the next dispatcher resolves
     the target slot instead of agents.profiles.blueprint."""
