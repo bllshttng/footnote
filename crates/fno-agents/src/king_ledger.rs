@@ -599,7 +599,7 @@ td.slug{color:var(--ink-mut);min-width:22ch}
 .pr.none{color:var(--rule-2);border:none}
 .sess.zero{color:var(--rule-2)}
 .grid{display:grid;gap:20px;grid-template-columns:repeat(auto-fit,minmax(min(430px,100%),1fr))}
-@media(max-width:900px){.grid{grid-template-columns:1fr}.tscroll{margin:0 -18px;padding:0 18px}}
+@media(max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}.tscroll{margin:0 -18px;padding:0 18px}}
 footer{font-family:var(--mono);font-size:11px;color:var(--ink-mut);border-top:1px solid var(--rule);padding-top:14px;
   display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
 "##;
