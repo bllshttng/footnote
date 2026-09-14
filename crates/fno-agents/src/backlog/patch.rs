@@ -275,7 +275,9 @@ const FIELD_POLICY: &[(&str, Policy)] = &[
 ];
 
 /// Names the policy table covers beyond `CANONICAL_FIELD_ORDER` (the model
-/// key groups' extra members). The coverage test keys on this.
+/// key groups' extra members). The coverage test keys on this; the table
+/// itself is runtime code, so the list stays test-only.
+#[cfg(test)]
 const MODEL_EXTRA_KEYS: &[&str] = &[
     "dispatch_verb",
     "dispatch_brief",
@@ -573,7 +575,8 @@ fn clear_park_facts(rows: &mut [Value], idx: usize, changes: &mut Vec<Change>) {
     put_key(obj, changes, &id, "deferred_at", Value::Null);
     put_key(obj, changes, &id, "deferred_reason", Value::Null);
     put_key(obj, changes, &id, "deferred_kind", Value::Null);
-    drop(obj);
+    // The borrow of rows[idx] ends here; the supersession clear re-enters
+    // rows for the replacer's backref.
     clear_supersession_facts(rows, idx, changes);
 }
 

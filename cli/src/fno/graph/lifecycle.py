@@ -64,7 +64,9 @@ def forward_update_door(
     legacy_flags = [
         _flag_spelling(param)
         for param in _LEGACY_UPDATE_PARAMS
-        if values.get(param) not in (None, False)
+        # Identity, not `in (None, False)`: `--fixes-pr 0` means clear, and
+        # `0 == False` would silently drop that flag from the mix refusal.
+        if values.get(param) is not None and values.get(param) is not False
     ]
     if legacy_flags:
         typer.echo(

@@ -396,3 +396,13 @@ def test_the_door_flags_cannot_mix_with_a_legacy_flag(tmp_graph):
     assert r.exit_code == 2, r.output
     assert "--priority" in r.output
     assert _entry(tmp_graph, "x-0001")["priority"] == "p2"
+
+def test_the_mix_refusal_catches_a_zero_valued_legacy_flag(tmp_graph):
+    """`--fixes-pr 0` means clear, and `0 == False`: the mix check must use
+    identity, or the door silently eats the legacy flag."""
+    _seed(tmp_graph, _node("x-0001"))
+
+    r = _invoke("update", "x-0001", "--status", "idea", "--fixes-pr", "0")
+
+    assert r.exit_code == 2, r.output
+    assert "--fixes-pr" in r.output
