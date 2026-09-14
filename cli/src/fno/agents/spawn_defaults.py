@@ -119,44 +119,30 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
 
 
 def extract_existing_pane(args: Sequence[str]) -> tuple[List[str], Optional[int]]:
-    """Remove fno's ``--pane`` target before Typer parses spawn arguments.
-
-    The spawn seam owns this flag because it is a control-plane target, not a
-    provider option. Values after a value flag and after either passthrough
-    boundary remain opaque to fno.
-    """
+    """Remove fno's control-plane pane target before Typer parses."""
+    raw = _head_flag_value(args, ("--pane",))
+    if raw is None:
+        return list(args), None
+    try:
+        pane = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"--pane needs an integer pane id, got {raw!r}") from exc
     out: List[str] = []
-    pane: Optional[int] = None
-    it = iter(enumerate(args))
-    for index, token in it:
+    index = 0
+    while index < len(args):
+        token = args[index]
         if token in ("--argv", "--"):
             out.extend(args[index:])
             break
-        key, equals, value = token.partition("=")
-        if key != "--pane":
-            out.append(token)
-            if not equals and token in _SPAWN_VALUE_FLAGS:
-                try:
-                    _, next_value = next(it)
-                except StopIteration:
-                    continue
-                out.append(next_value)
+        key, equals, _ = token.partition("=")
+        if key == "--pane":
+            index += 1 if equals else 2
             continue
-        if pane is not None:
-            raise ValueError("--pane may be specified only once")
-        if not equals:
-            try:
-                _, value = next(it)
-            except StopIteration as exc:
-                raise ValueError("--pane needs a pane id") from exc
-        if value.startswith("-"):
-            raise ValueError("--pane needs a pane id")
-        try:
-            pane = int(value)
-        except ValueError as exc:
-            raise ValueError(f"--pane needs an integer pane id, got {value!r}") from exc
-    else:
-        return out, pane
+        out.append(token)
+        index += 1
+        if not equals and token in _SPAWN_VALUE_FLAGS and index < len(args):
+            out.append(args[index])
+            index += 1
     return out, pane
 
 # Tokens that pin the substrate explicitly (a positional substrate word conflicts

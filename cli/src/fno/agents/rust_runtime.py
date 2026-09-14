@@ -1632,10 +1632,7 @@ def make_agents_group_cls() -> type:
                 verb = args[0]
                 if verb == "spawn" or verb in _WORKER_DIR_VERBS:
                     if verb == "spawn":
-                        from fno.agents.spawn_defaults import (
-                            extract_existing_pane,
-                            inject_spawn_defaults,
-                        )
+                        from fno.agents.spawn_defaults import extract_existing_pane, inject_spawn_defaults
 
                         args = inject_spawn_defaults(args)
                         try:

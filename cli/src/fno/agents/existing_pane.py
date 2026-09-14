@@ -1,4 +1,4 @@
-"""Start workers in panes placed by a separate mux verb."""
+"""Start a worker in a pane placed by a separate mux verb."""
 from __future__ import annotations
 
 import shlex
@@ -6,9 +6,7 @@ import subprocess
 from typing import Callable
 
 from fno.agents.dispatch import DispatchAskError
-
 Runner = Callable[..., subprocess.CompletedProcess[str]]
-
 
 def pane_placement_conflict(pane: int | None, **placements) -> str | None:
     if pane is None:
@@ -16,7 +14,6 @@ def pane_placement_conflict(pane: int | None, **placements) -> str | None:
     labels = {"workspace": "--workspace", "split": "--split", "at": "--at", "tab": "--tab", "bounded": "--bounded-placement", "tab_id": "--tab-id"}
     flag = next((labels[name] for name, value in placements.items() if value is not None and value is not False), None)
     return f"--pane cannot be combined with {flag}; it targets an already-placed pane" if flag else None
-
 
 def resolve_existing_pane(session: str, pane_id: int, rows: list[dict]) -> dict:
     if pane_id < 1:
@@ -30,14 +27,9 @@ def resolve_existing_pane(session: str, pane_id: int, rows: list[dict]) -> dict:
         raise DispatchAskError(f"--pane {pane_id} is not a confirmed pristine idle shell", exit_code=2)
     return row
 
-
 def start_existing_pane(session: str, pane_id: int, cwd: str, wrapped: list[str], run_mux: Runner, runner: Runner) -> subprocess.CompletedProcess[str]:
-    proc = run_mux(
-        [
-            "mux", "pane", "send", "--server", session, str(pane_id), "--text", "cd -- " + shlex.quote(cwd) + " && exec " + shlex.join(wrapped), "--submit", "--raw", "--guarded",
-        ],
-        runner,
-    )
+    text = "cd -- " + shlex.quote(cwd) + " && exec " + shlex.join(wrapped)
+    proc = run_mux(["mux", "pane", "send", "--server", session, str(pane_id), "--text", text, "--submit", "--raw", "--guarded"], runner)
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         raise DispatchAskError(f"existing pane {pane_id} rejected the worker start in session {session!r}: {detail or 'no output'}", exit_code=1)
