@@ -133,6 +133,16 @@ kill_criteria:
 - How it was discovered or why it matters now
 - Any relevant constraints or prior decisions]
 
+## Five questions
+
+[Answer each BEFORE designing. Each answer is a named thing or the word `none`; `none` is a claim and is judged like one.]
+
+1. **Persona**: who hits this, and what does it cost them today? Name the person (operator, crowned king, worker session, plugin user) and tie the cost to a source the plan cites.
+2. **Surface fit**: which existing verb, skill or config does this extend? Name it, or name the one you searched for and why it does not cover this.
+3. **Uncovered case**: which realistic input or state will this design NOT cover? Name it; "none" must survive re-reading the plan's own steps.
+4. **Deletable**: what in this plan could be deleted and the goal would still ship? Name it, or name the last thing you considered cutting.
+5. **Duplication**: which existing module already implements this, or could be extended so the feature falls out? Name the module and relationship, or `none` after checking `rg` for the plan's key symbols and the dual-implementation inventory.
+
 ## Changes
 
 ### 1. [Short descriptive name]

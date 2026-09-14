@@ -40,6 +40,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 | Plan-level dispatch hold | named evidence must exist before this plan dispatches or merges |
 | Answerer Enumeration Gate | the plan changes a read, write, or feed - step 2b-bis |
 | Consolidation Gate | always, between discovery grounding (2b) and the write (3) - step 2d |
+| Five questions and the judge | every plan - answered at 2a-bis, judged at step 3 after finalize |
 | Schema Citation Gate | the codemap has a `## Database Schema` section AND the plan touches the DB |
 | Python tree allowance | a Files-to-Modify row targets `cli/src/fno/**.py` |
 | Executor Lock Transcription | a design doc supplies a Locked Decision (executor) |
@@ -157,6 +158,7 @@ fi
    ```
    If `fno` is unavailable or codemap's deps are missing, skip silently. Read `.fno/codemap.md` if it exists - use it to identify god nodes, module boundaries, and dependency flow before Grep/Glob exploration. Top files in the output are highest-importance; changes to these need extra phases.
 2a. **Verify the premise** - applies to node-seeded and raw-prose input; a supplied design doc already carries cited findings. Read the whole node with `fno backlog get <id>`, including `dispatch_brief` and `progress_notes`; a later correcting note wins over the details. Name the one claim the plan rests on (what a line does, a count, a stall). Measure it again at its source, with a positive control, before writing. When it holds, cite the reading in Context. When it does not, record the real reading with `fno backlog note <id> "<reading>"`, then plan the real defect or halt and say the node is wrong. A plan on a premise nobody re-measured sends a worker after a defect that does not exist.
+2a-bis. **The five questions** - answer them BEFORE designing, each as a named thing or the word `none`, into a `## Five questions` section: who hits this and what it costs them today (a named person, a sourced cost); which existing verb, skill or config it extends; which case the design will not cover; what could be deleted; which existing module already implements this or could be extended. For the last one, ask the code-index provider when one is registered (x-7a2e); otherwise run `rg` for the node's key symbols and read `docs/architecture/dual-implementation-inventory.md`. The schema lives in [references/quick-template.md](references/quick-template.md); the pass criteria stay with the grader (`evals/blueprint-judge/lenses.md`) and are never copied here - a plan must not learn to write to its judge. An answer that changes the deliverable changes the plan; that is the point of asking before designing. Step 3's judge call grades the answers.
 2c. **Schema citation gate** - When a `## Database Schema` section exists in the
    codemap, run the **Schema Citation Gate** ([references/blueprint-gates.md](references/blueprint-gates.md#schema-citation-gate-graduated-db-touching-plans)) before adopt.
    Quick mode is `-S`-class, so it WARNS on an uncited DB-touching task and
@@ -230,15 +232,18 @@ fi
 
    Full body: [references/blueprint-gates.md](references/blueprint-gates.md#join-posture-step-3-every-plan-carrying-an-execution-strategy).
 
-   Then validate the exact saved file before collision checking or intake:
+   Then validate the exact saved file before collision checking or intake. `mutate_doc.py` runs through the same interpreter ladder `validate-plan.sh` uses (`FNO_PYTHON`, then the source checkout's `cli/.venv`): a bare `python3` dies with `ModuleNotFoundError: No module named 'pydantic'` right after the validator prints PASS on machines whose system python lacks it (reproduced 2026-09-11). Resolve the interpreter once, then chain:
 
    ```bash
+   FINALIZE_PY="${FNO_PYTHON:-$( [[ -x "$(dirname "$SKILL_DIR")/../cli/.venv/bin/python" ]] && echo "$(dirname "$SKILL_DIR")/../cli/.venv/bin/python" || echo python3 )}"
    bash "${SKILL_DIR}/scripts/validate-plan.sh" "$PLAN_PATH" \
-     && python3 "${SKILL_DIR}/scripts/mutate_doc.py" "$PLAN_PATH" --finalize
+     && "$FINALIZE_PY" "${SKILL_DIR}/scripts/mutate_doc.py" "$PLAN_PATH" --finalize
+   fno doctor observer judge --plan "$PLAN_PATH" --node "${CLAIMS_ID:-}" || true
    ```
 
-   A nonzero exit stops Blueprint before `3a` and `3b`; never register a draft that the executor would reject.
+   A nonzero exit from the validate-and-finalize chain stops Blueprint before `3a` and `3b`; never register a draft that the executor would reject.
    The `&&` is load-bearing: `--finalize` re-checks only the execution contract, so an unchained run stamps `status: ready` onto a plan the validator rejected for anything else (stub markers, malformed `kill_criteria`).
+   The judge call is advisory and level-gated (prints `skipped level=report` unless `config.loops.blueprint_judge.level` is `assisted` or `--force`): on a fail, revise the plan once or write a one-line disposition under that question in `## Five questions`; never loop, never block intake.
 
 3a. **Collision check + peer heads-up** (conditional). Between writing the plan and auto-intake, run the collision check (skip with `no-collision-check`) and, when a `peers` block exists, the cross-project peer heads-up. Both are gate-shaped, skip-flagged steps - full procedure (the `fno backlog collisions check` read, high-severity AskUserQuestion / beastmode auto-decision, the four options, and the peer-surface match + send) is in [references/blueprint-gates.md](references/blueprint-gates.md#collision-check-step-3a-skip-with-no-collision-check).
 
@@ -523,6 +528,7 @@ Exit codes:
 /blueprint ONLY writes sections in `BLUEPRINT_WRITE_ALLOWLIST`:
 - `Execution Strategy`
 - `File Ownership Map` (brownfield only)
+- `Five questions` (the step 2a-bis answers; the judge's fail dispositions land there too)
 - `Patterns to Reuse` (brownfield only)
 - `kill_criteria` (frontmatter)
 - `execution_mode`, `waves` (frontmatter)

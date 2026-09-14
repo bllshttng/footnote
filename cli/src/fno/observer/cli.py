@@ -30,7 +30,10 @@ from typing import Callable, Optional
 
 import typer
 
+from fno.loops import loop_level
 from fno.observer import fold
+from fno.plan._doc import load_plan_text
+from fno.rust_binary import find_dev_binary, resolve_binary
 
 observer_app = typer.Typer(
     name="observer",
@@ -177,10 +180,9 @@ def _default_gh(args: list[str]) -> "tuple[int, str, str]":
         return 1, "", str(exc)
 
 
-# Per-run cap on gh invocations. The eval loop is a background accumulator, not
-# a deadline job: nodes past the cap are picked up by later daily sweeps. Bounds
-# a sweep's total network fan-out (each gh call already has its own 60s timeout)
-# so N concurrent sweeps can't stretch a seconds-job into tens of minutes (x-dbdf).
+# Per-run cap on gh invocations: bounds a sweep's total network fan-out so N
+# concurrent sweeps can't stretch a seconds-job into tens of minutes; nodes
+# past the cap are picked up by later daily sweeps, not lost.
 _GH_FANOUT_CAP = int(os.environ.get("FNO_OBSERVER_GH_CAP", "10"))
 
 
@@ -218,7 +220,7 @@ def _score_item(item: dict, skill: str, by_id: dict, gh_runner) -> dict[str, Opt
         return fold.score_review_item(**ids)
     except Exception as exc:  # any unforeseen I/O fault -> coverage gap, not crash
         print(f"observer: scoring item {item.get('session_id')} failed: {exc}", file=sys.stderr)
-        dims = ("structural_validity", "collision_free", "shipped_outcome") if skill == "blueprint" else ("finding_precision",)
+        dims = fold.BLUEPRINT_DIMENSIONS if skill == "blueprint" else ("finding_precision",)
         return {d: None for d in dims}
 
 
@@ -295,10 +297,9 @@ def _emit_run_complete(summary: dict, events_paths: list[Path]) -> bool:
 def _write_digest(summary: dict, skill: str, *, mode: str) -> Path:
     from fno import paths as _paths
 
-    # Pin the digest to the project that owns the evaluated skill (the skill-id
-    # namespace, e.g. "fno:blueprint" -> "fno"), not the ambient launch cwd -
-    # a sweep fired from a worktree or a sibling repo must still land under
-    # internal/<owner>/, never internal/<that-checkout's-basename>/.
+    # Pin the digest to the skill-id namespace ("fno:blueprint" -> "fno"), not
+    # the ambient launch cwd, so a worktree/sibling-repo sweep still lands
+    # under internal/<owner>/, never internal/<that-checkout's-basename>/.
     sid = str(summary.get("skill_id", ""))
     owner = sid.split(":", 1)[0] if ":" in sid else None
     reports_dir = _paths.observer_reports_dir(project_id=owner)
@@ -339,22 +340,36 @@ def _mint_run_id(skill_id: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-@observer_app.command("sweep")
+@observer_app.command(
+    "sweep",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
 def sweep(
+    ctx: typer.Context,
     skill: str = typer.Option(..., "--skill", help="blueprint | review | target"),
     since: int = typer.Option(28, "--since", help="Window in days (default 28)."),
     repo: Optional[str] = typer.Option(None, "--repo", help="target only: pin one repo (owner/name); default = the graph's distinct PR repos."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the run summary as JSON."),
 ) -> None:
     """Retrospective read-only sweep: score a recorded corpus and emit events.
+    --judge N is fno-agents' flag; read from raw argv, not typer.Option.
 
     States on stdout: ``ok`` (run_complete emitted), ``insufficient`` (<10
     attributable items, no run_complete), ``partial`` (a coverage gap is
     present). Never exits 0 silently with no state word (the one anti-silent
     rule for this harness).
     """
+    judge_n = 0
+    if "--judge" in ctx.args:
+        try:
+            judge_n = int(ctx.args[ctx.args.index("--judge") + 1])
+        except (IndexError, ValueError):
+            raise typer.BadParameter("--judge needs an integer")
+
     if skill not in ("blueprint", "review", "target"):
         raise typer.BadParameter("--skill must be blueprint, review, or target")
+    if judge_n > 0 and skill != "blueprint":
+        typer.echo("--judge applies to --skill blueprint only; ignored")
     if since < 1:
         raise typer.BadParameter("--since must be >= 1 (days).")
 
@@ -411,6 +426,15 @@ def sweep(
         scored_count=scored_count,
     )
     summary["cost_usd"] = 0.0  # sweep is a read-only fold
+    if judge_n > 0 and skill == "blueprint":
+        # Judge before run_complete closes the run; a judge fault never loses the code record.
+        try:
+            for item in items[-judge_n:]:
+                _judge_one_item(item, run_id, events_paths)
+            typer.echo(f"  judge: offered the model judge to {min(judge_n, len(items))} window plan(s)")
+        except Exception as exc:
+            typer.echo(f"judge fault (code scoring unaffected): {exc}", err=True)
+
     if not _emit_run_complete(summary, events_paths):
         typer.echo(
             "error: could not write the canonical skill_eval_run_complete event; "
@@ -443,16 +467,116 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
     return f"session {sid} node {nid}: {dimension}={verdict}"
 
 
+def _arg_value(args: list[str], flag: str) -> Optional[str]:
+    i = args.index(flag) + 1 if flag in args else -1
+    return args[i] if 0 <= i < len(args) else None
+
+
+def _judge_via_rust(argv: list[str]) -> Optional[dict]:
+    """One fno-agents judge round-trip: JSON out, None on any fault (a coverage gap, never a fabricated verdict)."""
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
+        return None
+    # Labels mode caps at rows x dimensions x the spawn's own 600s bound.
+    timeout = 14400 if "--labels" in argv else 3600
+    try:
+        result = subprocess.run([str(binary), "judge", *argv], capture_output=True, text=True, timeout=timeout)
+        out = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        detail = f"bad output (stdout={result.stdout[:200]!r} stderr={result.stderr[:200]!r})" if isinstance(exc, ValueError) else str(exc)
+        typer.echo(f"judge fault: {detail}", err=True)
+        return None
+    if isinstance(out, dict) and out.get("error"):
+        typer.echo(f"judge fault: {out['error']}", err=True)
+        return None
+    return out
+
+
+def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[str, int]:
+    """("judged", n), ("gap", 0) for no section, or ("fault", 0) for a failed round-trip - never a fabricated fail."""
+    pp = item.get("plan_path")
+    try:
+        text = Path(pp).read_text(encoding="utf-8") if pp else ""
+        has_five = bool(text) and load_plan_text(text).has_section("Five questions")
+    except Exception:  # unreadable/unparseable -> no section, no judge call
+        has_five = False
+    if not has_five:
+        return "gap", 0
+    argv = ["--plan", str(pp)] + (["--node", str(item["graph_node_id"])] if item.get("graph_node_id") else [])
+    out = _judge_via_rust(argv)
+    if out is None:
+        return "fault", 0
+    fails = 0
+    for row in out.get("rows", []):
+        dimension, verdict, reason = row["dimension"], row.get("verdict"), row.get("reason", "")
+        if verdict is None:
+            typer.echo(f"  {dimension}: unanswered ({reason[:120]})")
+            continue
+        fails += verdict == "fail"
+        typer.echo(f"  {dimension}: {verdict} - {reason[:160]}")
+        _emit_finding(
+            run_id=run_id, item=item, dimension=dimension, verdict=verdict,
+            evidence=f"cost-untracked; {reason}", cost_usd=0.0,  # untracked, not free
+            skill_ref=None, events_paths=events_paths,
+        )
+    return "judged", fails
+
+
+@observer_app.command(
+    "judge",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def judge_cmd(ctx: typer.Context) -> None:
+    """Advisory five-question judge, never blocking. Every flag is fno-agents'; forwards raw argv, no typer.Option."""
+    args = ctx.args
+    if "--split" in args and "--labels" not in args:
+        typer.echo("--split applies to --labels only; ignored")
+    if "--labels" in args:
+        out = _judge_via_rust(args)
+        if out is None:
+            raise typer.Exit(1)
+        for dim, s in out.get("dimensions", {}).items():
+            typer.echo(f"{dim}: n={s['n']} tp_rate={s['tp_rate']} tn_rate={s['tn_rate']}")
+        for d in out.get("disagreements", []):
+            typer.echo(f"{d['plan']}  {d['dimension']}  label={d['label']}  judge={d['judge']}  {d['reason'][:120]}")
+        if out.get("controls_wrong"):
+            typer.echo(f"controls wrong: {out['controls_wrong']}")
+            raise typer.Exit(1)
+        return
+    plan = _arg_value(args, "--plan")
+    if plan is None:
+        raise typer.BadParameter("give --plan or --labels")
+    if "--force" not in args and "-F" not in args and loop_level("blueprint_judge") == "report":
+        typer.echo("skipped level=report")
+        return
+    plan_path = Path(plan)
+    if not plan_path.exists():
+        typer.echo(f"unanswered: no plan at {plan_path}")
+        raise typer.Exit(1)
+    node = _arg_value(args, "--node")
+    typer.echo(f"judging {plan_path} ({node or 'no node'})")
+    status, fails = _judge_one_item(
+        {"skill_id": "fno:blueprint", "session_id": None, "graph_node_id": node, "plan_path": str(plan_path)},
+        _mint_run_id("fno:blueprint"), _events_paths(),
+    )
+    if status == "gap":
+        typer.echo("unanswered: plan carries no ## Five questions section; no judge call")
+        return
+    if status == "fault":
+        typer.echo("unanswered: the fno-agents judge round-trip failed; see the fault line above")
+        raise typer.Exit(1)
+    if fails:
+        typer.echo("revise the plan once, or write a one-line disposition under that question; intake proceeds either way")
+
+
 # --------------------------------------------------------------------------- #
 # target sweep: PR-anchored walk-back (x-6ff0)
 # --------------------------------------------------------------------------- #
 
-# gh pr list defaults to 30 results (Domain Pitfall); pull generously so the
-# *list* limit does not silently shrink the denominator. target makes NO per-PR
-# gh calls (outcome comes from the graph, signals from events), so ONE `gh pr
-# list` per repo covers a whole repo - a high limit costs nothing extra, and an
-# active repo ships >100 PRs inside a 28d window, so a low cap would truncate the
-# default sweep (the truncation caveat still fires past this ceiling).
+# gh pr list defaults to 30 (Domain Pitfall); one call per repo covers the
+# whole repo at this limit, so pull generously - an active repo still ships
+# >100 PRs in a 28d window (the truncation caveat still fires past this cap).
 _PR_LIST_LIMIT = int(os.environ.get("FNO_OBSERVER_PR_LIST_LIMIT", "600"))
 
 
@@ -471,9 +595,8 @@ def _gh_pr_list(repo: str, cutoff, now, gh_runner) -> "tuple[Optional[list[dict]
     gap for the whole repo, never a crash). ``truncated`` is True when the repo
     returned exactly the list limit (there may be more PRs - no silent
     truncation)."""
-    # `--state` is a SCALAR flag (open|closed|merged|all): repeating it is not a
-    # documented union, so use `--state all` and let the merged/closed timestamp
-    # filter below drop OPEN PRs (they carry neither mergedAt nor closedAt).
+    # `--state` is scalar (no repeated-flag union), so use `--state all` and
+    # let the merged/closed timestamp filter below drop OPEN PRs.
     args = [
         "pr", "list", "--repo", repo, "--state", "all",
         "--limit", str(_PR_LIST_LIMIT),
@@ -619,9 +742,7 @@ def _write_target_digest(summary: dict, coverage: dict, meta: dict, crosstab: di
 
     attributed = coverage["attributed"]
     no_pr = coverage["no_pr_attempts"]
-    # AC3-HP: the attempt->PR formula and the no_pr line render UNCONDITIONALLY,
-    # including at 0 (a conditional formula that only appears when no_pr>0 is the
-    # bypass; `no_pr_attempts: 0` printed explicitly is the proof it ran).
+    # AC3-HP: renders unconditionally, even at 0 - the explicit `no_pr_attempts: 0` is the proof this ran.
     denom = attributed + no_pr
     attempt_to_pr = _pct(attributed, denom) if denom else 0
     stop = coverage["no_pr_stop_cause"]
@@ -688,10 +809,9 @@ def _sweep_target(*, since: int, repo: Optional[str], json_out: bool) -> None:
     items = corpus["items"]
     coverage = corpus["coverage"]
 
-    # Boundary: 0 merged/closed PRs. Distinguish a genuine empty window (exit 0,
-    # legitimately nothing to do) from an outage where every scoped repo's gh
-    # call failed - the denominator was never OBSERVED, so reporting `no_data`
-    # would hide a coverage failure from operators/automation (exit non-zero).
+    # Boundary: 0 merged/closed PRs. A genuine empty window exits 0; every
+    # scoped repo's gh call failing means the denominator was never observed,
+    # so that outage reports as a failure instead of a fabricated no_data.
     if coverage["prs_total"] == 0:
         if meta["repos_scoped"] > 0 and meta["dropped_repos"] >= meta["repos_scoped"]:
             typer.echo(
@@ -825,7 +945,8 @@ def _write_workdir_settings(workdir: Path) -> None:
 
 def _default_spawn(name: str, prompt: str, *, cwd: Path, timeout: int) -> "tuple[int, str, str]":
     """Sanctioned headless spawn (never a bare ``claude -p``). fable-tier for
-    /blueprint per the loops-roadmap routing table (Locked Decision 6)."""
+    /blueprint per the loops-roadmap routing table (Locked Decision 6); the
+    blueprint judge's own spawn lives in fno-agents (blueprint_judge.rs)."""
     try:
         p = subprocess.run(
             [
@@ -938,13 +1059,11 @@ def _replay(
         typer.echo(f"already scored ({run_id}, {skill_ref or 'HEAD'}, {corpus_item}); skipping (AC2-FR).")
         raise typer.Exit(0)
 
-    # The recorded input: the design-doc/plan text the historical blueprint ran
-    # on (best-effort from disk). Absent -> a tool fault for this item, not a
-    # skill-quality verdict.
+    # The recorded plan text, best-effort from disk; absent is a tool fault, not a skill-quality verdict.
     plan_text = _read_plan_text(item, by_id.get(item.get("graph_node_id")), _default_gh)
     if not plan_text:
         _emit_finding(
-            run_id=run_id, item=item, dimension="structural_validity", verdict="fail",
+            run_id=run_id, item=item, dimension="collision_free", verdict="fail",
             evidence=f"replay tool-fault: recorded input for {corpus_item} unresolvable",
             cost_usd=0.0, skill_ref=skill_ref, events_paths=events_paths,
         )
@@ -1033,7 +1152,7 @@ def _replay(
             # tool_fault=True so downstream never counts it as a skill-quality
             # structural fail (AC2-ERR: never conflated).
             _emit_finding(
-                run_id=run_id, item=item, dimension="structural_validity", verdict="fail",
+                run_id=run_id, item=item, dimension="collision_free", verdict="fail",
                 evidence=f"replay spawn tool-fault rc={rc}: {(err or '')[:200]}",
                 cost_usd=cost_usd, skill_ref=skill_ref, events_paths=events_paths,
                 tool_fault=True,

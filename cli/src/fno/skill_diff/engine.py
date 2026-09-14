@@ -286,11 +286,11 @@ def build_pr_body(
 if __name__ == "__main__":  # pragma: no cover - smoke self-check
     evs = [
         {"type": "skill_eval_run_complete", "data": {"run_id": "r1", "skill_id": "fno:blueprint",
-         "failure_ranking": [{"dimension": "structural_validity", "fail_count": 2}]}},
+         "failure_ranking": [{"dimension": "collision_free", "fail_count": 2}]}},
         {"type": "skill_eval_finding", "data": {"run_id": "r1", "skill_id": "fno:blueprint",
-         "dimension": "structural_validity", "verdict": "fail"}},
+         "dimension": "collision_free", "verdict": "fail"}},
         {"type": "skill_eval_finding", "data": {"run_id": "r1", "skill_id": "fno:blueprint",
-         "dimension": "structural_validity", "verdict": "fail", "tool_fault": True}},
+         "dimension": "collision_free", "verdict": "fail", "tool_fault": True}},
     ]
     assert unprocessed_runs(evs, "fno:blueprint") == ["r1"]
     # A replay/candidate eval run_complete is NOT a trigger - by FIELD presence,
@@ -304,7 +304,7 @@ if __name__ == "__main__":  # pragma: no cover - smoke self-check
     assert unprocessed_runs(evs_ref, "fno:blueprint") == ["r1"]  # both after-runs excluded
     assert len(findings_for_run(evs, "r1")) == 1  # tool_fault excluded
     assert has_actionable_findings(evs, "r1")
-    assert top_dimension(evs, "r1") == "structural_validity"
+    assert top_dimension(evs, "r1") == "collision_free"
     evs.append({"type": "skill_diff_noop", "data": {"run_id": "r1", "skill_id": "fno:blueprint"}})
     assert unprocessed_runs(evs, "fno:blueprint") == []  # now handled
     print("engine ok")

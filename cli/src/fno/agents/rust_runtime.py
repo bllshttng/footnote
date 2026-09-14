@@ -227,15 +227,12 @@ RUST_CLIENT_VERBS = frozenset(
         # (no daemon RPC, no Python impl); this entry keeps the
         # client.rs<->router parity test in sync and provides the help line.
         "recover",
-        # Batch graph read, Bash-call census, and the session-start byte total
-        # (x-997a): all three dispatch directly in client.rs before
-        # build_request (no daemon RPC, no Python impl). `fno backlog get`'s
-        # forwarder and `fno doctor bash-census` invoke the binary directly
-        # (not via `fno agents` routing); these entries keep the
-        # client.rs<->router parity test in sync.
+        # Batch graph read, bash-census, and session-start bytes (x-997a): all
+        # three dispatch directly in client.rs before build_request, never `fno agents`.
         "graph-get",
         "bash-census",
         "session-start-bytes",
+        "judge",
         # backlog-note + backlog-notes (the bounded-state change): direct
         # client.rs dispatch, never `fno agents` routing; keeps the
         # client.rs<->router parity test in sync.
@@ -518,6 +515,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "backlog-notes": "Note-corpus inventory, digest migration (preview default, explicit apply), and paged history readback (x-920a); the migration runbook drives it, not `fno agents` routing.",
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts (x-997a); invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total (x-997a); invoked directly by `fno doctor`'s session-start byte report.",
+    "judge": "Blueprint judge: grade a plan against the five product questions, or --labels/--split to calibrate against evals/blueprint-judge/labels.yaml; invoked by fno.observer.cli's judge_cmd/sweep through its own subprocess round-trip (_judge_via_rust), not `fno agents` routing.",
     "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
     "court-fold": "The crown scope fold: --graph <graph.json> --crowns-json <crowns> --claims-dir <dir> --format json|html-section; invoked directly by `fno agents court`, not `fno agents` routing.",
     "king-history": "The crown-scope reign_checkin readback: --scope <scope> --events-path <events.jsonl> [--events-path ...] [--json]; invoked directly by `fno agents king history`, which passes every journal paths.event_journals resolves.",

@@ -102,9 +102,11 @@ internal
 .fno/feels/observations.archive/
 .fno/feels/.usage-data-watermark
 
-# CLI package build artifacts
+# CLI package build artifacts. NO trailing slash on .venv: a worktree links
+# the canonical venv as a SYMLINK, and git ignores symlinks only when the
+# pattern carries none (a linked worktree would otherwise show it untracked).
 cli/dist/
-cli/.venv/
+cli/.venv
 
 # managed by link-skills.py. NO trailing slash: setup-worktree.sh links these
 # as SYMLINKS into the canonical checkout, and a trailing-slash pattern matches

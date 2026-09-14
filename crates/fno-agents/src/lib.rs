@@ -56,6 +56,7 @@ pub mod authorized_merge;
 pub mod backlog;
 pub mod backlog_ready;
 pub mod bash_census;
+pub mod blueprint_judge;
 mod bounded_cmd;
 mod bounded_spawn;
 mod cancel_sentinel;

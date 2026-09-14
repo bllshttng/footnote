@@ -193,10 +193,15 @@ def test_map_covers_current_surface_once():
     # Counted from the merged file at the x-f33e fold: main carried 619
     # (provider-cap and compaction among them) and this branch allocates
     # `doctor evals macro`, its forwarded `evals macro` spelling, and the
-    # binary-first `agents evals-macro` action the dispatchers expose.
-    # This branch allocates `agents backlog-note` and `agents backlog-notes`,
-    # the two native note verbs: counted from the merged file, 622 -> 624.
-    assert len(mapped) == 624, (
+    # binary-first `agents evals-macro` action the dispatchers expose:
+    # 618 -> 622. `doctor observer judge` and `observer judge`, the
+    # blueprint five-question judge and its bare-form leaf (refs 2 and 0,
+    # swept): counted from the merged file, 622 -> 624. `agents judge`, the
+    # Rust-client help entry the judge port's RUST_ONLY_VERB_HELP
+    # registration surfaces under `fno agents --help` (refs 0): 624 -> 625.
+    # The second main fold allocates `agents backlog-note` and
+    # `agents backlog-notes`, the two native note verbs: 625 -> 627.
+    assert len(mapped) == 627, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

@@ -1,0 +1,60 @@
+# Blueprint judge labels (x-9983).
+#
+# One row per (plan, node) pair. Schema:
+#   {plan: <path relative to this file>, node: <graph node id> | node_text: <inline>,
+#    split: train|dev|test, control: bool, labels: {<dimension>: pass|fail}, note}
+#
+# A row labels only the dimensions listed; unlisted dimensions are not judged
+# for that row. The five controls ship with this file. The operator adds real
+# labels after merge: every plan-attributable bounce or revert, then clean
+# merges at random, one line of "what would I have pushed back on" each.
+
+- plan: controls/good-plan.md
+  node_text: >
+    Retire the groom worker's duplicate lock check. Since the 2026-08-14
+    dispatch change, groom re-acquires the lock it already holds; drop the
+    second acquisition.
+  split: test
+  control: true
+  labels: {persona: pass, surface_fit: pass, uncovered_case: pass, deletable: pass, duplication: pass}
+  note: A plan that answers all five with named things; must pass everywhere.
+
+- plan: controls/empty-answers.md
+  node_text: >
+    Add a weekly digest of the activity feed projection delivered as agent
+    mail on Mondays.
+  split: test
+  control: true
+  labels: {persona: fail}
+  note: The Five questions section names nobody at all; persona fails.
+
+- plan: controls/all-none.md
+  node_text: >
+    Ship a second backlog board renderer called board2 with its own column
+    logic and rank handling.
+  split: test
+  control: true
+  labels: {surface_fit: fail}
+  note: All five answered none on a feature plan; claiming no existing
+    surface covers it is a claim, and fno backlog board already renders
+    boards (surface_fit fails).
+
+- plan: controls/invented-persona.md
+  node_text: >
+    Add configurable badges to backlog board cards.
+  split: test
+  control: true
+  labels: {persona: fail}
+  note: A confident persona ("users love badges", "increase engagement by
+    40 percent") with no source the plan cites; persona fails.
+
+- plan: controls/wrong-node.md
+  node_text: >
+    Add a weekly digest of the activity feed projection delivered as agent
+    mail on Mondays.
+  split: test
+  control: true
+  labels: {persona: fail}
+  note: A good plan judged against a DIFFERENT node's text; the who it names
+    (groom lock waits) hits a different problem than the node (digest mail),
+    so persona fails.

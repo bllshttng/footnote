@@ -15,6 +15,7 @@ BLUEPRINT_WRITE_ALLOWLIST: frozenset[str] = frozenset(
     {
         "Execution Strategy",
         "File Ownership Map",
+        "Five questions",
         "Patterns to Reuse",
         # Frontmatter keys /blueprint writes. Routed through the same allowlist
         # so the ownership model covers frontmatter writes, not just sections.

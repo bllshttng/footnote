@@ -52,6 +52,7 @@ class TestBlueprintWriteAllowlist:
             {
                 "Execution Strategy",
                 "File Ownership Map",
+                "Five questions",
                 "Patterns to Reuse",
                 "kill_criteria",
                 "execution_mode",
