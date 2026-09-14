@@ -136,12 +136,22 @@ def classify_durable_owner(
     return DurableOwner.DEAD_LETTER
 
 
+def owner_ttl_hours(owner: DurableOwner | str) -> float:
+    """The unread horizon (hours) the sweep enforces for an owner class.
+
+    The receipt's drain-window clause (x-1602) quotes this same table, so a
+    window shown to a sender can never disagree with the bound the sweep
+    acts on. Unknown classes return 0 (no committed bound).
+    """
+    key = owner.value if isinstance(owner, DurableOwner) else owner
+    return _OWNER_TTL_HOURS.get(key, 0.0)
+
+
 def ttl_at_for(owner: DurableOwner | str, created: datetime) -> datetime:
     """The ``ttl_at`` horizon for an owner class, measured from ``created``."""
     from datetime import timedelta
 
-    key = owner.value if isinstance(owner, DurableOwner) else owner
-    return created + timedelta(hours=_OWNER_TTL_HOURS.get(key, 0.0))
+    return created + timedelta(hours=owner_ttl_hours(owner))
 
 # Map deprecated kinds -> what to use instead. Reading these tokens from
 # the CLI exits non-zero with a hint pointing at the replacement.

@@ -58,6 +58,54 @@ def _is_live_lane_failure(reason: Optional[str]) -> bool:
     )
 
 
+def durable_window_clause(owner: Optional[str]) -> str:
+    """The drain-window clause every ``queued (durable)`` receipt carries (x-1602).
+
+    ``queued (durable)`` states a queue state and nothing about time, so a
+    reader who checks early cannot tell "not yet" from "never" -- the absence
+    misread that held a fleet-wide standing order an extra cycle on a working
+    lane. The clause quotes the owner-class horizon the stranded sweep itself
+    enforces (the one bound the machine already commits to), so a new owner
+    class in the sweep table gains its window automatically; an unknown class
+    prints no window rather than a guessed one, since a guessed constant here
+    is this defect wearing a friendlier sentence.
+    """
+    from fno.inbox.store import owner_ttl_hours
+
+    hours = owner_ttl_hours(owner or "")
+    if hours <= 0:
+        return ""
+    if hours < 1:
+        window = f"~{round(hours * 60)}m"
+    else:
+        window = f"~{round(hours)}h"
+    return f"typically drains within {window} - an empty unread before then is not a failure"
+
+
+def durable_window_tail(owner: Optional[str]) -> str:
+    """The clause as a receipt-line tail (`` - <clause>``), or empty when the
+    owner class carries no committed horizon."""
+    clause = durable_window_clause(owner)
+    return f" - {clause}" if clause else ""
+
+
+def durable_leg_story(reason: Optional[str]) -> Optional[str]:
+    """Positive stdout wording for a live-lane failure demotion (x-1602).
+
+    A live-inject miss followed by a successful durable enqueue is a normal,
+    fully-working outcome on this lane; rendering it with the raw failure
+    token (``io-error``, ``attach-failed``, ...) put an error string inside a
+    success receipt, and that is what read as a broken lane before any clock
+    was involved. The story names which leg missed and that the durable leg
+    holds; the precise token stays diagnostic (stderr advisory, bus record).
+    Returns None when the reason is not a live-lane failure, so callers keep
+    their existing wording.
+    """
+    if not _is_live_lane_failure(reason):
+        return None
+    return "live leg unconfirmed; durable leg holds"
+
+
 def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] = None) -> None:
     """Fail loud on a dead-letter miss: the envelope hit only the durable floor
     with no live inject path, so the sender learns delivery deferred instead of

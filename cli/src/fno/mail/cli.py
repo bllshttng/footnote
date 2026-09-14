@@ -62,9 +62,12 @@ from fno.mail.codex_review_target import (
 from fno.mail.receipts import (
     _live_miss_age_suffix,
     _warn_deferred,
+    durable_leg_story,
+    durable_window_tail,
 )
 from fno.inbox.store import (
     DEPRECATED_KINDS,
+    DurableOwner,
     ProjectIdentificationError,
     ThreadHandle,
     VALID_KINDS,
@@ -2564,9 +2567,15 @@ def _name_lane_send(
     if bus_only:
         reason = hold_note or "DND (bus-only): recipient polls the bus at each turn boundary"
     else:
-        reason = "self-send" if self_send else (live_reason or "live-miss")
+        # x-1602: a live-lane failure renders as legs on stdout; the raw token
+        # (io-error, attach-failed, ...) stays diagnostic on stderr, because an
+        # error string inside a success receipt reads as a broken lane.
+        reason = durable_leg_story(live_reason) or (
+            "self-send" if self_send else (live_reason or "live-miss")
+        )
         if reason == "live-miss":
             reason = f"live-miss{_live_miss_age_suffix(recipient)}"
+    window_tail = durable_window_tail(owner.value)
     hint = ""
     if hold_note:
         hint = f" `fno agents mail withdraw {msg_id}` retracts it."
@@ -2576,7 +2585,7 @@ def _name_lane_send(
             "`codex app-server daemon start`, then restart the session "
             "(the socket must exist before the codex TUI starts)"
         )
-    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]{hint}")
+    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]{hint}{window_tail}")
     # Live-miss escalation lane (node x-1904 widened this from attended-only). A
     # miss to an operator-attended session is the stranded case: the human is not
     # watching the drain, so nothing else surfaces it. A miss to a worker the
@@ -3614,7 +3623,9 @@ def cmd_send(
     ``fno agents mail sent --unclaimed`` / ``mail withdraw <id>``.
 
     Stdout: one line, ``msg-<id> delivered (hosted)`` or
-    ``msg-<id> queued (durable) [<reason>]``. Exit 0 for both.
+    ``msg-<id> queued (durable) [<reason>]`` plus the drain-window clause
+    (x-1602: an empty unread inside the window is not a failure). Exit 0 for
+    both.
     """
     from fno.agents.dispatch import (
         DispatchAskError,
@@ -4039,7 +4050,8 @@ def cmd_send(
             }))
         else:
             verb = "appended (durable) to" if res.appended else "queued (durable) for"
-            print(f"{res.msg_id} {verb} {recipient} [param-forced: --kind {kind}]")
+            window_tail = durable_window_tail(DurableOwner.INBOX_DRAIN.value)
+            print(f"{res.msg_id} {verb} {recipient} [param-forced: --kind {kind}]{window_tail}")
         return
 
     # Project mode: the message is the sole positional, so `send --to-project X
@@ -4090,23 +4102,29 @@ def cmd_send(
                     f"[project {to_project}] "
                     f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
                     + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
+                    + durable_window_tail(result.durable_owner)
                 )
             else:
                 # The anycast lane reaches the SAME dispatch_send as the by-name
-                # lane, so it must carry the same cause.
+                # lane, so it must carry the same cause. x-1602: the raw live-lane
+                # failure token stays diagnostic (stderr); stdout names the legs.
                 _warn_deferred(result.recipient, reason=result.reason)
-                reason_tok = result.reason or "live-miss"
-                if reason_tok == "live-miss":
-                    reason_tok += _live_miss_age_suffix(result.recipient)
+                reason_tok = durable_leg_story(result.reason)
+                if reason_tok is None:
+                    reason_tok = result.reason or "live-miss"
+                    if reason_tok == "live-miss":
+                        reason_tok += _live_miss_age_suffix(result.recipient)
                 print(
                     f"{result.msg_id} queued (durable) for {result.recipient} "
                     f"[project {to_project}] [{reason_tok}]"
+                    + durable_window_tail(result.durable_owner)
                 )
         else:
             _warn_deferred(to_project, project=True)
             print(
                 f"{result.msg_id} queued (durable) for project {to_project} "
                 f"[param-forced: --to-project]"
+                + durable_window_tail(DurableOwner.INBOX_DRAIN.value)
             )
         return
 
@@ -4302,11 +4320,19 @@ def cmd_send(
             + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
         )
     else:
-        reason_tok = result.reason or "live-miss"
-        if reason_tok == "live-miss":
-            reason_tok += _live_miss_age_suffix(name)
+        # x-1602: a live-lane failure renders as legs on stdout; the raw token
+        # (io-error, attach-failed, ...) stays diagnostic on stderr, because an
+        # error string inside a success receipt reads as a broken lane.
+        reason_tok = durable_leg_story(result.reason)
+        if reason_tok is None:
+            reason_tok = result.reason or "live-miss"
+            if reason_tok == "live-miss":
+                reason_tok += _live_miss_age_suffix(name)
         _warn_deferred(name, reason=result.reason)
-        print(f"{result.msg_id} queued (durable) [{reason_tok}]")
+        print(
+            f"{result.msg_id} queued (durable) [{reason_tok}]"
+            + durable_window_tail(result.durable_owner)
+        )
 
 
 def _team_sender_kind_and_from(from_name: Optional[str]) -> tuple[str, str]:

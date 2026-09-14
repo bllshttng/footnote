@@ -434,15 +434,16 @@ def test_cell4_inject_boundary_parses_the_reason_side_channel(monkeypatch):
 
 
 def test_cell4_receipt_carries_the_inject_reason_token(runner, mailbox, monkeypatch, tmp_path):
-    """x-1904 change 4: a durable demotion names the live lane's own cause.
+    """x-1904 change 4, as refined by x-1602: the cause survives, split by channel.
 
-    The inject boundary already emits a precise reason vocabulary
-    (not-confirmed / attach-failed / io-error / ...); Python used to discard
-    it, so a miss to a LIVE recipient read as a bare live-miss -- and the
-    _warn_deferred boilerplate called the recipient "not live", a receipt
-    naming the wrong cause (it cost a wrong liveness hypothesis on measured
-    evidence). The receipt must carry the token, and the preamble must not
-    claim not-live when the lane itself says it missed a live recipient.
+    The inject boundary emits a precise reason vocabulary (not-confirmed /
+    attach-failed / io-error / ...); Python used to discard it, so a miss to a
+    LIVE recipient read as a bare live-miss. x-1904 put the raw token on the
+    stdout receipt; x-1602 moved it to the diagnostic channel, because an
+    error string inside a SUCCESS receipt is what read as a broken lane and
+    held a fleet order an extra cycle. The stdout receipt now names the legs;
+    the stderr advisory keeps both the token and the liveness truth (the
+    recipient was live and reachable, so "is not live" stays a lie).
     """
 
     def _miss(recipient, text, *, sender=None, reason_out=None):
@@ -459,11 +460,14 @@ def test_cell4_receipt_carries_the_inject_reason_token(runner, mailbox, monkeypa
 
     res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
     combined = res.output + (res.stderr or "")
+    receipt = next(ln for ln in res.stdout.splitlines() if "queued (durable)" in ln)
 
     assert res.exit_code == 0, combined
-    assert "queued (durable)" in combined
-    assert "[attach-failed]" in combined, (
-        f"the receipt must name the inject's own reason, not a generic live-miss: {combined}"
+    assert "durable leg holds" in receipt, (
+        f"the success receipt must carry the positive leg story: {receipt}"
+    )
+    assert "attach-failed" in (res.stderr or ""), (
+        f"the stderr advisory must keep the inject's own cause: {combined}"
     )
     assert "was live and reachable" in combined, (
         "the live-lane arm must credit the transcript verdict the lane "
@@ -545,6 +549,91 @@ def test_live_miss_age_suffix_names_unknown_when_no_transcript(
     from fno.mail.receipts import _live_miss_age_suffix
 
     assert _live_miss_age_suffix("nobody-here") == ", transcript age unknown"
+
+
+# ---------------------------------------------------------------------------
+# x-1602: the durable receipt carries its drain window, and a live-lane
+# failure renders as legs, never as an error token. A king once read an
+# absence inside the drain window, called a working lane broken, and held a
+# fleet-wide standing order an extra cycle; `queued (durable) [io-error]` is
+# the receipt that did it -- no clock, and an error string in a success.
+# ---------------------------------------------------------------------------
+
+
+def test_durable_receipt_names_the_drain_window(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """AC1 (x-1602): a normal `queued (durable)` receipt names its drain window.
+
+    `queued (durable)` states a queue state and nothing about time, so a reader
+    who checks early cannot tell "not yet" from "never". The clause quotes the
+    owner-class horizon the stranded sweep already enforces -- the one bound
+    the machine commits to -- so it must appear on an ORDINARY durable receipt,
+    not only on a failure-shaped one.
+    """
+    _seed_asleep_transcript(monkeypatch, tmp_path)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_and_deliver",
+        lambda *_a, **_k: (False, "spawn-exit-1"),
+    )
+
+    res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
+
+    assert res.exit_code == 0, res.output
+    receipt = next(ln for ln in res.stdout.splitlines() if "queued (durable)" in ln)
+    assert "typically drains within" in receipt, receipt
+    assert "an empty unread before then is not a failure" in receipt, receipt
+
+
+def test_window_clause_maps_owner_to_the_sweep_horizon():
+    """The window is the sweep's own horizon per owner class, never a constant.
+
+    An unknown class prints no window: a guessed bound is this node's own
+    defect wearing a friendlier sentence.
+    """
+    from fno.mail.receipts import durable_window_clause
+
+    assert "~1h" in durable_window_clause("live-drain")
+    assert "~6h" in durable_window_clause("wake-daemon")
+    assert "~24h" in durable_window_clause("inbox-drain")
+    for absent in (None, "", "dead-letter", "some-future-owner"):
+        assert durable_window_clause(absent) == "", absent
+
+
+def test_live_failure_receipt_positives_the_durable_leg_and_hides_the_token(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """AC2 (x-1602): a live-inject miss + durable success is a NORMAL outcome.
+
+    The stdout receipt says which leg missed and that the durable leg holds,
+    asserted as a positive marker (never as the absence of a word). The raw
+    token is diagnostic vocabulary: it must survive on stderr where the
+    recovery ladder reads it, but a success receipt must not wear it.
+    """
+
+    def _miss(recipient, text, *, sender=None, reason_out=None):
+        if reason_out is not None:
+            reason_out.append("io-error")
+        return False
+
+    _seed_asleep_transcript(monkeypatch, tmp_path)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", _miss)
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_and_deliver",
+        lambda *_a, **_k: (False, "spawn-exit-1"),
+    )
+
+    res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
+
+    assert res.exit_code == 0, res.output
+    receipt = next(ln for ln in res.stdout.splitlines() if "queued (durable)" in ln)
+    assert "durable leg holds" in receipt, receipt
+    assert "io-error" not in receipt, receipt
+    combined = res.output + (res.stderr or "")
+    assert "io-error" in combined, (
+        f"the diagnostic token must survive off the receipt line: {combined}"
+    )
 
 
 # ---------------------------------------------------------------------------

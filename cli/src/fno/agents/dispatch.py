@@ -4939,6 +4939,11 @@ class DispatchSendResult:
     # project (for the durable-queue and resolved-recipient stdout lines).
     recipient: Optional[str] = None
     to_project: Optional[str] = None
+    # The owner class this send's durable write was stamped with (x-1602), so
+    # the receipt quotes the same horizon the sweep enforces. None when no
+    # owner was stamped (hosted delivery, or a lock-timeout queue written
+    # before classification ran).
+    durable_owner: Optional[str] = None
 
 
 def rpc_roundtrip(
@@ -8091,7 +8096,12 @@ def dispatch_send(
                 registry_lock_timeout=registry_stamp_timeout_seconds,
             )
 
-            return DispatchSendResult(msg_id=msg_id, delivery=delivery, reason=live_miss_reason)
+            return DispatchSendResult(
+                msg_id=msg_id,
+                delivery=delivery,
+                reason=live_miss_reason,
+                durable_owner=durable_owner if delivery == "durable" else None,
+            )
 
     except AgentLockTimeout as exc:
         # INVARIANT, and it is load-bearing: this handler guards the whole
@@ -8625,4 +8635,5 @@ def dispatch_send_to_project(
         delivery="durable",
         recipient=None,
         to_project=project,
+        durable_owner=DurableOwner.INBOX_DRAIN.value,
     )
