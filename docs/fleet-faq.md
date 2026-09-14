@@ -437,16 +437,6 @@ The same session had verified six claims that arrived from other people that day
 
 *Graduates to:* a review question asking, of any proposed hook, how many times it fired last week. Until a proposal has to carry that number, this stays a habit.
 
-## A claim reads unknown and my target refuses to start
-
-**Answer.** Read the same key again with `--no-roster`. That is the lock itself. The default read also consults the roster, and it returns `unknown` once it cannot resolve enough rows. Unknown blocks the start as firmly as held does. Repair the rows. Never bypass the claim.
-
-**Specimen.** On 2026-09-08 a codex worker sat blocked for twelve hours. It did everything right. It measured, refused to claim, emitted a help block, and mailed its parent king. Nobody came. The key read `unknown` roster-aware, basis `unresolved-roster-row`, with 64 of 129 rows unresolved. The same key with `--no-roster` read `free`. The lock was never held. Re-measured twelve hours later, unchanged.
-
-**The wider shape.** The rows that reader cannot resolve look like the rows two other readers cannot attribute. On the same day a stop hook linked no king to 12 live workers. The footprint reported 12 pidless rows as an attribution gap. Three symptoms, one unattributable-row family, worth one investigation rather than three.
-
-*Graduates to:* a claim reader that reports a degraded roster as its own condition, so `unknown` never blocks work the way `held` does.
-
 ## Does my reign still have a beat?
 
 **Answer.** Check it, do not assume it. List the scheduled jobs. An empty list means the check-in loop is gone and the reign is now purely reactive. Re-arm before doing anything else. A king with no clock still answers messages, so it reads as active from the outside and from the inside.
@@ -477,6 +467,7 @@ The same read reported both branches as 32 commits behind `main`. That is the no
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.
 
+- **A claim reads unknown and my target refuses to start.** PR 1613. When an unresolved roster row's worktree names the node you asked about, the read turns unknown. Every other unresolved row leaves the read free, with `roster_coverage: degraded`.
 - **The merge gate refuses a real cross-model review.** PR 1595. The self lane counts any real review now, whatever produced it.
 - **My PR reads rounds 5 of 2.** PR 1426. A rebase or a fix under 100 interdiff lines carries its verdict now.
 
