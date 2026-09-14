@@ -3115,8 +3115,13 @@ def _raw_send(
         if heal_verdict == "rebound-thread":
             entry = resolve_agent(lookup_name).entry
         elif heal_verdict == "dead-pane":
+            pane_label = (
+                f"{heal_pane['session']}:{heal_pane['pane_id']}"
+                if heal_pane
+                else "unknown"
+            )
             _refused(
-                f"{name!r} mux pane {heal_pane['session']}:{heal_pane['pane_id']} "
+                f"{name!r} mux pane {pane_label} "
                 "is gone and the thread is not loaded anywhere fno can reach "
                 f"({heal_reason}); run fno agents resume {name}"
             )
@@ -3147,13 +3152,13 @@ def _raw_send(
             if not is_review:
                 raw_msg_id, reservation, authored_words = _reserve_raw()
                 turn_reasons: list[str] = []
-                delivered = _mail_inject_codex(
+                turn_delivered = _mail_inject_codex(
                     session_id,
                     stripped,
                     reason_out=turn_reasons,
                     origin=origin,
                 )
-                if delivered:
+                if turn_delivered:
                     _record_raw(raw_msg_id, authored_words)
                     print("injected")
                     raise typer.Exit(code=0)

@@ -7208,17 +7208,15 @@ def _deliver_live(
         # but whose thread is loaded in the app-server rebinds to the thread
         # lane, and the wrapped body rides turn/start instead of the durable
         # queue. Every other verdict keeps the durable fallback.
-        if (
-            getattr(entry, "harness", None) == "codex"
-            and getattr(entry, "harness_session_id", None)
-        ):
-            heal_verdict, _heal_reason, _pane = _lane_heal(entry.harness_session_id)
+        sid = getattr(entry, "harness_session_id", None)
+        if getattr(entry, "harness", None) == "codex" and sid:
+            heal_verdict, _heal_reason, _pane = _lane_heal(sid)
             if heal_verdict == "rebound-thread":
                 from fno.agents.registry import resolve_agent
 
                 entry = resolve_agent(entry.name).entry
                 return _mail_inject_codex(
-                    entry.harness_session_id,
+                    entry.harness_session_id or sid,
                     wrapped,
                     reason_out=reason_out,
                     origin=(mail.origin if mail else None),
