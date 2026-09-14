@@ -165,13 +165,19 @@ grep -q "all-source identity helper failed (exit 1)" <<<"$err" \
 grep -q "Use the full session id" <<<"$err" \
   || fail "nonzero identity helper omitted the full-id remedy: $err"
 
-# 7a-bis. An off-contract exit relays ONE labelled line, never the child's raw
-#         stderr: a traceback ahead of the refusal is a new error class.
-stub_fno "echo 'Traceback (most recent call last):' >&2; echo '  File \"x.py\", line 1' >&2; exit 70"
+# 7a-bis. An off-contract exit relays ONE labelled line - the child's FINAL
+#         stderr line, where a traceback names its real failure - never the
+#         raw multi-line stderr (a traceback ahead of the refusal is a new
+#         error class) and never the useless "Traceback" header (x-8f73).
+stub_fno "echo 'Traceback (most recent call last):' >&2; echo '  File \"x.py\", line 1' >&2; echo 'OSError: The current working directory was deleted' >&2; exit 70"
 err=$("$BIN" logs c655c326 2>&1); rc=$?
 [[ $rc -eq 13 ]] || fail "off-contract heal exit gave $rc, want 13"
-grep -q "all-source identity helper failed (exit 70): Traceback" <<<"$err" \
-  || fail "off-contract identity helper hid the refusal or cause: $err"
+grep -q "all-source identity helper failed (exit 70)" <<<"$err" \
+  || fail "off-contract identity helper hid the refusal: $err"
+grep -q "OSError: The current working directory was deleted" <<<"$err" \
+  || fail "off-contract identity helper hid the cause line: $err"
+grep -q "Traceback" <<<"$err" \
+  && fail "off-contract heal relayed the traceback header: $err"
 [[ "$(grep -c 'File "x.py"' <<<"$err")" -eq 0 ]] || fail "off-contract heal dumped a raw traceback: $err"
 
 # 7b. A banner ahead of the payload (a first-run `fno` prints setup lines) must

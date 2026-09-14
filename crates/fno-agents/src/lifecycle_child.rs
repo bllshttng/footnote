@@ -167,17 +167,23 @@ fn parse_heal_token_output(
         return Ok(None);
     }
     if !out.status.success() {
-        // The FULL stderr, not its first line: the helper's real failure is the
-        // tail of a Python traceback ("OSError: ...deleted"), and quoting only
-        // the first line shipped "(exit 1): Traceback" - a refusal that names
-        // nothing (x-8f73).
-        let detail = String::from_utf8_lossy(&out.stderr);
-        let detail = detail.trim();
+        // One labelled line, never the raw multi-line stderr (a traceback
+        // ahead of the refusal is a new error class) - but the CAUSE line, the
+        // helper's LAST stderr line, not its first. A Python traceback opens
+        // with the useless "Traceback" header and names the real failure in
+        // its tail ("OSError: ...deleted"); quoting the first line shipped
+        // "(exit 1): Traceback", a refusal that names nothing (x-8f73).
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let cause = stderr
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("");
         return Err(format!(
             "cannot safely resolve token {} because the all-source identity helper failed (exit {}){}. Use the full session id.",
             py_repr_str(token),
             out.status.code().unwrap_or(-1),
-            if detail.is_empty() { String::new() } else { format!(":\n{detail}") },
+            if cause.is_empty() { String::new() } else { format!(": {}", cause.trim()) },
         ));
     }
     // The LAST non-empty line, not the whole buffer: a first-run `fno` may print
@@ -294,10 +300,10 @@ mod tests {
     }
 
     #[test]
-    fn heal_failure_quotes_the_full_stderr_not_just_its_first_line() {
+    fn heal_failure_relays_the_cause_line_not_the_traceback_header() {
         // The x-8f73 failure shape: a Python traceback whose first line is the
-        // useless header and whose tail names the real cause. The refusal must
-        // carry the tail, because the tail is the diagnosis.
+        // useless header and whose tail names the real cause. The refusal
+        // relays ONE labelled line - the tail - and never the raw buffer.
         let out = std::process::Command::new("sh")
             .args([
                 "-c",
@@ -306,11 +312,12 @@ mod tests {
             .output()
             .unwrap();
         let message = parse_heal_token_output("deadbeef", &out).unwrap_err();
-        assert!(message.contains("Traceback"), "{message}");
+        assert!(!message.contains("Traceback"), "{message}");
         assert!(
             message.contains("OSError: The current working directory was deleted"),
             "{message}"
         );
+        assert!(!message.contains('\n'), "{message}");
     }
 
     #[test]
