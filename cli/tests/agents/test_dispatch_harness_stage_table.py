@@ -3,7 +3,7 @@
 ``agents.profiles.<verb>.provider`` (the stage table) is the home; the
 deprecated ``dispatch.harness`` reads as the fallback rung beneath it for one
 release. Both dispatch doors - ``resolve_dispatch`` (dispatch-node.sh /
-``fno agents dispatch resolve``) and ``fno agents spawn``
+``resolve_node_spawn``) and ``fno agents spawn``
 (inject_spawn_defaults) - must answer one harness for one node.
 """
 from __future__ import annotations

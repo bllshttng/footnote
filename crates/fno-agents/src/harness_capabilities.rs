@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The capability contract. This in-crate TOML is the CANONICAL table
 /// (x-244c, operator ruling 2026-09-02): `build.rs` copies it over the
@@ -75,7 +75,7 @@ const FEATURE_STATES: [&str; 4] = ["native", "capable", "absent", "unmeasured"];
 #[error("harness capability contract: {0}")]
 pub struct ContractError(String);
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessContract {
     pub map_version: u32,
@@ -91,7 +91,7 @@ pub struct HarnessContract {
     pub probe: BTreeMap<String, ProbeDecl>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProbeDecl {
     /// One of [`PROBE_KINDS`].
@@ -106,7 +106,7 @@ pub struct ProbeDecl {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessCapabilities {
     pub permission_bypass: Vec<String>,
@@ -173,7 +173,7 @@ pub struct HarnessCapabilities {
     pub features: BTreeMap<String, FeatureClaim>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeeperArm {
     /// Why this lane has no one-shot form, in the sentence the operator sees.
@@ -218,7 +218,7 @@ pub struct KeeperArm {
 /// The thread lane's carrier row (spawn flag passthrough). Kept beside
 /// [`KeeperArm`]: a harness answers its carrier question from `thread` when
 /// it has one and from `keeper` when it does not.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadArm {
     /// The launch axes this lane has a native form for.
@@ -232,7 +232,7 @@ pub struct ThreadArm {
 /// One feature claim: `state` is the claim, and `verbs` names the
 /// harness's own verbs that exercise it, measured. The vocabulary and
 /// the probe coupling are the contract.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeatureClaim {
     /// One of [`FEATURE_STATES`].
@@ -245,7 +245,7 @@ pub struct FeatureClaim {
     pub verbs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionResponse {
     pub supported: bool,
@@ -253,14 +253,14 @@ pub struct PermissionResponse {
     pub keys: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestRuleRef {
     pub id: String,
     pub state: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBinding {
     pub strategy: String,
@@ -268,13 +268,13 @@ pub struct SessionBinding {
     pub timeout_ms: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeStrategy {
     pub forms: BTreeMap<String, ResumeForm>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeForm {
     pub kind: String,
@@ -294,7 +294,7 @@ pub struct ResumeForm {
     pub pre_exec: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSwitchStrategy {
     pub kind: String,

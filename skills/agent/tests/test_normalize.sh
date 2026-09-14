@@ -20,8 +20,30 @@ FAIL=0
 # field <output> <key> -> prints the value for key=... (first match)
 field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
 
-# run <input> [extra argv...] -> echoes normalize.sh stdout
-run() { bash "$NORM" --input "$1" "${@:2}"; }
+# run <input> [extra argv...] -> echoes normalize.sh stdout.
+# PATH-pinned to a capabilities fixture that delegates everything else to the
+# HOST fno (resolved before the pin, x-3873): the surface read is a Rust-leaf
+# ask (`fno agents capabilities`), and a stale installed binary would refuse
+# it and error every classify regardless of the script under test.
+_HOST_FNO="$(command -v fno || true)"
+_run_stub="$(mktemp -d)"
+[[ -n "$_run_stub" && -d "$_run_stub" ]] || { echo "mktemp -d failed" >&2; exit 1; }
+# The host path is baked in at generation (never re-resolved at call time:
+# with the stub dir first on PATH, `command -v fno` would find the stub).
+cat > "$_run_stub/fno" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1 \$2" == "agents capabilities" ]]; then
+  case "\${3:-}" in
+    claude|agy|opencode) printf '{"command_surface":"slash"}\n'; exit 0 ;;
+    codex)               printf '{"command_surface":"codex-skill"}\n'; exit 0 ;;
+    *)                   printf '{"command_surface":"refused"}\n'; exit 0 ;;
+  esac
+fi
+exec "${_HOST_FNO:-/nonexistent-fno}" "\$@"
+EOF
+chmod +x "$_run_stub/fno"
+trap 'rm -rf "$_run_stub"' EXIT
+run() { PATH="$_run_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
 
 # run_nofno shadows `fno` with an exit-1 stub so assertions about BUILTIN
 # defaults (no-merge posture, static fallback tables) hold regardless of the
@@ -30,10 +52,25 @@ run() { bash "$NORM" --input "$1" "${@:2}"; }
 _de43_stub="$(mktemp -d)"
 # Guard the mktemp: an empty _de43_stub would write the stub to /fno.
 [[ -n "$_de43_stub" && -d "$_de43_stub" ]] || { echo "mktemp -d failed" >&2; exit 1; }
-printf '#!/usr/bin/env bash\nexit 1\n' > "$_de43_stub/fno"; chmod +x "$_de43_stub/fno"
+# The capabilities ask is answered from a fixture table (x-3873): it is the
+# surface read every classify needs, and the packaged table itself is
+# contract-tested in crates/fno-agents. Every other ask exits 1, so the
+# fail-closed posture property still holds suite-wide.
+cat > "$_de43_stub/fno" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "agents capabilities" ]]; then
+  case "${3:-}" in
+    claude|agy|opencode) printf '{"command_surface":"slash"}\n'; exit 0 ;;
+    codex)               printf '{"command_surface":"codex-skill"}\n'; exit 0 ;;
+    *)                   printf '{"command_surface":"refused"}\n'; exit 0 ;;
+  esac
+fi
+exit 1
+EOF
+chmod +x "$_de43_stub/fno"
 run_nofno() { PATH="$_de43_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
 
-# x-8151: family membership is an ASK now (fno dispatch family), fail-closed
+# x-8151: family membership is an ASK now (fno agents target-family), fail-closed
 # when the ask fails - the exit-1 stub above would refuse every run_nofno
 # classify. FAMILY_RESOLVER is the documented test injection (normalize.sh
 # consults it before fno), so the "no host fno" property holds: the stub
@@ -61,8 +98,10 @@ trap 'rm -rf "$_de43_stub" "$_FAMILY_STUB"' EXIT
 # still prove correctness, and CI (Linux, has `timeout`) enforces the no-hang.
 TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 run_guarded() {
-  if [[ -n "$TIMEOUT_BIN" ]]; then "$TIMEOUT_BIN" 5 bash "$NORM" --input "$1" "${@:2}"
-  else bash "$NORM" --input "$1" "${@:2}"; fi
+  # The same PATH pin `run` applies (capabilities fixture, x-3873), under a
+  # timeout so a regressed $#-guard that spins is caught, not hung.
+  if [[ -n "$TIMEOUT_BIN" ]]; then PATH="$_run_stub:$PATH" "$TIMEOUT_BIN" 20 bash "$NORM" --input "$1" "${@:2}" < /dev/null
+  else run "$@"; fi
 }
 
 check_eq() {

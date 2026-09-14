@@ -41,7 +41,7 @@ STUB_SLUG="$TMP/stub-slug.sh"; printf '#!/usr/bin/env bash\necho dashless-spawn\
 export NODE_SLUG_RESOLVER="$STUB_EMPTY"
 
 # x-8151/d-450caaeb: family membership is answered by the Rust owner through
-# `fno dispatch family`; with the FAILING fno on PATH below, every real ask
+# `fno agents target-family`; with the FAILING fno on PATH below, every real ask
 # would refuse the normalize (the loud fail-closed contract). Pin the answer
 # with a stub so the suite exercises normalize's own plumbing. The stub is a
 # FIXTURE table - the grammar itself is cargo-tested in
@@ -63,12 +63,25 @@ export FAMILY_RESOLVER="$STUB_FAMILY"
   && [[ "$("$STUB_FAMILY" "/think x-1")" == "other" ]] \
   || { echo "FAIL: family stub fixture drifted from the owner's table" >&2; exit 1; }
 
-# A dir with a FAILING `fno` on PATH forces normalize.sh's static command-surface
-# fallback (used when `fno agents dispatch resolve` is unreachable), so surface-dependent
-# assertions are deterministic regardless of the installed fno's freshness (x-de43:
-# a stale installed fno reports opencode=prose, a fresh one opencode=slash).
+# A dir with a stub `fno` on PATH answers `fno agents capabilities` from this
+# fixture table (x-3873: the surface read; the packaged table itself is
+# contract-tested in crates/fno-agents), so surface-dependent assertions are
+# deterministic regardless of the installed fno's freshness (x-de43: a stale
+# installed fno reported opencode=prose, a fresh one opencode=slash). Every
+# other ask exits 1, keeping the no-host-fno fail-closed property for posture.
 FBIN="$TMP/failing-fno"; mkdir -p "$FBIN"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$FBIN/fno"; chmod +x "$FBIN/fno"
+cat > "$FBIN/fno" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "agents capabilities" ]]; then
+  case "${3:-}" in
+    claude|agy|opencode) printf '{"command_surface":"slash"}\n'; exit 0 ;;
+    codex)               printf '{"command_surface":"codex-skill"}\n'; exit 0 ;;
+    *)                   printf '{"command_surface":"refused"}\n'; exit 0 ;;
+  esac
+fi
+exit 1
+EOF
+chmod +x "$FBIN/fno"
 # Pin it for the WHOLE suite, not per call site: an assertion about a builtin
 # default (no-merge posture, static surface tables) silently inverts on a host
 # whose config sets dispatch.auto_merge=true. Cases that exercise the config read
@@ -468,9 +481,21 @@ OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbee
 # Stub `fno` on PATH so the read is hermetic (normalize.sh's only runtime fno
 # call is `fno config get`; provider/slug resolution use their own env stubs).
 STUB_FNO_TRUE_DIR="$TMP/bin-fno-true"; mkdir -p "$STUB_FNO_TRUE_DIR"
-printf '#!/usr/bin/env bash\n[[ "$1 $2 $3" == "config get auto_merge.grant" ]] && { echo dispatch; exit 0; }\nexit 0\n' > "$STUB_FNO_TRUE_DIR/fno"; chmod +x "$STUB_FNO_TRUE_DIR/fno"
+cat > "$STUB_FNO_TRUE_DIR/fno" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1 $2 $3" == "config get auto_merge.grant" ]] && { echo dispatch; exit 0; }
+[[ "$1 $2" == "agents capabilities" ]] && { printf '{"command_surface":"slash"}\n'; exit 0; }
+exit 0
+EOF
+chmod +x "$STUB_FNO_TRUE_DIR/fno"
 STUB_FNO_ERR_DIR="$TMP/bin-fno-err"; mkdir -p "$STUB_FNO_ERR_DIR"
-printf '#!/usr/bin/env bash\n[[ "$1 $2 $3" == "config get auto_merge.grant" ]] && { echo "unknown config key" >&2; exit 1; }\nexit 0\n' > "$STUB_FNO_ERR_DIR/fno"; chmod +x "$STUB_FNO_ERR_DIR/fno"
+cat > "$STUB_FNO_ERR_DIR/fno" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1 $2 $3" == "config get auto_merge.grant" ]] && { echo "unknown config key" >&2; exit 1; }
+[[ "$1 $2" == "agents capabilities" ]] && { printf '{"command_surface":"slash"}\n'; exit 0; }
+exit 0
+EOF
+chmod +x "$STUB_FNO_ERR_DIR/fno"
 
 # AC2-HP: grant=dispatch (no flag) -> allow_merge=1
 OUT="$(PATH="$STUB_FNO_TRUE_DIR:$PATH" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude)"
@@ -573,10 +598,19 @@ if [[ ! -x "$VENV_PY" ]]; then
   CANON="$(cd "$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)"
   [[ -n "$CANON" ]] && VENV_PY="$CANON/cli/.venv/bin/python"
 fi
-# A REAL fno on PATH; the suite otherwise pins a failing one suite-wide.
+# A REAL fno on PATH; the suite otherwise pins a failing one suite-wide. The
+# capabilities ask is answered from the fixture table first (x-3873): it is a
+# Rust-leaf read, and the installed binary may predate this branch.
 REAL_FNO_DIR="$TMP/real-fno"; mkdir -p "$REAL_FNO_DIR"
 {
   echo '#!/usr/bin/env bash'
+  echo 'if [[ "$1 $2" == "agents capabilities" ]]; then'
+  echo '  case "${3:-}" in'
+  echo "    claude|agy|opencode) printf '{\"command_surface\":\"slash\"}\\n'; exit 0 ;;"
+  echo "    codex) printf '{\"command_surface\":\"codex-skill\"}\\n'; exit 0 ;;"
+  echo "    *) printf '{\"command_surface\":\"refused\"}\\n'; exit 0 ;;"
+  echo '  esac'
+  echo 'fi'
   echo "exec \"$VENV_PY\" -c 'import sys; sys.path.insert(0, \"$REPO_ROOT/cli/src\"); from fno.cli import app; app()' \"\$@\""
 } > "$REAL_FNO_DIR/fno"
 chmod +x "$REAL_FNO_DIR/fno"
@@ -612,7 +646,12 @@ print(agent_name('spawn', 'ab-deadbeef', slug='path consolidation wave 0 delegat
   # That must DEGRADE, never read as "unrepresentable" - misreading it would
   # refuse every node on an out-of-date install.
   STALE_DIR="$TMP/stale-fno"; mkdir -p "$STALE_DIR"
-  printf '#!/usr/bin/env bash\n[[ "${1:-}" == "agents" && "${2:-}" == "name" ]] && { echo "Usage: fno agents" >&2; exit 2; }\nexit 1\n' > "$STALE_DIR/fno"
+  cat > "$STALE_DIR/fno" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "agents" && "${2:-}" == "name" ]] && { echo "Usage: fno agents" >&2; exit 2; }
+[[ "$1 $2" == "agents capabilities" ]] && { printf '{"command_surface":"slash"}\n'; exit 0; }
+exit 1
+EOF
   chmod +x "$STALE_DIR/fno"
   OUT="$(NODE_SLUG_RESOLVER="$STUB_SLUG" DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" \
          PATH="$STALE_DIR:$PATH" bash "$NORM" --input "ab-deadbeef")"

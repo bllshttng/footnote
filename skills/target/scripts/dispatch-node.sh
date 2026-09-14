@@ -1,52 +1,34 @@
 #!/usr/bin/env bash
-# dispatch-node.sh - Dispatch ready backlog node(s) as fresh `claude --bg` /target
-# workers, fire-and-forget, with a per-node outcome line and a node:<id> claim
-# guard against double-dispatch. The fresh bg process IS the planning session's
-# "clear": a new process is the only real context reset, so the planning session
-# persists while dispatched workers run do->review->ship on their own.
+# dispatch-node.sh - Dispatch ready backlog node(s) as fresh detached `/target`
+# workers, fire-and-forget, with a per-node outcome line. The launch is ONE
+# command per node: `fno agents spawn --node <id> --substrate thread` (x-3873).
+# The spawn door renders the seed from the node's declared verb and brief chain,
+# picks the lane from the grid while the model axis is free, ensures the launch
+# worktree, and takes the family-2 guard against double-dispatch. This script
+# passes the node and only what the human typed - nothing else.
 #
-# Self-contained skill script. External deps: `fno` (backlog, claim, agents) + jq.
+# Self-contained skill script. External deps: `fno` (backlog, agents) + jq.
 # See internal/fno/plans/2026-06-02-target-plan-mode-phase2.md (US5/US6).
 #
 # Usage:
-#   dispatch-node.sh <node-id...> [--flags "<extra /target flags>"]
-#                                 [--allow-merge|--no-merge] [--max N] [--dry-run] [--here]
+#   dispatch-node.sh <node-id...> [--max N] [--dry-run] [--here]
 #                                 [--permission-mode <mode>] [--route provider/model]
-#                                 [--source <ab|sob|...>]
-#   dispatch-node.sh --all-ready  [--flags "..."] [--allow-merge|--no-merge] [--max N] [--dry-run] [--here]
+#   dispatch-node.sh --all-ready  [--max N] [--dry-run] [--here]
 #                                 [--permission-mode <mode>] [--route provider/model]
-#                                 [--source <ab|sob|...>]
 #
-# --source <code>: the dispatch origin stamped into every worker name (x-84b2),
-#   e.g. ab (active-backlog daemon) or sob (spawn on blueprint). Forwarded to
-#   `fno agents name --source`; the vocabulary is validated there, never here.
-#   An attended manual run omits it and the name carries no source segment.
-#
-# --allow-merge / --no-merge: per-run merge posture override (x-4391). Neither
-#   flag => posture from config.auto_merge.grant (default none = no-merge).
-#   An explicit flag wins the config default.
+# Merge posture (x-3873): config.auto_merge.grant decides at target init, the
+# same way it does for every advance worker. There is no per-run flag. The
+# per-run override is a typed message on the spawn itself:
+#   fno agents spawn --node <id> '/fno:target --no-merge <id>'
 #
 # --route provider/model: per-dispatch explicit model route (x-b0b4), forwarded
-#   to every worker spawn. Fails CLOSED in the spawn (unknown/non-anthropic/
-#   keyless refuses -> the node stays dispatchable). Wins over the build lane
-#   AND over the verb lane route (below). A CLAUDE worker carries --role build
-#   (the build lane is a fail-safe no-op until `fno config route set build ...`
-#   opts in). Non-claude workers do NOT: the
-#   build/route lane is claude-specific, and a role-bearing spawn is classified
-#   Python-owned by the runtime, which rejects opencode/agy (x-567d / codex P1).
+#   to every worker spawn only when typed. Fails CLOSED in the spawn.
 #
-# Verb lane route (x-14d4): with no explicit --route, a claude worker also
-#   carries the stage table's route (config.agents.profiles.<verb>.route) when
-#   the per-node resolve returns one - the vendor lane that selects the
-#   worker's route settings file. A cutover dispatch drops it (the destination
-#   account owns billing).
-#
-# --here / --in-place: keep a worker without a recorded node cwd in the
-#   dispatcher's cwd. Default (no node cwd) is --fresh: start from canonical
-#   main so a dispatch from a linked worktree does not inherit that worktree.
+# --here / --in-place: keep the worker in the dispatcher's cwd instead of the
+#   door's worktree-ensure default.
 #
 # Per-node outcome lines (stdout; one per node; NEVER silent):
-#   launched         <node> name=<agent> session=<sid> cwd=<path> hint="fno agents logs <agent>" route=<provider/model|primary>
+#   launched         <node> name=<agent> session=<sid> hint="fno agents logs <agent>"
 #   already-running  <node> reason="live target worker holds node:<id> (<holder>)"
 #   skipped-contested <node> reason="suspect claim (respawned worker); advancing" (x-ba4b)
 #   parked           <node> reason="blocked|deferred|<status> (not up-next)"
@@ -62,18 +44,9 @@
 #   summary: launched=<n> parked=<n> already=<n> skipped=<n> done=<n> failed=<n> capped=<n>[ nothing-up-next]
 #
 # Invariants (Failure Modes section of the plan):
-#   - Provider + substrate come from `fno agents dispatch resolve` (the x-4d85
-#     harness-capability map), NOT a hardcode (x-567d). Measured against the
-#     resolver: claude and codex resolve to a native interactive `thread` (the
-#     DETACHED `claude --bg` thread, x-2c27: auto-worktrees, runs unattended,
-#     shows in `claude agents`; `bg` is a deprecated alias of that same thread);
-#     opencode and agy have no journey-proven thread driver yet and degrade to
-#     `headless` (a one-shot that runs to completion) with a loud fallback event.
-#     The default is never `pane` (x-3ab8's owned-PTY default would stall a
-#     fire-and-forget dispatch at a placement prompt). NEVER `--bare`/`-p` for
-#     the thread lane (those force the API-credit pool and strip skills/hooks);
-#     claude's thread is the subscription `claude --bg` lane. An unresolvable
-#     harness hard-fails loudly (AC2-ERR), never a silent claude default.
+#   - The launch is the door (fno agents spawn), the one launch verb (law
+#     d-496680aa). The substrate is the detached thread lane. NEVER
+#     `--bare`/`-p` (those force the API-credit pool and strip skills/hooks).
 #   - A failed dispatch is surfaced and leaves the node `ready`/re-dispatchable;
 #     never reports a launch that did not happen; never silently swallows.
 #   - Fire-and-forget: this script NEVER writes/clears the caller's
@@ -91,79 +64,28 @@ set -uo pipefail
 command -v fno >/dev/null 2>&1 || { echo "failed: - reason=\"fno not on PATH\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 1; }
 command -v jq  >/dev/null 2>&1 || { echo "failed: - reason=\"jq not on PATH\""  >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 1; }
 
-# Canonical MAIN checkout for deterministic --fresh isolation (x-73ca). The
-# git-common-dir's parent is the main checkout even when the dispatcher runs
-# from a linked worktree; `fno agents workspace worktree ensure --repo <this>` then creates the
-# worker's conductor worktree off origin/main. Empty when not in a git repo
-# (the --fresh arm falls back to the Rust runtime's own --fresh resolution).
-CANONICAL_ROOT=""
-_gcd_raw="$(git rev-parse --git-common-dir 2>/dev/null)"
-if [[ -n "$_gcd_raw" ]]; then            # guard so we never `cd ""` (a no-op that
-  _gcd="$(cd "$_gcd_raw" 2>/dev/null && pwd -P)"   # would falsely set a non-git cwd)
-  [[ -n "$_gcd" ]] && CANONICAL_ROOT="$(dirname "$_gcd")"
-fi
-
 # ---- arg parse --------------------------------------------------------------
 NODES=()
 ALL_READY=0
-FLAGS=""
-# x-4391 tri-state: "" = unset (resolve from config.auto_merge.grant after arg
-# parse); 1 = allow merge (--allow-merge); 0 = no-merge (--no-merge). Once
-# resolved it is always 0/1, so the downstream `-eq 0`/`-eq 1` checks are total.
-ALLOW_MERGE=""
 MAX=0          # 0 => no cap (quota is the throttle; do not invent a hard cap)
 DRY_RUN=0
-HERE=0         # 1 => keep the worker in the dispatcher's cwd (opt out of --fresh)
-PERMISSION_MODE=""  # x-dfa4: forwarded as --permission-mode to each worker spawn
+HERE=0         # 1 => keep the worker in the dispatcher's cwd (opt out of ensure)
+PERMISSION_MODE=""  # forwarded as --permission-mode only when the human typed it
 ROUTE=""       # x-b0b4: per-dispatch explicit provider,model route (fail-closed)
-SOURCE=""      # x-84b2: dispatch origin stamped into every worker name (validated by the bridge)
-# The operator's exported refusal, captured before the loop arms/unsets the
-# carrier per node, so non-family dispatches restore it rather than a prior
-# iteration's value (round 12).
-_OPERATOR_NO_MERGE="${TARGET_NO_MERGE:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all-ready)  ALL_READY=1; shift ;;
-    # x-9d11: migrate the legacy bare `no-merge` token to the flag at parse, so
-    # the no-merge guards downstream match one spelling and a bare token in
-    # --flags cannot double-spell (bare + appended flag) into $tgt_cmd.
-    # Start-anchored, single replace (round 12): the legacy spelling was the
-    # whole --flags value (or its leading token), and a GLOBAL rewrite would
-    # mutate free text in --flags into the refusal flag.
-    --flags)      FLAGS="${2:-}"; shift 2 ;;
-    --allow-merge) ALLOW_MERGE=1; shift ;;
-    --no-merge)   ALLOW_MERGE=0; shift ;;
     --max)        MAX="${2:-0}"; shift 2 ;;
     --dry-run)    DRY_RUN=1; shift ;;
     --here|--in-place) HERE=1; shift ;;
     --permission-mode) PERMISSION_MODE="${2:-}"; shift 2 ;;
     --route)      [[ $# -ge 2 ]] || { echo "failed: --route reason=\"requires a provider/model value\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 2; }; ROUTE="$2"; shift 2 ;;
-    --source)     [[ $# -ge 2 ]] || { echo "failed: --source reason=\"requires a dispatch origin code\"" >&2; echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=1 capped=0"; exit 2; }; SOURCE="$2"; shift 2 ;;
     --) shift; while [[ $# -gt 0 ]]; do NODES+=("$1"); shift; done ;;
     -*) echo "failed: $1 reason=\"unknown flag\"" >&2; exit 2 ;;
     *)  NODES+=("$1"); shift ;;
   esac
 done
-
-# x-dfa4: config default for autonomous dispatch. An explicit --permission-mode
-# flag wins; else config.agents.defaults.permission_mode; else the built-in
-# unattended answer (x-7198; a shell dispatcher cannot import
-# SPAWN_PERMISSION_BUILTIN in spawn_defaults.py, so the literal is duplicated
-# here - a future change to one is a visible mismatch with the other). A stale
-# `fno` degrades to empty (fail-safe), which still falls through to the literal.
-if [[ -z "$PERMISSION_MODE" ]]; then
-  PERMISSION_MODE="$(fno config get agents.defaults.permission_mode 2>/dev/null | tr -d '[:space:]' || true)"
-  if [[ -z "$PERMISSION_MODE" ]]; then
-    PERMISSION_MODE="bypassPermissions"
-  fi
-fi
-
-# x-8151: the merge-posture machinery this file used to carry (the per-node
-# config reader, the legacy-token sed, the family-prefix strip helper) is
-# gone. The resolver owns all of it behind --merge-posture; this script only
-# chooses the posture input from the same tri-state the --allow-merge /
-# --no-merge flags have always fed.
 
 # ---- resolve the node set ---------------------------------------------------
 if [[ "$ALL_READY" -eq 1 ]]; then
@@ -196,48 +118,6 @@ fi
 if [[ "$ALL_READY" -eq 1 ]]; then
   echo "dispatching up to ${#NODES[@]} worker(s) (~${#NODES[@]}x subscription quota while active; quota is the throttle)" >&2
 fi
-
-# ---- resolve provider + substrate from the harness-capability map (x-567d) ---
-# Provider + substrate are NO LONGER hardcoded. `fno agents dispatch resolve`
-# reads config.dispatch.harness and returns the autonomous substrate: a detached
-# thread lane (claude, codex) or headless. Three
-# outcomes, all LOUD, never a silent claude default:
-#   - substrate=thread  : the detached thread (claude's is the `claude --bg`
-#     subscription lane; `bg` is its deprecated CLI alias).
-#   - substrate=headless: a one-shot that runs to completion; a downgrade event is
-#     emitted so an operator sees it (epic AC1-EDGE).
-#   - resolve fails      : an unknown/misconfigured harness has NO autonomous
-#     substrate -> hard fail naming config.dispatch.harness; every node stays
-#     ready, nothing launches, a failure event is recorded (epic AC2-ERR).
-# `fno agents dispatch resolve` / `fno doctor event emit` are top-level Python verbs (not in the
-# `agents` group), so they are immune to FNO_AGENTS_RUNTIME=rust - no pin needed.
-resolve_json="$(fno agents dispatch resolve --json 2>/dev/null)"; resolve_rc=$?
-# jq `//` treats "" as truthy, so filter empties with select() before the
-# fallback (repo rule) - a resolver that ever returned "" must read as absent.
-DISPATCH_PROVIDER="$(printf '%s' "$resolve_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
-DISPATCH_SUBSTRATE="$(printf '%s' "$resolve_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
-if [[ "$resolve_rc" -ne 0 || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
-  reason="no autonomous substrate resolved (rc=$resolve_rc); set config.agents.profiles.target.provider to a harness with an autonomous substrate (deprecated config.dispatch.harness still reads for one release; run fno agents dispatch resolve --harness <name> to see what each supports)"
-  fno doctor event emit -t dispatch_no_autonomous_substrate -s backlog \
-    -d "{\"reason\":\"dispatch resolve rc=$resolve_rc\",\"config_key\":\"config.agents.profiles.target.provider\"}" >/dev/null 2>&1 || true
-  for id in "${NODES[@]}"; do echo "failed $id reason=\"$reason\""; done
-  echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=${#NODES[@]} capped=0"
-  exit 1
-fi
-# Loud, once: the resolved substrate is the one-shot lane, so the launch is not
-# a detached thread. Reads the RESOLVED value's meaning (never a spelling that
-# can drift), and both message and event name what actually resolved.
-if [[ "$DISPATCH_SUBSTRATE" == "headless" ]]; then
-  echo "note: harness '$DISPATCH_PROVIDER' resolved substrate '$DISPATCH_SUBSTRATE' (one-shot runs to completion, not a detached thread)" >&2
-  fno doctor event emit -t dispatch_substrate_fallback -s backlog \
-    -d "{\"harness\":\"$DISPATCH_PROVIDER\",\"from\":\"$DISPATCH_SUBSTRATE\",\"to\":\"headless\"}" >/dev/null 2>&1 || true
-fi
-
-# The resolve above is node-agnostic, so it is the BASE: the fail-fast
-# substrate check ran against it, and an explicit --route pins the per-node
-# resolve to this harness (never to a cutover destination).
-DISPATCH_PROVIDER_BASE="$DISPATCH_PROVIDER"
-DISPATCH_SUBSTRATE_BASE="$DISPATCH_SUBSTRATE"
 
 # ---- per-node dispatch ------------------------------------------------------
 n_launched=0; n_parked=0; n_already=0; n_skipped=0
@@ -318,111 +198,6 @@ for id in "${NODES[@]}"; do
     continue
   fi
 
-  # x-ebd2: stay/cutover/defer and the command are ONE authoritative resolve
-  # below. The separate --autonomous route call this block used to make
-  # resolved quota against a node-agnostic command, so the pair could
-  # disagree; the consolidated tuple answers both from the same node read.
-  cutover_args=(); route_account=""; spawn_runtime=()
-
-  # x-571f: per-node model pin. Read once from the node JSON we already hold; a
-  # non-empty value is applied as `--model <m>` to every spawn branch below (and
-  # the dry-run hint). A bash ARRAY (not a string) so the value is quoted at
-  # expansion - no globbing/word-splitting even if a pin ever carried a glob char
-  # (gemini review PR #150; `fno backlog update --model` already forbids those,
-  # this is defense-in-depth). Expanded as `"${model_args[@]+"${model_args[@]}"}"`
-  # - the `+` guard keeps an EMPTY array from tripping bash 3.2's set -u unbound
-  # error (the same trap the --cwd branches below avoid). Empty pin -> zero args =
-  # byte-identical to today; fail-open on a bad read since jq // empty yields "".
-  model_pin="$(printf '%s' "$node_json" | jq -r '.model // empty' 2>/dev/null || true)"
-  model_pin_source=""  # "node" (operator pin) | "band" (resolve-model), for the lane-route coordinate rule
-  [[ -n "$model_pin" ]] && model_pin_source="node"
-  # x-d7a7: no exact `.model` pin? resolve the node's band via the single
-  # Python projection (`fno do target resolve-model` -> route_resolve) so a
-  # pinned node's worker spawns on the resolved model too - bash never
-  # resolves. Scope the
-  # pick to the RESOLVED dispatch provider (x-567d), not a hardcoded `claude`: a
-  # resolution that lands on a model of a DIFFERENT harness is dropped to the
-  # provider default rather than passed as an invalid `<provider> --model
-  # <foreign>` (the cross-harness mismatch obs 100675 named). Empty output (no
-  # pin, cross-harness pick, or any resolve error) -> zero args.
-  if [[ -z "$model_pin" ]]; then
-    model_pin="$(fno do target resolve-model "$id" --harness "$DISPATCH_PROVIDER" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
-    [[ -n "$model_pin" ]] && model_pin_source="band"
-  fi
-  model_args=()
-  [[ -n "$model_pin" ]] && model_args=("--model" "$model_pin")
-
-  # x-dfa4: forward the permission mode to the worker spawn (same array
-  # discipline as model_args - avoids word-splitting at the trust boundary).
-  # CLAUDE-ONLY on the autonomous lane (codex review P2): `fno agents spawn`
-  # REJECTS --permission-mode for a non-claude provider on a non-pane substrate
-  # (cli.py), so forwarding it to a codex/gemini/agy/opencode headless worker
-  # fails the whole dispatch. Non-claude workers get their bypass from the
-  # resolved permission_bypass caps, not this flag. Empty => byte-identical.
-  perm_args=()
-  perm_hint=""  # dry-run preview mirror of perm_args (claude-gated, codex review P2)
-  if [[ -n "$PERMISSION_MODE" && "$DISPATCH_PROVIDER" == "claude" ]]; then
-    perm_args=("--permission-mode" "$PERMISSION_MODE")
-    perm_hint="--permission-mode $PERMISSION_MODE "
-  fi
-
-  # x-b0b4: a claude worker rides the build lane. The build/route lane is
-  # claude-SPECIFIC (model routing over the claude subscription), and the runtime
-  # classifies any role-/route-bearing spawn as Python-owned - but Python's
-  # dispatchable set is claude/codex/gemini only, so a role-bearing opencode/agy
-  # spawn exits "unknown provider" BEFORE reaching its Rust headless dispatcher
-  # (x-567d / codex P1). Gate both on claude: non-claude spawns carry neither, so
-  # they reach their native dispatch path. Empty arrays need the bash-3.2 `+`
-  # guard at expansion (below) - do NOT expand a bare "${role_args[@]+"${role_args[@]}"}".
-  role_args=()
-  route_args=()
-  role_hint=""  # dry-run preview mirror of role_args (safe for the empty case)
-  if [[ "$DISPATCH_PROVIDER" == "claude" ]]; then
-    role_args=("--role" "build")
-    role_hint="--role build "
-    [[ -n "$ROUTE" ]] && route_args=("--route" "$ROUTE")
-  fi
-  # x-9f75: group pane workers by project - pass --workspace <node.project> so
-  # same-project dispatches converge into one workspace (create-if-absent lives
-  # server-side in run_pane). --workspace is pane-only (the CLI rejects it for
-  # bg/headless), so gate on the substrate; a bg worker is a detached thread
-  # with no tab to group. Best-effort: an empty project just omits the flag.
-  squad_args=()
-  squad_hint=""
-  if [[ "$DISPATCH_SUBSTRATE" == "pane" ]]; then
-    # `.project` is a Rust String (serialized "" when unset, not null), and jq's
-    # `//` treats "" as truthy, so filter empties explicitly before the fallback.
-    node_project="$(printf '%s' "$node_json" | jq -r '.project | select(. != "") // empty' 2>/dev/null)"
-    if [[ -n "$node_project" ]]; then
-      squad_args=("--workspace" "$node_project")
-      squad_hint="--workspace $node_project "
-    fi
-  fi
-  # Receipt route= token, resolved PER NODE (not once before the loop) so a
-  # `route set`/`unset` racing a bulk dispatch is stamped per worker, never
-  # inferred from a stale run-start snapshot (codex P2; plan's per-worker
-  # provenance invariant). Explicit --route wins. Otherwise the AUTHORITATIVE
-  # build-lane predicate is `fno config route env build`: it runs the same
-  # resolve_route('build') the worker's bg_create uses, so it catches every
-  # fall-safe-to-primary reason (model_routing.enabled=false, a keyed but
-  # non-anthropic provider) that a target+key table heuristic would miss. env
-  # exits 0 only when a real route resolves; `route ls -J` then supplies the
-  # provider,model string. A stale `fno` without the verb (or any failure) leaves
-  # `primary` - the honest conservative claim (routing not confirmed).
-  if [[ "$DISPATCH_PROVIDER" != "claude" ]]; then
-    # Non-claude carries no build/route lane (gated above); the receipt reflects
-    # the native provider, not a claude route.
-    route_val="$DISPATCH_PROVIDER"
-  elif [[ -n "$ROUTE" ]]; then
-    route_val="$ROUTE"
-  else
-    route_val="primary"
-    if fno config route env build >/dev/null 2>&1; then
-      _bpm="$(fno config route ls -J 2>/dev/null | jq -r '.[] | select(.role=="build") | .provider_model' 2>/dev/null || true)"
-      [[ -n "$_bpm" && "$_bpm" != "unconfigured" ]] && route_val="$_bpm"
-    fi
-  fi
-
   # ---- Read-only early receipt; cmd_spawn owns the real guard (x-5c08) ----
   # Dry-run and legacy claimed-node parking need a verdict before the spawn
   # branch. A real ready dispatch passes --node to `fno agents spawn`, whose one
@@ -433,10 +208,9 @@ for id in "${NODES[@]}"; do
   # spawn-guard is a Python-only verb (no Rust client impl). Pin the call to the
   # Python runtime so an operator with FNO_AGENTS_RUNTIME=rust exported does not
   # route it to the Rust binary (which lacks it -> 127 -> the guard fails closed
-  # and bg-dispatch breaks). The pre-refactor `fno agents claim` calls were never in the
-  # `agents` group so were immune; this restores that immunity (codex P2). The
-  # inline override is scoped to this command; the real `fno agents spawn` below
-  # routes normally. The default (unset) runtime already keeps spawn-guard Python.
+  # and bg-dispatch breaks). The inline override is scoped to this command; the
+  # real `fno agents spawn` below routes normally. The default (unset) runtime
+  # already keeps spawn-guard Python.
   res_key="dispatch:$id"; res_holder="dispatch-node:$$"
   node_guard_cwd="$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)"
   guard_cwd_args=()
@@ -545,109 +319,10 @@ for id in "${NODES[@]}"; do
       continue ;;
   esac
 
-  # ---- Build the worker command + resolve the launch cwd ----
-  # x-8151 + x-ebd2: ONE authoritative resolve per node builds the command for
-  # every branch, merge posture and lifecycle alike. The resolver loads the
-  # node itself and derives the workflow verb from its plan rung and
-  # difficulty, so this shell no longer pre-reads dispatch_verb/dispatch_brief
-  # and carries no local /target or DISPATCH_COMMAND fallback - a fallback
-  # here would bypass the derivation exactly the way the old hand-built claude
-  # /target did. --autonomous rides the quota route (stay/cutover/defer) on
-  # the same tuple. The resolve runs in the node's project cwd so from-config
-  # honors THIS node's config.auto_merge.grant in a batch spanning repos
-  # (codex P2, x-4391).
-  node_cwd="$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)"
-  case "$ALLOW_MERGE" in
-    1) posture_args=(--merge-posture allow) ;;
-    0) posture_args=(--merge-posture no-merge) ;;
-    *) posture_args=(--merge-posture from-config) ;;
-  esac
-  resolve_args=(dispatch resolve --autonomous --node "$id" "${posture_args[@]}" -J)
-  # An explicit --route is a human's model-and-billing choice, and precedence
-  # puts every explicit pin above quota policy. Passing the harness pin ONLY
-  # here makes the resolver treat this launch as pinned: it may still DEFER,
-  # but it is never rerouted onto another harness, which would discard the
-  # route. Unpinned launches stay rerouteable - the cutover answers ride the
-  # same tuple.
-  [[ -n "$ROUTE" ]] && resolve_args+=(--harness "$DISPATCH_PROVIDER_BASE")
-  if [[ -n "$node_cwd" && -d "$node_cwd" ]]; then
-    resolved_json="$( ( cd "$node_cwd" && fno "${resolve_args[@]}" 2>/dev/null ) )"; resolve_rc=$?
-  else
-    # NO recorded cwd: the node lives in THIS project, so from-config reads the
-    # caller's own config - thread it unchanged. A RECORDED cwd whose dir is
-    # gone (stale worktree, fake/mocked path) is a failed read of the node's
-    # own config: thread no-merge instead - Locked Decision 6 never grants on a
-    # failed read. The dispatch itself still proceeds from the caller's cwd.
-    if [[ -n "$node_cwd" && "${posture_args[*]}" == *from-config* ]]; then
-      # Element-wise: ${arr[@]/pat/rep} matches ONE element at a time, so the
-      # two-word "--merge-posture from-config" pattern can never match (review
-      # round on this PR). Only the posture VALUE element is rewritten.
-      for _i in "${!resolve_args[@]}"; do
-        [[ "${resolve_args[$_i]}" == "from-config" ]] && resolve_args[$_i]="no-merge"
-      done
-    fi
-    resolved_json="$(fno "${resolve_args[@]}" 2>/dev/null)"; resolve_rc=$?
-  fi
-  if [[ "$resolve_rc" -ne 0 ]] || ! printf '%s' "$resolved_json" | jq -e '.command' >/dev/null 2>&1; then
-    # Refused verb/brief/posture, oversized brief, or a stale fno without the
-    # posture flag: fail closed and leave the node re-dispatchable, never
-    # launch a wrong command.
-    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
-    echo "failed $id reason=\"dispatch resolve refused (rc=$resolve_rc); node not dispatched\""
-    n_failed=$((n_failed + 1))
-    continue
-  fi
-  tgt_cmd="$(printf '%s' "$resolved_json" | jq -r '.command')"
-  # x-ebd2: the same tuple is the harness authority for stay AND cutover. On a
-  # cutover the command is ALREADY rendered for the destination, and
-  # harness/substrate/account ride beside it; on stay they name the configured
-  # (or pinned) harness. Reset from the base resolve is unnecessary - one
-  # tuple, one truth, no leak between nodes.
-  DISPATCH_PROVIDER="$(printf '%s' "$resolved_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
-  DISPATCH_SUBSTRATE="$(printf '%s' "$resolved_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
-  route_action="$(printf '%s' "$resolved_json" | jq -r '.route_action // "stay"')"
-  if [[ "$route_action" == "defer" ]]; then
-    # The node stays ready and re-dispatchable; the reservation is released so
-    # the next run after the window dispatches it.
-    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
-    route_retry="$(printf '%s' "$resolved_json" | jq -r '.route_retry_at // ""' 2>/dev/null)"
-    echo "parked $id reason=\"quota-deferred on $(printf '%s' "$resolved_json" | jq -r '.route_source // "?"') (retry_at=${route_retry:-unknown})\""
-    n_parked=$((n_parked + 1))
-    continue
-  fi
-  if [[ "$route_action" == "cutover" ]]; then
-    route_account="$(printf '%s' "$resolved_json" | jq -r '.route_account | select(. != null and . != "")' 2>/dev/null)"
-    if [[ -z "$route_account" || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
-      # An incomplete destination parks the node: launching on the exhausted
-      # harness is the exact wrong-billing launch the selector ruled out.
-      fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
-      echo "parked $id reason=\"cutover selected but its destination is incomplete; not launching on the exhausted harness\""
-      n_parked=$((n_parked + 1))
-      continue
-    fi
-    # The record id travels on argv; spawn resolves its credentials itself.
-    cutover_args=(--dispatch-account "$route_account")
-    # `spawn` auto-routes to the Rust client, which does not know this flag
-    # ("fno-agents: unknown flag: --dispatch-account") and would kill the launch
-    # before it starts. The overlay resolver is Python, so pin the runtime for a
-    # cutover spawn - the same pin spawn-guard and `agents name` already use for
-    # Python-only surfaces in this script.
-    spawn_runtime=(env FNO_AGENTS_RUNTIME=python)
-    echo "note: $id cutting over to harness '$DISPATCH_PROVIDER' (account $route_account); $(printf '%s' "$resolved_json" | jq -r '.route_reason // "quota"')" >&2
-  fi
-  if [[ -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
-    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
-    echo "failed $id reason=\"dispatch resolve returned no harness/substrate (route_action=$route_action); node not dispatched\""
-    n_failed=$((n_failed + 1))
-    continue
-  fi
   # Provenance-carrying name (x-84b2): [<source>-]<verb-code>-<node>-<slug>,
-  # minted AFTER the resolve so the verb comes from the same authoritative
-  # tuple (resolved .verb; the node's declared verb reconciles the out-of-family
-  # case; the builtin target path is the one literal default). The vocabulary
-  # (codes, budget, refusals) lives in the bridge, never here.
-  # x-3218: the canonical owner (`fno.agents.naming`) sanitizes the slug AND
-  # budgets the assembled name against the runtime's 64-char limit.
+  # minted through the canonical owner (x-3218), which sanitizes the slug AND
+  # budgets the assembled name against the runtime's 64-char limit. No --verb:
+  # the seed (and so the verb) is rendered by the spawn door from the node.
   # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
   # EVERY `fno agents` verb to the binary, which has no `name` port. Exit 3 (not
   # 2) is the naming refusal - Click spends 2 on usage errors including "no such
@@ -658,15 +333,7 @@ for id in "${NODES[@]}"; do
   # contract (a live config notice on stderr reproduced a false refusal on
   # 2026-09-03 when the WHOLE capture was matched).
   node_slug="$(printf '%s' "$node_json" | jq -r '.slug // .title // empty' 2>/dev/null)"
-  verb_word="$(printf '%s' "$resolved_json" | jq -r '.verb | select(. != null and . != "")' 2>/dev/null)"
-  if [[ -z "$verb_word" ]]; then
-    verb_word="$(printf '%s' "$node_json" | jq -r '.dispatch_verb | select(. != null and . != "")' 2>/dev/null)"
-  fi
-  if [[ -z "$verb_word" ]]; then
-    verb_word="target"  # the builtin target path: the one default the bridge maps to t
-  fi
-  name_args=("$id" --slug "$node_slug" --verb "$verb_word")
-  [[ -n "$SOURCE" ]] && name_args+=(--source "$SOURCE")
+  name_args=("$id" --slug "$node_slug")
   name_out="$(FNO_AGENTS_RUNTIME=python fno agents name "${name_args[@]}" 2>&1)"
   name_rc=$?
   name_last="${name_out##*$'\n'}"
@@ -678,7 +345,6 @@ for id in "${NODES[@]}"; do
     # double quotes are squeezed out first: this line has a documented grammar
     # other tools parse, and the message embeds a repr of the node id.
     name_msg="$(printf '%s' "${name_out:-agent name cannot be represented}" | tr '\n"' '  ')"
-    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
     echo "failed $id reason=\"$name_msg\""
     n_failed=$((n_failed + 1))
     continue
@@ -709,100 +375,40 @@ for id in "${NODES[@]}"; do
     # so the daemon's 64-char validator is never reached. Refuse rather than
     # launch a worker under a name the runtime contract does not allow.
     if [[ "${#agent_name}" -gt 64 ]]; then
-      fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
       echo "failed $id reason=\"fallback name is ${#agent_name} chars, over the 64-char runtime limit\""
       n_failed=$((n_failed + 1))
       continue
     fi
   fi
 
-  # x-14d4: the verb lane vendor rides the SAME resolve that named the harness.
-  # The stage table's route (config.agents.profiles.<verb>.route) is what
-  # selects the worker's route settings file (endpoint+auth+model as one
-  # unit); a claude spawn carrying only --harness sends a routed model to the
-  # default endpoint, where it dies on first inference (HTTP 404
-  # model_not_found). An explicit --route outranks it, and a cutover's
-  # destination account owns billing instead.
-  lane_route=""
-  if [[ "$route_action" != "cutover" && -z "$ROUTE" && "$DISPATCH_PROVIDER" == "claude" ]]; then
-    lane_route="$(printf '%s' "$resolved_json" | jq -r '.route | select(. != null and . != "")' 2>/dev/null)"
-    if [[ -n "$lane_route" ]]; then
-      route_args=("--route" "$lane_route")
-      route_val="$lane_route"
-      # The lane is a COMPLETE coordinate (route/model stop at the lane, the
-      # same rule spawn_defaults enforces): a band-resolved --model would win
-      # over the route's model at the claude CLI and split the coordinate
-      # across two owners. A node .model pin (operator authority) keeps it.
-      case "$lane_route" in
-        *,*|*/*)
-          if [[ "$model_pin_source" != "node" ]]; then
-            model_args=(); model_pin=""
-          fi ;;
-      esac
-    fi
-  fi
-  # Auto-brief (x-d1f4): the SAME resolve auto-resolves the node's brief chain
-  # (explicit dispatch_brief > sidecar > details > transcript tail) whenever
-  # --node is passed with no --brief, so a plain node cold-starts with context.
-  TARGET_BRIEF_ENV="$(printf '%s' "$resolved_json" | jq -r '.env.TARGET_BRIEF | select(. != "") // empty')"
-  # --flags is pure extra argv the operator asked the /target-family command to
-  # carry (a target-skill flag), composed after the verb token. It carries NO
-  # merge predicate - the posture already rode the resolve - and the family
-  # question is asked of the single source (x-8151), never a local prefix
-  # match; a prose command gets nothing threaded.
-  if [[ -n "$FLAGS" ]]; then
-    family="$(fno agents dispatch family --message "$tgt_cmd" 2>/dev/null || true)"
-    if [[ "$family" == "family" ]]; then
-      tgt_cmd="${tgt_cmd%% *} $FLAGS ${tgt_cmd#* }"
-    fi
-  fi
+  # ---- Preview / launch ----
+  # One command per node (x-3873 change 4): the door renders the seed, picks
+  # the lane while the model axis is free, ensures the worktree, and takes the
+  # family-2 guard. Only what the human typed rides beside --node: --here,
+  # --route, --permission-mode. Worktree isolation is the door's (change 1), so
+  # no ensure runs here and the receipt does not claim a landing directory.
+  typed_args=()
+  [[ "$HERE" -eq 1 ]] && typed_args+=(--here)
+  [[ -n "$ROUTE" ]] && typed_args+=(--route "$ROUTE")
+  [[ -n "$PERMISSION_MODE" ]] && typed_args+=(--permission-mode "$PERMISSION_MODE")
 
-  # Launch in the node's _resolved_cwd (work-map root when project mapped;
-  # falls back to recorded .cwd against an older installed fno without the
-  # field; empty -> caller's cwd). The _resolved_cwd field is derived at
-  # read time by `fno backlog get` and never persisted to graph.json; $node_cwd
-  # was extracted before the resolve (the from-config posture reads it).
-  # cwd precedence: an explicit node cwd (work-map root) wins. With no node cwd,
-  # default to --fresh so a worker dispatched from a linked worktree starts from
-  # canonical main instead of inheriting the dispatcher's worktree (the shared
-  # .fno/ collision this guards against). --here/--in-place opts back into
-  # caller-cwd inheritance. --fresh is a no-op when the dispatcher is already at
-  # canonical (AC5), so it is always safe to pass here. dispatch-node is
-  # single-repo target-class by construction, so the cross-project flow (AC4)
-  # never reaches this path.
-  cwd_hint=""
-  dry_cwd="$(pwd)"
-  if [[ "$HERE" -eq 0 ]]; then
-    # Both non-here arms isolate through worktree ensure now, whatever the node
-    # recorded as cwd: the recorded cwd is almost always the canonical checkout
-    # root, and the receipt must not claim it as the landing directory. The real
-    # worktree path is only known once ensure runs, so preview the ensure hint on
-    # both arms. cwd= keeps a space-free placeholder so the receipt stays
-    # machine-parseable; the quoted hint carries the readable form.
-    cwd_hint="--cwd <fno agents workspace worktree ensure> "
-    dry_cwd="<fno-worktree-ensure>"
-  fi
-
-  route_hint=""
-  [[ ${#route_args[@]} -gt 0 ]] && route_hint="--route ${route_args[1]} "
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --harness $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${squad_hint}${role_hint}${route_hint}${model_pin:+--model $model_pin }${perm_hint}${route_account:+--dispatch-account $route_account }--name $agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN hint=\"would run: fno agents spawn --node $id --substrate thread --name $agent_name${typed_args:+ ${typed_args[*]}}\""
     n_launched=$((n_launched + 1))
     continue
   fi
 
   # ---- Guard 3: the agents registry (safe now, under the reservation) ----
   # A LIVE same-name agent means a worker is already up (its node:<id> claim not
-  # yet caught above); release our reservation and report already-running. A
-  # dead row is removed so `ask` creates fresh rather than resuming it.
+  # yet caught above); report already-running. A dead row is removed so `ask`
+  # creates fresh rather than resuming it.
   # Capture the probe exit code AND require a parseable {agents:[...]}: a
   # crashed/garbled `fno agents list` (daemon down, stale install printing a
-  # Typer error) must fail CLOSED (release + refuse), never collapse to an empty
+  # Typer error) must fail CLOSED (refuse), never collapse to an empty
   # existing_status and fall through to a double-launch in the boot window
   # (parity with spawn.sh Guard 3, cv-dddd8ae5; sigma silent-failure-hunter).
   agents_json="$(fno agents list 2>/dev/null)"; list_rc=$?
   if [[ "$list_rc" -ne 0 ]] || ! printf '%s' "$agents_json" | jq -e 'has("agents")' >/dev/null 2>&1; then
-    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
     echo "failed $id reason=\"agents-list probe failed (rc=$list_rc); not dispatching to avoid a double-launch\""
     n_failed=$((n_failed + 1))
     continue
@@ -810,7 +416,6 @@ for id in "${NODES[@]}"; do
   existing_status="$(printf '%s' "$agents_json" \
     | jq -r --arg n "$agent_name" '.agents[]? | select(.name==$n) | .status' 2>/dev/null | head -1)"
   if [[ "$existing_status" == "live" ]]; then
-    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
     echo "already-running $id reason=\"a live agent $agent_name already exists (worker booting/running)\""
     n_already=$((n_already + 1))
     continue
@@ -819,100 +424,15 @@ for id in "${NODES[@]}"; do
   fi
 
   # ---- Dispatch, fire-and-forget ----
-  # `fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE"`.
-  # For claude/bg this lands a DETACHED `claude --bg` thread (x-2c27): it
-  # auto-worktrees, runs the node to completion unattended, and shows in `claude
-  # agents` (attach/peek/reply) - NOT an owned-PTY pane that would stall at a
-  # placement prompt (the x-3ab8 default `pane` is the regression `bg` fixes). For
-  # a headless fallback it is a one-shot that runs to completion here. Still the
-  # subscription lane (NEVER --bare/-p) and still fire-and-forget. The bg receipt
-  # parsed below is the claude-spawn JSON; a headless one-shot has no short_id
-  # (see the substrate branch there). name is a positional. Three branches keep
-  # the optional --cwd off an empty-array path (bash 3.2 set -u safe). stderr goes
-  # to a temp file, NOT 2>&1: a stderr warning must never pollute the JSON receipt
-  # parse below (house rule; gemini review PR #457).
-  # Carry the US3 brief to the worker via env (inherited by claude --bg), never
-  # on the command line. Exported unconditionally (empty when the node has no
-  # brief) so a prior loop iteration's brief can never leak into a later node.
-  export TARGET_BRIEF="$TARGET_BRIEF_ENV"
-  # x-9d11 mechanical refusal carrier: derive from the FINAL command, not the
-  # resolver JSON - the allow-merge strip and the local claude build both
-  # rewrite the command after the resolve, and the env must match what the
-  # worker actually receives. Family-gated like harness_map's vocabulary
-  # (round 11): a prose template or /think prompt that MENTIONS the flag arms
-  # nothing. Unset (not merely empty) when allowed, so a prior loop iteration's
-  # refusal can never leak into a later node.
-  case "$tgt_cmd" in
-    /target\ *|/fno:target\ *|'$fno:target '*)
-      if [[ " $tgt_cmd " == *" --no-merge "* ]]; then
-        export TARGET_NO_MERGE=1
-      else
-        unset TARGET_NO_MERGE 2>/dev/null || true
-      fi
-      ;;
-    *)
-      # Non-family (prose, /think): no posture to derive. Restore the
-      # OPERATOR's exported value, not a prior iteration's - loop hygiene
-      # without dropping a documented control input (round 12; mirrors
-      # cmd_spawn, which clears nothing for non-family messages).
-      if [[ -n "$_OPERATOR_NO_MERGE" ]]; then
-        export TARGET_NO_MERGE=1
-      else
-        unset TARGET_NO_MERGE 2>/dev/null || true
-      fi
-      ;;
-  esac
+  # The detached thread lane: for claude this is the `claude --bg` thread
+  # (x-2c27) - it runs the node to completion unattended and shows in
+  # `claude agents`. NOT an owned-PTY pane (a fire-and-forget dispatch must not
+  # stall at a placement prompt) and NEVER --bare/-p (the API-credit pool).
+  # stderr goes to a temp file, NOT 2>&1: a stderr warning must never pollute
+  # the JSON receipt parse below (house rule; gemini review PR #457).
   spawn_err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/dispatch-node-$$.err")"
-  # Three explicit branches (NOT an optional-flag array): bash 3.2 (macOS)
-  # errors on `"${arr[@]}"` for an empty array under `set -u`. node cwd ->
-  # --cwd; no node cwd + default -> ensure a conductor worktree and pass --cwd
-  # it (deterministic isolation, x-73ca), falling back to --fresh on any ensure
-  # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
-  launch_cwd="${node_cwd:-$(pwd)}"
-  if [[ "$HERE" -eq 0 ]]; then
-    wt=""
-    # BOTH node-cwd and no-cwd dispatches isolate through ensure now. The old
-    # node-cwd arm skipped ensure entirely and spawned --cwd "$node_cwd" - and
-    # the recorded node cwd is almost always the canonical checkout root, where
-    # /target's location gate refuses to init, so the worker died at its own
-    # first gate. The repo root fed to ensure is the node's cwd when recorded,
-    # canonical otherwise; --here stays the only way to inherit the caller cwd.
-    _ensure_repo="${node_cwd:-$CANONICAL_ROOT}"
-    # DISPATCH_PROVIDER is the RESOLVED harness (.harness from dispatch resolve),
-    # so forward it as --harness: a claude bg dispatch lands harness-native at
-    # <repo>/.claude/worktrees/, a non-native harness degrades to external.
-    [[ -n "$_ensure_repo" ]] && wt="$( (fno agents workspace worktree ensure --repo "$_ensure_repo" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null || fno workspace worktree ensure --repo "$_ensure_repo" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null) )"
-    if [[ -n "$wt" ]]; then
-      # policy=never returns the repo root: launch in place, but SKIP setup - it
-      # links shared state INTO the canonical checkout (Locked Decision 4: guard
-      # worktree-only side effects on path == repo root). Compare physical paths
-      # (ensure prints the resolved root; the repo root is not phys-resolved).
-      _wt_phys="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
-      _root_phys="$(cd "$_ensure_repo" 2>/dev/null && pwd -P || printf '%s' "$_ensure_repo")"
-      if [[ "$_wt_phys" != "$_root_phys" ]]; then
-        # Link gitignored shared state into the new worktree (footnote-ecosystem
-        # only; absent -> skip). Caller-side because the verb is package code and
-        # may not shell out to a repo-root script (shellout-drift gate).
-        _wt_setup="$_ensure_repo/scripts/setup/setup-worktree.sh"
-        [[ -f "$_wt_setup" ]] && CANONICAL="$_ensure_repo" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
-      fi
-      spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
-      launch_cwd="$wt"
-    elif [[ -n "$node_cwd" ]]; then
-      # ensure failed: the node's recorded cwd is the best remaining landing (the
-      # worker's /target start self-isolates from there). Never block a dispatch
-      # on an ensure failure.
-      spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
-      launch_cwd="$node_cwd"
-    else
-      spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
-      # --fresh lands the worker in canonical main; report that real path (not a
-      # space-containing label) so the cwd= field stays machine-parseable.
-      launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
-    fi
-  else
-    spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
-  fi
+  spawn_out="$(fno agents spawn --node "$id" --substrate thread --name "$agent_name" \
+    ${typed_args[@]+"${typed_args[@]}"} 2>"$spawn_err_file")"; spawn_rc=$?
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then
     # The shared cmd_spawn guard reports a machine prefix before any substrate
@@ -975,11 +495,10 @@ for id in "${NODES[@]}"; do
         continue
       fi
     fi
-    # Surface the failure. cmd_spawn owns and releases the reservation on every
-    # pre-launch or spawn error, so this legacy-holder release is a safe no-op.
-    # A name collision (exit 2, "already exists") means a worker beat us in the
-    # registry-check window: report already-running, not failed.
-    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    # Surface the failure. cmd_spawn owns and releases the family-2 claims on
+    # every pre-launch or spawn error. A name collision (exit 2, "already
+    # exists") means a worker beat us in the registry-check window: report
+    # already-running, not failed.
     if [[ "$spawn_rc" -eq 2 ]] && printf '%s' "$spawn_err" | grep -qF "already exists"; then
       echo "already-running $id reason=\"an agent named $agent_name already exists (spawn collision)\""
       n_already=$((n_already + 1))
@@ -991,44 +510,16 @@ for id in "${NODES[@]}"; do
     continue
   fi
 
-  # Receipt shape is substrate-dependent (x-567d). bg lands a DETACHED thread and
-  # returns a compact JSON receipt with a short_id we require as launch proof:
-  #   {"name": "...", "short_id": "<8hex>", "harness": "claude", "status": "live"}
-  # headless is a ONE-SHOT that already ran to completion on exit 0 (no detached
-  # thread, no short_id) - the clean exit IS the proof, so we skip the short_id
-  # requirement and label the session `headless`.
-  if [[ "$DISPATCH_SUBSTRATE" == "bg" ]]; then
-    # grep the receipt line first as defense in depth. No parseable short id on
-    # exit 0 => no launch we can prove; report honestly + release the reservation.
-    sid="$(printf '%s\n' "$spawn_out" | grep -F '"short_id"' | head -1 | jq -r '.short_id | select(. != null and . != "")' 2>/dev/null)"
-    if [[ -z "$sid" ]]; then
-      fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
-      reason="$(printf '%s' "${spawn_out:-$spawn_err}" | tr '\n' ' ' | sed 's/"/'"'"'/g' | cut -c1-200)"
-      echo "failed $id reason=\"spawn exit 0 but no short_id receipt: $reason\""
-      n_failed=$((n_failed + 1))
-      continue
-    fi
-  else
-    sid="headless"
-  fi
-  # Launched. Leave the reservation to expire by TTL (the worker now owns
-  # node:<id>, which guards later dispatches).
-  echo "launched $id name=$agent_name session=$sid cwd=${launch_cwd} hint=\"fno agents logs $agent_name\" route=${route_val}"
-  # The cutover receipt, on the same contract the Python launchers honour:
-  # AFTER launch proof, never on the decision alone. Without it a shell cutover
-  # is invisible to `fno doctor event` and an operator cannot see that quota moved the
-  # work to another harness. Best-effort: telemetry never fails a dispatch.
-  if [[ -n "$route_account" ]]; then
-    fno doctor event emit -t dispatch_failover -s backlog -d "$(jq -nc \
-      --arg node_id "$id" \
-      --arg from "$(printf '%s' "$resolved_json" | jq -r '.route_source // ""')" \
-      --arg to "$route_account" \
-      --arg harness_to "$DISPATCH_PROVIDER" \
-      --arg window "$(printf '%s' "$resolved_json" | jq -r '.route_window // ""')" \
-      --arg reason "$(printf '%s' "$resolved_json" | jq -r '.route_reason // ""')" \
-      '{node_id:$node_id,from:$from,to:$to,harness_to:$harness_to,window:$window,reason:$reason}' \
-      2>/dev/null)" >/dev/null 2>&1 || true
-  fi
+  # The thread receipt is a compact JSON line naming the session. Parse
+  # claude's short_id or a session_id carrier; a receipt with neither still
+  # had exit 0 - the clean exit IS the launch proof, so label it `thread`.
+  sid="$(printf '%s\n' "$spawn_out" | grep -F '"short_id"' | head -1 \
+    | jq -r '.short_id | select(. != null and . != "")' 2>/dev/null)"
+  [[ -z "$sid" ]] && sid="$(printf '%s\n' "$spawn_out" | grep -F '"session_id"' | head -1 \
+    | jq -r '.session_id | select(. != null and . != "")' 2>/dev/null)"
+  [[ -z "$sid" ]] && sid="thread"
+  # Launched. The worker now owns node:<id>, which guards later dispatches.
+  echo "launched $id name=$agent_name session=$sid hint=\"fno agents logs $agent_name\""
   n_launched=$((n_launched + 1))
 done
 

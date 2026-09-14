@@ -35,6 +35,10 @@ inbox law prepare|fno inbox law set (one call, no staged proposal)|d-e1eec854
 inbox law enact|fno inbox law set (one call, no hash and no receipt)|d-e1eec854
 inbox law resume|fno inbox law set (nothing is staged, so nothing resumes)|d-e1eec854
 inbox law inspect|fno inbox decisions <subject> --lane law|d-e1eec854
+# d-496680aa (x-3873) retires the second launch verb: one launch verb, and it
+# is spawn. The door renders the verb, brief and lane for a node-seeded spawn.
+fno agents dispatch|fno agents spawn --node <id>|d-496680aa
+fno dispatch|fno agents spawn --node <id>|d-496680aa
 # d-fe66560a: hidden verb roots are not allowed at all. The loaded-thread
 # answer rides fno-agents list --json --harness codex as the codex_loaded
 # block; a caller-facing string may never teach the bare verb.

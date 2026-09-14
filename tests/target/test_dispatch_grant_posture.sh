@@ -1,62 +1,30 @@
 #!/usr/bin/env bash
+# Merge-posture ownership after x-3873: the per-run --allow-merge / --no-merge
+# flags are gone from /target bg (AC5-EDGE). config.auto_merge.grant decides at
+# target init, exactly as it does for every advance worker; the one per-run
+# override is a typed message on the spawn:
+#   fno agents spawn --node <id> '/fno:target --no-merge <id>'
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DISPATCH="$REPO_ROOT/skills/target/scripts/dispatch-node.sh"
-NORMALIZE="$REPO_ROOT/skills/agent/scripts/normalize.sh"
 TMP="$(mktemp -d -t dispatch-grant-posture.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 MOCKBIN="$TMP/bin"
-PROJECT="$TMP/project"
-mkdir -p "$MOCKBIN" "$PROJECT/.fno"
+NODES_JSON="$TMP/nodes"
+mkdir -p "$MOCKBIN" "$NODES_JSON"
 
 cat > "$MOCKBIN/fno" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-} ${2:-}" in
-  "config get")
-    if [[ "${3:-}" == "auto_merge.grant" ]]; then
-      printf '%s\n' "$PWD" >> "$CALL_LOG"
-      cat "$PWD/.fno/auto_merge" 2>/dev/null || printf 'none\n'
-    fi
-    ;;
   "backlog get")
-    printf '{"id":"%s","status":"ready","cwd":"%s","_resolved_cwd":"%s"}\n' "$NODE_ID" "$PROJECT" "$PROJECT"
+    printf '{"id":"%s","status":"ready","slug":"grant-posture","cwd":"%s"}\n' "$NODE_ID" "$PWD"
     ;;
   "agents spawn-guard")
     printf '{"verdict":"dispatchable"}\n'
-    ;;
-  "agents dispatch"|"dispatch resolve")
-    if [[ "${1:-}" == "agents" ]]; then
-      printf '{"harness":"claude","substrate":"bg","command":"/target --no-merge {id}"}\n'
-    else
-      node=""; posture=""; command="/target {id}"
-      args=("$@")
-      for ((i = 0; i < ${#args[@]}; i++)); do
-        case "${args[$i]}" in
-          --node) node="${args[$((i + 1))]}" ;;
-          --merge-posture) posture="${args[$((i + 1))]}" ;;
-          --command) command="${args[$((i + 1))]}" ;;
-        esac
-      done
-      command="${command//\{id\}/$node}"
-      case "$posture" in
-        allow) ;;
-        no-merge) command="$command --no-merge" ;;
-        from-config)
-          grant="$(cat "$PWD/.fno/auto_merge" 2>/dev/null || printf 'none')"
-          [[ "$(printf '%s' "$grant" | tr -d '[:space:]')" == "dispatch" ]] \
-            || command="$command --no-merge"
-          ;;
-        *) command="$command --no-merge" ;;
-      esac
-      printf '{"harness":"claude","substrate":"bg","route_action":"stay","command":"%s"}\n' "$command"
-    fi
-    ;;
-  "dispatch family")
-    printf 'family\n'
     ;;
   "agents name")
     printf 'target-%s\n' "$NODE_ID"
@@ -64,54 +32,43 @@ case "${1:-} ${2:-}" in
   "agents spawn")
     printf '{"name":"target-%s","short_id":"deadbeef01","harness":"claude","status":"live"}\n' "$NODE_ID"
     ;;
-  *)
-    ;;
+  *) ;;
 esac
 MOCK
 chmod +x "$MOCKBIN/fno"
-export PROJECT
 NODE_ID="x-884f01"
 export NODE_ID
-CALL_LOG="$TMP/config.log"
-export CALL_LOG
 export PATH="$MOCKBIN:$PATH"
 
-field() {
-  printf '%s\n' "$1" | awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }'
-}
+echo "== the shell launcher takes no per-run posture flag =="
+for flag in --allow-merge --no-merge; do
+  dispatch_out="$(bash "$DISPATCH" --dry-run $flag "$NODE_ID" 2>&1)" && rc=0 || rc=$?
+  [[ "$rc" -eq 2 ]] || { echo "FAIL: $flag must exit 2 as an unknown flag (rc=$rc): $dispatch_out"; exit 1; }
+  grep -q "failed: $flag reason=\"unknown flag\"" <<<"$dispatch_out" \
+    || { echo "FAIL: refusal must name $flag: $dispatch_out"; exit 1; }
+  ! grep -q "would run" <<<"$dispatch_out" || { echo "FAIL: $flag must launch nothing"; exit 1; }
+done
+echo "PASS: --allow-merge / --no-merge are unknown flags; nothing launches"
 
-echo dispatch > "$PROJECT/.fno/auto_merge"
-normalize_out="$(cd "$PROJECT" && bash "$NORMALIZE" --input "$NODE_ID")"
-[[ "$(field "$normalize_out" allow_merge)" == 1 ]]
-normalize_out="$(cd "$PROJECT" && bash "$NORMALIZE" --input "$NODE_ID" --no-merge)"
-[[ "$(field "$normalize_out" allow_merge)" == 0 ]]
-# Positive marker: the config-backed run really called the documented read;
-# the explicit flag run above must not add another read.
-[[ "$(wc -l < "$CALL_LOG" | tr -d '[:space:]')" -eq 1 ]]
+echo "== the launch carries no posture either way: the grant decides worker-side =="
+dispatch_out="$(bash "$DISPATCH" --dry-run "$NODE_ID" 2>&1)"
+grep -q "would run: fno agents spawn --node $NODE_ID --substrate thread --name target-$NODE_ID" <<<"$dispatch_out" \
+  || { echo "FAIL: preview argv is not the bare door: $dispatch_out"; exit 1; }
+! grep -q -- "--no-merge" <<<"$dispatch_out" \
+  || { echo "FAIL: a no-merge carrier must not be injected by the launcher"; exit 1; }
+! grep -q -- "--allow-merge" <<<"$dispatch_out" \
+  || { echo "FAIL: no allow-merge carrier rides the spawn"; exit 1; }
+echo "PASS: the launcher passes the node and nothing posture-shaped"
 
-dispatch_out="$(bash "$DISPATCH" --here --dry-run "$NODE_ID" 2>&1)"
-grep -q "'/target $NODE_ID'" <<<"$dispatch_out"
-! grep -q "'/target $NODE_ID --no-merge'" <<<"$dispatch_out"
+echo "== the grant is read at target init, inside the door's resolver =="
+# resolve_node_spawn is the ONE preference resolver the door's node-seeded
+# branch and the advance path share; the grant call must live there, never in
+# a shell launcher.
+node_dispatch="$REPO_ROOT/cli/src/fno/agents/node_dispatch.py"
+grep -q "auto_merge_grant(settings_obj)" "$node_dispatch" \
+  || { echo "FAIL: resolve_node_spawn no longer reads auto_merge_grant"; exit 1; }
+! grep -q "auto_merge_grant" "$DISPATCH" \
+  || { echo "FAIL: the shell launcher must not read the grant itself"; exit 1; }
+echo "PASS: the grant is read once, in the shared resolver"
 
-rm "$PROJECT/.fno/auto_merge"
-normalize_out="$(cd "$PROJECT" && bash "$NORMALIZE" --input "$NODE_ID")"
-[[ "$(field "$normalize_out" allow_merge)" == 0 ]]
-
-dispatch_out="$(bash "$DISPATCH" --here --dry-run "$NODE_ID" 2>&1)"
-grep -q "'/target $NODE_ID --no-merge'" <<<"$dispatch_out"
-
-: > "$CALL_LOG"
-normalize_out="$(cd "$PROJECT" && bash "$NORMALIZE" --input "$NODE_ID" --allow-merge)"
-[[ "$(field "$normalize_out" allow_merge)" == 1 ]]
-[[ ! -s "$CALL_LOG" ]]
-
-dispatch_out="$(bash "$DISPATCH" --here --dry-run --allow-merge "$NODE_ID" 2>&1)"
-! grep -q 'no-merge' <<<"$dispatch_out"
-[[ ! -s "$CALL_LOG" ]]
-
-normalize_out="$(cd "$PROJECT" && env PATH="/usr/bin:/bin" bash "$NORMALIZE" --input "$NODE_ID")" || true
-# AC8 fail-closed: with fno absent the family ask refuses the whole normalize
-# loud (no allow_merge field at all); the one thing it must never do is grant.
-[[ "$(field "$normalize_out" allow_merge)" != 1 ]]
-
-echo "PASS: dispatch and normalize resolve grant posture from config and fail closed"
+echo "PASS: dispatch and the door resolve grant posture from config, worker-side"

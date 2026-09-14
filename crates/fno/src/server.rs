@@ -631,9 +631,10 @@ pub(crate) enum CoreMsg {
     },
     /// (v11, x-6f77) "Grab work" (prefix+g): dispatch the next ready node into a
     /// new pane. `id` is the requesting client (for the outcome notice). The
-    /// spawn runs OFF the core loop in a detached task (it shells `fno agents dispatch
-    /// one`); the pane appears via the existing registry reader, and only the
-    /// no-work / refusal / failure outcomes come back as `DispatchResult`.
+    /// launch runs OFF the core loop in a detached task (it shells the door,
+    /// `fno agents spawn`, x-3873); the pane appears via the existing registry
+    /// reader, and only the no-work / refusal / failure outcomes come back as
+    /// `DispatchResult`.
     DispatchNext {
         id: u64,
         /// (x-c914) The requesting client's session-local active account, so
@@ -2686,57 +2687,65 @@ pub(crate) fn config_get(key: &str) -> Option<String> {
     value
 }
 
-/// Shell `fno agents dispatch next --server <s> --json`, bounded + fail-open (the
-/// digest_overlay idiom), and turn its verdict into the client notice. An empty
-/// return says nothing (the launched pane speaks for itself); every error path
-/// yields a visible notice rather than a silent no-op (x-6f77).
-fn dispatch_timeout() -> Duration {
-    Duration::from_secs(75)
-}
-
 async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&str>) -> String {
-    // Selection + spawn crosses a subprocess and a mux socket round-trip, so the
+    // Selection + spawn crosses subprocesses and a mux socket round-trip, so the
     // budget is seconds, not the digest's 800ms; a hung dispatch still fails
     // open to a notice rather than wedging.
-    let dispatch_timeout = dispatch_timeout();
-    // A targeted node (a clicked work-queue card, x-a496) pins `--node`; without
-    // it the porcelain picks the board's next ready node. x-e53e renamed the
-    // verb `one` -> `next` (hidden alias kept); the launch is the door's spawn.
-    let mut args = vec!["agents", "dispatch", "next", "--server", session, "--json"];
-    if let Some(n) = node {
-        args.push("--node");
-        args.push(n);
-    }
-    // (x-c914) The client's session-local active account, resolved to the
-    // spawn's `--account` overlay CLI-side (x-d012 owns the resolver + the
-    // stale-account refusal); the mux only forwards the id.
-    if let Some(a) = account {
-        args.push("--account");
-        args.push(a);
-    }
-    let mut command = crate::process_admission::tokio_command(fno_bin());
-    command
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(dispatch_timeout, fut).await {
-        Err(_) => "grab work: timed out".to_string(),
-        Ok(Err(_)) => "grab work: dispatch unavailable".to_string(),
-        // The porcelain ALWAYS prints its `--json` verdict to stdout, even on a
-        // `failed` exit (code 1), so parse stdout whenever it is non-empty - the
-        // JSON is the contract, not the exit code. `dispatch_notice` surfaces the
-        // `detail` of a failed verdict; the exit status only distinguishes
-        // "couldn't produce a verdict at all" (empty stdout).
-        Ok(Ok(o)) => {
-            let out = String::from_utf8_lossy(&o.stdout);
-            if out.trim().is_empty() {
-                "grab work: dispatch failed".to_string()
-            } else {
-                dispatch_notice(&out)
-            }
-        }
+    let dispatch_timeout = crate::dispatch_launch::dispatch_timeout();
+    let deadline = tokio::time::Instant::now() + dispatch_timeout;
+    let fno = fno_bin().display().to_string();
+
+    // Steps 1-2 (x-3873 change 3): resolve the node identity. A targeted node
+    // (a clicked work-queue card, x-a496) pins its id and reads through
+    // `fno backlog get`; without it the board's own order picks (`fno backlog
+    // next`, `null` or empty output on an empty bench).
+    let picked = if let Some(pinned) = node {
+        let argv = [fno.as_str(), "backlog", "get", pinned];
+        let answer =
+            match crate::dispatch_launch::run_fno_captured(&argv, dispatch_timeout, deadline).await
+            {
+                Some((true, out, _)) => crate::dispatch_launch::node_identity(&out)
+                    .ok_or_else(|| "grab work failed: the node record carries no id".to_string()),
+                _ => Err("grab work failed: the node read produced no answer".to_string()),
+            };
+        answer
+    } else {
+        let argv = [fno.as_str(), "backlog", "next"];
+        let answer =
+            match crate::dispatch_launch::run_fno_captured(&argv, dispatch_timeout, deadline).await
+            {
+                Some((true, out, _)) => crate::dispatch_launch::node_identity(&out),
+                _ => None,
+            };
+        answer.ok_or_else(|| "no ready work".to_string())
+    };
+    let (node_id, slug, parent) = match picked {
+        Ok(identity) => identity,
+        Err(notice) => return notice,
+    };
+
+    // Step 3: the door launches. The argv builder is pure and unit-pinned; no
+    // --harness/--model/--route and no message ride, so the grid picks the
+    // lane and the door renders the seed.
+    let argv = crate::dispatch_launch::dispatch_spawn_argv(
+        &fno,
+        &node_id,
+        session,
+        account,
+        parent.as_deref(),
+    );
+    let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+    // Step 4: the outcome maps to the operator's one-liner. Both streams are
+    // captured - the door's refusal receipt lives on stderr.
+    match crate::dispatch_launch::run_fno_captured(&borrowed, dispatch_timeout, deadline).await {
+        None => "grab work: timed out".to_string(),
+        Some((exit_ok, out, err)) => crate::dispatch_launch::dispatch_notice(
+            exit_ok,
+            &out,
+            &err,
+            &node_id,
+            slug.as_deref().unwrap_or(""),
+        ),
     }
 }
 
@@ -2774,7 +2783,7 @@ fn valid_session_uuid(s: &str) -> bool {
 /// `fallback`. Subprocess stdout/stderr becomes an operator-visible notice, so
 /// raw ANSI/C0 must never reach the status line (Domain Pitfall: route stderr
 /// through the same strip the peek body uses).
-fn first_line_or(s: &str, fallback: &str) -> String {
+pub(crate) fn first_line_or(s: &str, fallback: &str) -> String {
     s.lines()
         .map(|l| l.chars().filter(|c| !c.is_control()).collect::<String>())
         .map(|l| l.trim().to_string())
@@ -3022,67 +3031,6 @@ fn name_has_node_token(name: &str, node: &str) -> bool {
         from = start + first_char_len;
     }
     false
-}
-
-/// Map a `fno agents dispatch next --json` verdict to the one-line client notice.
-/// Unparseable / unknown output fails open to a generic failure notice (never
-/// silent on an error).
-fn dispatch_notice(stdout: &str) -> String {
-    let v: serde_json::Value = match serde_json::from_str(stdout.trim()) {
-        Ok(v) => v,
-        Err(_) => return "grab work: dispatch failed".to_string(),
-    };
-    let node = v.get("node").and_then(|n| n.as_str()).unwrap_or("");
-    let slug = v.get("slug").and_then(|s| s.as_str()).unwrap_or("");
-    let label = if slug.is_empty() { node } else { slug };
-    match v.get("outcome").and_then(|o| o.as_str()) {
-        // `seed_verified: false` means the pane was created but this dispatch
-        // cannot promise the work started. A bare "dispatched" promises exactly
-        // that. Absent field == an older porcelain, and unknown does not accuse.
-        //
-        // Two different things fail that check and the operator acts on them
-        // differently, so they are NOT rendered with one phrase. An unreadable
-        // pane means the seed WAS delivered (it rode in the harness argv) and
-        // nobody could see whether a pane is left to run it: re-probe or reap,
-        // never re-seed. "seed unverified" there would send a reader to
-        // re-submit a payload the pane may already be running, which is the
-        // duplicate this whole split exists to stop.
-        Some("launched") if v.get("seed_verified").and_then(|b| b.as_bool()) == Some(false) => {
-            // BOTH fields, never the pane one alone. An unreadable pane says
-            // nothing about whether a seed was sent, so keying on it by itself
-            // tells an agy operator "seed delivered" for a pane-send spawn where
-            // nothing was ever typed - and then tells them not to re-seed the one
-            // pane that needs it. `submitted` is what makes "delivered" true.
-            let seed = v.get("seed").and_then(|s| s.as_str());
-            let pane = v.get("pane_observation").and_then(|p| p.as_str());
-            let doubt = match (seed, pane) {
-                (Some("submitted"), Some("unreadable")) => "seed delivered, pane unreadable",
-                _ => "seed unverified",
-            };
-            if label.is_empty() {
-                format!("dispatched, {doubt}")
-            } else {
-                format!("dispatched {label}, {doubt}")
-            }
-        }
-        Some("launched") if label.is_empty() => String::new(),
-        Some("launched") => format!("dispatched {label}"),
-        Some("no-work") => "no ready work".to_string(),
-        // Retired with the lane slot (x-3f84 W5): a full fleet now blocks in
-        // the spawn gate, which raises its own exit code instead of returning
-        // a verdict. Kept for one release so a mixed-version porcelain that
-        // still emits it renders sensibly.
-        Some("lanes-full") => "lanes full".to_string(),
-        // The node is already being dispatched/worked (same-node race loser or an
-        // in-flight node) - a benign no-op, not a failure.
-        Some("already-dispatching") if label.is_empty() => "already dispatching".to_string(),
-        Some("already-dispatching") => format!("already dispatching {label}"),
-        Some("failed") => match v.get("detail").and_then(|d| d.as_str()) {
-            Some(d) if !d.is_empty() => format!("grab work failed: {d}"),
-            _ => "grab work: dispatch failed".to_string(),
-        },
-        _ => "grab work: dispatch failed".to_string(),
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8618,8 +8566,8 @@ impl Core {
     }
 
     /// "Grab work" (prefix+g, x-6f77): dispatch the next ready backlog node into
-    /// a new pane. Selection + guard + gate + spawn is the Python porcelain's
-    /// job (`fno agents dispatch next`), shelled OFF the core loop in a detached
+    /// a new pane. Board selection is `fno backlog next`; the launch is the door
+    /// (`fno agents spawn`, x-3873), shelled OFF the core loop in a detached
     /// task so a slow backlog read never stalls a pane. The launched pane
     /// appears through the existing registry reader; the outcome (dispatched /
     /// no-work / refusal / failure) routes back as `DispatchResult` for a
@@ -11618,10 +11566,11 @@ impl Core {
             }
             Command::DispatchNode { node, account } => {
                 // Targeted work-queue dispatch (a clicked card, x-a496). Reuses
-                // the prefix+g porcelain pinned to `--node`; the claim race
-                // (already-worked node bounces `already-dispatching`) and lane
-                // cap live in `fno agents dispatch next`. Routes through CoreMsg::Command,
-                // so the read-only-observer refusal already fired upstream.
+                // the prefix+g flow pinned to the card's node; the claim race
+                // (already-worked node bounces `already dispatching`) and lane
+                // cap live in the door (`fno agents spawn`). Routes through
+                // CoreMsg::Command, so the read-only-observer refusal already
+                // fired upstream.
                 //
                 // Re-check readiness against the server's OWN backlog snapshot
                 // (codex peer review): the client already gates the confirm to a
@@ -25413,97 +25362,6 @@ mod tests {
         let advanced = format!("{grid}Running the tool now...\n");
         let advanced_fp = *blake3::hash(bottom_non_empty_lines(&advanced, 8).as_bytes()).as_bytes();
         assert_ne!(daemon_fp, advanced_fp, "advanced grid must read stale");
-    }
-
-    #[test]
-    fn dispatch_notice_maps_each_verdict() {
-        // Launched shows the friendly slug; the pane itself is the real feedback.
-        assert_eq!(
-            dispatch_notice(r#"{"outcome":"launched","node":"x-1","slug":"feat"}"#),
-            "dispatched feat"
-        );
-        // A verified seed reads exactly as before; only the doubt is new.
-        assert_eq!(
-            dispatch_notice(
-                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed_verified":true}"#
-            ),
-            "dispatched feat"
-        );
-        // An unverified seed says so: the pane exists, the command may not have
-        // been submitted, and "dispatched" alone would promise work started.
-        assert_eq!(
-            dispatch_notice(
-                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed_verified":false}"#
-            ),
-            "dispatched feat, seed unverified"
-        );
-        assert_eq!(
-            dispatch_notice(r#"{"outcome":"launched","node":"","slug":"","seed_verified":false}"#),
-            "dispatched, seed unverified"
-        );
-        // An unreadable pane is the OTHER way to fail that check, and it earns
-        // its own phrase: the seed rode in the argv, so it was delivered, and
-        // telling an operator it is unverified sends them to re-seed a pane that
-        // may already be running it.
-        assert_eq!(
-            dispatch_notice(
-                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed":"submitted","seed_verified":false,"pane_observation":"unreadable"}"#
-            ),
-            "dispatched feat, seed delivered, pane unreadable"
-        );
-        // A pane that WAS observed keeps the original phrase: the doubt there is
-        // about the seed, which is what the words say.
-        assert_eq!(
-            dispatch_notice(
-                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed_verified":false,"pane_observation":"blank"}"#
-            ),
-            "dispatched feat, seed unverified"
-        );
-        // The pane-send path (agy) on an unreadable frame: the pane is equally
-        // unreadable, but NOTHING was typed into it. "seed delivered" there is
-        // false, and its advice - re-probe, never re-seed - is backwards for the
-        // one case that genuinely needs re-seeding.
-        assert_eq!(
-            dispatch_notice(
-                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed":"unattempted","seed_verified":false,"pane_observation":"unreadable"}"#
-            ),
-            "dispatched feat, seed unverified"
-        );
-        // No slug -> fall back to the node id.
-        assert_eq!(
-            dispatch_notice(r#"{"outcome":"launched","node":"x-1","slug":""}"#),
-            "dispatched x-1"
-        );
-        assert_eq!(dispatch_notice(r#"{"outcome":"no-work"}"#), "no ready work");
-        assert_eq!(dispatch_notice(r#"{"outcome":"lanes-full"}"#), "lanes full");
-        assert_eq!(
-            dispatch_notice(r#"{"outcome":"failed","detail":"boom"}"#),
-            "grab work failed: boom"
-        );
-        // Garbage / unknown outcome fails open to a visible notice, never silent.
-        assert_eq!(dispatch_notice("not json"), "grab work: dispatch failed");
-        assert_eq!(
-            dispatch_notice(r#"{"outcome":"???"}"#),
-            "grab work: dispatch failed"
-        );
-    }
-
-    #[test]
-    fn dispatch_timeout_exceeds_required_harness_binding_window() {
-        let contract: toml::Value = toml::from_str(include_str!(
-            "../../../cli/src/fno/agents/harness_capabilities.toml"
-        ))
-        .unwrap();
-        let max_binding_ms = contract["harness"]
-            .as_table()
-            .unwrap()
-            .values()
-            .filter_map(|caps| caps.get("session_binding"))
-            .filter(|binding| binding["required"].as_bool() == Some(true))
-            .filter_map(|binding| binding["timeout_ms"].as_integer())
-            .max()
-            .unwrap() as u64;
-        assert!(dispatch_timeout() >= Duration::from_millis(max_binding_ms + 15_000));
     }
 
     fn block(complete: bool, truncated: bool, implicit: bool, text: &str) -> vt::BlockRead {

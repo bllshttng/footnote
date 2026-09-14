@@ -68,7 +68,7 @@ Two traps carry the rest. `rpc` exits on stdin EOF mid-turn with status 0. `--pr
 
 The support probe is the onboarding gate for this table. Run `fno doctor harness <name> --live` before treating a row as supported. It must produce a positive marker for every non-skipped line. A missing credential is a named `skip`, not a pass or fail. Run `scripts/ci/check-harness-capabilities-fresh.sh` alongside the honesty sweep to catch a hand edit of a generated copy. The canonical table lives in `crates/fno-agents`, and every build regenerates the Python-tree and mux-crate copies from it.
 
-Run `fno agents dispatch capabilities <h> --json` to read one harness without dispatch configuration. The JSON includes versioned data for permissions, sessions, readiness, input, stop, and removal. Missing or malformed fields stop contract loading. A harness never inherits Claude defaults.
+Run `fno agents capabilities <h> --json` to read one harness's capability contract. The JSON includes versioned data for permissions, sessions, readiness, input, stop, and removal. Missing or malformed fields stop contract loading. A harness never inherits Claude defaults.
 
 | Harness | Permission response | Positive ready rule | Paste submission | Interactive resume | `stop` | `rm` harness cleanup |
 |---|---|---|---|---|---|---|

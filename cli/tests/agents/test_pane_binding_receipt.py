@@ -1113,10 +1113,12 @@ def test_exit_12_still_short_circuits_without_a_listing_call() -> None:
 
 
 def test_the_binding_window_stays_under_the_dispatch_subprocess_budget() -> None:
-    """`run_dispatch_one` kills the whole `fno agents dispatch next` subprocess after
-    20s, and that budget also covers process start, selection, and pane
-    creation. A window at or near 20s gets the subprocess killed BEFORE the
-    registry append, leaving a live pane with no row."""
+    """The mux's dispatch task kills a hung spawn subprocess after
+    `dispatch_timeout` (75s), and that budget also covers process start,
+    board selection, and pane creation. `run_dispatch_one` (x-3873) shells
+    the door directly, so this window is server-side; `_BINDING_WINDOW_S`
+    still has to leave the registry append room inside whatever subprocess
+    budget the launch path uses."""
     assert mux_spawn._BINDING_WINDOW_S <= 10.0
 
 

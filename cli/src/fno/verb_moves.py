@@ -63,7 +63,6 @@ VERB_MOVES: dict[str, Move] = {
         ),
     ),
     "delivery": Move(kind="deprecated", to="do delivery"),
-    "dispatch": Move(kind="deprecated", to="agents dispatch"),
     "done": Move(kind="deprecated", to="backlog done"),
     "evals": Move(kind="deprecated", to="doctor evals"),
     "event": Move(kind="deprecated", to="doctor event"),

@@ -210,8 +210,12 @@ def test_map_covers_current_surface_once():
     # `backlog-notes` reader: 629 -> 630. The graph cutover's flip verb
     # allocates `doctor graph backend` (refs 0): counted from the merged
     # file, 630 -> 631. Main's next fold adds one more verb of its own:
-    # counted from the merged file, 631 -> 632.
-    assert len(mapped) == 632, (
+    # counted from the merged file, 631 -> 632. x-3873 allocates `agents
+    # capabilities` and `agents target-family`, the two read leaves that
+    # replace the retired dispatch query leaves, then deletes the five
+    # `agents dispatch *` rows and the five bare `dispatch *` rows with the
+    # verb itself: counted from the merged file, 632 -> 624.
+    assert len(mapped) == 624, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -272,7 +276,8 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     groups_with_dispatch = {row["current-leaf"].split()[0] for row in rows if row["tier"] == "T1"}
     kept = Counter(row["current-leaf"].split()[0] for row in rows if row["tier"] == "KEEP")
     projected = len(groups_with_dispatch) + sum(kept.values())
-    assert projected == 79
+    # x-3873 deleted the `dispatch` group with the verb: 79 -> 78.
+    assert projected == 78
     assert projected <= 99
 
 

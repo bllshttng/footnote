@@ -8,6 +8,7 @@ agents autonomy provenance	T1	agents autonomy provenance	0
 agents backlog-note	T1	agents backlog-note	0
 agents backlog-notes	T1	agents backlog-notes	0
 agents bash-census	T1	agents bash-census	0
+agents capabilities	T1	agents capabilities	2
 agents census	T1	agents census	0
 agents claim acquire	T1	agents claim acquire	27
 agents claim list	T1	agents claim list	9
@@ -31,11 +32,6 @@ agents authorized-merge	T1	agents authorized-merge	0
 agents crown	T1	agents crown	17
 agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
-agents dispatch capabilities	T1	agents dispatch capabilities	0
-agents dispatch family	T1	agents dispatch family	1
-agents dispatch next	T1	agents dispatch next	9
-agents dispatch one	T1	agents dispatch one	0
-agents dispatch resolve	T1	agents dispatch resolve	23
 agents distress-scan	T1	agents distress-scan	0
 agents distress-verdicts	T1	agents distress-verdicts	0
 agents gate-status	T1	agents gate-status	0
@@ -125,6 +121,7 @@ agents status	T1	agents status	5
 agents stop	T1	agents stop	22
 agents subscribe	T1	agents subscribe	2
 agents sweep	T1	agents sweep	1
+agents target-family	T1	agents target-family	2
 agents test-run	T1	agents test-run	3
 agents top	T1	agents top	20
 agents trace	T1	agents trace	14
@@ -301,11 +298,6 @@ config unset	T1	config unset	5
 context	KEEP	context	15	single-leaf group
 cost	KEEP	cost	7	single-leaf group
 delivery	KEEP	delivery	7	single-leaf group
-dispatch capabilities	T1	dispatch capabilities	0
-dispatch family	T1	dispatch family	3
-dispatch next	T1	dispatch next	9
-dispatch one	T1	dispatch one	0
-dispatch resolve	T1	dispatch resolve	23
 do delivery evaluate	T1	do delivery evaluate	7
 do loops ls	T1	do loops ls	1
 do loops pause-all	T1	do loops pause-all	1

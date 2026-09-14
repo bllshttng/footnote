@@ -1372,20 +1372,6 @@ class TestEffectiveActive:
 
         assert effective_active(repo_root=diverged) == "makers"
 
-    def test_dispatch_path_agrees_with_the_display_path(self, diverged: Path) -> None:
-        # The two paths must not disagree: one resolver, called from both.
-        from fno.adapters.providers.loader import (
-            effective_active,
-            is_effective_active,
-            load_providers,
-        )
-        from fno.dispatch import _resolve_provider_id
-
-        config = load_providers(repo_root=diverged)
-        marked = [r.id for r in config.records if is_effective_active(r, config)]
-        assert marked == ["makers"]
-        assert _resolve_provider_id() == effective_active(repo_root=diverged) == "makers"
-
     def test_list_marks_the_slot_occupant_not_the_config_pointer(
         self, diverged: Path
     ) -> None:

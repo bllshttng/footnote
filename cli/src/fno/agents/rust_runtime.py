@@ -308,6 +308,12 @@ RUST_CLIENT_VERBS = frozenset(
         # PreCompact stamp writer/reader (x-7e05): the hook invokes the
         # binary directly (`fno-agents compaction mark`). Parity-synced.
         "compaction",
+        # Read leaves over the packaged capability table and the merge-posture
+        # family table (x-3873 change 2): the successors to the retired
+        # dispatch capabilities/family query leaves (d-496680aa). Direct dispatch
+        # in client.rs (no daemon RPC); hidden `fno agents` surface. Parity-synced.
+        "capabilities",
+        "target-family",
     }
 )
 
@@ -542,6 +548,8 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "fleet-incident": "Durable fleet incident breaker (x-77db): stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it (exit 0 clear, 1 stopped or unavailable); check [--json] is the admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches.",
     "announce": "Fleet announcements: send --scope S [--subject T] [--expires 24h] [--urgent] reads the body on stdin and appends ONE kind=announce bus line (operator or crowned agent, 6/hour); read --session-id ID --boundary B renders unseen standing announcements once per session; status ID [--json] reads the sender's receipts (audience/landed/pending/woken/unreachable/late). The public surface is `fno agents mail team`; hooks call the binary directly.",
     "compaction": "Compaction stamps: mark --session <id> writes the PreCompact stamp the provider-cap actor reads (best-effort, always exits 0); status --session <id> reads the stamp against the transcript's own boundary. The hook calls the binary directly.",
+    "capabilities": "One harness's config-independent capability contract (x-3873): <harness> [--json] prints map_version, harness, then that harness's table; an unknown harness exits 2 naming the declared list.",
+    "target-family": "Merge-posture family test (x-3873): --message <m> prints family when the message's first token is a /target-family spelling, other otherwise; exit 0 either way.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other
@@ -1431,6 +1439,25 @@ def _is_output_format_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+#: d-fe66560a keeps the binary's action list shrink-only, so these read
+#: leaves have no action of their own: the router rewrites each into an
+#: argument of the `status` action before the exec.
+_STATUS_ARG_LEAVES = {
+    "capabilities": "--capabilities",
+    "target-family": "--target-family",
+}
+
+
+def _rust_leaf_argv(args: "Sequence[str]") -> "list[str]":
+    """The binary argv for a routed leaf: plain passthrough, except a leaf in
+    :data:`_STATUS_ARG_LEAVES` becomes ``status <flag> ...``."""
+    if args:
+        flag = _STATUS_ARG_LEAVES.get(args[0])
+        if flag is not None:
+            return ["status", flag, *args[1:]]
+    return list(args)
+
+
 def route_to_rust(
     args: Sequence[str],
     *,
@@ -1482,7 +1509,7 @@ def route_to_rust(
     if env_pin:
         # Before the exec: the replacement inherits it; tests stubbing _exec never export.
         os.environ.update(env_pin)
-    argv = [str(binary), *args]
+    argv = [str(binary), *_rust_leaf_argv(args)]
     try:
         _exec(str(binary), argv)
     except OSError as exc:
