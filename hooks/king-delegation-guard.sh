@@ -18,17 +18,24 @@
 # bare `fno ...` verb needs no carveout: the Bash branch keys on shell write
 # operators, and a verb that writes state internally binds no redirect.
 #
+# Auto-memory is the third shape: recording a user preference or session fact
+# is not implementation, the same way plan writes are allowed, so writes under
+# ~/.claude/projects/<project>/memory/ pass for king and limb alike.
+#
 # Two shapes are not implementation writes. First, a redirect token may carry
 # glued statement boundaries (`shlex.split` never splits `2>&1;`), so the
 # redirect body is stripped of trailing `;|&` before the fd-dup check; a real
 # target outside the plans dir still refuses. Second, a Task subagent of the
-# crowned session is a limb, not the king: its payload carries the parent's
-# session id (so sections 2-4 see the crown) plus a non-empty agent_id, the
-# harness's only per-call subagent marker. The transcript path does not
-# discriminate - it names the parent transcript for king and limb alike
-# (measured 2026-09-13 on a live court), so a transcript under the session id's
-# subagents/ directory is kept only as a second signature for harnesses that
-# populate it. Any other shape fail-closes.
+# crowned session is a limb, not the king. The PreToolUse payload itself does
+# not mark one: agent_id rides SubagentStart/Stop only, and transcript_path
+# names the parent main transcript for king and limb alike (measured
+# 2026-09-13/14 on a live court). So the guard reads three signatures: a
+# non-empty agent_id (harnesses that send one), a transcript under the session
+# id's subagents/ directory (harnesses that populate it), and the world-truth
+# marker - a Task/Agent tool_use still open (no tool_result, and no later
+# tool_use) in the parent transcript is a sync limb in flight, and the
+# king's own main thread is blocked while it runs, so its spawn is always
+# the transcript's newest tool_use. Anything else fail-closes.
 #
 # NEVER blocks by accident. Any failure to read the payload, the registry,
 # the manifest, or the config exits 0 and allows - the compact-hook contract
@@ -61,7 +68,7 @@ _deny_text() {
     # target and the allowed roots. Delegation advice would misstate it.
     printf '%s\n' \
 "king-delegation-guard: write target '$1' is outside the allowed roots for a crowned session.
-Allowed roots: the plans directory (${PLANS_DIR:-<unresolved>}) and the crown handoff doc (${HANDOFF_PATH:-<unresolved>})."
+Allowed roots: the plans directory (${PLANS_DIR:-<unresolved>}), the crown handoff doc (${HANDOFF_PATH:-<unresolved>}), and auto-memory (${HOME:-~}/.claude/projects/*/memory/)."
 }
 _block() {
     _guard_mark king-delegation-guard block 2>/dev/null || true
@@ -231,6 +238,32 @@ sys.exit(0 if os.path.realpath(p) == os.path.realpath(h) else 1)
 ' "$p" "$CWD" "$HANDOFF_PATH" 2>/dev/null
 }
 
+# ── 6d. Memory carve-out: auto-memory is not implementation. A crowned
+#      session records a user preference or session fact the same way it
+#      authors a quick plan; refusing the write ships the ruling to nobody.
+#      Allowed: exactly ~/.claude/projects/<project>/memory/ (the note body
+#      and MEMORY.md live there), one project level under the root. ────────
+in_memory_dir() {
+    local p="$1"
+    [[ -n "$p" ]] || return 1
+    printf '%s' "$p" | python3 -c '
+import os, sys
+p, cwd, root = sys.argv[1], sys.argv[2], sys.argv[3]
+if not p:
+    sys.exit(1)
+if not os.path.isabs(p):
+    p = os.path.join(cwd or os.getcwd(), p)
+# realpath both sides: the projects dir can sit behind a symlink, and a
+# session holding the post-symlink spelling must still match.
+p = os.path.realpath(p)
+root = os.path.realpath(root)
+if p == root or not p.startswith(root + os.sep):
+    sys.exit(1)
+parts = p[len(root) + 1:].split(os.sep)
+sys.exit(0 if len(parts) >= 2 and parts[1] == "memory" else 1)
+' "$p" "$CWD" "${HOME:-}/.claude/projects" 2>/dev/null
+}
+
 # ── 6c. Limb carve-out: a Task subagent of this very court is a limb, not the
 #      king. Its payload carries the parent's session_id, so sections 2-4 see
 #      the crown. The harness marks subagent-borne tool calls with a non-empty
@@ -252,13 +285,53 @@ if [[ -n "$TRANSCRIPT" ]]; then
         echo "king-delegation-guard: limb of crowned session $SID; allowing" >&2
         _approve
     fi
+    # Third signature: the claude payload carries no per-call subagent marker
+    # (agent_id rides SubagentStart/Stop, transcript_path names this same
+    # parent main transcript), so read the world instead. The sync-limb
+    # shape is exact: a Task/Agent tool_use with no tool_result yet AND no
+    # later tool_use - the king's own main thread is blocked while the limb
+    # runs, so its spawn is always the transcript's newest tool_use. An
+    # aborted spawn the king worked past, or an old background fork, has
+    # later tool_use entries and stops holding the allowance. Tail only: a
+    # live transcript grows large, and the open entry sits at the end. A
+    # missing or unreadable transcript falls through: fail closed.
+    if [[ -f "$TRANSCRIPT" ]] \
+        && tail -c 262144 "$TRANSCRIPT" 2>/dev/null | python3 -c '
+import json, sys
+open_spawn, done = None, set()
+for line in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines():
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    content = (e.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        continue
+    for c in content:
+        if not isinstance(c, dict):
+            continue
+        if c.get("type") == "tool_use":
+            if c.get("name") in ("Task", "Agent"):
+                open_spawn = c.get("id")
+            else:
+                open_spawn = None
+        elif c.get("type") == "tool_result":
+            done.add(c.get("tool_use_id"))
+sys.exit(0 if open_spawn is not None and open_spawn not in done else 1)
+' 2>/dev/null; then
+        echo "king-delegation-guard: limb of crowned session $SID (open Task/Agent tool_use in the parent transcript); allowing" >&2
+        _approve
+    fi
 fi
 
 # ── 7. Decision ───────────────────────────────────────────────────────────────
 DENIED=""
 case "$TOOL" in
   Edit|Write|NotebookEdit)
-    if in_plans_dir "$FILE_PATH" || in_handoff "$FILE_PATH"; then
+    if in_plans_dir "$FILE_PATH" || in_handoff "$FILE_PATH" || in_memory_dir "$FILE_PATH"; then
         _approve
     fi
     DENIED="$FILE_PATH"
@@ -355,6 +428,9 @@ sys.stdout.write("\n".join(t for t in targets if t))
         esac
         if in_handoff "$p"; then
             continue  # the crown's own canon doc stays writable
+        fi
+        if in_memory_dir "$p"; then
+            continue  # auto-memory is not implementation
         fi
         if ! in_plans_dir "$p"; then
             ALLOW=0

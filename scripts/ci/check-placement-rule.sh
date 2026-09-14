@@ -60,6 +60,13 @@
 #      that eight rounds of hand-written cases missed. Read-only rglob over
 #      the harness's data; footnote stores nothing there, and a missing root
 #      exits 1 with a message rather than creating anything.
+#      hooks/king-delegation-guard.sh compares write paths a crowned session
+#      hands it against the ~/.claude/projects prefix too: auto-memory is
+#      Claude Code's own file store, so the memory carveout must name that
+#      root to allow exactly it and nothing wider. Comparison only; no
+#      footnote state lands there.
+#      the harness's data; footnote stores nothing there, and a missing root
+#      exits 1 with a message rather than creating anything.
 #      The inherited-model-env remedy strings (model_routing.py,
 #      model_env_scrub.rs, attest-model.sh) NAME ~/.claude/settings.json in
 #      operator-facing text - they advise a pin in Claude Code's own config,
@@ -288,6 +295,7 @@ crates/fno/src/transcript_tail.rs
 hooks/attest-model.sh
 hooks/cache-keepalive-inject.sh
 hooks/corrections-git-postcommit.sh
+hooks/king-delegation-guard.sh
 hooks/session-start.sh
 hooks/target-stop-hook.sh
 hooks/worktree-setup.sh
