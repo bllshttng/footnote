@@ -164,13 +164,23 @@ fn run_with_budget(cmd: &mut Command) -> Option<std::process::Output> {
 
 /// `Ok(true)` alive, `Ok(false)` provably gone, `Err(())` undecidable — the
 /// port of `spawn_gate._pid_alive`'s None: a denied inspection presents as an
-/// undecided case, never as a decided death.
-fn pid_liveness(pid: u32) -> Result<bool, ()> {
+/// undecided case, never as a decided death. When `recorded` carries the
+/// row's `pid_start_time`, a live pid of a DIFFERENT incarnation (the pid was
+/// recycled) reads as gone: the current start token is compared in the
+/// registry's own units, as `daemon::pid_is_ours` does. An unreadable current
+/// token against a recorded one is undecidable, never a silent count.
+fn pid_liveness(pid: u32, recorded: Option<u64>) -> Result<bool, ()> {
     if pid <= 1 {
         return Ok(false);
     }
     match claims::probe_pid(pid as i32) {
-        PidProbe::Created(_) => Ok(true),
+        PidProbe::Created(_) => match recorded {
+            None => Ok(true),
+            Some(rec) => match crate::daemon::process_start_time(pid) {
+                Some(now) => Ok(now == rec),
+                None => Err(()),
+            },
+        },
         PidProbe::Absent => Ok(false),
         PidProbe::Refused => Err(()),
     }
@@ -198,7 +208,7 @@ fn provider_roster_live_short_ids(wanted: &BTreeSet<String>) -> Result<BTreeSet<
         }
         match worker.pid {
             None => {}
-            Some(pid) => match pid_liveness(pid) {
+            Some(pid) => match pid_liveness(pid, None) {
                 Ok(true) => {
                     live.insert(short);
                 }
@@ -292,7 +302,7 @@ pub(crate) fn provider_live_count(
                 // and the pane probe settles everything else. An undecidable
                 // pid does NOT fault here - the pane gets the chance first,
                 // exactly as the Python counter ordered it.
-                if pid_liveness(pid as u32) == Ok(false) {
+                if pid_liveness(pid as u32, None) == Ok(false) {
                     continue;
                 }
                 match pane_state(row)? {
@@ -311,7 +321,7 @@ pub(crate) fn provider_live_count(
                 continue;
             }
             // With a recorded start time, pid reuse fails closed.
-            if pid_liveness(pid as u32)
+            if pid_liveness(pid as u32, row.pid_start_time)
                 .map_err(|_| format!("process incarnation unreadable for {}", row.name))?
             {
                 count += 1;
@@ -671,7 +681,7 @@ mod tests {
     fn live_row(name: &str, provider: &str, pid: Option<u32>) -> String {
         let fields = pid
             .map(|p| {
-                let start = claims::process_create_time_ms(p as i32).unwrap_or(0);
+                let start = crate::daemon::process_start_time(p).unwrap_or(0);
                 format!(r#","pid":{p},"pid_start_time":{start}"#)
             })
             .unwrap_or_default();
@@ -706,6 +716,38 @@ mod tests {
         let (count, counted) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
         assert_eq!(count, 2, "two live zai rows");
         assert_eq!(counted, vec!["a".to_string(), "b".to_string()]);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC7-ERR: a recycled pid — alive, but a different process incarnation
+    /// than the recorded start token — is not counted; the correct incarnation
+    /// still is.
+    #[test]
+    fn provider_count_skips_a_recycled_pid() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-recycled-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        let me = std::process::id();
+        let good = crate::daemon::process_start_time(me).unwrap_or(0);
+        let reg = dir.join("registry.json");
+        write_registry(
+            &reg,
+            &[
+                live_row("good", "zai", Some(me)),
+                format!(
+                    r#"{{"name":"recycled","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{me},"pid_start_time":{}}}"#,
+                    good + 1
+                ),
+            ],
+        );
+        let mut warnings = Vec::new();
+        let (count, counted) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
+        assert_eq!(count, 1, "the recycled incarnation must not count");
+        assert_eq!(counted, vec!["good".to_string()]);
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
     }
