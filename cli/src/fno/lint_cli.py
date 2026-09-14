@@ -47,6 +47,7 @@ CHECKS: dict[str, str] = {
     "field-coverage": "field_coverage",
     "graph-parity": "graph_parity",
     "preamble-budget": "preamble_budget",
+    "internal-refs": "internal_refs",
 }
 
 
@@ -1595,6 +1596,16 @@ def preamble_budget() -> None:
     already runs in guards.yml on every push and pull_request.
     """
     _run_ci_gate("scripts/ci/check-preamble-budget.sh")
+
+
+def internal_refs() -> None:
+    """Scan tracked prose for internal node-id references before a push.
+
+    Thin wrapper over the source-of-truth bash gate scripts/ci/check-no-internal-refs.sh:
+    the guard owns the node-id pattern, so this adds no second copy. Exit code
+    matches it (0 clean, 1 violation, 2 script error).
+    """
+    _run_ci_gate("scripts/ci/check-no-internal-refs.sh")
 
 
 def stale_skill_refs() -> None:

@@ -1483,6 +1483,45 @@ def test_preamble_budget_wrapper_propagates_the_gate_verdict(tmp_path, monkeypat
     assert result.exit_code == 2
 
 
+def test_internal_refs_check_is_dispatchable(monkeypatch) -> None:
+    """The CHECKS key resolves and the wrapper runs; exit code passes through."""
+    from fno import lint_cli
+
+    calls: list[str] = []
+
+    def fake() -> None:
+        calls.append("hit")
+        raise typer.Exit(code=0)
+
+    monkeypatch.setattr(lint_cli, "internal_refs", fake)
+    result = runner.invoke(app, ["internal-refs"])
+    assert result.exit_code == 0
+    assert calls == ["hit"]
+
+
+def test_internal_refs_wrapper_propagates_the_gate_verdict(tmp_path, monkeypatch) -> None:
+    """Exit 1 from the gate exits 1 here; a missing gate script is exit 2."""
+    from fno import lint_cli, paths
+
+    monkeypatch.setattr(paths, "resolve_repo_root", lambda: tmp_path)
+    script = tmp_path / "scripts" / "ci" / "check-no-internal-refs.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    result = runner.invoke(app, ["internal-refs"])
+    assert result.exit_code == 1
+
+    script.unlink()
+    result = runner.invoke(app, ["internal-refs"])
+    assert result.exit_code == 2
+
+
+def test_unknown_check_refusal_lists_internal_refs() -> None:
+    """The refusal derives from CHECKS, so the new name is discoverable there."""
+    result = runner.invoke(app, ["definitely-not-a-check"])
+    assert result.exit_code == 2
+    assert "internal-refs" in result.output
+
+
 def test_style_lint_encounter_surface_enforces_the_word_cap() -> None:
     # The encounter gate caps evidence bodies, so its own surface must be
     # checkable here - a rule 7 refusal names this command as its rewrite check.
