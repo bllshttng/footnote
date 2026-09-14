@@ -30,7 +30,7 @@ CLAUSE
 Use the canonical implementation worker spawn in [court-operations.md](court-operations.md#control-surfaces).
 ```
 
-The clause itself is substrate-independent - it rides every spawn payload. The canonical thread form has no placement flags; let the graph carry the mission instead.
+The clause itself is substrate-independent - it rides every spawn payload. The canonical thread form has no placement flags; let the graph carry the mission instead. Pane-only placement uses the canonical `--workspace <w>` spelling.
 
 The `<<'CLAUSE'` delimiter is quoted, so no backtick, `$`, or quote inside expands. `"$payload"` then hands the assembled text to spawn as one argument. The `|| true` is required: `read -d ''` returns exit 1 at EOF (it found no NUL terminator), which would abort the whole recipe under `set -e` before spawn ever runs.
 
