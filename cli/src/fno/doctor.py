@@ -2380,6 +2380,9 @@ def _emit_human(
         line = arm.get("line")
         if line:
             out(f"fno doctor: control-plane arm {line}")
+        elif arm.get("producer_evidence") == "unobserved":
+            out(f"fno doctor: control-plane arm {arm.get('arm')} is UNOBSERVED "
+                "(no producer receipt in the journals)")
         else:
             out(f"fno doctor: control-plane arm {arm.get('arm')} is STALE "
                 f"(last tick {arm.get('age_s')}s ago, interval {arm.get('interval_s')}s, "

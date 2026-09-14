@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::paths::AgentsHome;
-use crate::tick_ledger::{ArmStatus, DaemonFacts};
+use crate::tick_ledger::{ArmStatus, DaemonFacts, ProducerEvidence};
 
 /// The arm's own beat, matching its `KNOWN_ARMS` row.
 pub const ARM_WATCH_INTERVAL_S: u64 = 300;
@@ -63,7 +63,15 @@ pub fn tick_arm_watch(
                     Some("scheduler_down") | Some("tick_overdue")
                 )
                 && row.age_s.is_some_and(|s| s >= threshold_s);
-            failing_overdue || stale_overdue
+            // An unobserved periodic arm has no receipt to age, so no
+            // threshold applies: its journals hold no tick row at all, which
+            // is the dead-emitter shape the readout can only name, not age.
+            // Event-driven arms (interval 0) are exempt - quiet is their
+            // normal, and paging stop_hook for a machine with no recent
+            // session stops would cry wolf.
+            let unobserved_overdue =
+                row.interval_s > 0 && row.producer_evidence == ProducerEvidence::Unobserved;
+            failing_overdue || stale_overdue || unobserved_overdue
         })
         .collect();
     if overdue.is_empty() {
@@ -141,8 +149,11 @@ fn notice_body(overdue: &[&ArmStatus]) -> String {
     body
 }
 
-/// The body line for one overdue row: FAIL names the skip reason and how long the arm has been failing; STALE names the cause and the row age.
+/// The body line for one overdue row: FAIL names the skip reason and how long the arm has been failing; STALE names the cause and the row age; UNOBSERVED says the journals hold no receipt.
 fn row_line(row: &ArmStatus) -> String {
+    if row.producer_evidence == ProducerEvidence::Unobserved {
+        return format!("{} UNOBSERVED no producer receipt in the journals", row.arm);
+    }
     if row.failing {
         let skip = row.skip_reason.as_deref().unwrap_or("unknown");
         return match row.failing_for_s {
@@ -157,6 +168,12 @@ fn row_line(row: &ArmStatus) -> String {
 
 /// The token anchor: `now - failing_for_s` for a failing row (the newest ok run) and the row's `last_ts` for a stale row. Both stay constant while the episode lasts, so a quiet episode dedupes and a set change is a new token. A failing row with no ok run in the journals anchors on the constant 0: its last_ts is the newest FAILED run and advances per interval, which would re-page the same episode every rate floor.
 fn anchor(row: &ArmStatus, now_unix: u64) -> u64 {
+    if row.producer_evidence == ProducerEvidence::Unobserved {
+        // No receipt: the constant 0 anchors the whole episode, like the
+        // failing row with no ok run. The now-anchored fallback would move
+        // every tick and re-page the same absence at each rate floor.
+        return 0;
+    }
     if row.failing {
         return match row.failing_for_s {
             Some(s) => now_unix.saturating_sub(s),

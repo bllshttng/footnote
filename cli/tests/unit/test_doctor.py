@@ -1883,6 +1883,34 @@ def test_doctor_falls_back_to_the_sentence_for_rows_without_line(
     assert "skip: never" in combined, f"Got:\n{combined}"
 
 
+def test_doctor_falls_back_to_unobserved_wording_for_an_unobserved_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """x-6484: a line-less attention row whose producer evidence reads
+    unobserved falls back to UNOBSERVED wording, never the STALE sentence."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="xyz",
+        marker="xyz",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_control_plane_arms_report",
+        lambda: {"red": [{"arm": "king_wake", "stale": False, "age_s": None,
+                          "interval_s": 900, "skip_reason": "never",
+                          "producer_evidence": "unobserved"}],
+                 "unknown_reason": None},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, f"exit code {result.exit_code}, output: {result.stdout}{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "control-plane arm king_wake is UNOBSERVED" in combined, f"Got:\n{combined}"
+    assert "no producer receipt in the journals" in combined, f"Got:\n{combined}"
+    assert "is STALE" not in combined, f"Got:\n{combined}"
+
+
 def test_control_plane_arms_report_consumes_the_rust_attention_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
