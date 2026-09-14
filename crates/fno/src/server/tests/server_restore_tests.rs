@@ -1788,7 +1788,7 @@ fn workspace_restore_fills_a_locate_tier_portal_and_names_the_tier() {
     let mut core = empty_core();
     core.shells = vec!["/bin/cat".into()];
     set_attach_program(&["/bin/cat"]);
-    let (seat, _) = portal_restore_fixture(&mut core, "locate", 5, "agy-row", "agy");
+    let (_, _) = portal_restore_fixture(&mut core, "locate", 5, "agy-row", "agy");
     core.agents[0].attach_id = None;
     let rows = run_workspace_restore(&mut core, false);
     let row = portal_row(&rows, 5);
