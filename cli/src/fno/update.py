@@ -1345,6 +1345,41 @@ def _await_binary(post_install: str, binary: Optional[str]) -> str:
     )
 
 
+def _post_install_refresh_cmds(resolved: Path) -> tuple[list[list[str]], Optional[str]]:
+    """The best-effort commands chained after a successful install, plus the
+    binary a slow post-install step may await.
+
+    Every launchd agent fno installs embeds an absolute binary path and none
+    is re-rendered by the install, so each needs a refresh onto the new
+    binary; each verb self-gates, so listing one costs nothing on a machine
+    that does not use it. The Claude plugin stage ride-along (x-2b46): live
+    sessions exec hooks straight from the stage, so a restage IS the deploy;
+    ordered after the install so new hooks never call a verb the old install
+    lacks, and gated on the cargo binary because a machine without
+    fno-agents has no stage builder.
+    """
+    refresh_cmds: list[list[str]] = []
+    try:
+        from fno.pr_watch.cli import _resolve_fno_binary
+
+        _fno = _resolve_fno_binary()
+        refresh_cmds = [
+            [_fno, "do", "pr", "watch", "refresh"],
+            [_fno, "backlog", "groom", "--refresh-agent"],
+        ]
+        await_bin: Optional[str] = _fno
+    except Exception:
+        refresh_cmds = []
+        await_bin = None
+
+    agents_bin = _cargo_installed_bin()
+    if agents_bin is not None:
+        refresh_cmds.append(
+            [str(agents_bin), "plugin-install", "--restage", "--source", str(resolved)]
+        )
+    return refresh_cmds, await_bin
+
+
 def update_command(
     source: Optional[Path] = typer.Option(
         None,
@@ -1500,23 +1535,7 @@ def update_command(
     # fno-py to an ABSOLUTE, PATH-independent path (a cargo/front-door install may
     # not have fno-py on PATH, and the post-install shell inherits that PATH), and
     # carry it as an argv list so the Windows subprocess quotes it correctly.
-    # Every launchd agent fno installs needs this, not just the watcher: each
-    # embeds an absolute binary path and none is re-rendered by the install.
-    # Each verb self-gates (disabled watcher / no groom plist), so listing one
-    # here costs nothing on a machine that does not use it.
-    refresh_cmds: list[list[str]] = []
-    try:
-        from fno.pr_watch.cli import _resolve_fno_binary
-
-        _fno = _resolve_fno_binary()
-        refresh_cmds = [
-            [_fno, "do", "pr", "watch", "refresh"],
-            [_fno, "backlog", "groom", "--refresh-agent"],
-        ]
-        _await_bin = _fno
-    except Exception:
-        refresh_cmds = []
-        _await_bin = None
+    refresh_cmds, _await_bin = _post_install_refresh_cmds(resolved)
 
     # Machine-global mutations start here (cargo bins below, the uv/pip env
     # at the exec), so this is where the machine-scoped guard belongs - not

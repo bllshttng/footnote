@@ -2299,9 +2299,54 @@ def test_update_refreshes_the_groom_agent_too(monkeypatch) -> None:
     """
     import inspect
 
-    src = inspect.getsource(update.update_command)
+    src = inspect.getsource(update._post_install_refresh_cmds)
     assert '"do", "pr", "watch", "refresh"' in src
     assert '"backlog", "groom", "--refresh-agent"' in src
+
+
+def test_post_install_chain_includes_restage(monkeypatch, tmp_path) -> None:
+    """AC4-HP: with a cargo fno-agents present, the post-install chain ends
+    with the plugin-stage restage naming the resolved source."""
+    monkeypatch.setattr(
+        update, "_cargo_installed_bin", lambda: tmp_path / "cargo-bin" / "fno-agents"
+    )
+
+    def _raise() -> str:
+        raise RuntimeError("no pr-watch on this machine")
+
+    monkeypatch.setattr("fno.pr_watch.cli._resolve_fno_binary", _raise)
+    source = tmp_path / "cli-src"
+    source.mkdir()
+
+    refresh_cmds, await_bin = update._post_install_refresh_cmds(source)
+
+    restage = [
+        c
+        for c in refresh_cmds
+        if c[-4:] == ["plugin-install", "--restage", "--source", str(source)]
+    ]
+    assert len(restage) == 1, refresh_cmds
+    assert restage[0][0] == str(tmp_path / "cargo-bin" / "fno-agents")
+    # The restage rides last: after the install, so new hooks never call a
+    # verb the old install lacks.
+    assert refresh_cmds[-1] is restage[0] or refresh_cmds[-1] == restage[0]
+    assert await_bin is None
+
+
+def test_post_install_chain_without_cargo_skips_restage(monkeypatch, tmp_path) -> None:
+    """AC4-ERR: no cargo fno-agents -> no restage command, update proceeds."""
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: None)
+
+    def _raise() -> str:
+        raise RuntimeError("no pr-watch on this machine")
+
+    monkeypatch.setattr("fno.pr_watch.cli._resolve_fno_binary", _raise)
+
+    refresh_cmds, await_bin = update._post_install_refresh_cmds(tmp_path)
+
+    assert refresh_cmds == [], refresh_cmds
+    assert await_bin is None
+    assert not any("plugin-install" in c for c in refresh_cmds)
 
 
 # ---------------------------------------------------------------------------
