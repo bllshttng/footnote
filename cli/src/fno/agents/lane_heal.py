@@ -1,6 +1,6 @@
-"""Ask the hidden `fno-agents lane-heal` verb about a row's pane binding.
+"""Ask the `mail-inject --lane-heal` mode about a row's pane binding.
 
-One Python shim over one Rust verdict verb (x-4a68): the door owns the
+One Python shim over one Rust verdict mode (x-4a68): the door owns the
 decision, this only shells it and parses the one JSON line.
 """
 from __future__ import annotations
@@ -27,7 +27,15 @@ def lane_heal(session_id: str) -> tuple[str, Optional[str], Optional[dict]]:
         return ("unmeasurable", "binary-absent", None)
     try:
         proc = subprocess.run(
-            [str(binary), "lane-heal", "--session", session_id],
+            [
+                str(binary),
+                "mail-inject",
+                "--harness",
+                "codex",
+                "--session",
+                session_id,
+                "--lane-heal",
+            ],
             capture_output=True,
             text=True,
             timeout=_MAIL_INJECT_TIMEOUT_S,

@@ -14,7 +14,7 @@ use crate::state::{self};
 use serde::Serialize;
 
 /// What the probe + the loaded-thread list proved about a row's mux ref.
-/// Serialized verbatim as the `lane-heal` verb's one JSON output line.
+/// Serialized verbatim as the `mail-inject --lane-heal` one JSON output line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LaneVerdict {
     pub verdict: &'static str,
@@ -136,48 +136,6 @@ pub fn heal_dead_pane_binding(
         ],
     );
     verdict("rebound-thread", None, None)
-}
-
-/// The hidden `lane-heal` verb: one JSON verdict line on stdout, exit 0 for
-/// every verdict, exit 2 when `--session` is missing. The verdict is data a
-/// caller gates on, never a process error.
-pub async fn run_lane_heal(rest: &[String]) -> i32 {
-    let mut session: Option<&String> = None;
-    let mut rebind = true;
-    let mut args = rest.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--session" => session = args.next(),
-            "--no-rebind" => rebind = false,
-            other => {
-                eprintln!("fno-agents lane-heal: unknown argument {other:?}");
-                return 2;
-            }
-        }
-    }
-    let Some(session) = session else {
-        eprintln!("fno-agents lane-heal: --session <id> is required");
-        return 2;
-    };
-    let home = AgentsHome::from_env();
-    enum Loaded {
-        Ids(Vec<String>),
-        Err(&'static str),
-    }
-    let loaded = match crate::codex_inject::discover_loaded_threads().await {
-        Ok(threads) => Loaded::Ids(threads.into_iter().map(|t| t.session_id).collect()),
-        Err(reason) => Loaded::Err(reason),
-    };
-    let loaded = move || match &loaded {
-        Loaded::Ids(ids) => Ok(ids.clone()),
-        Loaded::Err(reason) => Err(*reason),
-    };
-    let v = heal_dead_pane_binding(&home, session, rebind, &run_mux_pane_probe, &loaded);
-    println!(
-        "{}",
-        serde_json::to_string(&v).unwrap_or_else(|_| "{}".into())
-    );
-    0
 }
 
 #[cfg(test)]
@@ -361,27 +319,5 @@ mod tests {
         let v = heal_dead_pane_binding(&home, "sess-1", true, &absent, &racer);
         assert_eq!(v.verdict, "unmeasurable");
         assert_eq!(v.reason, Some("row-changed"));
-    }
-
-    #[test]
-    fn lane_heal_verb_refuses_a_missing_session_with_2() {
-        let code = pollster_block_on(run_lane_heal(&["--no-rebind".to_string()]));
-        assert_eq!(code, 2);
-        let code = pollster_block_on(run_lane_heal(&["--bogus".to_string()]));
-        assert_eq!(code, 2);
-    }
-
-    // The binary entrypoint owns the only tokio runtime; tests block_on the
-    // async verb directly through a scratch reactor, mirroring the daemon
-    // tests' FakeDaemon pattern.
-    fn pollster_block_on<F>(f: F) -> i32
-    where
-        F: std::future::Future<Output = i32>,
-    {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(f)
     }
 }

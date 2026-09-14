@@ -2388,8 +2388,7 @@ fn should_delegate_claude_live_attach(
 /// inline and returns the exit code to propagate.
 use crate::resume_args::parse_resume_args;
 use crate::resume_wake::{
-    acquire_named_session_claim, acquire_resume_session_claim, run_and_confirm_respawn,
-    MUX_RESUME_CLAIM_TTL_MS,
+    acquire_resume_session_claim, run_and_confirm_respawn, MUX_RESUME_CLAIM_TTL_MS,
 };
 
 pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
@@ -3814,6 +3813,7 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resume_wake::acquire_named_session_claim;
     use serde_json::json;
 
     // --- attach: which rows are codex THREADS (x-6678) -----------------------

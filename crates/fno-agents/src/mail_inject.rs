@@ -37,6 +37,8 @@ use std::time::Duration;
 use crate::claude_attach::{perform_attach, AttachRequest, UnixControlTransport};
 use crate::claude_drive::{contains_detach_sentinel, find_transcript, transcript_len, DriveError};
 use crate::claude_roster::{read_control_key, ClaudeRoster};
+use crate::codex_inject::discover_loaded_threads;
+use crate::paths::AgentsHome;
 
 /// Default transcript-growth poll budget: 40 * 250ms = 10s. A live blocked
 /// session echoes the injected turn well within this; a miss demotes to durable.
@@ -179,6 +181,12 @@ pub struct MailInjectArgs {
     /// exists, injecting nothing and reading no stdin. Answers the question a
     /// caller has to ask BEFORE it prescribes an inject to someone.
     pub probe: bool,
+    /// `--lane-heal`: run the dead-pane-binding heal for `--session` and print
+    /// one JSON verdict instead of injecting. Carried as a flag on this verb,
+    /// never a top-level verb (law d-fe66560a).
+    pub lane_heal: bool,
+    /// `--no-rebind`: with `--lane-heal`, report without writing the row.
+    pub no_rebind: bool,
 }
 
 /// Resolution miss: no roster entry for the session, or a roster entry with no
@@ -222,6 +230,8 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut origin: Option<String> = None;
     let mut self_send = false;
     let mut probe = false;
+    let mut lane_heal = false;
+    let mut no_rebind = false;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -254,6 +264,8 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
             }
             "--provider" => return Err((2, PROVIDER_AXIS_TOMBSTONE.to_string())),
             "--probe" => probe = true,
+            "--lane-heal" => lane_heal = true,
+            "--no-rebind" => no_rebind = true,
             "--sender" => {
                 sender = Some(
                     it.next()
@@ -326,6 +338,8 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         origin,
         self_send,
         probe,
+        lane_heal,
+        no_rebind,
     })
 }
 
@@ -1336,6 +1350,38 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
                 1
             }
         };
+    }
+
+    // `--lane-heal`: run the dead-pane-binding heal and print one JSON verdict
+    // (law d-fe66560a: carried as a flag on this verb, never a top-level one).
+    // Exit 0 for every verdict - the verdict is data a caller gates on, never
+    // a process error.
+    if args.lane_heal {
+        let home = AgentsHome::from_env();
+        enum Loaded {
+            Ids(Vec<String>),
+            Err(&'static str),
+        }
+        let loaded_state = match discover_loaded_threads().await {
+            Ok(threads) => Loaded::Ids(threads.into_iter().map(|t| t.session_id).collect()),
+            Err(reason) => Loaded::Err(reason),
+        };
+        let loaded = move || match &loaded_state {
+            Loaded::Ids(ids) => Ok(ids.clone()),
+            Loaded::Err(reason) => Err(*reason),
+        };
+        let verdict = crate::lane_heal::heal_dead_pane_binding(
+            &home,
+            &args.session,
+            !args.no_rebind,
+            &crate::daemon::run_mux_pane_probe,
+            &loaded,
+        );
+        println!(
+            "{}",
+            serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".into())
+        );
+        return 0;
     }
 
     let mut text = String::new();
