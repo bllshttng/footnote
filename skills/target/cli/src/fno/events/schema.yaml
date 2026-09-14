@@ -2739,7 +2739,7 @@ event_types:
           description: "The sweep that confirmed this removal, such as roster-reap."
 
   - name: pr_nudge_sent
-    description: "The nudge ladder acted on a session the retirement sweep keeps on an open PR: mailed or resumed it to drive the PR to merge. attempt counts from 1; delivered reports the runner's exit status."
+    description: "The nudge ladder acted on a session the retirement sweep keeps on an open PR: mailed or resumed it to drive the PR to merge. attempt counts from 1; delivered reports receipt-confirmed landing (the send's exit 0 covers queued envelopes too). receipt carries the mail verb's own line, or exit <code> when it printed nothing; fallback names the rung that took over mid-pass; undelivered counts this budget's attempts that never landed."
     sources: [daemon]
     data:
       required: [session_id, node, pr, action, attempt, delivered]
@@ -2757,9 +2757,16 @@ event_types:
           type: integer
         delivered:
           type: boolean
+        receipt:
+          type: string
+        fallback:
+          type: string
+          enum: [resume]
+        undelivered:
+          type: integer
 
   - name: pr_nudge_escalated
-    description: "The nudge ladder's attempt budget is spent with no session activity: one operator question was filed (deduplicated on the marker) and the ladder now waits for activity."
+    description: "The nudge ladder's attempt budget is spent with no session activity: one operator question was filed (deduplicated on the marker) and the ladder now waits for activity. undelivered is how many of those nudges never landed in the session."
     sources: [daemon]
     data:
       required: [session_id, node, pr]
@@ -2769,6 +2776,8 @@ event_types:
         node:
           type: string
         pr:
+          type: integer
+        undelivered:
           type: integer
 
   - name: pr_nudge_paused
