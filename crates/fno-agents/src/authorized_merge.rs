@@ -842,6 +842,20 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         Ok(value) => value,
         Err(message) => return (2, String::new(), message),
     };
+    // The hold ops are merge-authority writes riding this verb's payload, not
+    // a new top-level root: `{"op": "hold-set"|"hold-release", ...}` answers
+    // with one receipt instead of a merge verdict.
+    if payload
+        .get("op")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("hold-"))
+    {
+        let out = crate::merge_hold::run(
+            payload.get("op").and_then(Value::as_str).unwrap_or(""),
+            &payload,
+        );
+        return (0, out, String::new());
+    }
     let request = match parse_request(&payload) {
         Ok(request) => request,
         Err(message) => return (2, String::new(), format!("authorized-merge: {message}\n")),

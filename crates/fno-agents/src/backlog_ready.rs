@@ -219,7 +219,7 @@ fn days_between(now_ms: i64, ts_ms: i64) -> i64 {
 /// (`ladder.resolve_plan_probe`): strip a `#anchor`, expand `~`, resolve a
 /// relative path against the NODE's own `cwd`; with no anchor, refuse to
 /// guess (the caller fails open).
-fn resolve_plan_probe(entry: &Value) -> Option<PathBuf> {
+pub(crate) fn resolve_plan_probe(entry: &Value) -> Option<PathBuf> {
     let plan_path = get_str(entry, "plan_path")?;
     if plan_path.is_empty() {
         return None;
@@ -253,7 +253,7 @@ fn resolve_plan_probe(entry: &Value) -> Option<PathBuf> {
 /// (`ladder._read_frontmatter`): an empty file, a missing closing fence,
 /// malformed YAML, or non-mapping frontmatter is UNREADABLE; a doc with no
 /// frontmatter, or empty frontmatter, reads as an empty mapping.
-fn read_frontmatter(probe: &std::path::Path) -> Option<Map<String, Value>> {
+pub(crate) fn read_frontmatter(probe: &std::path::Path) -> Option<Map<String, Value>> {
     let text = match std::fs::read_to_string(probe) {
         Ok(t) => t,
         Err(_) => return None,
@@ -367,12 +367,12 @@ fn has_intake_difficulty(e: &Value) -> bool {
 
 /// A non-ABSENT hold on a plan: HELD or INVALID, both of which PARK the node
 /// (the one fail-closed policy in this selector).
-struct HoldVerdict {
-    guard_reason: String,
+pub(crate) struct HoldVerdict {
+    pub(crate) guard_reason: String,
 }
 
 /// One plan's hold state (`ladder.dispatch_hold`).
-enum HoldState {
+pub(crate) enum HoldState {
     /// No declaration: no plan, no anchor, no file under an absent root, or
     /// no `dispatch_hold` key in readable frontmatter.
     Absent,
@@ -385,7 +385,7 @@ enum HoldState {
 }
 
 /// Read one plan's hold declaration (`ladder.dispatch_hold`).
-fn dispatch_hold(entry: &Value) -> HoldState {
+pub(crate) fn dispatch_hold(entry: &Value) -> HoldState {
     let Some(probe) = resolve_plan_probe(entry) else {
         return HoldState::Absent;
     };
@@ -435,7 +435,10 @@ fn dispatch_hold(entry: &Value) -> HoldState {
 /// Find a hold on a node, its parents, or its contained delivery owner
 /// (`ladder.dispatch_hold_verdict`): bounded BFS, enqueue-time dedup, first
 /// non-ABSENT verdict wins.
-fn dispatch_hold_verdict(entry: &Value, by_id: &BTreeMap<String, Value>) -> Option<HoldVerdict> {
+pub(crate) fn dispatch_hold_verdict(
+    entry: &Value,
+    by_id: &BTreeMap<String, Value>,
+) -> Option<HoldVerdict> {
     if !is_dict(entry) {
         return None;
     }

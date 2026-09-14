@@ -200,10 +200,10 @@ def test_map_covers_current_surface_once():
     # Rust-client help entry the judge port's RUST_ONLY_VERB_HELP
     # registration surfaces under `fno agents --help` (refs 0): 624 -> 625.
     # Later folds allocate `agents backlog-note` and `agents backlog-notes`,
-    # the two native note verbs (625 -> 627). This branch allocated
-    # `agents spawn-gate`, the verb the Python gate transport calls, in
-    # parallel from the same 616 base: counted from the merged file, 627 ->
-    # 628.
+    # the two native note verbs (625 -> 627). `agents spawn-gate`, the verb
+    # the Python gate transport calls, landed in parallel: 627 -> 628. This
+    # branch allocated `do pr hold` / `pr hold` rows then removed them when
+    # the writer moved into crates: counted from the merged file, 628.
     assert len(mapped) == 628, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
