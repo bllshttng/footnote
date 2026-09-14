@@ -102,6 +102,32 @@ pub(crate) fn king_quiet_body(session_id: &str, actionable: i64) -> Value {
     })
 }
 
+/// The quiet-branch block message: what the drain read measured, or the
+/// error when the read failed (the sentinel count i64::MAX rides beside it).
+pub(crate) fn king_quiet_message(
+    undelivered: i64,
+    drain_error: Option<&crate::loop_king::ScopeDrainError>,
+) -> String {
+    match drain_error {
+        Some(e) => {
+            format!("board quiet but scope delivery is unreadable: {e}; blocking completion")
+        }
+        None => format!("board quiet; {undelivered} scope nodes still undelivered (drive each scope node to done or superseded to drain)"),
+    }
+}
+
+/// The quiet-branch journal row: like `king_quiet_body`, plus the drain read
+/// it measured and whether that count shrank since the last fire.
+pub(crate) fn king_undelivered_body(session_id: &str, undelivered: i64, shrank: bool) -> Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "actionable": 0,
+        "undelivered": undelivered,
+        "actionable_ids": [],
+        "cleared": shrank,
+    })
+}
+
 pub(crate) fn read_king_board(
     fno_bin: &str,
     cwd: &Path,
