@@ -511,6 +511,28 @@ mod tests {
     }
 
     #[test]
+    fn a_tokenless_roster_candidate_reads_unmeasured() {
+        // A candidate row the producer left without a token is a missing
+        // probe, never an absent candidate: the fold reads it unmeasured, so
+        // the node can never fall through to none on a row it cannot read.
+        let node = json!({"id": "x-notok", "priority": "p2", "pr_number": 2});
+        let drivers = drivers_read(json!([{"name": "w", "node": "x-notok"}]));
+        let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
+        assert_eq!(
+            node_driver(
+                &node,
+                &HashMap::new(),
+                &activity,
+                None,
+                Some(&ok_worked(&[])),
+                Some(&drivers)
+            )
+            .0,
+            "unmeasured"
+        );
+    }
+
+    #[test]
     fn a_quiet_roster_candidate_past_the_stall_line_reads_none() {
         // A roster row whose probe answered unknown + silent + aged past the
         // stall line is the measured-no shape: node_driver none, so
