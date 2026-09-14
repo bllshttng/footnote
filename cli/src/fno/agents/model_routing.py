@@ -589,10 +589,9 @@ def unrouted_model_clear_notice(cleared: Sequence[str]) -> str:
     return (
         "fno: cleared "
         + ", ".join(cleared)
-        + " from this child's env: an unrouted child carries no model claim, so "
-        "it runs on its account's own default rather than a model inherited "
-        "from the launching shell. Select one with --model or a "
-        "config.agents.profiles entry to route it."
+        + " from this child's env: a model the launching shell exported never "
+        "reaches a child. The child's model comes from its --model flag, else "
+        "its account's own default."
     )
 
 

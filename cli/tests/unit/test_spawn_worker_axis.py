@@ -289,3 +289,59 @@ def test_failed_spawn_single_line_stderr_is_captured_whole(monkeypatch):
         advance._spawn_worker("x-0000", None, "slug")
     assert "boom: no spawn" in str(exc.value)
     assert exc.value.detail == "boom: no spawn"
+def test_grid_lane_for_pinned_model_takes_its_declared_row(monkeypatch):
+    """AC7-HP: a node pinned to gpt-5.6-sol with no provider resolves the
+    codex row through the slot and returns the row's coordinates."""
+    from fno import route_resolve as _rr
+
+    monkeypatch.setattr(_rr, "resolve_inventory", lambda: {})
+    monkeypatch.setattr(_rr, "runtime_capacity", lambda **kw: {})
+    seen: dict = {}
+
+    def fake_resolve_slot(profile_verb, node, capacity, *, inventory=None,
+                          explicit_model_value=None, **kw):
+        seen["model"] = explicit_model_value
+        return (
+            {"harness": "codex", "model": "gpt-5.6-sol", "pin_row": "codex-sol"},
+            ["slot=operator-pin-override row=codex-sol harness=codex"],
+            "pick",
+        )
+
+    monkeypatch.setattr(_rr, "resolve_slot", fake_resolve_slot)
+    got = advance._grid_lane_for(
+        {"difficulty": "medium", "plan_path": "/plans/p.md"},
+        model="gpt-5.6-sol",
+        provider=None,
+    )
+    assert seen["model"] == "gpt-5.6-sol"
+    assert got == ("codex", "gpt-5.6-sol", None, None, None)
+
+
+def test_grid_lane_for_pinned_model_without_a_row_declines(monkeypatch):
+    """A pinned model the rows do not declare dispatches on the default: the
+    answer is all-None with the slot's terminal as the reason."""
+    from fno import route_resolve as _rr
+
+    monkeypatch.setattr(_rr, "resolve_inventory", lambda: {})
+    monkeypatch.setattr(_rr, "runtime_capacity", lambda **kw: {})
+
+    def fake_resolve_slot(*a, **kw):
+        return (
+            None,
+            ["slot=operator-pin-override (a typed model/vendor/route outranks the lanes)"],
+            "unarmed",
+        )
+
+    monkeypatch.setattr(_rr, "resolve_slot", fake_resolve_slot)
+    got = advance._grid_lane_for(
+        {"difficulty": "medium", "plan_path": "/plans/p.md"},
+        model="opus",
+        provider=None,
+    )
+    assert got == (
+        None,
+        None,
+        None,
+        None,
+        "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)",
+    )
