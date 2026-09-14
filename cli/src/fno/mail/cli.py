@@ -3109,8 +3109,7 @@ def _raw_send(
 
     # 4. Heal a dead pane binding before routing on the row (x-4a68): a codex
     #    row whose pane is gone but whose thread is loaded rebinds to the
-    #    thread lane. An unmeasurable probe fails open for a real send and
-    #    answers exit 3 under --check.
+    #    thread lane. An unmeasurable probe fails open (exit 3 under --check).
     if entry.mux and session_id:
         heal_verdict, heal_reason, heal_pane = _lane_heal(session_id)
         if heal_verdict == "rebound-thread":
