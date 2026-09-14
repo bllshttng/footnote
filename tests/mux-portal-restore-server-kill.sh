@@ -171,11 +171,13 @@ if [[ "${FNO_PORTAL_LIVE:-0}" == "1" ]]; then
         --name proof-codex --harness codex --model gpt-5.6-luna --substrate thread --cwd "$TMP_DIR/repo" >/dev/null
 fi
 
-"$MUX_BIN" mux thread proof-claude --portal 0 >/dev/null 2>&1 || {
+"$MUX_BIN" mux thread proof-claude --portal 0 >/dev/null 2>&1 || \
+    "$MUX_BIN" mux thread proof-claude --portal 0 >/dev/null 2>&1 || {
     echo "FAIL: the first portal reach never filled; server log tail:" >&2
     tail -5 "$TMP_DIR/server.log" >&2
     exit 1
 }
+sleep 1
 "$MUX_BIN" mux thread proof-codex --portal 2 --split right >/dev/null 2>&1 || \
     echo "[plant] portal 2's first reach did not fill; the verb will still answer for it by name"
 
