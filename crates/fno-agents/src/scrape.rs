@@ -266,7 +266,7 @@ fn mux_pane_ls(bin: &std::ffi::OsStr, session: &str) -> Option<BTreeMap<u64, Opt
 
 /// `fno mux pane read <pane> --session <s> --json` -> the pane's rendered
 /// grid text. `None` on any failure (dead pane, unreachable server).
-fn mux_pane_read(bin: &std::ffi::OsStr, session: &str, pane: u64) -> Option<String> {
+pub(crate) fn mux_pane_read(bin: &std::ffi::OsStr, session: &str, pane: u64) -> Option<String> {
     let out = Command::new(bin)
         .args([
             "mux",

@@ -90,12 +90,16 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         branch_merged: None,
         planning: None,
         planning_closed: Vec::new(),
+        planning_plan_written: Vec::new(),
+        planning_released: false,
         confirm_hold: None,
         session_terminal: None,
         superseded_by_live_peer: None,
         node_merged: false,
         pid_gone: false,
         release_quiet: false,
+        open_pr: None,
+        peer_drives_pr: false,
     };
     assert_eq!(gc_decide(&live, 900).0, GcAction::Keep);
     assert_eq!(

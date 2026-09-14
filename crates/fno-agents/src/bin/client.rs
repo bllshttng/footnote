@@ -57,6 +57,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "grid",
     "help",
     "host",
+    "judge",
     "kill-check",
     "king-checkin",
     "king-history",
@@ -563,6 +564,13 @@ async fn run(args: Vec<String>) -> i32 {
     // `graph-get`/`bash-census`/`session-start-bytes` (x-997a): daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
+    }
+    // `judge`: the blueprint judge's grading half (lens prompts,
+    // model spawn, verdict parsing). Daemon-free like graph-get; the Python
+    // `fno doctor observer judge` / `sweep --judge` wrappers shell HERE and
+    // own event emission (fno.events single-sourced there).
+    if verb == "judge" {
+        return fno_agents::blueprint_judge::run_judge(&args[1..]);
     }
 
     // `backlog-notes` (x-920a wave 3): inventory, digest migration, and
@@ -2971,7 +2979,7 @@ fn run_node_route(rest: &[String]) -> i32 {
         let answer = match &graph {
             None => serde_json::json!({"state": "graph-unreadable"}),
             Some(g) => {
-                let verdict = fno_agents::gc_sweep::provenance_verdict(&entry, "", g, None);
+                let verdict = fno_agents::gc_sweep::provenance_verdict(&entry, "", g, None, None);
                 let node = verdict.route.node.clone();
                 let basis = format!(
                     "via {}",

@@ -959,11 +959,16 @@ def _verdict_one(
             return _verdict(row, LEAVE,
                             f"tail reads {truth}, session does not owe a move",
                             "none")
-        clause = ("last 429 window passed" if window == "passed"
-                  else "silent, no 429 in tail")
+        if window == "passed":
+            # x-6412: a clock-only return races the provider-cap canary and
+            # wakes every capped row at once. The return is the actor's, so a
+            # passed window leaves, never wakes.
+            return _verdict(row, LEAVE,
+                            "429 window passed; return owned by provider-cap",
+                            "none")
         return _verdict(row, WAKE,
                         f"{row.state} {_mins(now_s, facts.last_event_epoch)}m "
-                        f"silent, {clause}", "resume")
+                        f"silent, no 429 in tail", "resume")
 
     # leave: everything else, including every healthy injectable row - the
     # watchdog never competes with the normal inject path. Never

@@ -94,8 +94,8 @@ pub(super) fn graph_read(
         pr_state.insert(node.to_string(), (None, 0, 0));
     }
     let mut open: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for (sid, node) in open_do {
-        open.entry(sid.to_ascii_lowercase())
+    for (slurp, node) in open_do {
+        open.entry(slurp.to_ascii_lowercase())
             .or_default()
             .push(node.to_string());
     }
@@ -105,8 +105,12 @@ pub(super) fn graph_read(
         open_do: open,
         phases: std::collections::HashMap::new(),
         closed_planning: std::collections::HashMap::new(),
+        plan_written: std::collections::HashMap::new(),
         statuses,
         pr_state,
+        pr_number: std::collections::HashMap::default(),
+        do_nodes: std::collections::HashMap::default(),
+        pr_reads: std::collections::HashMap::default(),
     })
 }
 
@@ -1556,6 +1560,239 @@ fn a_planner_retires_only_on_its_own_closed_assignment() {
             .iter()
             .any(|e| e.name == "bp-x-4hp-a"),
         "the unclosed planner keeps its row"
+    );
+}
+
+/// d-81c6da7e AC1-HP over the PRODUCTION graph read: a codex `bp-` worker
+/// whose node reads `ready`, whose `plan_path` names a file that exists,
+/// and whose own blueprint row carries no `ended_at`. The written plan is
+/// the second finished marker: quiet past the planner grace retires the
+/// row, and the basis names `plan written`.
+#[test]
+fn a_codex_planner_that_wrote_the_plan_retires_without_a_close() {
+    use crate::daemon::CascadeOutcome;
+
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let plans = dir.path().join("plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    let plan_file = plans.join("x-m2hp.md");
+    std::fs::write(&plan_file, "# plan\n").unwrap();
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-m2hp",
+            "status": "ready",
+            "plan_path": plan_file.display().to_string(),
+            "sessions": [{
+                "phase": "blueprint",
+                "harness": "codex",
+                "session_id": "s-m2",
+                "started_at": "2026-09-01T00:00:00Z",
+            }],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "bp-x-m2hp".into();
+        e.short_id = "bp-x-m2hp".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-m2".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let store = home.root().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let quiet = quiet_transcript(&store, "q.jsonl", 2 * 3600);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &crate::gc_sweep::read_graph_entries,
+        &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
+        &|_| true,
+        &|_| CascadeOutcome::Removed,
+        &no_agents,
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    assert_eq!(summary.retired[0].0, "bp-x-m2hp", "{:?}", summary.retired);
+    assert!(
+        summary.retired[0]
+            .1
+            .contains("planning finished on x-m2hp: plan written"),
+        "{:?}",
+        summary.retired[0].1
+    );
+}
+
+/// d-81c6da7e AC3-HP: a planner whose node has a `plan_path` that names a
+/// MISSING file holds neither finished marker. The row keeps, the hold
+/// names the node and its status, and the reason is what escalates and
+/// what a release answers.
+#[test]
+fn a_planner_whose_plan_file_is_missing_keeps_and_holds() {
+    use crate::daemon::CascadeOutcome;
+
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let plan_file = dir.path().join("plans").join("gone.md");
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-m3hp",
+            "status": "idea",
+            "plan_path": plan_file.display().to_string(),
+            "sessions": [{
+                "phase": "blueprint",
+                "harness": "codex",
+                "session_id": "s-m3",
+                "started_at": "2026-09-01T00:00:00Z",
+            }],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "bp-x-m3hp".into();
+        e.short_id = "bp-x-m3hp".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-m3".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let store = home.root().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let quiet = quiet_transcript(&store, "q.jsonl", 2 * 3600);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &crate::gc_sweep::read_graph_entries,
+        &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
+        &|_| true,
+        &|_| CascadeOutcome::Removed,
+        &no_agents,
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert_eq!(summary.retired.len(), 0, "{:?}", summary.retired);
+    assert!(
+        summary
+            .kept_planning_unclosed
+            .iter()
+            .any(|(id, node)| id == "bp-x-m3hp" && node == "x-m3hp"),
+        "{:?}",
+        summary.kept_planning_unclosed
+    );
+    let hold = summary
+        .holds
+        .iter()
+        .find(|h| h.id == "bp-x-m3hp")
+        .expect("a hold for the unfinished planner");
+    assert_eq!(
+        hold.reason,
+        "planning assignment not finished by this session"
+    );
+    assert_eq!(
+        hold.detail,
+        "x-m3hp idea: no close and no plan written by this session"
+    );
+}
+
+/// d-81c6da7e AC2-HP: a replanner inherits nothing. Two planner sessions
+/// on one node, the earlier one with no close, the plan file present: the
+/// EARLIER session wrote the plan and retires on marker 2; the later one
+/// keeps - another planner preceded it, and it wrote no close of its own.
+#[test]
+fn a_replanner_does_not_inherit_an_earlier_planners_plan() {
+    use crate::daemon::CascadeOutcome;
+
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let plans = dir.path().join("plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    let plan_file = plans.join("x-m2hp.md");
+    std::fs::write(&plan_file, "# plan\n").unwrap();
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-m2hp",
+            "status": "ready",
+            "plan_path": plan_file.display().to_string(),
+            "sessions": [
+                {
+                    "phase": "blueprint",
+                    "harness": "codex",
+                    "session_id": "s-early",
+                    "started_at": "2026-09-01T00:00:00Z",
+                },
+                {
+                    "phase": "blueprint",
+                    "harness": "codex",
+                    "session_id": "s-late",
+                    "started_at": "2026-09-03T00:00:00Z",
+                },
+            ],
+        }]),
+    );
+    for (name, sid) in [("bp-x-m2hp-a", "s-early"), ("bp-x-m2hp-b", "s-late")] {
+        crate::state::update_registry(&home.registry_json(), |r| {
+            let mut e = state::RegistryEntry::default();
+            e.name = name.into();
+            e.short_id = name.into();
+            e.origin = Some("spawn".into());
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some(sid.into());
+            e.created_at = "2026-09-01T00:00:00Z".into();
+            r.entries.push(e);
+        })
+        .unwrap();
+    }
+    let store = home.root().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let quiet = quiet_transcript(&store, "q.jsonl", 2 * 3600);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &crate::gc_sweep::read_graph_entries,
+        &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
+        &|_| true,
+        &|_| CascadeOutcome::Removed,
+        &no_agents,
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    assert_eq!(summary.retired[0].0, "bp-x-m2hp-a", "{:?}", summary.retired);
+    assert!(
+        summary.retired[0]
+            .1
+            .contains("planning finished on x-m2hp: plan written"),
+        "{:?}",
+        summary.retired[0].1
+    );
+    assert!(
+        summary
+            .kept_planning_unclosed
+            .iter()
+            .any(|(id, node)| id == "bp-x-m2hp-b" && node == "x-m2hp"),
+        "{:?}",
+        summary.kept_planning_unclosed
     );
 }
 

@@ -339,8 +339,8 @@ def test_single_sgt_429_is_report_only_until_provider_quorum():
     [after] = _run(
         [row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL, age_min=125)}, now_s=NOW_1850
     )
-    assert after.verdict == WAKE
-    assert "window passed" in after.basis
+    assert after.verdict == LEAVE
+    assert "429 window passed; return owned by provider-cap" in after.basis
 
 
 def test_unparseable_reset_stamp_is_leave_never_wake():

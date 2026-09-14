@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::agents_config::provider_cap_config;
 use crate::paths::AgentsHome;
-use crate::provider_cap::{append_questions_row, questions_path, read_persisted_snapshot};
+use crate::provider_cap::read_persisted_snapshot;
 use crate::provider_cap::{
     epoch_to_rfc3339, lane_file_token, lanes_dir, now_epoch_secs, snapshot, CapSnapshot,
     PROVIDER_CAP_INTERVAL_S,
@@ -99,14 +99,24 @@ fn render_text_snapshot(v: &Value) -> String {
             .and_then(Value::as_i64)
             .map(epoch_to_rfc3339)
             .unwrap_or_else(|| "unknown".to_string());
+        let reset_passed = lane
+            .get("reset_passed_epoch")
+            .and_then(Value::as_i64)
+            .map(epoch_to_rfc3339);
         let missing = lane
             .get("missing_reset_timezone")
             .and_then(Value::as_array)
             .map(|a| a.len())
             .unwrap_or(0);
         out.push_str(&format!(
-            "\n{} [{}] reset={} missing_tz={}",
-            lane_name, state, reset, missing
+            "\n{} [{}] reset={}{} missing_tz={}",
+            lane_name,
+            state,
+            reset,
+            reset_passed
+                .map(|r| format!(" reset_passed={r}"))
+                .unwrap_or_default(),
+            missing
         ));
         for m in lane
             .get("members")
@@ -159,22 +169,15 @@ fn cap_decide(args: &[String]) -> i32 {
         eprintln!("provider-cap decide: cannot write {}: {e}", path.display());
         return 1;
     }
-    append_questions_row(
-        &questions_path(&home),
-        &json!({
-            "ts": epoch_to_rfc3339(now_epoch_secs()),
-            "type": "operator_question_closed",
-            "source": "provider-cap",
-            "data": {
-                "question_id": format!("provider-cap:{lane}"),
-                "answer": verdict,
-                "closed_by": "provider-cap decide",
-            },
-        }),
-    );
     // The answer consumes the open question: drop the marker so a later
     // strand on the same lane can ask fresh instead of being suppressed.
-    let _ = std::fs::remove_file(dir.join(format!("question-{}.json", lane_file_token(lane))));
+    crate::provider_cap::close_operator_question(
+        &home,
+        lane,
+        &verdict,
+        "provider-cap decide",
+        now_epoch_secs(),
+    );
     println!("recorded: {} -> {verdict}", path.display());
     0
 }
@@ -404,6 +407,34 @@ fn real_deps() -> crate::provider_cap::LeaveDeps {
                 Err(format!("stop {} failed", member.name))
             }
         }),
+        resume: Box::new(|member| {
+            let who = member
+                .session_id
+                .as_deref()
+                .and_then(|sid| sid.get(0..8))
+                .map(String::from)
+                .unwrap_or_else(|| member.name.clone());
+            if run_fno(
+                &["agents", "resume", &who],
+                None,
+                std::time::Duration::from_secs(180),
+            ) {
+                Ok(())
+            } else {
+                Err(format!("resume {} failed", member.name))
+            }
+        }),
+        announce: Box::new(|body| {
+            if run_fno(
+                &["agents", "mail", "team", "--scope", "all", body],
+                None,
+                std::time::Duration::from_secs(60),
+            ) {
+                Ok(())
+            } else {
+                Err("team mail refused".into())
+            }
+        }),
     }
 }
 
@@ -416,12 +447,31 @@ fn run_armed(
     cfg: &crate::agents_config::ProviderCapConfig,
     now: i64,
 ) -> String {
-    let deps = real_deps();
+    run_armed_with(home, scan, snap, cfg, now, &real_deps())
+}
+
+/// Same routing with injected deps (tests). Order: mark reopened canaries on
+/// open lanes, leave ladder per open lane, return ladder per returning lane.
+pub(crate) fn run_armed_with(
+    home: &crate::paths::AgentsHome,
+    scan: &crate::provider_cap::CapScan,
+    snap: &CapSnapshot,
+    cfg: &crate::agents_config::ProviderCapConfig,
+    now: i64,
+    deps: &crate::provider_cap::LeaveDeps,
+) -> String {
+    for lane in snap.open_lanes() {
+        crate::provider_cap::mark_reopened_if_pending(home, &lane.lane, now);
+    }
     let mut parts: Vec<String> = Vec::new();
     for lane in snap.open_lanes() {
         let answer = crate::provider_cap::read_decision(home, &lane.lane);
         let outcome =
             crate::provider_cap::run_leave_lane(home, scan, lane, answer.as_ref(), cfg, now, &deps);
+        parts.push(format!("{}: {outcome}", lane.lane));
+    }
+    for lane in snap.lanes.iter().filter(|l| l.state == "returning") {
+        let outcome = crate::provider_cap::run_return_lane(home, lane, cfg, now, deps);
         parts.push(format!("{}: {outcome}", lane.lane));
     }
     if parts.is_empty() {

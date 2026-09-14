@@ -81,7 +81,7 @@ Inline, final message:
 2. CLAIM: ...
 ### Findings
 - each probe gets a line here even when it held
-fno-prove-it: {"verdict":"<PASS|FAIL|BLOCKED|SKIP>","claim":"<one line>"}
+fno-prove-it: {"verdict":"<PASS|FAIL|BLOCKED|SKIP>","claim":"<one line>","retires":"<optional report path this PASS answers>"}
 ```
 
 Build/install/checkout are setup, not steps. The terminal `fno-prove-it:` JSON line is the machine record: `validate-prove-it.sh` reads it, refuses a PASS with no 🔍 marker in Steps, refuses a PASS with no `### Claims` section or a claim row missing its `CMD:`, and passes FAIL/BLOCKED/SKIP through untouched.
@@ -99,4 +99,4 @@ No partial pass: "3 of 4 passed" is FAIL until the fourth passes or is explained
 
 A FAIL lands on one of two paths, by where the run was declared. A declared run is a `done_probes`/`close_probes` entry the loop or close verbs spawn themselves through `fno-agents probe-run`: PASS satisfies the probe, FAIL blocks the loop or the close, and BLOCKED and SKIP carry NO verdict and read as UNANSWERED - they hold the gate without naming a failure. Probe declarations may carry their claim as a trailing ` # <claim>` comment; the row records it. A probe run through `fno-agents probe-run` must emit output to count: exit 0 with nothing captured reads SKIP, never pass.
 
-An ad-hoc run has no declared probe, so it has no gate consumer. Give it one: save the report under the audited plan's `.artifacts/` directory (`<plan>.artifacts/<name>/REPORT.md`). A report saved anywhere else still has no reader. `fno-agents prove-it-verdicts` reads the terminal record there, notes a FAIL on the node once, surfaces it on `fno inbox outstanding` and the king board, and holds the close of a node that is still open. It never reopens a done node - a king rules. A newer PASS record or a decision that names the report retires the FAIL.
+An ad-hoc run has no declared probe, so it has no gate consumer. Give it one: save the report under the audited plan's `.artifacts/` directory (`<plan>.artifacts/<name>/REPORT.md`). A report saved anywhere else still has no reader. `fno-agents prove-it-verdicts` reads the terminal record there, notes a FAIL on the node once, surfaces it on `fno inbox outstanding` and the king board, and holds the close of a node that is still open. It never reopens a done node - a king rules. A newer PASS retires the FAIL only when its claim states the FAIL's claim (the full FAIL claim text inside the PASS claim; the record may name the report it answers with `retires`, but the claim match is still required). A decision that names the report also retires it. A narrow re-run PASS leaves a broader FAIL open (x-9362).

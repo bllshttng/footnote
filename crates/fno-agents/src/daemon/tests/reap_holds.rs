@@ -4,7 +4,8 @@
 
 use super::gc_receipts::*;
 use super::*;
-use crate::gc_sweep::{self, GcSummary};
+use crate::gc_sweep::{self, GcSummary, GraphRead};
+use std::collections::HashMap;
 
 // ── x-e3cc: every hold carries an age, a basis and an escalation ─────────
 
@@ -674,6 +675,122 @@ fn the_witness_gate_releases_a_parked_witness_and_refuses_an_active_one() {
     );
 }
 
+/// d-81c6da7e AC3-HP: an idea-node planner hold ages on the same clock the
+/// other reaper holds use, reads `escalated` past the threshold, and its
+/// reason is the string a release answers.
+#[test]
+fn an_idea_planner_hold_ages_and_escalates_past_the_threshold() {
+    let (dir, home) = staged_graph_home();
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-idea",
+            "status": "idea",
+            "sessions": [{
+                "phase": "blueprint",
+                "harness": "codex",
+                "session_id": "s-idea",
+                "started_at": "2026-09-01T00:00:00Z",
+            }],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "bp-x-idea".into();
+        e.short_id = "bp-x-idea".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-idea".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let mut summary = gc_sweep::run(
+        &home,
+        &EventEmitter::new(home.events_jsonl(), "daemon"),
+        900,
+        true,
+        7,
+        &crate::gc_sweep::read_graph_entries,
+        &|_| None,
+        &uniform_ages(5401),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+    );
+    summary.mark_escalated(std::time::Duration::from_secs(5400));
+    let h = find_hold(&summary, "bp-x-idea");
+    assert_eq!(h.reason, "planning assignment not finished by this session");
+    assert_eq!(h.age_s, Some(5401));
+    assert!(h.escalated, "{h:?}");
+}
+
+/// d-81c6da7e AC3-EDGE: the release lifts the marker question by ruling -
+/// the row retires past the 1200 s planner grace, and the basis carries
+/// the release prefix plus the `released` marker.
+#[test]
+fn gc_sweep_release_retires_a_released_planner() {
+    let (dir, home) = staged_graph_home();
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-idea",
+            "status": "idea",
+            "sessions": [{
+                "phase": "blueprint",
+                "harness": "codex",
+                "session_id": "s-idea",
+                "started_at": "2026-09-01T00:00:00Z",
+            }],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "bp-x-idea".into();
+        e.short_id = "bp-x-idea".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-idea".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let release = gc_sweep::Release {
+        handle: "bp-x-idea".to_string(),
+        reason: "planning assignment not finished by this session".to_string(),
+        detail: "x-idea idea: no close and no plan written by this session".to_string(),
+    };
+    let summary = gc_sweep::run_with_release(
+        &home,
+        &EventEmitter::new(home.events_jsonl(), "daemon"),
+        900,
+        false,
+        7,
+        &crate::gc_sweep::read_graph_entries,
+        &|_| None,
+        &uniform_ages(5401),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+        Some(&release),
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    assert_eq!(summary.retired[0].0, "bp-x-idea", "{:?}", summary.retired);
+    let basis = &summary.retired[0].1;
+    assert!(
+        basis.starts_with("released planning assignment not finished by this session held "),
+        "basis: {basis}"
+    );
+    assert!(
+        basis.contains("planning finished on x-idea: released"),
+        "basis: {basis}"
+    );
+}
+
 /// AC4-HP: the unevaluated gate renders in both formats, named, and
 /// never reads as a retirement - the text says the gate was not evaluated
 /// and apply may still refuse, the JSON exposes the same id and reason, and
@@ -736,5 +853,78 @@ fn the_release_refusal_names_the_unverified_gate() {
         crate::reap_release::row_bucket_in(&home, &dry, "ghost"),
         "no registry row names this handle"
     );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+// ── the open-PR keep through the sweep ──────────────────────────────────────
+
+/// A stopped claude spawn row whose session has a do row on an in_review
+/// node carrying pr_number 1943 (merge_status unrecorded): the sweep keeps
+/// the row under `open pr`, projects a hold with a clock, and exposes the
+/// nudge-ladder row. A peer without a do row on the node changes nothing.
+#[test]
+fn ac1_hp_open_pr_keep_survives_a_terminal_state_through_the_sweep() {
+    let home = tmp_home("gc-open-pr");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = claude_worker_row("pr-row", "cccc9999");
+        row.origin = Some("spawn".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+    let sid = "cccc9999-1111-2222-3333-444444444444";
+    let graph = Some(GraphRead {
+        index: HashMap::from([(
+            sid.to_string(),
+            vec![("x-node".to_string(), "in_review".to_string())],
+        )]),
+        work_index: HashMap::from([(
+            sid.to_string(),
+            vec![("x-node".to_string(), "in_review".to_string())],
+        )]),
+        statuses: HashMap::from([("x-node".to_string(), "in_review".to_string())]),
+        pr_state: HashMap::from([("x-node".to_string(), (None, 0, 0))]),
+        pr_number: HashMap::from([("x-node".to_string(), Some(1943))]),
+        do_nodes: HashMap::from([(
+            sid.to_string(),
+            std::collections::HashSet::from(["x-node".to_string()]),
+        )]),
+        ..Default::default()
+    });
+    // The roster reads stopped: the exact state that reaped seven rows on
+    // 2026-09-13 before the keep existed.
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("stopped")),
+    ]);
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        graph,
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| true,
+    );
+    // The row handle is the short id when one is recorded.
+    assert_eq!(
+        summary.kept_open_pr,
+        vec![("cccc9999".to_string(), "x-node".to_string())],
+        "kept buckets: {:?}",
+        summary.kept_open_work
+    );
+    let hold = find_hold(&summary, "cccc9999");
+    assert_eq!(hold.reason, "open pr");
+    assert_eq!(hold.detail, "x-node #1943");
+    assert_eq!(summary.open_pr_rows.len(), 1, "{:?}", summary.open_pr_rows);
+    let ladder_row = &summary.open_pr_rows[0];
+    assert_eq!(ladder_row.node, "x-node");
+    assert_eq!(ladder_row.pr, 1943);
+    assert_eq!(ladder_row.session_id, sid);
+    // A stopped roster state reads as not live: the ladder's resume arm.
+    assert!(!ladder_row.live);
+    assert_eq!(summary.retired, vec![], "nothing retires");
     std::fs::remove_dir_all(home.root()).ok();
 }

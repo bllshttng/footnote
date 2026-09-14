@@ -12,7 +12,7 @@ from typing import Optional
 import typer
 
 # The constant lives in claims beside the other two holder prefixes.
-from fno.claims.core import BLUEPRINT_HOLDER_PREFIX
+from fno.claims.core import BLUEPRINT_HOLDER_PREFIX, HANDOVER_HOLDER_PREFIX
 
 
 def _graph_path():
@@ -624,7 +624,18 @@ def cmd_session_close(
     elif blueprint_held:
         _release_into(receipt, claim_key, blueprint_holder)
     else:
-        receipt["claim_released"] = False
+        # The env export cannot reach a daemon-forked worker, so the closing
+        # session may not carry its own handover holder. Resolve the worker
+        # name the registry binds to this session and release exactly that
+        # holder; any other holder stays held.
+        from fno.claims.self_identity import _roster_name_for_session
+
+        roster_name = _roster_name_for_session(eff_session)
+        handover = HANDOVER_HOLDER_PREFIX + roster_name if roster_name else ""
+        if handover and claim.get("holder") == handover:
+            _release_into(receipt, claim_key, handover)
+        else:
+            receipt["claim_released"] = False
     if json_out:
         typer.echo(json.dumps(receipt))
     else:

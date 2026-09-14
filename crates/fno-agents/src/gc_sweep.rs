@@ -120,6 +120,15 @@ pub struct GcSummary {
     /// `(id, node)`: all named nodes done, but one carries an OPEN do row
     /// for this session (Locked Decision 1).
     pub kept_open_do_row: Vec<(String, String)>,
+    /// `(id, node)`: the row keeps because its session drives an open PR on
+    /// the node. Counted in `kept_total`; projected into `holds` so the
+    /// hold has a clock like every other keep.
+    pub kept_open_pr: Vec<(String, String)>,
+    /// `(id, node)` for the rows the open-PR keep named, and the nudge
+    /// ladder's DRY-RUN plan: `would nudge <id> (<action>)`, no effect and
+    /// no state. Empty on a real run: the ladder fires on the daemon arm
+    /// only, never from a manual verb.
+    pub open_pr_nudge: Vec<(String, String)>,
     /// `(node, harness, session_id)` for every stale open do row this pass
     /// FILLED. The row stays; only `ended_at` and `ended_by` are added.
     pub settled_do_rows: Vec<(String, String, String)>,
@@ -175,6 +184,30 @@ pub struct GcSummary {
     /// whose current hold no longer matched the one it captured. The row
     /// keeps under its real hold; the reason rides here and in the JSON.
     pub release_refused: Vec<String>,
+    /// One entry per kept open-PR row (Locked Decision 7): the nudge
+    /// ladder's input. A projection the `kept_total` does not count.
+    pub open_pr_rows: Vec<OpenPrRow>,
+}
+
+/// One open-PR row the nudge ladder reads (Locked Decision 7): the row, the
+/// session it fronts, the node and PR it drives, and whether the session is
+/// reachable as mail or only by a resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OpenPrRow {
+    /// The row handle.
+    pub id: String,
+    /// The row's FULL harness session id (the mail/resume address).
+    pub session_id: String,
+    pub harness: String,
+    pub node: String,
+    pub pr: u64,
+    pub cwd: String,
+    /// Transcript-quiet seconds when the age seam answered.
+    pub transcript_age_s: Option<i64>,
+    /// Claude: a roster row exists with a non-terminal state. Other
+    /// harnesses: the pid is not gone and the registry status is not
+    /// `exited`.
+    pub live: bool,
 }
 
 /// The ruling a `reap --release <row>` carries into the sweep (x-e3cc): the
@@ -250,6 +283,7 @@ impl GcSummary {
             + self.kept_transcript_unresolved.len()
             + self.kept_graph_unreadable.len()
             + self.kept_open_do_row.len()
+            + self.kept_open_pr.len()
             + self.kept_dirty.len()
             + self.kept_unmerged.len()
             + self.kept_unprobed.len()
@@ -382,11 +416,59 @@ pub struct GraphRead {
     /// recorded as unrecorded, never asserted unmerged, and an additional PR
     /// whose state is unrecorded still counts as open.
     pub pr_state: HashMap<String, (Option<String>, usize, usize)>,
+    /// Node id -> recorded `pr_number` (Locked Decision 1). `None` when the
+    /// node carries no PR; absent when the node itself is unknown.
+    pub pr_number: HashMap<String, Option<u64>>,
+    /// Lowercased session id -> the node ids where the session has a `do`
+    /// row, ENDED OR NOT (Locked Decision 3): a session that ever did the
+    /// work on a node is the session whose PR it is.
+    pub do_nodes: HashMap<String, std::collections::HashSet<String>>,
     /// Lowercased session id -> the node ids where THIS session's own
     /// `blueprint` or `think` sessions[] row carries a non-empty `ended_at`
-    /// (x-5aef task 1.2). The positive marker the planner's own close
+    /// (x-5aef task 2). The positive marker the planner's own close
     /// writes; its absence means this assignment never finished.
     pub closed_planning: HashMap<String, std::collections::HashSet<String>>,
+    /// Lowercased session id -> the node ids where THIS session wrote the
+    /// node's plan (marker 2, d-81c6da7e): the node's `plan_path` names an
+    /// existing file and no other session's planning row on it started
+    /// earlier. Row order is the authorship fact, never plan mtime.
+    pub plan_written: HashMap<String, std::collections::HashSet<String>>,
+    /// Staged per-pass answers for the Locked Decision 2 GitHub read:
+    /// `(cwd, pr) -> Some(true) open | Some(false) merged/closed | None
+    /// unreadable`. Production leaves it empty and resolves misses through
+    /// [`gh_pr_is_open`]; tests stage answers here so no test touches the
+    /// network.
+    pub pr_reads: HashMap<(String, u64), Option<bool>>,
+}
+
+/// Does the node's `plan_path` name an existing file (marker 2)? A leading
+/// `~/` expands against `$HOME`; a relative path joins the node's `cwd`.
+/// An unresolvable path (no HOME, no cwd, no file) refuses: it proves no
+/// plan was written here.
+fn plan_file_exists(plan_path: &str, cwd: Option<&str>) -> bool {
+    let path = match plan_path.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) => std::path::PathBuf::from(home).join(rest),
+            Err(_) => return false,
+        },
+        None => std::path::PathBuf::from(plan_path),
+    };
+    let path = if path.is_relative() {
+        match cwd {
+            Some(cwd) => std::path::PathBuf::from(cwd).join(path),
+            None => return false,
+        }
+    } else {
+        path
+    };
+    path.is_file()
+}
+
+/// The planning hold's detail (d-81c6da7e). One builder: the hold the sweep
+/// pushes and the string a release ruling must match are the same bytes, so
+/// the two sites cannot drift.
+fn planning_hold_detail(node: &str, status: &str) -> String {
+    format!("{node} {status}: no close and no plan written by this session")
 }
 
 /// One row the pass decided to retire, with everything the write tail needs.
@@ -527,8 +609,11 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
     let mut phases: HashMap<String, Vec<String>> = HashMap::new();
     let mut closed_planning: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let mut plan_written: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut statuses: HashMap<String, String> = HashMap::new();
     let mut pr_state: HashMap<String, (Option<String>, usize, usize)> = HashMap::new();
+    let mut pr_number: HashMap<String, Option<u64>> = HashMap::new();
+    let mut do_nodes: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     for entry in &entries {
         let Some(node_id) = graph_store::entry_id(entry) else {
             continue;
@@ -540,6 +625,10 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+        );
+        pr_number.insert(
+            node_id.to_string(),
+            entry.get("pr_number").and_then(Value::as_u64),
         );
         let additional = entry
             .get("additional_prs")
@@ -564,6 +653,11 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
         let Some(rows) = entry.get("sessions").and_then(Value::as_array) else {
             continue;
         };
+        // Marker 2's inputs: every blueprint/think row on the node, as
+        // (session, parseable started_at). Collected first, so authorship
+        // is judged over the node's whole planner set, never one row
+        // alone.
+        let mut planning_rows: Vec<(String, Option<u64>)> = Vec::new();
         for row in rows {
             let sid = row.get("session_id").and_then(Value::as_str).map(str::trim);
             let Some(sid) = sid.filter(|s| !s.is_empty()) else {
@@ -574,6 +668,16 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                     .entry(sid.to_ascii_lowercase())
                     .or_default()
                     .push(node_id.to_string());
+            }
+            // Locked Decision 3: every `do` row, ended or not - a session
+            // that ever did the work on a node is the session whose PR it
+            // is. The open-do map above stays the obligation question; this
+            // one is the attribution question.
+            if row.get("phase").and_then(Value::as_str) == Some("do") {
+                do_nodes
+                    .entry(sid.to_ascii_lowercase())
+                    .or_default()
+                    .insert(node_id.to_string());
             }
             let phase = row
                 .get("phase")
@@ -604,6 +708,46 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                     .or_default()
                     .insert(node_id.to_string());
             }
+            if phase == "blueprint" || phase == "think" {
+                let started = row
+                    .get("started_at")
+                    .and_then(Value::as_str)
+                    .and_then(crate::tick_ledger::parse_rfc3339_unix);
+                planning_rows.push((sid.to_ascii_lowercase(), started));
+            }
+        }
+        // Marker 2 (d-81c6da7e): attribute the plan to its author. The
+        // stat runs only on a node with a planner and a plan_path, so a
+        // node with neither costs nothing. A session qualifies when its
+        // own row carries a parseable `started_at` and no OTHER session's
+        // row is missing one, unparseable, or strictly earlier - unknown
+        // order never proves this session came first. Same-second rows
+        // both qualify.
+        if !planning_rows.is_empty() {
+            let plan_path = entry
+                .get("plan_path")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let cwd = entry.get("cwd").and_then(Value::as_str);
+            if let Some(plan_path) = plan_path {
+                if plan_file_exists(plan_path, cwd) {
+                    for (sid_l, mine) in &planning_rows {
+                        let Some(mine) = mine else {
+                            continue;
+                        };
+                        let no_earlier_other = planning_rows.iter().all(|(other, theirs)| {
+                            other == sid_l || matches!(theirs, Some(t) if t >= mine)
+                        });
+                        if no_earlier_other {
+                            plan_written
+                                .entry(sid_l.clone())
+                                .or_default()
+                                .insert(node_id.to_string());
+                        }
+                    }
+                }
+            }
         }
     }
     Some(GraphRead {
@@ -612,8 +756,12 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
         open_do,
         phases,
         closed_planning,
+        plan_written,
         statuses,
         pr_state,
+        pr_number,
+        do_nodes,
+        pr_reads: HashMap::new(),
     })
 }
 
@@ -634,6 +782,34 @@ pub struct StaleDoRow {
 /// at merge time is `fno do pr merge`'s job (`_sync_graph_merge_status`).
 pub(crate) fn additional_pr_recorded_open(extra: &Value) -> bool {
     extra.get("merge_status").and_then(Value::as_str) != Some("merged")
+}
+
+/// Locked Decision 2's one REST read: `gh api repos/{owner}/{repo}/pulls/<n>`
+/// in the row's cwd. `Some(true)` open, `Some(false)` merged or closed,
+/// `None` unreadable - and an unreadable answer keeps the row. Bounded 30s;
+/// the caller caches per PR per pass, so steady state pays nothing.
+pub(crate) fn gh_pr_is_open(pr: u64, cwd: &str) -> Option<bool> {
+    let path = format!("repos/{{owner}}/{{repo}}/pulls/{pr}");
+    let out = crate::loopcheck::bounded_read(
+        "gh".as_ref(),
+        &["api", &path],
+        Path::new(cwd),
+        "gc-sweep",
+        std::time::Duration::from_secs(30),
+    )
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    if v.get("merged_at").and_then(Value::as_str).is_some() {
+        return Some(false);
+    }
+    match v.get("state").and_then(Value::as_str) {
+        Some("open") => Some(true),
+        Some("closed") => Some(false),
+        _ => None,
+    }
 }
 
 /// Every open do row sitting on a settled node. Every clause is a positive
@@ -929,15 +1105,29 @@ pub(crate) fn without_settled(mut graph: GraphRead, planned: &[StaleDoRow]) -> G
 /// Node id -> `(status, merge_status)` over the same read. The merge reaper's
 /// doneness re-read: a node must read done AND merged before its worker's
 /// rows or tree go.
+/// The node states the merge reaper and the release verb read: status,
+/// recorded merge_status, and the count of additional_prs entries still
+/// open by recorded state. The count rides so a done+merged node with an
+/// open additional PR holds its cleanup request instead of retiring rows
+/// behind an unmerged PR.
 pub(crate) fn read_graph_node_states(
     home: &AgentsHome,
-) -> Option<HashMap<String, (String, Option<String>)>> {
+) -> Option<HashMap<String, (String, Option<String>, usize)>> {
     let entries = read_graph_entries_raw(home)?;
     let mut states = HashMap::new();
     for entry in entries {
         let Some(id) = graph_store::entry_id(&entry) else {
             continue;
         };
+        let additional = entry
+            .get("additional_prs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let additional_open = additional
+            .iter()
+            .filter(|extra| additional_pr_recorded_open(extra))
+            .count();
         states.insert(
             id.to_string(),
             (
@@ -950,6 +1140,7 @@ pub(crate) fn read_graph_node_states(
                     .get("merge_status")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                additional_open,
             ),
         );
     }
@@ -1160,11 +1351,18 @@ pub struct ProvenanceVerdict {
     pub merged_but_open: Option<String>,
 }
 
+/// The GitHub read Locked Decision 2 pays: `Some(true)` = PR still open,
+/// `Some(false)` = merged or closed, `None` = the read failed. The caller
+/// owns the per-pass cache; the verdict itself stays network-free.
+pub type PrStateRead<'a> = &'a mut dyn FnMut(u64, &str) -> Option<bool>;
+
+#[allow(clippy::too_many_arguments)]
 pub fn provenance_verdict(
     e: &state::RegistryEntry,
     sid: &str,
     graph: &GraphRead,
     transcripts: Option<&[std::path::PathBuf]>,
+    mut pr_read: Option<PrStateRead>,
 ) -> ProvenanceVerdict {
     let mut work = graph_store::work_state(&graph.work_index, sid);
     // The full cascade runs EVEN WHEN the reverse join answers: the later
@@ -1206,6 +1404,42 @@ pub fn provenance_verdict(
                         detail: format!("additional_prs: {open} of {total} not recorded merged"),
                     });
                     break;
+                }
+                // Locked Decision 2: a done node with a recorded PR and no
+                // recorded merge outcome reads GitHub once. This session's
+                // own `do` row on the node is the attribution gate - a
+                // session that never did the work pays no network read.
+                if merge_status.is_none() {
+                    let drives = graph
+                        .do_nodes
+                        .get(&sid.to_ascii_lowercase())
+                        .is_some_and(|set| set.contains(node));
+                    let pr = graph.pr_number.get(node).copied().flatten();
+                    if drives {
+                        let read = pr_read.as_mut().map(|f| &mut **f);
+                        if let (Some(pr), Some(read)) = (pr, read) {
+                            match read(pr, &e.cwd) {
+                                Some(true) => {
+                                    hold = Some(KeepReason::OpenPr {
+                                        node: node.clone(),
+                                        pr,
+                                    });
+                                    break;
+                                }
+                                Some(false) => {
+                                    merge_note.push(format!("{node}:gh"));
+                                    continue;
+                                }
+                                None => {
+                                    hold = Some(KeepReason::PrStateContradicts {
+                                        node: node.clone(),
+                                        detail: format!("pr {pr} state unread"),
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
                 match &merge_status {
                     Some(m) if m != "merged" => {
@@ -1409,18 +1643,37 @@ pub(crate) fn run_with_release(
         };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
         let hits = store_matches(e);
-        let verdict = provenance_verdict(e, sid, graph, hits.as_deref());
+        // The PR-state reader the AllDone confirm arm may call: a staged
+        // answer in the graph read wins; a miss resolves through gh. The
+        // cache lives for this pass, keyed by cwd and PR.
+        let pr_cache: std::cell::RefCell<HashMap<(String, u64), Option<bool>>> = Default::default();
+        let mut pr_read_adapter = |pr: u64, cwd: &str| -> Option<bool> {
+            let key = (cwd.to_string(), pr);
+            if let Some(staged) = graph.pr_reads.get(&key) {
+                return *staged;
+            }
+            let hit = pr_cache.borrow().get(&key).copied();
+            if let Some(cached) = hit {
+                return cached;
+            }
+            let fresh = gh_pr_is_open(pr, cwd);
+            pr_cache.borrow_mut().insert(key, fresh);
+            fresh
+        };
+        let verdict =
+            provenance_verdict(e, sid, graph, hits.as_deref(), Some(&mut pr_read_adapter));
         let age = ages.get(&row_handle(e)).copied().flatten();
         staged.push(Some((verdict, age)));
     }
 
-    // The live-peer map (x-2774 change 3): node -> (name, created_at) of the
-    // NEWEST spawn row on that node whose transcript is inside the grace
-    // window. Both halves are positive markers - a newer spawn exists and it
-    // is demonstrably live - so a lone worker is never superseded and two
-    // quiet peers never sweep each other. Ties resolve by created_at then
-    // name so the map never depends on registry order.
-    let mut live_peer: HashMap<String, (String, String)> = HashMap::new();
+    // The live-peer map (x-2774 change 3): node -> (name, created_at, session
+    // id) of the NEWEST spawn row on that node whose transcript is inside the
+    // grace window. Both halves are positive markers - a newer spawn exists
+    // and it is demonstrably live - so a lone worker is never superseded and
+    // two quiet peers never sweep each other. Ties resolve by created_at then
+    // name so the map never depends on registry order. The session id rides
+    // so the open-PR keep can ask whether the PEER drives the PR.
+    let mut live_peer: HashMap<String, (String, String, String)> = HashMap::new();
     for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
         let Some((verdict, age)) = staged_row else {
             continue;
@@ -1432,13 +1685,20 @@ pub(crate) fn run_with_release(
         if let WorkState::Open { node, .. } = &verdict.work {
             let take = match live_peer.get(node) {
                 None => true,
-                Some((_, created)) if created.as_str() < e.created_at.as_str() => true,
-                Some((name, created)) => {
+                Some((_, created, _)) if created.as_str() < e.created_at.as_str() => true,
+                Some((name, created, _)) => {
                     created.as_str() == e.created_at.as_str() && name.as_str() < e.name.as_str()
                 }
             };
             if take {
-                live_peer.insert(node.clone(), (e.name.clone(), e.created_at.clone()));
+                live_peer.insert(
+                    node.clone(),
+                    (
+                        e.name.clone(),
+                        e.created_at.clone(),
+                        e.harness_session_id.as_deref().unwrap_or("").to_string(),
+                    ),
+                );
             }
         }
     }
@@ -1623,6 +1883,17 @@ pub(crate) fn run_with_release(
         } else {
             Vec::new()
         };
+        // Marker 2 (d-81c6da7e): the nodes where THIS session wrote the
+        // plan - the second finished marker, beside the closed set.
+        let planning_plan_written = if is_planning {
+            graph
+                .plan_written
+                .get(&sid.to_ascii_lowercase())
+                .map(|set| set.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         // x-2774 changes 1, 3 and 6: the session-shaped releases. The
         // harness's terminal state, a live newer peer on the same node, a
         // parked or never-started node, and a recorded merge the status lags
@@ -1630,23 +1901,71 @@ pub(crate) fn run_with_release(
         // and each falls through to the grace gate in gc_decide.
         // x-b7f8: EVERY claude row carries its terminal state, not only
         // Open-work rows - recency and lineage must be able to yield to it.
-        let session_terminal = if e.harness_name() == "claude" {
+        let roster_state = if e.harness_name() == "claude" {
             let mut memo = agents_memo.borrow_mut();
             let snapshot = memo.get_or_insert_with(&agents_read);
             crate::daemon::claude_row_id(e)
                 .and_then(|rid| snapshot.find(&rid).cloned())
                 .and_then(|row| row.state)
-                .filter(|s| crate::claude_roster::is_terminal_roster_state(s))
         } else {
             None
         };
+        let session_terminal = roster_state
+            .clone()
+            .filter(|s| crate::claude_roster::is_terminal_roster_state(s));
         let superseded_by_live_peer = match &work {
             WorkState::Open { node, .. } => live_peer
                 .get(node)
-                .filter(|(peer_name, peer_created)| {
+                .filter(|(peer_name, peer_created, _)| {
                     peer_name != &e.name && peer_created.as_str() > e.created_at.as_str()
                 })
-                .map(|(name, created)| format!("{name} (created {created})")),
+                .map(|(name, created, _)| format!("{name} (created {created})")),
+            _ => None,
+        };
+        // Locked Decision 4: the peer releases this row only when the PEER
+        // drives the PR - the peer's session holds a `do` row on the node.
+        // A peer that is not the PR driver is not a successor; the open-PR
+        // keep above answers for this row instead.
+        let peer_drives_pr = match &verdict.work {
+            WorkState::Open { node, .. } => live_peer
+                .get(node)
+                .filter(|(peer_name, peer_created, _)| {
+                    peer_name != &e.name && peer_created.as_str() > e.created_at.as_str()
+                })
+                .is_some_and(|(_, _, peer_sid)| {
+                    graph
+                        .do_nodes
+                        .get(peer_sid.to_ascii_lowercase().as_str())
+                        .is_some_and(|set| set.contains(node))
+                }),
+            _ => false,
+        };
+        // The open-PR fact (Locked Decision 1) is the graph record alone:
+        // this session has a `do` row on the open node, the node carries
+        // `pr_number`, and the recorded merge_status is not `merged`. The
+        // sweep makes no network call for an open node.
+        let open_pr = match &verdict.work {
+            WorkState::Open { node, .. } => {
+                let pr = graph.pr_number.get(node).copied().flatten();
+                let merged = graph
+                    .pr_state
+                    .get(node)
+                    .and_then(|(merge_status, _, _)| merge_status.clone())
+                    .as_deref()
+                    == Some("merged");
+                match pr {
+                    Some(pr)
+                        if !merged
+                            && graph
+                                .do_nodes
+                                .get(&sid.to_ascii_lowercase())
+                                .is_some_and(|set| set.contains(node)) =>
+                    {
+                        Some((node.clone(), pr))
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         };
         let node_merged = verdict.merged_but_open.is_some();
@@ -1677,7 +1996,7 @@ pub(crate) fn run_with_release(
                 release_note = Some(release_basis_prefix(&r.reason, hold_age_s, &r.detail));
             }
         }
-        let row = GcRow {
+        let mut row = GcRow {
             origin: e.origin.clone(),
             crowned: e.crown_level.is_some(),
             work,
@@ -1687,14 +2006,45 @@ pub(crate) fn run_with_release(
             branch_merged: None,
             planning,
             planning_closed,
+            planning_plan_written,
+            planning_released: false,
             confirm_hold,
             session_terminal,
             superseded_by_live_peer,
             node_merged,
             pid_gone,
             release_quiet: release_quiet_row,
+            open_pr,
+            peer_drives_pr,
         };
-        let (action, reason) = gc_decide(&row, grace_secs);
+        let (mut action, mut reason) = gc_decide(&row, grace_secs);
+        // d-81c6da7e: a release matched to the planning hold answers the
+        // marker question by ruling. Flip the row's released flag and
+        // decide again - the second verdict flows through the same gates,
+        // so only the planner's quiet clock stands between the row and its
+        // retirement.
+        if action == GcAction::Keep {
+            if let Some(KeepReason::PlanningUnclosed { node, status }) = &reason {
+                if release_note.is_none() {
+                    let hold_reason = KeepReason::PlanningUnclosed {
+                        node: node.clone(),
+                        status: status.clone(),
+                    }
+                    .as_str();
+                    let detail = planning_hold_detail(node, status);
+                    if let Some(r) = release_for_row {
+                        if r.matches(hold_reason, &detail) {
+                            row.planning_released = true;
+                            release_note =
+                                Some(release_basis_prefix(hold_reason, hold_age_s, &detail));
+                            let (next_action, next_reason) = gc_decide(&row, grace_secs);
+                            action = next_action;
+                            reason = next_reason;
+                        }
+                    }
+                }
+            }
+        }
         if action == GcAction::Keep {
             if let Some(r) = release_for_row {
                 if release_note.is_none() {
@@ -1758,8 +2108,58 @@ pub(crate) fn run_with_release(
                 Some(KeepReason::PrStateContradicts { node, detail }) => {
                     summary.kept_pr_contradicts.push((id, node, detail))
                 }
-                Some(KeepReason::PlanningUnclosed { node }) => {
-                    summary.kept_planning_unclosed.push((id, node))
+                Some(KeepReason::PlanningUnclosed { node, status }) => {
+                    summary
+                        .kept_planning_unclosed
+                        .push((id.clone(), node.clone()));
+                    // d-81c6da7e: the unfinished planner is a held row, not
+                    // a silent keep - the hold ages, escalates past
+                    // agents.hold_escalate_after_s, and lifts by release.
+                    summary.holds.push(Hold {
+                        id,
+                        reason: KeepReason::PlanningUnclosed {
+                            node: node.clone(),
+                            status: status.clone(),
+                        }
+                        .as_str(),
+                        detail: planning_hold_detail(&node, &status),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                }
+                Some(KeepReason::OpenPr { node, pr }) => {
+                    let sid_full = e.harness_session_id.clone().unwrap_or_default();
+                    let live = if e.harness_name() == "claude" {
+                        // A roster row exists with a non-terminal state.
+                        matches!(roster_state.as_deref(), Some(s)
+                            if !crate::claude_roster::is_terminal_roster_state(s))
+                    } else {
+                        !pid_gone && !matches!(e.status, crate::AgentStatus::Exited)
+                    };
+                    summary.kept_open_pr.push((id.clone(), node.clone()));
+                    summary.holds.push(Hold {
+                        id: id.clone(),
+                        reason: KeepReason::OpenPr {
+                            node: node.clone(),
+                            pr,
+                        }
+                        .as_str(),
+                        detail: format!("{node} #{pr}"),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                    summary.open_pr_rows.push(OpenPrRow {
+                        id,
+                        session_id: sid_full,
+                        harness: e.harness_name().to_string(),
+                        node,
+                        pr,
+                        cwd: e.cwd.clone(),
+                        transcript_age_s: hold_age_s,
+                        live,
+                    });
                 }
                 // GraphUnreadable / OpenDoRow are decided above, before the
                 // policy ran; they cannot arrive here.
@@ -2081,7 +2481,21 @@ pub(crate) fn run_with_release(
                 // and it is never anonymous. The arm order mirrors the
                 // release precedence in gc_decide: terminal state, then live
                 // peer, then inactive status, then recorded merge.
-                if let Some(peer) = &probed.superseded_by_live_peer {
+                if let Some(assignments) = &probed.planning {
+                    if assignments
+                        .iter()
+                        .any(|(n, _)| probed.planning_closed.contains(n))
+                    {
+                        format!("planning finished on {node}: closed by this session")
+                    } else if assignments
+                        .iter()
+                        .any(|(n, _)| probed.planning_plan_written.contains(n))
+                    {
+                        format!("planning finished on {node}: plan written")
+                    } else {
+                        format!("planning finished on {node}: released")
+                    }
+                } else if let Some(peer) = &probed.superseded_by_live_peer {
                     format!("superseded on {node} by live peer {peer}")
                 } else if let Some(state) = &probed.session_terminal {
                     format!(
@@ -2100,8 +2514,16 @@ pub(crate) fn run_with_release(
         // that reads "quiet past grace" when the transcript was actually
         // inside grace misreports why the row went; the pid evidence is the
         // reason it went when it did.
+        // d-81c6da7e: a planner row's quiet clock is 1200 s, so the pid
+        // suffix names an early fire against the planner grace, not the
+        // default one.
+        let quiet_gate = if probed.planning.is_some() {
+            crate::gc::PLANNING_IDLE_RETIRE_SECS
+        } else {
+            grace_secs
+        };
         let mut basis =
-            if probed.pid_gone && probed.transcript_age_s.is_some_and(|age| age <= grace_secs) {
+            if probed.pid_gone && probed.transcript_age_s.is_some_and(|age| age <= quiet_gate) {
                 format!("{basis}; pid {} is gone", e.pid.unwrap_or(0))
             } else {
                 basis
@@ -4052,7 +4474,7 @@ mod tests {
             pr_state: HashMap::from([("N1".to_string(), (Some("merged".into()), 0, 0))]),
             ..Default::default()
         };
-        let verdict = provenance_verdict(&e, "sid-77", &graph, None);
+        let verdict = provenance_verdict(&e, "sid-77", &graph, None, None);
         assert_eq!(
             verdict.hold,
             Some(KeepReason::NodeConflict {
@@ -4067,5 +4489,103 @@ mod tests {
             matches!(verdict.work, WorkState::NoProvenance),
             "a conflict leaves no work verdict to retire on"
         );
+    }
+
+    /// The AllDone confirm's GitHub read: a done node with a recorded PR,
+    /// no recorded merge outcome, and this session's own do row on it.
+    fn all_done_row_with_pr() -> (state::RegistryEntry, GraphRead) {
+        let mut e = state::RegistryEntry::default();
+        e.name = "worker".into();
+        e.cwd = "/repo/wt".into();
+        let graph = GraphRead {
+            index: HashMap::from([(
+                "sess-1".to_string(),
+                vec![("N1".to_string(), "done".to_string())],
+            )]),
+            work_index: HashMap::from([(
+                "sess-1".to_string(),
+                vec![("N1".to_string(), "done".to_string())],
+            )]),
+            statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
+            pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
+            pr_number: HashMap::from([("N1".to_string(), Some(1943))]),
+            do_nodes: HashMap::from([(
+                "sess-1".to_string(),
+                std::collections::HashSet::from(["N1".to_string()]),
+            )]),
+            ..Default::default()
+        };
+        (e, graph)
+    }
+
+    /// The staged-reader seam the sweep builds: answers come from
+    /// `pr_reads`; a miss would fall through to gh (never in these tests).
+    fn staged_reader(graph: &GraphRead) -> impl FnMut(u64, &str) -> Option<bool> + '_ {
+        |pr: u64, cwd: &str| {
+            graph
+                .pr_reads
+                .get(&(cwd.to_string(), pr))
+                .copied()
+                .flatten()
+        }
+    }
+
+    #[test]
+    fn all_done_open_pr_answer_holds_as_the_open_pr_keep() {
+        let (e, mut graph) = all_done_row_with_pr();
+        graph
+            .pr_reads
+            .insert(("/repo/wt".to_string(), 1943), Some(true));
+        let mut read = staged_reader(&graph);
+        let verdict = provenance_verdict(&e, "sess-1", &graph, None, Some(&mut read));
+        assert_eq!(
+            verdict.hold,
+            Some(KeepReason::OpenPr {
+                node: "N1".into(),
+                pr: 1943,
+            })
+        );
+    }
+
+    #[test]
+    fn all_done_merged_pr_answer_passes() {
+        let (e, mut graph) = all_done_row_with_pr();
+        graph
+            .pr_reads
+            .insert(("/repo/wt".to_string(), 1943), Some(false));
+        let mut read = staged_reader(&graph);
+        let verdict = provenance_verdict(&e, "sess-1", &graph, None, Some(&mut read));
+        assert_eq!(verdict.hold, None, "merged/closed is not a contradiction");
+    }
+
+    #[test]
+    fn all_done_unreadable_pr_answer_holds_and_never_retires() {
+        let (e, mut graph) = all_done_row_with_pr();
+        graph.pr_reads.insert(("/repo/wt".to_string(), 1943), None);
+        let mut read = staged_reader(&graph);
+        let verdict = provenance_verdict(&e, "sess-1", &graph, None, Some(&mut read));
+        assert_eq!(
+            verdict.hold,
+            Some(KeepReason::PrStateContradicts {
+                node: "N1".into(),
+                detail: "pr 1943 state unread".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_session_that_never_did_the_work_pays_no_read() {
+        let (e, mut graph) = all_done_row_with_pr();
+        graph.do_nodes.clear();
+        let mut calls = 0;
+        {
+            let mut read = |_pr: u64, _cwd: &str| {
+                calls += 1;
+                None
+            };
+            let verdict = provenance_verdict(&e, "sess-1", &graph, None, Some(&mut read));
+            assert_eq!(verdict.hold, None);
+        }
+        assert_eq!(calls, 0, "no network read without a do row");
     }
 }

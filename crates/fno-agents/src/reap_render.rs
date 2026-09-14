@@ -180,6 +180,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 json!({"node": node, "harness": harness, "session_id": session_id})
             })
             .collect();
+        let nudge_json: Vec<Value> = summary
+            .open_pr_nudge
+            .iter()
+            .map(|(id, action)| json!({"id": id, "action": action}))
+            .collect();
         let holds: Vec<Value> = summary
             .holds
             .iter()
@@ -210,6 +215,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_pr_contradicts": triples(&summary.kept_pr_contradicts),
                 "kept_open_work": open_work,
                 "kept_open_do_row": open_do,
+                "kept_open_pr": pair(&summary.kept_open_pr),
                 "kept_planning_unclosed": planning_unclosed,
                 "kept_active": active,
                 "kept_transcript_unresolved": summary.kept_transcript_unresolved,
@@ -228,6 +234,8 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "holds": holds,
                 "hold_escalate_after_s": summary.hold_escalate_after_s,
                 "release_refused": summary.release_refused,
+                "open_pr_rows": summary.open_pr_rows,
+                "open_pr_nudge": nudge_json,
                 "dry_run": dry_run,
             })
         );
@@ -312,9 +320,22 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             hold_line(summary, id)
         ));
     }
+    for (id, node) in &summary.kept_open_pr {
+        let detail = summary
+            .holds
+            .iter()
+            .find(|h| h.id == *id)
+            .map(|h| h.detail.as_str())
+            .unwrap_or("");
+        out.push_str(&format!(
+            "  kept {id} (open pr: {node} {detail}){}\n",
+            hold_line(summary, id)
+        ));
+    }
     for (id, node) in &summary.kept_planning_unclosed {
         out.push_str(&format!(
-            "  kept {id} (planning assignment never closed by this session: {node})\n"
+            "  kept {id} (planning assignment not finished by this session: {node}){}\n",
+            hold_line(summary, id)
         ));
     }
     for (id, age_s) in &summary.kept_active {
@@ -393,6 +414,9 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     }
     for (name, reason) in &summary.kept_receipts {
         out.push_str(&format!("  kept receipt {name} ({reason})\n"));
+    }
+    for (id, action) in &summary.open_pr_nudge {
+        out.push_str(&format!("  would nudge {id} ({action})\n"));
     }
     if dry_run {
         out.push_str("(dry-run: no changes made)\n");
@@ -1036,5 +1060,38 @@ mod tests {
         assert_eq!(row["id"], "bp-ebd2-verb-law");
         assert_eq!(row["held_s"], 7 * 3600);
         assert_eq!(row["nodes_done"], true);
+    }
+
+    /// d-81c6da7e AC4-HP: a held planner's line names the node, carries the
+    /// hold suffix, and once escalated names the release verb.
+    #[test]
+    fn a_held_planner_line_names_the_node_age_and_release() {
+        let mut s = summary(&[]);
+        s.kept_planning_unclosed
+            .push(("bp-x-861c".to_string(), "x-861c".to_string()));
+        s.holds.push(crate::gc_sweep::Hold {
+            id: "bp-x-861c".to_string(),
+            reason: "planning assignment not finished by this session",
+            detail: "x-861c ready: no close and no plan written by this session".to_string(),
+            age_s: Some(5401),
+            age_basis: "row created",
+            escalated: true,
+        });
+        s.hold_escalate_after_s = Some(5400);
+        let text = render_reap(&s, false, true);
+        let line = text
+            .lines()
+            .find(|l| l.contains("bp-x-861c"))
+            .expect("the planner line renders");
+        assert!(
+            line.contains("planning assignment not finished by this session: x-861c"),
+            "{line}"
+        );
+        assert!(line.contains("[held "), "{line}");
+        assert!(line.contains("row created]"), "{line}");
+        assert!(
+            line.contains("fno agents reap --release bp-x-861c"),
+            "{line}"
+        );
     }
 }

@@ -34,13 +34,13 @@ Three programs share the word reap. A reader who watches one and concludes the o
 | The registry sweep arm | the daemon idle tick | interval `agents.retire_interval_s`, default grace/3 | `retire` |
 | The merge-request arm | the daemon, after a merge | a recorded merge cleanup request | `reap` |
 
-The manual verb and the registry arm run the same sweep body (`client.rs:2386`, `gc.rs:833`). The registry arm runs one sweep at a time behind a one-in-flight gate (`gc.rs:821`). A slow sweep holds the next request, so the effective cadence is not the interval. Run `fno-agents status` to read the arms table.
+The manual verb and the registry arm run the same sweep body (`client.rs:2576`, `gc.rs:490`). The registry arm runs one sweep at a time behind a one-in-flight gate (`gc.rs:954`). A slow sweep holds the next request, so the effective cadence is not the interval. Run `fno-agents status` to read the arms table.
 
-The merge-request arm is a different program (`merge_reap.rs:669-775`). It loops only over pending merge cleanup requests (`merge_reap.rs:703`). With no pending request it does nothing. Its floor is 60 seconds (`merge_reap.rs:36`), and a request older than 86400 seconds expires unacted (`merge_reap.rs:42`). Its skip reasons are `no_requests`, `all_in_grace`, and `held` (`merge_reap.rs:763-771`), and its detail line carries the held count beside the request count. So its `acted=0 skip=held` line says nothing about the registry sweep.
+The merge-request arm is a different program (`merge_reap.rs:709-815`). It loops only over pending merge cleanup requests (`merge_reap.rs:741`). With no pending request it does nothing. Its floor is 60 seconds (`merge_reap.rs:36`), and a request older than 86400 seconds from the merge moment expires unacted (`merge_reap.rs:42`). Its skip reasons are `no_requests`, `all_in_grace`, and `held` (`merge_reap.rs:798-806`), and its detail line carries the held count beside the request count. So its `acted=0 skip=held` line says nothing about the registry sweep.
 
-The mux sideline sweep rides the manual verb only (`client.rs:2408-2415`). It shells out to `fno mux workspace prune` (`client.rs:2432-2444`). Neither daemon arm runs it. Pass `--no-mux` to skip it. So only a person typing the verb runs the sweep for ghost mux panes.
+The mux sideline sweep rides the manual verb (`client.rs:2794-2798`), which runs `mux_tab_sweep` (the tab-only prune through `fno mux workspace prune`). The daemon's retire arm runs the same sweep on the tab-only shape (`gc.rs:976`). A worker's tab closes with its row. Pass `--no-mux` to skip the manual verb's sweep.
 
-A fourth tool answers to a related name. `fno-agents roster-reap` removes claude rows that fno never registered. Nothing schedules it. A person types it. It is a dry run by default, and `--apply` acts (`client.rs:2470-2494`).
+A fourth tool answers to a related name. `fno-agents roster-reap` removes claude rows that fno never registered. Nothing schedules it. A person types it. It is a dry run by default, and `--apply` acts (`client.rs:2814-2838`).
 
 ## A dry run and a real run answer different questions
 
@@ -50,7 +50,7 @@ A dry run classifies exactly as a real run does. It subtracts three things:
 - It never prunes. Receipt retention is set to zero, because a rehearsal that prunes is not a rehearsal (`gc.rs:500`).
 - It subtracts the planned settle from the graph read, so the report shows the outcome the real pass produces (`gc.rs:485-490`).
 
-The `held` line is the trap. The line reads `held {id} (needs live stop: {reason})`. The condition is dry-run-only (`gc_sweep.rs:1229`). It fires on a claude row with no positive death evidence, such as a terminal roster state or a dead pid. So the rehearsal declines to promise a stop it cannot prove, and a real run can still take the row.
+The `held` line is the trap. The line reads `held {id} (needs live stop: {reason})`. The condition is dry-run-only (`gc_sweep.rs:2109`). It fires on a claude row with no positive death evidence, such as a terminal roster state or a dead pid. So the rehearsal declines to promise a stop it cannot prove, and a real run can still take the row.
 
 The guard exists because of one incident. On 2026-09-08 a dry run promised 9 retirements, and the real run retired 0 (`gc_sweep.rs:115-121`).
 
@@ -58,7 +58,7 @@ If the dry run prints this `held` line, run the real verb and read its verdict.
 
 ## Rows no sweep can take
 
-Three reasons are permanent by construction. The gate decides them before it reads the graph (`gc.rs:222-236`), so they mask every later reason.
+Three reasons are permanent by construction. The gate decides them before it reads the graph (`gc.rs:244-262`), so they mask every later reason.
 
 - `kept {id} (operator row)`: a human started this session (`gc.rs:135-136`). No sweep touches it.
 - `kept {id} (crowned)`: the row belongs to a crowned orchestrator (`gc.rs:137-138`).
@@ -86,14 +86,37 @@ The `read via` field tells you how the sweep linked the row to the node:
 
 If the node is genuinely open, run `fno backlog get <node>` and read the `status` field. The row waits for the node to ship. Deleting or hand-closing the node is falsifying work. It is never the fix.
 
-Four facts free an open-node row anyway (`gc.rs:106-112`):
+Four facts free an open-node row anyway (`gc.rs:121-127`):
 
 - The harness published a terminal state for the session.
 - A live newer row owns the same node.
-- The node sits parked at `deferred` or `idea` (`gc.rs:128`).
+- The node sits parked at `deferred` or `idea` (`gc.rs:143`).
 - The node recorded merge status reads `merged`.
 
-Each released row falls to the same quiet gate a done node takes, so the transcript still decides.
+Each released row falls to the same quiet gate a done node takes, so the transcript still decides. A planner row never takes these four releases. It never keeps under open work while it carries assignments: its own reason names the planning lane (`gc.rs:287-310`).
+
+None of the four applies while the session drives an open PR. That keep outranks all four releases. The next section covers it.
+
+### open pr
+
+The full line reads `kept {id} (open pr: {node} #<N>)`. The session has a `do` row on an open node that carries `pr_number`, and the node's recorded `merge_status` is not `merged`. The PR is unmerged and this session is its driver, so retiring the row strands the PR with nothing left to drive it. The fact is the graph record alone: the sweep makes no network call for an open node.
+
+The keep outranks every release above it. A terminal roster state, a parked node, or a live newer peer that does not drive the PR leaves the row standing. Only a driving peer releases the row. Driving means the peer's session holds a `do` row on the node. A recorded `merge_status: merged` empties the keep. A merged PR is not an open one.
+
+The remedy is merge, not reap. If another node must merge first, record a merge order (the next section shows the form). Otherwise drive the PR to merge. Run `fno do pr status <N>` to see what blocks it. A done node whose merge outcome nothing records reads GitHub once for the row's own PR. An unreadable read keeps the row too.
+
+### the nudge ladder
+
+A kept open-PR row is a session that is not driving. The daemon's retire arm runs a nudge ladder over every such row (`pr_nudge.rs`). The rules, in order:
+
+1. **Reset.** Transcript activity newer than the last nudge clears the budget: the session answered.
+2. **Wait.** The transcript is inside the grace window, or the last nudge is too young.
+3. **Pause.** A live merge order holds the session. The only allowed pause. A lead records it with `fno inbox decide "merge-order:<held-node>:after:<lead-node>" "<lead-node> merges first"`. The ladder waits while the lead node is not done.
+4. **Escalate.** After 3 nudges with no activity, one operator question is filed on the marker `pr-nudge:`. The ladder then waits for activity.
+5. **Mail.** A live session gets `fno agents mail send <full-session-id> "continue: PR #<N> on node <node> is open and not merged. Drive it to merge. ..."`.
+6. **Resume.** A session with no live process gets `fno agents resume <full-session-id> --message "<text>"`, which relaunches the same conversation under its full session id.
+
+The message carries the stdout line of `fno do pr status <N>`, so the session sees the verdict without a round trip. Events: `pr_nudge_sent`, `pr_nudge_escalated`, `pr_nudge_paused`. State is one file per session under `~/.fno/pr-nudge/`. The ladder fires on the daemon arm only. `fno agents reap --dry-run` prints its plan as `would nudge <id> (<action>)` and takes no effect.
 
 ### open do row on done node
 
@@ -105,13 +128,23 @@ The real run carries its own cure. The settle pass fills stale open do rows on d
 
 Never hand-close the node to clear this line. That hides the obligation and falsifies the record.
 
-### planning assignment never closed by this session
+### planning assignment not finished by this session
 
-The row is a planner. Every node it was assigned reached a planning-complete status, but this session's own blueprint or think row on the node carries no `ended_at` (`gc.rs:157-161`). The completion belongs to an earlier assignment, so this quiet replanning worker keeps its row (`gc.rs:264-283`).
+The line reads `kept {id} (planning assignment not finished by this session: {node})`. The row is a planner, the node sits planning-complete, and the session holds neither finished marker.
+
+Marker one: the session's own blueprint or think row on the node carries a non-empty `ended_at` (`gc.rs:287-310`).
+
+Marker two: the session wrote the node's plan. The node's `plan_path` names a file that exists, and no other planner's row on the node started earlier (`gc_sweep.rs:645-682`).
+
+A finished planner retires once its transcript is quiet for 1200 s, not the default grace (`gc.rs:140`).
+
+A planner with neither marker keeps its row, and the hold ages. Past `agents.hold_escalate_after_s` the line names the cure: `fno agents reap --release <row>` (`gc_sweep.rs:1881-1897`).
+
+The retirement basis names the marker that fired: `planning finished on {node}: closed by this session`, `planning finished on {node}: plan written`, or `planning finished on {node}: released` (`gc_sweep.rs:2224-2231`).
 
 ### live descendant
 
-The line reads `kept {id} (live descendant: {child})`. A live registry row names this row as its parent (`gc_sweep.rs:1681-1694`). The parent stays until the child is gone, unless the parent's own harness reports `done`, `stopped` or `failed` (`gc_sweep.rs:1684`). A terminal parent has no running surface for its children to keep alive, so the lineage guard yields to it. Retire the child and the parent becomes eligible.
+The line reads `kept {id} (live descendant: {child})`. A live registry row names this row as its parent (`gc_sweep.rs:2035-2049`). The parent stays until the child is gone, unless the parent's own harness reports `done`, `stopped` or `failed` (`gc_sweep.rs:2040`). A terminal parent has no running surface for its children to keep alive, so the lineage guard yields to it. Retire the child and the parent becomes eligible.
 
 ## The row is waiting on evidence
 
@@ -206,10 +239,11 @@ Every keep and hold reason from the sections above, one row each.
 | `kept {id} (crowned)` | Wait. This one is permanent. | The line itself names the reason. |
 | `kept {id} (not a spawn row: {why})` | Wait. This one is permanent. | The line prints `origin adopted` or `no origin recorded`. |
 | `kept {id} (open work: {node} {status}; read via {reader})` | Wait for the node to ship. Never close the node by hand. | Run `fno backlog get <node>` and read `status`. |
+| `kept {id} (open pr: {node} #<N>)` | Drive the PR to merge, or record a merge order. | Run `fno do pr status <N>`. |
 | `kept {id} (open do row on done node: {node})` | Wait. A real run settles it. Never close the node. | Run `fno backlog get <node>` and read `status`. |
-| `kept {id} (planning assignment never closed by this session: {node})` | Wait for the session to close its own assignment. | The line names the node. |
+| `kept {id} (planning assignment not finished by this session: {node})` | Wait up to 20 quiet minutes, or rule with `fno agents reap --release <row>` once escalated. | The line names the node and the hold age. |
 | `kept {id} (live descendant: {child})` | Wait for the child row to go, unless the parent's roster state reads `done`, `stopped` or `failed`. | The same report carries the child line. |
-| `kept {id} (active: transcript written {age}s ago)` | Wait past the grace window. A terminal harness state or a dead pid retires the row early. | Run the dry run again. Read the new age. |
+| `kept {id} (active: transcript written {age}s ago)` | Wait past the grace window. A terminal harness state or a dead pid retires the row early, unless the row keeps for an open PR. | Run the dry run again. Read the new age. |
 | `kept {id} (transcript unresolved: absence is not quiet)` | Diagnose one of the four causes above. | Run `fno agents list`. Rerun the dry run. Search the store roots. |
 | `kept {id} (no provenance: ...)` | Restore one resolvable source for the row. | Run `fno-agents node-route --names <name> --json`. |
 | `kept {id} (sources disagree: {a} vs {b})` | Fix source `{a}`, which named `{b}`. | Run `fno-agents node-route --names <name> --json`. |

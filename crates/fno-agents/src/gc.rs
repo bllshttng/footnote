@@ -72,6 +72,15 @@ pub struct GcRow {
     /// (x-5aef task 1.2). Empty on any other row. An empty set never
     /// retires a planner: an assignment nobody closed stays outstanding.
     pub planning_closed: Vec<String>,
+    /// Marker 2 (d-81c6da7e): the node ids where THIS session wrote the
+    /// node's plan - the node's `plan_path` names an existing file and no
+    /// other session's planning row on it started earlier. The sweep
+    /// resolves it from the graph; empty on every row that did not plan.
+    pub planning_plan_written: Vec<String>,
+    /// A `reap --release` ruling matched this row's planning hold: the
+    /// marker question is answered (the operator ruled the assignment
+    /// over), so only the 1200 s quiet gate remains.
+    pub planning_released: bool,
     /// A hold computed beside the work verdict (x-5a62): the cascade's
     /// conflict between witnesses, or the PR-state confirm contradicting a
     /// done node. Decided in the sweep where the route and the graph read
@@ -101,6 +110,16 @@ pub struct GcRow {
     /// instead of holding. Set only when the verb's ruling matched the row;
     /// a missing age is never quiet on any other path.
     pub release_quiet: bool,
+    /// The `(node, pr)` THIS session drives and the PR is still open:
+    /// the session has a `do` row on the open node, the node carries
+    /// `pr_number`, and its recorded `merge_status` is not `merged`.
+    /// The graph record is the whole open-PR fact - the sweep makes no
+    /// network call for an open node.
+    pub open_pr: Option<(String, u64)>,
+    /// The live newer peer on the same node has its own `do` row on the
+    /// node: the peer drives the PR, so this row's open-PR keep does not
+    /// apply and the ordinary release path answers.
+    pub peer_drives_pr: bool,
 }
 
 impl GcRow {
@@ -124,6 +143,11 @@ impl GcRow {
 /// revision assignment stays outstanding).
 pub const PLANNING_COMPLETE_STATUSES: [&str; 5] =
     ["done", "ready", "in_progress", "in_review", "shipped"];
+
+/// The idle grace for a PLANNER row whose planning assignment is finished
+/// (law d-81c6da7e): 20 quiet minutes, not the 900 s every other row takes.
+/// A ruled constant, not a config key: the law fixes the number.
+pub const PLANNING_IDLE_RETIRE_SECS: i64 = 1200;
 
 /// Node statuses that are NOT active work. A parked or never-started node
 /// is not evidence that a session is alive, so it does not shield one
@@ -159,11 +183,12 @@ pub enum KeepReason {
     /// absent merge_status does not hold - absence has three explanations
     /// and none is `unmerged` - and rides the basis as unrecorded instead.
     PrStateContradicts { node: String, detail: String },
-    /// The node reads planning-complete, but THIS session's own
-    /// blueprint/think row on it carries no `ended_at` (x-5aef): the
+    /// The node reads planning-complete, but THIS session holds neither
+    /// finished marker (x-5aef, d-81c6da7e): its own blueprint/think row
+    /// carries no `ended_at`, and it did not write the node's plan. The
     /// completion belongs to an earlier assignment, so this quiet
-    /// replanning worker keeps its row with the unclosed node named.
-    PlanningUnclosed { node: String },
+    /// replanning worker keeps its row with the node and its status named.
+    PlanningUnclosed { node: String, status: String },
     /// At least one named node is not done; the first open one is reported.
     OpenWork { node: String, status: String },
     /// The transcript was written inside the grace window: the session is
@@ -180,6 +205,10 @@ pub enum KeepReason {
     /// this session: settled work would be re-opened by the retirement's
     /// absence, so the row stays and the node is named.
     OpenDoRow { node: String },
+    /// The session's node carries an open PR (`pr_number` set, recorded
+    /// `merge_status` not `merged`): a retirement here strands the PR with
+    /// nothing left to drive it. The remedy is merge, not reap.
+    OpenPr { node: String, pr: u64 },
 }
 
 impl KeepReason {
@@ -195,13 +224,14 @@ impl KeepReason {
             KeepReason::NodeConflict { .. } => "sources disagree",
             KeepReason::PrStateContradicts { .. } => "pr state contradicts",
             KeepReason::PlanningUnclosed { .. } => {
-                "planning assignment never closed by this session"
+                "planning assignment not finished by this session"
             }
             KeepReason::OpenWork { .. } => "open work",
             KeepReason::Active { .. } => "active",
             KeepReason::TranscriptUnresolved => "transcript unresolved",
             KeepReason::GraphUnreadable => "graph unreadable",
             KeepReason::OpenDoRow { .. } => "open do row on done node",
+            KeepReason::OpenPr { .. } => "open pr",
         }
     }
 }
@@ -258,48 +288,54 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // non-complete status) holds the row: the plan it was dispatched
             // to write never landed there.
             // x-5aef task 1.2 binds that verdict to the CURRENT assignment:
-            // every node must ALSO sit in the set this session closed (its
-            // own blueprint/think row carrying `ended_at`). A quiet
+            // every node must ALSO carry a finished marker - either this
+            // session's own blueprint/think row on it carries `ended_at`,
+            // or (d-81c6da7e) this session wrote the node's plan. A quiet
             // replanning worker inherits no completion an earlier blueprint
-            // wrote. An absent or empty closed set fails closed, exactly as
-            // the empty-status guard below does.
-            // x-2774: the lane keeps precedence over the session-shaped
-            // releases below - a bp- row the releases would free but whose
-            // own assignment is still outstanding (AC3-EDGE, the idea-node
-            // hold) stays outstanding. Every change-1/3/6 acceptance row is
-            // a non-planner row, so their outcomes are unchanged.
+            // wrote.
+            // d-81c6da7e: a finished planner's quiet gate is 1200 s, not
+            // the 900 s every other row takes. A released planner skipped
+            // the marker question by ruling, so only its quiet gate is
+            // left. x-2774: the lane keeps precedence over the
+            // session-shaped releases below, and an unfinished assignment
+            // holds even when the node's status would free a non-planner.
             if let Some(assignments) = &row.planning {
+                if row.planning_released {
+                    return grace_gate(row, PLANNING_IDLE_RETIRE_SECS);
+                }
                 // An EMPTY status set fails closed: a lane that fires on a
                 // vacuous all() would retire a row the graph could not
-                // describe.
-                if !assignments.is_empty()
-                    && assignments
-                        .iter()
-                        .all(|(_, s)| PLANNING_COMPLETE_STATUSES.contains(&s.as_str()))
-                {
-                    let unclosed = assignments
-                        .iter()
-                        .find(|(n, _)| !row.planning_closed.contains(n));
-                    return match unclosed {
-                        None => grace_gate(row, grace_secs),
-                        Some((n, _)) => (
+                // describe. It falls through to the open-work gate below.
+                if !assignments.is_empty() {
+                    let unfinished = assignments.iter().find(|(n, s)| {
+                        !PLANNING_COMPLETE_STATUSES.contains(&s.as_str())
+                            || !(row.planning_closed.contains(n)
+                                || row.planning_plan_written.contains(n))
+                    });
+                    return match unfinished {
+                        None => grace_gate(row, PLANNING_IDLE_RETIRE_SECS),
+                        Some((n, s)) => (
                             GcAction::Keep,
-                            Some(KeepReason::PlanningUnclosed { node: n.clone() }),
+                            Some(KeepReason::PlanningUnclosed {
+                                node: n.clone(),
+                                status: s.clone(),
+                            }),
                         ),
                     };
                 }
-                if !assignments.is_empty() {
-                    // AC3-EDGE: an assignment that never reached a
-                    // planning-complete status holds the row - the plan it
-                    // was dispatched to write never landed. The x-2774
-                    // releases below do not steal this hold: an unfinished
-                    // planning assignment is work, whatever the node's
-                    // status says.
+            }
+            // The open-PR keep outranks every session-shaped release below:
+            // a terminal roster state, a parked node, or a live peer that
+            // does not drive the PR would strand a real PR with nothing
+            // left to drive it. The recorded-merge release cannot meet
+            // this arm, because merge_status merged means no open PR.
+            if let Some((node, pr)) = &row.open_pr {
+                if !row.peer_drives_pr {
                     return (
                         GcAction::Keep,
-                        Some(KeepReason::OpenWork {
+                        Some(KeepReason::OpenPr {
                             node: node.clone(),
-                            status: status.clone(),
+                            pr: *pr,
                         }),
                     );
                 }
@@ -542,6 +578,8 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
     // so an unused placeholder path satisfies the shared signature.
     let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
     let store = std::cell::RefCell::new(gc_sweep::HarnessStoreIndex::default());
+    // The rehearsal reads the same PR states the real arm would read, so its
+    // prediction holds when applied. Read-only; cached per PR per pass.
     let mut summary = gc_sweep::run(
         home,
         &emitter,
@@ -561,6 +599,8 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         .into_iter()
         .map(|row| (row.node, row.harness, row.session_id))
         .collect();
+    // The ladder's DRY-RUN plan: decisions only, no effect, no state write.
+    summary.open_pr_nudge = crate::pr_nudge::plan(home, &summary.open_pr_rows, grace_secs);
     summary
 }
 
@@ -929,6 +969,10 @@ pub fn maybe_retirement_sweep(
         let retain_days = crate::agents_config::reap_receipt_retain_days(&grace_cwd);
         let _ = state_file_sweep(&home, &emitter, &grace_cwd);
         let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
+        // Locked Decision 5: the nudge ladder rides the daemon's retire arm
+        // only, after the sweep that classified the open-PR rows. A manual
+        // verb run never nudges; its dry run only prints the plan.
+        crate::pr_nudge::run_ladder(&home, &emitter, &summary.open_pr_rows, grace_secs);
         unowned_sweeps(&home, &emitter, &grace_cwd);
         // The mux surface is one of the stores a reap must clear: the
         // default-flag prune closes an orphaned worker's tab on the retire
@@ -1715,20 +1759,24 @@ mod tests {
             branch_merged: Some(true),
             planning: None,
             planning_closed: Vec::new(),
+            planning_plan_written: Vec::new(),
+            planning_released: false,
             confirm_hold: None,
             session_terminal: None,
             superseded_by_live_peer: None,
             node_merged: false,
             pid_gone: false,
             release_quiet: false,
+            open_pr: None,
+            peer_drives_pr: false,
         }
     }
 
     /// The planning lane (AC3-HP): a blueprinter named on a node that reached
     /// ready has FINISHED its assignment - the plan was written, the node
     /// moved on, and THIS session's own blueprint row carries `ended_at`.
-    /// Quiet past grace retires it without closing the feature or inventing
-    /// a node.
+    /// Quiet past the 1200 s planner grace (d-81c6da7e), not the 900 s
+    /// default, retires it without closing the feature or inventing a node.
     #[test]
     fn ac3_hp_planner_on_ready_node_completes_at_plan_written() {
         let planner = GcRow {
@@ -1738,6 +1786,7 @@ mod tests {
             },
             planning: Some(vec![("x-70e1".to_string(), "ready".to_string())]),
             planning_closed: vec!["x-70e1".to_string()],
+            transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
             ..retiring()
         };
         assert_eq!(gc_decide(&planner, GRACE), (GcAction::Retire, None));
@@ -1750,15 +1799,27 @@ mod tests {
             },
             planning: Some(vec![("x-70e1".to_string(), "in_progress".to_string())]),
             planning_closed: vec!["x-70e1".to_string()],
-            ..retiring()
+            ..planner.clone()
         };
         assert_eq!(gc_decide(&dispatched, GRACE), (GcAction::Retire, None));
+        // AC1-EDGE: the planner grace is 1200 s, not the 900 s default - at
+        // 1100 s quiet the finished planner is still `active`.
+        let young = GcRow {
+            transcript_age_s: Some(1100),
+            ..planner
+        };
+        assert_eq!(
+            gc_decide(&young, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 1100 }))
+        );
     }
 
-    /// The planning lane's edge (AC3-EDGE): one named node still at `idea`
-    /// holds the planner - the plan it was dispatched to write never landed
-    /// there. A planning row with NO planning statuses (graph lost the join)
-    /// also keeps: an unjudgeable row is never retired on the planning lane.
+    /// The planning lane's edge (AC3-EDGE, d-81c6da7e): one named node still
+    /// at `idea` holds the planner as `PlanningUnclosed` - the plan it was
+    /// dispatched to write never landed there, and the named reason is what
+    /// the sweep's hold escalates on. A planning row with NO planning
+    /// statuses (graph lost the join) still keeps under open work: an
+    /// unjudgeable row is never retired on the planning lane.
     #[test]
     fn ac3_edge_planner_on_idea_node_stays_outstanding() {
         let planner = GcRow {
@@ -1773,7 +1834,7 @@ mod tests {
             gc_decide(&planner, GRACE),
             (
                 GcAction::Keep,
-                Some(KeepReason::OpenWork {
+                Some(KeepReason::PlanningUnclosed {
                     node: "x-70e1".into(),
                     status: "idea".into(),
                 })
@@ -1800,10 +1861,11 @@ mod tests {
         );
     }
 
-    /// x-5aef AC4-HP: a `bp-` row whose node reads `ready` but whose OWN
-    /// blueprint row carries no `ended_at` keeps its row - the completion
-    /// belongs to an earlier assignment, and the reason names the unclosed
-    /// node. Fail closed: an absent closed set keeps the row too.
+    /// x-5aef AC4-HP: a `bp-` row whose node reads `ready` but which holds
+    /// NEITHER finished marker (no `ended_at` of its own, no written plan)
+    /// keeps its row - the completion belongs to an earlier assignment, and
+    /// the reason names the unclosed node and its status. Fail closed: an
+    /// absent closed set keeps the row too.
     #[test]
     fn ac4_hp_ready_node_without_a_closed_assignment_holds_the_row() {
         let replanner = GcRow {
@@ -1821,6 +1883,7 @@ mod tests {
                 GcAction::Keep,
                 Some(KeepReason::PlanningUnclosed {
                     node: "x-5aef".into(),
+                    status: "ready".into(),
                 })
             )
         );
@@ -1839,13 +1902,14 @@ mod tests {
                 GcAction::Keep,
                 Some(KeepReason::PlanningUnclosed {
                     node: "x-5aef".into(),
+                    status: "ready".into(),
                 })
             )
         );
     }
 
-    /// x-5aef AC4-EDGE: the same row retires once its own blueprint row
-    /// gains `ended_at` - the closed set now names every assigned node.
+    /// x-5aef AC4-EDGE / d-81c6da7e marker 1: the same row retires once its
+    /// own blueprint row gains `ended_at` - past the 1200 s planner grace.
     #[test]
     fn ac4_edge_a_closed_assignment_releases_the_row() {
         let replanner = GcRow {
@@ -1855,9 +1919,55 @@ mod tests {
             },
             planning: Some(vec![("x-5aef".to_string(), "ready".to_string())]),
             planning_closed: vec!["x-5aef".to_string()],
+            transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
             ..retiring()
         };
         assert_eq!(gc_decide(&replanner, GRACE), (GcAction::Retire, None));
+    }
+
+    /// d-81c6da7e marker 2 (AC1-HP, AC1-EDGE): a codex planner that wrote
+    /// the node's plan - `plan_path` names an existing file, no earlier
+    /// planner - has finished its assignment with no `ended_at` to close
+    /// it. Twenty quiet minutes retire the row; nineteen keep it active.
+    #[test]
+    fn a_planner_that_wrote_the_plan_retires_after_twenty_quiet_minutes() {
+        let planner = GcRow {
+            work: WorkState::Open {
+                node: "x-861c".into(),
+                status: "ready".into(),
+            },
+            planning: Some(vec![("x-861c".to_string(), "ready".to_string())]),
+            planning_plan_written: vec!["x-861c".to_string()],
+            transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
+            ..retiring()
+        };
+        assert_eq!(gc_decide(&planner, GRACE), (GcAction::Retire, None));
+        let young = GcRow {
+            transcript_age_s: Some(1100),
+            ..planner
+        };
+        assert_eq!(
+            gc_decide(&young, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 1100 }))
+        );
+    }
+
+    /// d-81c6da7e AC3-EDGE: a released planner on an `idea` node retires
+    /// past the planner grace - the release ruling answered the marker
+    /// question, so only quiet remains.
+    #[test]
+    fn a_released_planner_on_an_idea_node_retires_past_the_planner_grace() {
+        let planner = GcRow {
+            work: WorkState::Open {
+                node: "x-70e1".into(),
+                status: "idea".into(),
+            },
+            planning: Some(vec![("x-70e1".to_string(), "idea".to_string())]),
+            planning_released: true,
+            transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
+            ..retiring()
+        };
+        assert_eq!(gc_decide(&planner, GRACE), (GcAction::Retire, None));
     }
 
     #[test]
@@ -1972,8 +2082,12 @@ mod tests {
             open_do: HashMap::new(),
             phases: HashMap::new(),
             closed_planning: HashMap::new(),
+            plan_written: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
             pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
+            pr_number: HashMap::new(),
+            do_nodes: HashMap::new(),
+            pr_reads: HashMap::new(),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -2083,8 +2197,12 @@ mod tests {
             open_do: HashMap::new(),
             phases: HashMap::new(),
             closed_planning: HashMap::new(),
+            plan_written: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
             pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
+            pr_number: HashMap::new(),
+            do_nodes: HashMap::new(),
+            pr_reads: HashMap::new(),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -2549,13 +2667,121 @@ mod tests {
             branch_merged: None,
             planning: None,
             planning_closed: Vec::new(),
+            planning_plan_written: Vec::new(),
+            planning_released: false,
             confirm_hold: None,
             session_terminal: None,
             superseded_by_live_peer: None,
             node_merged: false,
             pid_gone: false,
             release_quiet: false,
+            open_pr: None,
+            peer_drives_pr: false,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
+    }
+
+    /// The base open-PR row: a do-phase spawn row on an in_review node
+    /// whose PR is unmerged. `pr` and `node` parameterize the arms below.
+    fn open_pr_row(node: &str, status: &str, pr: u64) -> GcRow {
+        GcRow {
+            origin: Some("spawn".into()),
+            crowned: false,
+            work: WorkState::Open {
+                node: node.into(),
+                status: status.into(),
+            },
+            transcript_age_s: Some(10_000),
+            owns_worktree: true,
+            worktree_clean: None,
+            branch_merged: None,
+            planning: None,
+            planning_closed: Vec::new(),
+            planning_plan_written: Vec::new(),
+            planning_released: false,
+            confirm_hold: None,
+            session_terminal: None,
+            superseded_by_live_peer: None,
+            node_merged: false,
+            pid_gone: false,
+            release_quiet: false,
+            open_pr: Some((node.into(), pr)),
+            peer_drives_pr: false,
+        }
+    }
+
+    /// The keep outranks a terminal harness state: a stopped roster state
+    /// on an in_review node with an open PR must not release the row, or
+    /// the PR strands with nothing left to drive it.
+    #[test]
+    fn open_pr_keep_holds_a_terminal_session_without_a_pr_driver() {
+        let mut row = open_pr_row("x-node", "in_review", 1943);
+        row.session_terminal = Some("stopped".into());
+        row.transcript_age_s = Some(40);
+        let (action, reason) = gc_decide(&row, 900);
+        assert_eq!(action, GcAction::Keep);
+        assert_eq!(
+            reason,
+            Some(KeepReason::OpenPr {
+                node: "x-node".into(),
+                pr: 1943,
+            })
+        );
+    }
+
+    /// Every other release still answers to the keep: a live newer peer
+    /// that does NOT drive the PR, and a parked node.
+    #[test]
+    fn open_pr_keep_survives_a_non_driving_peer_and_a_parked_node() {
+        let mut row = open_pr_row("x-node", "in_review", 1943);
+        row.session_terminal = Some("stopped".into());
+        row.superseded_by_live_peer = Some("peer-b (created later)".into());
+        let (action, reason) = gc_decide(&row, 900);
+        assert_eq!(action, GcAction::Keep);
+        assert_eq!(
+            reason,
+            Some(KeepReason::OpenPr {
+                node: "x-node".into(),
+                pr: 1943,
+            })
+        );
+        let parked = open_pr_row("x-node", "deferred", 1943);
+        assert_eq!(
+            gc_decide(&parked, 900),
+            (
+                GcAction::Keep,
+                Some(KeepReason::OpenPr {
+                    node: "x-node".into(),
+                    pr: 1943,
+                })
+            )
+        );
+    }
+
+    /// The peer releases only when the PEER drives the PR: with a driving
+    /// peer the row falls through to the ordinary release path and retires
+    /// past the grace. A recorded merge empties open_pr, so the merged node
+    /// retires as today too.
+    #[test]
+    fn a_driving_peer_and_a_recorded_merge_release_the_row() {
+        let mut driven = open_pr_row("x-node", "in_review", 1943);
+        driven.peer_drives_pr = true;
+        driven.superseded_by_live_peer = Some("peer-b (created later)".into());
+        assert_eq!(gc_decide(&driven, 900), (GcAction::Retire, None));
+        let mut merged = open_pr_row("x-node", "in_review", 1943);
+        merged.node_merged = true;
+        merged.open_pr = None;
+        assert_eq!(gc_decide(&merged, 900), (GcAction::Retire, None));
+    }
+
+    /// The planning lane keeps precedence: a blueprint row that closed its
+    /// own planning assignment on an open-PR node retires past the grace -
+    /// the planner never drives the feature PR.
+    #[test]
+    fn a_closed_planner_row_on_an_open_pr_node_retires_as_today() {
+        let mut planner = open_pr_row("x-node", "in_review", 1943);
+        planner.planning = Some(vec![("x-node".into(), "in_review".into())]);
+        planner.planning_closed = vec!["x-node".into()];
+        assert_eq!(gc_decide(&planner, 900), (GcAction::Retire, None));
     }
 }
