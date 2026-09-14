@@ -768,3 +768,19 @@ def test_passing_run_prints_the_type_check_disclaimer(
     flat = "".join(result.output.split())
     assert "doesNOTtype-check" in flat
     assert "check-python-static.sh" in flat
+
+
+def test_smoke_list_output_stays_verbatim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`smoke --list` is a machine contract: one name per line, nothing else.
+    The scope statement must never join it."""
+    reg = tmp_path / "reg.py"
+    reg.write_text(
+        'STEPS = [("alpha pass", ".", "true"), ("bravo pass", ".", "true")]\n'
+    )
+    monkeypatch.setenv("SMOKE_REGISTRY_FILE", str(reg))
+    monkeypatch.setenv("SMOKE_FAILURE_RECORD", str(tmp_path / "rec.txt"))
+    result = CliRunner().invoke(test_command, ["smoke", "--list"])
+    assert result.exit_code == 0
+    assert result.output == "alpha pass\nbravo pass\n"

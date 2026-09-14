@@ -1050,7 +1050,6 @@ tests/hooks/test_init_node_guard_tokenize.sh
 tests/smoke-megatron-e2e.sh
 tests/smoke-target-shim.sh
 tests/test-backlog-triage.sh
-tests/test-graph-resolve.sh
 tests/test-worktree-inside-checkout-redirect.sh
 tests/test_emit_gate_transition.sh
 tests/test_provider_substrate_e2e.sh
@@ -2365,16 +2364,22 @@ def _run_census_deferred(args: Sequence[str]) -> int:
 )
 @click.argument("runner_args", nargs=-1, type=click.UNPROCESSED)
 def test_command(stream: bool, log_override: Optional[Path], runner_args: tuple[str, ...]) -> None:
-    # Scope statement, every mode, pass or fail: a green run here is pytest's
-    # verdict alone, and the reader must learn the typing gate lives elsewhere
-    # at the moment they might conclude otherwise.
-    print(
-        "fno doctor test runs tests only and does NOT type-check; ruff + mypy "
-        "run separately: bash scripts/ci/check-python-static.sh (CI job "
-        "main-python-static runs the same script).",
-        flush=True,
-    )
     args = list(runner_args)
+    # Scope statement, every RUN, pass or fail: a green run here is pytest's
+    # verdict alone, and the reader must learn the typing gate lives elsewhere
+    # at the moment they might conclude otherwise. Skipped where output is a
+    # machine contract, not a run verdict: `smoke --list` is verbatim-stable
+    # (one name per line) and the census emits parsed rows.
+    machine_output = bool(args) and (
+        args[0] == "--census-deferred" or (args[0] == "smoke" and "--list" in args)
+    )
+    if not machine_output:
+        print(
+            "fno doctor test runs tests only and does NOT type-check; ruff + mypy "
+            "run separately: bash scripts/ci/check-python-static.sh (CI job "
+            "main-python-static runs the same script).",
+            flush=True,
+        )
     if log_override is not None and (
         stream or (args and args[0] in ("smoke", "--census-deferred"))
     ):
