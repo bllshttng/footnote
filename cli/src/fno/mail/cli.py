@@ -3111,7 +3111,8 @@ def _raw_send(
     # 4. Heal a dead pane binding before routing on the row (x-4a68): a codex
     #    row whose pane is gone but whose thread is loaded rebinds to the
     #    thread lane. An unmeasurable probe fails open (exit 3 under --check).
-    if entry.mux and session_id:
+    #    Claude panes keep their existing heal owners and skip this entirely.
+    if entry.mux and session_id and entry.harness == "codex":
         heal_verdict, heal_reason, heal_pane = _lane_heal(session_id)
         if heal_verdict == "rebound-thread":
             entry = resolve_agent(lookup_name).entry
@@ -3278,12 +3279,10 @@ def _raw_send(
     # "A path exists" is the whole claim.
     if check:
         if entry.mux:
-            # The heal already probed this pane, so a surviving mux ref was
-            # read Present. Whether the paste LANDS is the send's question.
-            print(
-                "injectable: mux-pane (pane probed live; a paste still needs "
-                "the confirm to land)"
-            )
+            # A codex row here was probed live by the heal; a claude row keeps
+            # its own pane answers. Either way the paste landing is the send's
+            # question, decided by the confirm.
+            print("injectable: mux-pane (a paste still needs the confirm to land)")
             raise typer.Exit(code=0)
         if not session_id:
             # Reachable only under --check, which is exempt from the

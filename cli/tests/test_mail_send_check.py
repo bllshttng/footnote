@@ -174,13 +174,12 @@ def test_no_registry_row_is_not_injectable(tmp_path):
     assert out.startswith("not-injectable:"), out
 
 
-def test_non_keystroke_lane_is_not_injectable(tmp_path):
-    """A codex app-server peer has no prompt line.
+def test_non_keystroke_lane_check_follows_the_transport(tmp_path):
+    """A codex app-server peer answers from its real transport.
 
-    A non-review payload can never fire there. A review verb routes to
-    review/start, so its check answer follows the transport: with no
-    deployed binary the answer stays not-injectable rather than
-    promising the RPC path.
+    A non-review payload rides turn/start, so with no deployed binary the
+    check refuses on the transport rather than promising the path. A review
+    verb routes to review/start and follows the same transport rule.
     """
     _write_registry(
         tmp_path,
@@ -193,7 +192,8 @@ def test_non_keystroke_lane_is_not_injectable(tmp_path):
         tmp_path,
     )
     assert code == 1, out
-    assert "no prompt line" in out, out
+    assert "not-injectable:" in out, out
+    assert "turn/start has no transport" in out, out
     out, code = _run(
         ["cx", "/review", "--raw", "--check"],
         _self_env(),
@@ -217,11 +217,13 @@ def test_malformed_payload_is_a_usage_error_not_a_verdict(tmp_path):
 
     Reporting ``not-injectable`` here would assert exactly the kind of unestablished
     claim ``--check`` exists to prevent: a caller gating advice would tell a session
-    with a perfectly good path to go ask its operator.
+    with a perfectly good path to go ask its operator. A multi-line payload is the
+    standing malformed shape (a plain word became a legal payload under law
+    d-5976045c).
     """
     _write_registry(tmp_path, [_row(name="me", harness_session_id=SELF_SID)])
     out, code = _run(
-        ["me", "not-a-slash-verb", "--raw", "--check"],
+        ["me", "one line\nsecond line", "--raw", "--check"],
         _self_env(),
         tmp_path,
     )
