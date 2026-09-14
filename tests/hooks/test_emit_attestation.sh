@@ -597,30 +597,50 @@ for key in findings_blocking findings_nonblocking findings review_round disposit
     || fail "no-file payload carries $key='$got'"
 done
 
-echo "== default-branch refusal + delegated-path branch parity (x-a8a1) =="
+echo "== default-branch shapes + delegated-path branch parity (x-a8a1) =="
 git -C "$REPO" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
 git -C "$REPO" update-ref refs/remotes/origin/main "$BASE_SHA"
 git -C "$REPO" update-ref refs/remotes/origin/feature/x-e601 "$HEAD_SHA"
 
-# 15. A checkout ON the default branch refuses before anything is journaled:
-#     the upstream rewrite cannot produce the base name, so branch == base
-#     can only mean the emit ran on the repo default - lost for the real PR,
-#     in scope for any PR whose headRefName is main. Pre-attempt shape: no
-#     refused terminal row either (no review attempt exists to terminate).
+# 15. The canonical checkout sitting ON the default branch AT the base: the
+#     empty-diff refusal fires, and because branch == base there, it names the
+#     default-branch shape - lost for the real PR, in scope for any PR whose
+#     headRefName is the base - and points at the PR's worktree. The refused
+#     terminal row still journals (reason=empty_diff): an attempt that read
+#     nothing is recorded, not hidden.
 git -C "$REPO" checkout -q -B main "$BASE_SHA"
 rm -f "$TMP/last-emit.txt"
 RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
   FNO="$TMP/fno-stub" bash "$EMITTER" code-review pass 2>&1 >/dev/null)"
 RECEIPT_RC=$?
-[[ $RECEIPT_RC -ne 0 ]] && pass "default-branch emit refuses" \
-  || fail "default-branch emitted anyway (exit $RECEIPT_RC)"
-[[ ! -f "$TMP/last-emit.txt" ]] \
-  && pass "default-branch refusal journals nothing (pre-attempt shape)" \
-  || fail "default-branch refusal journaled a row: $(cat "$TMP/last-emit.txt" 2>/dev/null)"
-case "$RECEIPT" in
-  *"is the repo default"*) pass "refusal names the default-branch shape" ;;
-  *) fail "refusal lacks the reason: $RECEIPT" ;;
-esac
+[[ $RECEIPT_RC -ne 0 ]] && pass "default-branch checkout at the base refuses" \
+  || fail "default-branch at-base emitted anyway (exit $RECEIPT_RC)"
+stored '.reason' 2>/dev/null | grep -qx "empty_diff" \
+  && pass "refusal journals the empty-diff terminal" \
+  || fail "terminal reason: want empty_diff, got '$(stored '.reason')'"
+if grep -q "repo default branch" <<<"$RECEIPT" && grep -q "Run" <<<"$RECEIPT" \
+    && grep -q "from the PR's worktree" <<<"$RECEIPT"; then
+  pass "refusal names the default-branch shape and the worktree remedy"
+else
+  fail "refusal lacks the default-branch phrasing: $RECEIPT"
+fi
+
+# 15b. Work committed directly ON the default branch attests honestly: the
+#      actor producer (hooks, review lanes in in-place sessions) runs on
+#      main-based repos, and the row's branch=main is then the TRUE scope.
+#      The refusal stays out of this shape.
+echo mainline >> "$REPO/a.txt"
+git -C "$REPO" add a.txt
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m "main work"
+rm -f "$TMP/last-emit.txt"
+emit_rc=0
+(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-stub" bash "$EMITTER" code-review pass) >/dev/null 2>&1 || emit_rc=$?
+[[ $emit_rc -eq 0 ]] && pass "work directly on the default branch attests" \
+  || fail "main-based work refused (exit $emit_rc); the actor producer path closed"
+got="$(stored '.branch')"
+[[ "$got" == "main" ]] && pass "main-based work records branch=main (its true scope)" \
+  || fail "main-based branch: want main, got '$got'"
 
 # 16. The delegated path (--findings-file) records the SAME branch the typed
 #     path resolves: the script passes its post-rewrite branch through

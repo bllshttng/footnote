@@ -190,17 +190,6 @@ if [[ "$upstream" == */* && "${upstream#*/}" != "$base" && "$ahead" == "0" ]]; t
   branch="${upstream#*/}"
 fi
 
-# The rewrite above provably cannot produce the base name (its second conjunct
-# requires the upstream to differ from it), so branch == base here means the
-# checkout sits on the repo default branch. That emit is mis-scoped by
-# construction: lost for the real PR, in scope for any PR whose headRefName is
-# literally the base (x-a8a1). Same fail-closed shape as the detached-HEAD
-# refusal: a pre-attempt refusal, so it journals nothing.
-if [[ "$branch" == "$base" ]]; then
-  echo "emit-attestation: branch '${branch}' is the repo default; an attestation recorded here is lost for the real PR and in scope for any PR whose head is '${branch}'. Run from the PR's worktree; no event emitted" >&2
-  exit 1
-fi
-
 # Shared resolution for BOTH exits below (the refusal and the emit): the actor
 # reads and the invocation id. Hoisted above the diff measurement so the
 # empty-diff refusal can journal its own terminal row - a refusal that writes
@@ -315,6 +304,18 @@ if (( reviewed_file_count == 0 )); then
   fi
   echo "emit-attestation: the diff under review is empty (no changed files, base ${reviewed_base_sha} .. HEAD ${reviewed_head_sha} on branch ${branch})." >&2
   echo "A review with nothing to read is not a pass; ${refusal_row_note}." >&2
+  if [[ "$branch" == "$base" ]]; then
+    # The rewrite cannot produce the base name, so branch == base with an empty
+    # diff is the canonical checkout sitting on the repo default: exactly the
+    # x-a8a1 shape, where the attestation would be lost for the real PR and in
+    # scope for any PR whose headRefName is literally the base. Name it rather
+    # than refusing here - work committed directly ON the default branch attests
+    # honestly (the actor producer runs on main-based sessions), so only the
+    # nothing-to-read case carries the default-branch warning.
+    echo "You are on the repo default branch '${base}': an attestation recorded here" >&2
+    echo "is lost for the real PR and in scope for any PR whose head is '${base}'. Run" >&2
+    echo "from the PR's worktree." >&2
+  fi
   echo "If you are reviewing a worktree from the canonical checkout, hand the review its" >&2
   echo "target explicitly: run from the worktree path, or pass the PR number to the review verb." >&2
   exit 1
