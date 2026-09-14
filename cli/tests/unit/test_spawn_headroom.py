@@ -49,37 +49,32 @@ def _wire(
 
     monkeypatch.setattr("fno.config.load_settings", fake_load_settings)
     from fno.agents import spawn_gate
-    from fno.footprint import Admission
 
-    monkeypatch.setattr(
-        spawn_gate, "census", lambda: SimpleNamespace(slot_count=slots)
-    )
-    monkeypatch.setattr(
-        spawn_gate, "provider_live_count", lambda name, counted=None: live.get(name, 0)
-    )
     monkeypatch.setattr(
         spawn_gate,
         "provider_lanes_cap",
         cap_fn if cap_fn is not None else spawn_gate.provider_lanes_cap,
     )
-    # x-7783: the CPU axis bounds the width; pinned admitting unless a test
-    # asks for a hold, so no test reads the real machine.
-    admission = Admission(
-        verdict=cpu_verdict,
-        axis="fleet_cpu_share",
-        reason=f"test {cpu_verdict}",
-        share_low=0.1,
-        share_high=0.1,
-        bound="exact",
-        fleet_cores=1.2,
-        machine_cores=6.0,
-        capacity_cores=12.0,
-        ceiling=0.5,
-        gap=None,
-        load_15m=1.0,
-        backstop=480.0,
-    )
-    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
+    # The width reads the ONE gate's probe answer (x-6089): slots, lanes and
+    # the CPU verdict travel in one payload, stubbed here.
+    rows: list[dict] = [
+        {"name": "cpu-share", "measured": "1.20/12.00 cores", "threshold": "50%",
+         "verdict": "pass" if cpu_verdict == "admit" else "refuse",
+         "key": "agents.max_fleet_cpu_share", "note": f"test {cpu_verdict}"}
+    ]
+    answer = {
+        "verdict": "accepted" if cpu_verdict == "admit" else "refused",
+        "reason": None if cpu_verdict == "admit" else "fleet_cpu_share",
+        "message": None if cpu_verdict == "admit" else f"test {cpu_verdict}",
+        "slots": slots,
+        "max_live": max_live,
+        "lanes": {
+            name: {"cap": None, "live": count, "counted": []}
+            for name, count in live.items()
+        },
+        "rows": rows,
+    }
+    monkeypatch.setattr(spawn_gate, "probe_capacity", lambda *a, **k: answer)
 
 
 def test_width_is_the_minimum_of_fleet_and_provider_headroom(monkeypatch):

@@ -191,17 +191,20 @@ def test_map_covers_current_surface_once():
     # provider-cap actor's questions: 616 -> 617. `agents compaction`, the
     # hidden relay over the PreCompact stamp the hook writes: 617 -> 618.
     # Counted from the merged file at the x-f33e fold: main carried 619
-    # (provider-cap and compaction among them) and this branch allocates
+    # (provider-cap and compaction among them) and that branch allocates
     # `doctor evals macro`, its forwarded `evals macro` spelling, and the
-    # binary-first `agents evals-macro` action the dispatchers expose:
-    # 618 -> 622. `doctor observer judge` and `observer judge`, the
-    # blueprint five-question judge and its bare-form leaf (refs 2 and 0,
-    # swept): counted from the merged file, 622 -> 624. `agents judge`, the
+    # binary-first `agents evals-macro` action the dispatchers expose: 618 ->
+    # 622. `doctor observer judge` and `observer judge`, the blueprint
+    # five-question judge and its bare-form leaf (refs 2 and 0, swept):
+    # counted from the merged file, 622 -> 624. `agents judge`, the
     # Rust-client help entry the judge port's RUST_ONLY_VERB_HELP
     # registration surfaces under `fno agents --help` (refs 0): 624 -> 625.
-    # The second main fold allocates `agents backlog-note` and
-    # `agents backlog-notes`, the two native note verbs: 625 -> 627.
-    assert len(mapped) == 627, (
+    # Later folds allocate `agents backlog-note` and `agents backlog-notes`,
+    # the two native note verbs (625 -> 627). This branch allocated
+    # `agents spawn-gate`, the verb the Python gate transport calls, in
+    # parallel from the same 616 base: counted from the merged file, 627 ->
+    # 628.
+    assert len(mapped) == 628, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

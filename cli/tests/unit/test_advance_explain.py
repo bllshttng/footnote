@@ -256,33 +256,32 @@ def test_overall_max_bounds_the_epic_explain_decision(monkeypatch):
     assert asked["dropped_by"] == "max-dispatch"
 
 
-def test_cpu_share_row_reports_refuse_from_the_shared_decision(monkeypatch):
-    """The cpu-share row renders the gate's own admission with its numbers
-    and the backstop row sits beside it (x-7783: two axes, two rows)."""
-    from fno.agents import spawn_gate
+def test_the_probe_rows_render_as_gates_from_one_answer(monkeypatch):
+    """The probe answer's rows (Rust-rendered, x-6089) become Gate rows
+    verbatim, so the report can never recount the machine itself."""
     from fno.backlog import explain
-    from fno.footprint import Admission
 
-    admission = Admission(
-        verdict="undecidable",
-        axis="fleet_cpu_share",
-        reason=(
-            "spawn-gate: the fleet's CPU share cannot be decided: attributed "
-            "17.5% of capacity, up to 60.0% with rows unattributed"
-        ),
-        share_low=0.175,
-        share_high=0.6,
-        bound="upper",
-        fleet_cores=2.1,
-        machine_cores=7.2,
-        capacity_cores=12.0,
-        ceiling=0.5,
-        gap="3 pidless row(s)",
-        load_15m=45.0,
-        backstop=480.0,
-    )
-    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
-    rows = {g.name: g for g in explain._machine_gates()}
+    answer = {
+        "verdict": "accepted",
+        "rows": [
+            {
+                "name": "cpu-share",
+                "measured": "2.10/12.00 cores",
+                "threshold": "50%",
+                "verdict": "refuse",
+                "key": "agents.max_fleet_cpu_share",
+                "note": "spawn-gate: the fleet's CPU share cannot be decided",
+            },
+            {
+                "name": "load-backstop",
+                "measured": "45.0",
+                "threshold": "480.0",
+                "verdict": "pass",
+                "key": "agents.hard_max_load_per_cpu",
+            },
+        ],
+    }
+    rows = {g.name: g for g in explain.gates_for(None, probe=answer)}
     assert rows["cpu-share"].verdict == "refuse"
     assert "cannot be decided" in (rows["cpu-share"].note or "")
     assert rows["cpu-share"].measured == "2.10/12.00 cores"
@@ -291,69 +290,30 @@ def test_cpu_share_row_reports_refuse_from_the_shared_decision(monkeypatch):
     assert rows["load-backstop"].verdict == "pass"
 
 
-def test_unreadable_instrument_renders_unmeasured_never_zero(monkeypatch):
-    """An admission the instrument never measured renders
-    as unmeasured, not as 0.00/0.00 - the same shape a real reading has."""
-    from fno.agents import spawn_gate
-    from fno.backlog import explain
-    from fno.footprint import Admission
-
-    admission = Admission(
-        verdict="refuse",
-        axis="cpu_instrument",
-        reason=(
-            "spawn-gate: the CPU instrument is unreadable "
-            "(ps unavailable: timed out after 5.0s); refusing to spawn "
-            "(--force to bypass)"
-        ),
-        share_low=0.0,
-        share_high=0.0,
-        bound="exact",
-        fleet_cores=0.0,
-        machine_cores=0.0,
-        capacity_cores=0.0,
-        ceiling=0.0,
-        gap=None,
-        load_15m=None,
-        backstop=0.0,
-    )
-    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
-    rows = {g.name: g for g in explain._machine_gates()}
-    assert rows["cpu-share"].measured == "unreadable"
-    assert rows["cpu-share"].threshold == "-"
-    assert rows["cpu-share"].verdict == "refuse"
-    assert rows["load-backstop"].measured == "-"
-    assert rows["load-backstop"].threshold == "-"
-
-
 def test_preview_stops_when_the_cpu_axis_would_refuse(monkeypatch):
     """The dry run passes no gate the real spawn would refuse on. The
-    preview reads the gate's own admission."""
+    preview reads the ONE gate's probe answer."""
     _lane_fill_world(monkeypatch, [_ready_node("x-win")])
     from fno.agents import spawn_gate
     from fno.backlog.explain import build_lane_fill_report
-    from fno.footprint import Admission
 
-    admission = Admission(
-        verdict="undecidable",
-        axis="fleet_cpu_share",
-        reason="spawn-gate: cannot decide",
-        share_low=0.175,
-        share_high=0.6,
-        bound="upper",
-        fleet_cores=2.1,
-        machine_cores=7.2,
-        capacity_cores=12.0,
-        ceiling=0.5,
-        gap="3 pidless row(s)",
-        load_15m=45.0,
-        backstop=480.0,
-    )
-    monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
+    answer = {
+        "verdict": "accepted",
+        "rows": [
+            {
+                "name": "cpu-share",
+                "measured": "2.10/12.00 cores",
+                "threshold": "50%",
+                "verdict": "refuse",
+                "key": "agents.max_fleet_cpu_share",
+                "note": "spawn-gate: cannot decide",
+            }
+        ],
+    }
+    monkeypatch.setattr(spawn_gate, "probe_capacity", lambda *a, **k: answer)
     report = build_lane_fill_report(epic="x-epic")
     assert report["selection"]["stop"] == "load-refused"
     assert report["decision"]["would_dispatch"] == ["x-win"]
-
 
 # ---------------------------------------------------------------------------
 # ROUTING derives the slot from the node's verb (x-4890)

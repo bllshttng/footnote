@@ -209,6 +209,7 @@ def verb_call(
     unavailable: type = VerbUnavailable,
     *,
     timeout: float = 30,
+    passthrough_stderr: bool = False,
 ) -> dict:
     """One subprocess round-trip with the fno-agents binary: JSON payload in,
     parsed JSON answer out. The dev checkout's own build outranks any stale
@@ -219,6 +220,11 @@ def verb_call(
     makes its own network round trips must raise it, or the door reports the
     owner unreachable for a decision that was merely still running - and an
     unread authorization refuses the merge.
+
+    ``passthrough_stderr`` leaves the child's stderr attached to this process
+    instead of capturing it: a gate that queues for minutes streams its
+    ``spawn queued: ...`` prose live, so an operator watching the spawn sees
+    the wait instead of silence.
     """
     import json
     import os
@@ -234,7 +240,8 @@ def verb_call(
         proc = subprocess.run(
             [str(binary), verb],
             input=json.dumps(payload),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=None if passthrough_stderr else subprocess.PIPE,
             text=True,
             timeout=timeout,
         )

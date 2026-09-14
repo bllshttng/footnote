@@ -120,13 +120,6 @@ REGISTRY = [
         "why": "a status helper returning the stored field skips the read-time blocked derivation",
     },
     {
-        "name": "provider-resolution",
-        "glob": "cli/src/fno/agents/spawn_gate.py",
-        "site": r"row\.provider",
-        "required": r"resolve_provider|provider_for",
-        "why": "a raw provider read bypasses the resolver; the resolver does not exist yet",
-    },
-    {
         "name": "spawn-placement-flag-reach",
         # Reader half, cross-language: a placement flag advertised on the
         # Python spawn surface must also appear in the Rust client's argv

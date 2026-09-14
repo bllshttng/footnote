@@ -31,17 +31,20 @@ from fno.harness_identity import claude_transport_short_id
 
 # THE exit-code allocation table for the gate band across both trees (this
 # file and crates/fno-agents/src/spawn_gate.rs). A value >= 64 claims its
-# number once; cli/tests/unit/test_exit_code_allocation.py fails any
-# duplicate. The convention band stays outside the claim: small ints 0-5 and
-# 13-25 repeat per verb by design, and 124/127/137/143 mirror the standard
-# timeout/signal codes.
+# number once; the same NAME at the same number in both trees is byte-parity,
+# and cli/tests/unit/test_exit_code_allocation.py fails any duplicate. The
+# convention band stays outside the claim: small ints 0-5 and 13-25 repeat per
+# verb by design, and 124/127/137/143 mirror the standard timeout/signal codes.
 #   75-77, 79   capacity refusals, both gates (queue, no-wait, RAM, load)
-#   78          Python gate: provider cap. Rust never emits 78.
-#   80, 81      Python gate: king share, registry schema. Rust never emits these.
+#   78          provider cap; the quota lock and the lane faults keep it so
+#               exit-code consumers are unaffected
+#   80, 81      king share, registry schema
 #   82, 83      fleet incident stop pair, both gates (byte-parity)
-#   84          Rust gate only: state root ungranted (mirrored here so callers
-#               classify without reading Rust). Permanent until a human grants.
+#   84          state root ungranted. Permanent until a human grants.
 #   85          Python sandbox probe: sandbox unreachable.
+#   86          the spawn-gate transport could not get an answer at all (the
+#               gate verb missing, failed, or timed out); fail closed, never
+#               admit on an unreadable gate.
 #   90, 91      Rust fleet-incident check verb (fleet_incident.rs).
 EXIT_QUEUE_TIMEOUT = 75
 EXIT_NO_WAIT = 76
@@ -55,46 +58,8 @@ EXIT_FLEET_STOP_UNAVAILABLE = 83
 # Rust gate only (crates/fno-agents/src/spawn_gate.rs): the lane declares
 # nothing about how it stands toward the fno state root.
 EXIT_STATE_ROOT_UNGRANTED = 84
+EXIT_GATE_UNAVAILABLE = 87
 
-
-def _fleet_incident_gate() -> None:
-    """The pane gate's first admission boundary: the native verdict, BEFORE the bypass."""
-    import subprocess
-
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        return
-    try:
-        proc = subprocess.run(
-            [str(binary), "fleet-incident", "check", "--json"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except subprocess.TimeoutExpired:
-        proc = None
-    if proc is not None and proc.returncode != 0 and not proc.stdout.strip():
-        # A pre-breaker runtime answers unknown-verb on empty stdout: default clear.
-        return
-    try:
-        verdict = json.loads(proc.stdout) if proc else {}
-    except ValueError:
-        verdict = {}
-    if proc is None:
-        verdict.setdefault("reason", "check unavailable (the runtime timed out)")
-    if verdict.get("state") == "stopped":
-        _refuse(
-            EXIT_FLEET_STOP,
-            reason="fleet-stop",
-            generation=verdict.get("generation"),
-            detail=verdict.get("reason"),
-        )
-    if verdict.get("state") != "clear":
-        _refuse(
-            EXIT_FLEET_STOP_UNAVAILABLE,
-            reason="fleet-stop-unavailable",
-            detail=verdict.get("reason"),
-        )
 
 #: The refusal reasons a caller may outlast by retrying (spawn --wait). Owned
 #: HERE because these tokens are the gate's vocabulary; the CLI imports this
@@ -147,35 +112,6 @@ LIVE_STATUSES = frozenset(
 
 def _warn(msg: str) -> None:
     print(msg, file=sys.stderr)
-
-
-def _maybe_emit_spawn_cap_escape() -> None:
-    """Auto-emit ``gate_escape{reason:spawn-cap}`` when an operator bypasses the
-    gate (``FNO_SPAWN_GATE=0``) OUTSIDE a test context (x-91b5, Locked Decision
-    2). Fully fail-open: any error is swallowed so a spawn is NEVER blocked by
-    telemetry (AC1-FR).
-
-    The test-context guard is load-bearing: ``FNO_SPAWN_GATE=0`` also disables
-    the gate for the test suite, so without it every CI run would count as an
-    escape and the metric would read pure noise (AC1-EDGE). The Rust gate emits
-    the same event on its own bypass path; a shared fixture enforces the two
-    guards agree (AC2-FR)."""
-    try:
-        from fno.events.gate_escape import (
-            default_dedup_key,
-            emit_gate_escape,
-            should_emit_spawn_cap,
-        )
-
-        if not should_emit_spawn_cap():
-            return
-        emit_gate_escape(
-            "spawn-cap",
-            dedup_key=default_dedup_key("spawn-cap"),
-            detail="FNO_SPAWN_GATE=0 operator bypass",
-        )
-    except Exception:
-        pass  # ponytail: telemetry must never block a spawn (AC1-FR)
 
 
 # ---------------------------------------------------------------------------
@@ -581,225 +517,6 @@ _KNOWN_UNROUTED_PROVIDER = "__uncapped__"
 _PROVIDER_ADMISSION_TOKEN = object()
 
 
-def _provider_roster_live_short_ids(short_ids: set[str]) -> set[str]:
-    """Return requested bg ids with a positive live roster marker."""
-    try:
-        raw = json.loads(_roster_path().read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise ProviderCountUnavailable(f"claude roster unreadable: {exc}") from exc
-    workers = raw.get("workers") if isinstance(raw, dict) else None
-    if not isinstance(workers, dict):
-        raise ProviderCountUnavailable("claude roster has no workers object")
-
-    live: set[str] = set()
-    undecidable: set[str] = set()
-    for worker in workers.values():
-        if not isinstance(worker, dict):
-            continue
-        session_id = worker.get("sessionId")
-        if not isinstance(session_id, str) or not session_id:
-            continue
-        short_id = claude_transport_short_id(session_id)
-        if short_id not in short_ids:
-            continue
-        pid = worker.get("pid") if isinstance(worker.get("pid"), int) else None
-        state = _pid_alive(pid, None)
-        if state is True:
-            live.add(short_id)
-        elif state is None:
-            undecidable.add(short_id)
-    unknown = undecidable - live
-    if unknown:
-        raise ProviderCountUnavailable(
-            f"process incarnation unreadable for bg worker(s) {sorted(unknown)}"
-        )
-    return live
-
-
-#: Registry shapes already warned about in THIS process. The unattributed-row
-#: warning describes the registry as a whole, not one provider, so a caller
-#: asking about several providers - or a spawn queueing round the gate loop -
-#: repeated the identical line once per call. Deduped per process rather than
-#: silenced: the fact still reaches stderr exactly once.
-_UNATTRIBUTED_WARNED: set[tuple[str, str]] = set()
-
-
-def provider_live_count(provider: str, counted: Optional[set[str]] = None) -> int:
-    """Count provider rows only when status and positive liveness agree.
-
-    ``counted``, when given, is filled with the names of the rows this count
-    actually included. That is deliberately an out-parameter on the COUNTER
-    rather than a second walk in the caller: a display that recounted would
-    disagree with the refusal the first time either changed, and a lane display
-    that disagrees with the gate is worse than no display. Measured while
-    building `fno agents top`'s lane block: a naive registry walk listed five
-    openai rows beside the gate's count of 0, because status and positive
-    liveness are not the same population.
-    """
-    try:
-        from fno.agents.registry import load_registry
-
-        loaded = load_registry()
-        if getattr(loaded, "complete", True) is not True:
-            raise ProviderCountUnavailable(
-                "registry forward read skipped rows; provider count is incomplete"
-            )
-        live_rows = [row for row in loaded if row.status in LIVE_STATUSES]
-        unattributed: dict[tuple[str, str], int] = {}
-        for row in live_rows:
-            if row.provider:
-                continue
-            if row.origin == "operator":
-                # A hand-started session can never carry a spawn-time provider
-                # stamp; warning about it on every gate read taught nobody
-                # anything and rode stderr ahead of real refusals. Adopted and
-                # unknown-origin rows keep the warning: absence means unknown,
-                # and an unstamped spawn-minted row is the defect it names.
-                continue
-            shape = (row.harness or "unknown", row.origin or "unknown")
-            unattributed[shape] = unattributed.get(shape, 0) + 1
-        for (harness, origin), count in sorted(unattributed.items()):
-            if (harness, origin) in _UNATTRIBUTED_WARNED:
-                continue
-            _UNATTRIBUTED_WARNED.add((harness, origin))
-            _warn(
-                f"{count} live row(s) were minted without a provider stamp "
-                f"(harness={harness}, origin={origin})"
-            )
-        candidates = [row for row in live_rows if row.provider == provider]
-    except Exception as exc:
-        raise ProviderCountUnavailable(f"fno registry unreadable: {exc}") from exc
-
-    bg_short_ids = {
-        row.short_id
-        for row in candidates
-        if row.pid is None
-        and row.harness == "claude"
-        and bool(row.short_id)
-    }
-    bg_live = (
-        _provider_roster_live_short_ids(bg_short_ids) if bg_short_ids else set()
-    )
-
-    count = 0
-    counted_names: set[str] = set()
-
-    def _pane_state(row) -> "bool | None":
-        """Pane liveness via the mux probe. Raises ProviderCountUnavailable
-        when the probe crashes; None when the row carries no pane ref."""
-        if not isinstance(row.mux, dict):
-            return None
-        try:
-            from fno.agents.mux_spawn import _mux_pane_alive
-
-            return _mux_pane_alive(row.mux)
-        except Exception as exc:
-            raise ProviderCountUnavailable(
-                f"pane liveness unreadable for {row.name}: {exc}"
-            ) from exc
-
-    for row in candidates:
-        if row.pid is not None:
-            if row.pid_start_time is None:
-                state = _pid_alive(row.pid, None)
-                if state is False:
-                    continue
-                pane = _pane_state(row)
-                if pane is True:
-                    count += 1
-                    counted_names.add(row.name)
-                    continue
-                if pane is False:
-                    continue
-                raise ProviderCountUnavailable(
-                    f"process incarnation token missing for {row.name}"
-                )
-            state = _pid_alive(row.pid, row.pid_start_time)
-            if state is None:
-                raise ProviderCountUnavailable(
-                    f"process incarnation unreadable for {row.name}"
-                )
-            if state is True:
-                count += 1
-                counted_names.add(row.name)
-            continue
-        pane = _pane_state(row)
-        if pane is True:
-            count += 1
-            counted_names.add(row.name)
-            continue
-        if pane is False:
-            continue
-        if isinstance(row.mux, dict):
-            # Unreadable is not absent: the cap refuses before the bg fallback.
-            raise ProviderCountUnavailable(
-                f"pane liveness unreadable for {row.name}"
-            )
-        if row.short_id and row.short_id in bg_live:
-            count += 1
-            counted_names.add(row.name)
-    if counted is not None:
-        counted.update(counted_names)
-    return count + _provider_live_slot_claims(provider, counted_names)
-
-
-def _provider_live_slot_claims(provider: str, counted_names: set[str]) -> int:
-    """Count provider-tagged headless reservations not represented by rows."""
-    try:
-        from fno.claims.core import claim_status
-
-        root = _gate_claims_root()
-        claims_dir = root / ".fno" / "claims"
-        if not claims_dir.exists():
-            return 0
-        paths = list(claims_dir.glob("worker%3A*.lock"))
-    except Exception as exc:
-        raise ProviderCountUnavailable(
-            f"worker reservations unreadable: {exc}"
-        ) from exc
-
-    count = 0
-    for path in paths:
-        key = unquote(path.name[: -len(".lock")])
-        name = key.removeprefix("worker:")
-        if name in counted_names:
-            continue
-        try:
-            status = claim_status(key, root=root)
-        except Exception as exc:
-            raise ProviderCountUnavailable(
-                f"worker reservation {key} unreadable: {exc}"
-            ) from exc
-        state = status.get("state")
-        if state in ("free", "stale"):
-            continue
-        if state == "corrupted":
-            raise ProviderCountUnavailable(
-                f"worker reservation {key} is corrupted"
-            )
-        metadata = status.get("metadata")
-        model_provider = (
-            metadata.get("model_provider") if isinstance(metadata, dict) else None
-        )
-        if not isinstance(model_provider, str) or not model_provider:
-            _warn(
-                f"live worker reservation {key} was minted without "
-                "model_provider; skipping"
-            )
-            continue
-        if model_provider == _KNOWN_UNROUTED_PROVIDER:
-            continue
-        if model_provider != provider:
-            continue
-        if state == "suspect":
-            raise ProviderCountUnavailable(
-                f"worker reservation {key} liveness is suspect"
-            )
-        if state == "live":
-            count += 1
-    return count
-
-
 def _gate_claims_root() -> Path:
     from fno.claims.io import global_claims_root
 
@@ -974,31 +691,6 @@ class GateRefused(SystemExit):
         self.receipt = receipt
 
 
-def _acquire_gate_mutex(holder: str, *, fail_closed: bool = False) -> bool:
-    """One attempt at the spawn-gate mutex. True = held. Errors fail open."""
-    try:
-        from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim
-
-        try:
-            acquire_claim(
-                GATE_CLAIM_KEY,
-                holder,
-                ttl_ms=GATE_CLAIM_TTL_MS,
-                root=_gate_claims_root(),
-            )
-            return True
-        except CLAIM_UNAVAILABLE:
-            # Must not fall to the outer except below, which proceeds
-            # UNSERIALIZED on a claims-layer fault. Contention is the
-            # opposite: someone else has it, so this attempt fails closed.
-            return False
-    except Exception as exc:
-        if fail_closed:
-            raise ProviderCountUnavailable(f"spawn mutex unavailable: {exc}") from exc
-        _warn(f"spawn-gate: mutex unavailable ({exc}); proceeding unserialized")
-        return True
-
-
 def provider_lanes_cap(budget: object) -> Optional[int]:
     """The `lanes` dimension of one provider budget, whichever spelling arrived.
 
@@ -1086,76 +778,6 @@ def _refuse(
     raise refusal
 
 
-def _refuse_provider_cap(
-    provider: str,
-    cap: int,
-    current: int,
-) -> NoReturn:
-    """The measured-count refusal. `current` is REQUIRED: a provider_cap
-    receipt that cannot state the count it measured is blaming a cap it
-    never read (2026-09-09: `reason: provider_cap, cap: 10, count: null`
-    fired while zai held 9 of 10, because the mutex was busy)."""
-    _warn(
-        f"spawn-gate: provider {provider}, cap {cap}, current count "
-        f"{current}; refusing; no worker launched"
-    )
-    receipt = {
-        "status": "refused",
-        "reason": "provider_cap",
-        "provider": provider,
-        "cap": cap,
-        "count": current,
-        "current_count": current,
-    }
-    _refuse(EXIT_PROVIDER_CAP, receipt)
-
-
-def _refuse_gate_fault(
-    provider: Optional[str],
-    error: BaseException,
-    *,
-    reason: str = "gate_mutex_unavailable",
-) -> NoReturn:
-    """The claims-layer fault refusal: the gate could not serialize the
-    decision, so no count was measured and no cap may be named. The reason
-    names the claim site that faulted (the gate mutex, a worker lane
-    reservation), never a cap. Keeps EXIT_PROVIDER_CAP so exit-code
-    consumers are unaffected."""
-    _warn(
-        f"spawn-gate: provider {provider}, {reason.replace('_', ' ')} ({error}); "
-        "refusing; no worker launched"
-    )
-    receipt: dict[str, object] = {
-        "status": "refused",
-        "reason": reason,
-        "provider": provider,
-        "error": str(error),
-    }
-    _refuse(EXIT_PROVIDER_CAP, receipt)
-
-
-def _refuse_quota_lock(account: str, resets_at: Optional[float]) -> NoReturn:
-    """A vendor quota window on the caller-named account. NOT machine
-    busy-ness, so --force does not buy past it. Keeps EXIT_PROVIDER_CAP
-    for exit-code consumers, like _refuse_gate_fault."""
-    from datetime import datetime, timezone
-
-    when = (
-        datetime.fromtimestamp(resets_at, tz=timezone.utc).isoformat()
-        if resets_at else "unknown (no reset was readable)"
-    )
-    _warn(
-        f"spawn-gate: account {account} is rate-limited until {when}; "
-        "refusing; no worker launched"
-    )
-    _refuse(EXIT_PROVIDER_CAP, {
-        "status": "refused",
-        "reason": "provider_quota_lock",
-        "account": account,
-        "resets_at": resets_at,
-    })
-
-
 def _emit_gate_event(kind: str, **data: Any) -> None:
     """Best-effort agents-log event. Never raises, never blocks a spawn."""
     try:
@@ -1164,89 +786,6 @@ def _emit_gate_event(kind: str, **data: Any) -> None:
         events.emit(kind, **data)
     except Exception:  # noqa: BLE001 - telemetry never changes a gate outcome
         pass
-
-
-def _check_registry_schema() -> None:
-    """Refuse a spawn into a fleet whose shared registry this fno cannot write.
-
-    The 2026-08-28 story and the edge contract live in
-    docs/architecture/spawn-gate.md. Unreadable file skips (a spawn is not the
-    place to adjudicate a torn registry); schema ahead refuses with both
-    integers, the file, and the repair verb. Emission stays best-effort.
-    """
-    from fno.agents.registry import (
-        SCHEMA_VERSION,
-        _read_raw_registry,
-        _registry_path,
-    )
-
-    try:
-        target = _registry_path(None)
-        raw = _read_raw_registry(target)
-    except Exception as exc:  # noqa: BLE001 - resolving the path needs settings,
-        # and an unreadable config is not a fleet condition: no spawn is blocked
-        # because a path could not be resolved (the module contract that global
-        # guards fail OPEN on read errors).
-        #
-        # The skip leaves a trace, but NOT on stderr. `_check_ram_floor` and
-        # `_cpu_axis` warn on their equivalent skips, and this one
-        # cannot: the gate's own `test_under_cap_passes_silently` pins an empty
-        # stderr on the pass path, and this branch fires there. A silent skip is
-        # still unobservable, so it emits instead - the same aggregation argument
-        # the refusal below already makes, applied to the absence of a check.
-        _emit_gate_event("registry_schema_check_skipped", reason=repr(exc))
-        return
-    if raw is None:
-        return
-    on_disk = raw.get("schema_version")
-    if not isinstance(on_disk, int) or on_disk <= SCHEMA_VERSION:
-        return
-    _warn(
-        f"spawn-gate: the shared agent registry at {target} is "
-        f"schema_version={on_disk}, ahead of the schema_version={SCHEMA_VERSION} "
-        "this fno understands, so this worker could neither claim its node nor "
-        "stamp its mail; refusing to spawn. Upgrade this fno (fno doctor "
-        f"update), or repair the file (fno agents registry-repair --to "
-        f"{SCHEMA_VERSION} --apply)."
-    )
-    # This branch used to emit its own `registry_schema_ahead` beside the
-    # refusal: a bespoke answer to the general problem `_refuse` now solves for
-    # every branch. It had one producer and no consumer, and two events for one
-    # moment drift apart. The general event carries strictly more (the spawn
-    # name and the exit code), and `reason == "registry_schema"` still isolates
-    # this case for anyone querying only for it.
-    _refuse(
-        EXIT_REGISTRY_SCHEMA,
-        {
-            "status": "refused",
-            "reason": "registry_schema",
-            "registry_path": str(target),
-            "on_disk": on_disk,
-            "understood": SCHEMA_VERSION,
-        },
-    )
-
-
-def _check_ram_floor(floor_gb: float) -> None:
-    """Refuse (never queue) below the floor; <= 0 disables; unreadable skips."""
-    if floor_gb <= 0:
-        return
-    avail = available_ram_gb()
-    if avail is None:
-        _warn("spawn-gate: could not read available RAM; skipping the floor check")
-        return
-    if avail < floor_gb:
-        _warn(
-            f"spawn-gate: available RAM {avail:.1f}GB is below the min_free_gb "
-            f"floor {floor_gb:.1f}GB; refusing to spawn (--force to bypass)"
-        )
-        receipt = {
-            "status": "refused",
-            "reason": "ram_floor",
-            "available_gb": avail,
-            "min_free_gb": floor_gb,
-        }
-        _refuse(EXIT_RAM_REFUSED, receipt)
 
 
 #: `(None, "error")` is a real reading ("unreadable"), so the "not supplied"
@@ -1378,110 +917,6 @@ def _load_snapshot(max_load_per_cpu: float) -> LoadSnapshot:
     )
 
 
-def _king_share(cap: int, crowned: set[str], caller: str) -> int:
-    """One king's fair share of the ceiling: ``cap // crowns`` (x-5283 LD1).
-
-    The divisor counts CROWNS from the court's own ``crown_level`` field; the
-    caller folds in only when itself crowned (LD2: still share-checked, never
-    in the divisor). The floor of 1 keeps a crowded fleet able to start one
-    worker per king. A fleet with NO crowns divides by nothing, so every
-    uncrowned caller's share floors at 1: a session holds one worker until
-    someone is crowned. That is the crownless fleet refusing to be
-    ungoverned, not a malfunction, and the refusal's "across 0 kings" names
-    it.
-    """
-    divisor = len(crowned | ({caller} if caller in crowned else set()))
-    return max(1, cap // divisor) if divisor else 1
-
-
-def share_reading(census_obj: "LiveCensus", cap: int, caller: Optional[str]) -> dict:
-    """One share reading, printed by every surface that answers the question.
-
-    ``kings``/``share``/``held``/``held_rows`` (the caller's worker rows, by
-    name) and ``unattributed`` (the LD4 bucket: live rows that name nobody).
-    An unreadable registry returns None for every count (x-5283 AC9).
-    """
-    if not census_obj.registry_readable:
-        return {"kings": None, "share": None, "held": None,
-                "held_rows": None, "unattributed": None}
-    king_sessions = set(census_obj.crowned_sessions)
-    unattributed_rows = census_obj.worker_rows.get(None, [])
-    held_rows = list(census_obj.worker_rows.get(caller, [])) if caller else []
-    return {
-        "kings": len(king_sessions),
-        "share": _king_share(cap, king_sessions, caller or ""),
-        "held": len(held_rows),
-        "held_rows": held_rows,
-        "unattributed": {
-            "count": len(unattributed_rows),
-            "rows": list(unattributed_rows),
-        },
-    }
-
-
-def _take_headless_slot(
-    guard, name, holder, route_provider, provider_cap
-) -> None:
-    """The headless arm: bind the worker slot now. pane/bg keep the gate mutex
-    until dispatch returns (the caller releases via guard.release())."""
-    try:
-        _acquire_worker_slot(
-            guard, name, holder, route_provider,
-            fail_closed=provider_cap is not None,
-        )
-    except ProviderCountUnavailable as exc:
-        guard.release()
-        # A worker-slot claim fault is not the gate mutex; name the site.
-        _refuse_gate_fault(
-            route_provider or "unknown", exc, reason="lane_reservation_unavailable"
-        )
-    guard.release_gate_mutex()
-
-
-def _check_king_share(
-    census_obj: "LiveCensus", cap: int, *, caller_session: Optional[str]
-) -> None:
-    """Refuse (never queue) when the calling king holds its full share (x-3f84 W4).
-
-    The share divides ``max_live`` by CROWNS (x-5283 LD1); ``held`` counts
-    the caller's worker rows only; only a caller whose session identity
-    resolved is checked; and waiting cannot help - only the caller's own
-    workers dying frees its share - so this refuses like the provider cap.
-    Every number comes from :func:`share_reading`: the count the gate
-    refuses on and the count any readout prints are one value.
-    """
-    if not caller_session:
-        return
-    reading = share_reading(census_obj, cap, caller_session)
-    held, share, kings = reading["held"], reading["share"], reading["kings"]
-    if held is None or share is None or kings is None:
-        # An unreadable registry leaves every count unknown; there is nothing
-        # to enforce and no zero to fail open on.
-        return
-    if held >= share:
-        msg = (
-            f"spawn-gate: king {caller_session[:8]} holds {held} of max_live {cap} "
-            f"across {kings} kings (share {share}); refusing to spawn -- waiting "
-            f"cannot help while your own workers hold the share (--force to bypass)"
-        )
-        unattributed = reading["unattributed"] or {}
-        if unattributed.get("count"):
-            shown = ", ".join(unattributed["rows"][:5])
-            extra = "..." if unattributed["count"] > 5 else ""
-            msg += f"; {unattributed['count']} live row(s) name nobody and sit " \
-                f"in the unattributed bucket ({shown}{extra})"
-        _warn(msg)
-        _refuse(
-            EXIT_KING_SHARE,
-            reason="king_share",
-            king=caller_session,
-            held=held,
-            share=share,
-            max_live=cap,
-            kings=kings,
-        )
-
-
 def _acquire_worker_slot(
     guard: GateGuard,
     name: str,
@@ -1520,30 +955,20 @@ def _acquire_worker_slot(
         _warn(f"spawn-gate: worker slot claim {key} unavailable; proceeding uncounted")
 
 
-def gate_settings() -> tuple:
-    """The gate's knobs, shared by :func:`run_gate` and :func:`probe_capacity`
-    so the two cannot disagree about a cap. A missing CAP or the limits table
-    is a real attribute read (falling back would silently uncap a provider).
-    The fail-safe fallback carries the built-in budget table. The CPU axis's
-    thresholds are NOT here: they are read per sample inside :func:`_cpu_axis`
-    (x-7783), and the retired trigger key is read nowhere.
+def _call_gate_verb(payload: dict) -> dict:
+    """One round trip to the Rust gate (``fno-agents spawn-gate``, mode
+    ``gate``). The child's stderr stays attached to this process, so a gate
+    that queues streams its ``spawn queued: ...`` prose live. The timeout
+    bounds the verb's own 600s queue plus prose and startup.
     """
+    from fno.rust_binary import verb_call
 
-    try:
-        from fno.config import load_settings
-
-        agents_cfg = load_settings().agents
-        cap = int(agents_cfg.max_live)
-        floor_gb = float(agents_cfg.min_free_gb)
-        limits = dict(agents_cfg.provider_limits)
-    except Exception:
-        cap, floor_gb = 3, 4.0
-        from fno.config import ProviderBudget, _BUILTIN_PROVIDER_BUDGETS
-
-        limits = {
-            k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
-        }
-    return cap, floor_gb, limits
+    return verb_call(
+        "spawn-gate",
+        payload,
+        timeout=QUEUE_TIMEOUT_S + 100.0,
+        passthrough_stderr=True,
+    )
 
 
 def run_gate(
@@ -1555,35 +980,20 @@ def run_gate(
     route_provider: Optional[str] = None,
     account: Optional[str] = None,
 ) -> GateGuard:
-    """Run the full gate. Returns a :class:`GateGuard` to hold across dispatch
-    on pass; raises :class:`GateRefused` (a SystemExit) on refusal/timeout.
-    All output goes to stderr (the stdout receipt shape is reserved)."""
+    """Run the full gate - by asking the ONE gate in the binary. Returns a
+    :class:`GateGuard` to hold across dispatch on pass; raises
+    :class:`GateRefused` (a SystemExit) on refusal/timeout.
+
+    This is a TRANSPORT, not a second gate: the axes (fleet incident, schema,
+    quota lock, provider cap, CPU, slots, RAM, king share) are decided inside
+    ``crates/fno-agents/src/spawn_gate.rs`` and this side only carries the
+    caller's identity and the refusal out. The refusal event still emits from
+    here (locked decision 5), so the journal population is unchanged for
+    spawns that enter Python.
+    """
     # Set before the first branch that can refuse, so every refusal event in
     # this run names the spawn it refused (see _CURRENT_SPAWN).
     _CURRENT_SPAWN.set((name, substrate))
-    # The incident stop gates BEFORE the bypass: a breaker a flag bypasses is no breaker.
-    _fleet_incident_gate()
-    # FNO_SPAWN_GATE=0 disables the gate entirely (the FNO_THINK_SPAWN=0
-    # precedent): test suites exercising spawn plumbing must not queue behind
-    # the REAL machine's live workers, and it doubles as an operator escape.
-    if os.environ.get("FNO_SPAWN_GATE") == "0":
-        _maybe_emit_spawn_cap_escape()
-        return GateGuard(
-            _route_provider=route_provider,
-            _spawn_name=name,
-            _substrate=substrate,
-            _admission_token=_PROVIDER_ADMISSION_TOKEN,
-        )
-    cap, floor_gb, limits = gate_settings()
-    # The retired trigger key is read nowhere (x-7783 AC7); the CPU axis
-    # re-reads its thresholds per sample inside _cpu_axis.
-
-    provider_cap = (
-        provider_lanes_cap(limits.get(route_provider))
-        if route_provider is not None
-        else None
-    )
-
     # The calling king's session id (x-3f84 W4), resolved through the same
     # self-identity source that stamps `spawned_by_session` onto the spawned
     # row, so the gate attributes a spawn exactly the way the row will.
@@ -1594,583 +1004,71 @@ def run_gate(
     except Exception:  # noqa: BLE001 - no identity, no share check (an
         # operator-run spawn is not competing for the commons)
         caller_session = None
-
-    holder = f"spawn-gate:{os.getpid()}:{name}"
-    guard = GateGuard(
-        _route_provider=route_provider,
-        _spawn_name=name,
-        _substrate=substrate,
-        _admission_token=_PROVIDER_ADMISSION_TOKEN,
+    payload = {
+        "mode": "gate",
+        "name": name,
+        "substrate": substrate,
+        "force": force,
+        "no_wait": no_wait,
+        "route_provider": route_provider,
+        "account": account,
+        "caller_session": caller_session,
+        "holder_pid": os.getpid(),
+    }
+    try:
+        answer = _call_gate_verb(payload)
+    except Exception as exc:  # noqa: BLE001 - an unanswered gate never admits
+        _refuse(
+            EXIT_GATE_UNAVAILABLE,
+            {
+                "status": "refused",
+                "reason": "gate_unavailable",
+                "error": str(exc),
+            },
+        )
+    if answer.get("status") == "admitted":
+        return GateGuard(
+            _gate_holder=answer.get("gate_holder"),
+            _worker_key=answer.get("worker_key"),
+            _worker_holder=answer.get("worker_holder"),
+            _route_provider=route_provider,
+            _spawn_name=name,
+            _substrate=substrate,
+            _admission_token=_PROVIDER_ADMISSION_TOKEN,
+        )
+    # The verb produced an answer, and the answer is a refusal: the exit code
+    # and the receipt travelled inside the answer (a refusal is data).
+    _refuse(
+        int(answer.get("exit_code", EXIT_GATE_UNAVAILABLE)),
+        answer.get("receipt"),
+        **(answer.get("event") or {}),
     )
 
-    # Ahead of the force branch, deliberately. `--force` means "I know the
-    # machine is busy", and a schema mismatch is not resource pressure: it is a
-    # worker that can neither claim its node nor stamp its mail, which is the
-    # failure this check exists to name. Forcing past it would reproduce that
-    # failure with the diagnosis suppressed. Nothing is held yet, so a refusal
-    # here needs no `guard.release()`. The dequeue path re-checks, the way the
-    # RAM floor does, because the queue window is long enough for the shared
-    # schema to move underneath a waiting spawn.
-    _check_registry_schema()
 
-    # Ahead of the force branch too: a vendor quota window is not machine
-    # busy-ness, and forcing past it buys another corpse. An unnamed account
-    # is covered anyway: the accounts.quota picker reads the same lock.
-    if account and account != "default":
-        from fno.adapters.providers.runtime_state import is_in_cooldown, read_state
-        if is_in_cooldown(account):
-            health = read_state().provider_health.get(account)
-            _refuse_quota_lock(account, getattr(health, "rate_limited_until", None))
-
-    if force and provider_cap is None:
-        # Byte-twin with the Rust gate (check-reachable-paths); force also
-        # bypasses the king share here, which _check_king_share's own refusal
-        # names where it matters.
-        _warn("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)")
-        if substrate == "headless":
-            _acquire_worker_slot(guard, name, holder, route_provider)
-        return guard
-
-    started = time.monotonic()
-    last_progress = started
-    announced = False
-    slots: int = 0
-    #: x-7783 LD4: a fleet-over sample holds, and admission after a hold is
-    #: debounced to CPU_ADMIT_SAMPLES consecutive under-ceiling samples.
-    held_on_cpu = False
-    under_streak = 0
-    #: start of the current UNBROKEN run of failed acquisitions (None = holding
-    #: or not yet contended). Reset on every success so a long legitimate queue
-    #: never accumulates into a spurious fail-open.
-    mutex_blocked_since: Optional[float] = None
-    #: x-e32e: ONE bg-socket scan per spawn; a fresh scan on every queue
-    #: poll is what hung a spawn for 12 minutes.
-    sock_map: Optional[dict[str, int]] = None
-    sock_scanned = False
-    axes_read: dict[str, str] = {}
-    _CURRENT_AXES_READ.set(axes_read)
-    _CURRENT_AXIS.set("ram")
-
-    while True:
-        pause_s = QUEUE_POLL_S
-        # Before the mutex, never inside it: this can cost seconds and the
-        # mutex serializes every spawner on the machine. Re-taken each pass so
-        # a spawn that queued does not decide on a reading from minutes ago.
-        prefetched_fleet = _prefetch_fleet_reading()
-        try:
-            acquired = (
-                _acquire_gate_mutex(holder, fail_closed=True)
-                if provider_cap is not None
-                else _acquire_gate_mutex(holder)
-            )
-        except ProviderCountUnavailable as exc:
-            _refuse_gate_fault(route_provider or "unknown", exc)
-        if acquired:
-            mutex_blocked_since = None
-        else:
-            now = time.monotonic()
-            if mutex_blocked_since is None:
-                mutex_blocked_since = now
-            # --no-wait means "do not queue", and a busy mutex is queueing.
-            # Refusing here (rather than falling through to the sleep) is what
-            # keeps the promise: without it the caller waits the full
-            # QUEUE_TIMEOUT_S and then gets EXIT_QUEUE_TIMEOUT, so it cannot
-            # even tell "cap is full" from "the gate is wedged".
-            if no_wait:
-                _warn(
-                    "spawn-gate: another spawner holds the gate mutex; refusing "
-                    "(--no-wait). See `fno agents top`."
-                )
-                receipt = {
-                    "status": "refused",
-                    "reason": "no_wait_mutex_held",
-                    "max_live": cap,
-                }
-                _refuse(EXIT_NO_WAIT, receipt)
-            if now - mutex_blocked_since >= MUTEX_WAIT_BUDGET_S:
-                if provider_cap is not None:
-                    # Contention is a peer or a corpse, never a full cap. The
-                    # takeover asks THE single reap decision (x-9c91): force
-                    # only a provably-dead holder, queue past anything else.
-                    from fno.claims.core import (
-                        ClaimGoneAway,
-                        ClaimVerdictError,
-                        ClaimVerdictUnavailable,
-                        force_release_claim,
-                        read_claim_file,
-                        sweep_verdict,
-                    )
-                    from fno.claims.io import ClaimCorrupted, claim_path
-                    from fno.claims.verdict import claim_verdicts
-
-                    gate_path = claim_path(GATE_CLAIM_KEY, root=_gate_claims_root())
-                    if not gate_path.exists():
-                        _warn(
-                            "spawn-gate: no gate claim file at "
-                            f"{gate_path} past the wait budget; forcing the mutex"
-                        )
-                        force_release_claim(
-                            GATE_CLAIM_KEY,
-                            "spawn-gate held past the wait budget by a dead holder",
-                            root=_gate_claims_root(),
-                        )
-                        mutex_blocked_since = None
-                        continue
-                    try:
-                        gate_claim = read_claim_file(gate_path)
-                    except ClaimCorrupted:
-                        # Atomic writes mean corruption is damage, not a hold.
-                        force_release_claim(
-                            GATE_CLAIM_KEY,
-                            "spawn-gate gate claim corrupted past the wait budget",
-                            root=_gate_claims_root(),
-                        )
-                        mutex_blocked_since = None
-                        continue
-                    except ClaimGoneAway:
-                        mutex_blocked_since = None
-                        continue
-                    try:
-                        gate_native = claim_verdicts(
-                            [GATE_CLAIM_KEY], root=_gate_claims_root()
-                        ).get(GATE_CLAIM_KEY)
-                        if gate_native is None:
-                            raise ClaimVerdictError(
-                                "native verdict omitted the gate claim"
-                            )
-                        provably_dead, bucket = sweep_verdict(
-                            gate_claim, native_verdict=gate_native
-                        )
-                    except (ClaimVerdictUnavailable, ClaimVerdictError, ClaimGoneAway) as exc:
-                        _warn(
-                            "spawn-gate: gate claim unreadable by the native door "
-                            f"({exc}); queueing"
-                        )
-                    else:
-                        basis = str(gate_native.get("basis") or bucket)
-                        if provably_dead:
-                            _warn(
-                                "spawn-gate: forcing gate claim past the wait "
-                                f"budget (native basis {basis})"
-                            )
-                            force_release_claim(
-                                GATE_CLAIM_KEY,
-                                f"spawn-gate held past the wait budget; native basis {basis}",
-                                root=_gate_claims_root(),
-                            )
-                            mutex_blocked_since = None
-                            continue
-                        _warn(
-                            f"spawn-gate: gate claim kept ({bucket}), holder pid "
-                            f"{gate_claim.pid}; queueing past the wait budget"
-                        )
-                else:
-                    _warn(
-                        f"spawn-gate: gate mutex still held after "
-                        f"{int(MUTEX_WAIT_BUDGET_S)}s (holder likely died mid-gate); "
-                        f"proceeding unserialized"
-                    )
-                    acquired = True
-        if acquired:
-            guard._gate_holder = holder
-            if provider_cap is not None:
-                try:
-                    provider_slots = provider_live_count(route_provider or "")
-                except ProviderCountUnavailable as exc:
-                    guard.release_gate_mutex()
-                    _refuse_gate_fault(route_provider or "unknown", exc)
-                if provider_slots >= provider_cap:
-                    guard.release_gate_mutex()
-                    _refuse_provider_cap(
-                        route_provider or "unknown",
-                        provider_cap,
-                        provider_slots,
-                    )
-            if force:
-                _warn(
-                    "spawn-gate: forced past cap, RAM floor, and load ceiling "
-                    "(--force); provider cap remains enforced"
-                )
-                if substrate == "headless":
-                    _take_headless_slot(guard, name, holder, route_provider, provider_cap)
-                return guard
-            # x-7783: the CPU axis decides BEFORE the census, so a hold
-            # never pays the lsof scan (LD1).
-            _CURRENT_AXIS.set("cpu")
-            admission = _cpu_axis(prefetched_fleet)
-            verdict = admission.verdict
-            if admission.axis == "load_15m" and verdict == "refuse":
-                axes_read["load_15m"] = "over"
-                axes_read["cpu"] = "not-read"
-            else:
-                axes_read["load_15m"] = (
-                    "ok" if admission.load_15m is not None else "unavailable"
-                )
-                axes_read["cpu"] = verdict
-            # Figures an unreadable instrument never measured print as null,
-            # never as a 0.0 a reader would take for a reading.
-            unreadable = admission.axis == "cpu_instrument"
-            receipt_fields: dict[str, object] = dict(
-                axis=admission.axis,
-                detail=admission.reason,
-                share_low=None if unreadable else admission.share_low,
-                share_high=None if unreadable else admission.share_high,
-                bound=admission.bound,
-                fleet_cores=None if unreadable else admission.fleet_cores,
-                machine_cores=None if unreadable else admission.machine_cores,
-                capacity_cores=None if unreadable else admission.capacity_cores,
-                ceiling=None if unreadable else admission.ceiling,
-                load_15m=admission.load_15m,
-                backstop=None if unreadable else admission.backstop,
-            )
-            if verdict in ("refuse", "undecidable"):
-                guard.release()
-                if verdict == "undecidable":
-                    # LD3: ceiling inside the interval refuses at once.
-                    reason = "cpu_share_undecidable"
-                elif admission.axis == "load_15m":
-                    reason = "load_backstop"
-                else:
-                    reason = "cpu_instrument_unreadable"
-                _warn(admission.reason)
-                receipt = {
-                    "status": "refused",
-                    "reason": reason,
-                    "axes_read": dict(axes_read),
-                    **receipt_fields,
-                }
-                _refuse(EXIT_LOAD_REFUSED, receipt, reason=reason, **receipt_fields)
-            if verdict == "hold":
-                # LD4: over is a HOLD - the fleet's own work drains - not a
-                # refusal. Re-sample on the slower CPU poll; --no-wait fails
-                # on the first over sample.
-                held_on_cpu = True
-                under_streak = 0
-                guard.release_gate_mutex()
-                if no_wait:
-                    _warn(admission.reason)
-                    receipt = {
-                        "status": "refused",
-                        "reason": "fleet_cpu_share",
-                        "samples": 1,
-                        "held_on": "fleet_cpu_share",
-                        "axes_read": dict(axes_read),
-                        **receipt_fields,
-                    }
-                    _refuse(
-                        EXIT_LOAD_REFUSED,
-                        receipt,
-                        reason="fleet_cpu_share",
-                        samples=1,
-                        held_on="fleet_cpu_share",
-                        **receipt_fields,
-                    )
-                now = time.monotonic()
-                if not announced:
-                    _warn(admission.reason)
-                    announced = True
-                    last_progress = now
-                elif now - last_progress >= QUEUE_PROGRESS_EVERY_S:
-                    # The holder clause is the payload's own words, so the
-                    # reprint and the reason cannot drift.
-                    holder = (
-                        f"; top holder {admission.top_holder}"
-                        if admission.top_holder
-                        else ""
-                    )
-                    _warn(
-                        f"still held: fleet {admission.share_low * 100:.1f}% over "
-                        f"{admission.ceiling * 100:.1f}%, waited {int(now - started)}s"
-                        f"{holder}"
-                    )
-                    last_progress = now
-                pause_s = CPU_HOLD_POLL_S
-            else:
-                # admit. A held spawn needs CPU_ADMIT_SAMPLES consecutive
-                # under-ceiling samples before it believes the drain (LD4);
-                # a spawn that was never held admits on the first sample.
-                hold_pause = False
-                if held_on_cpu:
-                    under_streak += 1
-                    if under_streak < CPU_ADMIT_SAMPLES:
-                        guard.release_gate_mutex()
-                        pause_s = CPU_HOLD_POLL_S
-                        hold_pause = True
-                    else:
-                        _warn(
-                            f"spawn-gate: fleet share "
-                            f"{admission.share_low * 100:.1f}% under the ceiling "
-                            f"for {under_streak} consecutive samples; admitting"
-                        )
-                        # Hold served: later timeouts name the real queue.
-                        held_on_cpu = False
-                        under_streak = 0
-                if not hold_pause:
-                    if not sock_scanned:
-                        from fno.agents.session_procs import bg_socket_pid_map
-
-                        scan_started = time.monotonic()
-                        sock_map = bg_socket_pid_map()
-                        sock_scanned = True
-                        scan_waited = time.monotonic() - scan_started
-                        if scan_waited >= SLOW_SCAN_WARN_S:
-                            _warn(
-                                f"spawn-gate: the bg-socket census took "
-                                f"{scan_waited:.0f}s (lsof under load); it runs "
-                                "once per spawn"
-                            )
-                    c = census(socket_map=sock_map)
-                    for w in c.warnings:
-                        _warn(w)
-                    slots = c.slot_count
-                    if slots < cap:
-                        axes_read["slots"] = f"{slots}/{cap} ok"
-                        try:
-                            # Re-checked on dequeue for the same reason the RAM floor is
-                            # (test_dequeue_ram_recheck_refuses): a spawn can sit here for
-                            # up to QUEUE_TIMEOUT_S, and another process can raise the
-                            # shared schema inside that window. The entry check above owns
-                            # the force path; this one owns the queue window.
-                            _CURRENT_AXIS.set(None)  # the schema is no axis
-                            _check_registry_schema()
-                        except GateRefused:
-                            guard.release()
-                            raise
-                        _CURRENT_AXIS.set("ram")
-                        try:
-                            _check_ram_floor(floor_gb)
-                        except GateRefused:
-                            guard.release()
-                            raise
-                        axes_read["ram"] = "ok"
-                        _CURRENT_AXIS.set("king_share")
-                        try:
-                            _check_king_share(c, cap, caller_session=caller_session)
-                        except GateRefused:
-                            guard.release()
-                            raise
-                        axes_read["king_share"] = "ok"
-                        _CURRENT_AXIS.set("max_live")
-                        if substrate == "headless":
-                            _take_headless_slot(guard, name, holder, route_provider, provider_cap)
-                        # pane/bg: keep the mutex until dispatch returns (the row
-                        # exists by then); the caller releases via guard.release().
-                        return guard
-                    axes_read["slots"] = f"{slots}/{cap} queued"
-                    axes_read["king_share"] = "not-read"
-                    guard.release_gate_mutex()
-
-                    if no_wait:
-                        _warn(
-                            f"spawn-gate: {slots} live worker slots >= max_live "
-                            f"{cap}; a quiet row still holds a slot "
-                            f"(fno agents list --status quiet); refusing "
-                            f"(--no-wait). See `fno agents top`."
-                        )
-                        receipt = {
-                            "status": "refused",
-                            "reason": "no_wait",
-                            "axis": "max_live",
-                            "axes_read": dict(axes_read),
-                            "held_on": "max_live",
-                            "max_live": cap,
-                            "count": slots,
-                            "current_count": slots,
-                        }
-                        _refuse(EXIT_NO_WAIT, receipt)
-                    _CURRENT_AXIS.set("max_live")
-                    now = time.monotonic()
-                    if not announced:
-                        _warn(
-                            f"spawn queued: {slots} live worker slots >= max_live "
-                            f"{cap}; a quiet row still holds a slot "
-                            f"(fno agents list --status quiet); waiting for a "
-                            f"free slot (--no-wait to fail fast, --force to "
-                            f"bypass)"
-                        )
-                        announced = True
-                        last_progress = now
-                    elif now - last_progress >= QUEUE_PROGRESS_EVERY_S:
-                        _warn(
-                            f"still queued: {slots}/{cap} live worker slots, "
-                            f"waited {int(now - started)}s"
-                        )
-                        last_progress = now
-                    pause_s = QUEUE_POLL_S
-
-        if time.monotonic() - started >= QUEUE_TIMEOUT_S:
-            # A timeout still blocked on the mutex names the mutex; a timeout
-            # that held and released it all along names the axis that kept it
-            # queued. The receipt carries `held_on` (x-7783 LD4) so a reader
-            # never has to infer which queue ate the budget.
-            mutex_busy = mutex_blocked_since is not None
-            held_on = (
-                "gate_mutex" if mutex_busy else
-                ("fleet_cpu_share" if held_on_cpu else "max_live")
-            )
-            reason = "gate_mutex_busy" if mutex_busy else "queue_timeout"
-            _warn(
-                f"spawn-gate: {'gate mutex busy' if mutex_busy else 'queue timeout'} "
-                f"after {int(QUEUE_TIMEOUT_S)}s held on {held_on}; "
-                f"inspect live workers with `fno agents top`, "
-                f"or retry with --no-wait/--force"
-            )
-            receipt = {
-                "status": "refused",
-                "reason": reason,
-                "held_on": held_on,
-                "axis": "gate_mutex" if mutex_busy else held_on,
-                "axes_read": dict(axes_read),
-                "max_live": cap,
-                "count": slots,
-                "current_count": slots,
-            }
-            _refuse(EXIT_QUEUE_TIMEOUT, receipt)
-        time.sleep(pause_s)
-
-
-def _probe_refused(reason: str, message: str, **fields: object) -> dict:
-    """One refused probe payload, receipt-shaped like the real gate's."""
-    return {"verdict": "refused", "reason": reason, "message": message, **fields}
-
-
-def probe_capacity() -> dict:
-    """Answer "would a dispatch be admitted right now" without touching anything.
-
-    Read-only sibling of :func:`run_gate` for the stop hook: no mutex, no
-    reservations, no refusal events. Same settings and condition order as
-    :func:`run_gate`; lanes refuse only when EVERY capped lane is full. Never
-    raises: an internal fault returns ``verdict: unknown``, never saturation.
+def probe_capacity(only: Optional[list[str]] = None) -> dict:
+    """Answer "would a dispatch be admitted right now" - by asking the ONE
+    gate's read-only probe mode. No mutex, no reservations, no refusal events.
+    Never raises: an unanswered gate returns ``verdict: unknown``, never
+    saturation, and the measurement blocks (``lanes``/``share``/``rows``)
+    carry whatever the probe managed to read. ``only=["lanes"]`` skips the
+    CPU and RAM reads for callers already on the spawn path (route
+    resolution), where a footprint probe costs seconds under load.
     """
-    cap, floor_gb, limits = gate_settings()
-
-    from fno.agents.registry import SCHEMA_VERSION, _read_raw_registry, _registry_path
-
-    try:
-        raw = _read_raw_registry(_registry_path(None))
-        on_disk = raw.get("schema_version") if raw else None
-        if isinstance(on_disk, int) and on_disk > SCHEMA_VERSION:
-            return _probe_refused(
-                "registry_schema",
-                f"registry schema {on_disk} ahead of schema {SCHEMA_VERSION} "
-                "this fno understands; run fno doctor update",
-                on_disk=on_disk,
-                understood=SCHEMA_VERSION,
-            )
-    except Exception:  # noqa: BLE001 - unreadable registry skips, as the gate skips
-        pass
-
     try:
         from fno.claims.self_identity import resolve_self_identity
 
         caller = resolve_self_identity().session_id
     except Exception:  # noqa: BLE001 - no identity, no share check
         caller = None
+    from fno.rust_binary import verb_call
 
     try:
-        c = census()
-        if c.slot_count >= cap:
-            return _probe_refused(
-                "max_live",
-                f"{c.slot_count} live worker slots >= max_live {cap}",
-                count=c.slot_count,
-                max_live=cap,
-            )
-        if floor_gb > 0:
-            avail = available_ram_gb()
-            if avail is not None and avail < floor_gb:
-                return _probe_refused(
-                    "ram_floor",
-                    f"available RAM {avail:.1f}GB below the min_free_gb floor {floor_gb:.1f}GB",
-                    available_gb=avail,
-                    min_free_gb=floor_gb,
-                )
-        # x-7783: the same CPU-axis seam the gate and the explain rows read.
-        # A hold queues the real spawn, so the probe answers not-admitted;
-        # refuse and undecidable refuse outright.
-        admission = _cpu_axis()
-        if admission.verdict == "hold":
-            return _probe_refused(
-                "fleet_cpu_share",
-                admission.reason,
-                axis="fleet_cpu_share",
-                share_low=admission.share_low,
-                ceiling=admission.ceiling,
-            )
-        if admission.verdict in ("refuse", "undecidable"):
-            if admission.axis == "load_15m":
-                token = "load_backstop"
-            elif admission.axis == "cpu_instrument":
-                token = "cpu_instrument_unreadable"
-            else:
-                token = "cpu_share_undecidable"
-            return _probe_refused(
-                token,
-                admission.reason,
-                axis=admission.axis,
-                share_low=admission.share_low,
-                share_high=admission.share_high,
-            )
-        if caller:
-            reading = share_reading(c, cap, caller)
-            held, share, kings = reading["held"], reading["share"], reading["kings"]
-            if None not in (held, share, kings) and held >= share:
-                return _probe_refused(
-                    "king_share",
-                    f"this reign holds {held} of max_live {cap} across "
-                    f"{kings} kings (share {share})",
-                    king=caller,
-                    held=held,
-                    share=share,
-                    max_live=cap,
-                    kings=kings,
-                )
-    except Exception as exc:  # noqa: BLE001 - a broken reading is not saturation
-        return {"verdict": "unknown", "reason": "reading_failed", "error": str(exc)}
-    lanes: dict[str, dict[str, int]] = {}
-    full: list[str] = []
-    for provider, budget in sorted(limits.items()):
-        lane_cap = provider_lanes_cap(budget)
-        if lane_cap is None:
-            continue
-        try:
-            live = provider_live_count(provider)
-        except Exception as exc:  # noqa: BLE001 - a partial lane read is not saturation
-            return {
-                "verdict": "unknown",
-                "reason": "lane_count_unavailable",
-                "provider": provider,
-                "error": str(exc),
-            }
-        lanes[provider] = {"cap": lane_cap, "live": live}
-        if live >= lane_cap:
-            full.append(f"{provider} {live}/{lane_cap}")
-    if lanes and len(full) == len(lanes):
-        return _probe_refused(
-            "provider_cap",
-            "every dispatch lane at cap: " + ", ".join(full),
-            lanes=lanes,
+        return verb_call(
+            "spawn-gate", {"mode": "probe", "caller_session": caller, "only": only}
         )
-    # An accepted verdict names the readings that admitted it: a trigger is
-    # only actionable beside its reading.
-    from fno.doctor_footprint import _admission_config
+    except Exception as exc:  # noqa: BLE001 - an unanswered gate is unknown
+        return {"verdict": "unknown", "reason": "gate_unavailable", "error": str(exc)}
 
-    accepted: dict[str, object] = {
-        "verdict": "accepted",
-        "lanes": lanes,
-        "live_workers": c.slot_count,
-        "max_live": cap,
-        "share_low": admission.share_low,
-        "ceiling": admission.ceiling,
-        "load_15m": admission.load_15m,
-        "hard_max_load_per_cpu": _admission_config()[1],
-    }
-    if floor_gb > 0:
-        accepted["min_free_gb"] = floor_gb
-        avail = available_ram_gb()
-        if avail is not None:
-            accepted["available_ram_gb"] = avail
-    return accepted
 
 
 # ---------------------------------------------------------------------------

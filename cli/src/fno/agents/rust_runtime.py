@@ -108,6 +108,10 @@ RUST_CLIENT_VERBS = frozenset(
         # tick, on demand. Dispatched directly in client.rs before build_request
         # (operates on the registry under the shared flock; no daemon RPC).
         "reap",
+        # The ONE spawn gate (spawn_gate_verb.rs): dispatched directly before
+        # build_request, no daemon RPC. The Python gate transport shells it
+        # with a stdin JSON payload and reads the answer envelope.
+        "spawn-gate",
         # `drive` and `grid` (the WebSocket drive surface + the TUI compositor)
         # were retired at G4 (x-f54c) when the mux became the agent-PTY
         # substrate; the binary intercepts them with a mux pointer.
@@ -523,6 +527,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "king-checkin": "One verb runs the reign check-in body: --scope <scope> --events-path <events.jsonl> [--events-path ...] --graph <graph.json> --handoffs-dir <dir> [--faqs-dir <dir>] [--board-state <manifest>] [--emit-path <events.jsonl>] [--no-emit] [--json]; invoked directly by `fno agents king checkin`, which resolves the crown and the paths.",
     "reign-ledger": "The reign ledger page renderer: --court-json <court.json> --graph <graph.json> --generated <ts> --out <reign.html>; invoked directly by `fno agents king ledger`, which resolves the court and the paths.",
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
+    "spawn-gate": "The ONE spawn gate: reads one stdin JSON payload, writes one {status: admitted, gate/worker keys} or {status: refused, exit_code, receipt, event} answer; gate and probe modes; invoked by the fno.agents.spawn_gate transport.",
     "blueprint-feed": "Territory feed for the backlog supervisor's blueprinter tick: --scope <s> prints the standing worker + unfed ideas as JSON; --deliver mails the window; --repair <r> records a failed delivery.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
     "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; invoked by fno.agents.spawn_axes_client, not `fno agents` routing.",

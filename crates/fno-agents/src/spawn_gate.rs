@@ -27,6 +27,8 @@ use crate::agents_config;
 use crate::claims;
 use crate::claude_roster::ClaudeRoster;
 use crate::daemon::pid_is_ours;
+use crate::spawn_gate_lanes;
+use crate::spawn_gate_lanes::{check_account_quota_lock, check_registry_schema};
 use crate::state::{load_registry, Registry, RegistryEntry};
 use crate::AgentStatus;
 use std::collections::HashMap;
@@ -35,7 +37,8 @@ use std::collections::HashSet;
 /// Exit codes, allocated by the shared table in
 /// `cli/src/fno/agents/spawn_gate.py` and kept unique across both trees by
 /// `cli/tests/unit/test_exit_code_allocation.py` (values >= 64 claim a number
-/// once). Distinct from the convention codes (2, 13, 14, 15, 18, 127).
+/// once; the same NAME at the same number in both trees is byte-parity).
+/// Distinct from the convention codes (2, 13, 14, 15, 18, 127).
 pub const EXIT_QUEUE_TIMEOUT: i32 = 75;
 pub const EXIT_NO_WAIT: i32 = 76;
 /// The per-territory team cap refused the spawn (x-e221), or its attribution
@@ -43,12 +46,10 @@ pub const EXIT_NO_WAIT: i32 = 76;
 /// refusal with its own number, so a caller never retries it as capacity.
 pub const EXIT_TERRITORY_CAP: i32 = 86;
 pub const EXIT_RAM_REFUSED: i32 = 77;
-/// The lane declares nothing about how it stands toward the fno state root
-/// (epic rule R3). NOT "declares no carrier": an unsandboxed lane needs none.
-/// Rust-only concept: 78 is the Python gate's EXIT_PROVIDER_CAP, and a
-/// permanent refusal must never read as a transient capacity one.
-pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 84;
+pub const EXIT_PROVIDER_CAP: i32 = 78;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
+pub const EXIT_KING_SHARE: i32 = 80;
+pub const EXIT_REGISTRY_SCHEMA: i32 = 81;
 /// A durable fleet incident stop is active (x-77db) - refused before every
 /// bypass branch, `--force` and `FNO_SPAWN_GATE=0` included. In-flight
 /// workers are untouched; only new admission is refused. Same number as the
@@ -57,13 +58,59 @@ pub const EXIT_FLEET_STOP: i32 = 82;
 /// The incident state exists but cannot be read: fail closed, and say this is
 /// a CANNOT-TELL refusal, never a stop verdict.
 pub const EXIT_FLEET_STOP_UNAVAILABLE: i32 = 83;
+/// The lane declares nothing about how it stands toward the fno state root
+/// (epic rule R3). NOT "declares no carrier": an unsandboxed lane needs none.
+pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 84;
+/// The spawn-gate transport could not get an answer at all (the gate verb is
+/// missing, failed, or timed out): fail closed, never admit on an unreadable
+/// gate. Byte-parity with the Python table's EXIT_GATE_UNAVAILABLE. 86 went
+/// to the per-territory team cap, which landed first; the gate-unavailable
+/// number moved to the next free slot.
+pub const EXIT_GATE_UNAVAILABLE: i32 = 87;
+
+/// A refusal as data: the exit code the caller's arm returns, the stdout
+/// receipt it prints (byte-shape unchanged from when `run_gate` printed it
+/// itself), and the event fields the Python transport emits through `_refuse`
+/// for spawns that enter Python (locked decision 5 - refusal events stay
+/// Python-emitted; the native arm itself still emits nothing, x-ab75 owns a
+/// Rust emit). The eprintln prose stays at the refusal site either way.
+#[derive(Debug, Clone)]
+pub struct Refusal {
+    pub exit_code: i32,
+    pub receipt: Option<serde_json::Value>,
+    pub event: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Refusal {
+    pub(crate) fn code(exit_code: i32) -> Self {
+        Refusal {
+            exit_code,
+            receipt: None,
+            event: serde_json::Map::new(),
+        }
+    }
+
+    pub(crate) fn with_receipt(exit_code: i32, receipt: serde_json::Value) -> Self {
+        Refusal {
+            exit_code,
+            receipt: Some(receipt),
+            event: serde_json::Map::new(),
+        }
+    }
+
+    /// Attach one event field (builder style, so refusal sites stay one line).
+    pub(crate) fn ev(mut self, key: &str, value: serde_json::Value) -> Self {
+        self.event.insert(key.to_string(), value);
+        self
+    }
+}
 
 /// The first admission boundary of the native gate (x-77db): a durable
 /// incident stop or an unreadable incident state refuses before the
 /// `FNO_SPAWN_GATE=0` operator bypass, before `--force`, and before any
 /// capacity math. Mail stays ungated so the incident can be announced and
 /// explained; `fno agents incident clear` reopens admission.
-fn fleet_incident_gate() -> Result<(), i32> {
+fn fleet_incident_gate() -> Result<(), Refusal> {
     match crate::fleet_incident::verdict() {
         crate::fleet_incident::Verdict::Clear(_) => Ok(()),
         crate::fleet_incident::Verdict::Stopped(record) => {
@@ -73,14 +120,19 @@ fn fleet_incident_gate() -> Result<(), i32> {
                  Reopen with `fno agents incident clear --reason <text>`",
                 record.generation, record.reason
             );
-            Err(EXIT_FLEET_STOP)
+            Err(Refusal::code(EXIT_FLEET_STOP)
+                .ev("reason", serde_json::json!("fleet-stop"))
+                .ev("generation", serde_json::json!(record.generation))
+                .ev("detail", serde_json::json!(record.reason)))
         }
         crate::fleet_incident::Verdict::Unavailable(detail) => {
             eprintln!(
                 "refused: fleet incident state is unreadable ({detail}); \
                  admission fails closed until the record is readable again"
             );
-            Err(EXIT_FLEET_STOP_UNAVAILABLE)
+            Err(Refusal::code(EXIT_FLEET_STOP_UNAVAILABLE)
+                .ev("reason", serde_json::json!("fleet-stop-unavailable"))
+                .ev("detail", serde_json::json!(detail)))
         }
     }
 }
@@ -450,6 +502,22 @@ pub(crate) fn check_territory_cap(
     Ok(())
 }
 
+/// The territory refusal as data: the helper's receipt string parses into the
+/// answer envelope, and the event carries the receipt's own reason word, so
+/// the transport's emit vocabulary matches what the receipt says.
+fn territory_refusal(receipt: &str) -> Refusal {
+    let parsed = serde_json::from_str::<serde_json::Value>(receipt)
+        .unwrap_or(serde_json::json!({"status": "refused", "reason": "territory_cap"}));
+    let reason = parsed
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("territory_cap")
+        .to_string();
+    Refusal::with_receipt(EXIT_TERRITORY_CAP, parsed)
+        .ev("reason", serde_json::json!(reason))
+        .ev("axis", serde_json::json!("territory"))
+}
+
 /// `fno-agents territory-verdict --node <id>`: the per-territory cap verdict
 /// for one node as JSON on stdout. The single counting leg: the Python gate
 /// passes the node through this door and recomputes nothing. Exit is 0 for
@@ -634,6 +702,16 @@ impl Drop for GateGuard {
     }
 }
 
+impl GateGuard {
+    /// The still-held keys, taken out before the guard drops, so a
+    /// cross-process transport (the spawn-gate verb) can hand them back to
+    /// the caller whose pid owns them. The guard is empty afterwards; it must
+    /// NOT be released by the holder of the returned keys.
+    pub fn take_keys(&mut self) -> (Option<(String, String)>, Option<(String, String)>) {
+        (self.gate_key.take(), self.worker_key.take())
+    }
+}
+
 /// Pure parity core (x-91b5, AC2-FR): would a bypass in this env emit
 /// `spawn-cap`? True iff `FNO_SPAWN_GATE=0` AND no non-empty test-context
 /// marker. Mirrors `fno.events.gate_escape.should_emit_spawn_cap` exactly; a
@@ -699,7 +777,11 @@ fn maybe_emit_spawn_cap_escape() {
 ///
 /// Fails open on exactly one case: `roots` is empty. There is then no root to
 /// grant and nothing to refuse.
-pub fn state_root_grant_gate(harness: &str, substrate: &str, roots: &[String]) -> Result<(), i32> {
+pub fn state_root_grant_gate(
+    harness: &str,
+    substrate: &str,
+    roots: &[String],
+) -> Result<(), Refusal> {
     if roots.is_empty() {
         return Ok(());
     }
@@ -712,7 +794,7 @@ pub fn state_root_grant_gate(harness: &str, substrate: &str, roots: &[String]) -
             eprintln!(
                 "  a state root resolves for this spawn and no lane can be verified to carry it."
             );
-            return Err(EXIT_STATE_ROOT_UNGRANTED);
+            return Err(Refusal::code(EXIT_STATE_ROOT_UNGRANTED));
         }
     };
     if contract.state_root_stance(harness, substrate).is_some() {
@@ -735,20 +817,39 @@ pub fn state_root_grant_gate(harness: &str, substrate: &str, roots: &[String]) -
         "add {substrate} to [harness.{harness}.state_root_grant]: a carrier name, \
          \"unsandboxed\" when measured to need none, or \"unmeasured\"."
     );
-    Err(EXIT_STATE_ROOT_UNGRANTED)
+    Err(Refusal::code(EXIT_STATE_ROOT_UNGRANTED))
 }
 
-/// Run the full gate for a `bg`/`headless` spawn. Returns a guard to keep
-/// alive across dispatch on pass, or `Err(exit_code)` on refusal/timeout.
-/// All human-facing output goes to stderr (LD10: the stdout receipt is
-/// byte-reserved for the pass path).
+/// Everything the gate needs to decide one spawn. The Python transport
+/// (`spawn_gate.py run_gate`) sends these as the `spawn-gate` verb's payload;
+/// the native arms construct it directly. `holder_pid` is the pid whose death
+/// frees the gate's claims - the PYTHON caller's pid across the verb, so the
+/// native claim verdict judges the real holder, never the verb process.
+#[derive(Debug, Clone, Default)]
+pub struct GateInput {
+    pub name: String,
+    pub substrate: String,
+    pub flags: GateFlags,
+    pub route_provider: Option<String>,
+    pub account: Option<String>,
+    pub caller_session: Option<String>,
+    pub holder_pid: Option<u32>,
+}
+
+/// The held keys of a [`GateGuard`], taken out before the guard drops so a
+/// cross-process transport can hand them back to the caller.
+pub type GateKeys = (Option<(String, String)>, Option<(String, String)>);
+
+/// Run the full gate for a spawn. Returns a guard to keep alive across
+/// dispatch on pass, or `Err(Refusal)` on refusal/timeout. All human-facing
+/// output goes to stderr (LD10: the stdout receipt is byte-reserved for the
+/// pass path); the receipt itself travels as data in the [`Refusal`] for the
+/// caller's arm to print.
 pub fn run_gate(
     config_cwd: &Path,
     registry_path: &Path,
-    name: &str,
-    substrate: &str,
-    flags: GateFlags,
-) -> Result<GateGuard, i32> {
+    input: GateInput,
+) -> Result<GateGuard, Refusal> {
     // x-77db: the incident stop gates BEFORE the operator bypass below - a
     // circuit breaker that a flag can bypass is not a circuit breaker.
     fleet_incident_gate()?;
@@ -765,7 +866,12 @@ pub fn run_gate(
     // x-7783 AC7: the retired trigger (max_load_per_cpu) is not read here;
     // the CPU axis consumes the payload's admission, which the Python decider
     // computed from its own config read.
-    let holder = format!("spawn-gate:{}:{}", std::process::id(), name);
+    let name = input.name.as_str();
+    let substrate = input.substrate.as_str();
+    let flags = input.flags;
+    let route_provider = input.route_provider.as_deref();
+    let holder_pid = input.holder_pid.unwrap_or_else(std::process::id);
+    let holder = format!("spawn-gate:{}:{}", holder_pid, name);
     let root = gate_claims_root();
 
     let mut guard = GateGuard {
@@ -774,10 +880,37 @@ pub fn run_gate(
         root: root.clone(),
     };
 
-    if flags.force {
+    // Ahead of the force branch, deliberately. `--force` means "I know the
+    // machine is busy", and a schema mismatch is not resource pressure: it is
+    // a worker that can neither claim its node nor stamp its mail. The
+    // dequeue path re-checks, the way the RAM floor does, because the queue
+    // window is long enough for the shared schema to move underneath a
+    // waiting spawn.
+    let mut schema_warnings = Vec::new();
+    check_registry_schema(registry_path, &mut schema_warnings)?;
+    for w in &schema_warnings {
+        eprintln!("{w}");
+    }
+
+    // Ahead of the force branch too: a vendor quota window is not machine
+    // busy-ness, and forcing past it buys another corpse.
+    if let Some(account) = input.account.as_deref() {
+        let mut quota_warnings = Vec::new();
+        check_account_quota_lock(config_cwd, account, &mut quota_warnings)?;
+        for w in &quota_warnings {
+            eprintln!("{w}");
+        }
+    }
+
+    // The lane cap binds the provider axis only; an unrouted spawn is
+    // uncapped (KNOWN_UNROUTED_PROVIDER slots carry no provider tag).
+    let provider_cap =
+        route_provider.and_then(|p| spawn_gate_lanes::provider_lanes_cap(config_cwd, p));
+
+    if flags.force && provider_cap.is_none() {
         // Force speaks for the machine being busy, never for one territory
         // overrunning its team, so the per-territory cap stays enforced
-        // here (x-e221) - the one axis --force does not excuse.
+        // here - the one axis --force does not excuse.
         if let Some(node) = gate_node() {
             let mut warnings = Vec::new();
             let live = live_rows(registry_path, &mut warnings);
@@ -791,12 +924,13 @@ pub fn run_gate(
                 eprintln!("{receipt}");
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
-                return Err(EXIT_TERRITORY_CAP);
+                return Err(territory_refusal(&receipt));
             }
         }
         eprintln!("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)");
         if substrate == "headless" {
-            acquire_worker_slot(&mut guard, name, &holder);
+            // fail_closed=false: this arm cannot fault, only warn.
+            acquire_worker_slot(&mut guard, name, &holder, route_provider, false).ok();
         }
         return Ok(guard);
     }
@@ -830,18 +964,33 @@ pub fn run_gate(
         };
         // Serialize check→dispatch under the spawn-gate mutex so N concurrent
         // spawners at cap-1 can't all pass. Not held across the wait sleep.
+        // When a provider cap applies, the decision must be SERIALIZED to mean
+        // anything: a claims-layer fault refuses (fail closed), exactly as the
+        // Python gate's fail_closed arm refused.
+        let fail_closed = provider_cap.is_some();
         let mut acquired_mutex = match claims::acquire(
             "gate:spawn",
             &holder,
             claims::AcquireOpts {
                 ttl_ms: Some(GATE_CLAIM_TTL_MS),
                 root: root.clone(),
+                pid: fail_closed.then_some(holder_pid),
                 ..Default::default()
             },
         ) {
             claims::AcquireOutcome::Acquired(_) => true,
+            // Contention is a peer or a corpse, never a verdict: queue. The
+            // wait budget's takeover decides a dead holder; --no-wait refuses
+            // fast. Exactly the Python gate's CLAIM_UNAVAILABLE arm.
             claims::AcquireOutcome::HeldByOther { .. } => false,
             claims::AcquireOutcome::Error(e) => {
+                if fail_closed {
+                    return Err(gate_fault_refusal(
+                        route_provider,
+                        "gate_mutex_unavailable",
+                        &e,
+                    ));
+                }
                 // Fail open: the mutex is a serializer, not a state owner.
                 eprintln!("spawn-gate: mutex unavailable ({e}); proceeding unserialized");
                 true
@@ -863,30 +1012,125 @@ pub fn run_gate(
                     "spawn-gate: another spawner holds the gate mutex; refusing \
                      (--no-wait). See `fno agents top`."
                 );
-                println!(
-                    "{}",
+                return Err(Refusal::with_receipt(
+                    EXIT_NO_WAIT,
                     serde_json::json!({
                         "status": "refused",
                         "reason": "no_wait_mutex_held",
                         "max_live": cap,
-                    })
-                );
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-                return Err(EXIT_NO_WAIT);
+                    }),
+                ));
             }
             if now.duration_since(since) >= MUTEX_WAIT_BUDGET {
-                eprintln!(
-                    "spawn-gate: gate mutex still held after {}s (holder likely died \
-                     mid-gate); proceeding unserialized",
-                    MUTEX_WAIT_BUDGET.as_secs()
-                );
-                acquired_mutex = true;
+                if fail_closed {
+                    // Contention is a peer or a corpse, never a full cap. The
+                    // takeover asks THE single reap decision (x-9c91): force
+                    // only a provably-dead holder, queue past anything else.
+                    match takeover_dead_gate_mutex(root.as_deref()) {
+                        Takeover::Freed => {
+                            mutex_blocked_since = None;
+                            continue;
+                        }
+                        Takeover::Kept(basis) => {
+                            eprintln!(
+                                "spawn-gate: gate claim kept ({basis}); queueing past \
+                                 the wait budget"
+                            );
+                        }
+                        Takeover::Gone => {
+                            mutex_blocked_since = None;
+                            continue;
+                        }
+                        Takeover::Unreadable(why) => {
+                            eprintln!(
+                                "spawn-gate: gate claim unreadable by the native door \
+                                 ({why}); queueing"
+                            );
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "spawn-gate: gate mutex still held after {}s (holder likely died \
+                         mid-gate); proceeding unserialized",
+                        MUTEX_WAIT_BUDGET.as_secs()
+                    );
+                    acquired_mutex = true;
+                }
             }
         }
 
         if acquired_mutex {
             guard.gate_key = Some(("gate:spawn".to_string(), holder.clone()));
+            // The provider cap is counted UNDER the mutex (check→dispatch
+            // serialization is what makes the count mean anything), and
+            // refuses before the CPU axis, exactly as the Python gate ordered
+            // it. An unreadable count refuses - never a zero.
+            if let Some(cap_value) = provider_cap {
+                let mut lane_warnings = Vec::new();
+                match spawn_gate_lanes::provider_live_count(
+                    registry_path,
+                    route_provider.unwrap_or_default(),
+                    &mut lane_warnings,
+                ) {
+                    Ok((live, _counted)) => {
+                        for w in &lane_warnings {
+                            eprintln!("{w}");
+                        }
+                        if live >= cap_value {
+                            guard.release_gate_mutex();
+                            eprintln!(
+                                "spawn-gate: provider {}, cap {cap_value}, current count \
+                                 {live}; refusing; no worker launched",
+                                route_provider.unwrap_or("unknown")
+                            );
+                            return Err(Refusal::with_receipt(
+                                EXIT_PROVIDER_CAP,
+                                serde_json::json!({
+                                    "status": "refused",
+                                    "reason": "provider_cap",
+                                    "provider": route_provider,
+                                    "cap": cap_value,
+                                    "count": live,
+                                    "current_count": live,
+                                }),
+                            ));
+                        }
+                    }
+                    Err(fault) => {
+                        guard.release_gate_mutex();
+                        for w in &lane_warnings {
+                            eprintln!("{w}");
+                        }
+                        return Err(gate_fault_refusal(
+                            route_provider,
+                            "gate_mutex_unavailable",
+                            &fault,
+                        ));
+                    }
+                }
+            }
+            if flags.force {
+                // Byte-twin with the Python gate: force also bypasses the king
+                // share here; the provider cap above stays enforced.
+                eprintln!(
+                    "spawn-gate: forced past cap, RAM floor, and load ceiling \
+                     (--force); provider cap remains enforced"
+                );
+                if substrate == "headless" {
+                    // A worker-slot claim fault is not the gate mutex; name the site.
+                    if let Err(fault) =
+                        acquire_worker_slot(&mut guard, name, &holder, route_provider, true)
+                    {
+                        guard.release();
+                        return Err(gate_fault_refusal(
+                            route_provider,
+                            "lane_reservation_unavailable",
+                            &fault,
+                        ));
+                    }
+                }
+                return Ok(guard);
+            }
             // x-7783 Change 3: the CPU axis decides BEFORE the census, so a
             // hold never pays the registry scan and the slot cap stays the
             // backstop behind it (LD1).
@@ -906,7 +1150,7 @@ pub fn run_gate(
                 );
                 axes_read.insert("cpu".into(), serde_json::json!(admission.verdict));
             }
-            let receipt_fields = receipt_fields(admission);
+            let figures = receipt_fields(admission);
             match admission.verdict.as_str() {
                 "refuse" | "undecidable" => {
                     // The refusal is decided; drop the mutex BEFORE printing
@@ -919,13 +1163,14 @@ pub fn run_gate(
                         "reason": cpu.token,
                         "axes_read": axes_read.clone(),
                     });
-                    for (k, v) in receipt_fields.as_object().into_iter().flatten() {
+                    for (k, v) in figures.as_object().into_iter().flatten() {
                         receipt[k] = v.clone();
                     }
-                    println!("{receipt}");
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                    return Err(EXIT_LOAD_REFUSED);
+                    return Err(Refusal::with_receipt(EXIT_LOAD_REFUSED, receipt)
+                        .ev("reason", serde_json::json!(cpu.token))
+                        .ev("axis", serde_json::json!("cpu"))
+                        .ev("axes_read", serde_json::json!(axes_read))
+                        .ev("figures", figures));
                 }
                 "hold" => {
                     // LD4: over is a HOLD - the fleet's own work drains - not
@@ -943,13 +1188,16 @@ pub fn run_gate(
                             "held_on": "fleet_cpu_share",
                             "axes_read": axes_read.clone(),
                         });
-                        for (k, v) in receipt_fields.as_object().into_iter().flatten() {
+                        for (k, v) in figures.as_object().into_iter().flatten() {
                             receipt[k] = v.clone();
                         }
-                        println!("{receipt}");
-                        use std::io::Write;
-                        let _ = std::io::stdout().flush();
-                        return Err(EXIT_LOAD_REFUSED);
+                        return Err(Refusal::with_receipt(EXIT_LOAD_REFUSED, receipt)
+                            .ev("reason", serde_json::json!("fleet_cpu_share"))
+                            .ev("samples", serde_json::json!(1))
+                            .ev("held_on", serde_json::json!("fleet_cpu_share"))
+                            .ev("axis", serde_json::json!("cpu"))
+                            .ev("axes_read", serde_json::json!(axes_read))
+                            .ev("figures", figures));
                     }
                     if !announced {
                         eprintln!("{}", admission.reason);
@@ -997,16 +1245,34 @@ pub fn run_gate(
                             eprintln!("{w}");
                         }
                         if slots < cap {
+                            axes_read.insert(
+                                "slots".into(),
+                                serde_json::json!(format!("{slots}/{cap} ok")),
+                            );
+                            // Re-checked on dequeue for the same reason the RAM floor is: a
+                            // spawn can sit queued past QUEUE_POLL for minutes, and another
+                            // process can raise the shared schema inside that window.
+                            let mut dequeue_warnings = Vec::new();
+                            check_registry_schema(registry_path, &mut dequeue_warnings)
+                                .inspect_err(|_| guard.release())?;
                             // Slot free. RAM recheck happens NOW (at dequeue too — a spawn
                             // that queued 5 minutes must not dispatch into a tight machine).
-                            if let Err(code) = check_ram_floor(floor_gb) {
-                                guard.release();
-                                return Err(code);
-                            }
+                            check_ram_floor(floor_gb).inspect_err(|_| guard.release())?;
                             // Stamped only once the floor actually answered, so a
                             // receipt never claims an axis it did not read.
                             axes_read.insert("ram".into(), serde_json::json!("ok"));
-                            // The per-territory team cap (x-e221): beside the machine cap,
+                            for w in &dequeue_warnings {
+                                eprintln!("{w}");
+                            }
+                            check_king_share(
+                                registry_path,
+                                cap,
+                                input.caller_session.as_deref(),
+                                &axes_read,
+                            )
+                            .inspect_err(|_| guard.release())?;
+                            axes_read.insert("king_share".into(), serde_json::json!("ok"));
+                            // The per-territory team cap: beside the machine cap,
                             // never instead of it. Refuses (never queues) - waiting cannot
                             // help while the node's own territory is full, and other
                             // territories keep their headroom.
@@ -1020,13 +1286,24 @@ pub fn run_gate(
                                 ) {
                                     guard.release();
                                     eprintln!("{receipt}");
-                                    use std::io::Write;
-                                    let _ = std::io::stdout().flush();
-                                    return Err(EXIT_TERRITORY_CAP);
+                                    return Err(territory_refusal(&receipt));
                                 }
                             }
                             if substrate == "headless" {
-                                acquire_worker_slot(&mut guard, name, &holder);
+                                if let Err(fault) = acquire_worker_slot(
+                                    &mut guard,
+                                    name,
+                                    &holder,
+                                    route_provider,
+                                    provider_cap.is_some(),
+                                ) {
+                                    guard.release();
+                                    return Err(gate_fault_refusal(
+                                        route_provider,
+                                        "lane_reservation_unavailable",
+                                        &fault,
+                                    ));
+                                }
                                 // Slot claim is visible to concurrent gates: the mutex has
                                 // done its job for this spawn.
                                 guard.release_gate_mutex();
@@ -1048,8 +1325,8 @@ pub fn run_gate(
                                  row still holds a slot (fno agents list --status quiet); \
                                  refusing (--no-wait). See `fno agents top`."
                             );
-                            println!(
-                                "{}",
+                            return Err(Refusal::with_receipt(
+                                EXIT_NO_WAIT,
                                 serde_json::json!({
                                     "status": "refused",
                                     "reason": "no_wait",
@@ -1059,11 +1336,8 @@ pub fn run_gate(
                                     "max_live": cap,
                                     "count": slots,
                                     "current_count": slots,
-                                })
-                            );
-                            use std::io::Write;
-                            let _ = std::io::stdout().flush();
-                            return Err(EXIT_NO_WAIT);
+                                }),
+                            ));
                         }
                         if !announced {
                             eprintln!(
@@ -1090,18 +1364,15 @@ pub fn run_gate(
                         "spawn-gate: the CPU instrument is unreadable (the payload carries the \
                          unknown verdict {other:?}); refusing to spawn (--force to bypass)"
                     );
-                    println!(
-                        "{}",
+                    return Err(Refusal::with_receipt(
+                        EXIT_LOAD_REFUSED,
                         serde_json::json!({
                             "status": "refused",
                             "reason": "cpu_instrument_unreadable",
                             "axis": "cpu_instrument",
                             "axes_read": axes_read.clone(),
-                        })
-                    );
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                    return Err(EXIT_LOAD_REFUSED);
+                        }),
+                    ));
                 }
             }
         }
@@ -1124,8 +1395,8 @@ pub fn run_gate(
                  inspect live workers with `fno agents top`, or retry with --no-wait/--force",
                 QUEUE_TIMEOUT.as_secs()
             );
-            println!(
-                "{}",
+            return Err(Refusal::with_receipt(
+                EXIT_QUEUE_TIMEOUT,
                 serde_json::json!({
                     "status": "refused",
                     "reason": reason,
@@ -1135,11 +1406,8 @@ pub fn run_gate(
                     "max_live": cap,
                     "count": last_slots,
                     "current_count": last_slots,
-                })
-            );
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            return Err(EXIT_QUEUE_TIMEOUT);
+                }),
+            ));
         }
         std::thread::sleep(pause);
     }
@@ -1148,7 +1416,7 @@ pub fn run_gate(
 /// RAM floor check (Layer 2): refuse below `floor_gb` (never queue — low RAM
 /// with an under-cap worker count means something ELSE is eating the machine).
 /// `<= 0` disables; unreadable RAM skips with a warning (fail open).
-fn check_ram_floor(floor_gb: f64) -> Result<(), i32> {
+fn check_ram_floor(floor_gb: f64) -> Result<(), Refusal> {
     if floor_gb <= 0.0 {
         return Ok(());
     }
@@ -1159,18 +1427,15 @@ fn check_ram_floor(floor_gb: f64) -> Result<(), i32> {
                 "spawn-gate: available RAM {avail:.1}GB is below the min_free_gb floor \
                  {floor_gb:.1}GB; refusing to spawn (--force to bypass)"
             );
-            println!(
-                "{}",
+            Err(Refusal::with_receipt(
+                EXIT_RAM_REFUSED,
                 serde_json::json!({
                     "status": "refused",
                     "reason": "ram_floor",
                     "available_gb": avail,
                     "min_free_gb": floor_gb,
-                })
-            );
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            Err(EXIT_RAM_REFUSED)
+                }),
+            ))
         }
         None => {
             eprintln!("spawn-gate: could not read available RAM; skipping the floor check");
@@ -1184,36 +1449,36 @@ fn check_ram_floor(floor_gb: f64) -> Result<(), i32> {
 /// Rust gate computes no verdict of its own.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AdmissionPayload {
-    verdict: String,
-    axis: String,
-    reason: String,
+    pub(crate) verdict: String,
+    pub(crate) axis: String,
+    pub(crate) reason: String,
     #[serde(default)]
-    share_low: f64,
+    pub(crate) share_low: f64,
     #[serde(default)]
-    share_high: f64,
+    pub(crate) share_high: f64,
     #[serde(default)]
-    bound: String,
+    pub(crate) bound: String,
     #[serde(default)]
-    fleet_cores: f64,
+    pub(crate) fleet_cores: f64,
     #[serde(default)]
-    machine_cores: f64,
+    pub(crate) machine_cores: f64,
     #[serde(default)]
-    capacity_cores: f64,
+    pub(crate) capacity_cores: f64,
     #[serde(default)]
-    ceiling: f64,
+    pub(crate) ceiling: f64,
     // read only through serde: kept so the admission payload still parses
     // when the decider sends the gap the old verdict shape carried.
     #[serde(default)]
     #[allow(dead_code)]
-    gap: Option<String>,
+    pub(crate) gap: Option<String>,
     #[serde(default)]
-    load_15m: Option<f64>,
+    pub(crate) load_15m: Option<f64>,
     #[serde(default)]
-    backstop: f64,
+    pub(crate) backstop: f64,
     /// The Python decider's short form of the fleet's largest program; absent
     /// on an older wheel and whenever no attributed row exists.
     #[serde(default)]
-    top_holder: Option<String>,
+    pub(crate) top_holder: Option<String>,
 }
 
 /// The receipt's figure block. An axis of `cpu_instrument` measured nothing,
@@ -1357,11 +1622,11 @@ pub struct MachinePressurePayload {
 /// The CPU axis's answer for THIS spawn: the admission to branch on plus the
 /// receipt `reason` token a refusal carries (AC13). A synthetic instrument
 /// refusal is built when the payload carries no decidable admission.
-struct CpuAdmission {
-    payload: AdmissionPayload,
+pub(crate) struct CpuAdmission {
+    pub(crate) payload: AdmissionPayload,
     /// refuse|undecidable -> load_backstop | cpu_share_undecidable |
     /// cpu_instrument_unreadable. Empty for admit/hold (they never refuse).
-    token: &'static str,
+    pub(crate) token: &'static str,
 }
 
 /// Read the CPU axis from the prefetched footprint payload (x-7783 LD3).
@@ -1373,7 +1638,7 @@ struct CpuAdmission {
 /// `cpu_instrument_unreadable`: the sensor blinding under the load it
 /// measures is itself a symptom, and an unknown share is not headroom. The
 /// probe's own failure words (`probe_err`) travel into that refusal.
-fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) -> CpuAdmission {
+pub(crate) fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) -> CpuAdmission {
     fn instrument_refusal(why: &str) -> CpuAdmission {
         CpuAdmission {
             payload: AdmissionPayload {
@@ -1522,6 +1787,14 @@ fn format_machine_status_line(raw: &str) -> Option<String> {
 }
 
 pub(crate) fn footprint_cause_raw() -> Result<String, String> {
+    // Test seam: a pinned payload keeps gate tests measuring their own axis,
+    // never the live machine's load or whatever probe PATH resolves here.
+    #[cfg(test)]
+    if let Ok(raw) = std::env::var("FNO_TEST_FOOTPRINT_PAYLOAD") {
+        if !raw.is_empty() {
+            return Ok(raw);
+        }
+    }
     let argv = footprint_probe_argv().ok_or_else(|| {
         "no footprint probe resolves on PATH (fno-footprint-cause, fno-py)".to_string()
     })?;
@@ -1586,29 +1859,170 @@ fn footprint_cause_raw_with(argv: &[String], budget: Duration) -> Result<String,
     }
 }
 
-fn acquire_worker_slot(guard: &mut GateGuard, name: &str, holder: &str) {
+/// Take the headless worker slot claim. The claim carries `model_provider`
+/// (the route provider, else the un-routed marker) because the provider count
+/// reads that tag. `fail_closed` (a provider cap applies) turns a fault into
+/// the caller's refusal; without a cap the claim is count VISIBILITY, not a
+/// correctness gate, and a fault proceeds uncounted.
+fn acquire_worker_slot(
+    guard: &mut GateGuard,
+    name: &str,
+    holder: &str,
+    route_provider: Option<&str>,
+    fail_closed: bool,
+) -> Result<(), String> {
     let key = format!("worker:{name}");
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "model_provider".to_string(),
+        serde_json::Value::String(
+            route_provider
+                .filter(|p| !p.is_empty())
+                .unwrap_or(KNOWN_UNROUTED_PROVIDER)
+                .to_string(),
+        ),
+    );
     match claims::acquire(
         &key,
         holder,
         claims::AcquireOpts {
             ttl_ms: Some(WORKER_CLAIM_TTL_MS),
-            metadata: Some(serde_json::Map::from_iter([(
-                "model_provider".to_string(),
-                serde_json::Value::String(KNOWN_UNROUTED_PROVIDER.to_string()),
-            )])),
+            metadata: Some(metadata),
             root: guard.root.clone(),
             ..Default::default()
         },
     ) {
         claims::AcquireOutcome::Acquired(_) => {
             guard.worker_key = Some((key, holder.to_string()));
+            Ok(())
         }
         // Fail open: a slot claim is count VISIBILITY, not a correctness gate.
-        claims::AcquireOutcome::HeldByOther { .. } | claims::AcquireOutcome::Error(_) => {
-            eprintln!("spawn-gate: worker slot claim {key} unavailable; proceeding uncounted");
+        claims::AcquireOutcome::HeldByOther { holder: h, .. } => {
+            let fault = format!("worker reservation {key} held by {h}");
+            if fail_closed {
+                Err(fault)
+            } else {
+                eprintln!("spawn-gate: worker slot claim {key} unavailable; proceeding uncounted");
+                Ok(())
+            }
+        }
+        claims::AcquireOutcome::Error(e) => {
+            let fault = format!("worker reservation {key} unavailable: {e}");
+            if fail_closed {
+                Err(fault)
+            } else {
+                eprintln!("spawn-gate: worker slot claim {key} unavailable; proceeding uncounted");
+                Ok(())
+            }
         }
     }
+}
+
+/// The claims-layer fault refusal: the gate could not serialize the decision
+/// or take a lane reservation, so no count was measured and no cap may be
+/// named. The reason names the faulted site, never a cap.
+fn gate_fault_refusal(provider: Option<&str>, reason: &str, error: &str) -> Refusal {
+    Refusal::with_receipt(
+        EXIT_PROVIDER_CAP,
+        serde_json::json!({
+            "status": "refused",
+            "reason": reason,
+            "provider": provider,
+            "error": error,
+        }),
+    )
+}
+
+/// The outcome of asking the native claim verdict about a gate mutex held
+/// past the wait budget.
+enum Takeover {
+    /// The claim was provably dead and has been removed; retry the acquire.
+    Freed,
+    /// The claim vanished while we looked; retry the acquire.
+    Gone,
+    /// A live peer holds it; keep queueing.
+    Kept(&'static str),
+    /// The verdict itself could not be read; keep queueing.
+    Unreadable(String),
+}
+
+/// THE single reap decision (x-9c91) for the spawn-gate mutex: force only a
+/// provably-dead holder, queue past anything else. Used when a provider cap
+/// applies, where an unserialized overshoot would break the cap.
+fn takeover_dead_gate_mutex(root: Option<&Path>) -> Takeover {
+    let path = match claims::claim_path("gate:spawn", root) {
+        Ok(path) => path,
+        Err(_) => return Takeover::Unreadable("claims root unresolved".into()),
+    };
+    if !path.exists() {
+        let _ = std::fs::remove_file(&path);
+        return Takeover::Gone;
+    }
+    let record = match claims::read_claim_file(&path) {
+        Ok(record) => record,
+        // Atomic writes mean corruption is damage, not a hold.
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return Takeover::Gone;
+        }
+    };
+    let (provably_dead, bucket) =
+        claims::classify_for_sweep(&record, None, &|pid| claims::probe_pid(pid), None, None);
+    if provably_dead {
+        let _ = std::fs::remove_file(&path);
+        return Takeover::Freed;
+    }
+    Takeover::Kept(bucket)
+}
+
+/// The king-share refusal (x-3f84 W4 / x-5283 LD1): the share divides
+/// `max_live` by CROWNS; `held` counts the caller's own worker rows; a caller
+/// with no resolved session is not share-checked; waiting cannot help, so
+/// this refuses like the provider cap. Every number comes from
+/// [`spawn_gate_lanes::share_reading`]: the count the gate refuses on and the
+/// count any readout prints are one value.
+fn check_king_share(
+    registry_path: &Path,
+    cap: usize,
+    caller_session: Option<&str>,
+    _axes_read: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), Refusal> {
+    let Some(caller) = caller_session.filter(|c| !c.is_empty()) else {
+        return Ok(());
+    };
+    let reading = spawn_gate_lanes::share_reading(registry_path, cap, Some(caller));
+    let (Some(kings), Some(share), Some(held)) = (reading.kings, reading.share, reading.held)
+    else {
+        // An unreadable registry leaves every count unknown; nothing to
+        // enforce and no zero to fail open on.
+        return Ok(());
+    };
+    if held < share {
+        return Ok(());
+    }
+    let mut msg = format!(
+        "spawn-gate: king {} holds {held} of max_live {cap} across {kings} kings (share {share}); \
+         refusing to spawn -- waiting cannot help while your own workers hold the share \
+         (--force to bypass)",
+        &caller[..caller.len().min(8)]
+    );
+    if let Some(rows) = reading.unattributed_rows.filter(|r| !r.is_empty()) {
+        let shown: Vec<String> = rows.iter().take(5).cloned().collect();
+        msg.push_str(&format!(
+            "; {} live row(s) name nobody and sit in the unattributed bucket ({}{})",
+            rows.len(),
+            shown.join(", "),
+            if rows.len() > 5 { "..." } else { "" }
+        ));
+    }
+    eprintln!("{msg}");
+    Err(Refusal::code(EXIT_KING_SHARE)
+        .ev("reason", serde_json::json!("king_share"))
+        .ev("king", serde_json::json!(caller))
+        .ev("held", serde_json::json!(held))
+        .ev("share", serde_json::json!(share))
+        .ev("max_live", serde_json::json!(cap))
+        .ev("kings", serde_json::json!(kings)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1747,7 +2161,10 @@ mod tests {
         };
         std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
 
-        assert_eq!(fleet_incident_gate(), Err(EXIT_FLEET_STOP));
+        assert_eq!(
+            fleet_incident_gate().err().map(|r| r.exit_code),
+            Some(EXIT_FLEET_STOP)
+        );
         match saved {
             Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
             None => std::env::remove_var("FNO_AGENTS_HOME"),
@@ -1771,7 +2188,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(fleet_incident_gate(), Err(EXIT_FLEET_STOP_UNAVAILABLE));
+        assert_eq!(
+            fleet_incident_gate().err().map(|r| r.exit_code),
+            Some(EXIT_FLEET_STOP_UNAVAILABLE)
+        );
         match saved {
             Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
             None => std::env::remove_var("FNO_AGENTS_HOME"),
@@ -1783,12 +2203,16 @@ mod tests {
         // An unknown harness declares nothing at all, which is the only thing
         // this gate refuses.
         assert_eq!(
-            state_root_grant_gate("nosuchharness", "thread", &roots()),
-            Err(EXIT_STATE_ROOT_UNGRANTED)
+            state_root_grant_gate("nosuchharness", "thread", &roots())
+                .err()
+                .map(|r| r.exit_code),
+            Some(EXIT_STATE_ROOT_UNGRANTED)
         );
         assert_eq!(
-            state_root_grant_gate("claude", "nosuchsubstrate", &roots()),
-            Err(EXIT_STATE_ROOT_UNGRANTED)
+            state_root_grant_gate("claude", "nosuchsubstrate", &roots())
+                .err()
+                .map(|r| r.exit_code),
+            Some(EXIT_STATE_ROOT_UNGRANTED)
         );
     }
 
@@ -1806,9 +2230,8 @@ mod tests {
             ("gemini", "pane"),
             ("gemini", "thread"),
         ] {
-            assert_eq!(
-                state_root_grant_gate(harness, substrate, &roots()),
-                Ok(()),
+            assert!(
+                state_root_grant_gate(harness, substrate, &roots()).is_ok(),
                 "{harness}/{substrate} declares a stance, so it must pass"
             );
         }
@@ -1824,9 +2247,8 @@ mod tests {
             ("agy", "thread"),
             ("opencode", "thread"),
         ] {
-            assert_eq!(
-                state_root_grant_gate(harness, substrate, &roots()),
-                Ok(()),
+            assert!(
+                state_root_grant_gate(harness, substrate, &roots()).is_ok(),
                 "{harness}/{substrate}"
             );
         }
@@ -1852,7 +2274,7 @@ mod tests {
     /// to grant and nothing to refuse.
     #[test]
     fn no_resolved_root_passes_even_on_an_ungranted_lane() {
-        assert_eq!(state_root_grant_gate("gemini", "headless", &[]), Ok(()));
+        assert!(state_root_grant_gate("gemini", "headless", &[]).is_ok());
     }
 
     #[test]
@@ -2121,11 +2543,14 @@ MemAvailable:    8000000 kB\n";
         let got = run_gate(
             &dir,
             &dir.join("registry.json"),
-            "w2",
-            "bg",
-            GateFlags {
-                force: false,
-                no_wait: true,
+            GateInput {
+                name: "w2".into(),
+                substrate: "bg".into(),
+                flags: GateFlags {
+                    force: false,
+                    no_wait: true,
+                },
+                ..Default::default()
             },
         );
         let elapsed = started.elapsed();
@@ -2137,7 +2562,7 @@ MemAvailable:    8000000 kB\n";
         }
 
         assert_eq!(
-            got.err(),
+            got.err().map(|r| r.exit_code),
             Some(EXIT_NO_WAIT),
             "must refuse with the no-wait code"
         );
@@ -2193,6 +2618,100 @@ MemAvailable:    8000000 kB\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The port of `test_king_at_share_refuses_under_cap`: a caller whose own
+    /// workers hold its full share refuses exit 80 even with fleet slots free,
+    /// because waiting cannot help while the caller's own workers hold it.
+    #[test]
+    fn king_share_refuses_when_the_caller_holds_its_full_share() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-share-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        // Pin the CPU axis to an admit: the king share under test sits AFTER
+        // the CPU axis in gate order, so a busy machine (or a CI runner with
+        // no probe installed) would refuse with 79 before reaching it.
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 4\nmin_free_gb = 0\n",
+        )
+        .unwrap();
+
+        let pid = std::process::id();
+        let start = claims::process_create_time_ms(pid as i32).unwrap_or(0);
+        let live = |name: &str, spawned_by: &str| {
+            format!(
+                r#"{{"name":"{name}","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{pid},"pid_start_time":{start},"spawned_by_session":"{spawned_by}"}}"#
+            )
+        };
+        let crowned = |name: &str, session: &str| {
+            format!(
+                r#"{{"name":"{name}","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"{session}"}}"#
+            )
+        };
+        // 2 kings -> share 2; the caller holds its full share with 2 rows, so
+        // 2 slots remain fleet-wide and the king share still refuses.
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":{},"entries":[{},{},{},{}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                crowned("king-a", "session-aaaaaaaa"),
+                crowned("king-b", "session-bbbbbbbb"),
+                live("w1", "session-aaaaaaaa"),
+                live("w2", "session-aaaaaaaa"),
+            ),
+        )
+        .unwrap();
+
+        let got = run_gate(
+            &dir,
+            &reg,
+            GateInput {
+                name: "w3".into(),
+                substrate: "bg".into(),
+                flags: GateFlags {
+                    force: false,
+                    no_wait: true,
+                },
+                caller_session: Some("session-aaaaaaaa".into()),
+                ..Default::default()
+            },
+        );
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+        let refusal = got.err().expect("the full share must refuse");
+        assert_eq!(refusal.exit_code, EXIT_KING_SHARE, "{refusal:?}");
+        assert_eq!(
+            refusal.event.get("reason"),
+            Some(&serde_json::json!("king_share"))
+        );
+        assert_eq!(refusal.event.get("held"), Some(&serde_json::json!(2)));
+        assert_eq!(refusal.event.get("share"), Some(&serde_json::json!(2)));
+        assert_eq!(refusal.event.get("kings"), Some(&serde_json::json!(2)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn urldecode_inverts_encode_key() {
         let key = "worker:my agent/x";
@@ -2217,7 +2736,7 @@ MemAvailable:    8000000 kB\n";
             root: Some(root.clone()),
         };
 
-        acquire_worker_slot(&mut guard, "plain-codex", "spawn-gate:test");
+        acquire_worker_slot(&mut guard, "plain-codex", "spawn-gate:test", None, false).unwrap();
 
         let claim_path = root
             .join(".fno/claims")

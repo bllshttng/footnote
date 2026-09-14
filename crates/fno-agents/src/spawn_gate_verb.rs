@@ -1,0 +1,604 @@
+//! The `spawn-gate` verb (x-6089): the ONE spawn gate answered over one
+//! subprocess round trip, so every door - pane, routed, account, and the
+//! native bg/headless arms - reads the same question answered in one place.
+//!
+//! Two modes, selected by the payload's `mode` field. `gate` runs the full
+//! admission gate over one JSON round trip; the gate's own prose streams on
+//! stderr passthrough, so `spawn queued: ...` still streams during a queue.
+//! `probe` is the read-only capacity reading `fno agents gate-status`, the
+//! lane readouts and the advance width all consume: no mutex, no claims, no
+//! events. The verb exits 0 whenever it produced an ANSWER, including a
+//! refusal: a refusal is data now, not a process exit.
+
+use std::io::Read;
+use std::path::PathBuf;
+
+use serde_json::{json, Map, Value};
+
+use crate::agents_config;
+use crate::spawn_gate::{self, GateFlags, GateInput};
+use crate::spawn_gate_lanes;
+
+/// `spawn-gate`: one payload on stdin, one answer on stdout. Exit 0 whenever
+/// an answer was produced, including a refused answer. An unreadable payload
+/// is a loud non-zero: the transport turns that into a gate-unavailable
+/// refusal, never an admit.
+pub fn run_spawn_gate(_args: &[String]) -> i32 {
+    let mut raw = String::new();
+    if std::io::stdin().read_to_string(&mut raw).is_err() {
+        eprintln!("spawn-gate: could not read the request payload");
+        return 1;
+    }
+    let payload: Value = match serde_json::from_str(&raw) {
+        Ok(payload) => payload,
+        Err(e) => {
+            eprintln!("spawn-gate: unparseable request payload: {e}");
+            return 1;
+        }
+    };
+    let answer = match payload.get("mode").and_then(Value::as_str) {
+        Some("gate") => gate_answer(&payload),
+        Some("probe") => probe_answer(&payload),
+        other => {
+            eprintln!("spawn-gate: unknown mode {other:?}; want \"gate\" or \"probe\"");
+            return 1;
+        }
+    };
+    println!("{answer}");
+    0
+}
+
+fn gate_answer(payload: &Value) -> Value {
+    let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let home = crate::paths::AgentsHome::from_env();
+    let flags = GateFlags {
+        force: payload
+            .get("force")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        no_wait: payload
+            .get("no_wait")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    let input = GateInput {
+        name: str_of(payload, "name"),
+        substrate: str_of(payload, "substrate"),
+        flags,
+        route_provider: opt_str_of(payload, "route_provider"),
+        account: opt_str_of(payload, "account"),
+        caller_session: opt_str_of(payload, "caller_session"),
+        holder_pid: payload
+            .get("holder_pid")
+            .and_then(Value::as_u64)
+            .map(|p| p as u32),
+    };
+    match spawn_gate::run_gate(&config_cwd, &home.registry_json(), input) {
+        Ok(mut guard) => {
+            // Take the keys BEFORE the guard drops: releasing them here would
+            // free the very claims the caller must hold across dispatch.
+            let (gate, worker) = guard.take_keys();
+            let (gate_key, gate_holder) = unwrap_key(gate);
+            let (worker_key, worker_holder) = unwrap_key(worker);
+            json!({
+                "status": "admitted",
+                "gate_key": gate_key,
+                "gate_holder": gate_holder,
+                "worker_key": worker_key,
+                "worker_holder": worker_holder,
+            })
+        }
+        Err(refusal) => json!({
+            "status": "refused",
+            "exit_code": refusal.exit_code,
+            "receipt": refusal.receipt,
+            "event": refusal.event,
+        }),
+    }
+}
+
+fn str_of(payload: &Value, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn opt_str_of(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn probe_answer(_payload: &Value) -> Value {
+    probe::answer(_payload)
+}
+
+/// The probe's pieces, namespaced so the payload parsing and the row
+/// rendering stay testable beside each other.
+mod probe {
+    use super::*;
+
+    pub(super) fn answer(payload: &Value) -> Value {
+        let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let home = crate::paths::AgentsHome::from_env();
+        let registry_path = home.registry_json();
+        let caller = opt_str_of(payload, "caller_session");
+        let lanes_only = payload
+            .get("only")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).any(|s| s == "lanes"))
+            .unwrap_or(false);
+
+        let cap = agents_config::max_live(&config_cwd) as usize;
+        let floor_gb = agents_config::min_free_gb(&config_cwd);
+
+        let mut warnings: Vec<String> = Vec::new();
+        let mut out: Map<String, Value> = Map::new();
+
+        // Registry schema first, exactly as the Python probe ordered it.
+        if let Err(refusal) = spawn_gate_lanes::check_registry_schema(&registry_path, &mut warnings)
+        {
+            let receipt = refusal.receipt.unwrap_or(Value::Null);
+            return json!({
+                "verdict": "refused",
+                "reason": "registry_schema",
+                "message": format!(
+                    "registry schema {} ahead of schema {} this fno understands; run fno doctor update",
+                    receipt.get("on_disk").map(|v| v.to_string()).unwrap_or_default(),
+                    receipt.get("understood").map(|v| v.to_string()).unwrap_or_default()
+                ),
+                "on_disk": receipt.get("on_disk").cloned().unwrap_or(Value::Null),
+                "understood": receipt.get("understood").cloned().unwrap_or(Value::Null),
+                "rows": [],
+            });
+        }
+
+        // The slot count: the same counter the gate refuses on.
+        let slots = spawn_gate::slot_count(&registry_path, &mut warnings);
+
+        let mut ram_row: Option<Value> = None;
+        let mut cpu_rows: Vec<Value> = Vec::new();
+        let mut cpu: Option<spawn_gate::AdmissionPayload> = None;
+
+        if !lanes_only {
+            // The slot cap is a probe refusal exactly as the gate refuses.
+            if slots >= cap {
+                return refuse_with(
+                    "max_live",
+                    format!("{slots} live worker slots >= max_live {cap}"),
+                    json!({"count": slots, "max_live": cap}),
+                    &[fleet_row(slots, cap)],
+                    out,
+                );
+            }
+            // RAM floor: refuse below the floor; unreadable RAM skips.
+            let avail = spawn_gate::available_ram_gb();
+            ram_row = Some(ram_floor_row(avail, floor_gb));
+            if let Some(avail) = avail {
+                if avail < floor_gb {
+                    return refuse_with(
+                        "ram_floor",
+                        format!(
+                            "available RAM {avail:.1}GB below the min_free_gb floor {floor_gb:.1}GB"
+                        ),
+                        json!({"available_gb": avail, "min_free_gb": floor_gb}),
+                        &make_rows(None, slots, cap, ram_row, Vec::new()),
+                        out,
+                    );
+                }
+            }
+            // CPU axis: one footprint reading feeds the verdict and the rows.
+            let (prefetched, probe_err) = match spawn_gate::footprint_cause_raw() {
+                Ok(raw) => (Some(raw), None),
+                Err(why) => (None, Some(why)),
+            };
+            let admission = spawn_gate::check_cpu_axis(prefetched.as_deref(), probe_err.as_deref());
+            cpu_rows = vec![
+                cpu_share_row(&admission.payload),
+                load_backstop_row(&admission.payload),
+            ];
+            match admission.payload.verdict.as_str() {
+                "hold" => {
+                    return refuse_with(
+                        "fleet_cpu_share",
+                        admission.payload.reason.clone(),
+                        json!({
+                            "axis": "fleet_cpu_share",
+                            "share_low": admission.payload.share_low,
+                            "ceiling": admission.payload.ceiling,
+                        }),
+                        &make_rows(None, slots, cap, ram_row, cpu_rows),
+                        out,
+                    );
+                }
+                "refuse" | "undecidable" => {
+                    let token = if admission.payload.axis == "load_15m" {
+                        "load_backstop"
+                    } else if admission.payload.axis == "cpu_instrument" {
+                        "cpu_instrument_unreadable"
+                    } else {
+                        "cpu_share_undecidable"
+                    };
+                    return refuse_with(
+                        token,
+                        admission.payload.reason.clone(),
+                        json!({
+                            "axis": admission.payload.axis,
+                            "share_low": admission.payload.share_low,
+                            "share_high": admission.payload.share_high,
+                        }),
+                        &make_rows(None, slots, cap, ram_row, cpu_rows),
+                        out,
+                    );
+                }
+                _ => {}
+            }
+            cpu = Some(admission.payload);
+        }
+
+        // King share: only a caller whose session resolved is checked.
+        let reading = spawn_gate_lanes::share_reading(&registry_path, cap, caller.as_deref());
+        if let (Some(caller), Some(kings), Some(share), Some(held)) = (
+            caller.as_deref(),
+            reading.kings,
+            reading.share,
+            reading.held,
+        ) {
+            if !caller.is_empty() && held >= share {
+                return refuse_with(
+                    "king_share",
+                    format!(
+                        "this reign holds {held} of max_live {cap} across {kings} kings (share {share})"
+                    ),
+                    json!({
+                        "king": caller,
+                        "held": held,
+                        "share": share,
+                        "max_live": cap,
+                        "kings": kings,
+                    }),
+                    &make_rows(None, slots, cap, ram_row, cpu_rows),
+                    out,
+                );
+            }
+        }
+
+        // The lanes: every capped provider AND every provider a live row names.
+        let lanes = match lanes_answer(&config_cwd, &registry_path, &mut warnings) {
+            Ok(lanes) => lanes,
+            Err(fault) => {
+                return json!({
+                    "verdict": "unknown",
+                    "reason": "lane_count_unavailable",
+                    "provider": fault.provider,
+                    "error": fault.error,
+                });
+            }
+        };
+
+        // Lanes refuse only when EVERY capped lane is full.
+        let mut full: Vec<String> = Vec::new();
+        let mut capped_lanes = 0usize;
+        for (provider, lane) in lanes.as_object().map(|m| m.iter()).into_iter().flatten() {
+            let Some(lane_cap) = lane.get("cap").and_then(Value::as_u64) else {
+                continue;
+            };
+            capped_lanes += 1;
+            let live = lane.get("live").and_then(Value::as_u64).unwrap_or(0);
+            if live >= lane_cap {
+                full.push(format!("{provider} {live}/{lane_cap}"));
+            }
+        }
+        if capped_lanes > 0 && full.len() == capped_lanes {
+            return refuse_with(
+                "provider_cap",
+                format!("every dispatch lane at cap: {}", full.join(", ")),
+                json!({"lanes": lanes}),
+                &make_rows(Some(&lanes), slots, cap, ram_row, cpu_rows),
+                out,
+            );
+        }
+
+        // Accepted: the readings that admitted it, a trigger is only
+        // actionable beside its reading.
+        out.insert("verdict".into(), json!("accepted"));
+        out.insert("lanes".into(), lanes.clone());
+        out.insert("live_workers".into(), json!(slots));
+        out.insert("max_live".into(), json!(cap));
+        out.insert("slots".into(), json!(slots));
+        out.insert("share".into(), share_json(&reading));
+        if let Some(payload_adm) = &cpu {
+            out.insert("share_low".into(), json!(payload_adm.share_low));
+            out.insert("ceiling".into(), json!(payload_adm.ceiling));
+            out.insert("load_15m".into(), json!(payload_adm.load_15m));
+            out.insert(
+                "hard_max_load_per_cpu".into(),
+                json!(agents_config::hard_max_load_per_cpu(&config_cwd)),
+            );
+        }
+        if floor_gb > 0.0 {
+            out.insert("min_free_gb".into(), json!(floor_gb));
+            // available_ram_gb rides only when the RAM read ran.
+        }
+        out.insert(
+            "rows".into(),
+            json!(make_rows(Some(&lanes), slots, cap, ram_row, cpu_rows)),
+        );
+        Value::Object(out)
+    }
+}
+
+fn unwrap_key(held: Option<(String, String)>) -> (Value, Value) {
+    match held {
+        Some((key, holder)) => (json!(key), json!(holder)),
+        None => (Value::Null, Value::Null),
+    }
+}
+
+/// A refused probe: verdict + reason + message + the refused fields, plus the
+/// measurement rows read so far. A refusal is not the end of the answer: the
+/// rows carry whatever the probe managed to read before it refused.
+fn refuse_with(
+    reason: &str,
+    message: String,
+    mut extra: Value,
+    rows: &[Value],
+    mut out: Map<String, Value>,
+) -> Value {
+    out.insert("verdict".into(), json!("refused"));
+    out.insert("reason".into(), json!(reason));
+    out.insert("message".into(), json!(message));
+    if let Some(obj) = extra.as_object_mut() {
+        let moved: Vec<(String, Value)> =
+            obj.iter_mut().map(|(k, v)| (k.clone(), v.take())).collect();
+        for (k, v) in moved {
+            out.insert(k, v);
+        }
+    }
+    out.insert("rows".into(), json!(rows));
+    Value::Object(out)
+}
+
+/// The fleet-rows Gate dict.
+fn fleet_row(slots: usize, cap: usize) -> Value {
+    let mut row = Map::new();
+    row.insert("name".into(), json!("fleet-rows"));
+    row.insert("measured".into(), json!(slots.to_string()));
+    row.insert("threshold".into(), json!(cap.to_string()));
+    row.insert(
+        "verdict".into(),
+        json!(if slots >= cap { "refuse" } else { "pass" }),
+    );
+    row.insert("key".into(), json!("agents.max_live"));
+    row.insert(
+        "note".into(),
+        json!("x-3f84: rows are not what the machine spends; see the machine gates"),
+    );
+    Value::Object(row)
+}
+
+/// The Gate-dict row list: provider-lane per lane, fleet-rows, then whatever
+/// machine rows the mode read (RAM floor, CPU share, load backstop).
+fn make_rows(
+    lanes: Option<&Value>,
+    slots: usize,
+    cap: usize,
+    ram_row: Option<Value>,
+    cpu_rows: Vec<Value>,
+) -> Vec<Value> {
+    let mut rows: Vec<Value> = Vec::new();
+    if let Some(lanes) = lanes {
+        let mut lane_rows: Vec<(String, Value)> = lanes
+            .as_object()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        lane_rows.sort_by(|a, b| a.0.cmp(&b.0));
+        for (provider, lane) in lane_rows {
+            let Some(live) = lane.get("live").and_then(Value::as_u64) else {
+                continue;
+            };
+            let lane_cap = lane.get("cap").and_then(Value::as_u64);
+            let full = lane_cap.is_some_and(|c| live >= c);
+            let mut row = Map::new();
+            row.insert("name".into(), json!("provider-lane"));
+            row.insert("measured".into(), json!(format!("{live} ({provider})")));
+            row.insert(
+                "threshold".into(),
+                json!(lane_cap
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "uncapped".into())),
+            );
+            row.insert(
+                "verdict".into(),
+                json!(if full { "refuse" } else { "pass" }),
+            );
+            row.insert(
+                "key".into(),
+                json!(format!("agents.provider_limits.{provider}.lanes")),
+            );
+            rows.push(Value::Object(row));
+        }
+    }
+    rows.push(fleet_row(slots, cap));
+    rows.extend(ram_row);
+    rows.extend(cpu_rows);
+    rows
+}
+
+fn ram_floor_row(avail: Option<f64>, floor_gb: f64) -> Value {
+    let mut row = Map::new();
+    row.insert("name".into(), json!("ram-floor"));
+    match avail {
+        None => {
+            row.insert("measured".into(), Value::Null);
+            row.insert("threshold".into(), json!(format!("{floor_gb:.1}GB")));
+            row.insert("verdict".into(), json!("skipped: RAM unreadable"));
+        }
+        Some(avail) => {
+            row.insert("measured".into(), json!(format!("{avail:.1}GB")));
+            row.insert("threshold".into(), json!(format!("{floor_gb:.1}GB")));
+            row.insert(
+                "verdict".into(),
+                json!(if avail < floor_gb { "refuse" } else { "pass" }),
+            );
+        }
+    }
+    row.insert("key".into(), json!("agents.min_free_gb"));
+    Value::Object(row)
+}
+
+fn cpu_share_row(payload: &spawn_gate::AdmissionPayload) -> Value {
+    let unreadable = payload.axis == "cpu_instrument";
+    let verdict = match payload.verdict.as_str() {
+        "refuse" | "undecidable" => "refuse",
+        "hold" => "hold",
+        _ => "pass",
+    };
+    let mut row = Map::new();
+    row.insert("name".into(), json!("cpu-share"));
+    row.insert(
+        "measured".into(),
+        json!(if unreadable {
+            "unreadable".to_string()
+        } else {
+            format!(
+                "{:.2}/{:.2} cores",
+                payload.fleet_cores, payload.capacity_cores
+            )
+        }),
+    );
+    row.insert(
+        "threshold".into(),
+        json!(if unreadable {
+            "-".to_string()
+        } else {
+            format!("{:.0}%", payload.ceiling * 100.0)
+        }),
+    );
+    row.insert("verdict".into(), json!(verdict));
+    row.insert("key".into(), json!("agents.max_fleet_cpu_share"));
+    row.insert("note".into(), json!(payload.reason));
+    Value::Object(row)
+}
+
+fn load_backstop_row(payload: &spawn_gate::AdmissionPayload) -> Value {
+    let unreadable = payload.axis == "cpu_instrument";
+    let mut row = Map::new();
+    row.insert("name".into(), json!("load-backstop"));
+    row.insert(
+        "measured".into(),
+        json!(payload
+            .load_15m
+            .map(|v| format!("{v:.1}"))
+            .unwrap_or_else(|| "-".into())),
+    );
+    row.insert(
+        "threshold".into(),
+        json!(if unreadable {
+            "-".to_string()
+        } else {
+            format!("{:.1}", payload.backstop)
+        }),
+    );
+    row.insert(
+        "verdict".into(),
+        json!(
+            if payload.axis == "load_15m" && payload.verdict == "refuse" {
+                "refuse"
+            } else if payload.load_15m.is_some() {
+                "pass"
+            } else {
+                "skipped: load unreadable"
+            }
+        ),
+    );
+    row.insert("key".into(), json!("agents.hard_max_load_per_cpu"));
+    Value::Object(row)
+}
+
+fn share_json(reading: &spawn_gate_lanes::ShareReading) -> Value {
+    let mut share = Map::new();
+    share.insert("kings".into(), json!(reading.kings));
+    share.insert("share".into(), json!(reading.share));
+    share.insert("held".into(), json!(reading.held));
+    share.insert(
+        "held_rows".into(),
+        json!(reading.held_rows.clone().unwrap_or_default()),
+    );
+    share.insert(
+        "unattributed".into(),
+        json!(reading
+            .unattributed_rows
+            .clone()
+            .map(|rows| {
+                let mut un = Map::new();
+                un.insert("count".into(), json!(rows.len()));
+                un.insert("rows".into(), json!(rows));
+                Value::Object(un)
+            })
+            .unwrap_or(Value::Null)),
+    );
+    Value::Object(share)
+}
+
+/// The lanes block: every capped provider (the configured table, else the
+/// built-in budgets) AND every provider a live row names, capped or not.
+/// `Err` = one lane count faulted, which is the probe's unknown verdict,
+/// never a zero.
+fn lanes_answer(
+    config_cwd: &std::path::Path,
+    registry_path: &std::path::Path,
+    warnings: &mut Vec<String>,
+) -> Result<Value, spawn_gate_lanes::LaneFault> {
+    let mut providers: Vec<String> = Vec::new();
+    if let Some(table) = agents_config::config_lookup(config_cwd, &["agents", "provider_limits"])
+        .and_then(|t| {
+            t.as_table()
+                .map(|t| t.keys().cloned().collect::<Vec<String>>())
+        })
+    {
+        providers.extend(table);
+    } else {
+        providers.push("zai".to_string());
+    }
+    if let Ok(registry) = crate::state::load_registry(registry_path) {
+        let mut observed: Vec<String> = registry
+            .entries
+            .iter()
+            .filter(|e| crate::spawn_gate::status_is_liveish(&e.status))
+            .filter_map(|e| e.provider.clone())
+            .filter(|p| !p.is_empty())
+            .collect();
+        observed.sort();
+        observed.dedup();
+        for p in observed {
+            if !providers.contains(&p) {
+                providers.push(p);
+            }
+        }
+    }
+    providers.sort();
+    providers.dedup();
+
+    let mut lanes = Map::new();
+    for provider in providers {
+        let cap = spawn_gate_lanes::provider_lanes_cap(config_cwd, &provider);
+        match spawn_gate_lanes::provider_live_count(registry_path, &provider, warnings) {
+            Ok((live, counted)) => {
+                let mut lane = Map::new();
+                lane.insert("cap".into(), json!(cap));
+                lane.insert("live".into(), json!(live));
+                lane.insert("counted".into(), json!(counted));
+                lanes.insert(provider, Value::Object(lane));
+            }
+            Err(error) => {
+                return Err(spawn_gate_lanes::LaneFault { provider, error });
+            }
+        }
+    }
+    Ok(Value::Object(lanes))
+}

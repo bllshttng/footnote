@@ -393,1019 +393,420 @@ class TestCensus:
         assert not any("dead0000000001" in (w.name or "") for w in c.workers)
 
 
-class TestRamFloor:
-    def test_disabled_floor_never_fires(self, monkeypatch):
-        monkeypatch.setattr(spawn_gate, "available_ram_gb", lambda: 0.001)
-        spawn_gate._check_ram_floor(0)  # no raise
-        spawn_gate._check_ram_floor(-1)
-
-    def test_below_floor_refuses_with_numbers(self, monkeypatch, capsys):
-        """AC2-ERR / AC2-UI: refusal names floor + measured value + --force."""
-        monkeypatch.setattr(spawn_gate, "available_ram_gb", lambda: 1.5)
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate._check_ram_floor(4.0)
-        assert exc.value.code == spawn_gate.EXIT_RAM_REFUSED
-        err = capsys.readouterr().err
-        assert "1.5" in err and "4.0" in err and "--force" in err
-
-    def test_exactly_at_floor_passes(self, monkeypatch):
-        monkeypatch.setattr(spawn_gate, "available_ram_gb", lambda: 4.0)
-        spawn_gate._check_ram_floor(4.0)
-
-    def test_unreadable_ram_fails_open(self, monkeypatch, capsys):
-        """AC2-EDGE: unparseable read skips the guard with one warning."""
-        monkeypatch.setattr(spawn_gate, "available_ram_gb", lambda: None)
-        spawn_gate._check_ram_floor(4.0)
-        assert "skipping the floor check" in capsys.readouterr().err
-
-
-def _settings(
-    monkeypatch,
-    *,
-    max_live=3,
-    min_free_gb=0.0,
-    max_lanes=None,
-    max_load_per_cpu=0.0,
-    max_fleet_cpu_share=0.5,
-    hard_max_load_per_cpu=40.0,
-):
-    """Point run_gate at fixed knobs without touching real settings."""
-
-    class _D:
-        model = None
-        account = None
-
-    class _A:
-        defaults = _D()
-        profiles = {}
-        worker_qos = "off"
-
-    a = _A()
-    a.max_live = max_live
-    a.min_free_gb = min_free_gb
-    a.max_load_per_cpu = max_load_per_cpu  # 0 = the CPU guard stays off in tests
-    # run_gate reads these as REAL attributes (x-7c0f). A fake settings object
-    # missing one drops the whole config block into its fail-safe branch, which
-    # silently discards max_live as well - the failure looks like a cap bug.
-    a.max_fleet_cpu_share = max_fleet_cpu_share
-    a.hard_max_load_per_cpu = hard_max_load_per_cpu
-    a.provider_limits = {"zai": 5} if max_lanes is None else max_lanes
-
-    class _S:
-        pass
-
-    s = _S()
-    s.agents = a
-    monkeypatch.setattr("fno.config.load_settings", lambda: s)
-
-
-class TestRunGate:
-    def test_under_cap_passes_silently(self, monkeypatch, capsys):
-        """AC1-HP: nothing on stderr, no queue, guard holds the mutex."""
-        _settings(monkeypatch, max_live=3)
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        guard = spawn_gate.run_gate("w2", "bg")
-        assert capsys.readouterr().err == ""
-        guard.release()
-
-    def test_cpu_refusal_releases_the_gate_mutex_first(self, monkeypatch, capsys):
-        """The refusal is decided; the mutex drops BEFORE the refusal raises,
-        so queued spawners never sit behind evidence gathering (the x-7c0f
-        ordering, carried onto the CPU axis)."""
-        _settings(monkeypatch, max_live=3)
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        from fno.footprint import Admission
-
-        undecidable = Admission(
-            verdict="undecidable",
-            axis="fleet_cpu_share",
-            reason="spawn-gate: cannot decide",
-            share_low=0.2,
-            share_high=0.6,
-            bound="upper",
-            fleet_cores=2.1,
-            machine_cores=7.2,
-            capacity_cores=12.0,
-            ceiling=0.5,
-            gap="3 pidless row(s)",
-            load_15m=45.0,
-            backstop=480.0,
-        )
-        monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: undecidable)
-        released: list[str] = []
-
-        monkeypatch.setattr(
-            spawn_gate,
-            "_release_claim_bounded",
-            lambda key, holder: released.append(key) or True,
-        )
-
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("w2", "bg", no_wait=True)
-
-        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
-        assert spawn_gate.GATE_CLAIM_KEY in released
-
-    def test_cpu_axis_refuses_under_cap(self, monkeypatch, capsys):
-        """x-7783 wiring: the CPU axis fires beside the RAM floor, with slots
-        FREE - a machine can be oversubscribed while under cap."""
-        _settings(monkeypatch, max_live=3)
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        from fno.footprint import Admission
-
-        refusal = Admission(
-            verdict="refuse",
-            axis="load_15m",
-            reason=(
-                "spawn-gate: 15-minute load 500.0 against backstop 480.0 "
-                "(hard_max_load_per_cpu 40 x 12 cpus); refusing (--force to bypass)"
-            ),
-            share_low=0.0,
-            share_high=0.0,
-            bound="exact",
-            fleet_cores=0.1,
-            machine_cores=6.9,
-            capacity_cores=12.0,
-            ceiling=0.5,
-            gap=None,
-            load_15m=500.0,
-            backstop=480.0,
-        )
-        monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: refusal)
-
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("w2", "bg", no_wait=True)
-        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
-        receipt = exc.value.receipt
-        assert receipt["reason"] == "load_backstop"
-        assert receipt["axis"] == "load_15m"
-        assert receipt["load_15m"] == 500.0
-
-    def test_undecidable_refusal_prints_one_sample_not_two(self, monkeypatch, capsys):
-        """The admission sentence IS the refusal message: the gate appends no
-        second reading to a refusal that already named its own sample."""
-        _settings(monkeypatch, max_live=3)
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        from fno.footprint import Admission
-
-        undecidable = Admission(
-            verdict="undecidable",
-            axis="fleet_cpu_share",
-            reason="spawn-gate: cannot decide: attributed 17.5%, up to 60.0%",
-            share_low=0.175,
-            share_high=0.6,
-            bound="upper",
-            fleet_cores=2.1,
-            machine_cores=7.2,
-            capacity_cores=12.0,
-            ceiling=0.5,
-            gap="3 pidless row(s)",
-            load_15m=45.0,
-            backstop=480.0,
-        )
-        monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: undecidable)
-
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("w2", "bg", no_wait=True)
-
-        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
-        error = capsys.readouterr().err
-        assert "attributed 17.5%, up to 60.0%" in error
-        assert error.count("spawn-gate: cannot decide") == 1
-
-    def test_instrument_unreadable_refusal_names_no_load_number(
-        self, monkeypatch, capsys
-    ):
-        """AC5-ERR: an unreadable instrument refuses naming the failure text,
-        and no load number prints beside it."""
-        _settings(monkeypatch, max_live=3)
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        from fno.footprint import Admission
-
-        refusal = Admission(
-            verdict="refuse",
-            axis="cpu_instrument",
-            reason=(
-                "spawn-gate: the CPU instrument is unreadable "
-                "(footprint unavailable: ps unavailable: timed out); "
-                "refusing to spawn (--force to bypass)"
-            ),
-            share_low=0.0,
-            share_high=0.0,
-            bound="exact",
-            fleet_cores=0.0,
-            machine_cores=0.0,
-            capacity_cores=0.0,
-            ceiling=0.0,
-            gap=None,
-            load_15m=None,
-            backstop=0.0,
-        )
-        monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: refusal)
-
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("w2", "bg", no_wait=True)
-
-        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
-        receipt = exc.value.receipt
-        assert receipt["reason"] == "cpu_instrument_unreadable"
-        error = capsys.readouterr().err
-        assert "ps unavailable: timed out" in error
-        assert "load_15m" not in receipt or receipt.get("load_15m") is None
-
-    def test_at_cap_no_wait_refuses(self, monkeypatch, capsys):
-        _settings(monkeypatch, max_live=1)
-        w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
-        )
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("w2", "bg", no_wait=True)
-        assert exc.value.code == spawn_gate.EXIT_NO_WAIT
-        assert "fno agents top" in capsys.readouterr().err
-
-    def test_queue_announces_then_dispatches_when_slot_frees(
-        self, monkeypatch, capsys
-    ):
-        """AC1-UI: the queue line prints BEFORE the first poll sleep."""
-        _settings(monkeypatch, max_live=1)
-        w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
-        calls = {"n": 0}
-
-        def fake_census(socket_map=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
-            return spawn_gate.LiveCensus(workers=[])
-
-        monkeypatch.setattr(spawn_gate, "census", fake_census)
-        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
-        guard = spawn_gate.run_gate("w2", "bg")
-        err = capsys.readouterr().err
-        assert "spawn queued: 1 live worker slots >= max_live 1" in err
-        assert "--no-wait" in err and "--force" in err
-        guard.release()
-
-    def test_queue_timeout_is_distinct_and_loud(self, monkeypatch, capsys):
-        """AC1-ERR: reusable gate returns refusal data without writing stdout."""
-        _settings(monkeypatch, max_live=1)
-        w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
-        )
-        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
-        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("w2", "bg")
-        assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
-        captured = capsys.readouterr()
-        assert "fno agents top" in captured.err
-        assert exc.value.code not in (2, 13, 14, 15, 18, 127)
-        assert captured.out == ""
-        receipt = exc.value.receipt
-        assert receipt["status"] == "refused"
-        assert receipt["reason"] == "queue_timeout"
-        assert receipt["max_live"] == 1
-        assert receipt["count"] == 1
-        assert receipt["current_count"] == 1
-
-    def test_queue_timeout_spawn_command_emits_receipt_and_exits_75(self, monkeypatch):
-        """fno agents spawn exits non-zero (75) on queue timeout and emits machine-readable receipt."""
-        from typer.testing import CliRunner
-        from fno.agents.cli import agents_app
-
-        _settings(monkeypatch, max_live=2)
-        w1 = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
-        w2 = spawn_gate.LiveWorker("fno", "w2", "claude", "bg", ALIVE, "busy")
-        monkeypatch.setattr(
-            spawn_gate,
-            "census",
-            lambda socket_map=None: spawn_gate.LiveCensus(workers=[w1, w2], fno_slot_workers=2),
-        )
-        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
-        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
-        # The mutex is held and released every pass here: this pins the
-        # SLOT-cap timeout receipt, not mutex contention (that one refuses
-        # as gate_mutex_busy).
-        monkeypatch.setattr(
-            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
-        )
-
-        runner = CliRunner()
-        res = runner.invoke(
-            agents_app,
-            ["spawn", "do something", "--name", "w3", "-H", "claude", "-m", "claude-sonnet-4-6"],
-        )
-        assert res.exit_code == spawn_gate.EXIT_QUEUE_TIMEOUT
-        assert "queue timeout after 0s held on max_live" in res.output
-        receipt_line = [line for line in res.output.splitlines() if line.startswith("{")][-1]
-        receipt = json.loads(receipt_line)
-        assert receipt["status"] == "refused"
-        assert receipt["reason"] == "queue_timeout"
-        assert receipt["held_on"] == "max_live"
-        assert receipt["max_live"] == 2
-        assert receipt["count"] == 2
-        assert receipt["current_count"] == 2
-
-    def test_force_bypasses_and_prints_forced_line(self, monkeypatch, capsys):
-        _settings(monkeypatch, max_live=1)
-        w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1)
-        )
-        guard = spawn_gate.run_gate("w2", "bg", force=True)
-        assert "forced past cap" in capsys.readouterr().err
-        guard.release()
-
-    def test_no_wait_refuses_fast_when_the_mutex_is_contended(
-        self, monkeypatch, capsys
-    ):
-        """A busy gate mutex is queueing, so --no-wait must refuse on it.
-
-        Regression: the no_wait check used to live INSIDE the acquired-mutex
-        branch, so a spawner that died mid-gate (leaving the claim `suspect`
-        for its full TTL) made every --no-wait caller wait the whole
-        QUEUE_TIMEOUT_S and then exit EXIT_QUEUE_TIMEOUT - unable to tell
-        "cap is full" from "the gate is wedged".
-        """
-        _settings(monkeypatch, max_live=99)  # cap is irrelevant: never counted
-        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", lambda _h: False)
-        # Long enough that a fall-through to the queue loop is unmistakable.
-        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 30.0)
-        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("w2", "bg", no_wait=True)
-        assert exc.value.code == spawn_gate.EXIT_NO_WAIT
-        assert "gate mutex" in capsys.readouterr().err
-
-    def test_permanently_held_mutex_proceeds_unserialized(
-        self, monkeypatch, capsys
-    ):
-        """A wedged mutex must not brick spawning (the module's fail-open rule).
-
-        Regression: with no bound on the mutex wait, one spawner that died
-        inside the critical section queued EVERY other spawner on the machine
-        behind its corpse until each hit its own 600s timeout.
-        """
-        _settings(monkeypatch, max_live=3)
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", lambda _h: False)
-        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.05)
-        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
-        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 30.0)
-        guard = spawn_gate.run_gate("w2", "bg")  # must return, not hang
-        assert "proceeding unserialized" in capsys.readouterr().err
-        guard.release()
-
-    def test_mutex_budget_resets_on_a_successful_acquire(self, monkeypatch, capsys):
-        """The budget tracks an UNBROKEN contention run, not total queue time.
-
-        A long legitimate queue (mutex acquired every poll, cap simply full)
-        must never accumulate into a spurious "proceeding unserialized".
-        """
-        _settings(monkeypatch, max_live=1)
-        w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
-        monkeypatch.setattr(
-            spawn_gate,
-            "census",
-            lambda socket_map=None: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1),
-        )
-        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", lambda _h: True)
-        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.01)
-        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
-        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.2)
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("w2", "bg")
-        assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
-        assert "proceeding unserialized" not in capsys.readouterr().err
-
-    def test_capped_arm_steals_a_dead_gate_and_reacquires(self, monkeypatch, capsys):
-        """AC3-HP: a capped provider facing a PROVABLY-DEAD holder steals it
-        and re-acquires. The takeover asks the sweep's own decision
-        (sweep_verdict), and the override reason and warning name the native
-        basis - no second state table beside the sweep (x-9c91 change 3).
-        """
-        _settings(monkeypatch, max_live=9, max_lanes={"zai": 10})
-        acquire_calls: list[bool] = []
-
-        def _acquire(_holder, *, fail_closed=False):
-            acquire_calls.append(fail_closed)
-            return len(acquire_calls) > 1  # contended once, then the steal lands
-
-        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", _acquire)
-        from fno.claims.core import acquire_claim
-
-        # A real gate claim file; the pid value is inert because the native
-        # door is stubbed below.
-        acquire_claim(
-            spawn_gate.GATE_CLAIM_KEY, "target-session:dead", pid=999_999_999, root=None
-        )
-        monkeypatch.setattr(
-            "fno.claims.verdict.claim_verdicts",
-            lambda keys=None, **_kw: {
-                spawn_gate.GATE_CLAIM_KEY: {
-                    "key": spawn_gate.GATE_CLAIM_KEY,
-                    "state": "stale",
-                    "bucket": "",
-                    "provably_dead": True,
-                    "basis": "ttl-expired-dead-pid",
-                }
-            },
-        )
-        steals: list[tuple[str, str]] = []
-        monkeypatch.setattr(
-            "fno.claims.core.force_release_claim",
-            lambda key, reason, *, root=None: steals.append((key, reason)),
-        )
-        monkeypatch.setattr(spawn_gate, "provider_live_count", lambda _p: 3)
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.0)
-        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
-        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 5.0)
-
-        guard = spawn_gate.run_gate("w2", "pane", route_provider="zai")
-
-        assert steals == [
-            (
-                spawn_gate.GATE_CLAIM_KEY,
-                "spawn-gate held past the wait budget; native basis "
-                "ttl-expired-dead-pid",
-            )
-        ]
-        assert acquire_calls == [True, True], "capped arm stays fail_closed"
-        err = capsys.readouterr().err
-        assert "provider_cap" not in err
-        assert "native basis ttl-expired-dead-pid" in err
-        guard.release()
-
-    def test_capped_arm_steals_a_corrupted_gate_claim(
-        self, monkeypatch, capsys
-    ):
-        """A corrupted lockfile serializes nobody: claims are written
-        atomically, so corruption means the file is damaged, not held."""
-        _settings(monkeypatch, max_live=9, max_lanes={"zai": 10})
-        calls: list[bool] = []
-
-        def _acquire(_holder, *, fail_closed=False):
-            calls.append(fail_closed)
-            return len(calls) > 1  # contended once, then the steal lands
-
-        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", _acquire)
-        gate_dir = Path(os.environ["FNO_CLAIMS_ROOT"]) / ".fno" / "claims"
-        gate_dir.mkdir(parents=True, exist_ok=True)
-        (gate_dir / "gate%3Aspawn.lock").write_text("{ not: [valid")
-        steals: list[str] = []
-        monkeypatch.setattr(
-            "fno.claims.core.force_release_claim",
-            lambda key, reason, *, root=None: steals.append(key),
-        )
-        monkeypatch.setattr(spawn_gate, "provider_live_count", lambda _p: 3)
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.0)
-        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
-        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 5.0)
-
-        guard = spawn_gate.run_gate("w2", "pane", route_provider="zai")
-
-        assert steals == [spawn_gate.GATE_CLAIM_KEY]
-        guard.release()
-
-    def test_dequeue_ram_recheck_refuses(self, monkeypatch):
-        """AC2-FR: a freed slot still refuses when RAM dropped meanwhile."""
-        _settings(monkeypatch, max_live=1, min_free_gb=4.0)
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        monkeypatch.setattr(spawn_gate, "available_ram_gb", lambda: 1.0)
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("w2", "bg")
-        assert exc.value.code == spawn_gate.EXIT_RAM_REFUSED
-
-    def test_headless_holds_worker_slot_claim(self, monkeypatch):
-        """AC1-FR territory: a headless pass leaves a visible slot claim
-        until release; concurrent census sees it."""
-        _settings(monkeypatch, max_live=3)
-        real_census = spawn_gate.census
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
-        guard = spawn_gate.run_gate("one-shot", "headless")
-        monkeypatch.setattr(spawn_gate, "census", real_census)
-        assert spawn_gate.census().slot_claims == 1
-        guard.release()
-        assert spawn_gate.census().slot_claims == 0
-
-    def test_cap_two_refuses_third_but_not_codex_then_exit_releases_slot(
-        self, monkeypatch, capsys
-    ):
-        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
-        rows: list[AgentEntry] = []
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
-        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, _start: bool(pid))
-        monkeypatch.setattr(
-            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
-        )
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        for index in (1, 2):
-            guard = spawn_gate.run_gate(f"zai-{index}", "pane", route_provider="zai")
-            rows.append(
-                AgentEntry(
-                    name=f"zai-{index}", harness="claude", provider="zai",
-                    cwd="/tmp", log_path="/tmp/log", pid=100 + index,
-                    pid_start_time=1000 + index,
-                )
-            )
-            guard.release()
-
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("zai-3", "pane", route_provider="zai")
-        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
-        refused = capsys.readouterr().err
-        assert "provider zai" in refused and "cap 2" in refused
-        assert "current count 2" in refused and "queued" not in refused
-
-        codex = spawn_gate.run_gate("codex-peer", "pane")
-        codex.release()
-        rows[0].status = "exited"
-        admitted = spawn_gate.run_gate("zai-4", "pane", route_provider="zai")
-        admitted.release()
-
-    def test_unreadable_provider_count_refuses_instead_of_zero(
-        self, monkeypatch, capsys
-    ):
-        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
-        monkeypatch.setattr(
-            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
-        )
-
-        def unreadable():
-            raise OSError("registry denied")
-
-        monkeypatch.setattr("fno.agents.registry.load_registry", unreadable)
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("zai-1", "pane", route_provider="zai")
-        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
-        refused = capsys.readouterr().err
-        assert "provider zai" in refused
-        assert "gate mutex unavailable" in refused
-        assert "registry denied" in refused
-        assert "provider_cap" not in refused
-
-    def test_partial_forward_registry_refuses_instead_of_undercounting(
-        self, monkeypatch
-    ):
-        from fno.agents.registry import LoadedRegistry
-
-        monkeypatch.setattr(
-            "fno.agents.registry.load_registry",
-            lambda: LoadedRegistry([], complete=False),
-        )
-        with pytest.raises(spawn_gate.ProviderCountUnavailable):
-            spawn_gate.provider_live_count("zai")
-
-    def test_null_provider_live_row_warns_and_skips(
-        self, monkeypatch, capsys
-    ):
-        row = AgentEntry(
-            name="unattributed-live",
-            harness="claude",
-            provider=None,
-            origin="spawn",
-            cwd="/tmp",
-            log_path="/tmp/log",
-            pid=101,
-            pid_start_time=1001,
-        )
+class TestCensus:
+    def test_succession_keeps_one_positive_slot_and_current_address(self, monkeypatch):
+        """AC5-HP/AC6-HP: one row remains one slot while its address advances."""
+        from fno.agents.registry import resolve_agent_in
+
+        row = _row("target-worker", pid=ALIVE, short_id="old-session")
+        row.mux = {"session": "main", "pane_id": 12}
+        row.harness_session_id = "old-session"
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
-        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
-        assert spawn_gate.provider_live_count("zai") == 0
-        assert (
-            "1 live row(s) were minted without a provider stamp "
-            "(harness=claude, origin=spawn)"
-        ) in capsys.readouterr().err
+        before = spawn_gate.census()
 
-    def test_operator_origin_unstamped_row_is_silent(self, monkeypatch, capsys):
-        """Only the operator shape goes quiet: a hand-started session can
-        never carry a spawn-time provider stamp, and warning about it on every
-        gate read rode stderr ahead of real refusals. Adopted and unknown
-        origins keep the warning."""
-        row = AgentEntry(
-            name="operator-live",
-            harness="claude",
-            provider=None,
-            origin="operator",
-            cwd="/tmp",
-            log_path="/tmp/log",
-            pid=101,
-            pid_start_time=1001,
-        )
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
-        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
-        assert spawn_gate.provider_live_count("zai") == 0
-        assert "without a provider stamp" not in capsys.readouterr().err
+        row.harness_session_id = "new-session"
+        row.predecessor_session_ids = ["old-session"]
+        after = spawn_gate.census()
+        resolved = resolve_agent_in([row], "new-session")
 
-    def test_missing_claim_provider_warns_and_skips(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        claims = tmp_path / ".fno" / "claims"
-        claims.mkdir(parents=True)
-        (claims / "worker%3Aplain-peer.lock").write_text("claim")
-        monkeypatch.setattr(spawn_gate, "_gate_claims_root", lambda: tmp_path)
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
-        monkeypatch.setattr(
-            "fno.claims.core.claim_status",
-            lambda *_args, **_kwargs: {"state": "live", "metadata": {}},
-        )
+        assert before.fno_slot_workers == 1
+        assert after.fno_slot_workers == 1
+        assert resolved.entry.harness_session_id == "new-session"
+        assert resolved.entry.mux == {"session": "main", "pane_id": 12}
 
-        assert spawn_gate.provider_live_count("zai") == 0
-        assert (
-            "live worker reservation worker:plain-peer was minted without "
-            "model_provider; skipping"
-        ) in capsys.readouterr().err
+    def test_duplicate_successor_is_an_explicit_address_ambiguity(self):
+        """AC5-ERR: two rows carrying B cannot resolve as one worker."""
+        from fno.agents.registry import AgentResolutionError, resolve_agent_in
 
-    def test_every_registry_mint_site_stamps_model_provider(self):
-        root = Path(__file__).resolve().parents[3]
-        claude_rust = (root / "crates/fno-agents/src/claude_ask.rs").read_text()
-        adopt_rust = (root / "crates/fno-agents/src/claude_adopt.rs").read_text()
-        codex_rust = (root / "crates/fno-agents/src/codex_ask.rs").read_text()
-        dispatch_python = (root / "cli/src/fno/agents/dispatch.py").read_text()
-        mux_python = (root / "cli/src/fno/agents/mux_spawn.py").read_text()
-
-        def section(text: str, start: str, end: str) -> str:
-            assert start in text and end in text.split(start, 1)[1]
-            return text.split(start, 1)[1].split(end, 1)[0]
-
-        rust_claude_spawn = section(
-            claude_rust, "fn create(\n", "#[cfg(test)]"
-        )
-        rust_claude_adopt = section(
-            adopt_rust, "pub fn mint_adopted_entry", "pub fn upsert_adopted_row"
-        )
-        rust_codex_create = section(
-            codex_rust, "fn dispatch_create(\n", "fn dispatch_resume(\n"
-        )
-        python_codex_create = section(
-            dispatch_python, "def _codex_create_path(\n",
-            # The lineage helpers that used to end this section moved to
-            # fno.agents.spawn_lineage (x-5c25, file budget); the re-export
-            # block that replaced them is the boundary now.
-            "# Moved to fno.agents.spawn_lineage",
-        )
-        python_claude_spawn = section(
-            dispatch_python, "def _claude_create_path(\n",
-            "# Task 1.2: spawn verb (US2 Python fallback runtime)\n",
-        )
-        assert "def dispatch_spawn_pane(\n" in mux_python
-        python_pane_spawn = mux_python.split("def dispatch_spawn_pane(\n", 1)[1]
-
-        assert 'provider: Some("anthropic".to_string())' in rust_claude_spawn
-        # x-98ab: adopt mints NO provider - the old unconditional "anthropic"
-        # was a guess about an unobserved route, and a wrong stamp is how a
-        # session bills the wrong account with nothing recorded to compare
-        # against. `adopt` fills it from the transcript model matched against
-        # the recorded route-settings files, and records none on no match.
-        assert "provider: None" in rust_claude_adopt
-        assert "provider_from_route_settings(Some(&model))" in adopt_rust
-        assert "transcript_model(&worker.session_id)" in adopt_rust
-        assert 'provider: Some("openai".to_string())' in rust_codex_create
-        assert 'provider="openai"' in python_codex_create
-        assert (
-            "lane_provider = route_provider or resolve_lane_vendor("
-            in python_claude_spawn
-        )
-        assert "provider=lane_provider" in python_claude_spawn
-        assert "provider=resolved_lane_provider" in python_pane_spawn
-
-        # x-98ab: every mint site stamps `node` so a reap decision reads the
-        # node off the row instead of parsing it out of a name. The Python
-        # spawn seams take the caller's RESOLVED provenance value (never the
-        # spawner's ambient env); the client-side Rust ask lanes inherit the
-        # spawner's exported FNO_NODE; adopt stamps None because it observed
-        # nothing.
-        assert "node=node," in python_claude_spawn
-        assert "node=node," in python_codex_create
-        assert 'node=(provenance or {}).get("FNO_NODE") or None' in python_pane_spawn
-        assert 'node: std::env::var("FNO_NODE")' in rust_claude_spawn
-        assert 'node: std::env::var("FNO_NODE")' in codex_rust
-        assert "node: None" in rust_claude_adopt
-
-    def test_every_registry_mint_site_stamps_spawned_by(self):
-        """The parent-edge sibling of the provider stamp test: each mint site
-        calls the ambient capture helper and wires the triple onto the row.
-        The Rust mint constructor (RegistryEntry::new) now makes the omission a
-        compile error; this sweep stays as the local-suite check that each
-        site routes through it and still captures the ambient edge."""
-        root = Path(__file__).resolve().parents[3]
-        rust_sites = {
-            "claude create": (
-                root / "crates/fno-agents/src/claude_ask.rs", "fn create(\n", "#[cfg(test)]"
-            ),
-            "claude adopt": (
-                root / "crates/fno-agents/src/claude_adopt.rs",
-                "pub fn mint_adopted_entry", "pub fn upsert_adopted_row",
-            ),
-            "codex create": (
-                root / "crates/fno-agents/src/codex_ask.rs",
-                "fn dispatch_create(\n", "fn dispatch_resume(\n",
-            ),
-            "gemini create": (
-                root / "crates/fno-agents/src/gemini_ask.rs",
-                "fn dispatch_create(\n", "fn dispatch_resume(\n",
-            ),
-            "daemon stream worker": (
-                root / "crates/fno-agents/src/daemon.rs",
-                "fn build_claude_stream_entry", "fn acquire_session_claim",
-            ),
-            "synthesized row": (
-                root / "crates/fno-agents/src/client_verbs.rs",
-                "fn mint_synthesized_entry", "fn upsert_synthesized_row",
-            ),
-        }
-        for label, (path, start, end) in rust_sites.items():
-            text = path.read_text()
-            assert start in text and end in text.split(start, 1)[1], label
-            body = text.split(start, 1)[1].split(end, 1)[0]
-            assert "crate::claims::ambient_parent_edge()" in body, label
-            # The identity and the parent edge ride the required mint
-            # constructor; a site naming neither fails to compile.
-            assert "RegistryEntry::new(" in body, label
-            assert "Lineage {" in body or "Lineage::captured(" in body, label
-
-        state_rust = (root / "crates/fno-agents/src/state.rs").read_text()
-        for field in ("spawned_by_session", "spawned_by_harness", "spawned_by_cwd"):
-            assert f"pub {field}:" in state_rust, field
-
-        dispatch_python = (root / "cli/src/fno/agents/dispatch.py").read_text()
-        codex_create = dispatch_python.split("def _codex_create_path(\n", 1)[1].split(
-            "def _codex_followup_path(\n", 1
-        )[0]
-        assert "_capture_parent_edge()" in codex_create
-        assert "spawned_by_session=_cx_session" in codex_create
-        registry_python = (root / "cli/src/fno/agents/registry.py").read_text()
-        register = registry_python.split("def register_existing_session(", 1)[1].split(
-            "def restamp_harness_session_id(", 1
-        )[0]
-        assert 'origin == "operator"' in register
-        assert "spawned_by_session=_sb_session" in register
-        fallback_python = (root / "cli/src/fno/agents/store_fallback.py").read_text()
-        # x-5283 LD3: the adoption mint site stamps the VOUCHER, never a
-        # spawn edge - its spawned_by_* stays None by design, so crowning
-        # cannot move a row's cost into the grantor's account.
-        assert "spawned_by_session=None" in fallback_python
-        assert "adopted_by_session=_sb_session" in fallback_python
-
-    def test_force_does_not_bypass_provider_cap(self, monkeypatch):
-        _settings(monkeypatch, max_live=99, max_lanes={"zai": 1})
-        row = AgentEntry(
-            name="zai-live", harness="claude", provider="zai", cwd="/tmp",
-            log_path="/tmp/log", pid=101, pid_start_time=1001,
-        )
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
-        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
-        monkeypatch.setattr(
-            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
-        )
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate(
-                "zai-forced", "pane", route_provider="zai", force=True
-            )
-        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
-
-    def test_capped_arm_queues_behind_a_live_holder_and_never_says_provider_cap(
-        self, monkeypatch, capsys
-    ):
-        """AC3-ERR: a LIVE holder is a live peer; queue to the timeout, and
-        the refusal must never name the cap the gate never read. The takeover
-        releases nothing and its warning names the bucket and holder pid."""
-        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
-        monkeypatch.setattr(
-            spawn_gate, "_acquire_gate_mutex", lambda _h, **_k: False
-        )
-        from fno.claims.core import acquire_claim
-
-        acquire_claim(
-            spawn_gate.GATE_CLAIM_KEY, "target-session:peer", pid=424_242, root=None
-        )
-        monkeypatch.setattr(
-            "fno.claims.verdict.claim_verdicts",
-            lambda keys=None, **_kw: {
-                spawn_gate.GATE_CLAIM_KEY: {
-                    "key": spawn_gate.GATE_CLAIM_KEY,
-                    "state": "live",
-                    "bucket": "live",
-                    "provably_dead": False,
-                    "basis": "pid",
-                }
-            },
-        )
-        steals: list[str] = []
-        monkeypatch.setattr(
-            "fno.claims.core.force_release_claim",
-            lambda key, reason, *, root=None: steals.append(key),
-        )
-        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.01)
-        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
-        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.15)
-
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("zai-now", "pane", route_provider="zai")
-
-        assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
-        assert exc.value.receipt is not None
-        assert exc.value.receipt["reason"] == "gate_mutex_busy"
-        assert steals == [], "a live holder is never force-released"
-        err = capsys.readouterr().err
-        assert "gate claim kept (live), holder pid 424242" in err
-
-    def test_provider_count_requires_positive_liveness_and_skips_exited(
-        self, monkeypatch
-    ):
         rows = [
-            AgentEntry(name="positive", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", pid=101, pid_start_time=1001),
-            AgentEntry(name="stale", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", pid=102, pid_start_time=1002),
-            AgentEntry(name="exited", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", status="exited", pid=103, pid_start_time=1003),
+            _row("target-a", pid=ALIVE, short_id="new-session"),
+            _row("target-b", pid=ALIVE, short_id="new-session"),
         ]
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        for row in rows:
+            row.harness_session_id = "new-session"
+
+        with pytest.raises(AgentResolutionError, match="ambiguous"):
+            resolve_agent_in(rows, "new-session")
+
+    def test_pid_start_token_mismatch_is_not_our_process(self, monkeypatch):
+        """A reused numeric PID must not keep an old registry row alive."""
+        class Proc:
+            def is_running(self):
+                return True
+
+            def status(self):
+                return "running"
+
+        class Psutil:
+            STATUS_ZOMBIE = "zombie"
+
+            @staticmethod
+            def Process(_pid):
+                return Proc()
+
         monkeypatch.setattr(
-            spawn_gate, "_pid_alive",
-            lambda pid, _start: {101: True, 102: False, 103: True}[pid],
+            spawn_gate, "_process_start_time",
+            lambda _pid, _psutil=None: 42_000_000,
+            raising=False,
         )
-        assert spawn_gate.provider_live_count("zai") == 1
+        assert not spawn_gate._pid_alive(4242, 41_000_000, _psutil=Psutil)
+        assert spawn_gate._pid_alive(4242, 42_000_000, _psutil=Psutil)
 
-    def test_live_pid_without_incarnation_token_refuses_but_dead_pid_skips(
-        self, monkeypatch
-    ):
-        row = AgentEntry(
-            name="ambiguous", harness="claude", provider="zai", cwd="/tmp",
-            log_path="/tmp/log", pid=101,
-        )
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
-        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
-        with pytest.raises(spawn_gate.ProviderCountUnavailable):
-            spawn_gate.provider_live_count("zai")
+        monkeypatch.setattr(spawn_gate, "_process_start_time", lambda *_args: None)
+        assert spawn_gate._pid_alive(4242, 42_000_000, _psutil=Psutil) is None
+        assert not spawn_gate._pid_alive(4242, 42_000_000, _psutil=Psutil)
 
-        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: False)
-        assert spawn_gate.provider_live_count("zai") == 0
-
-    def test_headless_provider_claim_holds_and_releases_a_lane(
-        self, monkeypatch, capsys
-    ):
-        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-
-        first = spawn_gate.run_gate("peer-1", "headless", route_provider="zai")
-        second = spawn_gate.run_gate("peer-2", "headless", route_provider="zai")
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("peer-3", "headless", route_provider="zai")
-        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
-        assert "current count 2" in capsys.readouterr().err
-
-        first.release()
-        replacement = spawn_gate.run_gate(
-            "peer-4", "headless", route_provider="zai"
-        )
-        replacement.release()
-        second.release()
-
-    def test_known_unrouted_headless_claim_does_not_block_capped_provider(
-        self, monkeypatch
-    ):
-        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-
-        unrelated = spawn_gate.run_gate("codex-peer", "headless")
-        assert spawn_gate.provider_live_count("zai") == 0
-        unrelated.release()
-
-    def test_suspect_claim_for_other_provider_does_not_block_count(
-        self, tmp_path, monkeypatch
-    ):
-        claims = tmp_path / ".fno" / "claims"
-        claims.mkdir(parents=True)
-        (claims / "worker%3Aopenai-peer.lock").write_text("claim")
-        monkeypatch.setattr(spawn_gate, "_gate_claims_root", lambda: tmp_path)
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
-        other_provider = "openai"
-        monkeypatch.setattr(
-            "fno.claims.core.claim_status",
-            lambda *_args, **_kwargs: {
-                "state": "suspect",
-                "metadata": {"model_provider": other_provider},
-            },
-        )
-
-        assert spawn_gate.provider_live_count("zai") == 0
-
-    def test_capped_headless_refuses_when_lane_reservation_is_unwritable(
-        self, monkeypatch, capsys
-    ):
-        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
-        monkeypatch.setattr(
-            spawn_gate, "census", lambda socket_map=None: spawn_gate.LiveCensus(workers=[])
-        )
-        monkeypatch.setattr(
-            "fno.claims.core.acquire_claim",
-            lambda *args, **kwargs: (
-                True
-                if args[0] == spawn_gate.GATE_CLAIM_KEY
-                else (_ for _ in ()).throw(OSError("claim store denied"))
-            ),
-        )
-
-        with pytest.raises(SystemExit) as exc:
-            spawn_gate.run_gate("peer-1", "headless", route_provider="zai")
-        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
-        refused = capsys.readouterr().err
-        assert "provider zai" in refused
-        assert "lane reservation unavailable" in refused
-        assert "claim store denied" in refused
-        assert "provider_cap" not in refused
-
-    def test_release_failures_are_loud_and_retain_retry_state(
-        self, monkeypatch, capsys
-    ):
-        guard = spawn_gate.GateGuard(
-            _gate_holder="gate-holder",
-            _worker_key="worker:peer",
-            _worker_holder="worker-holder",
-        )
-        monkeypatch.setattr(
-            "fno.claims.core.release_claim",
-            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("store denied")),
-        )
-
-        guard.release()
-
-        assert guard._gate_holder == "gate-holder"
-        assert guard._worker_key == "worker:peer"
-        refused = capsys.readouterr().err
-        assert "could not release gate mutex" in refused
-        assert "could not release worker reservation worker:peer" in refused
-
-    def test_release_retries_transient_claim_store_failures(self, monkeypatch):
-        guard = spawn_gate.GateGuard(
-            _gate_holder="gate-holder",
-            _worker_key="worker:peer",
-            _worker_holder="worker-holder",
-        )
-        attempts: dict[str, int] = {}
-
-        def flaky_release(key, *_args, **_kwargs):
-            attempts[key] = attempts.get(key, 0) + 1
-            if attempts[key] < 3:
-                raise OSError("transient store failure")
-
-        monkeypatch.setattr("fno.claims.core.release_claim", flaky_release)
-
-        guard.release()
-
-        assert attempts == {spawn_gate.GATE_CLAIM_KEY: 3, "worker:peer": 3}
-        assert guard._gate_holder is None
-        assert guard._worker_key is None
-
-    def test_pidless_bg_requires_a_readable_positive_roster_marker(
-        self, tmp_path, monkeypatch
-    ):
-        row = AgentEntry(
-            name="zai-bg", harness="claude", provider="zai", cwd="/tmp",
-            log_path="/tmp/log", short_id="11111111",
-        )
-        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
-        with pytest.raises(spawn_gate.ProviderCountUnavailable):
-            spawn_gate.provider_live_count("zai")
+    def test_union_counts_and_dedups_adopted_session(self, tmp_path, monkeypatch):
+        """AC1-EDGE: 1 fno pane worker + 1 foreign roster worker + 1 adopted
+        session (roster row AND minted registry row) -> count 3."""
         _write_roster(
             tmp_path,
-            {"zai-bg": {"sessionId": "11111111-2222-3333-4444-55555555abcd", "pid": ALIVE}},
+            {
+                "aaaaaaaa": {"sessionId": "aaaaaaaa-1-2-3-4", "pid": ALIVE},
+                "bbbbbbbb": {"sessionId": "bbbbbbbb-1-2-3-4", "pid": ALIVE},
+            },
         )
-        assert spawn_gate.provider_live_count("zai") == 1
+        rows = [
+            _row("pane-worker", pid=ALIVE),  # fno-only
+            _row("adopted", pid=ALIVE, short_id="bbbbbbbb"),  # dup of roster
+        ]
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        c = spawn_gate.census()
+        assert c.count == 3
+        assert not c.warnings
+
+    def test_dead_pids_contribute_zero(self, tmp_path, monkeypatch):
+        """AC1-EDGE2 / AC4-EDGE: reaped processes free slots."""
+        _write_roster(
+            tmp_path,
+            # pid 2**22+17 is (realistically) never alive; None pid = disk-only.
+            {
+                "cccccccc": {"sessionId": "cccccccc-1-2-3-4", "pid": 4194321},
+                "dddddddd": {"sessionId": "dddddddd-1-2-3-4"},
+            },
+        )
+        rows = [_row("dead-worker", status="live", pid=4194321)]
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        assert spawn_gate.census().count == 0
+
+    def test_spawning_outlived_by_a_live_pid_renders_quiet_with_basis(
+        self, monkeypatch
+    ):
+        """(x-d401 / x-0248) AC3-HP: a stored `spawning` token a live pid has
+        outlived does not render a bare `spawning` - the row names the
+        movement-derived state and a basis for the rewrite. The process is
+        confirmed but the transcript is unread, so the served word is
+        `quiet`, never a `live` token. AC3-EDGE: a row with no pid recorded
+        yet keeps its honest token."""
+        from datetime import datetime, timedelta, timezone
+
+        stale = datetime.now(timezone.utc) - timedelta(hours=13)
+        fresh = datetime.now(timezone.utc) - timedelta(seconds=5)
+        rows = [
+            _row("stale-spawn", status="spawning", pid=ALIVE),
+            _row("fresh-spawn", status="spawning", pid=ALIVE),
+        ]
+        rows[0].created_at = stale.strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows[1].created_at = fresh.strftime("%Y-%m-%dT%H:%M:%SZ")
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+
+        by_name = {w.name: w for w in spawn_gate.census().workers}
+
+        assert by_name["stale-spawn"].status == "quiet", (
+            "a working row must not read spawning"
+        )
+        assert by_name["stale-spawn"].status_basis == "stale-spawning-live-pid"
+        assert by_name["fresh-spawn"].status == "spawning", (
+            "a live pid younger than the spawn timeout is still mid-spawn"
+        )
+        assert by_name["fresh-spawn"].status_basis is None
+
+    def test_unreadable_pid_never_upgrades_to_positive_liveness(self, monkeypatch):
+        """(x-d401) An UNMEASURED pid must not fire the stale-spawning rule.
+
+        `resolve_session_pid` falls back to the recorded pid, so a bare
+        `session_pid is not None` is true for any row carrying a pid. Paired
+        with an unreadable incarnation, that handed the rule positive liveness
+        it never measured, and a parked `spawning` row was rewritten to `live`
+        under a basis naming a measurement nobody took. The census warns
+        "process incarnation unreadable" for exactly these rows, so asserting
+        liveness three lines later contradicts its own warning.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        stale = datetime.now(timezone.utc) - timedelta(hours=13)
+        rows = [_row("unreadable-spawn", status="spawning", pid=ALIVE)]
+        rows[0].created_at = stale.strftime("%Y-%m-%dT%H:%M:%SZ")
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        # None = "could not read this incarnation", the case the warning names.
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda *_a, **_k: None)
+
+        by_name = {w.name: w for w in spawn_gate.census().workers}
+
+        assert by_name["unreadable-spawn"].status == "spawning", (
+            "unknown liveness keeps the token, per the rule's own contract"
+        )
+        assert by_name["unreadable-spawn"].status_basis is None, (
+            "no basis may name a measurement that was never taken"
+        )
+
+    def test_unknown_process_incarnation_counts_conservatively(self, monkeypatch):
+        row = _row("unreadable-worker", pid=ALIVE)
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda *_args: None)
+
+        result = spawn_gate.census()
+
+        assert result.count == 1
+        assert result.fno_slot_workers == 1
+        assert [worker.name for worker in result.workers] == ["unreadable-worker"]
+        assert any("incarnation unreadable" in warning for warning in result.warnings)
+
+    def test_non_live_statuses_never_counted(self, monkeypatch):
+        rows = [
+            _row("gone", status="exited", pid=ALIVE),
+            _row("dead", status="permanent_dead", pid=ALIVE),
+            _row("orphan", status="orphaned", pid=ALIVE),
+        ]
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        assert spawn_gate.census().count == 0
+
+    def test_malformed_roster_fails_open_with_warning(self, tmp_path, monkeypatch):
+        (tmp_path / "daemon" / "roster.json").write_text("{ not json")
+        rows = [_row("ok", pid=ALIVE)]
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        c = spawn_gate.census()
+        assert c.count == 1, "registry still counts when the roster is garbage"
+        assert any("roster unreadable" in w for w in c.warnings)
+
+    def test_missing_roster_is_silent_zero(self, monkeypatch):
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        c = spawn_gate.census()
+        assert c.count == 0
+        assert not c.warnings
+
+    def test_broken_registry_fails_open_with_warning(self, tmp_path, monkeypatch):
+        _write_roster(
+            tmp_path, {"eeeeeeee": {"sessionId": "eeeeeeee-1-2-3-4", "pid": ALIVE}}
+        )
+
+        def boom():
+            raise RuntimeError("registry exploded")
+
+        monkeypatch.setattr("fno.agents.registry.load_registry", boom)
+        c = spawn_gate.census()
+        assert c.count == 1, "roster still counts when the registry is broken"
+        assert any("registry unreadable" in w for w in c.warnings)
+
+    def test_headless_slot_claims_count(self, monkeypatch):
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        from fno.claims.core import acquire_claim
+        from fno.claims.io import global_claims_root
+
+        acquire_claim(
+            "worker:one-shot", "h1", ttl_ms=60_000, root=global_claims_root()
+        )
+        assert spawn_gate.census().count == 1
+
+    def test_live_registry_row_deduplicates_worker_claim(self, monkeypatch):
+        monkeypatch.setattr(
+            "fno.agents.registry.load_registry",
+            lambda: [_row("revived", pid=ALIVE)],
+        )
+        from fno.claims.core import acquire_claim
+        from fno.claims.io import global_claims_root
+
+        acquire_claim(
+            "worker:revived", "h1", ttl_ms=60_000, root=global_claims_root()
+        )
+
+        result = spawn_gate.census()
+
+        assert result.fno_slot_workers == 1
+        assert result.slot_claims == 0
+        assert result.slot_count == 1
+
+    def test_subagent_source_is_outside_slot_arithmetic(self, tmp_path, monkeypatch):
+        """AC6-INV (x-af92): the sidechain discovery source never feeds census().
+
+        census() counts only live registry rows + headless slot claims;
+        subagents live in the projects transcript store, which census does not
+        read. This pins both halves: census() never calls the sidechain reader,
+        and sidechain transcripts on disk do not move slot_count, so a
+        display-only visibility feature can never alter spawn admission.
+        """
+        monkeypatch.setattr(
+            "fno.agents.registry.load_registry",
+            lambda: [_row("w1", status="busy", pid=ALIVE, short_id="aaaa0000")],
+        )
+        # Sidechain transcripts present in the projects store census never reads.
+        sdir = tmp_path / "projects" / "-c" / "p-1-2-3-4-5" / "subagents"
+        sdir.mkdir(parents=True)
+        (sdir / "agent-dead0000000001.jsonl").write_text(
+            json.dumps(
+                {
+                    "isSidechain": True,
+                    "agentId": "dead0000000001",
+                    "sessionId": "p-1-2-3-4-5",
+                    "type": "user",
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+
+        # If a future change wires the sidechain reader into census(), this fires.
+        def _fail_if_called(*a, **k):
+            raise AssertionError(
+                "census() must not call discover_subagents; the sidechain "
+                "source is display-only (x-af92 AC6-INV)"
+            )
+
+        monkeypatch.setattr(
+            "fno.agents.discover.discover_subagents", _fail_if_called
+        )
+
+        c = spawn_gate.census()
+        assert c.slot_count == 1  # the one live registry row; nothing from sidechains
+        assert not any("dead0000000001" in (w.name or "") for w in c.workers)
 
 
+
+
+def _stub_verb(monkeypatch, answer=None, error=None):
+    """Stub the gate verb: a fixed JSON answer, or a failure."""
+    from fno import rust_binary
+
+    if error is not None:
+        def boom(*_a, **_k):
+            raise error
+        monkeypatch.setattr(rust_binary, "verb_call", boom)
+        return boom
+
+    def fake(verb, payload, **_kwargs):
+        assert verb == "spawn-gate", f"the transport must call the gate verb, got {verb}"
+        fake.payload = payload
+        return answer
+
+    fake.payload = None
+    monkeypatch.setattr(rust_binary, "verb_call", fake)
+    return fake
+
+
+class TestTransport:
+    """The transport contract: run_gate asks the ONE gate verb and carries
+    the answer out; the axes themselves are pinned in Rust."""
+
+    def test_admitted_answer_becomes_a_guard_holding_the_verbs_keys(self, monkeypatch):
+        stub = _stub_verb(
+            monkeypatch,
+            {
+                "status": "admitted",
+                "gate_key": "gate:spawn",
+                "gate_holder": "spawn-gate:4242:w1",
+                "worker_key": None,
+                "worker_holder": None,
+            },
+        )
+        guard = spawn_gate.run_gate("w1", "bg")
+        assert guard._gate_holder == "spawn-gate:4242:w1"
+        assert guard._worker_key is None
+        assert guard._route_provider is None
+        assert guard._spawn_name == "w1"
+        assert guard._substrate == "bg"
+        # The caller's pid travels in the payload: the verb's claims are
+        # owned by the CALLER across the process boundary (locked decision 3).
+        assert stub.payload["holder_pid"] == os.getpid()
+        assert stub.payload["mode"] == "gate"
+
+    def test_refused_answer_raises_gate_refused_with_the_receipt(self, monkeypatch, capsys):
+        events = []
+        monkeypatch.setattr(
+            spawn_gate, "_emit_gate_event", lambda kind, **data: events.append((kind, data))
+        )
+        receipt = {
+            "status": "refused",
+            "reason": "provider_cap",
+            "provider": "zai",
+            "cap": 5,
+            "count": 5,
+            "current_count": 5,
+        }
+        _stub_verb(
+            monkeypatch,
+            {
+                "status": "refused",
+                "exit_code": spawn_gate.EXIT_PROVIDER_CAP,
+                "receipt": receipt,
+                "event": {"reason": "provider_cap", "provider": "zai"},
+            },
+        )
+        with pytest.raises(spawn_gate.GateRefused) as exc:
+            spawn_gate.run_gate("w", "pane", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        assert exc.value.receipt == receipt
+        # Exactly ONE refusal event lands, carrying the receipt fields.
+        kinds = [k for k, _ in events]
+        assert kinds == ["spawn_gate_refused"]
+        data = events[0][1]
+        assert data["exit_code"] == spawn_gate.EXIT_PROVIDER_CAP
+        assert data["reason"] == "provider_cap"
+        assert data["provider"] == "zai"
+        assert data["gate"] == "python"
+        assert data["name"] == "w"
+        assert data["substrate"] == "pane"
+
+    def test_missing_binary_refuses_exit_86_gate_unavailable(self, monkeypatch, capsys):
+        from fno.rust_binary import VerbUnavailable
+
+        events = []
+        monkeypatch.setattr(
+            spawn_gate, "_emit_gate_event", lambda kind, **data: events.append((kind, data))
+        )
+        _stub_verb(monkeypatch, error=VerbUnavailable("the fno-agents binary was not found"))
+        with pytest.raises(spawn_gate.GateRefused) as exc:
+            spawn_gate.run_gate("w", "pane")
+        assert exc.value.code == spawn_gate.EXIT_GATE_UNAVAILABLE
+        assert exc.value.receipt["reason"] == "gate_unavailable"
+        assert "not found" in exc.value.receipt["error"]
+        assert [k for k, _ in events] == ["spawn_gate_refused"]
+
+    def test_the_callers_session_rides_the_payload(self, monkeypatch):
+        stub = _stub_verb(monkeypatch, {"status": "admitted"})
+        spawn_gate.run_gate("w", "bg")
+        assert "caller_session" in stub.payload
+        assert stub.payload["account"] is None
+
+    def test_probe_is_a_verb_call_passed_through(self, monkeypatch):
+        stub = _stub_verb(
+            monkeypatch, {"verdict": "accepted", "lanes": {}, "live_workers": 0}
+        )
+        answer = spawn_gate.probe_capacity()
+        assert answer["verdict"] == "accepted"
+        assert stub.payload["mode"] == "probe"
+
+    def test_probe_never_raises_on_an_unanswered_gate(self, monkeypatch):
+        from fno.rust_binary import VerbUnavailable
+
+        _stub_verb(monkeypatch, error=VerbUnavailable("exited 1"))
+        answer = spawn_gate.probe_capacity()
+        assert answer["verdict"] == "unknown"
+        assert answer["reason"] == "gate_unavailable"
+        assert "exited 1" in answer["error"]
+
+    def test_gate_unavailable_refusal_event_names_the_reason(self, monkeypatch):
+        from fno.rust_binary import VerbUnavailable
+
+        events = []
+        monkeypatch.setattr(
+            spawn_gate, "_emit_gate_event", lambda kind, **data: events.append((kind, data))
+        )
+        _stub_verb(monkeypatch, error=VerbUnavailable("boom"))
+        with pytest.raises(spawn_gate.GateRefused):
+            spawn_gate.run_gate("w", "headless")
+        data = events[0][1]
+        assert data["reason"] == "gate_unavailable"
+        assert data["exit_code"] == spawn_gate.EXIT_GATE_UNAVAILABLE
 class TestQos:
     def test_wrap_identity_when_off(self, monkeypatch):
         monkeypatch.setattr(spawn_gate, "_qos_enabled", lambda: False)
@@ -1559,197 +960,3 @@ def _write_incident_state(tmp_path: Path, state: str) -> Path:
     return home
 
 
-def test_fleet_incident_stop_refuses_before_the_operator_bypass(
-    tmp_path, monkeypatch
-):
-    """AC3-HP: FNO_SPAWN_GATE=0 must NOT reach past the incident gate."""
-    home = _write_incident_state(tmp_path, "stopped")
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
-    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
-
-    with pytest.raises(spawn_gate.GateRefused) as excinfo:
-        spawn_gate.run_gate("t-fleet-stop", "headless")
-
-    assert excinfo.value.code == spawn_gate.EXIT_FLEET_STOP
-
-
-def test_fleet_incident_force_flag_also_refuses(tmp_path, monkeypatch):
-    """AC3-HP: --force past capacity does not past a fleet stop."""
-    home = _write_incident_state(tmp_path, "stopped")
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
-
-    with pytest.raises(spawn_gate.GateRefused) as excinfo:
-        spawn_gate.run_gate("t-fleet-force", "headless", force=True)
-
-    assert excinfo.value.code == spawn_gate.EXIT_FLEET_STOP
-
-
-def test_fleet_incident_unavailable_fails_closed(tmp_path, monkeypatch):
-    """AC3-EDGE: an unreadable record is a CANNOT-TELL refusal, named as such."""
-    home = _write_incident_state(tmp_path, "sorta-open")
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
-
-    with pytest.raises(spawn_gate.GateRefused) as excinfo:
-        spawn_gate.run_gate("t-fleet-bogus", "headless")
-
-    assert excinfo.value.code == spawn_gate.EXIT_FLEET_STOP_UNAVAILABLE
-
-
-def test_fleet_incident_clear_admits(tmp_path, monkeypatch):
-    """The clear verdict admits: the gate seam itself refuses nothing."""
-    home = _write_incident_state(tmp_path, "clear")
-    monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
-    monkeypatch.setattr(
-        spawn_gate,
-        "_refuse",
-        lambda *a, **k: pytest.fail("a clear verdict must refuse nothing"),
-    )
-
-    assert spawn_gate._fleet_incident_gate() is None
-
-
-def test_fleet_incident_without_a_runtime_defaults_clear(monkeypatch):
-    """No fno-agents runtime means no incident authority to ask: the python
-    fallback's own contracts (e.g. the exit-13 missing-runtime refusal) hold."""
-    from fno import rust_binary
-
-    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: None)
-    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
-    monkeypatch.setattr(
-        spawn_gate,
-        "_refuse",
-        lambda *a, **k: pytest.fail("a binary-less machine must not refuse"),
-    )
-
-    assert spawn_gate._fleet_incident_gate() is None
-
-
-def test_fleet_incident_stale_runtime_without_the_verb(tmp_path, monkeypatch):
-    """An installed runtime that predates the breaker does not answer for it:
-    unknown-verb on the check is no authority, not a cannot-tell."""
-    from fno import rust_binary
-
-    stale = tmp_path / "stale-fno-agents"
-    stale.write_text("#!/bin/sh\nexit 2\n")
-    stale.chmod(0o755)
-    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: None)
-    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: stale)
-    monkeypatch.setattr(
-        spawn_gate,
-        "_refuse",
-        lambda *a, **k: pytest.fail("a pre-breaker runtime must not refuse"),
-    )
-
-    assert spawn_gate._fleet_incident_gate() is None
-
-
-class TestQuotaLockRefusal:
-    """The gate reads the sweep's quota lock (x-bbc0 change 3): a vendor
-    window on the caller-named account refuses with exit 78, names the
-    reset, and is NOT waitable."""
-
-    @pytest.fixture
-    def locked_account(self, tmp_path, monkeypatch):
-        """Write a real quota lock into an isolated runtime-state file."""
-        from datetime import datetime, timedelta, timezone
-
-        monkeypatch.setenv(
-            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
-        )
-        from fno.agents.quota_lock import record_quota_lock
-
-        reset = datetime.now(timezone.utc) + timedelta(hours=3)
-        body = (
-            "API Error: 429 usage limit reached. Quota exceeded; "
-            f"resets at {reset.strftime('%Y-%m-%dT%H:%M:%S+00:00')}."
-        )
-        assert record_quota_lock("readyrule", body) == "readyrule"
-        return body
-
-    def _admitting_world(self, monkeypatch):
-        _settings(monkeypatch, max_live=3)
-        monkeypatch.setattr(
-            spawn_gate,
-            "census",
-            lambda socket_map=None: spawn_gate.LiveCensus(workers=[]),
-        )
-
-    def test_a_future_lock_refuses_with_78_and_names_the_reset(
-        self, monkeypatch, capsys, locked_account
-    ):
-        self._admitting_world(monkeypatch)
-        emitted: list[tuple] = []
-
-        import fno.agents.events as events_mod
-
-        monkeypatch.setattr(
-            events_mod, "emit", lambda kind, **data: emitted.append((kind, data))
-        )
-
-        with pytest.raises(spawn_gate.GateRefused) as excinfo:
-            spawn_gate.run_gate("w2", "bg", account="readyrule")
-
-        assert excinfo.value.code == spawn_gate.EXIT_PROVIDER_CAP
-        receipt = excinfo.value.receipt
-        assert receipt["reason"] == "provider_quota_lock"
-        assert receipt["account"] == "readyrule"
-        assert receipt["resets_at"] > time.time()
-        assert any(
-            k == "spawn_gate_refused" and d.get("reason") == "provider_quota_lock"
-            for k, d in emitted
-        )
-        err = capsys.readouterr().err
-        assert "readyrule" in err
-        assert "rate-limited until" in err
-
-    def test_the_refusal_sits_ahead_of_force(self, monkeypatch, locked_account):
-        self._admitting_world(monkeypatch)
-
-        with pytest.raises(spawn_gate.GateRefused) as excinfo:
-            spawn_gate.run_gate("w2", "bg", force=True, account="readyrule")
-
-        assert excinfo.value.receipt["reason"] == "provider_quota_lock"
-
-    def test_a_past_lock_passes_silently(self, monkeypatch, capsys, tmp_path):
-        # A lock whose named reset already passed reads not-in-cooldown via
-        # the shared vocabulary. Written directly: a record_quota_lock call
-        # with a past resets_at falls back to a computed backoff step, which
-        # is a different (and still-live) lock.
-        monkeypatch.setenv(
-            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
-        )
-        state = tmp_path / "provider-runtime-state.json"
-        state.write_text(json.dumps({
-            "schema_version": 2,
-            "provider_health": {
-                "readyrule": {
-                    "backoff_level": 1,
-                    "rate_limited_until": time.time() - 5.0,
-                    "last_error_at": time.time(),
-                },
-            },
-        }))
-        self._admitting_world(monkeypatch)
-
-        guard = spawn_gate.run_gate("w2", "bg", account="readyrule")
-        assert capsys.readouterr().err == ""
-        guard.release()
-
-    def test_no_account_or_default_passes_silently(self, monkeypatch, capsys, tmp_path):
-        from fno.agents.quota_lock import record_quota_lock
-
-        monkeypatch.setenv(
-            "FNO_RUNTIME_STATE_PATH", str(tmp_path / "provider-runtime-state.json")
-        )
-        record_quota_lock("readyrule", "quota exceeded", resets_at=time.time() + 3600.0)
-        self._admitting_world(monkeypatch)
-
-        for account in (None, "default"):
-            guard = spawn_gate.run_gate("w2", "bg", account=account)
-            guard.release()
-        assert "quota" not in capsys.readouterr().err
-
-    def test_the_reason_is_not_waitable(self):
-        # A vendor window runs hours; the queue times out at 600s. Waiting
-        # would convert an honest refusal into a hang (x-bbc0).
-        assert "provider_quota_lock" not in spawn_gate.WAITABLE_REFUSAL_REASONS

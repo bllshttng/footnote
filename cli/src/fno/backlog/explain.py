@@ -10,7 +10,7 @@ selection.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, cast
+from typing import Optional
 
 from fno.graph.store import ready as store_ready
 from fno.graph._intake import repo_root
@@ -110,27 +110,10 @@ def _unreadable(name: str, exc: BaseException, *, key: Optional[str] = None) -> 
     return Gate(name, None, None, f"unreadable: {exc}", key=key)
 
 
-#: Sentinel for "sample one"; None means the shared read ran and found the
-#: gate unreadable.
-_UNSAMPLED: object = object()
-
-
-def _explain_load_decision() -> "Optional[object]":
-    """One CPU-axis admission per report build, or None when unreadable: the
-    gates rows and the stop share one sample instead of paying it twice.
-    """
-    try:
-        from fno.agents.spawn_gate import _cpu_axis
-
-        return _cpu_axis()
-    except Exception:  # noqa: BLE001 - an unreadable preview gate holds no opinion
-        return None
-
-
 def gates_for(
     node: Optional[dict],
     grid_harness: Optional[str] = None,
-    load_decision: object = _UNSAMPLED,
+    probe: Optional[dict] = None,
 ) -> list[Gate]:
     """Every gate advance would consult for ``node``, each measured.
 
@@ -138,19 +121,17 @@ def gates_for(
     acquires the spawn mutex and a worker slot. An explain that queued behind
     the real gate would change the fleet it is describing.
 
-    ``grid_harness`` is the harness the capacity grid picked, so the provider
-    lane reported is the one the spawn would actually be counted against rather
-    than the config default the grid was about to override.
+    ``grid_harness`` is the harness the capacity grid picked, kept for the
+    claim rows' context; the provider-lane rows now cover EVERY lane, read
+    from the ONE gate's probe answer, so no report can recount a provider
+    differently from the refusal.
 
-    ``load_decision`` is a decision a caller already sampled for this report
-    (one footprint read per build); leave it unsampled to read fresh.
+    ``probe`` is a probe answer a caller already sampled for this report (one
+    footprint read per build); leave it None to read fresh.
+
+    The walker-claim and node-claim rows stay here: they are advance-owned
+    claims, not gate axes.
     """
-    from fno.agents.spawn_gate import (
-        ProviderCountUnavailable,
-        census,
-        provider_lanes_cap,
-        provider_live_count,
-    )
     from fno.backlog import advance as adv
 
     out: list[Gate] = []
@@ -186,159 +167,40 @@ def gates_for(
         except Exception as exc:  # noqa: BLE001
             out.append(_unreadable("node-claim", exc))
 
-    # Per-project occupancy row DELETED with the dead lane counter (x-7f1f):
-    # the epic advance's width derives from spawn-gate headroom (the fleet and
-    # provider rows above), and a configured parallel.max_lanes is deprecated
-    # and ignored - a counter for a cap nobody reads is a row that reports a
-    # selector the drain does not run.
+    # Per-project occupancy row DELETED with the dead lane counter (x-7f1f).
 
-    # Provider lanes: the cap that was actually binding on 2026-09-01.
-    provider = _resolved_vendor(node, grid_harness)
-    if provider is None and node is None:
-        # No subject to resolve a vendor from (the epic explain with an empty
-        # fill): the binding configured provider is the one whose cap explains
-        # a width of 0. Without this row the report shows width 0 and no gate
-        # naming why. Fails open to no row, never to a fake pass.
-        from fno.backlog import advance as adv
-
-        try:
-            provider = adv._binding_provider()
-        except Exception:  # noqa: BLE001 - an unreadable read names no provider
-            provider = None
-    if provider:
-        try:
-            from fno.config import load_settings, provider_limits_table
-
-            limits = dict(provider_limits_table(load_settings().agents))
-            cap = provider_lanes_cap(limits.get(provider))
-        except Exception as exc:  # noqa: BLE001
-            out.append(_unreadable("provider-lane", exc))
-        else:
+    # The measurement rows (provider lanes, fleet rows, RAM floor, CPU share,
+    # load backstop) come from the ONE gate's probe answer; this report no
+    # longer measures the machine itself, so a preview and the real spawn can
+    # never disagree about a reading.
+    answer = probe if probe is not None else probe_capacity()
+    rows = answer.get("rows") if isinstance(answer, dict) else None
+    if isinstance(rows, list):
+        for row in rows:
             try:
-                count = provider_live_count(provider)
-            except ProviderCountUnavailable as exc:
-                out.append(
-                    _unreadable(
-                        "provider-lane", exc, key=f"agents.provider_limits.{provider}.lanes"
-                    )
-                )
-            else:
-                full = cap is not None and count >= cap
-                out.append(
-                    Gate(
-                        "provider-lane",
-                        f"{count} ({provider})",
-                        str(cap) if cap is not None else "uncapped",
-                        "refuse" if full else "pass",
-                        key=f"agents.provider_limits.{provider}.lanes",
-                    )
-                )
-
-    try:
-        c = census()
-        cap = int(_max_live())
-        out.append(
-            Gate(
-                "fleet-rows",
-                str(c.slot_count),
-                str(cap),
-                "refuse" if c.slot_count >= cap else "pass",
-                key="agents.max_live",
-                note="x-3f84: rows are not what the machine spends; see the machine gates",
-            )
-        )
-    except Exception as exc:  # noqa: BLE001
-        out.append(_unreadable("fleet-rows", exc, key="agents.max_live"))
-
-    out.extend(_machine_gates(load_decision))
+                out.append(Gate(**row))
+            except TypeError as exc:  # noqa: BLE001 - a malformed row is a
+                # display fault, never a report-killing one
+                out.append(_unreadable(str(row.get("name", "gate")) if isinstance(row, dict) else "gate", exc))
     return out
 
 
-def _max_live() -> int:
-    from fno.config import load_settings
+def probe_capacity() -> dict:
+    """Module-local alias so the readouts and the docs name one door: the
+    spawn gate's own read-only probe."""
+    from fno.agents.spawn_gate import probe_capacity as _probe
 
-    return int(load_settings().agents.max_live)
+    return _probe()
 
 
-def _machine_gates(load_decision: object = _UNSAMPLED) -> list[Gate]:
-    """RAM and the CPU axis, read the way the gate reads them (never probing
-    to refuse)."""
-    from fno.agents.spawn_gate import available_ram_gb
-
-    out: list[Gate] = []
-    try:
-        from fno.config import load_settings
-
-        agents_cfg = load_settings().agents
-        floor = float(agents_cfg.min_free_gb)
-    except Exception as exc:  # noqa: BLE001
-        return [_unreadable("machine", exc)]
-
-    try:
-        avail = available_ram_gb()
-    except Exception as exc:  # noqa: BLE001
-        out.append(_unreadable("ram-floor", exc, key="agents.min_free_gb"))
-    else:
-        if avail is None:
-            out.append(
-                Gate("ram-floor", None, f"{floor:.1f}GB", "skipped: RAM unreadable",
-                     key="agents.min_free_gb")
-            )
-        else:
-            out.append(
-                Gate(
-                    "ram-floor",
-                    f"{avail:.1f}GB",
-                    f"{floor:.1f}GB",
-                    "refuse" if avail < floor else "pass",
-                    key="agents.min_free_gb",
-                )
-            )
-
-    try:
-        from fno.agents.spawn_gate import _cpu_axis
-        from fno.footprint import Admission
-
-        admission = (
-            _cpu_axis() if load_decision is _UNSAMPLED else cast("Admission", load_decision)
-        )
-    except Exception as exc:  # noqa: BLE001
-        out.append(_unreadable("cpu-share", exc, key="agents.max_fleet_cpu_share"))
-        return out
-    if admission is None:
-        out.append(_unreadable("cpu-share", RuntimeError("admission unreadable"),
-                               key="agents.max_fleet_cpu_share"))
-        return out
-    verdict = admission.verdict
-    # An instrument that never answered has no figures to show: render the
-    # row unmeasured, never a fabricated 0.00/0.00.
-    unreadable = admission.axis == "cpu_instrument"
-    # Same decision function the real gate runs, so the dry run cannot pass a
-    # box the spawn would refuse or hold.
-    out.append(
-        Gate(
-            "cpu-share",
-            "unreadable" if unreadable
-            else f"{admission.fleet_cores:.2f}/{admission.capacity_cores:.2f} cores",
-            "-" if unreadable else f"{admission.ceiling * 100:.0f}%",
-            "refuse" if verdict in ("refuse", "undecidable")
-            else ("hold" if verdict == "hold" else "pass"),
-            key="agents.max_fleet_cpu_share",
-            note=admission.reason,
-        )
-    )
-    out.append(
-        Gate(
-            "load-backstop",
-            "-" if admission.load_15m is None else f"{admission.load_15m:.1f}",
-            "-" if unreadable else f"{admission.backstop:.1f}",
-            "refuse" if (admission.axis == "load_15m" and verdict == "refuse")
-            else ("pass" if admission.load_15m is not None
-                  else "skipped: load unreadable"),
-            key="agents.hard_max_load_per_cpu",
-        )
-    )
-    return out
+def _cpu_row_refused(probe_answer: dict) -> bool:
+    """The probe answer's cpu-share row refused (refuse/undecidable render as
+    the row's ``refuse`` verdict, exactly what the real gate refuses on)."""
+    rows = probe_answer.get("rows") if isinstance(probe_answer, dict) else None
+    for row in rows or []:
+        if isinstance(row, dict) and row.get("name") == "cpu-share":
+            return row.get("verdict") == "refuse"
+    return False
 
 
 def _resolved_vendor(node: Optional[dict], grid_harness: Optional[str] = None) -> Optional[str]:
@@ -755,14 +617,11 @@ def build_lane_fill_report(
         stop = "max-dispatch"
 
     # The CPU axis refuses machine-wide; a preview that left stop empty
-    # would promise a dispatch the real spawn refuses. One admission sample
-    # feeds both this stop and the gates rows below.
-    load_decision = _explain_load_decision()
-    if (
-        stop is None
-        and load_decision is not None
-        and getattr(load_decision, "verdict", None) in ("refuse", "undecidable")
-    ):
+    # would promise a dispatch the real spawn refuses. ONE probe answer feeds
+    # both this stop and the gates rows below, so the report pays one
+    # footprint read and cannot disagree with the gate that refused.
+    probe_answer = probe_capacity()
+    if stop is None and _cpu_row_refused(probe_answer):
         stop = "load-refused"
 
     ordered_names = [
@@ -821,7 +680,7 @@ def build_lane_fill_report(
         "gates": [
             g.as_dict()
             for g in gates_for(
-                subject, (routing.get("candidate") or {}).get("harness"), load_decision
+                subject, (routing.get("candidate") or {}).get("harness"), probe=probe_answer
             )
         ],
         "routing": routing,

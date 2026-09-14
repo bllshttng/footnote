@@ -351,15 +351,12 @@ def _census(
     together. The gap rides as its own field for the same reason (x-e040).
     Full rule: docs/architecture/resource-meter.md.
     """
-    # The caller's own share reading (x-5283), from the ONE function the
-    # spawn gate refuses on; None when it cannot be read.
+    # The caller's own share reading (x-5283), from the ONE gate's probe
+    # answer - the same share the gate refuses on; None when it cannot be read.
     try:
-        from fno.agents.spawn_gate import census as gate_census, share_reading
-        from fno.claims.self_identity import resolve_self_identity
-        from fno.config import load_settings
+        from fno.agents.spawn_gate import probe_capacity
 
-        share = share_reading(gate_census(), int(load_settings().agents.max_live),
-                              resolve_self_identity().session_id)
+        share = probe_capacity().get("share")
     except Exception:
         share = None
     census: dict[str, Any] = {

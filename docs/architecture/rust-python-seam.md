@@ -57,6 +57,7 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 | `daemon.rs:3530` | conforming | stale-question reconcile routed through the verb that owns it, no apply form |
 | `daemon.rs:7876` | conforming | pane kill through the only path to the server that owns pane state |
 | `daemon.rs:7935` | conforming | pane read probe, absence proved by the pane owner's own vocabulary |
+| `spawn_gate_lanes.rs:95` | conforming | pane liveness for the provider count, read through the pane owner's own wait verb like `daemon.rs:7935` |
 | `daemon.rs:9010` | conforming | codex rollout walk reused from Python rather than reimplemented |
 | `finalize.rs:472` | conforming | run summary pushed to the parent through the event registry owner |
 | `finalize.rs:1858` | conforming | PR metadata read through the REST wrapper owner |
@@ -99,6 +100,7 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 | `yard_overlay.rs:49` | infrastructure | the delegation helper definition |
 | `yard_overlay.rs:50` | infrastructure | the delegation body line, one resolver per crate enforced here |
 | `yard_overlay.rs:57` | conforming | yard fold read through the verb owner, fail-open |
+| `spawn_gate_lanes.rs:123` | conforming | pane listing fallback for the same probe, the pane owner's authoritative enumeration |
 
 ## The refusal of consumer-driven scoping
 

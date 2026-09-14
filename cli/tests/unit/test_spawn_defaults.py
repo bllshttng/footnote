@@ -878,7 +878,11 @@ def test_profile_lanes_skip_capped_vendor(monkeypatch):
 
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [object()])
     monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
-    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    monkeypatch.setattr(
+        spawn_gate,
+        "probe_capacity",
+        lambda *a, **k: {"verdict": "accepted", "lanes": {"zai": {"cap": 2, "live": 2, "counted": []}}},
+    )
     err = io.StringIO()
     out = _inject(
         ["spawn", "--name", "w", "/fno:target x-1"],
@@ -904,7 +908,11 @@ def test_profile_only_lane_at_cap_refuses(monkeypatch):
     # refusal under test here. Opt back in, or this asserts nothing.
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
-    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    monkeypatch.setattr(
+        spawn_gate,
+        "probe_capacity",
+        lambda *a, **k: {"verdict": "accepted", "lanes": {"zai": {"cap": 2, "live": 2, "counted": []}}},
+    )
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
         _inject(
@@ -931,8 +939,13 @@ def test_profile_capped_lane_refuses_when_count_unavailable(monkeypatch):
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
     monkeypatch.setattr(
         spawn_gate,
-        "provider_live_count",
-        lambda vendor: (_ for _ in ()).throw(spawn_gate.ProviderCountUnavailable("registry incomplete")),
+        "probe_capacity",
+        lambda *a, **k: {
+            "verdict": "unknown",
+            "reason": "lane_count_unavailable",
+            "provider": "zai",
+            "error": "registry incomplete",
+        },
     )
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
@@ -1840,7 +1853,11 @@ def test_capped_lane_does_not_refuse_a_spawn_that_names_its_own_lane(monkeypatch
 
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
-    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    monkeypatch.setattr(
+        spawn_gate,
+        "probe_capacity",
+        lambda *a, **k: {"verdict": "accepted", "lanes": {"zai": {"cap": 2, "live": 2, "counted": []}}},
+    )
     err = io.StringIO()
     out = _inject(
         ["spawn", "--name", "w", "--harness", "codex", "/fno:target x-1"],
@@ -1867,7 +1884,11 @@ def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
     monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
-    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    monkeypatch.setattr(
+        spawn_gate,
+        "probe_capacity",
+        lambda *a, **k: {"verdict": "accepted", "lanes": {"zai": {"cap": 2, "live": 2, "counted": []}}},
+    )
     err = io.StringIO()
 
     # Two lanes, one capped: the free lane is still chosen rather than refused.
@@ -2231,7 +2252,11 @@ def test_explicit_vendor_pin_outranks_the_lanes_regardless_of_cap(monkeypatch):
 
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
-    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    monkeypatch.setattr(
+        spawn_gate,
+        "probe_capacity",
+        lambda *a, **k: {"verdict": "accepted", "lanes": {"zai": {"cap": 2, "live": 2, "counted": []}}},
+    )
     err = io.StringIO()
     out = _inject(
         ["spawn", "--name", "w", "-P", "zai", "/fno:target x-1"],

@@ -1,19 +1,43 @@
-# The spawn gate: why it refuses
+# The spawn gate: one gate, one answer
 
-The gate lives in `cli/src/fno/agents/spawn_gate.py` (the only gate on every `fno agents spawn` path) and in its Rust twin `crates/fno-agents/src/spawn_gate.rs`. This doc carries the two long stories from the docstrings. The code keeps its prose short.
+There is ONE spawn gate: `crates/fno-agents/src/spawn_gate.rs`, with the lane axes in `spawn_gate_lanes.rs`. Every door asks the same gate: pane, routed, account, and the native bg/headless arms. Python's `cli/src/fno/agents/spawn_gate.py` is a TRANSPORT over the `fno-agents spawn-gate` verb. It carries the caller's identity in. It carries the refusal out, as data. This doc carries the long stories from the docstrings. The code keeps its prose short.
 
-## The load ceiling reads two instruments (measured twice)
+## The verb contract
 
-`_check_load_ceiling` runs three thresholds. Below `max_load_per_cpu x cpus` the gate admits the spawn and probes nothing, so the common path costs no subprocess. Above the trigger the gate asks footprint whose CPU this is. When the fleet holds more than `max_fleet_cpu_share` of capacity, the refusal fires. `hard_max_load_per_cpu x cpus` refuses with no attribution check.
+`fno-agents spawn-gate` reads one JSON payload on stdin. It writes one JSON answer on stdout. The verb exits 0 whenever it produced an ANSWER, including a refusal. A refusal is data. The caller decides what to do with it. The gate's own prose (`spawn queued: ...` during a 600-second queue) streams on stderr.
 
-The history: the check once refused on the 1-min load average. The same refusal printed the contradicting footprint attribution: `load 127.6 exceeds ... 96.0` beside `attributes 0.79/12.00 cores (6.6% capacity)`. Load average counts runnable PLUS blocked processes, so it is not a CPU measure and belongs to nobody. On 2026-08-29 the three largest consumers on the refusing box were desktop applications. An operator killed one unscoped ripgrep, and the 1-min load moved from 374 to 179 with no agent stopped. A gate that refuses beside its own contradicting measurement teaches an operator to reach for `--force`. That is how a guard becomes a formality.
+Two modes:
 
-The hard backstop exists because a pure fleet-share governor admits onto a box that already thrashes from foreign work. Keep the backstop well above the trigger. The `AgentsBlock` defaults are 8 and 40.
+- `gate` runs the full admission gate. The payload is `{mode, name, substrate, force, no_wait, route_provider, account, caller_session, holder_pid}`. An admitted answer is `{status: "admitted", gate_key, gate_holder, worker_key, worker_holder}`. A key is null when that claim is not held. A refused answer is `{status: "refused", exit_code, receipt, event}`.
+- `probe` is the read-only capacity reading. `fno agents gate-status`, the lane readouts, `explain` and the advance width all consume it. The payload is `{mode: "probe", caller_session, only}`. Set `only: ["lanes"]` to skip the CPU and RAM reads. This is for callers already on the spawn path. The answer keeps the probe's verdict shape. It adds three blocks every reader consumes. `lanes` covers every capped provider and every provider a live row names, each `{cap, live, counted}`. `share` is `{kings, share, held, held_rows, unattributed}`. `rows` holds the explain Gate dicts in `{name, measured, threshold, verdict, key, note}` shape.
+
+## Claims cross the boundary owned by the caller
+
+Every claim the verb takes in gate mode is stamped with the PYTHON caller's pid. The holder reads `spawn-gate:<holder_pid>:<name>`. The native claim verdict therefore judges the real holder. It never judges the verb process, which has already exited by the time dispatch returns. The verb hands the held keys back in the admitted answer. The Python `GateGuard` releases them with the ordinary release path.
+
+## The exit-code allocation table
+
+One table is shared by both trees. It lives in `cli/src/fno/agents/spawn_gate.py` and is mirrored in `spawn_gate.rs`. `cli/tests/unit/test_exit_code_allocation.py` keeps it unique. Values >= 64 claim a number once. The same NAME at the same number in both trees is byte-parity.
+
+- 75 queue timeout
+- 76 no-wait
+- 77 RAM floor
+- 78 provider cap. The quota lock and the lane faults keep this number, so exit-code consumers are unaffected. The receipt's `reason` discriminates `provider_cap`, `provider_quota_lock`, `gate_mutex_unavailable`, and `lane_reservation_unavailable`.
+- 79 load
+- 80 king share
+- 81 registry schema
+- 82 and 83, the fleet incident pair, byte-parity
+- 84 state root ungranted. Permanent until a human grants.
+- 85 the Python sandbox probe
+- 86 the per-territory team cap. The one permanent, non-queueable machine refusal with its own number, so a caller never retries it as capacity; the territory attribution being unreadable refuses with this number too.
+- 87 gate unavailable. The gate verb is missing, failed, or timed out. Fail closed: never admit on an unreadable gate.
+
+## Refusal events stay Python-emitted
+
+Some spawns ENTER Python: pane, routed, and account. For them the verb returns the event fields, and the Python transport emits `spawn_gate_refused` through `_refuse`. The journal vocabulary is unchanged. The native unrouted arms emit nothing yet. A Rust emitter is still owed, blocked on a config-resolved state-dir parity. See `scripts/ci/check-gate-refusals-emit.sh` for the seam guard.
 
 ## The registry schema check refuses writes it cannot understand
 
-`_check_registry_schema` refuses a spawn into a fleet whose shared registry this fno cannot write. A node claim and a mail stamp are both WRITES, so a registry ahead of this fno blocks the whole spawn path. On 2026-08-28 a worker reported "Claim store is not writable for this Codex session". The worker blamed a sandbox permission profile, and the report was believed. Nothing in that chain named the registry.
+`check_registry_schema` refuses a spawn into a fleet whose shared registry this binary cannot write. A node claim and a mail stamp are both WRITES. A registry ahead of this fno therefore blocks the whole spawn path. On 2026-08-28 a worker reported "Claim store is not writable for this Codex session". The worker blamed a sandbox permission profile, and the report was believed. Nothing in that chain named the registry.
 
-So the check refuses and does not warn. The message carries both integers, the file, and the repair verb. On the edges it matches the other guards. An unreadable file skips the check: a spawn is not the place to adjudicate a torn registry. A refusal there can make the repair verb itself unspawnable.
-
-The event is the other half. Every degraded READ prints a banner. A refused WRITE returns an error to one caller, and the caller reports it in its own words to a king who is not watching. Nothing collects those reports into "the fleet cannot write". Emission is best-effort and never blocks the refusal.
+So the check refuses and does not warn. The message carries both integers, the file, and the repair verb. On the edges it matches the other guards. An unreadable file skips the check, because a spawn is not the place to adjudicate a torn registry. A refusal there can make the repair verb itself unspawnable. Both trees read the version from `src/registry_schema.toml`. build.rs projects the same file into the wheel. The two sides of the check therefore cannot disagree about a number.

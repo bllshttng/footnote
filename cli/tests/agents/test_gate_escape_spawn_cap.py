@@ -129,15 +129,5 @@ def test_run_gate_bypass_under_pytest_emits_nothing(tmp_path, monkeypatch):
     spawn_gate.run_gate("t", "bg")  # PYTEST_CURRENT_TEST set -> guard blocks the emit
     assert _escapes(ev) == []
 
-
-def test_maybe_emit_fires_when_guard_says_yes(tmp_path, monkeypatch):
-    """The gate wiring DOES emit when should_emit_spawn_cap is true. pytest
-    always sets PYTEST_CURRENT_TEST, so the positive path is proven by forcing
-    the guard true (the guard logic itself is covered by the parity fixture)."""
-    ev = tmp_path / "events.jsonl"
-    monkeypatch.setattr(ge, "canonical_events_path", lambda *a, **k: ev)
-    monkeypatch.setattr(ge, "should_emit_spawn_cap", lambda *a, **k: True)
-    from fno.agents import spawn_gate
-
-    spawn_gate._maybe_emit_spawn_cap_escape()
-    assert len(_escapes(ev)) == 1
+# The Python emit helper is gone: the Rust gate emits the same event on its
+# bypass path, pinned against the shared fixture by the Rust test.

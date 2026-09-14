@@ -174,7 +174,9 @@ fn parse_usage(raw: &Value) -> Map<String, Value> {
     out
 }
 
-fn parse_health(raw: &Value) -> Map<String, Value> {
+/// The provider_health table as `{account: {rate_limited_until, last_error_at}}`,
+/// shared with the spawn gate's quota-lock read (one parse, no second impl).
+pub(crate) fn parse_provider_health(raw: &Value) -> Map<String, Value> {
     let mut out = Map::new();
     if let Some(block) = raw.get("provider_health").and_then(Value::as_object) {
         for (pid, entry) in block {
@@ -366,7 +368,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         })
         .unwrap_or_else(|| json!({}));
-    let health = parse_health(&state);
+    let health = parse_provider_health(&state);
     let usage = parse_usage(&state);
     let mut eligible = Vec::new();
     for (i, raw) in links.iter().enumerate() {

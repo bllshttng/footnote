@@ -28,7 +28,7 @@ A	--provider was split at the axis rename: the cli binary is --harness/-h;	py=cl
 A	--tail must be >= 0 (got {tail})	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	--workspace/-s needs a nonblank workspace name	py=cli/src/fno/agents/spawn_defaults.py;rs=crates/fno-agents/src/bin/client.rs|crates/fno/src/mux_cli.rs	# msg-twin
 A	caller-assigned-cwd-scoped	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: a session_binding strategy, twinned like preassigned-or-session-start because both validators enforce one closed vocabulary
-A	cpu_instrument_unreadable	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin: the receipt reason token both gates refuse with when the CPU instrument is unreadable
+A	cpu_instrument_unreadable	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs|crates/fno-agents/src/spawn_gate_verb.rs	# msg-twin: the receipt reason token both gates refuse with when the CPU instrument is unreadable; the verb's probe answers reuse the token
 A	fno_review_invocation_id	py=cli/src/fno/agents/dispatch.py;rs=crates/fno/src/review_invocation.rs	# protocol: both sides pass the same optional id so Python-owned mux telemetry does not duplicate the native event (rs side moved out of mux_cli.rs, x-91ba)
 A	/scripts/ci/preflight.sh	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# data
 A	/var/lib/dbus/machine-id	py=cli/src/fno/claims/hostid.py;rs=crates/fno-agents/src/claims.rs|crates/fno/src/agents_view.rs	# data
@@ -61,7 +61,6 @@ A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-ag
 A	fno_global_settings_path	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config/_loader.py|cli/src/fno/config_io.py|cli/src/fno/conftest.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/agents_config.rs|crates/fno-agents/src/claude_roster.rs|crates/fno/src/agents_view.rs|crates/fno/src/digest_overlay.rs|crates/fno/src/sideline_color.rs	# protocol
 A	fno_mux_shell_integration	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/client.rs|crates/fno/src/pty.rs	# protocol
 A	fno_process_admission_max	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/bootstrap.rs|crates/fno/src/process_admission.rs	# protocol: Python resolves process_admission.max_processes and Rust enforces the same process-unit env wire; bootstrap.rs is the cfg(test) fixture only, production bootstrap deliberately reads neither wire (bypass hardcodes the default)
-A	fno_spawn_gate=0 operator bypass	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	from-name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
 A	github_approval_satisfies	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: both gates re-derive coverage from the same config key
 A	kept_transcript_unresolved	py=cli/src/fno/agents/retirement.py;rs=crates/fno-agents/src/reap_render.rs	# protocol: the Python verdict mapper consumes the Rust sweep renderer's bucket name; both sides must agree forever, and this line's stale check is that agreement's guard
@@ -111,9 +110,8 @@ A	send_keys_enter_delay_ms	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/
 A	status pattern needs model and effort groups	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	spare_pool_process_count	py=cli/src/fno/doctor_footprint.py;rs=crates/fno-agents/src/spawn_gate.rs	# protocol: the footprint JSON payload's pool-count field; the Python verb builds it and the Rust gate reads it for the fno agents status machine line
 A	spawn-gate: corrupted slot claim {key} ignored	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
-A	spawn-gate: could not read available ram; skipping the floor check	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
-A	spawn-gate: forced past cap, ram floor, and load ceiling (--force)	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	spawn-gate: qos demotion of pid {pid} failed (non-fatal)	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
+# retired 2026-09-13: `fno_spawn_gate=0 operator bypass` - the verb owns the bypass message; the Python transport relays the refusal receipt instead of restating the words
 A	spawn-gate: worker slot claim {key} unavailable; proceeding uncounted	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon/list_rows.rs	# protocol
 A	stopped: {name} ({short_id})	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/bin/client.rs	# msg-twin
@@ -126,7 +124,9 @@ A	{lane} drops its attach id	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-
 A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fleet_percent_measured_cpu	py=cli/src/fno/doctor_footprint.py;rs=crates/fno-agents/src/spawn_gate.rs	# protocol
 A	fno_cursor_agent_provider	py=cli/src/fno/agents/harnesses/cursor_agent.py;rs=crates/fno-agents/src/cursor_agent.rs	# protocol: both runtimes read the same Cursor provider environment key
-R	provider-resolution:cli/src/fno/agents/spawn_gate.py::provider_live_count	# both raw row.provider reads live here; no resolver exists yet
+A	agents.hard_max_load_per_cpu	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/spawn_gate_verb.rs	# protocol: one `config.agents.*` key name, both trees must spell it identically - the Pydantic model declares it, the verb's probe reads it for the CPU ceiling row
+A	agents.max_fleet_cpu_share	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/spawn_gate_verb.rs	# protocol: one `config.agents.*` key name, both trees must spell it identically - the Pydantic model declares it, the verb's probe reads it for the share row
+A	provider-runtime-state.json	py=cli/src/fno/paths.py;rs=crates/fno-agents/src/provider_cap.rs|crates/fno-agents/src/spawn_gate_lanes.rs	# protocol: the fleet-incident state file name; the Python paths module owns the location, the Rust gate and the provider-cap actor read the same file for their refusals
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# the epic surface reads stored status; the overlay routing lands with its fix
 A	fno_agents_idle_exit_secs	py=cli/scripts/smoke/cursor-agent-keeper-journey.py;rs=crates/fno-agents/src/bin/daemon.rs	# the smoke pins the same idle window the daemon defaults to; a smoke fixture, not a shared constant
 A	auto_merge.require_checks_pass	py=cli/src/fno/config/optouts.py|cli/src/fno/config/registry.py;rs=crates/fno-agents/src/claims.rs|crates/fno-agents/src/finalize.rs	# cross-impl merge-gating key: the py config layer owns the opt-out registry and field metadata while the rs finalize/claims gates enforce the same switch; behavior parity is held by the cross-impl claims compat matrix

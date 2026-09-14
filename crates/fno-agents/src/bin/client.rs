@@ -110,6 +110,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "scratch",
     "session-start-bytes",
     "spawn",
+    "spawn-gate",
     "spawn-overlay",
     "spawn-axes",
     "fallback-chain",
@@ -510,6 +511,13 @@ async fn run(args: Vec<String>) -> i32 {
     // send one JSON payload and read {status, candidate, chain} back.
     if verb == "route-slot" {
         return fno_agents::route_slot::run_route_slot(&args[1..]);
+    }
+
+    // `spawn-gate`: the ONE spawn gate (see spawn_gate_verb.rs doc). Direct
+    // dispatch; no daemon RPC. The Python transport sends one JSON payload
+    // and reads the admit (with the held claim keys) or the refusal back.
+    if verb == "spawn-gate" {
+        return fno_agents::spawn_gate_verb::run_spawn_gate(&args[1..]);
     }
 
     // `spawn-overlay`: the harness-keyed spawn-defaults resolver (see
@@ -1278,12 +1286,20 @@ async fn run(args: Vec<String>) -> i32 {
         match fno_agents::spawn_gate::run_gate(
             &config_cwd,
             &home.registry_json(),
-            &agent_name,
-            "bg",
-            daemon_gate_flags,
+            fno_agents::spawn_gate::GateInput {
+                name: agent_name.clone(),
+                substrate: "bg".into(),
+                flags: daemon_gate_flags,
+                ..Default::default()
+            },
         ) {
             Ok(guard) => Some(guard),
-            Err(code) => return code,
+            Err(refusal) => {
+                if let Some(receipt) = &refusal.receipt {
+                    println!("{receipt}");
+                }
+                return refusal.exit_code;
+            }
         }
     } else {
         None
@@ -1813,10 +1829,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             substrate
         };
         let roots = fno_agents::claude_ask::state_dirs_from_env();
-        if let Err(code) =
+        if let Err(refusal) =
             fno_agents::spawn_gate::state_root_grant_gate(provider, declared_substrate, &roots)
         {
-            return Some(code);
+            return Some(refusal.exit_code);
         }
     }
 
@@ -2049,12 +2065,20 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         match fno_agents::spawn_gate::run_gate(
             &config_cwd,
             &home.registry_json(),
-            name,
-            substrate,
-            flags,
+            fno_agents::spawn_gate::GateInput {
+                name: name.to_string(),
+                substrate: substrate.to_string(),
+                flags,
+                ..Default::default()
+            },
         ) {
             Ok(g) => Some(g),
-            Err(code) => return Some(code),
+            Err(refusal) => {
+                if let Some(receipt) = &refusal.receipt {
+                    println!("{receipt}");
+                }
+                return Some(refusal.exit_code);
+            }
         }
     };
 

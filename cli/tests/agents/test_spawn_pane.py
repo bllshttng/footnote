@@ -3467,7 +3467,6 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
 
     use_tmpdir(monkeypatch, tmp_path)
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
-    monkeypatch.setattr(spawn_gate, "_maybe_emit_spawn_cap_escape", lambda: None)
     fake_runner = FakeRunner()
     real_dispatch = mux_spawn.dispatch_spawn_pane
 
