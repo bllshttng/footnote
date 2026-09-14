@@ -4887,8 +4887,8 @@ event_types:
       properties:
         outcome:
           type: string
-          enum: [ok, degraded, disabled, lock_held, quota_skip, timeout, error]
-          description: "ok = sweep completed with zero repo failures; degraded = completed with at least one; the rest never minted a pr_watch_tick."
+          enum: [ok, degraded, disabled, lock_held, quota_skip, timeout, error, paused]
+          description: "ok = sweep completed with zero repo failures; degraded = completed with at least one; paused = the global loop pause held before settings or sweep; the rest never minted a pr_watch_tick."
         duration_s:
           type: number
           description: "Wall-clock seconds from tick entry to this record."

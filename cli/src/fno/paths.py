@@ -1128,24 +1128,6 @@ def runtime_state_json() -> Path:
     return _guard_state_path(_resolve("~/.fno/") / "provider-runtime-state.json")
 
 
-def loops_paused_json() -> Path:
-    """Return the path to the global loops pause-all sentinel.
-
-    Always ``~/.fno/loops-paused.json`` unless explicitly overridden - unlike
-    :func:`ledger_json`, this does NOT follow a customized absolute
-    ``config.state_dir``: a per-project settings.yaml could set a different
-    absolute ``state_dir`` per repo, which would fork the "one global kill
-    switch" sentinel into multiple files despite each being individually
-    absolute. The sentinel's whole purpose is a single coordination point
-    every loop tick checks, across every repo, so it is pinned unconditionally.
-    """
-    settings = _settings()
-    override = settings.paths.loops_paused_json
-    if override is not None:
-        return _guard_state_path(_resolve(override))
-    return _guard_state_path(_resolve("~/.fno/") / "loops-paused.json")
-
-
 def observer_reports_dir(
     project_root: Optional[Path] = None, project_id: Optional[str] = None
 ) -> Path:

@@ -26,3 +26,19 @@ pub(crate) fn allow_output(
     };
     serde_json::to_string(&out).unwrap_or_else(|_| r#"{"decision":"allow","termination_reason":null,"message":"serialization error","fires":0,"fingerprint":null}"#.to_string())
 }
+
+pub(crate) fn paused_output(driver: &str, message: &str) -> String {
+    if driver == "king" {
+        return serde_json::json!({
+            "driver": "king",
+            "decision": "allow",
+            "termination_reason": null,
+            "reason": message,
+            "message": message,
+            "actionable": 0,
+            "fires": 0,
+        })
+        .to_string();
+    }
+    allow_output("allow", None, message, 0, None)
+}
