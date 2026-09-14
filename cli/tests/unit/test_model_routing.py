@@ -21,6 +21,7 @@ import pytest
 
 from fno.agents import model_routing as mr
 from fno.config import ConfigBlock, ModelRoutingBlock, SettingsModel
+from fno.rust_binary import find_dev_binary
 
 
 def _settings(**block_kwargs: object) -> SettingsModel:
@@ -623,7 +624,12 @@ def test_protected_role_floor_is_exported_and_strong() -> None:
 
 
 def _openai_settings(model: str = "glm-5.2", **extra: object) -> SettingsModel:
-    """A settings block with an openai-protocol provider routed to `tidy`."""
+    """A settings block with an openai-protocol provider routed to `tidy`.
+
+    Only the ROLE half of this block reaches the codex lane now (x-3954): the
+    provider record itself resolves in Rust, which reads the real candidates -
+    pin it with :func:`_pin_codex_config`.
+    """
     prov = {
         "zai-openai": {
             "protocol": "openai",
@@ -635,11 +641,42 @@ def _openai_settings(model: str = "glm-5.2", **extra: object) -> SettingsModel:
     return _settings(providers=prov, roles={"tidy": f"zai-openai,{model}"})
 
 
-def test_codex_route_returns_config_and_env_for_openai_provider() -> None:
-    route = mr.resolve_codex_route(
-        "tidy", settings=_openai_settings(), env={"OPENAI_API_KEY": "oai-key"}
+def _pin_codex_config(
+    tmp_path, monkeypatch, provider: str, body: str, *, role: str = "tidy"
+) -> None:
+    """Write a real config.toml carrying ``provider``'s record and pin it via
+    FNO_CONFIG: the codex lane's provider half resolves in Rust, which reads
+    the real candidates, so a pydantic settings block cannot carry it."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[model_routing]\n"
+        f'[model_routing.roles]\n{role} = "{provider},glm-5.2"\n'
+        f"[model_routing.providers.{provider}]\n" + body,
+        encoding="utf-8",
     )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
+@requires_rust
+def test_codex_route_returns_config_and_env_for_openai_provider(tmp_path, monkeypatch) -> None:
+    _pin_codex_config(
+        tmp_path,
+        monkeypatch,
+        "zai-openai",
+        'protocol = "openai"\n'
+        'base_url = "https://api.z.ai/api/coding/paas/v4"\n'
+        'api_key_env = "OPENAI_API_KEY"\n',
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
+    route = mr.resolve_codex_route("tidy")
     assert route is not None
+    assert route.provider == "zai-openai" and route.model == "glm-5.2"
     # The stamp rides with the codex lane too (x-c703): without it a routed
     # codex worker resolves provider "unknown" and ignores its subagent budget.
     assert route.env == {
@@ -657,12 +694,19 @@ def test_codex_route_returns_config_and_env_for_openai_provider() -> None:
     assert "model='glm-5.2'" in joined
 
 
-def test_codex_route_honors_configured_wire_api() -> None:
-    route = mr.resolve_codex_route(
-        "tidy",
-        settings=_openai_settings(wire_api="responses"),
-        env={"OPENAI_API_KEY": "k"},
+@requires_rust
+def test_codex_route_honors_configured_wire_api(tmp_path, monkeypatch) -> None:
+    _pin_codex_config(
+        tmp_path,
+        monkeypatch,
+        "zai-openai",
+        'protocol = "openai"\n'
+        'base_url = "https://api.z.ai/api/coding/paas/v4"\n'
+        'api_key_env = "OPENAI_API_KEY"\n'
+        'wire_api = "responses"\n',
     )
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    route = mr.resolve_codex_route("tidy")
     assert route is not None
     assert "wire_api = 'responses'" in " ".join(route.config_args)
 
@@ -670,17 +714,22 @@ def test_codex_route_honors_configured_wire_api() -> None:
 def test_codex_route_none_for_anthropic_provider() -> None:
     # The default zai provider is anthropic-protocol -> belongs to the claude
     # lane, so the codex lane returns None (no cross-lane leakage).
-    assert (
-        mr.resolve_codex_route("tidy", settings=_settings(), env={"ZAI_API_KEY": "k"})
-        is None
+    assert mr.resolve_codex_route("tidy", settings=_settings()) is None
+
+
+@requires_rust
+def test_codex_route_none_without_key(tmp_path, monkeypatch) -> None:
+    _pin_codex_config(
+        tmp_path,
+        monkeypatch,
+        "zai-openai",
+        'protocol = "openai"\n'
+        'base_url = "https://api.z.ai/api/coding/paas/v4"\n'
+        'api_key_env = "OPENAI_API_KEY"\n',
     )
-
-
-def test_codex_route_none_without_key() -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     notes, sink = _collector()
-    route = mr.resolve_codex_route(
-        "tidy", settings=_openai_settings(), env={}, notice=sink
-    )
+    route = mr.resolve_codex_route("tidy", notice=sink)
     assert route is None
     assert notes
 
@@ -697,47 +746,50 @@ def test_codex_route_never_routes_protected_role(role: str) -> None:
         },
         roles={role: "oai,glm-5.2"},
     )
-    assert mr.resolve_codex_route(role, settings=s, env={"OPENAI_API_KEY": "k"}) is None
+    assert mr.resolve_codex_route(role, settings=s) is None
 
 
-def test_codex_route_bails_on_unsafe_provider_name() -> None:
+@requires_rust
+def test_codex_route_bails_on_unsafe_provider_name(tmp_path, monkeypatch) -> None:
     notes, sink = _collector()
     # A dot is a valid single non-whitespace token (so _parse_target accepts it)
-    # but is not a safe codex bareword provider id, so resolve_codex_route's own
-    # regex guard is what bails + notices here. (A space in the provider is caught
+    # but is not a safe codex bareword provider id, so the Rust builder's own
+    # guard is what bails + notices here. (A space in the provider is caught
     # earlier by _parse_target; see test_parse_target_rejects_internal_whitespace.)
-    s = _settings(
-        providers={
-            "b.ad": {
-                "protocol": "openai",
-                "base_url": "https://x/v4",
-                "api_key_env": "OPENAI_API_KEY",
-            }
-        },
-        roles={"tidy": "b.ad,glm-5.2"},
+    _pin_codex_config(
+        tmp_path,
+        monkeypatch,
+        "b.ad",
+        'protocol = "openai"\n'
+        'base_url = "https://x/v4"\n'
+        'api_key_env = "OPENAI_API_KEY"\n',
     )
-    route = mr.resolve_codex_route(
-        "tidy", settings=s, env={"OPENAI_API_KEY": "k"}, notice=sink
-    )
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    route = mr.resolve_codex_route("tidy", notice=sink)
     assert route is None
-    assert notes
+    assert any("safe codex provider id" in n for n in notes), notes
 
 
+@requires_rust
 @pytest.mark.parametrize("bad_url", ["https://x/v4'inject", "https://x/v4\x00", "https://x\nv4", "https://x\tv4"])
-def test_codex_route_bails_on_unquotable_value(bad_url: str) -> None:
+def test_codex_route_bails_on_unquotable_value(tmp_path, monkeypatch, bad_url: str) -> None:
     # A value with a single quote OR any control char (incl. NUL, which would
     # otherwise make subprocess raise) can't be embedded -> bail fail-safe.
-    s = _settings(
-        providers={
-            "oai": {
-                "protocol": "openai",
-                "base_url": bad_url,
-                "api_key_env": "OPENAI_API_KEY",
-            }
-        },
-        roles={"tidy": "oai,glm-5.2"},
+    notes, sink = _collector()
+    import json as _json
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[model_routing]\n"
+        '[model_routing.roles]\ntidy = "oai,glm-5.2"\n'
+        "[model_routing.providers.oai]\n"
+        f"protocol = \"openai\"\nbase_url = {_json.dumps(bad_url)}\n"
+        'api_key_env = "OPENAI_API_KEY"\n',
+        encoding="utf-8",
     )
-    assert mr.resolve_codex_route("tidy", settings=s, env={"OPENAI_API_KEY": "k"}) is None
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    assert mr.resolve_codex_route("tidy", notice=sink) is None
 
 
 def test_claude_lane_still_skips_openai_provider() -> None:

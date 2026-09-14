@@ -71,12 +71,17 @@ class CodexResult:
         last_msg: last assistant text seen on the stream; "" if no
             ``agent_message`` event fired.
         duration_ms: wall-clock elapsed since Popen returned.
+        provider: the routing provider the launch used ("" when unrouted);
+            the identity a registry row records for a relaunch to re-resolve.
+        model: the routed model id ("" when unrouted).
     """
 
     exit_code: int
     session_id: Optional[str]
     last_msg: str
     duration_ms: int
+    provider: str = ""
+    model: str = ""
 
 
 class CodexInvocationError(RuntimeError):
@@ -777,6 +782,7 @@ def create(
     # changes nothing (fail-safe). `-c` flags are GLOBAL, so they precede `exec`.
     config_args: list[str] = []
     route_env: dict[str, str] = {}
+    codex_route = None
     if role:
         from fno.agents.model_routing import resolve_codex_route
 
@@ -845,6 +851,16 @@ def create(
         agent_self=agent_self,
         route_env=route_env or None,
     )
+    # x-3954: carry the resolved route identity on the result so the minted
+    # registry row records it (never an endpoint or a key - the relaunch
+    # re-resolves the route from today's config). CodexResult is frozen, so
+    # the identity rides a copy, not a mutation.
+    if codex_route is not None:
+        import dataclasses
+
+        result = dataclasses.replace(
+            result, provider=codex_route.provider, model=codex_route.model
+        )
     # The spawn is fully real by here, so a slow or refusing assignment can
     # never delay or fail it (fire-and-forget; see codex_project).
     from fno.agents.codex_project import assign_project_detached

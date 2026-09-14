@@ -2419,26 +2419,11 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         (v, None)
     };
 
-    // x-3954: a routed codex row re-resolves its route from TODAY's config.
-    // Resolved once here; the loaded-thread wake below runs first and needs no
-    // route (a thread still loaded in the app-server keeps the endpoint its
-    // app-server already holds), so the refusal fires only on the relaunch
-    // path. `argv` is spliced eagerly so `--print-command` and the launch
-    // shapes below all carry the tokens.
-    let codex_route_outcome: Option<Result<Option<crate::codex_route::CodexRoute>, String>> =
-        if harness == "codex" {
-            let outcome = crate::codex_route::resolve_row_route(entry, Path::new(cwd));
-            if let Ok(Some(route)) = &outcome {
-                crate::codex_route::splice_route(&mut argv, route);
-            }
-            Some(outcome)
-        } else {
-            None
-        };
-    let route_provider = entry
-        .get("route_provider_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    // x-3954: a routed codex row re-resolves its route from TODAY's config,
+    // spliced eagerly so the print and launch shapes carry the tokens. The
+    // refusal waits for the loaded-thread wake: it needs no route.
+    let codex_route_outcome =
+        crate::codex_route::resume_route(harness, entry, Path::new(cwd), &mut argv);
 
     // A pane (mux) row carries the session it was launched on; resume puts the
     // worker back THERE via `fno mux pane run`, not in this terminal, so the
@@ -2529,13 +2514,11 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     };
 
     if print_command {
-        // x-3954: an unresolvable codex route refuses even the print form - a
-        // printed unrouted recipe is the same wrong launch, one paste away.
+        // x-3954: an unresolvable codex route refuses even the print form.
         if let Some(Err(reason)) = &codex_route_outcome {
             eprintln!(
-                "fno agents resume: refused: {row_name} was launched on codex route \
-                 {route_provider}, and it cannot be restored ({reason}); \
-                 not relaunching on codex's default provider"
+                "{}",
+                crate::codex_route::refusal_line(entry, &row_name, reason)
             );
             return crate::reentry::REENTRY_REFUSED_EXIT;
         }
@@ -2556,14 +2539,9 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             }
             None => argv.clone(),
         };
-        // x-3954: a restored codex route prints its env pairs too, the key
-        // masked - ids and shapes only, never the value from config.
+        // x-3954: a restored codex route prints its env pairs too, key masked.
         if let Some(Ok(Some(route))) = &codex_route_outcome {
-            let mut env_prefix: Vec<String> = route
-                .env_masked()
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect();
+            let mut env_prefix = crate::codex_route::print_env_prefix(route);
             env_prefix.extend(printed_argv.iter().cloned());
             printed_argv = env_prefix;
         }
@@ -2704,23 +2682,9 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
-    // x-3954: refuse AFTER the wake (it needs no route) and BEFORE any claim -
-    // nothing launches and no claim is taken when the route cannot be
-    // restored. Relaunching on codex's default provider while holding the
-    // route's identity is the silent wrong-bill shape.
-    if let Some(Err(reason)) = &codex_route_outcome {
-        eprintln!(
-            "fno agents resume: refused: {row_name} was launched on codex route \
-             {route_provider}, and it cannot be restored ({reason}); \
-             not relaunching on codex's default provider"
-        );
-        return crate::reentry::REENTRY_REFUSED_EXIT;
-    }
-    if let Some(Ok(Some(route))) = &codex_route_outcome {
-        eprintln!(
-            "route: restored {} model {} (recorded when {row_name} launched)",
-            route.provider, route.model
-        );
+    // x-3954: refuse after the wake, before any claim; announce a restore.
+    if let Some(code) = crate::codex_route::resume_verdict(&codex_route_outcome, entry, &row_name) {
+        return code;
     }
 
     let resume_id = claim_uuid
@@ -2767,8 +2731,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             .map(|p| p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
         // x-3954: the restored route's env (key + provider stamp) rides the
-        // pane relaunch the same way - the child env is the only channel that
-        // can carry the key off the argv.
+        // pane relaunch - the child env is the only key channel.
         if let Some(Ok(Some(route))) = &codex_route_outcome {
             plan_env.extend(route.env.clone());
         }

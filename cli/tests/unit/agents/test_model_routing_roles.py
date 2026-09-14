@@ -23,6 +23,44 @@ from fno.roles import (
     RoleResolutionReason,
     RoutingHint,
 )
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
+def _pin_oai_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Write the oai provider record to a real config.toml and pin it via
+    FNO_CONFIG: the codex lane's provider half resolves in Rust, which reads
+    the real candidates (x-3954), so a pydantic settings block cannot carry it."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[model_routing.providers.oai]\n"
+        'protocol = "openai"\n'
+        'base_url = "https://example.test/v1"\n'
+        'api_key_env = "OPENAI_API_KEY"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+
+def _call_resolver(resolver, role, *, settings=None, env=None, notice=None, business_lookup=None):
+    """``resolve_codex_route`` no longer takes ``env=`` (the key resolves in
+    the Rust verb's process env); the claude signature keeps it."""
+    kwargs: dict = {}
+    if notice is not None:
+        kwargs["notice"] = notice
+    if business_lookup is not None:
+        kwargs["business_lookup"] = business_lookup
+    if resolver is mr.resolve_route:
+        kwargs["settings"] = settings
+        kwargs["env"] = env
+    elif settings is not None:
+        kwargs["settings"] = settings
+    return resolver(role, **kwargs)
 
 
 def _settings(**block_kwargs: object) -> SettingsModel:
@@ -146,8 +184,11 @@ def test_ac_r4_compat_not_found_is_a_golden_legacy_delegate(
     legacy_notices: list[str] = []
     bridge_notices: list[str] = []
 
-    legacy = resolver(role, settings=settings, env=env, notice=legacy_notices.append)
-    bridged = resolver(
+    legacy = _call_resolver(
+        resolver, role, settings=settings, env=env, notice=legacy_notices.append
+    )
+    bridged = _call_resolver(
+        resolver,
         role,
         settings=settings,
         env=env,
@@ -207,11 +248,13 @@ def test_resolved_business_role_changes_only_claude_provider_and_model() -> None
     )
 
 
-def test_resolved_business_role_routes_the_codex_lane() -> None:
+@requires_rust
+def test_resolved_business_role_routes_the_codex_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin_oai_config(tmp_path, monkeypatch)
     route = mr.resolve_codex_route(
         "publisher",
-        settings=_settings(providers=OPENAI_PROVIDER),
-        env={"OPENAI_API_KEY": "openai-key"},
         business_lookup=lambda _: _resolved(provider="oai", model="gpt-business"),
     )
 
@@ -219,6 +262,7 @@ def test_resolved_business_role_routes_the_codex_lane() -> None:
     # The stamp rides with the codex lane too (x-c703): without it a routed
     # codex worker resolves provider "unknown" and ignores its subagent budget.
     assert route.env == {"OPENAI_API_KEY": "openai-key", "FNO_ROUTE_PROVIDER": "oai"}
+    assert route.provider == "oai" and route.model == "gpt-business"
     assert "model='gpt-business'" in " ".join(route.config_args)
 
 
@@ -273,8 +317,9 @@ def test_disabled_routing_not_found_remains_exact_legacy_none(
     legacy_notices: list[str] = []
     bridge_notices: list[str] = []
 
-    legacy = resolver("publisher", settings=settings, env={}, notice=legacy_notices.append)
-    bridged = resolver(
+    legacy = _call_resolver(resolver, "publisher", settings=settings, env={}, notice=legacy_notices.append)
+    bridged = _call_resolver(
+        resolver,
         "publisher",
         settings=settings,
         env={},
@@ -299,11 +344,8 @@ def test_disabled_routing_invalid_manifest_still_fails_closed(
     )
 
     with pytest.raises(mr.BusinessRoleResolutionBlockedError) as caught:
-        resolver(
-            "publisher",
-            settings=_settings(enabled=False),
-            env={},
-            business_lookup=lambda _: blocked,
+        _call_resolver(
+            resolver, "publisher", settings=_settings(enabled=False), business_lookup=lambda _: blocked
         )
 
     assert caught.value.result is blocked
@@ -321,10 +363,10 @@ def test_disabled_routing_resolved_business_role_remains_disabled(
         return _resolved(provider="oai", model="gpt-business")
 
     assert (
-        resolver(
+        _call_resolver(
+            resolver,
             "publisher",
             settings=_settings(enabled=False, providers=OPENAI_PROVIDER),
-            env={"OPENAI_API_KEY": "openai-key"},
             business_lookup=lookup,
         )
         is None
@@ -345,10 +387,10 @@ def test_protected_business_names_validate_manifest_but_keep_primary_route(
         return _resolved(provider="oai", model="unsafe")
 
     assert (
-        resolver(
+        _call_resolver(
+            resolver,
             role,
             settings=_settings(providers=OPENAI_PROVIDER, roles={role: "oai/unsafe"}),
-            env={"OPENAI_API_KEY": "openai-key"},
             business_lookup=lookup,
         )
         is None
@@ -410,6 +452,7 @@ def test_default_production_lookup_projects_manifest_through_spawn_route(
     assert route["ANTHROPIC_MODEL"] == "business-model"
 
 
+@requires_rust
 def test_default_production_lookup_projects_manifest_through_codex_route(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -417,12 +460,9 @@ def test_default_production_lookup_projects_manifest_through_codex_route(
     root = tmp_path / "roles"
     _write_business_role(root, provider="oai", model="gpt-business")
     monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
+    _pin_oai_config(tmp_path, monkeypatch)
 
-    route = mr.resolve_codex_route(
-        "publisher",
-        settings=_settings(providers=OPENAI_PROVIDER),
-        env={"OPENAI_API_KEY": "openai-key"},
-    )
+    route = mr.resolve_codex_route("publisher")
 
     assert route is not None
     # The stamp rides with the codex lane too (x-c703): without it a routed
@@ -441,7 +481,7 @@ def test_business_manifest_without_optional_routing_hint_uses_primary_route(
     _write_business_role(root, provider=None, model=None)
     monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
 
-    assert resolver("publisher", settings=_settings(), env={}) is None
+    assert _call_resolver(resolver, "publisher", settings=_settings(), env={}) is None
 
 
 @pytest.mark.parametrize(
@@ -473,7 +513,7 @@ def test_business_manifest_without_routing_hint_ignores_same_name_legacy_route(
     _write_business_role(root, provider=None, model=None)
     monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
 
-    assert resolver("publisher", settings=settings, env=env) is None
+    assert _call_resolver(resolver, "publisher", settings=settings, env=env) is None
 
 
 def test_business_manifest_lookup_preserves_exact_mixed_case_role_identity(
@@ -499,6 +539,7 @@ def test_business_manifest_lookup_preserves_exact_mixed_case_role_identity(
     assert route["ANTHROPIC_MODEL"] == "business-model"
 
 
+@requires_rust
 def test_codex_business_lookup_preserves_exact_mixed_case_role_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -511,12 +552,9 @@ def test_codex_business_lookup_preserves_exact_mixed_case_role_identity(
         model="gpt-business",
     )
     monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
+    _pin_oai_config(tmp_path, monkeypatch)
 
-    route = mr.resolve_codex_route(
-        "Publisher",
-        settings=_settings(providers=OPENAI_PROVIDER),
-        env={"OPENAI_API_KEY": "openai-key"},
-    )
+    route = mr.resolve_codex_route("Publisher")
 
     assert route is not None
     assert "model='gpt-business'" in " ".join(route.config_args)
@@ -625,7 +663,7 @@ def test_default_production_lookup_blocks_corrupt_sources_even_when_disabled(
     monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
 
     with pytest.raises(mr.BusinessRoleResolutionBlockedError) as caught:
-        resolver("publisher", settings=_settings(enabled=False), env={})
+        _call_resolver(resolver, "publisher", settings=_settings(enabled=False), env={})
 
     assert caught.value.result.reason is RoleResolutionReason.INVALID_MANIFEST
     assert caught.value.result.source_layer is RoleLayer.PROJECT
@@ -728,7 +766,7 @@ def test_default_lookup_blocks_corrupt_sources_for_protected_roles(
     monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
 
     with pytest.raises(mr.BusinessRoleResolutionBlockedError):
-        resolver("implement", settings=_settings(), env={})
+        _call_resolver(resolver, "implement", settings=_settings(), env={})
 
 
 def test_spawn_paths_share_the_guarded_routing_seams() -> None:

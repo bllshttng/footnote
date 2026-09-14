@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
+from fno.rust_binary import find_dev_binary as _find_dev_binary
 
 ROUTE_ENV = {
     "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
@@ -400,20 +401,66 @@ def test_ac5_hp_a_never_routed_row_restores_nothing(tmp_path, monkeypatch) -> No
     assert restore_route_for_relaunch(row) is None
 
 
-def test_ac4_err_a_codex_pane_records_no_route_so_it_cannot_half_restore(
+requires_rust = pytest.mark.skipif(
+    _find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
+@requires_rust
+def test_ac4_a_routed_codex_pane_records_identity_but_never_a_route_file(
     tmp_path, monkeypatch
 ) -> None:
-    """AC4-ERR, the honest half: no door may relaunch on HALF a route.
+    """AC4, flipped by x-3954: a routed codex pane records its route IDENTITY
+    on the row (`route_provider_id` + `model_name`, identifiers only) and still
+    records no route-settings file. The endpoint lives in no artifact at all:
+    every relaunch door re-resolves the route from today's config in Rust
+    (`codex_route.rs`) or refuses, so a half restore onto codex's default
+    provider stays impossible rather than merely avoided.
 
-    A codex route lives in `-c` config args, not the env, so recording
-    `CodexRoute.env` would let a relaunch land on codex's default provider while
-    holding the route's API key - working, wrong, and silent. Not recording is
-    what makes that impossible; codex relaunch stays exactly as it is today.
+    The provider record is pinned via a TOML config (re-pinned AFTER
+    use_tmpdir, which points FNO_CONFIG at a YAML file the Rust reader cannot
+    parse), so the REAL resolution path runs - no stubbed resolver.
     """
     from fno.agents.registry import load_registry
 
-    _spawn_pane(monkeypatch, tmp_path, provider="codex", route_env=dict(ROUTE_ENV))
-    assert load_registry()[0].route_settings_path is None
+    use_tmpdir(monkeypatch, tmp_path)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[config]\nstate_dir = "{tmp_path / ".fno"}/"\n'
+        "[model_routing]\n"
+        '[model_routing.roles]\ncodex-verify = "zai-openai,glm-5.3-flash[1m]"\n'
+        "[model_routing.providers.zai-openai]\n"
+        'protocol = "openai"\n'
+        'base_url = "https://api.z.ai/api/coding/paas/v4"\n'
+        'api_key_env = "ZAI_API_KEY"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret-token")
+    for var in ("FNO_SESSION", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(var, raising=False)
+
+    from fno.agents import mux_spawn
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(
+        mux_spawn,
+        "_backfill_codex_session_id",
+        lambda *a, **k: "019fb024-2327-75f3-8b80-06e9d5ade05f",
+    )
+    mux_spawn.dispatch_spawn_pane(
+        name="router",
+        message="go",
+        provider="codex",
+        cwd=tmp_path,
+        runner=_FakeRunner(),
+        role="codex-verify",
+    )
+    row = load_registry()[0]
+    assert row.route_settings_path is None
+    assert row.route_provider_id == "zai-openai"
+    assert row.model_name == "glm-5.3-flash[1m]"
 
 
 def test_restore_never_replays_the_auth_scrub_floor(tmp_path, monkeypatch) -> None:

@@ -24,6 +24,7 @@ const DEFAULT_WIRE_API: &str = "chat";
 
 /// A resolved codex route: the argv tokens select the endpoint, the env pairs
 /// carry the key under the name the provider declares plus the provider stamp.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexRoute {
     pub provider: String,
     pub model: String,
@@ -54,6 +55,7 @@ impl CodexRoute {
 /// Why a route did not resolve. `Unrouted` is the deliberate no-op (the
 /// provider belongs to the claude lane); `Refused` names a misconfiguration
 /// the operator should see. Both carry a key-free reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexRouteError {
     Unrouted(String),
     Refused(String),
@@ -221,6 +223,72 @@ pub fn resolve_codex_route(
 /// order is `codex`, route tokens, grant, `--cd`, `resume`, id.
 pub fn splice_route(argv: &mut Vec<String>, route: &CodexRoute) {
     argv.splice(1..1, route.config_args.clone());
+}
+
+/// x-3954: the `fno agents resume` door. For a codex row, resolve the route
+/// from TODAY's config and splice its tokens into `argv` after the binary;
+/// `None` for a non-codex row, `Ok(None)` for an unrouted one.
+pub fn resume_route(
+    harness: &str,
+    entry: &Value,
+    cwd: &Path,
+    argv: &mut Vec<String>,
+) -> Option<Result<Option<CodexRoute>, String>> {
+    if harness != "codex" {
+        return None;
+    }
+    let route = resolve_row_route(entry, cwd);
+    if let Ok(Some(resolved)) = &route {
+        splice_route(argv, resolved);
+    }
+    Some(route)
+}
+
+/// The refusal line: names the row, the recorded provider, and the restoring
+/// contract. Ids only - never the key.
+pub fn refusal_line(entry: &Value, row_name: &str, reason: &str) -> String {
+    let provider = entry
+        .get("route_provider_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    format!(
+        "fno agents resume: refused: {row_name} was launched on codex route \
+         {provider}, and it cannot be restored ({reason}); not relaunching on \
+         codex's default provider"
+    )
+}
+
+/// The launch path's one verdict: refuse AFTER the loaded-thread wake and
+/// BEFORE any claim (`Some(REENTRY_REFUSED_EXIT)`), announce a restored route
+/// on stderr, and pass a non-codex or unrouted row through untouched.
+pub fn resume_verdict(
+    route: &Option<Result<Option<CodexRoute>, String>>,
+    entry: &Value,
+    row_name: &str,
+) -> Option<i32> {
+    match route {
+        Some(Err(reason)) => {
+            eprintln!("{}", refusal_line(entry, row_name, reason));
+            Some(crate::reentry::REENTRY_REFUSED_EXIT)
+        }
+        Some(Ok(Some(resolved))) => {
+            eprintln!(
+                "route: restored {} model {} (recorded when {row_name} launched)",
+                resolved.provider, resolved.model
+            );
+            None
+        }
+        Some(Ok(None)) | None => None,
+    }
+}
+
+/// The `--print-command` env prefix: the route's env pairs, key masked.
+pub fn print_env_prefix(route: &CodexRoute) -> Vec<String> {
+    route
+        .env_masked()
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect()
 }
 
 /// Key precedence (twin of `_resolve_key`, `model_routing.py`): the env var
