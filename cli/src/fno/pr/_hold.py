@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
 from fno.graph.ladder import DispatchHoldState, DispatchHoldVerdict, dispatch_hold_verdict
@@ -321,7 +322,9 @@ def _disarm_queued_auto_merge(pr_number: int, cwd: str, why: str) -> None:
 # The writer: fno do pr hold set|release. Every merge path already reads the
 # block; this is the receipted way to author and lift a merge condition. The
 # readback is the ladder reader the merge gate uses, so a write that cannot
-# prove itself restores the original bytes.
+# prove itself is rolled back. Frontmatter mutation rides the ship gate's own
+# plan writer (plan._stamp), whose round trip is byte-stable on the vault's
+# plans.
 
 
 class HoldWriteError(RuntimeError):
@@ -332,9 +335,7 @@ class HoldWriteError(RuntimeError):
         self.exit_code = exit_code
 
 
-def _resolve_plan_file(node: str, graph_path: Optional[str]) -> tuple[dict, str]:
-    from pathlib import Path
-
+def _resolve_plan_file(node: str, graph_path: Optional[str]) -> tuple[dict, Path]:
     from fno.graph.ladder import resolve_plan_probe
     from fno.graph.store import read_graph
     from fno.paths import graph_json
@@ -349,65 +350,13 @@ def _resolve_plan_file(node: str, graph_path: Optional[str]) -> tuple[dict, str]
     return entry, probe
 
 
-def _fence_close(lines: list[str]) -> Optional[int]:
-    if not lines or lines[0] != "---":
-        return None
-    return next((i for i in range(1, len(lines)) if lines[i] == "---"), None)
-
-
-def _insert_hold_block(text: str, block: str) -> Optional[str]:
-    lines = text.split("\n")
-    close = _fence_close(lines)
-    if close is None:
-        return None
-    return "\n".join(lines[:close]) + "\n" + block.rstrip("\n") + "\n" + "\n".join(lines[close:])
-
-
-def _remove_hold_block(text: str) -> Optional[str]:
-    lines = text.split("\n")
-    close = _fence_close(lines)
-    if close is None:
-        return None
-    start = next((i for i in range(1, close) if lines[i].startswith("dispatch_hold:")), None)
-    if start is None:
-        return None
-    end = start + 1
-    while end < close and (not lines[end] or lines[end][0] in " \t"):
-        end += 1
-    return "\n".join(lines[:start] + lines[end:])
-
-
-def _write_proven(new_text: str, probe: str, entry: dict, want_held: bool, original: str) -> None:
-    from fno.graph.ladder import DispatchHoldState, dispatch_hold
-
-    tmp = f"{probe}.hold.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(new_text)
-    os.replace(tmp, probe)
-    want = DispatchHoldState.HELD if want_held else DispatchHoldState.ABSENT
-    if dispatch_hold(entry).state is want:
-        return
-    with open(probe, "w", encoding="utf-8") as fh:
-        fh.write(original)
-    raise HoldWriteError(f"readback missed {want.value}; original bytes restored", 1)
-
-
-def hold_write(
-    action: str,
-    node: str,
-    *,
-    reason: str = "",
-    release_when: str = "",
-    set_by: str = "",
-    review_on: str = "",
-    evidence: str = "",
-    graph_path: Optional[str] = None,
-) -> dict:
+def hold_write(action: str, node: str, *, reason: str = "", release_when: str = "", set_by: str = "", review_on: str = "", evidence: str = "", graph_path: Optional[str] = None) -> dict:
     """Set or release one node plan's dispatch_hold; returns the receipt."""
     import datetime
 
     import yaml
-    from fno.graph.ladder import DispatchHoldState, dispatch_hold, dispatch_hold_verdict
+    from fno.graph.ladder import DispatchHoldState, dispatch_hold
+    from fno.plan._stamp import RawBlock, read_plan_file, write_plan_file
 
     if action == "set":
         for name, value in (("reason", reason), ("release-when", release_when), ("set-by", set_by)):
@@ -422,39 +371,29 @@ def hold_write(
     entry, probe = _resolve_plan_file(node, graph_path)
     node_id = str(entry.get("id") or node)
     held = dispatch_hold(entry)
+    target, fields, rest = read_plan_file(Path(probe))
+    original_fields = dict(fields)
     if action == "set":
         if held.state is not DispatchHoldState.ABSENT:
-            raise HoldWriteError(
-                f"node {node_id} is already held: reason={held.reason} release_when={held.release_when}; lift it with `fno do pr hold release {node_id} --evidence <proof>`",
-                3,
-            )
-        block = yaml.safe_dump({"dispatch_hold": {"reason": reason, "release_when": release_when, "review_on": review.isoformat(), "set_by": set_by}}, sort_keys=False, default_flow_style=False)
-    elif held.state is DispatchHoldState.ABSENT:
-        raise HoldWriteError(f"node {node_id} carries no merge hold; nothing to release", 3)
-    with open(probe, encoding="utf-8") as fh:
-        original = fh.read()
-    new_text = _insert_hold_block(original, block) if action == "set" else _remove_hold_block(original)
-    if new_text is None:
-        raise HoldWriteError(f"plan {probe} does not carry a spliceable dispatch_hold block", 1 if action == "set" else 3)
-    _write_proven(new_text, probe, entry, action == "set", original)
-    receipt: dict = {"node": node_id, "action": action, "plan": probe}
+            raise HoldWriteError(f"node {node_id} is already held: reason={held.reason} release_when={held.release_when}; lift it with `fno do pr hold release {node_id} --evidence <proof>`", 3)
+        quoted = lambda v: yaml.safe_dump(v, default_flow_style=False).splitlines()[0]  # noqa: E731
+        raw = "\n".join(f"  {k}: {quoted(v)}" for k, v in (("reason", reason), ("release_when", release_when), ("review_on", review.isoformat()), ("set_by", set_by)))
+        fields["dispatch_hold"] = RawBlock(raw)
+    else:
+        if held.state is DispatchHoldState.ABSENT and "dispatch_hold" not in fields:
+            raise HoldWriteError(f"node {node_id} carries no merge hold; nothing to release", 3)
+        fields.pop("dispatch_hold", None)
+    write_plan_file(target, fields, rest)
+    want = DispatchHoldState.HELD if action == "set" else DispatchHoldState.ABSENT
+    if dispatch_hold(entry).state is not want:
+        write_plan_file(target, original_fields, rest)
+        raise HoldWriteError(f"readback missed {want.value}; plan restored", 1)
+    receipt: dict = {"node": node_id, "action": action, "plan": str(probe)}
     if action == "set":
         pr = entry.get("pr_number")
         if isinstance(pr, int) and pr > 0:
             _disarm_queued_auto_merge(pr, str(entry.get("cwd") or os.getcwd()), reason)
-        receipt.update(
-            hold={"reason": reason, "release_when": release_when, "review_on": review.isoformat(), "set_by": set_by},
-            pr=pr if isinstance(pr, int) else None,
-            disarm="issued" if isinstance(pr, int) and pr > 0 else "skipped",
-        )
+        receipt.update(hold={"reason": reason, "release_when": release_when, "review_on": review.isoformat(), "set_by": set_by}, pr=pr if isinstance(pr, int) else None, disarm="issued" if isinstance(pr, int) and pr > 0 else "skipped")
     else:
-        from pathlib import Path
-
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
-
-        rows = read_graph(Path(graph_path) if graph_path else graph_json())
-        by_id = {e.get("id"): e for e in rows if isinstance(e, dict) and e.get("id")}
-        verdict = dispatch_hold_verdict(entry, by_id)
-        receipt.update(hold={"evidence": evidence, "still_held_by": verdict.guard_reason if verdict else None}, disarm="skipped")
+        receipt.update(hold={"evidence": evidence}, disarm="skipped")
     return receipt
