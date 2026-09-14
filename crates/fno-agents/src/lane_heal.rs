@@ -6,7 +6,7 @@
 //! stale, so the fix heals the fact once here and every reader stays as it is.
 //! The verdict is data, never an exit code.
 
-use crate::daemon::{run_mux_pane_probe, PaneProbe};
+use crate::daemon::PaneProbe;
 use crate::paths::AgentsHome;
 #[cfg(test)]
 use crate::state::RegistryEntry;
