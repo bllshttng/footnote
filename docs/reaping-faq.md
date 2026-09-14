@@ -38,7 +38,7 @@ The manual verb and the registry arm run the same sweep body (`client.rs:2576`, 
 
 The merge-request arm is a different program (`merge_reap.rs:709-815`). It loops only over pending merge cleanup requests (`merge_reap.rs:741`). With no pending request it does nothing. Its floor is 60 seconds (`merge_reap.rs:36`), and a request older than 86400 seconds from the merge moment expires unacted (`merge_reap.rs:42`). Its skip reasons are `no_requests`, `all_in_grace`, and `held` (`merge_reap.rs:798-806`), and its detail line carries the held count beside the request count. So its `acted=0 skip=held` line says nothing about the registry sweep.
 
-The mux sideline sweep rides the manual verb (`client.rs:2794-2798`), which runs `mux_tab_sweep` (the tab-only prune through `fno mux workspace prune`). The daemon's retire arm runs the same sweep on the tab-only shape (`gc.rs:976`), so a worker's tab closes with its row without a person typing anything. Pass `--no-mux` to skip the manual verb's sweep.
+The mux sideline sweep rides the manual verb (`client.rs:2794-2798`), which runs `mux_tab_sweep` (the tab-only prune through `fno mux workspace prune`). The daemon's retire arm runs the same sweep on the tab-only shape (`gc.rs:976`). A worker's tab closes with its row. Pass `--no-mux` to skip the manual verb's sweep.
 
 A fourth tool answers to a related name. `fno-agents roster-reap` removes claude rows that fno never registered. Nothing schedules it. A person types it. It is a dry run by default, and `--apply` acts (`client.rs:2814-2838`).
 
@@ -95,15 +95,15 @@ Four facts free an open-node row anyway (`gc.rs:121-127`):
 
 Each released row falls to the same quiet gate a done node takes, so the transcript still decides. A planner row never takes these four releases. It never keeps under open work while it carries assignments: its own reason names the planning lane (`gc.rs:287-310`).
 
-None of the four applies while the session drives an open PR. That keep outranks all four releases; it is the next section.
+None of the four applies while the session drives an open PR. That keep outranks all four releases. The next section covers it.
 
 ### open pr
 
-The full line reads `kept {id} (open pr: {node} #<N>)`. The session has a `do` row on an open node that carries `pr_number`, and the node's recorded `merge_status` is not `merged`. The PR is unmerged and this session is its driver, so retiring the row would strand the PR with nothing left to drive it. The fact is the graph record alone: the sweep makes no network call for an open node.
+The full line reads `kept {id} (open pr: {node} #<N>)`. The session has a `do` row on an open node that carries `pr_number`, and the node's recorded `merge_status` is not `merged`. The PR is unmerged and this session is its driver, so retiring the row strands the PR with nothing left to drive it. The fact is the graph record alone: the sweep makes no network call for an open node.
 
-The keep outranks every release above it. A terminal roster state, a parked node, or a live newer peer that does not drive the PR leaves the row standing. A peer releases the row only when the peer's own session holds a `do` row on the node, and a recorded `merge_status: merged` empties the keep, because a merged PR is not an open one.
+The keep outranks every release above it. A terminal roster state, a parked node, or a live newer peer that does not drive the PR leaves the row standing. Only a driving peer releases the row. Driving means the peer's session holds a `do` row on the node. A recorded `merge_status: merged` empties the keep. A merged PR is not an open one.
 
-The remedy is merge, not reap. Drive the PR to merge (`fno do pr status <N>` tells you what blocks it), or record a merge order if another node must merge first (the next section shows the form). A done node whose merge outcome nothing records reads GitHub once for the row's own PR; an unreadable read keeps the row too.
+The remedy is merge, not reap. If another node must merge first, record a merge order (the next section shows the form). Otherwise drive the PR to merge. Run `fno do pr status <N>` to see what blocks it. A done node whose merge outcome nothing records reads GitHub once for the row's own PR. An unreadable read keeps the row too.
 
 ### the nudge ladder
 
@@ -111,12 +111,12 @@ A kept open-PR row is a session that is not driving. The daemon's retire arm run
 
 1. **Reset.** Transcript activity newer than the last nudge clears the budget: the session answered.
 2. **Wait.** The transcript is inside the grace window, or the last nudge is too young.
-3. **Pause.** A live merge order holds the session. The only allowed pause. A lead records it as a decision with the subject `merge-order:<held-node>:after:<lead-node>` (`fno inbox decide "merge-order:x-5474:after:x-7979" "<lead-node> merges first"`), and the ladder waits while the lead node is not done.
-4. **Escalate.** After 3 nudges with no activity, one operator question is filed on the marker `pr-nudge:` and the ladder waits for activity.
+3. **Pause.** A live merge order holds the session. The only allowed pause. A lead records it with `fno inbox decide "merge-order:<held-node>:after:<lead-node>" "<lead-node> merges first"`. The ladder waits while the lead node is not done.
+4. **Escalate.** After 3 nudges with no activity, one operator question is filed on the marker `pr-nudge:`. The ladder then waits for activity.
 5. **Mail.** A live session gets `fno agents mail send <full-session-id> "continue: PR #<N> on node <node> is open and not merged. Drive it to merge. ..."`.
 6. **Resume.** A session with no live process gets `fno agents resume <full-session-id> --message "<text>"`, which relaunches the same conversation under its full session id.
 
-The message carries the stdout line of `fno do pr status <N>`, so the session sees the verdict without a round trip. Events: `pr_nudge_sent`, `pr_nudge_escalated`, `pr_nudge_paused`. State is one file per session under `~/.fno/pr-nudge/`. The ladder fires on the daemon arm only; `fno agents reap --dry-run` prints its plan as `would nudge <id> (<action>)` and takes no effect.
+The message carries the stdout line of `fno do pr status <N>`, so the session sees the verdict without a round trip. Events: `pr_nudge_sent`, `pr_nudge_escalated`, `pr_nudge_paused`. State is one file per session under `~/.fno/pr-nudge/`. The ladder fires on the daemon arm only. `fno agents reap --dry-run` prints its plan as `would nudge <id> (<action>)` and takes no effect.
 
 ### open do row on done node
 
