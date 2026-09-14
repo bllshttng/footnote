@@ -93,7 +93,7 @@ Four facts free an open-node row anyway (`gc.rs:106-112`):
 - The node sits parked at `deferred` or `idea` (`gc.rs:128`).
 - The node recorded merge status reads `merged`.
 
-Each released row falls to the same quiet gate a done node takes, so the transcript still decides.
+Each released row falls to the same quiet gate a done node takes, so the transcript still decides. A planner row never takes these four releases. It never keeps under open work while it carries assignments: its own reason names the planning lane (`gc.rs:287-310`).
 
 ### open do row on done node
 
@@ -105,9 +105,19 @@ The real run carries its own cure. The settle pass fills stale open do rows on d
 
 Never hand-close the node to clear this line. That hides the obligation and falsifies the record.
 
-### planning assignment never closed by this session
+### planning assignment not finished by this session
 
-The row is a planner. Every node it was assigned reached a planning-complete status, but this session's own blueprint or think row on the node carries no `ended_at` (`gc.rs:157-161`). The completion belongs to an earlier assignment, so this quiet replanning worker keeps its row (`gc.rs:264-283`).
+The line reads `kept {id} (planning assignment not finished by this session: {node})`. The row is a planner, the node sits planning-complete, and the session holds neither finished marker.
+
+Marker one: the session's own blueprint or think row on the node carries a non-empty `ended_at` (`gc.rs:287-310`).
+
+Marker two: the session wrote the node's plan. The node's `plan_path` names a file that exists, and no other planner's row on the node started earlier (`gc_sweep.rs:645-682`).
+
+A finished planner retires once its transcript is quiet for 1200 s, not the default grace (`gc.rs:140`).
+
+A planner with neither marker keeps its row, and the hold ages. Past `agents.hold_escalate_after_s` the line names the cure: `fno agents reap --release <row>` (`gc_sweep.rs:1881-1897`).
+
+The retirement basis names the marker that fired: `planning finished on {node}: closed by this session`, `planning finished on {node}: plan written`, or `planning finished on {node}: released` (`gc_sweep.rs:2224-2231`).
 
 ### live descendant
 
@@ -207,7 +217,7 @@ Every keep and hold reason from the sections above, one row each.
 | `kept {id} (not a spawn row: {why})` | Wait. This one is permanent. | The line prints `origin adopted` or `no origin recorded`. |
 | `kept {id} (open work: {node} {status}; read via {reader})` | Wait for the node to ship. Never close the node by hand. | Run `fno backlog get <node>` and read `status`. |
 | `kept {id} (open do row on done node: {node})` | Wait. A real run settles it. Never close the node. | Run `fno backlog get <node>` and read `status`. |
-| `kept {id} (planning assignment never closed by this session: {node})` | Wait for the session to close its own assignment. | The line names the node. |
+| `kept {id} (planning assignment not finished by this session: {node})` | Wait up to 20 quiet minutes, or rule with `fno agents reap --release <row>` once escalated. | The line names the node and the hold age. |
 | `kept {id} (live descendant: {child})` | Wait for the child row to go, unless the parent's roster state reads `done`, `stopped` or `failed`. | The same report carries the child line. |
 | `kept {id} (active: transcript written {age}s ago)` | Wait past the grace window. A terminal harness state or a dead pid retires the row early. | Run the dry run again. Read the new age. |
 | `kept {id} (transcript unresolved: absence is not quiet)` | Diagnose one of the four causes above. | Run `fno agents list`. Rerun the dry run. Search the store roots. |
