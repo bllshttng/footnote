@@ -963,12 +963,31 @@ pub(crate) fn read_graph_node_states(
 /// under `spawn_blocking`), and a fresh thread is legal in both. A runtime
 /// that cannot be built fails closed: the row keeps under `stop_refused`.
 pub(crate) fn stop_row_process(home: &AgentsHome, e: &state::RegistryEntry) -> bool {
-    // A claude row owns no worker socket, so the socket probe below reads
-    // "down" instantly and the registry row would drop while the claude
-    // daemon still holds the session - the adopt-then-rm recovery the
-    // operator ran 50 times. Stop through `claude stop` instead.
-    if e.harness_name() == "claude" {
+    stop_row_process_with(home, e, &crate::pane_stop::run_mux_pane_kill)
+}
+
+/// The injectable body of [`stop_row_process`]: `kill` is the same mux
+/// pane kill seam `fno agents rm` runs, so a test stages its answers.
+pub(crate) fn stop_row_process_with(
+    home: &AgentsHome,
+    e: &state::RegistryEntry,
+    kill: &dyn Fn(&str, u64) -> Result<bool, String>,
+) -> bool {
+    // Law d-81c6da7e: only a claude background thread stops before its
+    // removal (and only `rm` composes that stop now). A claude pane or
+    // headless row ends like any other row. A claude row owns no worker
+    // socket, so without the claude arm the socket probe below reads "down"
+    // instantly and the registry row would drop while the claude daemon
+    // still holds the session - the adopt-then-rm recovery the operator ran
+    // 50 times.
+    if crate::gc_native::stop_precedes_removal(e) {
         return stop_claude_confirmed(e);
+    }
+    // A row with a mux ref: the pane kill IS the process end - the same
+    // seam rm runs. Ok(_) (killed, or already absent) confirms; an error
+    // holds the row for the next pass.
+    if let Some(mux) = e.mux.as_ref() {
+        return mux_pane_kill_stop(mux, kill).confirmed;
     }
     let home = home.clone();
     let entry = e.clone();
@@ -981,6 +1000,30 @@ pub(crate) fn stop_row_process(home: &AgentsHome, e: &state::RegistryEntry) -> b
     })
     .join()
     .unwrap_or(false)
+}
+
+/// One mux-ref row's process end through the pane kill seam. The detail is
+/// the measurement: `killed`, `already absent`, or the kill's error - so a
+/// receipt (and rm's hold) names what actually happened, never a bare bool.
+pub(crate) fn mux_pane_kill_stop(
+    mux: &state::MuxRef,
+    kill: &dyn Fn(&str, u64) -> Result<bool, String>,
+) -> crate::pane_stop::PaneStop {
+    let (session, pane_id) = (mux.session.clone(), mux.pane_id);
+    match kill(&session, pane_id) {
+        Ok(true) => crate::pane_stop::PaneStop {
+            confirmed: true,
+            detail: format!("mux pane {session}:{pane_id} killed"),
+        },
+        Ok(false) => crate::pane_stop::PaneStop {
+            confirmed: true,
+            detail: format!("mux pane {session}:{pane_id} already absent"),
+        },
+        Err(reason) => crate::pane_stop::PaneStop {
+            confirmed: false,
+            detail: format!("mux pane {session}:{pane_id} kill failed: {reason}"),
+        },
+    }
 }
 
 /// Positive death evidence for a claude row, read off the `claude agents
@@ -1090,9 +1133,11 @@ fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
 /// checked-in probe (`scripts/probes/reap-receipt-stop-probe.py`) verifies
 /// that pid reads gone.
 fn stop_row_detail(e: &state::RegistryEntry) -> Option<String> {
-    if e.harness_name() == "claude" {
+    if crate::gc_native::stop_precedes_removal(e) {
         let sid = e.harness_session_id.as_deref()?;
         Some(format!("claude stop ran; session {sid}"))
+    } else if let Some(mux) = e.mux.as_ref() {
+        Some(format!("mux pane {}:{} killed", mux.session, mux.pane_id))
     } else {
         let pid = e.pid.map(|p| format!("; pid {p}")).unwrap_or_default();
         Some(format!("worker socket stop ran{pid}"))
@@ -1968,6 +2013,7 @@ pub(crate) fn run_with_release(
             stop_observation,
             released,
             &stop_on_death,
+            &crate::pane_stop::run_mux_pane_kill,
             surface_removal,
             &mut receipts,
         ) {
@@ -2263,6 +2309,7 @@ pub(crate) fn stage_session_retirement(
     stop_observation: StopObservation,
     session_released: bool,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
+    mux_kill: &dyn Fn(&str, u64) -> Result<bool, String>,
     surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
 ) -> Result<StagedRetirement, RetireRefusal> {
@@ -2340,11 +2387,16 @@ pub(crate) fn stage_session_retirement(
     // Effect 1: the confirmed stop of the held process. Pane-substrate rows
     // stop through the pid-proving helper (x-1b90 change 1): the roster and
     // the worker socket never held the pane, so both today's arms confirm a
-    // stop that never happened. The detail is the receipt's measurement, so
-    // the routing decision lives here where the effect is built - never in
-    // the seam closure, whose bool answer cannot carry it.
+    // stop that never happened. A mux ref without a pane substrate takes
+    // the pane kill rm itself runs (law d-81c6da7e): the bool seam cannot
+    // carry its reason, so the kill runs HERE and the error becomes the
+    // hold detail. The detail is the receipt's measurement, so the routing
+    // decision lives here where the effect is built - never in the seam
+    // closure, whose bool answer cannot carry it.
     let pane_stop = if e.substrate.as_deref() == Some("pane") {
         Some(crate::pane_stop::stop_pane_process_confirmed(e))
+    } else if let Some(mux) = e.mux.as_ref() {
+        Some(mux_pane_kill_stop(mux, mux_kill))
     } else {
         None
     };

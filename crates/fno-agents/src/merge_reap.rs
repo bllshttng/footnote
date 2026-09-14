@@ -272,14 +272,12 @@ fn stop_harness_confirmed(
     entry: &state::RegistryEntry,
     agents: &crate::claude_roster::ClaudeAgentsSnapshot,
 ) -> Result<String, &'static str> {
-    // A mux row's pane death IS the harness stop; rm handles it.
-    if entry.mux.is_some() {
-        return Ok(String::new());
-    }
     // Positive death evidence first: a finished claude agent never leaves the
     // roster, so its stop can never be confirmed by absence. The evidence
-    // instrument is claude's roster, so only a claude row consults it.
-    if entry.harness_name() == "claude"
+    // instrument is claude's roster, so only a claude background thread
+    // consults it - every other row's process is ended by the shared stage
+    // below (law d-81c6da7e).
+    if crate::gc_native::stop_precedes_removal(entry)
         && crate::gc_sweep::claude_death_reason(entry, agents).is_some()
     {
         return Ok(row_stop_short(entry).unwrap_or_default());
@@ -530,6 +528,7 @@ fn run_request(
             crate::gc_sweep::StopObservation::Unproven,
             false,
             &stop,
+            &crate::pane_stop::run_mux_pane_kill,
             seams.surface_removal,
             &mut receipts,
         ) {

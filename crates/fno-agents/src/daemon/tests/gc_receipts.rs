@@ -4370,3 +4370,154 @@ fn dry_run_promises_only_provable_rows() {
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+// == x-a33f: the stage ends a row's process the way rm does ==============
+
+fn staged_row(name: &str, harness: &str) -> state::RegistryEntry {
+    let mut e = ask_row(name, None);
+    e.short_id = format!("sid{name}");
+    e.harness = Some(harness.into());
+    e.harness_session_id = Some(format!("sess-{name}"));
+    e.origin = Some("spawn".into());
+    e
+}
+
+fn stage_direct(
+    home: &AgentsHome,
+    e: &state::RegistryEntry,
+    stop: &dyn Fn(&state::RegistryEntry) -> bool,
+    kill: &dyn Fn(&str, u64) -> Result<bool, String>,
+) -> Result<crate::gc_sweep::StagedRetirement, crate::gc_sweep::RetireRefusal> {
+    let mut receipts = std::collections::BTreeMap::new();
+    crate::gc_sweep::stage_session_retirement(
+        home,
+        e,
+        None,
+        crate::gc_sweep::RetireMode::Apply,
+        crate::gc_sweep::StopObservation::Unproven,
+        false,
+        stop,
+        kill,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &mut receipts,
+    )
+}
+
+fn sole_receipt(home: &AgentsHome) -> crate::receipt::ReapReceipt {
+    let dir = home.root().join("reap-receipts");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .expect("the receipt dir exists")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(names.len(), 1, "exactly one receipt: {names:?}");
+    let path = names.remove(0);
+    crate::receipt::read_reap_receipt(&path).expect("the staged receipt parses")
+}
+
+/// AC7-HP: a finished claude row with a mux ref and no pane substrate takes
+/// the pane kill (no claude stop), and the native-stop effect names the
+/// pane it killed.
+#[test]
+fn ac7_stage_kills_the_mux_pane_and_names_it_in_the_stop_effect() {
+    let home = tmp_home("gc-ac7-hp");
+    let mut row = staged_row("muxrow", "claude");
+    row.mux = Some(state::MuxRef {
+        session: "main".into(),
+        pane_id: 1,
+    });
+    let kills = std::sync::Mutex::new(Vec::new());
+    let staged = stage_direct(
+        &home,
+        &row,
+        &|_| panic!("a mux row must not reach the stop seam"),
+        &|session, pane_id| {
+            kills.lock().unwrap().push((session.to_string(), pane_id));
+            Ok(true)
+        },
+    );
+    assert!(
+        matches!(staged, Ok(crate::gc_sweep::StagedRetirement::Retired)),
+        "stage did not retire",
+    );
+    assert_eq!(kills.into_inner().unwrap(), vec![("main".to_string(), 1)]);
+    let receipt = sole_receipt(&home);
+    let stop_effect = receipt
+        .effects
+        .iter()
+        .find(|eff| eff.op == "native-stop")
+        .expect("the stop effect is recorded");
+    assert_eq!(stop_effect.outcome, "confirmed-removed");
+    assert_eq!(
+        stop_effect.detail.as_deref(),
+        Some("mux pane main:1 killed")
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// AC7-ERR: a failing pane kill holds the row under `stop refused`, and the
+/// hold detail quotes the kill's reason.
+#[test]
+fn ac7_stage_holds_the_row_when_the_pane_kill_fails() {
+    let home = tmp_home("gc-ac7-err");
+    let mut row = staged_row("muxrow", "codex");
+    row.mux = Some(state::MuxRef {
+        session: "main".into(),
+        pane_id: 2,
+    });
+    let staged = stage_direct(
+        &home,
+        &row,
+        &|_| panic!("a mux row must not reach the stop seam"),
+        &|_, _| Err("pane server unreachable".into()),
+    );
+    match staged {
+        Err(crate::gc_sweep::RetireRefusal::StopRefused(reason)) => {
+            assert!(reason.contains("mux pane main:2 kill failed"), "{reason}");
+            assert!(reason.contains("pane server unreachable"), "{reason}");
+        }
+        other => match other {
+            Ok(_) => panic!("expected a stop refusal, got Retired"),
+            Err(crate::gc_sweep::RetireRefusal::StopRefused(r)) => {
+                panic!("wrong stop refusal: {r}")
+            }
+            Err(_) => panic!("expected a stop refusal, got a different refusal"),
+        },
+    }
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// AC8-HP: a finished claude background thread still stops first, and the
+/// stop effect names the session before the active-surface removal runs.
+#[test]
+fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
+    let home = tmp_home("gc-ac8-hp");
+    let row = staged_row("bgrow", "claude");
+    let stops = std::sync::atomic::AtomicUsize::new(0);
+    let staged = stage_direct(
+        &home,
+        &row,
+        &|_| {
+            stops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        },
+        &|_, _| panic!("a background thread has no pane to kill"),
+    );
+    assert!(
+        matches!(staged, Ok(crate::gc_sweep::StagedRetirement::Retired)),
+        "stage did not retire",
+    );
+    assert_eq!(stops.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let receipt = sole_receipt(&home);
+    let stop_effect = receipt
+        .effects
+        .iter()
+        .find(|eff| eff.op == "native-stop")
+        .expect("the stop effect is recorded");
+    assert_eq!(stop_effect.outcome, "confirmed-removed");
+    assert_eq!(
+        stop_effect.detail.as_deref(),
+        Some("claude stop ran; session sess-bgrow")
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}

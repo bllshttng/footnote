@@ -18,7 +18,7 @@ Receipts live in `<agents home>/reap-receipts/`, one per retired session, keyed 
 
 | Op | What it proves |
 |---|---|
-| `native-stop` | the held process was stopped, or confirmed already gone |
+| `native-stop` | the held process was stopped, or confirmed already gone: a claude background thread gets `claude stop`, and every other row gets the removal's own process end (pane stop, mux pane kill, or worker socket stop) |
 | `active-surface` | the harness's own listing no longer carries the session |
 | `resume-evidence` | the receipt names resume tokens and a transcript that exists on disk |
 
