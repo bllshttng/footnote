@@ -1209,7 +1209,8 @@ mod tests {
     // AC1-HP
     #[test]
     fn status_idea_on_a_superseded_plan_less_node_clears_the_chain_in_one_write() {
-        let dir = tempfile::tempdir().unwrap();
+        // Named: the TempDir must outlive the graph reads inside the test.
+        let _dir = tempfile::tempdir().unwrap();
         let replacer = node("x-aaaa", serde_json::json!({ "supersedes": ["x-3873"] }));
         let victim = node(
             "x-3873",
