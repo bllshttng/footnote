@@ -64,7 +64,7 @@ from fno.mail.receipts import (
     _warn_deferred,
     demotion_receipt,
     durable_leg_story,
-    durable_window_tail,
+    durable_window_clause,
     print_project_demotion,
 )
 from fno.inbox.store import (
@@ -2577,7 +2577,7 @@ def _name_lane_send(
         )
         if reason == "live-miss":
             reason = f"live-miss{_live_miss_age_suffix(recipient)}"
-    window_tail = durable_window_tail(owner.value)
+    window_tail = durable_window_clause(owner.value)
     hint = ""
     if hold_note:
         hint = f" `fno agents mail withdraw {msg_id}` retracts it."
@@ -4052,7 +4052,7 @@ def cmd_send(
             }))
         else:
             verb = "appended (durable) to" if res.appended else "queued (durable) for"
-            window_tail = durable_window_tail(DurableOwner.INBOX_DRAIN.value)
+            window_tail = durable_window_clause(DurableOwner.INBOX_DRAIN.value)
             print(f"{res.msg_id} {verb} {recipient} [param-forced: --kind {kind}]{window_tail}")
         return
 

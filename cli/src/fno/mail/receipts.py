@@ -59,11 +59,11 @@ def _is_live_lane_failure(reason: Optional[str]) -> bool:
 
 
 def durable_window_clause(owner: Optional[str]) -> str:
-    """The drain-window clause every ``queued (durable)`` receipt carries (x-1602).
+    """The drain-window tail every ``queued (durable)`` receipt carries (x-1602).
 
     ``queued (durable)`` says nothing about time, so "not yet" and "never"
-    read identically. The clause quotes the owner-class horizon the stranded
-    sweep enforces (one bound, one table); an unknown class prints no window,
+    read identically. The tail quotes the owner-class horizon the stranded
+    sweep enforces (one bound, one table); an unknown class prints nothing,
     since a guessed constant is this defect in friendlier dress.
     """
     from fno.inbox.store import owner_ttl_hours
@@ -75,24 +75,15 @@ def durable_window_clause(owner: Optional[str]) -> str:
         window = f"~{round(hours * 60)}m"
     else:
         window = f"~{round(hours)}h"
-    return f"typically drains within {window} - an empty unread before then is not a failure"
-
-
-def durable_window_tail(owner: Optional[str]) -> str:
-    """The clause as a receipt-line tail (`` - <clause>``), or empty."""
-    clause = durable_window_clause(owner)
-    return f" - {clause}" if clause else ""
+    return f" - typically drains within {window} - an empty unread before then is not a failure"
 
 
 def durable_leg_story(reason: Optional[str]) -> Optional[str]:
-    """Positive stdout wording for a live-lane failure demotion (x-1602).
-
-    A live-inject miss plus a durable success is a normal outcome; rendering
-    the raw token (``io-error``, ``attach-failed``, ...) put an error string
-    inside a success receipt, which is what read as a broken lane. Returns
-    None when the reason is not a live-lane failure; the token stays
-    diagnostic (stderr advisory, bus record).
-    """
+    """Positive stdout wording for a live-lane failure demotion (x-1602): a
+    live-inject miss plus a durable success is a normal outcome, and the raw
+    token (``io-error``, ``attach-failed``, ...) rendered an error string
+    inside a success receipt. None when the reason is not a live-lane
+    failure; the token stays diagnostic (stderr advisory, bus record)."""
     if not _is_live_lane_failure(reason):
         return None
     return "live leg unconfirmed; durable leg holds"
@@ -107,12 +98,7 @@ def demotion_receipt(
     project: Optional[str] = None,
     age_target: Optional[str] = None,
 ) -> str:
-    """The stdout line for a durable demotion (x-1904, refined by x-1602).
-
-    A live-lane failure renders as legs, never as an error token; a plain
-    live-miss keeps its transcript-age suffix (``age_target`` names the
-    recipient the miss concerns); the line ends in the drain window."""
-
+    """The stdout line for a durable demotion (x-1904, refined by x-1602)."""
     token = durable_leg_story(reason)
     if token is None:
         token = reason or "live-miss"
@@ -121,7 +107,7 @@ def demotion_receipt(
     where = f" for {target}" if target else ""
     if project:
         where += f" [project {project}]"
-    return f"{msg_id} queued (durable){where} [{token}]" + durable_window_tail(owner)
+    return f"{msg_id} queued (durable){where} [{token}]" + durable_window_clause(owner)
 
 
 def print_project_demotion(result, to_project: str) -> None:
@@ -145,7 +131,7 @@ def print_project_demotion(result, to_project: str) -> None:
                 f"[project {to_project}] "
                 f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
                 + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
-                + durable_window_tail(result.durable_owner)
+                + durable_window_clause(result.durable_owner)
             )
         else:
             _warn_deferred(result.recipient, reason=result.reason)
@@ -161,7 +147,7 @@ def print_project_demotion(result, to_project: str) -> None:
     print(
         f"{result.msg_id} queued (durable) for project {to_project} "
         f"[param-forced: --to-project]"
-        + durable_window_tail(DurableOwner.INBOX_DRAIN.value)
+        + durable_window_clause(DurableOwner.INBOX_DRAIN.value)
     )
 
 

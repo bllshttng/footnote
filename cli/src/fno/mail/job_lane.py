@@ -39,7 +39,7 @@ def job_lane_send(
     from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
     from fno.mail.envelope import wrap_fno_mail
     from fno.mail.job_address import resolve_job_address
-    from fno.mail.receipts import durable_window_tail
+    from fno.mail.receipts import durable_window_clause
 
     job = resolve_job_address(token)
     if job is None:
@@ -160,7 +160,7 @@ def job_lane_send(
         print(
             f"{th.thread_id} queued (durable) for {recipient} "
             f"[bus-only: a holder drains it by policy]{holder_tag}"
-            + durable_window_tail(owner.value)
+            + durable_window_clause(owner.value)
         )
         return
     print(f"mail: {recipient} live-inject missed; durable until a holder drains",
@@ -169,5 +169,5 @@ def job_lane_send(
     print(
         f"{th.thread_id} queued (durable) for {recipient} "
         f"[job-live-miss{suffix}]{holder_tag}"
-        + durable_window_tail(owner.value)
+        + durable_window_clause(owner.value)
     )
