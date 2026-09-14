@@ -2374,80 +2374,68 @@ def test_stable_tab_id_refuses_ordinal_before_spawn(tmp_path: Path, monkeypatch)
     assert runner.calls == []
 
 
-@pytest.mark.parametrize("existing_count", [0, 1, 2, 3])
-def test_bounded_placement_selects_existing_tab_below_four(
-    tmp_path: Path, monkeypatch, existing_count: int
+def test_bounded_placement_sends_fit_and_skips_tab_reads(
+    tmp_path: Path, monkeypatch
 ) -> None:
+    # AC6-HP: with no explicit geometry the bounded lane sends --fit and
+    # never asks the server about tabs - the server picks the tab now.
     from fno.agents.mux_spawn import dispatch_spawn_bounded_pane
 
     use_tmpdir(monkeypatch, tmp_path)
-    existing = list(range(20, 20 + existing_count))
     post_panes = [
-        {"pane_id": pane, "squad_id": 1, "tab_id": 12, "cwd": "/w", "child_pid": 4000 + pane}
-        for pane in existing
-    ] + [{"pane_id": 7, "squad_id": 1, "tab_id": 12, "cwd": str(tmp_path), "child_pid": 4242}]
-    runner = FakeRunner(
-        tab_stdout=json.dumps([{"tab_id": 12, "pane_ids": existing}]),
-        ls_stdout=json.dumps(post_panes),
-    )
+        {"pane_id": 7, "squad_id": 1, "tab_id": 12, "cwd": str(tmp_path), "child_pid": 4242}
+    ]
+    runner = FakeRunner(ls_stdout=json.dumps(post_panes))
     harness = "claude"
 
     dispatch_spawn_bounded_pane(
-        name=f"bounded-{existing_count}", message="hello", provider=harness,
-        cwd=tmp_path, placement_holder=f"test:{existing_count}",
+        name="bounded-fit", message="hello", provider=harness,
+        cwd=tmp_path, placement_holder="test:fit",
         claims_root=tmp_path, runner=runner,
     )
 
     run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
-    assert run_call[run_call.index("--tab") + 1] == "id:12"
+    assert "--fit" in run_call[: run_call.index("--")]
+    assert "--tab" not in run_call[: run_call.index("--")]
+    assert not any(call[1:4] == ["mux", "tab", "ls"] for call in runner.calls)
     assert not any(call[1:4] == ["mux", "tab", "create"] for call in runner.calls)
 
 
-def test_bounded_placement_excludes_four_pane_tab(tmp_path: Path, monkeypatch) -> None:
-    from fno.agents.mux_spawn import dispatch_spawn_bounded_pane
-
-    use_tmpdir(monkeypatch, tmp_path)
-    runner = FakeRunner(
-        tab_stdout=json.dumps([
-            {"tab_id": 12, "pane_ids": [1, 2, 3, 4]},
-            {"tab_id": 13, "pane_ids": [5]},
-        ]),
-        ls_stdout=json.dumps([
-            {"pane_id": 5, "squad_id": 1, "tab_id": 13, "cwd": "/w", "child_pid": 4005},
-            {"pane_id": 7, "squad_id": 1, "tab_id": 13, "cwd": str(tmp_path), "child_pid": 4242},
-        ]),
-    )
-    harness = "claude"
-    dispatch_spawn_bounded_pane(
-        name="bounded-open", message="hello", provider=harness, cwd=tmp_path,
-        placement_holder="test:open", claims_root=tmp_path, runner=runner,
-    )
-    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
-    assert run_call[run_call.index("--tab") + 1] == "id:13"
-
-
-def test_bounded_placement_creates_tab_when_every_tab_is_full(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize(
+    "geometry", ["split", "at", "tab", "tab_id"]
+)
+def test_bounded_placement_with_geometry_sends_no_fit(
+    tmp_path: Path, monkeypatch, geometry: str
 ) -> None:
+    # AC7-EDGE: an explicit placement directive stays caller-chosen - no
+    # --fit, and a pane-group --tab keeps its new-tab-then-join path.
     from fno.agents.mux_spawn import dispatch_spawn_bounded_pane
 
     use_tmpdir(monkeypatch, tmp_path)
+    post_panes = [
+        {"pane_id": 7, "squad_id": 1, "tab_id": 12, "cwd": str(tmp_path), "child_pid": 4242}
+    ]
     runner = FakeRunner(
-        tab_stdout=json.dumps([{"tab_id": 12, "pane_ids": [1, 2, 3, 4]}]),
-        tab_create_stdout=json.dumps({"tab_id": 14}),
-        ls_stdout=json.dumps([
-            {"pane_id": 8, "squad_id": 1, "tab_id": 14, "cwd": "/w", "child_pid": 4200},
-            {"pane_id": 7, "squad_id": 1, "tab_id": 14, "cwd": str(tmp_path), "child_pid": 4242},
-        ]),
+        ls_stdout=json.dumps(post_panes),
+        tab_stdout=json.dumps([{"tab_id": 12, "pane_ids": []}]),
     )
     harness = "claude"
+    directive = {
+        "split": "down",
+        "at": "3",
+        "tab": "workers",
+        "tab_id": "id:12",
+    }[geometry]
+
     dispatch_spawn_bounded_pane(
-        name="bounded-new", message="hello", provider=harness, cwd=tmp_path,
-        placement_holder="test:new", claims_root=tmp_path, runner=runner,
+        name=f"bounded-geo-{geometry}", message="hello", provider=harness,
+        cwd=tmp_path, placement_holder=f"test:geo-{geometry}",
+        claims_root=tmp_path, runner=runner,
+        **{geometry: directive},
     )
-    assert any(call[1:4] == ["mux", "tab", "create"] for call in runner.calls)
+
     run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
-    assert run_call[run_call.index("--tab") + 1] == "id:14"
+    assert "--fit" not in run_call
 
 
 def test_bounded_placement_lease_loser_spawns_nothing(tmp_path: Path, monkeypatch) -> None:
@@ -2470,7 +2458,6 @@ def test_bounded_placement_lease_loser_spawns_nothing(tmp_path: Path, monkeypatc
     ("listing", "reason"),
     [
         ([{"pane_id": 7, "squad_id": 1, "tab_id": 13}], "landed in tab 13, expected tab 12"),
-        ([{"pane_id": pane, "squad_id": 1, "tab_id": 12} for pane in range(3, 8)], "fifth pane"),
     ],
 )
 def test_bounded_post_spawn_failure_reaps_pane_and_writes_no_row(
