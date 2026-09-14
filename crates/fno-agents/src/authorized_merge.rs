@@ -219,6 +219,12 @@ pub struct PrFacts {
     pub head_sha: String,
     pub head_ref: String,
     pub base_ref: String,
+    /// The PR page URL, as the payload carried it.
+    pub url: String,
+    /// The PR body, the third binding key's source. `None` only when the
+    /// payload carried no body key at all, which is how an out-of-date
+    /// deployed `fno` looks; a null body reads as an empty string.
+    pub body: Option<String>,
     /// `OPEN`, `MERGED`, or `CLOSED`.
     pub state: String,
     /// GitHub's auto-merge queue already owns this PR. Rides the same pulls
@@ -738,6 +744,16 @@ pub fn parse_pr_facts(payload: &Value) -> Result<PrFacts, String> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
+        url: payload
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        // The body rides this same payload. `None` means the key was absent:
+        // an out-of-date deployed `fno`, not a bodyless PR.
+        body: payload
+            .get("body")
+            .map(|v| v.as_str().unwrap_or("").to_string()),
         state: payload
             .get("state")
             .and_then(Value::as_str)
@@ -950,6 +966,8 @@ mod tests {
             head_sha: "abc123".to_string(),
             head_ref: "feature/x".to_string(),
             base_ref: "main".to_string(),
+            url: "https://github.com/o/r/pull/7".to_string(),
+            body: Some("Backlog-Closure: x-0001\n".to_string()),
             state: "OPEN".to_string(),
             armed: false,
         }
