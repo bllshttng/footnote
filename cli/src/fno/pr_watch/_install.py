@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -259,28 +260,53 @@ def _run_launchctl_timed(*args: str, timeout_s: float = _LAUNCHCTL_TIMEOUT_S) ->
         return -1, False
 
 
-def _tick_in_flight() -> Optional[int]:
-    """PID of a live, young ``pr-watch:tick`` claim holder, else None. Under one
-    StartInterval (600s) is a tick mid-flight; older is a hung tick and bounces.
-    Contract: docs/architecture/pr-watch-merge-phase.md."""
-    try:
-        from fno.claims.core import claim_status
+def _stdout_of(argv: list[str]) -> str:
+    """stdout of ``argv``, or "" when the command is missing, hangs, or fails.
 
-        info = claim_status("pr-watch:tick")
-    except Exception:  # noqa: BLE001 - an unread claim never blocks a cure
-        return None
-    if info.get("state") != "live":
-        return None
-    acquired = info.get("acquired_at")
-    if not acquired:
-        return None
+    An unread answer never blocks a cure (fail-open, like the claim read it
+    replaced).
+    """
     try:
-        if int(time.time() * 1000) - int(acquired) >= 600_000:
-            return None
-    except (TypeError, ValueError):
+        result = subprocess.run(
+            argv, capture_output=True, text=True, check=False,
+            timeout=_LAUNCHCTL_TIMEOUT_S,
+        )
+        return result.stdout or ""
+    except Exception:  # noqa: BLE001 - OSError or timeout reads as no tick
+        return ""
+
+
+# `ps -o etime=` prints [[dd-]hh:]mm:ss.
+_ETIME_RE = re.compile(r"^(?:(\d+)-)?(?:(\d+):)?(\d{1,2}):(\d{2})$")
+
+
+def _etime_seconds(etime: str) -> Optional[int]:
+    """Parse ``[[dd-]hh:]mm:ss`` from ``ps -o etime=``; None on anything else."""
+    m = _ETIME_RE.match(etime.strip())
+    if m is None:
         return None
-    pid = info.get("pid")
-    return pid if isinstance(pid, int) else 0
+    dd = int(m.group(1) or 0)
+    hh = int(m.group(2) or 0)
+    return ((dd * 24 + hh) * 60 + int(m.group(3))) * 60 + int(m.group(4))
+
+
+def _tick_in_flight(run: Optional[Callable[[list[str]], str]] = None) -> Optional[int]:
+    """PID of a tick process younger than one StartInterval (600s), else None.
+
+    launchd owns this answer: while a tick runs, ``launchctl list`` names the
+    service's PID and ``ps -o etime=`` ages it. The old ``pr-watch:tick`` claim
+    read covered only the sweep phase and routed by cwd, so it read free while
+    a tick ran in merge, king_wake or recovery (x-09d8). A live tick older than
+    one StartInterval is hung and still bounces.
+    Contract: docs/architecture/pr-watch-merge-phase.md.
+    """
+    run = run or _stdout_of
+    m = re.search(r'"PID" = (\d+);', run(["launchctl", "list", _LABEL]))
+    if m is None:
+        return None
+    pid = int(m.group(1))
+    age = _etime_seconds(run(["ps", "-o", "etime=", "-p", str(pid)]))
+    return pid if age is not None and age < 600 else None
 
 
 def bounce(

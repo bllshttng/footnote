@@ -1148,26 +1148,39 @@ def test_bounce_proceeds_when_tick_claim_is_old(tmp_launch_agents, monkeypatch):
     assert [c[0] for c in calls] == ["bootout", "bootstrap", "kickstart"]
 
 
-def test_tick_in_flight_reads_claim_state_and_age(monkeypatch):
-    """Only a LIVE claim younger than 600s counts as in flight; a stale,
-    suspect, or old one never defers the cure."""
-    import time as _time
+def test_tick_in_flight_asks_launchd(monkeypatch):
+    """launchd owns the in-flight answer: a listed PID younger than one
+    StartInterval defers the cure; an old tick, a missing PID line, or an
+    unread launchctl (OSError, timeout) never blocks it."""
+    import subprocess as _subprocess
 
     m = _install()
-    now_ms = int(_time.time() * 1000)
 
-    def _claim(state, acquired=None):
-        monkeypatch.setattr(
-            "fno.claims.core.claim_status",
-            lambda key, **kw: {"key": key, "state": state, "pid": 777,
-                               "acquired_at": acquired},
-        )
-        return m._tick_in_flight()
+    def _world(pid_line: str, etime: str):
+        return lambda argv: pid_line if argv[0] == "launchctl" else etime
 
-    assert _claim("live", now_ms - 30_000) == 777
-    assert _claim("live", now_ms - 900_000) is None  # hung tick: bounce proceeds
-    assert _claim("stale", now_ms - 30_000) is None
-    assert _claim("live", None) is None
+    def probe(pid_line: str, etime: str):
+        return m._tick_in_flight(run=_world(pid_line, etime))
+
+    assert probe('"PID" = 8574;', "02:02") == 8574  # 122s old: in flight
+    assert probe('"PID" = 8574;', "09:59") == 8574  # 599s: still young
+    assert probe('"PID" = 8574;', "10:01") is None  # 601s: hung tick, bounces
+    assert probe('"PID" = 8574;', "1-02:03:04") is None
+    assert probe('"PID" = 8574;', "garbage") is None
+    assert probe("", "02:02") is None  # job not loaded
+
+    def _raise(exc):
+        def _run(*_a, **_kw):
+            raise exc
+
+        return _run
+
+    monkeypatch.setattr(m.subprocess, "run", _raise(OSError("no launchctl")))
+    assert m._tick_in_flight() is None
+    monkeypatch.setattr(
+        m.subprocess, "run", _raise(_subprocess.TimeoutExpired("launchctl", 10))
+    )
+    assert m._tick_in_flight() is None
 
 
 def test_refresh_watcher_rerenders_then_bounces(tmp_launch_agents):
