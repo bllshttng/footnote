@@ -1,8 +1,5 @@
-"""The return contract of :func:`fno.agents.dispatch.dispatch_send`.
-
-Split from dispatch.py (file-budget: that module is shrink-only); dispatch
-re-exports the name so the historical import path keeps working.
-"""
+"""The return contract of :func:`fno.agents.dispatch.dispatch_send`; split from
+dispatch.py (file-budget: shrink-only), which re-exports the name."""
 from __future__ import annotations
 
 from dataclasses import dataclass

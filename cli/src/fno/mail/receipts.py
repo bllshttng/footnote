@@ -113,11 +113,9 @@ def demotion_receipt(
 def print_project_demotion(result, to_project: str) -> None:
     """Stdout receipt(s) for a --to-project send that wrote durable.
 
-    A resolved live peer demoted to durable is addressed to that PEER (the
-    anycast lane reaches the same dispatch_send as the by-name lane, so it
-    carries the same cause); a bus-only peer gets the designed-queue receipt;
-    no peer queues to the project inbox itself. Split from mail.cli
-    (file-budget).
+    A resolved live peer demoted to durable is addressed to that PEER (same
+    dispatch_send as the by-name lane, same cause); a bus-only peer gets the
+    designed-queue receipt; no peer queues to the project inbox itself.
     """
     if result.recipient is not None:
         from fno.agents.dispatch import BUS_ONLY_POLICY
