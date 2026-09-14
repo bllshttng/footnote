@@ -27,6 +27,12 @@ def quiet_budget(monkeypatch):
     fno-agents binary and reads the operator's machine-wide budget. Tests of
     the backoff path re-stub it to True."""
     monkeypatch.setattr(_quota, "backoff_live", lambda: False)
+    # `_secondary_reason()` classifies a verbatim 403 through the REAL
+    # classifier, whose secondary arm now records the refusal fleet-wide;
+    # stubbed here, or every test building that reason opens a live 60s
+    # backoff on the operator's machine-wide budget.
+    monkeypatch.setattr(_quota, "record_refusal", lambda stderr: None)
+    monkeypatch.setattr(_quota, "admit", lambda argv: None)
 
 
 # Verbatim as measured 2026-08-24T01:01:17Z during a live secondary refusal:

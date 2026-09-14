@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 
-from fno.pr import _rest, _status
+import pytest
+
+from fno.pr import _quota, _rest, _status
 from fno.pr._proc import Result
 
 _PULLS = {
@@ -516,7 +518,21 @@ def test_wrapper_warning_on_line_1_is_not_the_quoted_cause():
 # ---- the secondary arm records the refusal in the fleet budget ledger ----
 
 
+@pytest.fixture(autouse=True)
+def quiet_budget(monkeypatch):
+    """Keep every classification test off the real fleet ledger: a test that
+    classifies a verbatim 403 through the REAL chain would open a live 60s
+    backoff on the operator's machine-wide budget. The three door tests below
+    restore the real record_refusal from the import-time capture."""
+    monkeypatch.setattr("fno.pr._quota.record_refusal", lambda text: None)
+    monkeypatch.setattr("fno.pr._quota.admit", lambda argv: None)
+
+
+_REAL_RECORD_REFUSAL = _quota.record_refusal
+
+
 def test_a_secondary_classification_records_the_refusal_once(monkeypatch):
+    monkeypatch.setattr("fno.pr._quota.record_refusal", _REAL_RECORD_REFUSAL)
     ops = []
     monkeypatch.setattr(
         "fno.pr._quota._gh_budget",

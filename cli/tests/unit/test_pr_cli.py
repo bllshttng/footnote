@@ -405,6 +405,10 @@ def _fake_gh(tmp_path: Path, monkeypatch) -> Path:
     gh.chmod(0o755)
     monkeypatch.setattr(_quota, "resolve_real_gh", lambda: str(gh))
     monkeypatch.setattr(_quota, "quota_lock_path", lambda: tmp_path / "quota.lock")
+    # The full exec path now admits against the real fleet ledger; keep the
+    # hermetic door shut (admit -> None, refusals recorded nowhere).
+    monkeypatch.setattr(_quota, "admit", lambda argv: None)
+    monkeypatch.setattr(_quota, "record_refusal", lambda stderr: None)
     return rec
 
 
