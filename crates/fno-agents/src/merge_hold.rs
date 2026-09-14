@@ -16,7 +16,9 @@ use crate::graph_get::{default_graph_path, find_entry};
 use crate::graph_store;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Run one hold op from an `authorized-merge` payload. Always answers with a
 /// JSON receipt (`outcome`, `exit_code` inside); the verb's exit status
@@ -59,6 +61,50 @@ pub fn run(op: &str, payload: &Value) -> String {
 /// refusal, 1 write/readback failure) + `detail` on a refusal.
 fn receipt(outcome: &str, code: i32, detail: impl Into<String>) -> Value {
     json!({"outcome": outcome, "exit_code": code, "detail": detail.into()})
+}
+
+/// How long a hold op waits for another hold op on the same plan.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Exclusive flock serializing concurrent hold ops on one plan: the
+/// read-modify-write is not atomic as a whole, and a crown setting while a
+/// worker releases would silently drop one ruling.
+struct PlanLock {
+    /// Held for the lock's lifetime; the flock dies with this handle.
+    _file: File,
+}
+
+impl PlanLock {
+    fn acquire(plan: &Path) -> Result<PlanLock, Value> {
+        let lock_path = PathBuf::from(format!("{}.lock", plan.display()));
+        if let Some(parent) = lock_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| receipt("error", 2, format!("hold lock open failed: {e}")))?;
+        let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(PlanLock { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(receipt(
+                            "error",
+                            2,
+                            format!("hold lock timeout after 10s at {}", lock_path.display()),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(receipt("error", 2, format!("hold lock failed: {e}"))),
+            }
+        }
+    }
 }
 
 fn resolve_plan(entry: &Value, node_id: &str) -> Result<std::path::PathBuf, Value> {
@@ -241,6 +287,10 @@ fn set_hold(entry: &Value, node_id: &str, payload: &Value) -> String {
         Ok(p) => p,
         Err(err) => return err.to_string(),
     };
+    let _lock = match PlanLock::acquire(&probe) {
+        Ok(l) => l,
+        Err(err) => return err.to_string(),
+    };
     if !matches!(dispatch_hold(entry), HoldState::Absent) {
         let (r, w) = existing_hold(&probe);
         return receipt(
@@ -313,6 +363,10 @@ fn release_hold(entry: &Value, node_id: &str, payload: &Value, entries: &[Value]
     }
     let probe = match resolve_plan(entry, node_id) {
         Ok(p) => p,
+        Err(err) => return err.to_string(),
+    };
+    let _lock = match PlanLock::acquire(&probe) {
+        Ok(l) => l,
         Err(err) => return err.to_string(),
     };
     if matches!(dispatch_hold(entry), HoldState::Absent) {
