@@ -1434,7 +1434,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             // lives in the crate producing the unconfirmed raw outcome; the
             // runner inherits stderr so it reaches the sender beside the
             // Python receipt.
-            if reason == "not-confirmed" && args.provider == MailInjectProvider::Claude {
+            if reason == "not-confirmed" && args.harness == MailInjectHarness::Claude {
                 if let Some(h) = route_hint_for_session(&home, &args.session) {
                     eprintln!("{h}");
                 }
