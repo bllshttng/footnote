@@ -2132,7 +2132,7 @@ mod tests {
 
         // One member's 429 newer than the record: a NEW strand, so the lane
         // falls back to the open/closed rule. Two capped members meet quorum.
-        let newer = four29_line("2026-09-13T23:59:59.000Z");
+        let newer = four29_line(&epoch_to_rfc3339(now + 60));
         write(
             &projects.join("22222222-2222-2222-2222-222222222222.jsonl"),
             &format!("{OK_LINE}\n{newer}\n"),
