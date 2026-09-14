@@ -271,11 +271,32 @@ def test_identity_accepts_cross_process_recall_without_local_store() -> None:
     assert verdict.marker == "cross-process recall nonce"
 
 
+def _sweep_json(named_pairs=None, negative_counts=None) -> str:
+    return json.dumps(
+        {
+            "status": "measured",
+            "populations": [
+                {
+                    "name": "harness-capabilities",
+                    "status": "measured",
+                    "rows": 8,
+                    "fields": 73,
+                    "uniform": [],
+                    "uniform_among_declarers": [],
+                    "negative_counts": negative_counts or {"codex": 12},
+                    "named_pairs": named_pairs or [],
+                    "name_lists": [],
+                }
+            ],
+        }
+    )
+
+
 def test_line_seven_reports_instrument_results(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         harness_probe,
         "run_instrument",
-        lambda *args, **kwargs: (0, "=== 3. findings ===\n=== 4. lists ===\n"),
+        lambda *args, **kwargs: (0, _sweep_json()),
     )
     for relative in (
         "crates/fno-agents/src/harness_capabilities.toml",
@@ -313,7 +334,7 @@ def test_row_match_ignores_harness_name_in_negative_claim_counts(monkeypatch, tm
         "run_instrument",
         lambda command, **kwargs: (
             0,
-            "=== 2. negative claims ===\n  claude: 3\n=== 3. a negative claim beside a harness-NAMED implementation ===\n",
+            _sweep_json(negative_counts={"claude": 3}),
         ),
     )
     for relative in (
@@ -345,8 +366,46 @@ def test_row_match_ignores_harness_name_in_negative_claim_counts(monkeypatch, tm
     assert verdict.status == "pass"
 
 
+def test_row_match_fails_when_sweep_prints_non_json(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        harness_probe,
+        "run_instrument",
+        lambda command, **kwargs: (0, "=== 3. findings ===\n"),
+    )
+    for relative in (
+        "crates/fno-agents/src/harness_capabilities.toml",
+        "cli/src/fno/harness_names.py",
+        "cli/src/fno/agents/harnesses/__init__.py",
+        "cli/src/fno/agents/mux_spawn.py",
+        "crates/fno-agents/src/provider.rs",
+        "cli/src/fno/hermetic.py",
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if relative.endswith("harness_capabilities.toml"):
+            content = "[harness.claude]\n"
+        elif relative.endswith("provider.rs"):
+            content = 'pub const KNOWN_PROVIDERS: &[&str] = &["claude"];\n'
+        else:
+            content = (
+                "KNOWN_HARNESSES = ('claude',)\n"
+                "READABLE_PROVIDERS = ('claude',)\n"
+                "PANE_HOSTABLE_PROVIDERS = ('claude',)\n"
+                "_SESSION_BINDING_HARNESSES = ('claude',)\n"
+                "_AMBIENT_NAMES = ('CLAUDE_HOME',)\n"
+            )
+        path.write_text(content, encoding="utf-8")
+
+    verdict = harness_probe.line_row_matches("claude", repo_root=tmp_path)
+
+    assert verdict.status == "fail"
+    assert "sweep=finding" in verdict.detail
+
+
 def test_row_match_fails_missing_required_registration(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(harness_probe, "run_instrument", lambda *args, **kwargs: (0, ""))
+    monkeypatch.setattr(
+        harness_probe, "run_instrument", lambda *args, **kwargs: (0, _sweep_json())
+    )
     table = tmp_path / "crates/fno-agents/src/harness_capabilities.toml"
     table.parent.mkdir(parents=True)
     table.write_text("[harness.claude]\n", encoding="utf-8")
