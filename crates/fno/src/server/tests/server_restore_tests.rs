@@ -1725,3 +1725,92 @@ fn restore_reconstructs_a_separate_unnamed_lane_as_its_own_squad() {
         core.reap_pane(pid);
     }
 }
+
+#[test]
+fn repro_two_live_squads_on_one_key_clobber_stored_members() {
+    let s = StoreScratch::new("repro-two-live-one-key");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin = origin.to_string_lossy().into_owned();
+    let key = crate::squad_store::origin_key(&[origin.clone()]);
+    let worker = |name: &str| crate::squad_store::StoredMember {
+        attach_id: String::new(),
+        tombstone: false,
+        tombstone_reason: None,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: Some(name.into()),
+        harness: Some("codex".into()),
+        harness_session_id: Some(format!("{name}-session")),
+        pane_id: None,
+    };
+    crate::squad_store::upsert(
+        "",
+        &key,
+        &[origin.clone()],
+        &[
+            worker("t-old-one"),
+            worker("t-old-two"),
+            worker("t-old-three"),
+        ],
+    )
+    .unwrap();
+    let stored = || {
+        crate::squad_store::load()
+            .squads
+            .into_iter()
+            .find(|sq| sq.key == key)
+            .map(|sq| {
+                sq.members
+                    .iter()
+                    .filter_map(|m| m.worker.clone())
+                    .collect::<Vec<_>>()
+            })
+    };
+    eprintln!("REPRO stored before: {:?}", stored());
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["t-old-one", "t-old-two", "t-old-three", "t-new"]);
+    core.session.add_squad(
+        1,
+        vec![origin.clone()],
+        None,
+        Tab {
+            name: None,
+            id: 1,
+            root: Node::Leaf(1),
+            focus: 1,
+        },
+    );
+    core.next_squad_id = core.next_squad_id.max(2);
+    core.squad_members.insert(1, vec![worker("t-new")]);
+    core.pre_restore_squads.insert(1);
+    core.persist_squad(1);
+    eprintln!("REPRO stored after pre-restore persist: {:?}", stored());
+    core.restore_squads(24, 80, 999);
+    let live_on_key: Vec<u64> = core
+        .session
+        .squads
+        .iter()
+        .filter(|sq| sq.key == key)
+        .map(|sq| sq.id)
+        .collect();
+    eprintln!("REPRO live squads on key after restore: {live_on_key:?}");
+    eprintln!("REPRO stored after restore: {:?}", stored());
+    core.persist_squad(1);
+    let after = stored();
+    eprintln!("REPRO stored after pre-restore lane persists post-restore: {after:?}");
+    let pids: Vec<u64> = core.panes.keys().copied().collect();
+    for pid in pids {
+        core.reap_pane(pid);
+    }
+    let after = after.unwrap_or_default();
+    for old in ["t-old-one", "t-old-two", "t-old-three"] {
+        assert!(
+            after.iter().any(|w| w == old),
+            "stored member {old} survived: {after:?}"
+        );
+    }
+}
