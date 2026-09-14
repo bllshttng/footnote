@@ -1,7 +1,8 @@
 //! The merge-hold writer behind the `authorized-merge` verb's `op` field.
 //!
-//! `fno do pr hold set|release` (Python surface) forwards via `verb_call` with
-//! `{"op": "hold-set"|"hold-release", ...}`. The block it writes is the same
+//! A crown or worker pipes `{"op": "hold-set"|"hold-release", ...}` straight
+//! into `fno-agents authorized-merge` (taught in the king and blueprint
+//! skills). The block it writes is the same
 //! `dispatch_hold` frontmatter every merge path already reads; the write is
 //! proven by the same reader ready selection uses, and a failed readback
 //! restores the original bytes. Rides an existing verb rather than a new
