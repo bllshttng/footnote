@@ -465,6 +465,78 @@ pub fn parse_verb_token(tok: &str) -> Option<(&str, bool)> {
     Some((verb, namespaced))
 }
 
+/// The shipped footnote verb roster, mirroring Python's `footnote_verbs()`:
+/// every `skills/<name>/SKILL.md` and `commands/<name>.md` the plugin ships.
+/// Read from the surface, never a retyped literal. Resolved from the plugin
+/// root env hints, then the persisted `~/.fno/plugin-root` pointer; empty on
+/// any resolution failure, where pass-through is the safe direction and the
+/// plugin-qualified `/fno:` spelling keeps working on namespace alone.
+fn footnote_verbs() -> std::collections::HashSet<String> {
+    static VERBS: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    if let Some(verbs) = VERBS.get() {
+        return verbs.clone();
+    }
+    let verbs = read_footnote_verbs();
+    // An EMPTY read means the surface did not RESOLVE, never that footnote
+    // ships no verbs - like Python, cache only a real answer so the next call
+    // can succeed after the environment settles.
+    if verbs.is_empty() {
+        return verbs;
+    }
+    let _ = VERBS.set(verbs.clone());
+    verbs
+}
+
+fn read_footnote_verbs() -> std::collections::HashSet<String> {
+    let mut verbs = std::collections::HashSet::new();
+    let Some(root) = plugin_root() else {
+        return verbs;
+    };
+    if let Ok(entries) = std::fs::read_dir(root.join("skills")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.join("SKILL.md").is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    verbs.insert(name.to_string());
+                }
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(root.join("commands")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    verbs.insert(stem.to_string());
+                }
+            }
+        }
+    }
+    verbs
+}
+
+fn plugin_root() -> Option<PathBuf> {
+    for name in ["CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "FNO_REPO_ROOT"] {
+        if let Ok(root) = std::env::var(name) {
+            if !root.is_empty() {
+                return Some(PathBuf::from(root));
+            }
+        }
+    }
+    let mut pointer = home_dir()?;
+    pointer.push(".fno/plugin-root");
+    let text = std::fs::read_to_string(pointer).ok()?;
+    let root = PathBuf::from(text.trim());
+    // Only a root carrying the plugin manifest answers: a stale pointer
+    // falls through to empty rather than naming a dead path.
+    if root.join(".claude-plugin").join("plugin.json").is_file() {
+        Some(root)
+    } else {
+        None
+    }
+}
+
 /// The ONE verb-seed renderer (x-c976): parse the message's FIRST token and
 /// render it for `harness` from the capability row. A seed's sigil says WHO
 /// WROTE it, never which harness runs it (x-413d). The rest of the message
@@ -497,13 +569,14 @@ pub fn render_verb_seed(message: &str, harness: &str) -> String {
                 return format!("$fno:{verb}{tail}");
             }
             // A bare `/verb` is rewritten only when it is nobody's native
-            // verb and IS a footnote work verb (the name-mint vocabulary);
-            // an unknown verb stays literal instead of being captured into
-            // a phantom `$fno:` skill.
+            // verb and IS a footnote verb (the shipped roster, with the
+            // name-mint vocabulary as the always-present floor); an unknown
+            // verb stays literal instead of being captured into a phantom
+            // `$fno:` skill.
             if native(&format!("/{verb}")) {
                 return message.to_string();
             }
-            if crate::naming::is_word_code_verb(verb) {
+            if crate::naming::is_word_code_verb(verb) || footnote_verbs().contains(verb) {
                 return format!("$fno:{verb}{tail}");
             }
             message.to_string()

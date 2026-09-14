@@ -621,14 +621,17 @@ def normalize_command(command: str, harness: str) -> str:
     The plugin-qualified ``/fno:verb`` spelling is unambiguous by namespace and
     always rewrites. Pure string transform; no config or IO."""
     caps = capabilities(harness)  # loud on an unknown harness, before anything
+    surface = caps["command_surface"]
+    if surface == _REFUSED:
+        # The deprecation tripwire stays ahead of the parse gate: a refused
+        # harness has no dispatch lane, so every command is refused loudly,
+        # whatever its first token shapes as.
+        raise DispatchResolveError(_refused_reason(harness))
     cmd = command.strip()
     first_word = cmd.split(maxsplit=1)[0] if cmd else ""
     seed = parse_verb_token(first_word) if first_word else None
     if seed is None:
         return cmd
-    surface = caps["command_surface"]
-    if surface == _REFUSED:
-        raise DispatchResolveError(_refused_reason(harness))
     verb, namespaced = seed
     tail = cmd[len(first_word):]
     slash_sigil = first_word.startswith("/")

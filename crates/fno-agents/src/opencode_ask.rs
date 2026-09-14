@@ -223,6 +223,20 @@ pub(crate) fn apply_opencode_variant_at(
     result
 }
 
+/// The one opencode prompt envelope (x-c976): a footnote verb seed (`/fno:verb
+/// ...`, either sigil) is a command dispatch, not a conversational message, so
+/// it rides WITHOUT the `[from:]` envelope (`opencode run --command`; an
+/// envelope would demote it to prose no-op). A prose message keeps the
+/// courtesy envelope (x-de43).
+pub fn opencode_envelope(effective_message: &str, from_name: &str) -> String {
+    let first = effective_message.split_whitespace().next().unwrap_or("");
+    if crate::provider::parse_verb_token(first).is_some() {
+        effective_message.to_string()
+    } else {
+        format!("[from: {from_name}]\n\n{effective_message}")
+    }
+}
+
 /// `opencode run --dangerously-skip-permissions [--model <m>] <tail>` - the
 /// headless one-shot argv (matches `OpencodeProvider::create_argv`). The bypass
 /// flag auto-approves permissions so an unattended worker never wedges on an
@@ -433,16 +447,7 @@ pub fn dispatch_opencode_once(
         if message.is_empty() { "hello" } else { message },
         "opencode",
     );
-    // A footnote verb seed (`/fno:verb ...`, either sigil) is a command
-    // dispatch, not a conversational message: send it WITHOUT the `[from:]`
-    // envelope so it rides `opencode run --command` (an envelope would demote
-    // it to prose no-op). A prose message keeps the courtesy envelope (x-de43).
-    let first = effective_message.split_whitespace().next().unwrap_or("");
-    let full_prompt = if crate::provider::parse_verb_token(first).is_some() {
-        effective_message.to_string()
-    } else {
-        format!("[from: {}]\n\n{}", from_name, effective_message)
-    };
+    let full_prompt = opencode_envelope(&effective_message, from_name);
     if let Some(effort) = effort {
         let selected_model = model
             .filter(|model| !model.is_empty())
