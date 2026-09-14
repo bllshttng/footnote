@@ -793,6 +793,14 @@ struct DispatchFacts {
     /// Children resolved synchronously this pass (dispatched headless rows):
     /// real work the tick did even though nothing entered `pending`.
     sync_resolved: usize,
+    /// A dispatch gate (x-39f4, the fleet-incident defense in depth) refused
+    /// this pass before the advance shell-out. Names the tick's skip token;
+    /// nothing else may read as this gate, so a stopped verdict can never
+    /// masquerade as `no_work` and trigger the stranded observer.
+    gate: Option<String>,
+    /// The gate's human detail: the stop's generation, or the unreadable
+    /// record's error.
+    gate_detail: Option<String>,
 }
 
 fn undispatched_count(cfg: &DrainConfig) -> Result<usize, String> {
@@ -839,6 +847,8 @@ fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
         requests: receipt.requests,
         // Set later, by the dispatch loop that actually resolves the rows.
         sync_resolved: 0,
+        gate: None,
+        gate_detail: None,
     }
 }
 
@@ -890,22 +900,29 @@ fn dispatch_member(
     // fails closed with its own reason, never as clear.
     let incident = crate::fleet_incident::verdict();
     if !matches!(incident, crate::fleet_incident::Verdict::Clear(_)) {
-        let (state, generation, detail) = match &incident {
+        let (token, generation, detail) = match &incident {
             crate::fleet_incident::Verdict::Stopped(r) => (
-                "fleet-stop",
+                "fleet_stop",
                 Some(r.generation),
                 format!("generation {}", r.generation),
             ),
             crate::fleet_incident::Verdict::Unavailable(d) => {
-                ("fleet-stop-unavailable", None, d.clone())
+                ("fleet_stop_unavailable", None, d.clone())
             }
             crate::fleet_incident::Verdict::Clear(_) => unreachable!(),
         };
         let _ = journal.append(
             "active_backlog_skip",
-            json!({"reason": state, "mission": cfg.mission, "generation": generation, "detail": detail}),
+            json!({"reason": token, "mission": cfg.mission, "generation": generation, "detail": detail}),
+       );
+        return (
+            MissionDispatch::Continue,
+            DispatchFacts {
+                gate: Some(token.to_string()),
+                gate_detail: Some(detail),
+                ..Default::default()
+            },
         );
-        return (MissionDispatch::Continue, DispatchFacts::default());
     }
     // Epic members converge as `advance --epic <id> --continuation`; loose
     // members drain as `advance --loose --project <project>` (the CLI takes no
@@ -1279,6 +1296,11 @@ pub fn mission_drain_tick(
     let sync_closed = facts.sync_resolved as u64;
     let skip_reason: Option<String> = match outcome {
         MissionDispatch::Retire => Some("mission_retired".to_string()),
+        // The dispatch gate refused before any child: name the gate, never
+        // `no_work` - a stopped verdict must not read as an exhausted
+        // mission, and `no_work` is what triggers the stranded observer
+        // (x-39f4).
+        MissionDispatch::Continue if facts.gate.is_some() => facts.gate.clone(),
         MissionDispatch::Continue if closed + newly_dispatched + sync_closed > 0 => None,
         // The gate held this tick's converge: name HELD, never no_work - an
         // empty child set from a held receipt is the amplifier reporting
@@ -1323,8 +1345,13 @@ pub fn mission_drain_tick(
     } else {
         String::new()
     };
+    let gate_note = facts
+        .gate_detail
+        .as_deref()
+        .map(|d| format!(" gate={d}"))
+        .unwrap_or_default();
     let detail = format!(
-        "{}{}{} ready={} closed={} dispatched={} sync={} pending={}{}{}",
+        "{}{}{} ready={} closed={} dispatched={} sync={} pending={}{}{}{}",
         label,
         kingless_mark,
         rotation,
@@ -1334,6 +1361,7 @@ pub fn mission_drain_tick(
         sync_closed,
         pending.len(),
         held_requests,
+        gate_note,
         match skip_reason.as_deref() {
             Some("no_work") => match undispatched_count(cfg) {
                 Ok(count) => format!(" stranded={count}"),
@@ -1701,6 +1729,27 @@ async fn per_project_fanout_loop(target: FanoutTarget, fno_bin: String, shutdown
     }
 }
 
+/// Spawn one fanout loop per project not already live. Shared by the normal
+/// pass and the paused pass (x-39f4), which differ only in what they resolve.
+fn spawn_fanout_loops(
+    fanout_targets: Vec<FanoutTarget>,
+    fno_bin: &str,
+    fanout_tasks: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
+) {
+    for ft in fanout_targets {
+        if let std::collections::hash_map::Entry::Vacant(slot) =
+            fanout_tasks.entry(ft.project.clone())
+        {
+            slot.insert(tokio::spawn(per_project_fanout_loop(
+                ft,
+                fno_bin.to_string(),
+                Arc::clone(&shutdown),
+            )));
+        }
+    }
+}
+
 /// Build the per-project loop journal (project events.jsonl fatal, global mirror
 /// best-effort) for a drain target's cwd.
 fn journal_for(cwd: &Path) -> Journal {
@@ -1835,6 +1884,39 @@ pub async fn run_supervisor(
         tasks.retain(|_, h| !h.is_finished());
         fanout_tasks.retain(|_, h| !h.is_finished());
 
+        // x-39f4: while dispatch is effectively paused, the supervisor must
+        // NOT resolve drain targets. Resident mission handles are retained
+        // (each loop gates itself before any child); status-fanout keeps
+        // resolving so the fanout family stays live. One positive tick row
+        // names the pause at this loop's real 60s recheck cadence.
+        let pause = crate::loops_pause::dispatch_pause();
+        if pause.is_paused() {
+            let fanout_targets = resolve_fanout_targets(&fno_bin);
+            live.store(
+                !tasks.is_empty() || !fanout_targets.is_empty(),
+                Ordering::SeqCst,
+            );
+            spawn_fanout_loops(
+                fanout_targets,
+                &fno_bin,
+                &mut fanout_tasks,
+                Arc::clone(&shutdown),
+            );
+            let _ = emitter.emit(
+                crate::tick_ledger::EVENT_TYPE,
+                &serde_json::json!({
+                    "arm": "active_backlog",
+                    "scheduler": "daemon",
+                    "acted": 0,
+                    "skip_reason": pause.skip_reason(),
+                    "detail": format!("dispatch paused: {}", pause.detail()),
+                    "interval_s": 60,
+                }),
+            );
+            sleep_interruptible(recheck, &shutdown).await;
+            continue;
+        }
+
         let DrainResolve {
             targets,
             missions: receipt_missions,
@@ -1914,19 +1996,12 @@ pub async fn run_supervisor(
             }
         }
 
-        for ft in fanout_targets {
-            // Entry API: one lookup, and only spawn when this project has no live
-            // loop yet. A loop that already exists self-reconciles config changes.
-            if let std::collections::hash_map::Entry::Vacant(slot) =
-                fanout_tasks.entry(ft.project.clone())
-            {
-                slot.insert(tokio::spawn(per_project_fanout_loop(
-                    ft,
-                    fno_bin.clone(),
-                    Arc::clone(&shutdown),
-                )));
-            }
-        }
+        spawn_fanout_loops(
+            fanout_targets,
+            &fno_bin,
+            &mut fanout_tasks,
+            Arc::clone(&shutdown),
+        );
 
         sleep_interruptible(recheck, &shutdown).await;
     }
@@ -1984,6 +2059,37 @@ async fn mission_drain_loop(
             break;
         }
 
+        // x-39f4: the EFFECTIVE dispatch pause (manual sentinel OR fleet
+        // incident) is checked BEFORE the target re-resolve and the converge
+        // permit, so a stopped incident runs no dispatch-oriented child. The
+        // target this loop was spawned with names the blocked tick (cwd,
+        // interval) without re-resolving; pending and the breaker are
+        // untouched, and the same loop re-resolves and resumes on clear.
+        let pause = crate::loops_pause::dispatch_pause();
+        if pause.is_paused() {
+            let journal = journal_for(Path::new(&target.cwd));
+            crate::tick_ledger::emit_tick(
+                &journal,
+                "active_backlog",
+                "daemon",
+                0,
+                Some(pause.skip_reason()),
+                Some(&format!(
+                    "mission={} dispatch paused: {}",
+                    key,
+                    pause.detail()
+                )),
+                target.interval_seconds.max(1),
+            );
+            wait_for_wake(
+                Duration::from_secs(target.interval_seconds.max(1)),
+                &shutdown,
+                &mut last_nudge,
+            )
+            .await;
+            continue;
+        }
+
         // Re-resolve this territory's liveness. If its scope dropped out of the
         // target set (crown revoked / workspace gone), exit the loop (the
         // supervisor will not respawn it). The position in this list (already
@@ -2006,23 +2112,6 @@ async fn mission_drain_loop(
             continue;
         };
         let journal = journal_for(&cfg.cwd);
-
-        // Pause is checked before the converge gate and before the advance
-        // shell-out. Keep the resident loop observable without dispatching or
-        // mutating its breaker while the operator's hold is active.
-        if crate::loops_pause::is_paused() {
-            crate::tick_ledger::emit_tick(
-                &journal,
-                "active_backlog",
-                "daemon",
-                0,
-                Some("loops_paused"),
-                Some(&format!("mission={} loops paused", cfg.mission)),
-                cfg.interval_seconds.max(1),
-            );
-            wait_for_wake(interval, &shutdown, &mut last_nudge).await;
-            continue;
-        }
 
         // Take a converge slot before the tick shells `advance --epic`. A
         // mission that must wait SAYS so first and then waits its turn: a
@@ -3126,6 +3215,213 @@ mod tests {
     }
 
     #[test]
+    fn incident_unavailable_reads_as_fleet_stop_unavailable_never_no_work() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_drain_recorder(&tmp.path().join("bin"), &record, tmp.path());
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending: Vec<PendingDispatch> = Vec::new();
+
+        // A corrupt fleet record is Unavailable, never clear: the tick must
+        // name fleet_stop_unavailable and spawn no poll child - and never
+        // read as no_work.
+        let saved_agents = std::env::var_os("FNO_AGENTS_HOME");
+        let agents = tmp.path().join("agents-home");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &agents);
+        std::fs::write(
+            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&agents)),
+            b"{not json",
+        )
+        .unwrap();
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        match saved_agents {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+
+        let rows: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "control_plane_tick")
+            .collect();
+        assert_eq!(rows.len(), 1, "exactly one tick row: {rows:?}");
+        let data = &rows[0]["data"];
+        assert_eq!(data["skip_reason"], "fleet_stop_unavailable");
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(
+            !calls.contains("advance")
+                && !calls.contains("undispatched")
+                && !calls.contains("active-backlog"),
+            "no poll child while the record is unreadable: {calls}"
+        );
+    }
+
+    /// A stub `fno` that answers the drain's three verbs AND records EVERY
+    /// argv, so a paused cycle is proven silent against a recorder the clear
+    /// cycle proves live (the positive control).
+    fn stub_fno_drain_recorder(
+        dir: &std::path::Path,
+        record: &std::path::Path,
+        cwd: &std::path::Path,
+    ) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 echo \"$@\" >> \"{}\"\n\
+                 if [[ \"$1\" == config && \"$2\" == active-backlog ]]; then \
+                 cat <<'JSON'\n{{\"targets\":[{{\"project\":\"fno\",\"cwd\":\"{}\",\"interval_seconds\":1,\"failure_limit\":3,\"mission\":\"x-epic\",\"max_concurrent\":1}}],\"missions\":1}}\nJSON\nexit 0; fi\n\
+                 if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
+                 cat <<'JSON'\n{{\"epic_id\":\"x-epic\",\"deactivated\":false,\"all_done\":false,\"children\":[{{\"node_id\":\"x-a\",\"decision\":\"dispatched\",\"substrate\":\"thread\"}}]}}\nJSON\nexit 0; fi\n\
+                 if [[ \"$1\" == backlog && \"$2\" == undispatched ]]; then \
+                 printf '%s' '{{\"status\":\"ok\",\"rows\":[]}}'; fi\nexit 0\n",
+                record.display(),
+                cwd.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
+    /// Write a fleet incident record into a sandbox agents home.
+    fn write_incident(home: &std::path::Path, state: &str, generation: u64) {
+        std::fs::write(
+            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(home)),
+            serde_json::to_string(&crate::fleet_incident::IncidentRecord {
+                version: crate::fleet_incident::STATE_VERSION,
+                state: state.into(),
+                generation,
+                changed_at: "2026-09-13T01:07:00Z".into(),
+                changed_by: "op".into(),
+                reason: "load 385".into(),
+                source: Some("file".into()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// x-39f4 regression: with a positive stopped record, one supervisor and
+    /// one mission cycle record ZERO dispatch-only poll children
+    /// (`config active-backlog`, `backlog advance`, `backlog undispatched`)
+    /// while the tick rows name fleet_stop with the generation. Flipping the
+    /// same record to clear generation N+1 makes the SAME residents re-resolve
+    /// and advance - no daemon restart, no task respawn. The clear phase is
+    /// the positive control: it proves the stub would have recorded them.
+    /// x-39f4 regression: with a positive stopped record, one supervisor and
+    /// one mission cycle record ZERO dispatch-only poll children
+    /// (`config active-backlog`, `backlog advance`, `backlog undispatched`)
+    /// while the tick rows name fleet_stop with the generation. Flipping the
+    /// same record to clear generation N+1 makes the SAME residents re-resolve
+    /// and advance - no daemon restart, no task respawn. The clear phase is
+    /// the positive control: it proves the stub would have recorded them.
+    #[tokio::test]
+    async fn incident_pause_suppresses_dispatch_only_poll_children() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_drain_recorder(&tmp.path().join("bin"), &record, tmp.path());
+        let agents = tmp.path().join("agents-home");
+        std::fs::create_dir_all(&agents).unwrap();
+
+        // Pin BOTH homes: the fleet record lives under FNO_AGENTS_HOME; HOME
+        // keeps the manual sentinel absent and the loop's nudge stat + global
+        // journal mirror inside the sandbox.
+        let saved_home = std::env::var_os("HOME");
+        let saved_agents = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("HOME", tmp.path());
+        std::env::set_var("FNO_AGENTS_HOME", &agents);
+        write_incident(&agents, "stopped", 5);
+
+        let target = ResolvedTarget {
+            project: "fno".into(),
+            cwd: tmp.path().display().to_string(),
+            interval_seconds: 1,
+            failure_limit: 3,
+            mission: Some("x-epic".into()),
+            max_concurrent: 1,
+        };
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let live = Arc::new(AtomicBool::new(false));
+        let emitter = EventEmitter::new(tmp.path().join("supervisor-events.jsonl"), "daemon");
+        let gate = Arc::new(ConvergeGate::new(1));
+
+        let sup = tokio::spawn(run_supervisor(
+            fno.clone(),
+            emitter.clone(),
+            Arc::clone(&live),
+            Arc::clone(&shutdown),
+        ));
+        let drain = tokio::spawn(mission_drain_loop(
+            target,
+            fno.clone(),
+            emitter,
+            Arc::clone(&shutdown),
+            Arc::clone(&gate),
+        ));
+
+        // One paused cycle: both residents tick at once, then idle. Zero
+        // dispatch-only children; a tick row names the stop.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(
+            !calls.contains("active-backlog"),
+            "supervisor must not shell the resolver while stopped: {calls}"
+        );
+        assert!(
+            !calls.contains("advance"),
+            "no advance while stopped: {calls}"
+        );
+        assert!(
+            !calls.contains("undispatched"),
+            "no undispatched probe while stopped: {calls}"
+        );
+        let rows: Vec<serde_json::Value> =
+            journal_lines(&tmp.path().join(".fno").join("events.jsonl"))
+                .iter()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|v| v["type"] == "control_plane_tick")
+                .collect();
+        assert!(
+            rows.iter().any(|v| v["data"]["skip_reason"] == "fleet_stop"
+                && v["data"]["detail"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("generation 5"))),
+            "a tick row must name fleet_stop with the generation: {rows:?}"
+        );
+
+        // Flip the SAME record to clear at generation N+1: the same residents
+        // re-resolve and advance - the positive control proving the stub
+        // records these verbs when unblocked.
+        write_incident(&agents, "clear", 6);
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(
+            calls.contains("active-backlog") && calls.contains("advance"),
+            "clear must resume: resolver and advance run again: {calls}"
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = tokio::time::timeout(Duration::from_secs(5), sup).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match saved_agents {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+    }
+
+    #[test]
     fn dispatch_mission_refuses_to_mint_work_while_a_fleet_stop_is_active() {
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
@@ -3183,7 +3479,7 @@ mod tests {
         let skips: Vec<serde_json::Value> = journal_lines(&project_journal)
             .iter()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|v| v["data"]["reason"] == "fleet-stop")
+            .filter(|v| v["data"]["reason"] == "fleet_stop")
             .collect();
         assert!(
             skips
