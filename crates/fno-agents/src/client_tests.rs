@@ -2645,13 +2645,25 @@ fn attention_row(
 /// is not, an observed stale or failed arm is.
 #[test]
 fn status_payload_publishes_the_rust_owned_arms_attention() {
-    let unobserved = attention_row("a_unobserved", fno_agents::tick_ledger::ProducerEvidence::Unobserved);
-    let mut fresh_no_op = attention_row("a_fresh_no_op", fno_agents::tick_ledger::ProducerEvidence::Observed);
+    let unobserved = attention_row(
+        "a_unobserved",
+        fno_agents::tick_ledger::ProducerEvidence::Unobserved,
+    );
+    let mut fresh_no_op = attention_row(
+        "a_fresh_no_op",
+        fno_agents::tick_ledger::ProducerEvidence::Observed,
+    );
     fresh_no_op.acted = Some(0);
     fresh_no_op.skip_reason = Some("no_work".to_string());
-    let mut stale = attention_row("a_stale", fno_agents::tick_ledger::ProducerEvidence::Observed);
+    let mut stale = attention_row(
+        "a_stale",
+        fno_agents::tick_ledger::ProducerEvidence::Observed,
+    );
     stale.stale = true;
-    let mut failing = attention_row("a_failing", fno_agents::tick_ledger::ProducerEvidence::Observed);
+    let mut failing = attention_row(
+        "a_failing",
+        fno_agents::tick_ledger::ProducerEvidence::Observed,
+    );
     failing.failing = true;
     let rows = vec![unobserved, fresh_no_op, stale, failing];
 
