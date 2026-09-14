@@ -2852,8 +2852,11 @@ def _raw_send(
     twice before it gave up. A caller gates on this rather than guessing from the
     session's shape, and gets the same resolution the real send would run.
     """
+    from fno.agents.lane_heal import (
+        lane_heal as _lane_heal,
+        raw_send_heal_action as _raw_send_heal_action,
+    )
     from fno.agents.dispatch import (
-        _lane_heal,
         _mail_inject_claude,
         _mail_inject_codex,
         _mux_pane_send,
@@ -3108,27 +3111,16 @@ def _raw_send(
                 file=sys.stderr,
             )
 
-    # 4. Heal a dead pane binding before routing on the row (x-4a68): a codex
-    #    row whose pane is gone but whose thread is loaded rebinds to the
-    #    thread lane. An unmeasurable probe fails open (exit 3 under --check).
-    #    Claude panes keep their existing heal owners and skip this entirely.
+    # 4. Heal a dead pane binding before routing on the row: a codex row whose
+    #    pane is gone but whose thread is loaded rebinds to the thread lane.
     if entry.mux and session_id and entry.harness == "codex":
-        heal_verdict, heal_reason, heal_pane = _lane_heal(session_id)
-        if heal_verdict == "rebound-thread":
+        action, detail = _raw_send_heal_action(*_lane_heal(session_id), name)
+        if action == "rebound":
             entry = resolve_agent(lookup_name).entry
-        elif heal_verdict == "dead-pane":
-            pane_label = (
-                f"{heal_pane['session']}:{heal_pane['pane_id']}"
-                if heal_pane
-                else "unknown"
-            )
-            _refused(
-                f"{name!r} mux pane {pane_label} "
-                "is gone and the thread is not loaded anywhere fno can reach "
-                f"({heal_reason}); run fno agents resume {name}"
-            )
-        elif heal_verdict == "unmeasurable" and check:
-            _unmeasurable(f"lane-heal could not read the pane binding ({heal_reason})")
+        elif action == "refused":
+            _refused(detail)
+        elif action == "check" and check:
+            _unmeasurable(detail)
 
     # 5. Route by the actual lane. Mux-hosted Codex is a keystroke lane like any
     #    other mux pane; only a Codex app-server thread uses structured lanes

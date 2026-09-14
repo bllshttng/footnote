@@ -7,6 +7,7 @@
 # Forgetting is refused at runtime. Adding is refused at CI. Neither one passes
 # forever by describing today.
 cli/src/fno/agents/dispatch.py::mail_inject_probe  # --probe: reads no payload, injects nothing
+cli/src/fno/agents/lane_heal.py::lane_heal  # --lane-heal: flag-only verdict probe, injects no payload
 cli/src/fno/agents/dispatch.py::_mail_inject_claude  # framed <fno_mail>/<cross-session-message>, or _raw_send slash
 cli/src/fno/agents/dispatch.py::_mail_inject_codex  # framed <fno_mail>/<cross-session-message>, or slash
 cli/src/fno/agents/dispatch.py::_mail_inject_keeper  # framed <fno_mail> only; keeper lane-B PTY, prose rides mail send

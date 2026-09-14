@@ -793,7 +793,7 @@ def test_raw_check_dead_pane_thread_not_loaded_answers_not_injectable(
 
     _seed_codex_pane(mailbox, monkeypatch)
     monkeypatch.setattr(
-        "fno.agents.dispatch._lane_heal",
+        "fno.agents.lane_heal.lane_heal",
         lambda sid: (
             "dead-pane",
             "thread-not-loaded",
@@ -814,7 +814,7 @@ def test_raw_check_unmeasurable_heal_answers_exit_3(mailbox, monkeypatch, capsys
 
     _seed_codex_pane(mailbox, monkeypatch)
     monkeypatch.setattr(
-        "fno.agents.dispatch._lane_heal",
+        "fno.agents.lane_heal.lane_heal",
         lambda sid: ("unmeasurable", "binary-absent", None),
     )
     with pytest.raises(typer.Exit) as exc:
@@ -828,7 +828,7 @@ def test_raw_check_live_mux_pane_answers_probed_live(mailbox, monkeypatch, capsy
 
     _seed_codex_pane(mailbox, monkeypatch)
     monkeypatch.setattr(
-        "fno.agents.dispatch._lane_heal",
+        "fno.agents.lane_heal.lane_heal",
         lambda sid: ("live-pane", None, {"session": "main", "pane_id": 2179}),
     )
     with pytest.raises(typer.Exit) as exc:
@@ -854,7 +854,7 @@ def test_raw_rebound_thread_re_resolves_and_delivers_over_the_daemon(
         mux=None,
     )
     monkeypatch.setattr(
-        "fno.agents.dispatch._lane_heal",
+        "fno.agents.lane_heal.lane_heal",
         lambda sid: ("rebound-thread", None, None),
     )
     monkeypatch.setattr(

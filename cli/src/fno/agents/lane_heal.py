@@ -52,3 +52,27 @@ def lane_heal(session_id: str) -> tuple[str, Optional[str], Optional[dict]]:
         )
     except (ValueError, AttributeError):
         return ("unmeasurable", "unparseable-output", None)
+
+
+def raw_send_heal_action(
+    verdict: str, reason: Optional[str], pane: Optional[dict], name: str
+) -> tuple[str, str]:
+    """Map a lane-heal verdict to the one action `mail send --raw` takes.
+
+    Returns ``(action, detail)``: ``rebound`` means the caller re-resolves the
+    registry row, ``refused`` carries the dead-pane message, ``check`` carries
+    the unmeasurable message the caller shows under ``--check``, and
+    ``continue`` routes normally.
+    """
+    if verdict == "rebound-thread":
+        return ("rebound", "")
+    if verdict == "dead-pane":
+        label = f"{pane['session']}:{pane['pane_id']}" if pane else "unknown"
+        detail = (
+            f"{name!r} mux pane {label} is gone and the thread is not loaded "
+            f"anywhere fno can reach ({reason}); run fno agents resume {name}"
+        )
+        return ("refused", detail)
+    if verdict == "unmeasurable":
+        return ("check", f"lane-heal could not read the pane binding ({reason})")
+    return ("continue", "")
