@@ -427,8 +427,7 @@ def sweep(
     )
     summary["cost_usd"] = 0.0  # sweep is a read-only fold
     if judge_n > 0 and skill == "blueprint":
-        # Judge the newest N before run_complete closes the run (never loses
-        # the code record on a judge fault, hence the guard).
+        # Judge before run_complete closes the run; a judge fault never loses the code record.
         try:
             for item in items[-judge_n:]:
                 _judge_one_item(item, run_id, events_paths)
@@ -470,9 +469,7 @@ def _evidence(item: dict, dimension: str, verdict: str) -> str:
 
 # the advisory five-question judge (grading: crates/fno-agents/src/blueprint_judge.rs).
 
-
 def _arg_value(args: list[str], flag: str) -> Optional[str]:
-    """The token after ``flag``, or None if absent or trailing."""
     i = args.index(flag) + 1 if flag in args else -1
     return args[i] if 0 <= i < len(args) else None
 
@@ -483,8 +480,7 @@ def _judge_via_rust(argv: list[str]) -> Optional[dict]:
     if binary is None:
         typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
         return None
-    # A labels run is rows x dimensions x the Rust spawn's own 600s cap; the
-    # wrapper cap grows with it, and --split is the chunking remedy.
+    # Labels mode caps at rows x dimensions x the spawn's own 600s bound.
     timeout = 14400 if "--labels" in argv else 3600
     try:
         result = subprocess.run([str(binary), "judge", *argv], capture_output=True, text=True, timeout=timeout)

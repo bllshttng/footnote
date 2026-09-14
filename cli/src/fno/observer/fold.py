@@ -167,10 +167,8 @@ def build_corpus(
 BLUEPRINT_DIMENSIONS = ("collision_free", "shipped_outcome")
 JUDGE_DIMENSIONS = ("persona", "surface_fit", "uncovered_case", "deletable", "duplication")
 
-# The failure-modes heading and file-ownership copies that lived here were
-# deleted 2026-09-12 (a dead rule and a forked, diverged collision check).
-# collision_free now imports the validator's own parallel-surface check.
-
+# The retired heading check and the diverged collision copy were deleted;
+# collision_free imports the validator's own parallel-surface check.
 
 def _surface_collisions(plan_text: str) -> Optional[list[str]]:
     """Files claimed by more than one task of a parallel wave, per the
@@ -184,8 +182,7 @@ def _surface_collisions(plan_text: str) -> Optional[list[str]]:
     except (FrontmatterError, ParseError):
         return None
     if any(v.field == "waves" for v in violations):
-        # No waves: the check above never ran. A single task cannot collide
-        # with itself (still a measured pass); more than one is a real gap.
+        # No waves: one task cannot collide with itself; more than one is a gap.
         try:
             tasks = parse_execution_strategy(doc.get_section("Execution Strategy") or "").get("tasks", [])
         except (BriefParseError, TypeError, ValueError):
