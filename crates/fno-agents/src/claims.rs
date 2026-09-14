@@ -1056,7 +1056,7 @@ pub(crate) enum ReadError {
     Corrupted(String),
 }
 
-fn serialize_claim(rec: &ClaimRecord) -> Result<String, String> {
+pub(crate) fn serialize_claim(rec: &ClaimRecord) -> Result<String, String> {
     validate_record(rec).map_err(|e| format!("claim YAML serialize failed: {e}"))?;
     serde_yaml_ng::to_string(rec).map_err(|e| format!("claim YAML serialize failed: {e}"))
 }
@@ -1321,7 +1321,7 @@ fn create_via_link(parent: &Path, path: &Path, content: &str) -> std::io::Result
 /// Replace `path` with `content` via write-temp + rename (idempotent
 /// re-acquire path). Temp in the same directory so the rename is atomic;
 /// tmp is cleaned up on any failure between write and rename.
-fn atomic_replace(path: &Path, content: &str) -> Result<(), String> {
+pub(crate) fn atomic_replace(path: &Path, content: &str) -> Result<(), String> {
     // Counter (not just pid): two threads replacing the SAME claim path (e.g.
     // concurrent same-key idempotent re-acquires) would otherwise share a temp
     // name and clobber each other. Uniqueness makes each replace independent.
@@ -2644,13 +2644,26 @@ pub fn parse_ttl_ms(s: &str) -> Option<i64> {
 /// a dead-looking pid there is unverifiable and only the TTL may move.
 ///
 /// The whole mutate runs under the SAME per-claim recovery mutex `acquire` uses
-/// for stale recovery, and re-reads inside the lock, so a renew can never clobber
-/// a peer's concurrent stale-reclaim. An already-expired claim is NOT renewed
-/// (it is reclaimable; resurrecting it would race a legitimate recovery).
+/// for stale recovery. The status verdict is computed BEFORE the mutex, from
+/// the pre-read record: the session witness may read transcripts, and slow
+/// I/O under this mutex makes a successor's `target init --handover-from`
+/// refuse as mutex-busy. Inside the lock the record is extended only when
+/// `holder`, `acquired_at` and `expires_at` still equal the values that
+/// verdict was computed from; a record that moved between the two reads is
+/// not the one the verdict described, and the next stop retries (x-b445).
+///
+/// An expired claim is renewed exactly when `fno agents claim status` calls it
+/// LIVE or SUSPECT. `classify` keeps a claim whose pid or session witness
+/// reads live unstealable past its TTL, so refusing to extend it left a live
+/// session unable to renew a lease no peer could take: every such stop burned
+/// a turn on a refused watch idle (x-b445, 738 refusals in 4 days). Only a
+/// STALE verdict refuses: the claim is then reclaimable, and resurrecting it
+/// would race a legitimate recovery.
 ///
 /// Returns `Ok(true)` when renewed, `Ok(false)` on a benign no-op (missing /
-/// gone / corrupted / held-by-other / PID-liveness / already-expired claim, or a
-/// peer holding the recovery mutex), and `Err(_)` only on a real write failure.
+/// gone / corrupted / held-by-other / PID-liveness / stale verdict /
+/// changed-under-lock claim, or a peer holding the recovery mutex), and
+/// `Err(_)` only on a real write failure.
 pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Result<bool, String> {
     if key.is_empty() || holder.is_empty() {
         return Err("key and holder must be non-empty".into());
@@ -2660,13 +2673,26 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
     }
     let path = claim_path(key, root)?;
     // Cheap pre-check outside the mutex: skip the lock for the common
-    // not-ours/absent/PID-liveness cases so idle stops stay lock-free.
-    match read_claim_file(&path) {
-        Ok(rec) if rec.holder == holder && rec.expires_at.is_some() => {}
+    // not-ours/absent/PID-liveness cases so idle stops stay lock-free. The
+    // status verdict is computed HERE for the same reason (x-b445): the
+    // session witness may read transcripts, and slow I/O under the recovery
+    // mutex makes a successor's `target init --handover-from` refuse as
+    // mutex-busy.
+    let observed = match read_claim_file(&path) {
+        Ok(rec) if rec.holder == holder && rec.expires_at.is_some() => {
+            // Extend exactly what `fno agents claim status` would call live:
+            // only a STALE verdict refuses (x-b445). Live and Suspect both
+            // extend, so a session past its TTL whose pid or session witness
+            // reads live can renew its own lease again.
+            if crate::claim_verbs::status_verdict(&rec).0 == ClaimState::Stale {
+                return Ok(false);
+            }
+            rec
+        }
         Ok(_) => return Ok(false),
         Err(ReadError::GoneAway) => return Ok(false),
         Err(ReadError::Corrupted(_)) => return Ok(false),
-    }
+    };
     let recovery_lock = path.with_file_name(format!(
         "{}.recovery.d",
         path.file_name()
@@ -2695,7 +2721,7 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
     } else {
         return Ok(false);
     };
-    let result = renew_locked(&path, holder, ttl_ms);
+    let result = renew_locked(&path, holder, ttl_ms, &observed);
     release_dir_mutex(&recovery_lock, &token);
     result
 }
@@ -2800,7 +2826,16 @@ const SESSION_PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 /// Critical section of [`renew`]: re-read under the mutex (the holder may have
 /// changed while we grabbed it), then extend only a still-live, still-ours claim.
-fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> {
+/// `observed` is the record the caller's verdict was computed from; if any of
+/// the identity fields moved between that read and this lock, what is on disk
+/// is not the record the verdict described, so back off (x-b445) - the next
+/// stop recomputes and retries.
+fn renew_locked(
+    path: &Path,
+    holder: &str,
+    ttl_ms: i64,
+    observed: &ClaimRecord,
+) -> Result<bool, String> {
     let mut existing = match read_claim_file(path) {
         Ok(rec) => rec,
         Err(ReadError::GoneAway) => return Ok(false),
@@ -2809,12 +2844,15 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
     if existing.holder != holder {
         return Ok(false); // a peer reclaimed it while we took the lock
     }
+    if existing.acquired_at != observed.acquired_at || existing.expires_at != observed.expires_at {
+        return Ok(false); // moved between the verdict read and this lock
+    }
     if existing.expires_at.is_none() {
         return Ok(false); // PID-liveness claim: no TTL to extend
     }
-    if is_expired(&existing, now_ms()) {
-        return Ok(false); // reclaimable already; do not resurrect + race recovery
-    }
+    // No TTL-expiry refusal here (x-b445): the caller refuses a STALE verdict
+    // before the lock; an expired claim whose status verdict reads Live or
+    // Suspect extends.
     let now = now_ms();
     // Re-anchor a corpse (x-05be). Guarded three ways: the holder already
     // matched above, the recorded pid must be dead or reused, and the claim must
@@ -2930,6 +2968,25 @@ mod tests {
             root: Some(root.path().to_path_buf()),
             events_dir: Some(root.path().to_path_buf()),
             ..Default::default()
+        }
+    }
+
+    /// Pin FNO_AGENTS_HOME for a test whose renew call consults the session
+    /// witness (renew classifies through the registry leg, x-b445), so an
+    /// ambient session id never reads the operator's real registry. Callers
+    /// hold test_env_lock; restore with restore_agents_home.
+    fn pin_agents_home(td: &TempDir) -> Option<std::ffi::OsString> {
+        let home = td.path().join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let saved = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", &home);
+        saved
+    }
+
+    fn restore_agents_home(saved: Option<std::ffi::OsString>) {
+        match saved {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
         }
     }
 
@@ -3063,7 +3120,9 @@ mod tests {
 
     #[test]
     fn renew_resets_deadline_to_now_plus_ttl_and_preserves_acquired_at() {
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
+        let saved_home = pin_agents_home(&td);
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         match acquire("node:x-renew", "target-session:me", o) {
@@ -3093,6 +3152,7 @@ mod tests {
             t0 + 120_000
         );
         assert_eq!(after.acquired_at, acquired_at, "acquired_at preserved");
+        restore_agents_home(saved_home);
     }
 
     /// A pid the OS does not report, so `is_live` reads the claim as a corpse.
@@ -3124,6 +3184,7 @@ mod tests {
         // respawned worker and a dead one left byte-identical claims.
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
+        let saved_home = pin_agents_home(&td);
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         o.pid = Some(dead_pid());
@@ -3152,6 +3213,7 @@ mod tests {
             ClaimState::Live,
             "a re-anchored claim must read LIVE, not SUSPECT"
         );
+        restore_agents_home(saved_home);
     }
 
     #[test]
@@ -3168,6 +3230,7 @@ mod tests {
         // the cross-session takeover a re-anchor must never perform.
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
+        let saved_home = pin_agents_home(&td);
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         o.pid = Some(dead_pid());
@@ -3200,6 +3263,7 @@ mod tests {
             ClaimState::Live,
             "a held anchor must still read LIVE, or the repair did nothing"
         );
+        restore_agents_home(saved_home);
     }
 
     #[test]
@@ -3212,6 +3276,7 @@ mod tests {
         // durable pid exists and is still not written.
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
+        let saved_home = pin_agents_home(&td);
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         o.pid_unavailable = true;
@@ -3241,6 +3306,7 @@ mod tests {
             ClaimState::Live,
             "a v2 claim must stay SUSPECT until expiry, never LIVE"
         );
+        restore_agents_home(saved_home);
     }
 
     #[test]
@@ -3249,6 +3315,7 @@ mod tests {
         // loop-check exits about a second after renewing.
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
+        let saved_home = pin_agents_home(&td);
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         let corpse = dead_pid();
@@ -3276,13 +3343,16 @@ mod tests {
         assert_eq!(after.pid, Some(corpse as i32));
         assert_eq!(after.acquired_at, before.acquired_at);
         assert!(after.expires_at.unwrap() > before.expires_at.unwrap());
+        restore_agents_home(saved_home);
     }
 
     #[test]
     fn renew_deadline_does_not_grow_across_repeated_renewals() {
         // Regression for the span-growth bug (codex P1): renewing N times must
         // NOT compound the window. Each renewal pins expires_at to now+ttl.
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
+        let saved_home = pin_agents_home(&td);
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         let _ = acquire("node:x-grow", "target-session:me", o);
@@ -3300,6 +3370,7 @@ mod tests {
             "deadline grew across renewals: {}ms out",
             exp - now_ms()
         );
+        restore_agents_home(saved_home);
     }
 
     #[test]
@@ -3337,12 +3408,17 @@ mod tests {
             renew("session:pidonly", "h", 120_000, Some(td.path())),
             Ok(false)
         );
-        // An already-expired claim is NOT resurrected (it is reclaimable).
+        // An expired claim is refused only when its status verdict reads
+        // STALE (x-b445): dead pid, no session id for a witness to heal.
+        // A live-pid expired fixture now RENEWS (see
+        // renew_extends_an_expired_claim_the_status_verdict_calls_live).
         let mut o = opts_in(&td);
         o.ttl_ms = Some(60_000);
         let _ = acquire("node:x-expired", "target-session:me", o);
-        // Hand-write an expired deadline for our own claim.
         let mut rec = read_claim(&td, "node:x-expired");
+        rec.session_id = None;
+        rec.pid = Some(dead_pid() as i32);
+        rec.pid_provenance = Some("session-prover".into());
         rec.expires_at = Some(now_ms() - 1);
         atomic_replace(
             &lockfile(&td, "node:x-expired"),
@@ -3357,6 +3433,111 @@ mod tests {
                 Some(td.path())
             ),
             Ok(false)
+        );
+    }
+
+    #[test]
+    fn renew_extends_an_expired_claim_the_status_verdict_calls_live() {
+        // x-b445 AC1-HP: a session past its TTL whose pid is verifiably alive
+        // extends its own claim, on the same verdict `claim status` prints.
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(60_000);
+        let _ = acquire("node:x-expired-live", "target-session:me", o);
+        let mut rec = read_claim(&td, "node:x-expired-live");
+        rec.session_id = None; // witness never consulted; verdict = pid arithmetic
+        rec.pid = Some(std::process::id() as i32);
+        rec.pid_provenance = Some("session-prover".into());
+        rec.expires_at = Some(now_ms() - 1);
+        atomic_replace(
+            &lockfile(&td, "node:x-expired-live"),
+            &serialize_claim(&rec).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            classify(&read_claim(&td, "node:x-expired-live"), None),
+            ClaimState::Live,
+            "fixture must read LIVE past expiry or AC1-HP proves nothing"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+        let t0 = now_ms();
+        assert_eq!(
+            renew(
+                "node:x-expired-live",
+                "target-session:me",
+                120_000,
+                Some(td.path())
+            ),
+            Ok(true)
+        );
+        let after = read_claim(&td, "node:x-expired-live");
+        let exp = after.expires_at.unwrap();
+        assert!(
+            (exp - (t0 + 120_000)).abs() < 1_000,
+            "deadline must be ~now+ttl, got {exp} vs {}",
+            t0 + 120_000
+        );
+    }
+
+    #[test]
+    fn renew_refuses_a_stale_verdict_and_leaves_the_lockfile_bytes_alone() {
+        // x-b445 AC1-ERR: verdict-gated renewal still refuses a corpse, and a
+        // refused renew writes nothing.
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(60_000);
+        o.pid = Some(dead_pid());
+        let _ = acquire("node:x-expired-corpse", "target-session:me", o);
+        let mut rec = read_claim(&td, "node:x-expired-corpse");
+        rec.session_id = None;
+        rec.pid_provenance = Some("session-prover".into());
+        rec.expires_at = Some(now_ms() - 1);
+        let path = lockfile(&td, "node:x-expired-corpse");
+        let bytes = serialize_claim(&rec).unwrap();
+        atomic_replace(&path, &bytes).unwrap();
+        assert_eq!(
+            classify(&rec, None),
+            ClaimState::Stale,
+            "fixture must read STALE or AC1-ERR proves nothing"
+        );
+        assert_eq!(
+            renew(
+                "node:x-expired-corpse",
+                "target-session:me",
+                60_000,
+                Some(td.path())
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes.as_bytes(),
+            "a refused renew must not touch the lockfile"
+        );
+    }
+
+    #[test]
+    fn renew_locked_refuses_a_record_that_moved_between_verdict_and_lock() {
+        // x-b445 AC1-EDGE: the verdict described `observed`; a lockfile that
+        // changed before the mutex was taken is a different record, so extend
+        // nothing.
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(120_000);
+        let _ = acquire("node:x-moved", "target-session:me", o);
+        let on_disk = read_claim(&td, "node:x-moved");
+        let mut observed = on_disk.clone();
+        observed.expires_at = Some(on_disk.expires_at.unwrap() - 1_000);
+        let path = lockfile(&td, "node:x-moved");
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            renew_locked(&path, "target-session:me", 120_000, &observed),
+            Ok(false)
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a moved record must not be overwritten"
         );
     }
 
