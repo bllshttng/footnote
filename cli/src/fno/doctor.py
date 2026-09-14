@@ -144,14 +144,6 @@ def _is_claude_plugin_cache(path: Path) -> bool:
     )
 
 
-def _is_plugin_stage(path: Path) -> bool:
-    parts = path.parts
-    return any(
-        parts[index : index + 2] == ("plugin-stage", "fno")
-        for index in range(max(0, len(parts) - 1))
-    )
-
-
 def _plugin_file_report(active_path: Path) -> dict[str, Any]:
     """Compare one active skill file with the matching source bytes."""
     try:
@@ -210,13 +202,7 @@ def _plugin_file_report(active_path: Path) -> dict[str, Any]:
         "active_digest": active_digest,
         "source_digest": source_digest,
     }
-    if stale and _is_plugin_stage(active_path):
-        report["detail"] = (
-            "the active skill lives in the fno-managed Claude plugin stage; "
-            "run `fno doctor update` to restage it from the source checkout, "
-            "then restart the session for skill text"
-        )
-    elif stale and _is_claude_plugin_cache(active_path):
+    if stale and _is_claude_plugin_cache(active_path):
         report["detail"] = (
             "active Claude plugin bytes are stale; run `claude plugin update "
             "fno@footnote`, then restart the session; `fno doctor update` does "
@@ -775,20 +761,12 @@ def _stage_check_report() -> Optional[dict[str, Any]]:
     status = verdict.get("status")
     if status not in ("fresh", "stale", "absent", "unknown"):
         status = "unknown"
-    source_root = str(verdict.get("source") or src)
-    return {
-        "status": status,
-        "sha": verdict.get("source_head"),
-        "installed_at": None,
-        "detail": verdict.get("detail"),
-        "kind": "stage",
-        "stage": str(verdict.get("stage") or stage_path),
-        "source": source_root,
-        "differing_count": verdict.get("differing_count", 0),
-        "missing_count": verdict.get("missing_count", 0),
-        "sample": verdict.get("sample", []),
-        "remedy": f"cd {source_root} && fno config plugin install claude",
-    }
+    verdict["status"] = status
+    verdict["kind"] = "stage"
+    verdict["sha"] = verdict.pop("source_head", None)
+    verdict["installed_at"] = None
+    verdict.setdefault("remedy", f"cd {verdict.get('source') or src} && fno config plugin install claude")
+    return verdict
 
 
 def _plugin_cache_report() -> dict[str, Any]:
@@ -2079,10 +2057,10 @@ def _blockers(result: dict[str, Any]) -> list[str]:
     plugin_cache = result.get("plugin_cache") or {}
     if plugin_cache.get("kind") == "stage" and plugin_cache.get("status") == "stale":
         sample = plugin_cache.get("sample") or []
+        drift = plugin_cache.get("differing_count", 0) + plugin_cache.get("missing_count", 0)
         blockers.append(
-            f"plugin stage {plugin_cache.get('stage')} differs from source HEAD in "
-            f"{plugin_cache.get('differing_count', 0) + plugin_cache.get('missing_count', 0)} file(s) "
-            f"(e.g. {sample[0] if sample else '?'}). Fix: {plugin_cache.get('remedy')}"
+            f"plugin stage {plugin_cache.get('stage')} differs from source HEAD in {drift} "
+            f"file(s) (e.g. {sample[0] if sample else '?'}). Fix: {plugin_cache.get('remedy')}"
         )
     elif plugin_cache.get("status") == "stale":
         deleted = plugin_cache.get("deleted_hook_scripts") or []
@@ -4699,9 +4677,8 @@ def doctor_command(
         (result.get("archive_id_collisions") or {}).get("count")
         or (result.get("archive_id_collisions") or {}).get("unreadable")
     )
-    # A stale stage is not advisory: Claude sessions execute its hooks byte
-    # for byte, so drift here is the git-cache-blocker's equal, not the
-    # after-every-merge advisory the git cache kind stays as.
+    # A stale stage runs its hooks byte for byte; drift there is a blocker,
+    # not the after-every-merge advisory the git cache kind stays as.
     pc = result.get("plugin_cache") or {}
     stage_stale = pc.get("kind") == "stage" and pc.get("status") == "stale"
     raise typer.Exit(

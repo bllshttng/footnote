@@ -2931,23 +2931,6 @@ def test_plugin_cache_non_directory_marketplace_keeps_registry_answer(tmp_path, 
     assert report["detail"] == "installed_plugins.json carries no gitCommitSha"
 
 
-def test_plugin_file_report_names_restage_for_stage_paths(tmp_path, monkeypatch):
-    """A stale SKILL.md under the fno stage points at `fno doctor update`."""
-    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
-    stage_skill = tmp_path / "plugin-stage" / "fno" / "skills" / "review" / "SKILL.md"
-    stage_skill.parent.mkdir(parents=True)
-    stage_skill.write_text("staged bytes\n", encoding="utf-8")
-    source_skill = repo / "skills" / "review" / "SKILL.md"
-    source_skill.parent.mkdir(parents=True)
-    source_skill.write_text("source bytes\n", encoding="utf-8")
-    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
-
-    report = doctor._plugin_file_report(stage_skill)
-
-    assert report["status"] == "stale"
-    assert "fno doctor update" in (report.get("detail") or "")
-
-
 def _plugin_repo_with_hook_deletion(tmp_path: Path) -> tuple[Path, str]:
     """Two commits: the first references hooks/demo-gate.sh, the second
     deletes the script and its config entry together (the incident shape).
