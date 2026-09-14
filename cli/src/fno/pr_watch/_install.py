@@ -320,12 +320,9 @@ def _record_bounce(*, caller: str, deferred: bool, state_root: Optional[Path] = 
     }
     if not deferred:
         try:
-            root = state_root
-            if root is None:
-                from fno.paths import state_dir
+            from fno.paths import state_dir
 
-                root = state_dir()
-            sidecar = Path(root) / "pr-watch-bounce.json"
+            sidecar = Path(state_root or state_dir()) / "pr-watch-bounce.json"
             sidecar.parent.mkdir(parents=True, exist_ok=True)
             tmp = sidecar.with_name(sidecar.name + ".tmp")
             tmp.write_text(json.dumps({"ts": time.time(), **data}), encoding="utf-8")
@@ -431,7 +428,7 @@ def heal_watcher(
 ) -> tuple[str, int]:
     """Resolve the plist path and bounce the watcher. Doctor's --fix entrypoint.
 
-    Returns ``(message, exit_code)``; nonzero when the plist is absent or a bounce step wedged.
+    Returns ``(message, exit_code)``; nonzero when the plist is absent or a step wedged.
     """
     plist_path = launch_agents_dir / _PLIST_FILENAME
     if not plist_path.exists():
