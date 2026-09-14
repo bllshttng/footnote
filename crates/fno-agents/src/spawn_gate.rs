@@ -1158,15 +1158,22 @@ pub fn run_gate(
                     route_provider.unwrap_or_default(),
                     &mut lane_warnings,
                 ) {
-                    Ok((live, _counted)) => {
+                    Ok((live, _counted, parked)) => {
                         for w in &lane_warnings {
                             eprintln!("{w}");
                         }
                         if live >= cap_value {
                             guard.release_gate_mutex();
+                            let parked_names: Vec<String> =
+                                parked.iter().map(|(n, _)| n.clone()).collect();
+                            let wait_note = if parked.is_empty() {
+                                String::new()
+                            } else {
+                                format!("; {} waiting on the operator, not counted", parked.len())
+                            };
                             eprintln!(
                                 "spawn-gate: provider {}, cap {cap_value}, current count \
-                                 {live}; refusing; no worker launched",
+                                 {live}{wait_note}; refusing; no worker launched",
                                 route_provider.unwrap_or("unknown")
                             );
                             return Err(Refusal::with_receipt(
@@ -1178,6 +1185,7 @@ pub fn run_gate(
                                     "cap": cap_value,
                                     "count": live,
                                     "current_count": live,
+                                    "parked": parked_names,
                                 }),
                             ));
                         }

@@ -619,11 +619,21 @@ fn lanes_answer(
     for provider in providers {
         let cap = spawn_gate_lanes::provider_lanes_cap(config_cwd, &provider);
         match spawn_gate_lanes::provider_live_count(registry_path, &provider, warnings) {
-            Ok((live, counted)) => {
+            Ok((live, counted, parked)) => {
                 let mut lane = Map::new();
                 lane.insert("cap".into(), json!(cap));
                 lane.insert("live".into(), json!(live));
                 lane.insert("counted".into(), json!(counted));
+                lane.insert(
+                    "parked".into(),
+                    json!(parked
+                        .iter()
+                        .map(|(name, qid)| serde_json::json!({
+                            "name": name,
+                            "question_id": json!(qid),
+                        }))
+                        .collect::<Vec<_>>()),
+                );
                 lanes.insert(provider, Value::Object(lane));
             }
             Err(error) => {
