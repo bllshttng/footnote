@@ -3,8 +3,6 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
-
 import typer
 
 graph_app = typer.Typer(help="Inspect or export the durable graph store.")
@@ -36,22 +34,25 @@ def export_graph(now: bool = typer.Option(False, "--now", help="Wait for a fresh
 
 def _gate_gaps(client, repo_root: Path) -> list[str]:
     gaps = list(client.request("backend_gate", {}).get("gaps") or [])
-    proc = subprocess.run(
-        ["bash", str(repo_root / "scripts/ci/check-graph-flip-gates.sh")],
-        capture_output=True, text=True, timeout=2400,
-    )
-    gaps.extend(
-        line[len("flip-gate: FAIL: ") :]
-        for line in (proc.stdout + proc.stderr).splitlines()
-        if line.startswith("flip-gate: FAIL: ")
-    )
-    if proc.returncode not in (0, 1):
-        gaps.append("flip gates could not run (see scripts/ci/check-graph-flip-gates.sh)")
+    try:
+        proc = subprocess.run(
+            ["bash", str(repo_root / "scripts/ci/check-graph-flip-gates.sh")],
+            capture_output=True, text=True, timeout=2400,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        gaps.append(f"flip gates could not run: {exc}")
+    else:
+        gaps.extend(
+            line[len("flip-gate: FAIL: ") :]
+            for line in (proc.stdout + proc.stderr).splitlines()
+            if line.startswith("flip-gate: FAIL: ")
+        )
+        if proc.returncode not in (0, 1):
+            gaps.append("flip gates could not run (see scripts/ci/check-graph-flip-gates.sh)")
     return gaps
 
 
 def _keepers() -> str:
-    """Identify backends over every `*.store.sock` in the state root."""
     from fno import paths
     from fno.graph.store import _Keeper
 
@@ -79,26 +80,24 @@ def _flip(target: str) -> None:
             for gap in gaps:
                 typer.echo(f"graph backend: refused: {gap}", err=True)
             raise typer.Exit(1)
-    else:  # Rollback exports FIRST (AC22): sqlite still owns the rows.
-        client.request("export_now", {})
-    result = client.request("set_backend", {"backend": target})
-    if result.get("since_ms"):
-        typer.echo(f"graph backend: flipped {result.get('previous')} -> {target}")
+    else:  # Rollback exports FIRST: sqlite still owns the rows until the flip.
+        try:
+            client.request("export_now", {})
+        except Exception as exc:  # noqa: BLE001 - a failed export refuses, never crashes
+            typer.echo(f"graph backend: refused: export before flip failed: {exc}", err=True)
+            raise typer.Exit(1) from exc
+    client.request("set_backend", {"backend": target})
     try:
         from fno.config.writer import set_config_value
         set_config_value("graph.read_source", target, scope="global")
     except Exception as exc:  # noqa: BLE001 - keeper flipped; name the remedy
-        typer.echo(
-            f"graph backend: keeper flipped to {target} but graph.read_source"
-            f" was not written ({exc}); run `fno config set graph.read_source {target}`",
-            err=True,
-        )
+        typer.echo(f"graph backend: keeper flipped but graph.read_source not written ({exc}); run `fno config set graph.read_source {target}`", err=True)
     typer.echo(f"backend={target} keepers={_keepers()}")
 
 
 @graph_app.command("backend")
 def graph_backend(
-    target: Optional[str] = typer.Argument(None, help="sqlite or json: the backend to flip to."),
+    target: "str | None" = typer.Argument(None, help="sqlite or json: the backend to flip to."),
     status: bool = typer.Option(False, "--status", help="Print backend, since date, days, and keeper backends."),
 ) -> None:
     if status:
@@ -106,13 +105,13 @@ def graph_backend(
         from fno.graph.store import _client_for
 
         state = _client_for(paths.graph_json()).request("backend_status", {})
-        since_raw = state.get("since_ms")
-        if since_raw:
-            since = datetime.fromtimestamp(int(since_raw) / 1000, tz=timezone.utc)
-            since_text = since.strftime("%Y-%m-%d")
-            days = (datetime.now(timezone.utc) - since).days
-        else:
-            since_text, days = "never", 0
+        since = (
+            datetime.fromtimestamp(int(state["since_ms"]) / 1000, tz=timezone.utc)
+            if state.get("since_ms")
+            else None
+        )
+        since_text = since.strftime("%Y-%m-%d") if since else "never"
+        days = (datetime.now(timezone.utc) - since).days if since else 0
         typer.echo(
             f"backend={state.get('backend')} since={since_text} days={days} keepers={_keepers()}"
         )

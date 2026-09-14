@@ -1680,17 +1680,33 @@ fn handle_set_backend(state: &StoreState, params: &Value) -> Result<Value, Store
     }))
 }
 
-/// The flip gate's soak half: the sampler's own journal read by the keeper
-/// that wrote it, one gap line per failed requirement. The source-tree
-/// half (census, writer ratchet, ownership test, negative control) runs
-/// from scripts/ci/check-graph-flip-gates.sh; the verb unions both.
+/// The flip gate's soak half: one gap line per failed requirement, read
+/// from the journals the sampler could have written. The keeper's own
+/// `--events` path is the first candidate; a Rust-spawned keeper carries
+/// none, so the state-root and every space journal are unioned in - the
+/// soak was recorded wherever the canonical keeper's spawner pointed.
+/// The source-tree half of the gate (the census, the writer ratchet, the
+/// ownership test, the negative control) runs from
+/// scripts/ci/check-graph-flip-gates.sh; the verb unions both halves.
 fn handle_backend_gate(state: &StoreState) -> Result<Value, StoreError> {
+    let mut journals: Vec<PathBuf> = state.events.clone().into_iter().collect();
+    if let Some(root) = state.graph.parent() {
+        journals.push(root.join("events.jsonl"));
+        for entry in root
+            .join("spaces")
+            .read_dir()
+            .map(|read| read.flatten().collect::<Vec<_>>())
+            .unwrap_or_default()
+        {
+            let journal = entry.path().join("events.jsonl");
+            if journal.is_file() {
+                journals.push(journal);
+            }
+        }
+    }
     Ok(json!({
         "backend": state.backend().name(),
-        "gaps": crate::backlog::soak_gaps(
-            state.events.as_deref(),
-            chrono::Utc::now(),
-        ),
+        "gaps": crate::backlog::soak_gaps(&journals, chrono::Utc::now()),
     }))
 }
 

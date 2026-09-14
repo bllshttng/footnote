@@ -541,19 +541,29 @@ pub fn export_now(graph: &Path) -> Result<String, String> {
 }
 
 /// Flip `graph_meta.backend` and stamp `backend_since_ms` on an actual
-/// change. A re-run of the same backend keeps the original stamp: the clock
-/// the `--status` days count reads must not reset under an idempotent verb.
+/// change. The read, the write, and the stamp run in one IMMEDIATE
+/// transaction, so two concurrent flips serialize: the second sees the
+/// first's backend and keeps its since stamp. A re-run of the same backend
+/// keeps the original stamp: the clock the `--status` days count reads
+/// must not reset under an idempotent verb.
 pub fn flip_backend(graph: &Path, target: Backend) -> Result<(Backend, Option<u128>), String> {
-    let previous = backend(graph);
-    set_backend(graph, target)?;
-    let connection = open(graph)?;
+    let mut connection = open(graph)?;
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let previous = match meta(&transaction, "backend")? {
+        Some(value) if value == Backend::Sqlite.name() => Backend::Sqlite,
+        _ => Backend::Json,
+    };
+    stamp_meta(&transaction, "backend", target.name())?;
     let since = if previous != target {
         let stamp = now_ms();
-        stamp_meta(&connection, "backend_since_ms", &stamp.to_string())?;
+        stamp_meta(&transaction, "backend_since_ms", &stamp.to_string())?;
         Some(stamp)
     } else {
-        meta(&connection, "backend_since_ms")?.and_then(|value| value.parse::<u128>().ok())
+        meta(&transaction, "backend_since_ms")?.and_then(|value| value.parse::<u128>().ok())
     };
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok((previous, since))
 }
 
@@ -579,25 +589,30 @@ pub fn backend_since(graph: &Path) -> Result<Option<u128>, String> {
     }
 }
 
-/// The soak evidence the flip needs, read from the sampler's own journal
-/// (task 10.1): one gap line per failed requirement, empty when the soak
-/// is clean. A journal is the active `events.jsonl` plus its single
-/// rotation generation; a sample row carries `{ts, type|kind,
-/// data:{divergent, divergent_ids}}` (the retired flat shape reads too).
-pub fn soak_gaps(events: Option<&Path>, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
-    let Some(path) = events else {
-        return vec!["the keeper has no events journal; the soak sampler cannot have run".into()];
-    };
+/// The soak evidence the flip needs, read from the journals the client
+/// names (the sampler wrote whichever journal its spawner carried, so the
+/// caller that knows the space layout names the candidates): one gap line
+/// per failed requirement, empty when the soak is clean. Each journal is
+/// read with its single rotation generation; a sample row carries
+/// `{ts, type|kind, data:{divergent, divergent_ids}}` (the retired flat
+/// shape reads too).
+pub fn soak_gaps(journals: &[PathBuf], now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
     let mut rows: Vec<(chrono::DateTime<chrono::Utc>, i64, Vec<String>)> = Vec::new();
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string());
-    let mut journals: Vec<PathBuf> = vec![path.to_path_buf()];
-    if let Some(name) = &name {
-        journals.push(path.with_file_name(format!("{name}.1")));
-    }
+    let mut paths: Vec<PathBuf> = Vec::new();
     for journal in journals {
-        let Ok(text) = std::fs::read_to_string(&journal) else {
+        paths.push(journal.clone());
+        if let Some(name) = journal
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+        {
+            paths.push(journal.with_file_name(format!("{name}.1")));
+        }
+    }
+    if paths.is_empty() {
+        return vec!["no soak journal to read; the client named no candidate journals".into()];
+    }
+    for journal in &paths {
+        let Ok(text) = std::fs::read_to_string(journal) else {
             continue;
         };
         for line in text.lines() {
@@ -641,9 +656,13 @@ pub fn soak_gaps(events: Option<&Path>, now: chrono::DateTime<chrono::Utc>) -> V
         }
     }
     if rows.is_empty() {
+        let named: Vec<String> = journals
+            .iter()
+            .map(|journal| journal.display().to_string())
+            .collect();
         return vec![format!(
             "no graph_parity_sample events found in {}; the soak sampler has not run",
-            path.display()
+            named.join(", ")
         )];
     }
     rows.sort_by_key(|(ts, _, _)| *ts);
@@ -858,7 +877,7 @@ mod tests {
             lines.push(sample_row(now - chrono::Duration::days(offset)));
         }
         std::fs::write(&journal, lines.join("\n") + "\n").unwrap();
-        assert_eq!(soak_gaps(Some(&journal), now), Vec::<String>::new());
+        assert_eq!(soak_gaps(&[journal.clone()], now), Vec::<String>::new());
         drop(dir);
     }
 
@@ -875,7 +894,7 @@ mod tests {
                 + &sample_row(now - chrono::Duration::days(1)),
         )
         .unwrap();
-        let gaps = soak_gaps(Some(&journal), now);
+        let gaps = soak_gaps(&[journal.clone()], now);
         assert!(
             gaps.iter().any(|gap| gap.contains("day(s) old")),
             "{gaps:?}"
@@ -892,7 +911,7 @@ mod tests {
                 + &sample_row_divergent(now - chrono::Duration::days(1)),
         )
         .unwrap();
-        let gaps = soak_gaps(Some(&journal), now);
+        let gaps = soak_gaps(&[journal.clone()], now);
         assert!(
             gaps.iter()
                 .any(|gap| gap.contains("divergent") && gap.contains("x-bad")),
@@ -904,10 +923,10 @@ mod tests {
     #[test]
     fn soak_no_journal_and_empty_journal_name_the_gap() {
         let dir = TempDir::new().unwrap();
-        let gaps = soak_gaps(None, chrono::Utc::now());
-        assert!(gaps[0].contains("no events journal"), "{gaps:?}");
+        let gaps = soak_gaps(&[], chrono::Utc::now());
+        assert!(gaps[0].contains("no soak journal"), "{gaps:?}");
         let journal = dir.path().join("events.jsonl");
-        let gaps = soak_gaps(Some(&journal), chrono::Utc::now());
+        let gaps = soak_gaps(&[journal], chrono::Utc::now());
         assert!(gaps[0].contains("sampler has not run"), "{gaps:?}");
         drop(dir);
     }
