@@ -178,14 +178,13 @@ pub struct NodeUpdateInput {
 
 impl NodeUpdateInput {
     /// Apply the sparse update to a typed row. `Err` is a domain refusal
-    /// (unknown status or priority word): the caller answers success:false
-    /// and the store stays untouched.
+    /// (unknown priority word): the caller answers success:false and the
+    /// store stays untouched. Status is NOT here: it is a derived column,
+    /// so the caller routes it through the patch planner (`patch::
+    /// plan_status_on_rows`) before this runs.
     fn apply(&self, node: &mut Node) -> Result<(), String> {
         if let Some(title) = &self.title {
             node.title = title.clone();
-        }
-        if let Some(status) = &self.status {
-            node.status = Status::parse(status).map_err(|e| e.0)?;
         }
         if let Some(priority) = &self.priority {
             node.priority = Priority::parse(priority).map_err(|e| e.0)?;
@@ -620,6 +619,15 @@ pub fn node_update(
     }
     let mut updated: Option<Node> = None;
     let ok = mutate(store, |rows| {
+        // The status arm goes through the patch door: status is derived, so
+        // the planner changes the facts and validates the readback. A
+        // refusal (a done node, a plan-less ready, an owned transition)
+        // answers success:false with the rows untouched (x-665f, AC9).
+        if let Some(word) = &input.status {
+            if crate::backlog::patch::plan_status_on_rows(rows, id, word).is_err() {
+                return Ok(false);
+            }
+        }
         for row in rows.iter_mut() {
             if crate::graph_store::entry_id(row) != Some(id) {
                 continue;
@@ -659,6 +667,15 @@ pub fn node_batch_update(
     let wanted: std::collections::BTreeSet<&str> = ids.iter().map(String::as_str).collect();
     let mut updated: Vec<Node> = Vec::new();
     let ok = mutate(store, |rows| {
+        // Same door as the single update: every wanted id's status moves
+        // through the planner, and one refusal refuses the batch.
+        if let Some(word) = &input.status {
+            for id in &wanted {
+                if crate::backlog::patch::plan_status_on_rows(rows, id, word).is_err() {
+                    return Ok(false);
+                }
+            }
+        }
         for row in rows.iter_mut() {
             let Some(id) = crate::graph_store::entry_id(row) else {
                 continue;

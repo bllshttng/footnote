@@ -904,6 +904,7 @@ def test_ac1_hp_graph_remove(tmp_graph):
 
 # --- defer ---
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_ac1_hp_graph_defer(tmp_graph):
     """AC1-HP: fno graph defer sets deferred_at + deferred_reason and derives status: deferred."""
     r = _invoke("backlog", "add", "ToDefer")

@@ -136,6 +136,16 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `backlog-update` (x-665f): the native patch door. Transport-only, so it
+    // dispatches here and not in `run`: every arm in `run` is a client verb
+    // the verb-surface ratchet enumerates against ALL_CLIENT_ACTIONS, and the
+    // shrink law (d-fe66560a) bars adding one. The Python backlog bridge and
+    // the lifecycle verbs reach this arm through resolve_binary; `fno agents
+    // backlog-update` is not a supported client spelling, and the refusal for
+    // it names nothing because the surface never advertised it.
+    if args.first().map(String::as_str) == Some("backlog-update") {
+        std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

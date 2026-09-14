@@ -177,9 +177,10 @@ Priority is bounded to four values, so two agents disagreeing about a node produ
 
 | Action | Command | Effect |
 |--------|---------|--------|
+| Move any stored field, status included | `fno backlog update <id> --status <word>` and `--set <field>=<value>` | the patch door: lifecycle rules refuse a move whose facts are missing and name the flag or verb that supplies them; `--leave deferred\|--superseded` reverses one park without touching the other |
 | Pause a node | `fno backlog defer <id> --reason "..."` | leaves the board; `status: deferred` |
 | Retract a false row | `fno backlog retract <id> "the false premise"` | defers + stamps `deferred_kind: retracted` in one act; the blueprint consolidation gate halts on the stamp |
-| Resume it | `fno backlog undefer <id>` | returns to `ready`/`idea` |
+| Resume it | `fno backlog undefer <id>` | returns to `ready`/`idea`; refuses a still-superseded node and names `fno backlog update <id> --status idea` instead |
 | Replace with a newer node | `fno backlog supersede <new> --replaces <old> --cause "..." --surface <path>` | old's status reads `superseded` from the edge alone; a merged PR touching every `--surface` stamps the record's `verified_at` |
 | Mark complete | `fno backlog done <id>` | closes only on a MERGED PR; sets `completed_at`, unblocks dependents |
 | Reopen it | `fno backlog reopen <id> --reason "..."` | clears `completed_at`; refuses when a referenced PR is MERGED |

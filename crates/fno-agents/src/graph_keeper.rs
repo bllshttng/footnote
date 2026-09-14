@@ -2249,28 +2249,10 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
             let kind = opt_str(p, "kind")
                 .map(str::to_string)
                 .or_else(|| classify_deferred_reason(reason).map(str::to_string));
-            let idx = find_exact(entries, node_id)
-                .ok_or_else(|| StoreError::Invalid(format!("no node resolves to '{node_id}'")))?;
-            let obj = entries[idx].as_object_mut().unwrap();
-            obj.insert("locked_by".to_string(), Value::Null);
-            obj.insert("locked_at".to_string(), Value::Null);
-            obj.insert("completed_at".to_string(), Value::Null);
-            obj.insert(
-                "deferred_at".to_string(),
-                Value::String(graph_store::now_isoformat()),
-            );
-            obj.insert(
-                "deferred_reason".to_string(),
-                Value::String(reason.to_string()),
-            );
-            match kind {
-                Some(k) => {
-                    obj.insert("deferred_kind".to_string(), Value::String(k));
-                }
-                None => {
-                    obj.shift_remove("deferred_kind");
-                }
-            }
+            // The shared defer leg (x-665f): the blank-reason refusal and the
+            // kind vocabulary live in the patch planner, so the mux op and
+            // the CLI door cannot disagree.
+            crate::backlog::patch::defer_facts(entries, node_id, reason, kind.as_deref())?;
             Ok(json!({"deferred": true}))
         }
         "end_mission" => {
@@ -2344,11 +2326,7 @@ fn opt_str<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn classify_deferred_reason(reason: &str) -> Option<&'static str> {
-    match reason {
-        "stale >30d, drained by maintain" => Some("expired"),
-        "stale-quarantine (guard)" => Some("expired"),
-        _ => None,
-    }
+    crate::backlog::patch::classify_deferred_reason(reason)
 }
 
 fn node_carries_pr(node: &Value, pr_number: i64, repo: Option<&str>) -> bool {

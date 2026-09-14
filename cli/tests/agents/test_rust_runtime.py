@@ -812,6 +812,10 @@ def test_rust_client_verbs_match_client_rs() -> None:
             "plugin-install",
             "publish-review",
             "canonical-check",
+            # The patch door (x-665f): resolve_binary-only, like board - the
+            # client action list is shrink-only (d-fe66560a), so this arm is
+            # never registered and never routed.
+            "backlog-update",
         }
     )
 

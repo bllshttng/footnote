@@ -378,6 +378,7 @@ def test_add_child_repaints_parent_epic(tmp_graph, tmp_path):
     assert fe["children_total"] == "1"
 
 
+@pytest.mark.usefixtures("native_backlog_door")
 def test_defer_undefer_roundtrip_no_verb_failure(tmp_graph, tmp_path):
     """defer + undefer both project best-effort and never fail on a live doc."""
     plan = _plan(tmp_path)

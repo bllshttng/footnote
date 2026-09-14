@@ -352,6 +352,45 @@ fn api_failed_mutation_keeps_version() {
 }
 
 #[test]
+fn api_node_update_status_moves_through_the_patch_door() {
+    // AC9-HP: the typed API's status arm refuses a door-invalid move and
+    // leaves the row and version untouched. Leaving a terminal row rewrites
+    // the replacer's chain, a second-row edit the single-row API must not
+    // do silently, so it refuses naming the owning door.
+    let (_d1, _d2, json_store, _sqlite_store) = both_stores();
+    let graph = _d1.path().join("graph.json");
+    let mut entries: Vec<Value> = fixture_nodes().iter().map(Node::to_json).collect();
+    entries.push(json!({
+        "id": "ab-five",
+        "slug": "ab-five",
+        "title": "Five",
+        "type": "feature",
+        "status": "superseded",
+        "priority": "p2",
+        "domain": "code",
+        "created_at": "2026-09-11T00:00:00+00:00",
+        "superseded_by": "ab-one",
+    }));
+    std::fs::write(
+        &graph,
+        serde_json::to_string(&json!({ "entries": entries })).unwrap(),
+    )
+    .unwrap();
+    let before = version(&json_store).unwrap();
+    let payload = node_update(
+        &json_store,
+        "ab-five",
+        NodeUpdateInput {
+            status: Some("idea".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!payload.success);
+    assert_eq!(version(&json_store).unwrap(), before);
+}
+
+#[test]
 fn api_node_create_appends_and_queries() {
     let (_d1, _d2, json_store, sqlite_store) = both_stores();
     for store in [&json_store, &sqlite_store] {
@@ -783,17 +822,19 @@ fn readers_follow_store_rows_reflect_mutations() {
         assert_eq!(all.len(), 4);
         assert_eq!(all[0]["id"], "ab-one");
         assert_eq!(all[3]["id"], "ab-four"); // archived rows ride along
+                                             // x-665f: status no longer moves through this seam (it is derived;
+                                             // the patch door owns it), so the mutation here is a plain field.
         node_update(
             store,
             "ab-two",
             NodeUpdateInput {
-                status: Some("in_progress".into()),
+                title: Some("Two renamed".into()),
                 ..Default::default()
             },
         )
         .unwrap();
         let after = rows(store).unwrap();
         assert_eq!(after[1]["id"], "ab-two");
-        assert_eq!(after[1]["status"], "in_progress");
+        assert_eq!(after[1]["title"], "Two renamed");
     }
 }

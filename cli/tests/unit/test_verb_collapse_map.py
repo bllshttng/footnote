@@ -217,7 +217,9 @@ def test_map_covers_current_surface_once():
     # verb itself: counted from the merged file, 632 -> 624. This branch's
     # gh-budget row was added then removed when the budget became a
     # `fleet-incident` argument (law d-fe66560a: no new client action), so
-    # it allocates no row: counted from the merged file, 624.
+    # it allocates no row: counted from the merged file, 624. (The
+    # backlog-update patch door is likewise transport-only and takes no
+    # row.)
     assert len(mapped) == 624, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
