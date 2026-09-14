@@ -9915,10 +9915,11 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert!(summary.pruned.is_empty());
     }
 
-    // The gc ladder, reap-receipt gate and plan_reconcile
-    // families, moved verbatim into their own module (file budget: this
-    // file is far over the shrink-only line; test motion is the sanctioned
-    // shrink).
+    // The gc ladder, reap-receipt gate and plan_reconcile families, moved
+    // verbatim into their own module (file budget: test motion is the
+    // sanctioned shrink; this file is far over the shrink-only line).
+    #[path = "gc_mux_member.rs"]
+    mod gc_mux_member;
     #[path = "gc_receipts.rs"]
     mod gc_receipts;
     #[path = "keeper_sweep.rs"]
@@ -9929,9 +9930,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     mod reap_session;
     #[path = "rm_refusal.rs"]
     mod rm_refusal;
-    // The rm success family, moved verbatim into its own module for the
-    // same reason as gc_receipts above: file budget, test motion is the
-    // sanctioned shrink.
+    // The rm success family: same module motion as gc_receipts (file budget).
     #[path = "rm_success.rs"]
     mod rm_success;
     #[path = "stop_claims.rs"]

@@ -211,8 +211,10 @@ def test_map_covers_current_surface_once():
     # capabilities` and `agents target-family`, the two read leaves that
     # replace the retired dispatch query leaves, then deletes the five
     # `agents dispatch *` rows and the five bare `dispatch *` rows with the
-    # verb itself: counted from the merged file, 630 -> 622.
-    assert len(mapped) == 622, (
+    # verb itself: counted from the merged file, 630 -> 622. Main's x-f743
+    # `backlog notes` row lands beside them: counted from the merged file,
+    # 622 -> 623.
+    assert len(mapped) == 623, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

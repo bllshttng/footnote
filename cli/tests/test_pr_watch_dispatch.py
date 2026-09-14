@@ -38,6 +38,14 @@ def _hermetic_post_merge(monkeypatch):
     monkeypatch.setattr(pmr, "emit_receipt", lambda *a, **k: True)
 
 
+@pytest.fixture(autouse=True)
+def _unpaused_loop_gate(monkeypatch):
+    """Keep dispatch-composition tests on the normal, unpaused path."""
+    from fno import loops
+
+    monkeypatch.setattr(loops, "loops_paused", lambda: False)
+
+
 # ---------------------------------------------------------------------------
 # Helpers / stubs
 # ---------------------------------------------------------------------------

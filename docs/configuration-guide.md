@@ -26,7 +26,6 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `paths.handoffs_dir` | str (optional) | _(none)_ | never | Override path to the handoffs dir. |
 | `paths.retro_pending_dir` | str (optional) | _(none)_ | never | Override path to the retro-pending dir. |
 | `paths.bus_dir` | str (optional) | _(none)_ | never | Override path to the cross-project mail bus dir. |
-| `paths.loops_paused_json` | str (optional) | _(none)_ | never | Override path to the loops pause-all sentinel. |
 | `paths.observer_reports_dir` | str (optional) | _(none)_ | never | Override path to the observer harness digest dir. |
 | `paths.operator_lane` | str (optional) | _(none)_ | never | Override path to the operator's priorities lane. |
 | `paths.spaces_dir` | str (optional) | _(none)_ | never | Override path to the per-repo spaces root. |

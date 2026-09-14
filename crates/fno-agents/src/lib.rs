@@ -141,6 +141,7 @@ pub mod loop_reign;
 pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
+pub mod loops_pause;
 pub mod machine_watch;
 pub mod mail_inject;
 pub mod manifest;

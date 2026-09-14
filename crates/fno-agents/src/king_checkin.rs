@@ -311,7 +311,7 @@ fn fetch_board(ctx: &Ctx) -> Result<Value, String> {
 
 fn fetch_fold(ctx: &Ctx) -> Result<Value, String> {
     let crowns = vec![json!({"scope": ctx.scope, "level": ctx.level})];
-    let payload = court_fold(&ctx.graph, &ctx.cwd, None, &crowns, "json")
+    let payload = court_fold(&ctx.graph, &ctx.cwd, None, &crowns)
         .map_err(|e| format!("scope fold unreadable: {e}"))?;
     let mine = payload
         .get("scope_nodes")

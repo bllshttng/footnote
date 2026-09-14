@@ -1,0 +1,8 @@
+id: regression-wrapper-outcome-evaluator
+tier: regression
+grade:
+  - kind: exit
+    command: cargo test --manifest-path crates/fno-agents/Cargo.toml --example wrapper_outcome_eval
+    expect: 0
+timeout_minutes: 20
+tags: [scratch, wrappers, outcome, calibration, grade-only]

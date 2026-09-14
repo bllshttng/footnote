@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "calibration",
+  "cohort_id": "example-not-collected",
+  "declared_at": "2026-09-14T00:00:00Z",
+  "intervention": "Replace a mixed stdout response with a single JSON document; example only",
+  "baseline_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "candidate_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "runtime": {
+    "harness": "codex",
+    "model": "replace-with-observed-model",
+    "effort": "high",
+    "budget_seconds": 600
+  },
+  "repetitions": 3,
+  "tasks": [
+    {
+      "id": "replace-with-preregistered-task",
+      "input_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "expected": {"count": 0}
+    }
+  ],
+  "runs": []
+}

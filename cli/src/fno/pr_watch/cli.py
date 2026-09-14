@@ -436,6 +436,20 @@ def tick() -> None:
         {"pid": os.getpid(), "phase": "entry"},
     )
 
+    from fno.loops import loops_paused
+
+    if loops_paused():
+        _emit_event(
+            "pr_watch_tick_end",
+            {
+                "outcome": "paused",
+                "duration_s": round(time.monotonic() - started, 3),
+                "phase": "entry",
+                "pid": os.getpid(),
+            },
+        )
+        return
+
     outcome = "error"
     result = None
     tick_failed = None
