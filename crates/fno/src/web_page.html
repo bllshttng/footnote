@@ -64,10 +64,7 @@
   #bar.ended { background: #4a1616; color: #f08a8a; }
   #bar.authfailed { background: #4a1616; color: #f08a8a; }
   #status { font-weight: 600; }
-  #backlog-link { color: #9aa4b6; text-decoration: none; }
-  #backlog-link:hover { color: #fff; text-decoration: underline; }
-  #crown-link { color: #9aa4b6; text-decoration: none; }
-  #crown-link:hover { color: #fff; text-decoration: underline; }
+  /* Shared nav injected at serve time (see web.rs nav_fragment) */
   /* Pushed to the far edge, and a 30px box so a thumb can hit it. */
   #fitbtn { margin-left: auto; font: inherit; font-size: 12px; cursor: pointer;
     background: #141a26; color: #9aa4b6; border: 1px solid #232b3a;
@@ -101,7 +98,8 @@
 </style>
 </head>
 <body>
-  <div id="bar" class="connecting"><span id="status">connecting…</span><span id="sub"></span><a id="backlog-link" href="#">backlog</a><a id="crown-link" href="#">crown</a><button id="fitbtn" type="button" title="fit the grid to the screen width, or show it at full size">fit</button></div>
+<!--fno-nav-->
+  <div id="bar" class="connecting"><span id="status">connecting…</span><span id="sub"></span><button id="fitbtn" type="button" title="fit the grid to the screen width, or show it at full size">fit</button></div>
   <div id="picker"></div>
   <div id="screen"><pre id="term"><span id="keptnote" class="kept-note"></span><span id="kept" class="kept"></span><span id="live"></span></pre></div>
   <div id="overlay"></div>
@@ -493,10 +491,6 @@
 
   // ---- websocket ----
   const token = new URLSearchParams(location.search).get("t") || "";
-  const backlogProject = new URLSearchParams(location.search).get("project");
-  const backlogScope = backlogProject ? `&project=${encodeURIComponent(backlogProject)}` : "";
-  $("backlog-link").href = `/backlog?t=${encodeURIComponent(token)}${backlogScope}`;
-  $("crown-link").href = `/crown?t=${encodeURIComponent(token)}`;
   // A pasted per-pane link names its pane (x-b80d): pin the first paint to it
   // instead of whichever frame lands first, then clear the want so the operator
   // can still switch panes by hand afterwards. A want that never paints
@@ -506,7 +500,8 @@
   if (wanted != null) { wanted = parseInt(wanted, 10); if (Number.isNaN(wanted)) wanted = null; if (wanted != null) wantedSince = Date.now(); }
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+    const base = document.querySelector("nav.fno-nav").dataset.base;
+    const ws = new WebSocket(`${proto}://${location.host}${base}ws?t=${encodeURIComponent(token)}`);
     ws.onopen = () => setBar("connecting", "connecting…", "waiting for first frame");
     ws.onmessage = (ev) => { try { onMsg(JSON.parse(ev.data)); } catch (_) {} };
     ws.onclose = (ev) => {
