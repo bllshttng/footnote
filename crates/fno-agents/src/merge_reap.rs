@@ -428,7 +428,7 @@ fn run_request(
     emitter: &EventEmitter,
     request: &MergeCleanupRequest,
     root: &str,
-    states: Option<&HashMap<String, (String, Option<String>)>>,
+    states: Option<&HashMap<String, (String, Option<String>, usize)>>,
     ledger: Option<&[Value]>,
     now: i64,
     seams: &RequestSeams,
@@ -449,10 +449,13 @@ fn run_request(
         .node_ids
         .iter()
         .filter_map(|id| match states.get(id.as_str()) {
-            Some((status, merge_status)) if status == "done" => match merge_status {
-                Some(m) if m != "merged" => Some(format!("merge-status:{m}:{id}")),
-                _ => None,
-            },
+            Some((status, merge_status, additional_open)) if status == "done" => {
+                match merge_status.as_deref() {
+                    Some(m) if m != "merged" => Some(format!("merge-status:{m}:{id}")),
+                    _ if *additional_open > 0 => Some(format!("additional-pr-open:{id}")),
+                    _ => None,
+                }
+            }
             _ => Some(format!("node-open:{id}")),
         })
         .collect();
@@ -1088,10 +1091,10 @@ mod tests {
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_registry(&home, &[]);
         let mut states = HashMap::new();
-        states.insert("x-1".to_string(), ("done".to_string(), None));
+        states.insert("x-1".to_string(), ("done".to_string(), None, 0));
         states.insert(
             "x-2".to_string(),
-            ("done".to_string(), Some("merged".to_string())),
+            ("done".to_string(), Some("merged".to_string()), 0),
         );
         let mut request = settled_request("/repo/wt");
         request.worktree = None;
@@ -1136,7 +1139,7 @@ mod tests {
         let mut states = HashMap::new();
         states.insert(
             "x-1".to_string(),
-            ("done".to_string(), Some("open".to_string())),
+            ("done".to_string(), Some("open".to_string()), 0),
         );
         let mut request = settled_request("/repo/wt");
         request.worktree = None;
@@ -1163,6 +1166,48 @@ mod tests {
         assert!(
             events.contains("merge-status:open:x-1"),
             "the hold must name the recorded merge_status: {events}"
+        );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn open_additional_pr_holds_the_cleanup_request() {
+        // The doneness gate honors the same keep as the retire sweep: a
+        // done+merged node whose additional_prs record one still open holds
+        // the request under additional-pr-open:<node>; no row, no tree.
+        let home = temp_home("additional-pr-open");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        write_registry(&home, &[]);
+        let mut states = HashMap::new();
+        states.insert(
+            "x-1".to_string(),
+            ("done".to_string(), Some("merged".to_string()), 1),
+        );
+        let mut request = settled_request("/repo/wt");
+        request.worktree = None;
+        let seams = RequestSeams {
+            finished: &|_entry| true,
+            stop: &|_entry| Ok("abc123".to_string()),
+            surface_removal: &|_entry| crate::daemon::CascadeOutcome::Removed,
+            tree_holds: &|_wt| false,
+            take_tree: &|_wt, _root| true,
+        };
+        let (acted, held) = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            Some(&states),
+            None,
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 0);
+        assert!(held, "an open additional PR holds the request");
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        assert!(
+            events.contains("additional-pr-open:x-1"),
+            "the hold must name the open additional PR: {events}"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
@@ -1245,11 +1290,11 @@ mod tests {
         row
     }
 
-    fn merged_states() -> Option<HashMap<String, (String, Option<String>)>> {
+    fn merged_states() -> Option<HashMap<String, (String, Option<String>, usize)>> {
         let mut states = HashMap::new();
         states.insert(
             "x-1".to_string(),
-            ("done".to_string(), Some("merged".to_string())),
+            ("done".to_string(), Some("merged".to_string()), 0),
         );
         Some(states)
     }
@@ -1416,7 +1461,7 @@ mod tests {
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         write_registry(&home, &[claude_row("target-x-1-worker", false)]);
         let mut states = HashMap::new();
-        states.insert("x-1".to_string(), ("in_progress".to_string(), None));
+        states.insert("x-1".to_string(), ("in_progress".to_string(), None, 0));
         let request = settled_request("/repo/wt");
         let seams = RequestSeams {
             finished: &|_entry| true,
@@ -1660,9 +1705,9 @@ mod tests {
         let mut states = HashMap::new();
         states.insert(
             "x-1a2b".to_string(),
-            ("done".to_string(), Some("merged".to_string())),
+            ("done".to_string(), Some("merged".to_string()), 0),
         );
-        states.insert("x-ffff".to_string(), ("in_progress".to_string(), None));
+        states.insert("x-ffff".to_string(), ("in_progress".to_string(), None, 0));
         let mut request = settled_request("/no-such-worktree");
         request.node_ids = vec!["x-1a2b".to_string()];
         let seams = RequestSeams {
@@ -1717,9 +1762,9 @@ mod tests {
         let mut states = HashMap::new();
         states.insert(
             "x-1a2b".to_string(),
-            ("done".to_string(), Some("merged".to_string())),
+            ("done".to_string(), Some("merged".to_string()), 0),
         );
-        states.insert("x-cccc".to_string(), ("in_progress".to_string(), None));
+        states.insert("x-cccc".to_string(), ("in_progress".to_string(), None, 0));
         let mut holding = settled_request("/no-such-worktree");
         holding.node_ids = vec!["x-cccc".to_string()];
         let mut clean = settled_request("/no-such-worktree");

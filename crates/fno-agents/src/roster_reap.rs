@@ -255,7 +255,7 @@ pub(crate) fn run(
         };
         let hits = transcripts(&entry);
         let sid = entry.harness_session_id.as_deref().unwrap_or("").trim();
-        let verdict = provenance_verdict(&entry, sid, graph, hits.as_deref());
+        let verdict = provenance_verdict(&entry, sid, graph, hits.as_deref(), None);
         let node = verdict.route.node.clone();
         // A hold (conflict or PR contradiction) names itself, and stays a
         // keep at every scope: contested truth is not a scope question.
@@ -327,6 +327,33 @@ pub(crate) fn run(
                         Some(crate::node_route::NodeSource::Sessions)
                             | Some(crate::node_route::NodeSource::Registry)
                     );
+                // The open-PR keep at scope all: an open node whose PR is
+                // unmerged and whose driver is THIS session keeps its row
+                // even on a terminal roster state - the tree's branch is
+                // unmerged and the PR needs its driver alive. The default
+                // scope is unchanged.
+                if scope_all_strong {
+                    let pr = graph.pr_number.get(n).copied().flatten();
+                    let merged = graph
+                        .pr_state
+                        .get(n)
+                        .and_then(|(merge_status, _, _)| merge_status.clone())
+                        .as_deref()
+                        == Some("merged");
+                    let drives = graph
+                        .do_nodes
+                        .get(&sid.to_ascii_lowercase())
+                        .is_some_and(|set| set.contains(n));
+                    if let Some(pr) = pr.filter(|_| !merged && drives) {
+                        summary.kept.push(judgement(
+                            &ident,
+                            Some(n.clone()),
+                            format!("open pr: {n} #{pr}"),
+                            false,
+                        ));
+                        continue;
+                    }
+                }
                 match &open_release {
                     Some(release) => {
                         if scope_all_strong {
@@ -671,6 +698,47 @@ mod tests {
                 .starts_with("session terminal: harness state done"),
             "{summary:?}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The open-PR keep at scope all: an open node whose PR is unmerged and
+    // whose driver is THIS session keeps its row even on a terminal roster
+    // state. The default scope keeps the row too, but under the unchanged
+    // open-work reason.
+    #[test]
+    fn open_pr_keep_at_scope_all_beats_the_terminal_release() {
+        let dir = tmpdir("open-pr");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-bbbb-worker"))];
+        let mut g = graph_done("x-aaaa");
+        g.statuses.insert("x-bbbb".into(), "in_review".into());
+        g.index.insert(
+            "sid-1".to_string(),
+            vec![("x-bbbb".to_string(), "in_review".to_string())],
+        );
+        g.work_index = g.index.clone();
+        g.pr_number.insert("x-bbbb".into(), Some(1943));
+        g.pr_state.insert("x-bbbb".into(), (None, 0, 0));
+        g.do_nodes.insert(
+            "sid-1".to_string(),
+            std::collections::HashSet::from(["x-bbbb".to_string()]),
+        );
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::All,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(g.clone()),
+            &|_e| Some(vec![transcript.clone()]),
+            &|_e| mtime_age(&[transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(summary.retired.is_empty(), "{summary:?}");
+        let kept = &summary.kept[0];
+        assert!(kept.reason.contains("open pr: x-bbbb #1943"), "{summary:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
