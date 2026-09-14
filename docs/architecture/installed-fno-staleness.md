@@ -120,6 +120,14 @@ Three consumers read the same verdict:
 
 The front door's own re-provision passes `--refresh` to `uv tool install`. A wheel-cache hit can no longer reinstall the same stale bytes and call the loop converged.
 
+## The Claude plugin stage
+
+When the install is a directory marketplace, Claude does not copy the footnote plugin into its own cache. It executes hooks and skills straight from `~/.fno/plugin-stage/fno`. A restage of that directory IS the deploy for every Claude session on the machine. The only writer was `fno config plugin install`, run by hand, so the stage lagged main until someone noticed hooks behaving oddly. One stale staged hook produced 738 watch-lease refusals across 99 sessions before anyone named the cause.
+
+Whenever the stage directory exists, `fno doctor update` now restages it after a successful install. `fno-agents plugin-install --restage --source <checkout>` is the deploy verb it chains. On a machine that never set up the directory marketplace, restage rebuilds nothing. The rebuild swaps by rename, so a live session never sees a half-built tree. Hook scripts the old stage's config references are carried forward, so pre-restage sessions keep their Bash.
+
+`fno-agents plugin-install --check [--json]` is the drift verdict: one byte comparison of the stage against the source checkout's HEAD. Exit 0 is fresh or absent, 3 is stale, 4 is unknown. When the install registry carries no `gitCommitSha`, `fno doctor` runs that check and exits 1 on a stale stage. The report names the differing and missing counts with a sample. The repair is `cd <source root> && fno config plugin install claude`, or wait for `fno doctor update` on the next merge.
+
 ## Locked decisions
 
 1. `fno doctor` is the primary mechanism, not reinstall-on-ship. Detection plus explicit repair beats implicit mutation that races a running pipeline.
