@@ -93,9 +93,6 @@ def _emit_for_sweep(event_type: str, data: dict[str, Any]) -> None:
     _emit_event(event_type, data)
 
 
-_BOUNCE_SIDECAR = "pr-watch-bounce.json"
-
-
 def _bounce_sender(window_s: float = 15.0) -> str:
     """The bounce that just sent this SIGTERM, from its receipt; else unrecorded.
 
@@ -105,6 +102,7 @@ def _bounce_sender(window_s: float = 15.0) -> str:
     try:
         import time
         from fno.paths import state_dir
+        from fno.pr_watch._install import _BOUNCE_SIDECAR
 
         raw = json.loads((state_dir() / _BOUNCE_SIDECAR).read_text(encoding="utf-8"))
         if time.time() - float(raw["ts"]) <= window_s:

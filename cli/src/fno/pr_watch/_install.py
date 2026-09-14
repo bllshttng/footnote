@@ -34,6 +34,9 @@ import typer
 
 _LABEL = "sh.fno.pr-watcher"
 _PLIST_FILENAME = f"{_LABEL}.plist"
+# Written by _record_bounce, read by cli._bounce_sender; rename both or the
+# sender join breaks silently.
+_BOUNCE_SIDECAR = "pr-watch-bounce.json"
 _LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 # Per-repo watchers from the retired scripts/post-merge/ path. Their target
 # script is deleted, so a loaded job would fail under launchd forever.
@@ -322,7 +325,7 @@ def _record_bounce(*, caller: str, deferred: bool, state_root: Optional[Path] = 
         try:
             from fno.paths import state_dir
 
-            sidecar = Path(state_root or state_dir()) / "pr-watch-bounce.json"
+            sidecar = Path(state_root or state_dir()) / _BOUNCE_SIDECAR
             sidecar.parent.mkdir(parents=True, exist_ok=True)
             tmp = sidecar.with_name(sidecar.name + ".tmp")
             tmp.write_text(json.dumps({"ts": time.time(), **data}), encoding="utf-8")

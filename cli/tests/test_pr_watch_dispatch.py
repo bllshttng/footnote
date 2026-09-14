@@ -2524,6 +2524,7 @@ class TestTickRecordsAndDeadline:
 
         import fno.paths
         from fno.pr_watch import cli as prcli
+        from fno.pr_watch import _install as pinst
 
         installed: dict[int, object] = {}
 
@@ -2535,7 +2536,7 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr(prcli.os, "kill", lambda pid, sig: None)
 
         res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
-        sidecar = Path(fno.paths.state_dir()) / prcli._BOUNCE_SIDECAR
+        sidecar = Path(fno.paths.state_dir()) / pinst._BOUNCE_SIDECAR
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(json.dumps({
             "ts": time.time(), "caller": "heal", "pid": 123,
@@ -2551,8 +2552,9 @@ class TestTickRecordsAndDeadline:
         not this kill's sender; the row must not blame the wrong bounce."""
         import fno.paths
         from fno.pr_watch import cli as prcli
+        from fno.pr_watch import _install as pinst
 
-        sidecar = Path(fno.paths.state_dir()) / prcli._BOUNCE_SIDECAR
+        sidecar = Path(fno.paths.state_dir()) / pinst._BOUNCE_SIDECAR
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(json.dumps({
             "ts": time.time() - 16, "caller": "refresh", "pid": 99,
