@@ -506,7 +506,7 @@ def test_a_hand_composed_foreign_route_is_never_cleared(capsys):
 
 def test_an_unrouted_scrub_clears_a_coherent_claim_and_says_so(capsys):
     # A spawn composing no route inherits the shell's pin otherwise; the
-    # notice is true whether or not --model was typed (x-8fb6): it never
+    # notice is true whether or not --model was typed: it never
     # calls a pinned child unrouted nor prescribes the flag it already used.
     env = {"ANTHROPIC_MODEL": "claude-opus-4-8"}
     dropped = scrub_incoherent_model_env_and_notify(env, routed=False)

@@ -1638,7 +1638,7 @@ def test_ac3_hp_explicit_wins_every_injectable_field():
 @requires_rust
 def test_model_vendor_mismatch_refuses_without_a_typed_harness():
     # --model glm-5.3 with no -H and no declared row: the spawn refuses
-    # before launch (x-8fb6) instead of launching claude on a zai model.
+    # before launch instead of launching claude on a zai model.
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
         _inject(

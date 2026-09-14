@@ -1260,7 +1260,7 @@ fn resolve_slot_walk(payload: &Value) -> Value {
     {
         // A typed --model whose routing.models row declares exactly one
         // harness resolves that row instead of falling through to a
-        // config-scalar harness (x-8fb6): the row IS the model's own
+        // config-scalar harness: the row IS the model's own
         // declaration. A typed --route or -P, or a typed -H (payload
         // explicit_lane), keeps the plain override - the operator already
         // named those axes. Zero row matches also keep it: no vendor
@@ -3516,7 +3516,7 @@ mod tests {
 
     #[test]
     fn pin_model_resolves_its_declared_row_harness() {
-        // x-8fb6: the row IS the model's own declaration, so the pin takes
+        // The row IS the model's own declaration, so the pin takes
         // the row's harness instead of a config-scalar default.
         let out = resolve_slot_payload(&strict_payload(json!({
             "work_verb": "blueprint",

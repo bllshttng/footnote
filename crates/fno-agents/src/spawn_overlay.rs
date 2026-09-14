@@ -541,7 +541,7 @@ fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
     }
     // A spawn whose harness nobody typed is not a deliberate passthrough:
     // --node dispatch harnesses come from a resolver, and an untyped -H
-    // came from config or a default (x-8fb6). A typed -H beside a typed
+    // came from config or a default. A typed -H beside a typed
     // model is the operator's own pairing, so it only warns. The --account
     // downgrade and the early --route return stay as they are.
     let harness_typed = payload
