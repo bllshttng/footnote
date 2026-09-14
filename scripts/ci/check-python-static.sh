@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Repo-wide Python static step. CI, fno doctor test, and the merge-result probe run this one file.
+# Repo-wide Python static step. CI (guards.yml job main-python-static) and the
+# merge-result probe run this one file; `fno doctor test` does not, which is
+# why that verb states this gap in its own output.
 # $1 is the cli directory to check (default: cli next to this repo root).
 set -euo pipefail
 export NO_COLOR=1

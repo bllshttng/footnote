@@ -12,12 +12,14 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 from fno.test_cmd import (
     _STRUCTURAL_STEPS,
     changed_snapshot,
     discover_shell_harnesses,
     select_changed,
+    test_command,
 )
 
 
@@ -740,3 +742,45 @@ def test_run_smoke_routes_through_the_discovered_steps_helper() -> None:
 
     assert "smoke_steps" in inspect.getsource(tc._run_smoke)
     assert "_smoke_discovered_steps" in inspect.getsource(tc.smoke_steps)
+
+
+def test_help_states_the_verb_never_type_checks() -> None:
+    """The scope statement is in `--help`: a reader who only reads help still
+    learns the typing gate lives elsewhere. Click's help wrapper may break a
+    hyphenated token across lines, so match on whitespace-stripped text."""
+    result = CliRunner().invoke(test_command, ["--help"])
+    assert result.exit_code == 0
+    flat = "".join(result.output.split())
+    assert "nevertype-checks" in flat
+    assert "check-python-static.sh" in flat
+
+
+def test_passing_run_prints_the_type_check_disclaimer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The acceptance shape: the statement prints on a PASSING run, not only
+    when something already went wrong."""
+    import fno.test_cmd as tc
+
+    monkeypatch.setattr(tc, "_run", lambda *a, **k: 0)
+    result = CliRunner().invoke(tc.test_command, [])
+    assert result.exit_code == 0
+    flat = "".join(result.output.split())
+    assert "doesNOTtype-check" in flat
+    assert "check-python-static.sh" in flat
+
+
+def test_smoke_list_output_stays_verbatim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`smoke --list` is a machine contract: one name per line, nothing else.
+    The scope statement must never join it."""
+    reg = tmp_path / "reg.py"
+    reg.write_text(
+        'STEPS = [("alpha pass", ".", "true"), ("bravo pass", ".", "true")]\n'
+    )
+    monkeypatch.setenv("SMOKE_REGISTRY_FILE", str(reg))
+    monkeypatch.setenv("SMOKE_FAILURE_RECORD", str(tmp_path / "rec.txt"))
+    result = CliRunner().invoke(test_command, ["smoke", "--list"])
+    assert result.exit_code == 0
+    assert result.output == "alpha pass\nbravo pass\n"
