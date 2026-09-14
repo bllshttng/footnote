@@ -71,6 +71,7 @@ from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
+from fno.agents.send_result import DispatchSendResult
 from fno.agents.stop_receipt import emit_shellout_stop, wake_set_refusal
 from fno.agents.registry import (
     AgentEntry,
@@ -4915,9 +4916,6 @@ def register_mcp_channel(
 
 #: Body size cap enforced before any envelope write (AC3-EDGE).
 _SEND_MAX_BODY_BYTES = 1024 * 1024  # 1 MiB
-
-
-from fno.agents.send_result import DispatchSendResult
 
 
 def rpc_roundtrip(
