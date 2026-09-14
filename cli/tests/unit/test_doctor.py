@@ -2888,6 +2888,45 @@ def test_plugin_cache_directory_marketplace_stage_stale(tmp_path, monkeypatch):
     assert any("hooks/claim-heartbeat.sh" in b for b in blockers)
 
 
+def test_stage_check_prefers_the_registry_install_location(tmp_path, monkeypatch):
+    """Claude execs from the plugin registry's installLocation; that path
+    wins over the marketplace path when both exist."""
+    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
+    registry = tmp_path / "installed_plugins.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "fno@footnote": [
+                        {"scope": "user", "installLocation": "/live/fno"}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(doctor, "_plugin_registry_path", lambda: registry)
+    monkeypatch.setattr(
+        doctor,
+        "_known_marketplaces_path",
+        lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    seen = {}
+
+    def _probe(argv):
+        seen["stage"] = argv[argv.index("--stage") + 1]
+        return 0, json.dumps({"status": "fresh"}), ""
+
+    monkeypatch.setattr(doctor, "_run_stage_check", _probe)
+
+    report = doctor._plugin_cache_report()
+
+    assert seen["stage"] == "/live/fno"
+    assert report["stage"] == "/live/fno"
+
+
 def test_plugin_cache_stage_check_transport_failure_is_unknown(tmp_path, monkeypatch):
     """AC5-ERR: a failed or timed-out stage probe is unknown with the reason
     in detail, and adds no blocker."""

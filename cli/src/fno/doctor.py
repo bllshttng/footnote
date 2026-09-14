@@ -710,13 +710,15 @@ def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
         return -1, "", str(exc)
 
 
-def _stage_check_report() -> Optional[dict[str, Any]]:
+def _stage_check_report(install_location: str = "") -> Optional[dict[str, Any]]:
     """Stage-drift verdict when Claude runs the plugin from the fno stage.
 
     A directory marketplace never mints a ``gitCommitSha``, so for that
     install shape freshness is a byte comparison of the stage against source
     HEAD. Returns None when this install is not a directory marketplace; any
     transport failure maps to ``unknown`` in ``detail``, never ``fresh``.
+    ``install_location`` (where Claude actually execs) wins over the
+    marketplace path when both exist.
     """
     try:
         data = json.loads(_known_marketplaces_path().read_text(encoding="utf-8"))
@@ -725,7 +727,7 @@ def _stage_check_report() -> Optional[dict[str, Any]]:
         return None
     if not isinstance(source, dict) or source.get("source") != "directory":
         return None
-    stage_path = str(source.get("path") or "")
+    stage_path = install_location or str(source.get("path") or "")
     if not stage_path:
         return None
 
@@ -751,8 +753,8 @@ def _stage_check_report() -> Optional[dict[str, Any]]:
     if not isinstance(verdict, dict):
         return unknown("plugin-install --check printed a non-object")
     verdict["kind"] = "stage"
+    verdict.setdefault("stage", stage_path)
     verdict["sha"] = verdict.pop("source_head", None)
-    verdict["installed_at"] = None
     verdict.setdefault("remedy", f"cd {verdict.get('source') or src} && fno config plugin install claude")
     return verdict
 
@@ -804,8 +806,8 @@ def _plugin_cache_report() -> dict[str, Any]:
         return report
     sha = entry.get("gitCommitSha")
     if not sha:
-        # No sha means a directory marketplace: the stage is the artifact.
-        return _stage_check_report() or report | {
+        # The stage is the artifact; Claude execs from the registry path.
+        return _stage_check_report(str(entry.get("installLocation") or "")) or report | {
             "detail": "installed_plugins.json carries no gitCommitSha"
         }
     report["sha"] = sha
@@ -2738,8 +2740,6 @@ def _emit_human(
             f"{pc.get('missing_count', 0)} missing; e.g. {sample[0] if sample else '?'}). "
             f"Fix: {pc.get('remedy')}, then restart sessions to pick up new hook text."
         )
-    elif pc.get("kind") == "stage" and pc.get("status") == "fresh":
-        out("fno doctor: plugin stage: fresh (matches source HEAD).")
     elif pc.get("status") == "stale":
         sha = str(pc.get("sha") or "")[:12]
         when = str(pc.get("installed_at") or "")[:10] or "?"
