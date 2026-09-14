@@ -43,6 +43,14 @@ pub struct LadderState {
     pub escalated: bool,
     #[serde(default)]
     pub last_pause_emit_at: Option<i64>,
+    /// Attempts in this budget whose nudge did not land.
+    #[serde(default)]
+    pub undelivered: u32,
+    /// Mail to this session last came back `queued (durable)`: the lane
+    /// cannot reach it, so the ladder stays on the Resume rung. Sticky until
+    /// the state file is dropped by `cleanup_state_files`.
+    #[serde(default)]
+    pub mail_durable: bool,
 }
 
 /// What this pass does with one open-PR row.
@@ -87,6 +95,7 @@ pub fn decide(input: &NudgeInput) -> (NudgeAction, LadderState) {
         if activity > nudged {
             input.state.attempts = 0;
             input.state.escalated = false;
+            input.state.undelivered = 0;
         }
     }
     let state = input.state.clone();
@@ -117,8 +126,10 @@ pub fn decide(input: &NudgeInput) -> (NudgeAction, LadderState) {
         }
         return (NudgeAction::Wait, state);
     }
-    // 5/6. A live session reads its mail; a dead process needs a resume.
-    if input.live {
+    // 5/6. A live session reads its mail - unless mail to it last queued
+    // durable, in which case the lane is dead and every rung resumes. A
+    // dead process needs a resume regardless.
+    if input.live && !input.state.mail_durable {
         (NudgeAction::Mail, state)
     } else {
         (NudgeAction::Resume, state)
@@ -244,13 +255,7 @@ pub fn apply(
         NudgeAction::Escalate => {
             let marker = format!("pr-nudge: PR #{} on {}", row.pr, row.node);
             if !open_questions_mention(marker.as_str()) {
-                let text = format!(
-                    "{marker}, session {}: {MAX_ATTEMPTS} nudges drew no activity. \
-                     The row is kept. Resume it with `fno agents resume {sid}`, \
-                     or record a merge order.",
-                    row.session_id,
-                    sid = row.session_id,
-                );
+                let text = escalation_text(&marker, &row.session_id, state.undelivered);
                 let argv = vec![
                     "fno".to_string(),
                     "inbox".to_string(),
@@ -270,46 +275,92 @@ pub fn apply(
                     "session_id": row.session_id,
                     "node": row.node,
                     "pr": row.pr,
+                    "undelivered": state.undelivered,
                 }),
             );
         }
         NudgeAction::Mail | NudgeAction::Resume => {
             let text = nudge_text(row, runner);
-            let argv = match action {
-                NudgeAction::Mail => vec![
+            let resume_argv = vec![
+                "fno".to_string(),
+                "agents".to_string(),
+                "resume".to_string(),
+                row.session_id.clone(),
+                "--message".to_string(),
+                text.clone(),
+            ];
+            let (code, stdout, landed, fallback) = if action == NudgeAction::Mail {
+                let argv = vec![
                     "fno".to_string(),
                     "agents".to_string(),
                     "mail".to_string(),
                     "send".to_string(),
                     row.session_id.clone(),
                     text,
-                ],
-                _ => vec![
-                    "fno".to_string(),
-                    "agents".to_string(),
-                    "resume".to_string(),
-                    row.session_id.clone(),
-                    "--message".to_string(),
-                    text,
-                ],
+                ];
+                let (code, stdout) = runner(&argv, "");
+                let mut landed = crate::mail_inject::mail_send_landed(code, &stdout);
+                let mut fallback = false;
+                // Exit 0 is only a queue acceptance. When the receipt says
+                // the lane cannot reach the session, remember it; either way
+                // the attempt must still have had a chance to land, so the
+                // same pass falls back to the content-confirmed resume.
+                if !landed {
+                    if crate::mail_inject::mail_send_receipt(&stdout).contains("queued (durable)") {
+                        state.mail_durable = true;
+                    }
+                    let (resume_code, _) = runner(&resume_argv, "");
+                    landed = resume_code == 0;
+                    fallback = true;
+                }
+                (code, stdout, landed, fallback)
+            } else {
+                let (code, stdout) = runner(&resume_argv, "");
+                (code, stdout, code == 0, false)
             };
-            let (code, _) = runner(&argv, "");
             state.attempts += 1;
+            if !landed {
+                state.undelivered += 1;
+            }
             state.last_nudge_at = Some(now);
             save_state(home, &row.session_id, &state);
-            let _ = emitter.emit(
-                "pr_nudge_sent",
-                &serde_json::json!({
-                    "session_id": row.session_id,
-                    "node": row.node,
-                    "pr": row.pr,
-                    "action": action.as_str(),
-                    "attempt": state.attempts,
-                    "delivered": code == 0,
-                }),
-            );
+            let receipt_line = crate::mail_inject::mail_send_receipt(&stdout);
+            let receipt = if receipt_line.is_empty() {
+                format!("exit {code}")
+            } else {
+                receipt_line.chars().take(200).collect()
+            };
+            let mut fields = serde_json::json!({
+                "session_id": row.session_id,
+                "node": row.node,
+                "pr": row.pr,
+                "action": action.as_str(),
+                "attempt": state.attempts,
+                "delivered": landed,
+                "receipt": receipt,
+            });
+            if fallback {
+                fields["fallback"] = serde_json::json!("resume");
+            }
+            let _ = emitter.emit("pr_nudge_sent", &fields);
         }
     }
+}
+
+/// The operator-ask text. Nudges that never landed are named as such, so
+/// "3 nudges drew no activity" cannot stand in for nudges the session never
+/// saw.
+fn escalation_text(marker: &str, sid: &str, undelivered: u32) -> String {
+    let note = if undelivered > 0 {
+        format!(", and {undelivered} of them never landed in the session")
+    } else {
+        String::new()
+    };
+    format!(
+        "{marker}, session {sid}: {MAX_ATTEMPTS} nudges drew no activity{note}. \
+         The row is kept. Resume it with `fno agents resume {sid}`, \
+         or record a merge order."
+    )
 }
 
 /// The nudge body: the order to drive, plus the PR's own verdict line so
@@ -547,21 +598,34 @@ mod tests {
         }
     }
 
+    /// The last event of `kind` on this home's log, framed `{ts, type,
+    /// source, data}` by the unified envelope.
+    fn last_event(home: &AgentsHome, kind: &str) -> Value {
+        let text = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        text.lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| v.get("type").and_then(Value::as_str) == Some(kind))
+            .last()
+            .unwrap()
+    }
+
     #[test]
     fn quiet_live_row_gets_mail() {
-        let live_row = row(true);
+        // AC2-HP: a hosted receipt lands; no fallback runs.
         let mut text_runner_calls: Vec<Vec<String>> = Vec::new();
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
             text_runner_calls.push(argv.to_vec());
             if argv.contains(&"do".to_string()) {
                 (0, "1943 OPEN pending\n".into())
+            } else if argv.contains(&"send".to_string()) {
+                (0, "msg-1 delivered (hosted)\n".into())
             } else {
                 (0, String::new())
             }
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-mail"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
         let emitter = EventEmitter::new(home.events_jsonl(), "test");
-        let _ = live_row;
         apply(
             &home,
             &emitter,
@@ -581,7 +645,13 @@ mod tests {
         assert!(mail[5].contains("1943 OPEN pending"));
         let saved = load_state(&home, &row(true).session_id);
         assert_eq!(saved.attempts, 1);
-        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-pn-mail"));
+        assert_eq!(saved.undelivered, 0);
+        assert!(!saved.mail_durable);
+        let ev = last_event(&home, "pr_nudge_sent");
+        assert_eq!(ev["data"]["delivered"], serde_json::json!(true));
+        assert_eq!(ev["data"]["receipt"], "msg-1 delivered (hosted)");
+        assert!(ev["data"].get("fallback").is_none());
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
     }
 
     #[test]
@@ -608,6 +678,215 @@ mod tests {
         );
         assert!(saw_resume);
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-pn-resume"));
+    }
+
+    #[test]
+    fn durable_mail_falls_back_to_resume_in_the_same_pass() {
+        // AC1-HP: exit 0 on a durable queue is not a landing. The same pass
+        // resumes with the same text, and the receipt + fallback ride the
+        // event.
+        let mut mail_text: Option<String> = None;
+        let mut resume_text: Option<String> = None;
+        let mut saw_resume = false;
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                return (0, "1943 OPEN pending\n".into());
+            }
+            if argv.contains(&"send".to_string()) {
+                mail_text = Some(argv[5].clone());
+                return (0, "msg-1 queued (durable) [live-miss]\n".into());
+            }
+            if argv.contains(&"resume".to_string()) {
+                saw_resume = true;
+                resume_text = argv.last().cloned();
+            }
+            (0, String::new())
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-durable"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &row(true),
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        assert!(saw_resume);
+        assert_eq!(
+            mail_text, resume_text,
+            "the fallback carries the same nudge text"
+        );
+        let saved = load_state(&home, &row(true).session_id);
+        assert_eq!(saved.attempts, 1);
+        assert!(saved.mail_durable);
+        assert_eq!(saved.undelivered, 0, "the resume landed");
+        let ev = last_event(&home, "pr_nudge_sent");
+        assert_eq!(ev["data"]["delivered"], serde_json::json!(true));
+        assert_eq!(ev["data"]["fallback"], "resume");
+        assert_eq!(ev["data"]["receipt"], "msg-1 queued (durable) [live-miss]");
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn mail_exit_zero_with_empty_stdout_falls_back_to_resume() {
+        // AC3-ERR: no receipt, no landing; the fallback still runs.
+        let mut saw_resume = false;
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                return (0, "1943 OPEN pending\n".into());
+            }
+            if argv.contains(&"send".to_string()) {
+                return (0, String::new());
+            }
+            if argv.contains(&"resume".to_string()) {
+                saw_resume = true;
+            }
+            (0, String::new())
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-empty"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &row(true),
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        assert!(saw_resume);
+        let saved = load_state(&home, &row(true).session_id);
+        assert!(!saved.mail_durable, "no queued receipt, no sticky rung");
+        let ev = last_event(&home, "pr_nudge_sent");
+        assert_eq!(ev["data"]["receipt"], "exit 0");
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn mail_nonzero_exit_falls_back_to_resume() {
+        let mut saw_resume = false;
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                return (0, "1943 OPEN pending\n".into());
+            }
+            if argv.contains(&"send".to_string()) {
+                return (7, "boom\n".into());
+            }
+            if argv.contains(&"resume".to_string()) {
+                saw_resume = true;
+            }
+            (0, String::new())
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-nonzero"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &row(true),
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        assert!(saw_resume);
+        let ev = last_event(&home, "pr_nudge_sent");
+        assert_eq!(ev["data"]["fallback"], "resume");
+        assert_eq!(ev["data"]["receipt"], "boom");
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn failed_resume_after_durable_mail_counts_undelivered() {
+        // Mail queues durable and the resume also fails: the attempt did
+        // not land, and the escalation must be able to say so.
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                return (0, "1943 OPEN pending\n".into());
+            }
+            if argv.contains(&"send".to_string()) {
+                return (0, "msg-1 queued (durable) [live-miss]\n".into());
+            }
+            (1, "no such session\n".into())
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-undelivered"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &row(true),
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        let saved = load_state(&home, &row(true).session_id);
+        assert_eq!(saved.attempts, 1);
+        assert_eq!(saved.undelivered, 1);
+        assert!(saved.mail_durable);
+        let ev = last_event(&home, "pr_nudge_sent");
+        assert_eq!(ev["data"]["delivered"], serde_json::json!(false));
+        assert_eq!(ev["data"]["fallback"], "resume");
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn a_mail_durable_row_takes_the_resume_rung_while_live() {
+        // AC4-HP: once mail queued durable, the live row never returns to
+        // the Mail rung.
+        let st = LadderState {
+            mail_durable: true,
+            ..Default::default()
+        };
+        assert_eq!(decide(&input(st, true)).0, NudgeAction::Resume);
+    }
+
+    #[test]
+    fn escalation_names_nudges_that_never_landed() {
+        // AC5-EDGE: the operator question must not dress queued envelopes up
+        // as ignored nudges. The dedupe marker stays.
+        let marker = "pr-nudge: PR #1943 on x-node";
+        let with = escalation_text(marker, "sid-1", 2);
+        assert!(with.contains(marker), "{with}");
+        assert!(
+            with.contains("3 nudges drew no activity, and 2 of them never landed in the session"),
+            "{with}"
+        );
+        let without = escalation_text(marker, "sid-1", 0);
+        assert!(
+            without.contains("3 nudges drew no activity. The row is kept"),
+            "{without}"
+        );
+        assert!(!without.contains("never landed"), "{without}");
+    }
+
+    #[test]
+    fn activity_reset_clears_undelivered_but_keeps_mail_durable() {
+        // AC6-EDGE: the session answered, so the undelivered count clears;
+        // the lane fact is sticky until the state file is dropped.
+        let st = LadderState {
+            attempts: 3,
+            last_nudge_at: Some(100),
+            escalated: true,
+            undelivered: 2,
+            mail_durable: true,
+            ..Default::default()
+        };
+        let mut inp = input(st, true);
+        inp.last_activity_at = Some(1500);
+        let (action, state) = decide(&inp);
+        assert_eq!(action, NudgeAction::Resume, "mail_durable keeps resume");
+        assert_eq!(state.undelivered, 0);
+        assert!(state.mail_durable);
     }
 
     #[test]
