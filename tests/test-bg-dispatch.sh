@@ -74,10 +74,9 @@ case "$sub $verb" in
     printf 'rm %s\n' "${3:-}" >> "$S/rm.log"; echo "removed ${3:-}" ;;
   "agents name")
     id="${3:-}"
-    for a in "$@"; do
-      [[ "$a" == "--verb" ]] && { echo "naming must not pass --verb (x-3873)" >&2; exit 3; }
-    done
-    printf 'target-%s\n' "$id" ;;
+    # x-57fe: the dispatch carries --verb t (the bridge refuses a verb-less
+    # mint), and the minted name is the canonical hex shape.
+    printf 't-%s\n' "${id##*-}" ;;
   "agents spawn")
     printf '%s\n' "$*" >> "$S/ask.log"
     if [[ -f "$S/spawn_refuse" ]]; then
@@ -124,12 +123,12 @@ out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
 rc=$?
 [[ "$rc" -eq 0 ]] && pass "single ready dispatch exits 0" || fail "single ready dispatch exits 0 (rc=$rc): $out"
 argv="$(spawn_argv 1)"
-[[ "$argv" == "agents spawn --node ab-aaaa1111 --substrate thread --name target-ab-aaaa1111" ]] \
+[[ "$argv" == "agents spawn --node ab-aaaa1111 --substrate thread --name t-aaaa1111" ]] \
   && pass "spawn argv is exactly node+substrate+name" || fail "spawn argv is exactly node+substrate+name (got: $argv)"
 grep -q -- "--harness" <<<"$argv" && fail "no --harness rides the spawn" || pass "no --harness rides the spawn"
 grep -q -- "--model" <<<"$argv" && fail "no --model rides the spawn" || pass "no --model rides the spawn"
 grep -q -- "--route" <<<"$argv" && fail "no --route rides an untyped dispatch" || pass "no --route rides an untyped dispatch"
-grep -q "launched ab-aaaa1111 name=target-ab-aaaa1111" <<<"$out" \
+grep -q "launched ab-aaaa1111 name=t-aaaa1111" <<<"$out" \
   && pass "launched line names the node and agent" || fail "launched line names the node and agent: $out"
 grep -q "summary: launched=1 " <<<"$out" \
   && pass "summary counts one launch" || fail "summary counts one launch: $out"
@@ -143,7 +142,7 @@ set_status ab-aaaa1111 ready
 set_slug ab-aaaa1111 the-slug
 out="$(bash "$DISPATCH" --here --route zai/glm-5.3 --permission-mode acceptEdits ab-aaaa1111 2>&1)"
 argv="$(spawn_argv 1)"
-[[ "$argv" == "agents spawn --node ab-aaaa1111 --substrate thread --name target-ab-aaaa1111 --here --route zai/glm-5.3 --permission-mode acceptEdits" ]] \
+[[ "$argv" == "agents spawn --node ab-aaaa1111 --substrate thread --name t-aaaa1111 --here --route zai/glm-5.3 --permission-mode acceptEdits" ]] \
   && pass "typed --here/--route/--permission-mode ride the spawn" || fail "typed flags ride the spawn (got: $argv)"
 
 # ---- AC5-EDGE: the retired per-run flags are unknown flags -----------------
@@ -205,7 +204,7 @@ reset_mock
 reset_mock
 set_status ab-aaaa1111 ready
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
-grep -q "would run: fno agents spawn --node ab-aaaa1111 --substrate thread --name target-ab-aaaa1111" <<<"$out" \
+grep -q "would run: fno agents spawn --node ab-aaaa1111 --substrate thread --name t-aaaa1111" <<<"$out" \
   && pass "dry run previews the door argv" || fail "dry run previews the door argv: $out"
 [[ -f "$MOCKSTATE/ask.log" ]] && fail "dry run launches nothing" || pass "dry run launches nothing"
 

@@ -27,17 +27,18 @@ case "${1:-} ${2:-}" in
     printf '{"verdict":"dispatchable"}\n'
     ;;
   "agents name")
-    printf 'target-%s\n' "$NODE_ID"
+    printf 't-%s\n' "${NODE_ID##*-}"
     ;;
   "agents spawn")
-    printf '{"name":"target-%s","short_id":"deadbeef01","harness":"claude","status":"live"}\n' "$NODE_ID"
+    printf '{"name":"t-%s","short_id":"deadbeef01","harness":"claude","status":"live"}\n' "${NODE_ID##*-}"
     ;;
   *) ;;
 esac
 MOCK
 chmod +x "$MOCKBIN/fno"
 NODE_ID="x-884f01"
-export NODE_ID
+NODE_HEX="${NODE_ID##*-}"
+export NODE_ID NODE_HEX
 export PATH="$MOCKBIN:$PATH"
 
 echo "== the shell launcher takes no per-run posture flag =="
@@ -52,7 +53,7 @@ echo "PASS: --allow-merge / --no-merge are unknown flags; nothing launches"
 
 echo "== the launch carries no posture either way: the grant decides worker-side =="
 dispatch_out="$(bash "$DISPATCH" --dry-run "$NODE_ID" 2>&1)"
-grep -q "would run: fno agents spawn --node $NODE_ID --substrate thread --name target-$NODE_ID" <<<"$dispatch_out" \
+grep -q "would run: fno agents spawn --node $NODE_ID --substrate thread --name t-$NODE_HEX" <<<"$dispatch_out" \
   || { echo "FAIL: preview argv is not the bare door: $dispatch_out"; exit 1; }
 ! grep -q -- "--no-merge" <<<"$dispatch_out" \
   || { echo "FAIL: a no-merge carrier must not be injected by the launcher"; exit 1; }

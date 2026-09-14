@@ -621,7 +621,9 @@ resolve_node_slug() {
   else
     _raw="$(fno backlog get "$_id" 2>/dev/null | jq -r '.slug // .title // empty' 2>/dev/null)"
   fi
-  sanitize_name "$_raw" | cut -c1-30 | sed -E 's/-+$//'
+  # The whole slug rides; the canonical owner budgets it (x-3218). A local
+  # cap here would diverge from the mint's hyphen-aware cut (x-57fe).
+  sanitize_name "$_raw"
 }
 
 if [[ "$NAME_SET" -eq 1 ]]; then
@@ -660,9 +662,9 @@ elif [[ -n "$NODE" ]]; then
     # empties the slug via resolve_node_slug, so this normally yields
     # <verb>-<node>).
     if [[ -n "$_node_slug" ]]; then
-      agent_name="${verb}-${NODE}-${_node_slug}"
+      agent_name="${verb}-${NODE##*-}-${_node_slug}"
     else
-      agent_name="${verb}-${NODE}"
+      agent_name="${verb}-${NODE##*-}"
     fi
     # Nothing downstream enforces 64 for a node spawn: it passes --node, which
     # forces the Python path (_NAME_MAX_LEN = 128), so the daemon's 64-char
