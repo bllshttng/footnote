@@ -80,7 +80,6 @@ impl Scratch {
             )
             .env("FNO_E2E", "1")
             .env("FNO_PROCESS_ADMISSION_MAX", "512");
-        pin_checkout_worker(cmd);
     }
 
     fn isolate_pty_command(&self, cmd: &mut CommandBuilder) {
