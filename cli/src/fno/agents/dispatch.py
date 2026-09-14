@@ -749,11 +749,9 @@ def _codex_create_path(
         model=model,
         model_basis="requested" if model else None,
         effort=effort,
-        # x-3954: a routed mint records the route identity, like the pane lane.
         route_provider_id=result.provider or None,
         model_name=result.model or None,
-        # The THIRD Python mint path, after the pane and bg paths; the Rust
-        # counterpart in codex_ask.rs stamps the same field.
+        # The THIRD Python mint path; codex_ask.rs stamps the same field.
         origin="spawn",
         # x-98ab: the node this spawn was FOR (the caller's provenance pass),
         # never this process's ambient value.
