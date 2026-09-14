@@ -10,9 +10,16 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fno.provenance.registry_liveness import registry_status_of
-
 _LIFECYCLE_PHASES = ("think", "blueprint", "do", "review", "ship")
+
+
+def registry_status_of(
+    session_id: Optional[str], status_index: "dict[str, str] | None"
+) -> Optional[str]:
+    """The status word one roster row renders, or ``None`` when unannotated."""
+    if status_index is None or not session_id:
+        return None
+    return status_index.get(session_id) or "reaped"
 
 
 def observed_model_of(row: dict) -> Optional[str]:
@@ -172,8 +179,7 @@ def pr_block(entry_or_sidecar: Any) -> dict:
 
 
 def render_pr_line(pr: dict) -> str:
-    """The human ``pr:`` line: both when both, the one present, (none) never
-    omitted - an absent line reads as 'this verb does not report PRs'."""
+    """The human ``pr:`` line: both when both, the one present; never omitted."""
     num, url = pr.get("number"), pr.get("url")
     if num is None and not url:
         return "  pr: (none)"

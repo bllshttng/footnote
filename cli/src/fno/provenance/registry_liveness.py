@@ -1,12 +1,9 @@
 """Registry-backed liveness for `fno backlog provenance`.
 
-Sits in the provenance package, not the graph package: the graph layer must
-not import the agents runtime directly (company boundary, L1 -> L5), and the
-provenance package already owns the read-side joins between the two.
+The graph layer must not import the agents runtime (company boundary); this
+provenance-package module is the one that reads it.
 """
 from __future__ import annotations
-
-from typing import Optional
 
 
 def registry_status_index() -> "dict[str, str] | None":
@@ -28,12 +25,3 @@ def registry_status_index() -> "dict[str, str] | None":
         if sid:
             index[sid] = getattr(row, "status", None) or "unknown"
     return index
-
-
-def registry_status_of(
-    session_id: Optional[str], status_index: "dict[str, str] | None"
-) -> Optional[str]:
-    """The status word one roster row renders, or ``None`` when unannotated."""
-    if status_index is None or not session_id:
-        return None
-    return status_index.get(session_id) or "reaped"
