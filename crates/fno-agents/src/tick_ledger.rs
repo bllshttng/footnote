@@ -521,24 +521,43 @@ pub fn read_tick_trace(journals: &[PathBuf], now_unix: u64) -> TickTrace {
     trace
 }
 
+/// The pr-watcher label behind [`SCHED_LAUNCHD`].
+fn launchd_label() -> &'static str {
+    SCHED_LAUNCHD
+        .strip_prefix("launchd:")
+        .unwrap_or(SCHED_LAUNCHD)
+}
+
 /// The registered plist path from `launchctl print` output, when it is not the
 /// one the installer writes. The first `path = ` line is the job's plist; the
 /// `stdout path =` / `stderr path =` lines name the job's own log files and do
-/// not match the prefix. `None` means healthy or unreadable - both leave the
+/// not match the prefix. A textually different path that resolves to the same
+/// file (symlinked HOME, alternate volume spelling) is still the installer's
+/// own registration. `None` means healthy or unreadable - both leave the
 /// existing cause rules in charge.
 pub fn foreign_plist_path(print_stdout: &str, home: &Path) -> Option<String> {
-    let label = SCHED_LAUNCHD
-        .strip_prefix("launchd:")
-        .unwrap_or(SCHED_LAUNCHD);
     let expected = home
         .join("Library")
         .join("LaunchAgents")
-        .join(format!("{label}.plist"));
+        .join(format!("{}.plist", launchd_label()));
     print_stdout.lines().find_map(|line| {
         let line = line.trim();
         line.strip_prefix("path = ")
             .map(|p| p.trim().to_string())
-            .filter(|p| Path::new(p) != expected)
+            .filter(|p| {
+                let cand = Path::new(p);
+                if cand == expected {
+                    return false;
+                }
+                match (
+                    std::fs::canonicalize(cand),
+                    std::fs::canonicalize(&expected),
+                ) {
+                    (Ok(cand), Ok(expected)) => cand != expected,
+                    // A nonexistent candidate cannot be the installer's file.
+                    _ => true,
+                }
+            })
     })
 }
 
@@ -558,9 +577,7 @@ pub fn read_tick_trace_live(journals: &[PathBuf], rows: &[ArmStatus], now_unix: 
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return trace;
     };
-    let label = SCHED_LAUNCHD
-        .strip_prefix("launchd:")
-        .unwrap_or(SCHED_LAUNCHD);
+    let label = launchd_label();
     // SAFETY: getuid reads a per-process kernel value; it cannot fail or race.
     let uid = unsafe { libc::getuid() };
     let cmd = vec![
@@ -2074,7 +2091,31 @@ mod tests {
         assert_eq!(foreign_plist_path(&healthy_first, &home), None);
     }
 
-    /// The measured 2026-09-11 outage: the pr-watcher job unloaded at    /// 10:41Z and at 10:59Z the four launchd arms read 1114s, 1084s, 1123s
+    #[test]
+    fn a_textually_different_but_same_file_path_is_not_foreign() {
+        // A symlinked HOME spells the installer's path two ways; the file
+        // identity, not the spelling, decides. The healthy textual match
+        // short-circuits before any syscall in the common case.
+        let dir = temp_dir();
+        let home = dir.join("home");
+        let expected = home
+            .join("Library")
+            .join("LaunchAgents")
+            .join("sh.fno.pr-watcher.plist");
+        std::fs::create_dir_all(expected.parent().unwrap()).ok();
+        std::fs::write(&expected, "plist").ok();
+        let alt = dir.join("homelink");
+        std::os::unix::fs::symlink(&home, &alt).ok();
+        let registered = format!(
+            "\tpath = {}/Library/LaunchAgents/sh.fno.pr-watcher.plist\n",
+            alt.display()
+        );
+        assert_eq!(foreign_plist_path(&registered, &home), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The measured 2026-09-11 outage: the pr-watcher job unloaded at
+    /// 10:41Z and at 10:59Z the four launchd arms read 1114s, 1084s, 1123s
     /// and 1113s against intervals 900, 600, 600 and 300. Three of the four
     /// pass the per-arm rule; the cross-arm verdict must still red them all.
     #[test]
