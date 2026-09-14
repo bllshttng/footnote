@@ -2122,11 +2122,14 @@ fn render_list_with_discovered_lane() {
         &discovered,
         Some(3),
         Some(3),
+        None,
     );
     let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
     assert_eq!(parsed["discovered_count"], 1);
     assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
     assert_eq!(parsed["schema_version"], 7);
+    // Without a codex probe the key is absent, not null.
+    assert!(parsed.get("codex_loaded").is_none());
 
     let table = render_list_table(&agents, &discovered, Some(3), Some(3));
     assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));
@@ -2149,6 +2152,28 @@ fn render_list_with_discovered_lane() {
     assert!(table.contains("aaaa1111"));
     assert!(table.contains("fno-aaaa1111"));
     assert!(table.contains("busy"));
+}
+
+/// A codex-filtered list folds the loaded-thread block into the JSON
+/// envelope; the key carries the retired verb's exact payload shape.
+#[test]
+fn render_list_json_folds_in_the_codex_loaded_block_when_probed() {
+    let agents = json!([]);
+    let filters = json!({"cwd": null, "provider": "codex", "status": null});
+    let block = fno_agents::codex_inject::loaded_threads_block(Ok(vec![
+        fno_agents::codex_inject::LoadedThread {
+            session_id: "019f4d0c-full".into(),
+            cwd: "/repo".into(),
+        },
+    ]));
+    let out = render_list_json(&agents, &filters, &json!([]), &[], None, None, Some(&block));
+    let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(parsed["codex_loaded"]["available"], true);
+    assert_eq!(
+        parsed["codex_loaded"]["threads"][0]["session_id"],
+        "019f4d0c-full"
+    );
+    assert_eq!(parsed["codex_loaded"]["threads"][0]["cwd"], "/repo");
 }
 
 /// The registry table is the surface nearly every reader sees: `list`
