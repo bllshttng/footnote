@@ -331,12 +331,25 @@ def test_mail_presiding_king_true_only_on_a_zero_exit(monkeypatch) -> None:
     from fno.king.escalate import mail_presiding_king
 
     class _Proc:
-        def __init__(self, code: int) -> None:
+        def __init__(self, code: int, stdout: str) -> None:
             self.returncode = code
+            self.stdout = stdout
 
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/fno")
-    monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc(0))
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: _Proc(0, "msg-1 delivered (hosted)\n"),
+    )
     assert mail_presiding_king("l1-king", STALLED, "NoProgress") is True
 
-    monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc(1))
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: _Proc(0, "msg-1 queued (durable) [live-miss]\n"),
+    )
+    assert mail_presiding_king("l1-king", STALLED, "NoProgress") is False
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: _Proc(1, "msg-1 delivered (hosted)\n"),
+    )
     assert mail_presiding_king("l1-king", STALLED, "NoProgress") is False

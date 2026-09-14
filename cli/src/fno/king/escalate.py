@@ -160,8 +160,8 @@ def mail_presiding_king(holder: str, stalled_ids: "list[str]", reason: str) -> b
     try:
         proc = subprocess.run(
             [fno_bin, "agents", "mail", "send", holder, message],
-            capture_output=True, timeout=15, check=False,
+            capture_output=True, timeout=15, check=False, text=True,
         )
-        return proc.returncode == 0
+        return proc.returncode == 0 and "delivered (hosted)" in (proc.stdout or "")
     except (OSError, subprocess.SubprocessError):
         return False
