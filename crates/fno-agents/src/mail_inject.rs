@@ -335,7 +335,7 @@ pub fn outcome_json(delivered: bool, reason: &str) -> String {
     serde_json::json!({ "delivered": delivered, "reason": reason }).to_string()
 }
 
-/// The portal route for an idle claude thread row (x-8f6d). A not-confirmed
+/// The portal route for an idle claude thread row. A not-confirmed
 /// raw inject there cannot prove landing: the content confirm greps the
 /// transcript for the payload's first line, a dialog command writes no turn,
 /// and the paste measurably fails to land on an idle thread at all. The
@@ -1425,12 +1425,12 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             if reason == NOT_INJECTABLE {
                 eprintln!("{NOT_INJECTABLE_HELP}");
             }
-            // x-8f6d: an unconfirmed control.sock paste into an idle thread row
+            // An unconfirmed control.sock paste into an idle thread row
             // cannot prove landing and measurably may not land at all, so the
-            // outcome names the route that reaches an idle thread. Operator
-            // ruling on 1a5328246: the hint lives in the crate producing the
-            // unconfirmed raw outcome; the runner inherits stderr so it reaches
-            // the sender beside the Python receipt.
+            // outcome names the route that reaches an idle thread. The hint
+            // lives in the crate producing the unconfirmed raw outcome; the
+            // runner inherits stderr so it reaches the sender beside the
+            // Python receipt.
             if reason == "not-confirmed" && args.provider == MailInjectProvider::Claude {
                 if let Some(h) = route_hint_for_session(&home, &args.session) {
                     eprintln!("{h}");
@@ -2443,7 +2443,7 @@ mod tests {
     }
 
     /// The hint fires only for an idle thread row and names the two commands the
-    /// operator's specimen measured working (x-8f6d).
+    /// operator's specimen measured working.
     #[test]
     fn thread_route_hint_names_the_portal_route() {
         let h = thread_route_hint(Some("thread"), "king-fno-g6").expect("thread row hints");
