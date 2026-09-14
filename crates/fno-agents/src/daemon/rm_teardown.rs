@@ -54,24 +54,20 @@ pub(crate) async fn end_codex_thread(ctx: &Ctx, name: &str) -> Result<String, St
 
 /// The production claude stop rm runs itself (law d-81c6da7e): one bounded
 /// `claude stop <short>` whose success is the exit status. Blocking; the
-/// caller hops through `off_executor`.
+/// caller hops through `off_executor`, whose blocking-permitted context a
+/// fresh current-thread runtime is legal inside.
 pub(crate) fn claude_stop_confirmed(short: &str) -> bool {
     let short = short.to_string();
-    std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map(|rt| {
-                rt.block_on(async {
-                    matches!(
-                        super::bounded_claude_stop(&short, std::time::Duration::from_secs(15))
-                            .await,
-                        Ok(Ok(output)) if output.status.success()
-                    )
-                })
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map(|rt| {
+            rt.block_on(async {
+                matches!(
+                    super::bounded_claude_stop(&short, std::time::Duration::from_secs(15)).await,
+                    Ok(Ok(output)) if output.status.success()
+                )
             })
-            .unwrap_or(false)
-    })
-    .join()
-    .unwrap_or(false)
+        })
+        .unwrap_or(false)
 }
