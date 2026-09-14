@@ -12,6 +12,7 @@ from fno.pr._proc import Result
 # exercise the real functions restore them from these import-time captures.
 _REAL_ADMIT = _quota.admit
 _REAL_RECORD_REFUSAL = _quota.record_refusal
+_REAL_BACKOFF_LIVE = _quota.backoff_live
 
 
 @pytest.fixture(autouse=True)
@@ -713,6 +714,7 @@ def test_admit_fails_open_when_the_verb_is_unavailable(monkeypatch, capsys):
 
 
 def test_backoff_live_reads_the_status_answer(monkeypatch):
+    monkeypatch.setattr(_quota, "backoff_live", _REAL_BACKOFF_LIVE)
     answers = iter([{"backoff_remaining_s": 42}, {"backoff_remaining_s": 0}])
     monkeypatch.setattr(_quota, "_gh_budget", lambda payload: next(answers))
     assert _quota.backoff_live() is True
@@ -721,6 +723,8 @@ def test_backoff_live_reads_the_status_answer(monkeypatch):
 
 def test_backoff_live_is_false_when_the_verb_is_unavailable(monkeypatch):
     from fno.rust_binary import VerbUnavailable
+
+    monkeypatch.setattr(_quota, "backoff_live", _REAL_BACKOFF_LIVE)
 
     def unavailable(payload):
         raise VerbUnavailable("no binary")
