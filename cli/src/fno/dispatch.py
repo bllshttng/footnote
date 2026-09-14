@@ -491,71 +491,7 @@ def _emit_quota_deferred(node_id: str, provider: str, state: str, retry_at: Opti
         pass
 
 
-def _worktree_ensure_for_launch(
-    recorded_cwd: Path, agent_name: str, harness: str
-) -> Optional[str]:
-    """Resolve the launch cwd through the worktree verb (x-3f84 W5, change 5).
-
-    The node's recorded cwd is the canonical checkout for every organically
-    filed node, and launching there puts a code worker on the protected branch
-    that sibling terminals share. ``fno agents workspace worktree ensure`` owns the
-    policy resolution (per-project policy > global > harness-native); it
-    prints the resolved root and exits 0, or prints nothing and exits non-zero
-    on a refusal/misconfig - the caller HOLDS on that answer rather than
-    falling back to canonical main. Returns the path to launch in (the repo
-    root itself is the legal ``policy = never`` in-place answer), or None.
-    """
-    import subprocess
-
-    from fno.agents.mux_spawn import _fno_bin
-
-    try:
-        repo = subprocess.run(
-            ["git", "-C", str(recorded_cwd), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if not recorded_cwd.is_dir():
-        # A missing recorded cwd is the spawn's own error to surface (the old
-        # behavior passed it through verbatim); it is not a worktree-policy
-        # refusal, and holding here would break every scratch-cwd fixture.
-        return str(recorded_cwd)
-    if repo.returncode != 0:
-        # ONLY a genuine "not a repository" answer means launch-in-place (a
-        # vault project, worktree.policy=never by design). Any other git
-        # failure - dubious ownership, a corrupted .git, a missing cwd - must
-        # HOLD, not silently fall back to the canonical checkout this change
-        # exists to keep workers off (review finding, x-3f84).
-        if "not a git repository" in (repo.stderr or ""):
-            return str(recorded_cwd)
-        return None
-    canonical = repo.stdout.strip()
-    try:
-        ensured = subprocess.run(
-            [
-                _fno_bin(),
-                "workspace",
-                "worktree",
-                "ensure",
-                "--repo",
-                canonical,
-                "--name",
-                agent_name,
-                "--harness",
-                harness,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if ensured.returncode != 0:
-        return None
-    return ensured.stdout.strip() or None
+from fno.agents.node_dispatch import _worktree_ensure_for_launch
 
 
 def _dispatch_one(

@@ -1605,6 +1605,34 @@ def cmd_spawn(
             "verb_source": "declared",
             "brief_source": node_brief_source,
         }
+        # x-3873 change 1: a node-seeded spawn with no explicit cwd source
+        # launches in an ensured worktree, not the node's recorded cwd (the
+        # canonical checkout for every organically filed node). The ensure
+        # runs here, before the family-2 guard takes `dispatch:<id>`; a
+        # typed message, --cwd or --here keeps the pre-change resolution.
+        if cwd is None and not here:
+            from fno.agents.node_dispatch import _worktree_ensure_for_launch
+
+            recorded_cwd = seed_rec.get("_resolved_cwd") or seed_rec.get("cwd")
+            ensured = _worktree_ensure_for_launch(
+                Path(recorded_cwd) if recorded_cwd else Path.cwd(),
+                name,
+                harness,
+            )
+            if ensured is None:
+                print(
+                    f"fno agents spawn: worktree ensure refused or "
+                    f"misconfigured for {seed_node_id}; holding the node "
+                    "rather than launching on canonical main",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=2)
+            workdir = Path(ensured).resolve()
+            # Re-derive the receipt's moved-cwd note against the ensured
+            # workdir: the first derivation ran before the seed branch read.
+            _moved_cwd = (
+                str(workdir) if not cwd and workdir != Path(os.getcwd()).resolve() else None
+            )
 
     from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
 
