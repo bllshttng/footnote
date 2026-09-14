@@ -1762,10 +1762,13 @@ def _session_start_bytes_line(preamble_line: Optional[str]) -> Optional[str]:
 
 
 def _control_plane_arms_report() -> dict[str, Any]:
-    """Red control-plane arms (stale or failing) via the one Rust reader
-    (shells ``fno-agents status --json``): unknown on a failed read, never
-    green. Rows carry the reader's rendered ``line``; rows from an older
-    binary without one fall back to the sentence render.
+    """Red control-plane arms via the one Rust reader (shells
+    ``fno-agents status --json``): unknown on a failed read, never green.
+    The Rust owner selects the attention rows (unobserved, stale, or
+    failing) into ``arms_attention``; Python prints them and never
+    re-derives a verdict from the legacy booleans. Rows carry the reader's
+    rendered ``line``; rows from an older binary without one fall back to
+    the sentence render.
     """
     try:
         from fno import rust_binary
@@ -1777,11 +1780,11 @@ def _control_plane_arms_report() -> dict[str, Any]:
             capture_output=True, text=True, timeout=10, check=False,
         )
         payload = json.loads(result.stdout) if result.stdout.strip() else {}
-        arms = payload.get("arms")
-        if not isinstance(arms, list):
-            return {"red": [], "unknown_reason": "status payload carries no arms"}
-        return {"red": [a for a in arms if isinstance(a, dict)
-                        and (a.get("stale") or a.get("failing"))],
+        attention = payload.get("arms_attention")
+        if not isinstance(attention, list):
+            return {"red": [],
+                    "unknown_reason": "status payload carries no arms_attention"}
+        return {"red": [a for a in attention if isinstance(a, dict)],
                 "unknown_reason": None}
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         return {"red": [], "unknown_reason": f"read failed: {exc}"}

@@ -1883,6 +1883,89 @@ def test_doctor_falls_back_to_the_sentence_for_rows_without_line(
     assert "skip: never" in combined, f"Got:\n{combined}"
 
 
+def test_control_plane_arms_report_consumes_the_rust_attention_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """x-6484: `_control_plane_arms_report` passes the Rust-owned
+    `arms_attention` rows through as `red` and never re-derives the verdict
+    from the legacy `stale`/`failing` booleans: a stale row left out of the
+    Rust selection stays unreported.
+    """
+    from fno import rust_binary
+
+    observed_fresh = {"arm": "watchdog", "stale": False, "failing": False,
+                      "producer_evidence": "observed", "line": "watchdog ok"}
+    stale_left_out = {"arm": "reap", "stale": True, "failing": False,
+                      "producer_evidence": "observed"}
+    unobserved = {"arm": "king_wake", "stale": False, "failing": False,
+                  "producer_evidence": "unobserved",
+                  "line": "king_wake         UNOBSERVED     never via=launchd"}
+    payload = json.dumps({"arms": [observed_fresh, stale_left_out, unobserved],
+                          "arms_attention": [unobserved]})
+
+    class _FakeResult:
+        stdout = payload
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/bin/fno-agents"))
+    monkeypatch.setattr(
+        doctor.subprocess, "run",
+        lambda *a, **kw: _FakeResult(),
+    )
+    report = doctor._control_plane_arms_report()
+    assert report["unknown_reason"] is None
+    assert report["red"] == [unobserved], f"Got: {report}"
+
+
+def test_control_plane_arms_report_unknown_without_the_attention_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """x-6484 AC3: an older status payload carrying only `arms[]` (no
+    `arms_attention`) reads unknown - never derived from legacy booleans."""
+    from fno import rust_binary
+
+    class _FakeResult:
+        stdout = json.dumps({"arms": [{"arm": "reap", "stale": True}]})
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/bin/fno-agents"))
+    monkeypatch.setattr(
+        doctor.subprocess, "run",
+        lambda *a, **kw: _FakeResult(),
+    )
+    report = doctor._control_plane_arms_report()
+    assert report["red"] == []
+    assert report["unknown_reason"] is not None
+    assert "arms_attention" in report["unknown_reason"]
+
+
+def test_doctor_prints_the_unobserved_row_the_reader_rendered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """x-6484: an unobserved arm in the canonical attention set prints the
+    reader's own UNOBSERVED line, once; an observed fresh arm is not named."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="xyz",
+        marker="xyz",
+        capture_present="present",
+    )
+    unobserved_line = (
+        "king_wake         UNOBSERVED     never via=launchd:sh.fno.pr-watcher"
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_control_plane_arms_report",
+        lambda: {"red": [{"arm": "king_wake", "stale": False, "failing": False,
+                          "producer_evidence": "unobserved", "line": unobserved_line}],
+                 "unknown_reason": None},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, f"exit code {result.exit_code}, output: {result.stdout}{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert f"fno doctor: control-plane arm {unobserved_line}" in combined, f"Got:\n{combined}"
+    assert combined.count("UNOBSERVED") == 1, "the unobserved line must print exactly once"
+
+
 def test_ac3_fr_fix_rust_only_stale_runs_refresh_never_raw_cargo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
