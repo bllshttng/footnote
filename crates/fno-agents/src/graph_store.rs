@@ -1202,6 +1202,19 @@ pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
         ] {
             obj.entry(k.to_string()).or_insert_with(|| v.clone());
         }
+        // A row that carries current_state keeps its prose in the note
+        // journal; an empty progress_notes beside it reads as a field empty
+        // forever, indistinguishable from a node that never had a note. Drop
+        // only the empty form: rows holding real pre-cutover notes keep them.
+        if obj.contains_key(crate::backlog::node_state::STATE_KEY) {
+            let empty_notes = obj
+                .get("progress_notes")
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.is_empty());
+            if empty_notes {
+                obj.shift_remove("progress_notes");
+            }
+        }
     }
     normalize_lock_fields(entries);
     apply_readiness_overlay(entries);
@@ -2804,6 +2817,46 @@ mod tests {
         assert_eq!(s_str(e, "priority"), Some("p1"));
         assert_eq!(s_str(e, "parent"), None);
         assert!(e.get("children").unwrap().is_array());
+    }
+
+    #[test]
+    fn current_state_row_drops_the_empty_progress_notes_key() {
+        // Both shapes land keyless: an explicit empty array and the default
+        // the row never carried.
+        let mut entries = vec![
+            json!({
+                "id": "ab-2", "status": "in_progress",
+                "current_state": {"revision": 2, "body": "b"},
+                "progress_notes": [],
+            }),
+            json!({
+                "id": "ab-3", "status": "ready",
+                "current_state": {"revision": 1, "body": "b"},
+            }),
+        ];
+        apply_defaults(&mut entries, false);
+        assert!(entries[0].get("progress_notes").is_none());
+        assert_eq!(entries[0]["current_state"]["revision"], json!(2));
+        assert!(entries[1].get("progress_notes").is_none());
+    }
+
+    #[test]
+    fn current_state_row_keeps_a_real_legacy_note() {
+        let note = json!({"ts": "T1", "text": "pre-cutover prose"});
+        let mut entries = vec![json!({
+            "id": "ab-4", "status": "ready",
+            "current_state": {"revision": 1, "body": "b"},
+            "progress_notes": [note],
+        })];
+        apply_defaults(&mut entries, false);
+        assert_eq!(entries[0]["progress_notes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn row_without_current_state_keeps_the_progress_notes_default() {
+        let mut entries = vec![json!({"id": "ab-5"})];
+        apply_defaults(&mut entries, false);
+        assert!(entries[0]["progress_notes"].is_array());
     }
 
     #[test]
