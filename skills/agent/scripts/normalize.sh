@@ -383,12 +383,12 @@ _normalize_is_family() {
   if [[ -n "${FAMILY_RESOLVER:-}" ]]; then
     _answer="$("$FAMILY_RESOLVER" "$1" 2>/dev/null </dev/null)" || _answer=""
   else
-    _answer="$(fno dispatch family --message="$1" 2>/dev/null </dev/null)" || _answer=""
+    _answer="$(fno agents target-family --message "$1" 2>/dev/null </dev/null)" || _answer=""
   fi
   case "$_answer" in
     family) return 0 ;;
     other)  return 1 ;;
-    *) emit_error "cannot classify the message against the /target-family vocabulary (the 'fno dispatch family' ask failed; is the installed fno stale? run 'fno doctor update', or set FAMILY_RESOLVER in tests)" ;;
+    *) emit_error "cannot classify the message against the /target-family vocabulary (the 'fno agents target-family' ask failed; is the installed fno stale? run 'fno doctor update', or set FAMILY_RESOLVER in tests)" ;;
   esac
 }
 
@@ -819,25 +819,14 @@ else
   esac
 fi
 
-# Command surface (slash|codex-skill|prose) from the harness-map normalizer
-# (fno.agents.harness_map), the single source both dispatch surfaces route
-# through - so /agent spawn never re-encodes the per-harness spelling and can't
-# drift from the `/target` dispatch surface. `fno agents dispatch resolve` is authoritative; a static
-# fallback keeps a spawn working if fno is unreachable (mirrors resolve_project).
+# Command surface (slash|codex-skill|refused) from the packaged harness
+# capability table via `fno agents capabilities` (x-3873), the single source
+# both spawn surfaces route through - so /agent spawn never re-encodes the
+# per-harness spelling and can't drift from the `/target` dispatch surface.
+# NO static fallback copy: a spawn cannot run when fno is unreachable, so a
+# mirror here would only hide drift from the packaged table.
 resolve_command_surface() {
-  local _prov="$1" _line
-  _line="$(fno agents dispatch resolve --harness "$_prov" 2>/dev/null | sed -n 's/^command_surface=//p' | head -1)"
-  if [[ -n "$_line" ]]; then printf '%s' "$_line"; return 0; fi
-  # Static mirror of fno.agents.harness_map (a python test asserts parity):
-  # opencode's fno plugin exposes `/fno:verb` (palette + `run --command`), so it
-  # is a slash surface; gemini is deprecated -> refused. Unknown -> refused too,
-  # never a silent prose no-op.
-  case "$_prov" in
-    claude|agy|opencode) printf 'slash' ;;
-    codex)               printf 'codex-skill' ;;
-    gemini)              printf 'refused' ;;
-    *)                   printf 'refused' ;;
-  esac
+  fno agents capabilities "$1" --json 2>/dev/null | jq -r '.command_surface // empty'
 }
 
 # The plugin-namespace prefix a slash-surface provider prepends to `/verb`
