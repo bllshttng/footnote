@@ -473,8 +473,8 @@ fn fire(args: &[&str]) -> (i32, Decision) {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 mod cancel_sentinel;
-mod watch_lease_gate;
 mod gh_budget_gate;
+mod watch_lease_gate;
 
 /// AC1-HP: promise with green PR -> DonePRGreen, exit 0, termination event.
 #[test]
