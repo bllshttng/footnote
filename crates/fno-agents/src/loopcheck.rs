@@ -1923,56 +1923,6 @@ pub(crate) fn is_graphql_read(read: &str) -> bool {
     )
 }
 
-/// Whether ANY session on this machine hit the secondary limit recently.
-/// The secondary limit is per-USER, not per-session: a fleet of concurrent
-/// sessions shares one burst budget, so a refusal scoped to the reading
-/// session alone means every other session keeps sending against a budget
-/// one of them just proved is refusing - each of those sends is itself a
-/// call against the shared limiter. Scans the MACHINE-WIDE `global_events`
-/// log (every session's `loop_check_gh_error` rows already land there via
-/// `emit_to_both`, so this reuses an existing write path rather than adding
-/// one) with no session filter, by design.
-/// A row counts on its `rate_limit_class` FIELD - the verdict the emitting
-/// session computed against the live exempt bucket - never on its
-/// `stderr_tail` prose: GitHub reworded the refusal body once already, and a
-/// prose match here would miss the real body again. Rows emitted before the
-/// field existed simply age out of the window.
-/// The primary-quota floor (`GRAPHQL_FLOOR`) is blind to this failure mode by
-/// construction - advertised remaining looks healthy while calls are being
-/// refused - so a fire must ALSO stand down on observed refusals, not only
-/// on advertised headroom, or the floor never fires when it is most needed.
-fn recent_secondary_refusal(events_path: &Path, now: DateTime<Utc>, window_secs: i64) -> bool {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        return false;
-    };
-    for line in content.lines().rev() {
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if val.get("type").and_then(|v| v.as_str()) != Some("loop_check_gh_error") {
-            continue;
-        }
-        let Some(ts) = val
-            .get("ts")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-        else {
-            continue;
-        };
-        if (now - ts).num_seconds() > window_secs {
-            break;
-        }
-        if val
-            .pointer("/data/rate_limit_class")
-            .and_then(|v| v.as_str())
-            == Some("secondary")
-        {
-            return true;
-        }
-    }
-    false
-}
-
 /// The self-teaching exhaustion message. A session that reads it must stop
 /// retrying the GraphQL reads this window and know where the answer still
 /// lives - anything less and it burns a fire every tick on a call that
@@ -7850,6 +7800,11 @@ struct LoopCheckArgs {
     global_events_path: Option<PathBuf>,
     settings_path: Option<PathBuf>,
     ledger_path: Option<PathBuf>,
+    /// Override for the fleet GitHub request budget ledger (default
+    /// `$HOME/.fno/locks/github-request-budget.json`). Same hermeticity door
+    /// as `--global-events`: tests pin it so a fire never reads (or seeds)
+    /// the developer's live machine budget.
+    gh_budget_ledger: Option<PathBuf>,
     now_override: Option<String>,
     gh_bin: String,
     git_bin: String,
@@ -7889,6 +7844,7 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut global_events_path: Option<PathBuf> = None;
     let mut settings_path: Option<PathBuf> = None;
     let mut ledger_path: Option<PathBuf> = None;
+    let mut gh_budget_ledger: Option<PathBuf> = None;
     let mut now_override: Option<String> = None;
     let mut gh_bin =
         std::env::var("FNO_LOOPCHECK_GH_BIN").unwrap_or_else(|_| "fno-gh-loopcheck".to_string());
@@ -7932,6 +7888,8 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
             global_settings_path = Some(PathBuf::from(val));
         } else if let Some(val) = try_flag_value(arg, "--ledger", args, &mut i) {
             ledger_path = Some(PathBuf::from(val));
+        } else if let Some(val) = try_flag_value(arg, "--gh-budget-ledger", args, &mut i) {
+            gh_budget_ledger = Some(PathBuf::from(val));
         } else if let Some(val) = try_flag_value(arg, "--now", args, &mut i) {
             now_override = Some(val);
         } else if let Some(val) = try_flag_value(arg, "--gh-bin", args, &mut i) {
@@ -7981,6 +7939,7 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
         global_events_path,
         settings_path,
         ledger_path,
+        gh_budget_ledger,
         now_override,
         gh_bin,
         git_bin,
@@ -8660,22 +8619,35 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // GraphQL at all rather than politely spending less. A promise-intent fire
     // always proceeds - the floor belongs to it. The probe itself is REST and
     // primary-exempt; a failed probe (None) changes nothing.
-    let quota_probe = probe_graphql_quota(gh_bin, &cwd);
-    // The primary-quota floor is blind to GitHub's SECONDARY (burst/
-    // concurrency) limit by construction: advertised `remaining` can read
-    // thousands healthy while a call is refused (measured live: core
-    // 4922/5000, graphql 1392/5000, a 403 anyway). A floor keyed only on
-    // advertised remaining never fires when THAT is the limiter, so a fire
-    // also stands down on an observed secondary refusal in the last 5
-    // minutes, independent of what this fire's probe reports (and
-    // independent of whether the probe itself succeeded). The observed rows
-    // carry the refusing session's live-bucket verdict in
-    // `rate_limit_class`, which is what `recent_secondary_refusal` matches.
-    // Reads `global_events`, not `project_events`: the limit is
-    // per-USER, shared by every session on the machine, so a refusal any one
-    // of them observed must stand every fleet member down, not just the one
-    // that hit it.
-    let secondary_refusal = recent_secondary_refusal(&global_events, now, 300);
+    //
+    // The fleet's ONE GitHub request budget answers before anything here
+    // spends: a live refusal backoff, or a 60s window already at its point
+    // cap, skips the probe entirely. The measured 2026-09-13 refusal window
+    // kept 160 stand-downs alive by probing through them; a stand-down under
+    // the ledger now spends ZERO GitHub requests. The ledger
+    // (`fno-agents gh-budget status`) is also the fleet-wide refusal memory:
+    // every gh call this machine admits is stamped there, and a GitHub 403
+    // any caller records opens the same fleet-wide backoff - the secondary
+    // limit is per-USER, so one session's refusal must stand every member
+    // down, not just the one that hit it.
+    let budget_ledger = parsed
+        .gh_budget_ledger
+        .clone()
+        .unwrap_or_else(crate::gh_budget::ledger_path);
+    let budget = crate::gh_budget::snapshot(&budget_ledger, now.timestamp_millis());
+    let budget_cause: Option<&'static str> = if budget.backoff_remaining_s > 0 {
+        Some("backoff")
+    } else if budget.points_60s >= budget.cap as i64 {
+        Some("budget")
+    } else {
+        None
+    };
+    let quota_probe = if budget_cause.is_none() {
+        probe_graphql_quota(gh_bin, &cwd)
+    } else {
+        None
+    };
+    let secondary_refusal = budget_cause.is_some();
     let below_primary_floor = quota_probe
         .as_ref()
         .map(|q| q.remaining < GRAPHQL_FLOOR)
@@ -8690,12 +8662,17 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             let remaining_display = remaining_field
                 .map(|r| r.to_string())
                 .unwrap_or_else(|| "unknown (probe failed)".to_string());
-            let cause = if secondary_refusal {
-                "a recent gh read hit GitHub's secondary (burst/concurrency) limit - the \
-                 advertised quota cannot see this, so it stays standing down until 5 \
-                 minutes pass with no further refusal"
+            let cause: String = if secondary_refusal {
+                format!(
+                    "the fleet GitHub request budget is holding calls ({}: {}/{} points in 60s, \
+                     backoff {}s left) - `fno-agents gh-budget status` reads the ledger",
+                    budget_cause.unwrap_or("budget"),
+                    budget.points_60s,
+                    budget.cap,
+                    budget.backoff_remaining_s
+                )
             } else {
-                "GraphQL primary quota"
+                "GraphQL primary quota".to_string()
             };
             // Lease-only exemption for a WATCHING fire (review finding on the
             // floor): the watch-idle branch below is unreachable from here, so
@@ -8750,7 +8727,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                                 "lease_ms": window_ms,
                                 "stand_down": true,
                                 "graphql_remaining": remaining_field,
-                                "secondary_refusal": secondary_refusal
+                                "secondary_refusal": secondary_refusal,
+                                "budget_cause": budget_cause
                             }),
                         );
                         return (
@@ -8797,7 +8775,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     "standing_down": true,
                     "graphql_remaining": remaining_field,
                     "graphql_floor": GRAPHQL_FLOOR,
-                    "secondary_refusal": secondary_refusal
+                    "secondary_refusal": secondary_refusal,
+                    "budget_cause": budget_cause
                 }),
             );
             return (
@@ -10173,9 +10152,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 let quota = quota_probe.or_else(|| probe_graphql_quota(gh_bin, &cwd));
                 // Classified against the LIVE exempt bucket, never wording
                 // (see `refusal_is_secondary`), and the verdict rides the
-                // event as a FIELD: `recent_secondary_refusal` matches the
-                // field, so a GitHub reword cannot blind the fleet-wide
-                // stand-down again.
+                // event as a FIELD: journal readers match the field, so a
+                // GitHub reword cannot misread a stored refusal.
                 let secondary =
                     refusal_is_secondary(&failed_stderr, quota.as_ref(), is_graphql_read);
                 emit(
@@ -17552,114 +17530,6 @@ git_bounded();";
             Some(&quota_with(4890, Some(4922))),
             true
         ));
-    }
-
-    #[test]
-    fn recent_secondary_refusal_finds_a_matching_gh_error_within_the_window() {
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        let now: DateTime<Utc> = "2026-06-05T00:30:00Z".parse().unwrap();
-        std::fs::write(
-            &events,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "loop_check_gh_error",
-                    "ts": "2026-06-05T00:28:00Z",
-                    "data": {
-                        "session_id": "sess-sec",
-                        "read": "pulls_comments",
-                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit",
-                        "rate_limit_class": "secondary"
-                    }
-                })
-            ),
-        )
-        .unwrap();
-        assert!(recent_secondary_refusal(&events, now, 300));
-        // Outside the window (5 minutes = 300s; this row is 130s old, so still
-        // in-window - shrink the window to prove the cutoff actually applies).
-        assert!(!recent_secondary_refusal(&events, now, 60));
-    }
-
-    #[test]
-    fn recent_secondary_refusal_is_fleet_wide_not_scoped_to_the_reading_session() {
-        // The secondary limit is per-USER: a refusal observed by session A
-        // must stand session B down too, or a 29-session fleet only quiets
-        // one member at a time while the other 28 keep tripping the guard.
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        let now: DateTime<Utc> = "2026-06-05T00:30:00Z".parse().unwrap();
-        std::fs::write(
-            &events,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "loop_check_gh_error",
-                    "ts": "2026-06-05T00:28:00Z",
-                    "data": {
-                        "session_id": "sess-a",
-                        "read": "pulls_comments",
-                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit",
-                        "rate_limit_class": "secondary"
-                    }
-                })
-            ),
-        )
-        .unwrap();
-        assert!(recent_secondary_refusal(&events, now, 300));
-    }
-
-    #[test]
-    fn recent_secondary_refusal_ignores_prose_without_the_verdict_field() {
-        // The pre-fix consumer matched the phrase; GitHub's measured body
-        // does not carry it, so the phrase was never load-bearing. A row
-        // with the phrase but no field (an emitter older than the field)
-        // must not count: the verdict is the field, never the wording.
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        let now: DateTime<Utc> = "2026-06-05T00:30:00Z".parse().unwrap();
-        std::fs::write(
-            &events,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "loop_check_gh_error",
-                    "ts": "2026-06-05T00:28:00Z",
-                    "data": {
-                        "session_id": "sess-old",
-                        "read": "pulls_comments",
-                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
-                    }
-                })
-            ),
-        )
-        .unwrap();
-        assert!(!recent_secondary_refusal(&events, now, 300));
-    }
-
-    #[test]
-    fn recent_secondary_refusal_ignores_a_primary_quota_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let events = tmp.path().join("events.jsonl");
-        let now: DateTime<Utc> = "2026-06-05T00:30:00Z".parse().unwrap();
-        std::fs::write(
-            &events,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "loop_check_gh_error",
-                    "ts": "2026-06-05T00:29:30Z",
-                    "data": {
-                        "session_id": "sess-prim",
-                        "read": "pr_view",
-                        "stderr_tail": "API rate limit exceeded for user ID 1."
-                    }
-                })
-            ),
-        )
-        .unwrap();
-        assert!(!recent_secondary_refusal(&events, now, 300));
     }
 
     #[test]

@@ -3759,7 +3759,7 @@ event_types:
     consumers: [operator]
 
   - name: loop_check_graphql_standdown
-    description: "Emitted when a fire stands down instead of blocking via loop_check: below the primary GraphQL floor, on an observed secondary (burst/concurrency) refusal in the last 5 minutes, or both. It verified no PR state, so it has no fingerprint and must not be counted as a loop_check fire (an empty fingerprint would break the reverse-scan streak in read_prior_fires)."
+    description: "Emitted when a fire stands down instead of blocking via loop_check: the fleet GitHub request budget holds a live refusal backoff or an exhausted 60s point window (budget_cause names which; `fno-agents gh-budget status` reads the ledger), the primary GraphQL floor is breached, or both. It verified no PR state, so it has no fingerprint and must not be counted as a loop_check fire (an empty fingerprint would break the reverse-scan streak in read_prior_fires)."
     sources: [hook]
     data:
       required: [session_id, decision, standing_down, graphql_remaining, graphql_floor]
@@ -3787,7 +3787,11 @@ event_types:
           description: "The configured floor (GRAPHQL_FLOOR) this remaining count fell below."
         secondary_refusal:
           type: boolean
-          description: "True when a recent gh read on this session hit GitHub's secondary (burst/concurrency) limit - a failure mode the advertised quota cannot see, so this is the only signal for it."
+          description: "True when the fleet GitHub request budget (or, historically, a recent observed secondary refusal) says the machine is being burst-limited - a failure mode the advertised quota cannot see."
+        budget_cause:
+          type: [string, "null"]
+          enum: [backoff, budget, null]
+          description: "Why the fleet GitHub request budget is holding calls: 'backoff' (a live refusal backoff) or 'budget' (the 60s point window is at its cap). Null when the stand-down came from the primary floor alone."
     consumers: [operator]
 
   - name: loop_check_config
