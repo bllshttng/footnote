@@ -30,7 +30,7 @@
 //!
 //! Client-side and daemon-free, like [`crate::prove_it_verdicts`]: a sweep
 //! reads declared populations from disk; it is not an agent-lifecycle
-//! operation. Ported from `scripts/diagnostics/capability-honesty-sweep.py`
+//! operation. Ported from the deleted Python diagnostic of the same name
 //! (law d-b6cc1a2a: existing Python is ported, never extended).
 
 use regex::Regex;
