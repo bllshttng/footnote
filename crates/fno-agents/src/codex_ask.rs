@@ -455,6 +455,7 @@ fn run_codex(
     popen_cwd: Option<&Path>,
     agent_self: Option<&str>,
     bound_session_id: Option<&str>,
+    route_env: &[(String, String)],
 ) -> Result<CodexResult, CodexAskError> {
     use std::process::{Command, Stdio};
 
@@ -470,6 +471,11 @@ fn run_codex(
         crate::spawn_gate::qos_wrap(popen_cwd.unwrap_or_else(|| Path::new(".")), argv.to_vec());
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
+    // x-3954: a resumed followup carries its route's env (key + provider
+    // stamp) in the child env - the argv cannot hold a secret.
+    for (key, value) in route_env {
+        cmd.env(key, value);
+    }
     cmd.stdin(Stdio::null()); // LD11
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped()); // merged below via thread
@@ -797,11 +803,25 @@ pub fn codex_create(
         add_dir,
         harness_args,
     );
-    run_codex(&argv, output_path, timeout, true, None, agent_self, None)
+    run_codex(
+        &argv,
+        output_path,
+        timeout,
+        true,
+        None,
+        agent_self,
+        None,
+        &[],
+    )
 }
 
 /// Spawn `codex exec resume <session_id> --json ...` from `cwd`.
 /// Resume does NOT accept `--cd`; cwd is pinned via `Command::current_dir`.
+/// `route` (x-3954) carries the row's re-resolved codex route: its tokens are
+/// spliced right after `codex` and its env (key + provider stamp) rides the
+/// child env, so a followed-up headless worker reaches the same routed
+/// endpoint it was minted on.
+#[allow(clippy::too_many_arguments)]
 pub fn codex_resume(
     session_id: &str,
     cwd: &Path,
@@ -812,6 +832,7 @@ pub fn codex_resume(
     timeout: Option<Duration>,
     reasoning_effort: Option<&str>,
     agent_self: Option<&str>,
+    route: Option<&crate::codex_route::CodexRoute>,
 ) -> Result<CodexResult, CodexAskError> {
     let effective_prompt = normalize_codex_command(prompt);
     let full_prompt = inject_from_name(&effective_prompt, from_name);
@@ -832,7 +853,11 @@ pub fn codex_resume(
             message,
         });
     }
-    let argv = build_argv_resume(cwd, session_id, &full_prompt, eff, reasoning_effort);
+    let mut argv = build_argv_resume(cwd, session_id, &full_prompt, eff, reasoning_effort);
+    if let Some(route) = route {
+        crate::codex_route::splice_route(&mut argv, route);
+    }
+    let route_env: Vec<(String, String)> = route.map(|r| r.env.clone()).unwrap_or_default();
     run_codex(
         &argv,
         output_path,
@@ -841,6 +866,7 @@ pub fn codex_resume(
         Some(cwd),
         agent_self,
         Some(session_id),
+        &route_env,
     )
 }
 
@@ -1466,6 +1492,61 @@ fn dispatch_resume(
     );
 
     let timeout_sec = timeout.unwrap_or(DEFAULT_FOLLOWUP_TIMEOUT);
+    // x-3954: a routed headless row re-resolves its route from today's config
+    // before the followup runs. A route the row names but config cannot
+    // rebuild refuses with exit 2 - the code every route-composition refusal
+    // already uses - and no codex process starts.
+    let route = match crate::codex_route::row_route_identity(
+        entry.harness.as_deref(),
+        entry.route_provider_id.as_deref(),
+        entry.model_name.as_deref(),
+    ) {
+        Err(reason) => {
+            let msg = format!(
+                "registry entry {name:?} was launched on a codex route and it cannot \
+                 be restored ({reason}); not following up on codex's default provider. \
+                 rm the row and re-ask to recreate it on today's route"
+            );
+            emit_event(
+                events,
+                "agent_followup_failed",
+                &[
+                    ("stage", "codex-route".into()),
+                    ("name", name.into()),
+                    ("provider", "codex".into()),
+                    ("codex_session_id", session_id.clone().into()),
+                ],
+            );
+            return AskOutcome::err(msg, 2);
+        }
+        Ok(None) => None,
+        Ok(Some((p, m))) => {
+            let r = crate::codex_route::resolve_codex_route(&registered_cwd, &p, &m);
+            match r {
+                Ok(route) => Some(route),
+                Err(e) => {
+                    let msg = format!(
+                        "registry entry {name:?} was launched on codex route {p:?} and it \
+                         cannot be restored ({}); not following up on codex's default \
+                         provider",
+                        e.message()
+                    );
+                    emit_event(
+                        events,
+                        "agent_followup_failed",
+                        &[
+                            ("stage", "codex-route".into()),
+                            ("name", name.into()),
+                            ("provider", "codex".into()),
+                            ("codex_session_id", session_id.clone().into()),
+                            ("returncode", 2.into()),
+                        ],
+                    );
+                    return AskOutcome::err(msg, 2);
+                }
+            }
+        }
+    };
     let result = match codex_resume(
         &session_id,
         &registered_cwd,
@@ -1476,6 +1557,7 @@ fn dispatch_resume(
         Some(timeout_sec),
         entry.effort.as_deref(),
         Some(name),
+        route.as_ref(),
     ) {
         Ok(r) => r,
         Err(e) => {
