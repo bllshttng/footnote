@@ -81,8 +81,9 @@ pub fn verb_usage(verb: &str) -> Option<&'static str> {
 pub const LOOP_CHECK_USAGE: &str = "\
 usage: fno-agents loop-check --state <manifest> --transcript <transcript.jsonl> --cwd <project-root>
        [--driver target|king] [--events <p>] [--global-events <p>] [--settings <p>]
-       [--global-settings <p>] [--ledger <p>] [--now <rfc3339>] [--author-harness <h>]
-       [--hook-input-stdin] [--gh-bin <p>] [--git-bin <p>] [--fno-bin <p>] [--read-timeout-ms <n>]
+       [--global-settings <p>] [--ledger <p>] [--gh-budget-ledger <p>] [--now <rfc3339>]
+       [--author-harness <h>] [--hook-input-stdin] [--gh-bin <p>] [--git-bin <p>]
+       [--fno-bin <p>] [--read-timeout-ms <n>]
 
 The stop-hook decision verb: it decides whether a driven session may stop,
 and every verdict comes from external truth read fresh on each fire - PR
