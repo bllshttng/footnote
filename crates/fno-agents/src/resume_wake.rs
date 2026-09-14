@@ -296,6 +296,42 @@ fn wake_loaded_thread(
     0
 }
 
+/// The production wake route: the real pane probe, the real loaded-thread
+/// read, the real mux shell-out. The seams in [`codex_resume_route`] stay for
+/// tests (x-4a68).
+pub(crate) fn codex_resume_wake_route(
+    name: &str,
+    entry: &Value,
+    session_id: &str,
+    message: Option<&str>,
+    cwd: &str,
+    row_name: &str,
+    identity: &[String],
+    home: &AgentsHome,
+) -> Option<i32> {
+    let loaded = || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| "io-error")?;
+        let threads = rt.block_on(crate::codex_inject::discover_loaded_threads())?;
+        Ok(threads.into_iter().map(|t| t.session_id).collect())
+    };
+    codex_resume_route(
+        name,
+        entry,
+        session_id,
+        message,
+        cwd,
+        row_name,
+        identity,
+        home,
+        &crate::daemon::run_mux_pane_probe,
+        &loaded,
+        &ShellViewportIo,
+    )
+}
+
 /// The delivered-but-not-rebound floor: rebind the row to the thread lane so
 /// later sends still land, and exit 0 - the message WAS delivered.
 fn finish_on_the_thread_lane(
