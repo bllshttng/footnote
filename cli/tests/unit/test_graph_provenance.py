@@ -769,6 +769,50 @@ def test_cli_session_close_codex_receipt_reads_back_exact_blueprint_entry(tmp_pa
     assert entries and entries[0].get("ended_at")
 
 
+def test_cli_session_close_stores_dollar_launch_as_slash_namespaced(tmp_path, monkeypatch):
+    """x-c976: a `$fno:` launch stores the canonical `/fno:` dispatch_verb."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-close0009", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close9")
+
+    result = CliRunner().invoke(C.cli, [
+        "session", "close", "ab-close0009",
+        "--summary", "saved plan",
+        "--launch", "$fno:target ab-close0009",
+        "--json",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert read_graph(g)[0].get("dispatch_verb") == "/fno:target"
+
+
+def test_cli_session_close_bare_target_launch_writes_no_dispatch_verb(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-close0010", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close10")
+
+    result = CliRunner().invoke(C.cli, [
+        "session", "close", "ab-close0010",
+        "--summary", "saved plan",
+        "--launch", "/target ab-close0010",
+        "--json",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "not written" in result.output
+    assert read_graph(g)[0].get("dispatch_verb") is None
+
+
 def test_cli_session_close_without_identity_refuses_before_closed_receipt(tmp_path, monkeypatch):
     """AC1-ERR: unresolved identity is a visible nonzero close refusal."""
     from typer.testing import CliRunner

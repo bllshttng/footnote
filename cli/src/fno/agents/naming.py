@@ -8,6 +8,8 @@ import subprocess
 from collections import namedtuple
 from functools import lru_cache
 
+from fno.config._dispatch_verbs import parse_verb_token
+
 MAX_LEN = 64
 SLUG_CAP = 30
 
@@ -85,7 +87,9 @@ def agent_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=None
                                           ("--discriminator", discriminator)))
 
 def verb_code_for(word):
-    v = (word or "").strip().removeprefix("/fno:").removeprefix("$fno:").lstrip("/") or "target"
+    w = (word or "").strip()
+    parsed = parse_verb_token(w) if w else None
+    v = (parsed[0] if parsed else w) or "target"
     code = _codes()[2].get(v)
     if not code:
         raise AgentNameError(f"unknown dispatch verb {word!r}")

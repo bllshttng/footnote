@@ -312,3 +312,13 @@ def test_max_len_matches_the_daemon_contract():
     found = _re.search(r"len\(\)\s*<=\s*(\d+)", fn)
     assert found, f"could not locate the registry length check in: {fn[:200]!r}"
     assert int(found.group(1)) == MAX_LEN
+
+
+def test_verb_code_reads_both_sigils():
+    """x-c976: the name mint strips either sigil through the parse owner."""
+    from fno.agents.naming import verb_code_for
+
+    assert verb_code_for("$target") == "t"
+    assert verb_code_for("$fno:target") == "t"
+    assert verb_code_for("/target") == "t"
+    assert verb_code_for("target") == "t"

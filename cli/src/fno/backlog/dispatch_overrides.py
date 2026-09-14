@@ -6,6 +6,7 @@ from typing import Optional
 import typer
 
 from fno.agents.harness_map import _BRIEF_MAX_BYTES
+from fno.config._dispatch_verbs import canonical_verb_key, parse_verb_token
 
 
 def _verb_refusal(value: str) -> tuple[Optional[str], Optional[str]]:
@@ -19,9 +20,9 @@ def _verb_refusal(value: str) -> tuple[Optional[str], Optional[str]]:
     - shape: one bare token. A verb carrying an argument stores fine and then
       fails at the drain's agent-name mint, three failed drains after the
       auto-failure rule has deferred the node.
-    - prefix: bare or '/fno:' only. The dispatch resolver canonicalizes
-      '/fno:' and nothing else, so a '$fno:' value passes the name mint and
-      still fails at the resolver - the same delayed failure.
+    - prefix: bare, or either namespaced spelling (``/fno:`` and ``$fno:``).
+      A namespaced value stores as ``/fno:<verb>``, the spelling every
+      reader canonicalizes.
     - membership: the word must resolve in the drain's name vocabulary
       (``verb_code_for``) OR in the configured allowlist/registry, which the
       resolver honors. A config-only word writes with a warning naming the
@@ -36,14 +37,6 @@ def _verb_refusal(value: str) -> tuple[Optional[str], Optional[str]]:
             "verb word. The field takes a single verb token; a verb with an "
             f"argument fails every drain at name mint. accepted: {accepted} "
             "(bare or '/fno:'-prefixed)",
-            None,
-        )
-    if value.startswith("$fno:"):
-        return (
-            f"Error: --dispatch-verb {value!r} refused at write: the stored "
-            "field takes a bare verb or a '/fno:'-prefixed one; the dispatch "
-            "resolver canonicalizes only '/fno:' and would reject this at "
-            "drain.",
             None,
         )
     static_ok = True
@@ -67,7 +60,7 @@ def _verb_refusal(value: str) -> tuple[Optional[str], Optional[str]]:
         )
     except Exception:  # noqa: BLE001 - unreadable config leaves the static set
         allowed, registry = [], {}
-    chosen = "/" + value[len("/fno:"):] if value.startswith("/fno:") else value
+    chosen = canonical_verb_key(value) if parse_verb_token(value) else value
     if chosen in allowed or chosen in registry:
         return None, (
             f"warning: dispatch verb {value!r} resolves only in "
@@ -110,6 +103,9 @@ def apply(node: dict, dispatch_verb: Optional[str], dispatch_brief: Optional[str
                 raise typer.Exit(code=2)
             if verb_warning is not None:
                 warnings.append(verb_warning)
+            parsed = parse_verb_token(verb_val)
+            if parsed and parsed[1]:
+                verb_val = f"/fno:{parsed[0]}"
         node["dispatch_verb"] = verb_val
     if dispatch_brief is not None:
         brief_val = None if dispatch_brief.lower() == "null" else dispatch_brief
