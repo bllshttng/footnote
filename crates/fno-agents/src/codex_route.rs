@@ -407,8 +407,7 @@ api_key_env = "FNO_TEST_ZAI_KEY"
     fn tokens_equal_pythons_recorded_launch_tokens() {
         let fx = fixture();
         fx.write(PROVIDER);
-        // SAFETY: single-threaded within the fixture mutex.
-        std::env::remove_var("FNO_TEST_ZAI_KEY");
+        std::env::set_var("FNO_TEST_ZAI_KEY", "test-key");
         let route = resolve_codex_route(fx.cwd(), "zai-openai", "glm-5.3-flash[1m]").unwrap();
         assert_eq!(
             route.config_args,
@@ -421,6 +420,7 @@ api_key_env = "FNO_TEST_ZAI_KEY"
                 "model='glm-5.3-flash[1m]'",
             ]
         );
+        std::env::remove_var("FNO_TEST_ZAI_KEY");
         let _ = std::fs::remove_dir_all(&fx.dir);
     }
 
@@ -471,6 +471,7 @@ api_key_env = "FNO_TEST_ZAI_KEY"
         assert_eq!(read_var_from_env_file(f.to_str().unwrap(), "K3"), None);
         assert_eq!(read_var_from_env_file(f.to_str().unwrap(), "K4"), None);
         assert_eq!(read_var_from_env_file("/nonexistent/env", "K1"), None);
+        std::env::remove_var("FNO_TEST_ZAI_KEY");
         let _ = std::fs::remove_dir_all(&fx.dir);
     }
 
@@ -540,6 +541,7 @@ api_key_env = "FNO_TEST_ZAI_KEY"
     fn resolve_row_route_none_for_unrouted_value_entry() {
         let fx = fixture();
         fx.write(PROVIDER);
+        std::env::set_var("FNO_TEST_ZAI_KEY", "test-key");
         let unrouted = serde_json::json!({
             "harness": "codex",
             "route_provider_id": "openai",
@@ -553,6 +555,7 @@ api_key_env = "FNO_TEST_ZAI_KEY"
         });
         let route = resolve_row_route(&routed, fx.cwd()).unwrap().unwrap();
         assert_eq!(route.provider, "zai-openai");
+        std::env::remove_var("FNO_TEST_ZAI_KEY");
         let _ = std::fs::remove_dir_all(&fx.dir);
     }
 
@@ -560,7 +563,7 @@ api_key_env = "FNO_TEST_ZAI_KEY"
     fn splice_inserts_right_after_the_binary() {
         let fx = fixture();
         fx.write(PROVIDER);
-        std::env::remove_var("FNO_TEST_ZAI_KEY");
+        std::env::set_var("FNO_TEST_ZAI_KEY", "test-key");
         let route = resolve_codex_route(fx.cwd(), "zai-openai", "glm").unwrap();
         let mut argv = vec![
             "codex".to_string(),
@@ -573,9 +576,11 @@ api_key_env = "FNO_TEST_ZAI_KEY"
         assert_eq!(argv[0], "codex");
         assert!(argv[1].starts_with("-c"));
         assert!(argv[2].starts_with("model_providers."));
-        // The grant token follows the route tokens.
-        assert!(argv[route.config_args.len() + 1].starts_with("sandbox_workspace_write"));
+        // The grant token (a `-c` flag + value) follows the route tokens.
+        assert!(argv[route.config_args.len() + 1] == "-c");
+        assert!(argv[route.config_args.len() + 2].starts_with("sandbox_workspace_write"));
         assert_eq!(argv.last().unwrap(), "sid");
+        std::env::remove_var("FNO_TEST_ZAI_KEY");
         let _ = std::fs::remove_dir_all(&fx.dir);
     }
 
