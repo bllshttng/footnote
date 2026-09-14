@@ -317,3 +317,168 @@ def test_lifecycle_empty_sessions_no_crash(tmp_graph, tmp_path, monkeypatch):
     r = _invoke("backlog", "provenance", "ab-life0003", "--json")
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["sessions"] == []
+
+
+# ---------------------------------------------------------------------------
+# x-d72f - one-call answer: the PR block + per-session registry liveness
+# ---------------------------------------------------------------------------
+
+
+def _pin_registry(monkeypatch, tmp_path, agents):
+    """Point the registry reader at a hermetic file with the given agent rows.
+
+    Every row gains the required-but-irrelevant cwd/log_path fields so the
+    strict AgentEntry parse accepts the fixture."""
+    filled = [
+        {"cwd": "/tmp/wt", "log_path": "/tmp/wt/log", **a}
+        for a in agents
+    ]
+    p = tmp_path / "registry.json"
+    p.write_text(
+        json.dumps({"schema_version": 19, "agents": filled}), encoding="utf-8"
+    )
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: p)
+
+
+def test_ac1_hp_pr_renders_human_and_json(tmp_graph, tmp_path, monkeypatch):
+    """AC1-HP: an entry with pr_number/pr_url renders a pr: line and JSON keys."""
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
+
+    _write_node(tmp_graph, _base_node(
+        "ab-prv00001",
+        pr_number=1234,
+        pr_url="https://github.com/bllshttng/footnote/pull/1234",
+    ))
+
+    r = _invoke("backlog", "provenance", "ab-prv00001")
+    assert r.exit_code == 0, r.output
+    assert "pr: #1234" in r.output
+    assert "https://github.com/bllshttng/footnote/pull/1234" in r.output
+
+    rj = _invoke("backlog", "provenance", "ab-prv00001", "--json")
+    data = json.loads(rj.output)
+    assert data["pr"]["number"] == 1234
+    assert data["pr"]["url"] == "https://github.com/bllshttng/footnote/pull/1234"
+
+
+def test_ac1_edge_no_pr_renders_none_with_keys_present(tmp_graph, tmp_path, monkeypatch):
+    """AC1-EDGE: no PR -> pr renders (none); JSON carries nulls, keys present."""
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
+
+    _write_node(tmp_graph, _base_node("ab-prv00002"))
+
+    r = _invoke("backlog", "provenance", "ab-prv00002")
+    assert r.exit_code == 0, r.output
+    assert "pr: (none)" in r.output
+
+    data = json.loads(_invoke("backlog", "provenance", "ab-prv00002", "--json").output)
+    assert data["pr"]["number"] is None
+    assert data["pr"]["url"] is None
+
+
+def test_ac3_hp_registry_status_live_and_reaped(tmp_graph, tmp_path, monkeypatch):
+    """AC3-HP: a row whose session id has a registry entry renders that status;
+    a row with no entry renders reaped."""
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
+
+    _pin_registry(monkeypatch, tmp_path, [
+        {"name": "worker-live", "harness": "claude",
+         "harness_session_id": "sess-live-0001", "status": "live"},
+        {"name": "worker-done", "harness": "claude",
+         "harness_session_id": "sess-exited-01", "status": "exited"},
+    ])
+    _write_node(tmp_graph, _base_node("ab-liv00001", sessions=[
+        {"phase": "do", "harness": "claude", "session_id": "sess-live-0001",
+         "started_at": "2026-09-14T01:00:00Z"},
+        {"phase": "do", "harness": "claude", "session_id": "sess-exited-01",
+         "started_at": "2026-09-14T02:00:00Z"},
+        {"phase": "ship", "harness": "claude", "session_id": "sess-gone-0001",
+         "started_at": "2026-09-14T03:00:00Z"},
+    ]))
+
+    r = _invoke("backlog", "provenance", "ab-liv00001")
+    assert r.exit_code == 0, r.output
+    assert "sess-live-0001" in r.output and "[live]" in r.output
+    assert "sess-exited-01" in r.output and "[exited]" in r.output
+    assert "sess-gone-0001" in r.output and "[reaped]" in r.output
+
+    data = json.loads(_invoke("backlog", "provenance", "ab-liv00001", "--json").output)
+    by_sid = {row["session_id"]: row.get("registry_status")
+              for row in data["lifecycle"]["phases"] if row.get("recorded")}
+    assert by_sid["sess-live-0001"] == "live"
+    assert by_sid["sess-exited-01"] == "exited"
+    assert by_sid["sess-gone-0001"] == "reaped"
+
+
+def test_ac3_hp_observed_model_renders_when_observed(tmp_graph, tmp_path, monkeypatch):
+    """AC3-HP: a row carrying an observed model renders it; a row without does not."""
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
+
+    _pin_registry(monkeypatch, tmp_path, [])
+    _write_node(tmp_graph, _base_node("ab-obs00001", sessions=[
+        {"phase": "do", "harness": "claude", "session_id": "sess-obs-0001",
+         "started_at": "2026-09-14T01:00:00Z",
+         "observed_model": {"kind": "observed", "model": "glm-5.3-flash", "samples": 9}},
+        {"phase": "do", "harness": "claude", "session_id": "sess-nomod-001",
+         "started_at": "2026-09-14T02:00:00Z",
+         "observed_model": {"kind": "no-model-yet"}},
+    ]))
+
+    r = _invoke("backlog", "provenance", "ab-obs00001")
+    assert r.exit_code == 0, r.output
+    assert "glm-5.3-flash" in r.output
+
+    data = json.loads(_invoke("backlog", "provenance", "ab-obs00001", "--json").output)
+    by_sid = {row["session_id"]: row.get("observed_model")
+              for row in data["lifecycle"]["phases"] if row.get("recorded")}
+    assert by_sid["sess-obs-0001"] == "glm-5.3-flash"
+    assert by_sid["sess-nomod-001"] is None
+
+
+def test_ac4_edge_registry_read_failure_omits_annotations(tmp_graph, tmp_path, monkeypatch):
+    """AC4-EDGE: an unreadable registry omits liveness annotations, never fails."""
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
+
+    import fno.agents.registry as registry_mod
+    def _boom():
+        raise RuntimeError("registry wedged")
+    monkeypatch.setattr(registry_mod, "load_registry", _boom)
+    _write_node(tmp_graph, _base_node("ab-fail0001", sessions=[
+        {"phase": "do", "harness": "claude", "session_id": "sess-fail-0001",
+         "started_at": "2026-09-14T01:00:00Z"},
+    ]))
+
+    r = _invoke("backlog", "provenance", "ab-fail0001")
+    assert r.exit_code == 0, r.output
+    assert "sess-fail-0001" in r.output
+    assert "[reaped]" not in r.output
+    assert "[live]" not in r.output
+
+
+def test_d72f_dispatcher_survives_reap(tmp_graph, tmp_path, monkeypatch):
+    """The node's verify contract: with an empty registry (worker reaped), the
+    spawn edge still names the dispatcher and the worker's row reads reaped."""
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
+
+    _pin_registry(monkeypatch, tmp_path, [])
+    _write_node(tmp_graph, _base_node(
+        "ab-reap0001",
+        spawned_by_session="disp-aaaa-0000-0000-000000000001",
+        spawned_by_harness="claude",
+        sessions=[
+            {"phase": "do", "harness": "claude", "session_id": "worker-aaaa-0000-0000-000000000001",
+             "started_at": "2026-09-14T01:00:00Z"},
+        ],
+    ))
+
+    r = _invoke("backlog", "provenance", "ab-reap0001")
+    assert r.exit_code == 0, r.output
+    assert "disp-aaaa-0000-0000-000000000001" in r.output  # dispatcher survives
+    assert "worker-aaaa-0000-0000-000000000001" in r.output
+    assert "[reaped]" in r.output  # and the reaped row says so

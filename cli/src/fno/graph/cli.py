@@ -50,6 +50,10 @@ from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importer
 from fno.graph.node_builder import register as _register_node_builder
 from fno.graph.rank import cmd_rank as _cmd_rank
 from fno.graph.api import cmd_version as _cmd_version
+# The roster renderer lives in its own module: this file is shrink-only and the
+# x-d72f change touches it. The alias keeps the historical name importable.
+from fno.graph.provenance_view import lifecycle_roster as _lifecycle_roster
+from fno.graph.provenance_view import pr_block, registry_status_index, render_pr_line
 
 cli = typer.Typer(
     name="graph",
@@ -5181,127 +5185,6 @@ def _spawned_walk(
     return rows, cycle, truncated
 
 
-_LIFECYCLE_PHASES = ("think", "blueprint", "do", "review", "ship")
-
-
-def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
-    """Per-phase lifecycle roster: start, end, duration per row, and an honest
-    node total. Returns ``(human_lines, summary_dict)``.
-
-    Honesty is the acceptance criterion (node ): a phase with no row
-    renders 'not recorded'; a row with an end but no start renders 'end only';
-    neither renders as a duration, and the total states how many of the
-    lifecycle phases contributed a duration rather than summing silently over
-    gaps. Start reads ``started_at`` (canonical) with ``claimed_at`` as the
-    legacy fallback.
-    """
-    from datetime import datetime
-
-    by_phase: "dict[str, list[dict]]" = {p: [] for p in _LIFECYCLE_PHASES}
-    for s in sessions or []:
-        ph = s.get("phase") if isinstance(s, dict) else None
-        if ph in by_phase:
-            by_phase[ph].append(s)
-
-    def _start(row: dict) -> "str | None":
-        return row.get("started_at") or row.get("claimed_at")
-
-    def _end(row: dict) -> "str | None":
-        return row.get("ended_at") or row.get("at")
-
-    def _honest(row: dict) -> bool:
-        # A duration is honest only when both CANONICAL names are present.
-        # Legacy rows (claimed_at/at) hold stamp-fire time, not phase boundaries
-        # - their span is the whole session - so they render 'end only' and are
-        # never summed, named, or displayed as a phase duration.
-        return "started_at" in row and "ended_at" in row
-
-    def _dur(row: dict) -> "float | None":
-        if not _honest(row):
-            return None
-        try:
-            sp = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
-            ep = datetime.fromisoformat(row["ended_at"].replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            return None
-        sec = (ep - sp).total_seconds()
-        # An inverted window (started_at after ended_at) is a backfill typo or
-        # a clock skew, not a phase duration. Render it as end-only rather than
-        # summing a negative span into the node total.
-        if sec < 0:
-            return None
-        return sec
-
-    def _fmt(sec: float) -> str:
-        sec = int(round(sec))
-        if sec < 60:
-            return f"{sec}s"
-        if sec < 3600:
-            return f"{sec // 60}m"
-        return f"{sec // 3600}h{(sec % 3600) // 60}m"
-
-    lines: list[str] = []
-    phases: list[dict] = []
-    total = 0.0
-    phases_with_window = 0
-    for ph in _LIFECYCLE_PHASES:
-        rows = by_phase[ph]
-        if not rows:
-            lines.append(f"    {ph:<9} not recorded")
-            phases.append({"phase": ph, "recorded": False})
-            continue
-        phase_has_window = False
-        for row in rows:
-            st, en, dur = _start(row), _end(row), _dur(row)
-            head = f"    {ph:<9} {row.get('harness', '?')}:{row.get('session_id', '?')}"
-            if dur is not None:
-                lines.append(f"{head} {row['started_at']} -> {row['ended_at']} ({_fmt(dur)})")
-                total += dur
-                phase_has_window = True
-            elif en:
-                lines.append(f"{head} end only @ {en}")
-            elif st:
-                lines.append(f"{head} in progress (since {st})")
-            else:
-                lines.append(head.rstrip())
-            phases.append(
-                {
-                    "phase": ph,
-                    "recorded": True,
-                    "harness": row.get("harness"),
-                    "session_id": row.get("session_id"),
-                    "start": st,
-                    "end": en,
-                    "duration_seconds": dur,
-                }
-            )
-        if phase_has_window:
-            phases_with_window += 1
-
-    # Predicate on phases_with_window, not total: a zero-second window
-    # (started_at == ended_at) or any out-of-order stamp leaves total at 0
-    # while a phase still contributed a window. Keying on total would drop
-    # the duration line and report total_duration_seconds: null despite a
-    # real recorded window.
-    if phases_with_window > 0:
-        lines.append(
-            f"    total     {_fmt(total)} "
-            f"({phases_with_window} of {len(_LIFECYCLE_PHASES)} phases recorded)"
-        )
-    else:
-        lines.append(
-            f"    total     {phases_with_window} of {len(_LIFECYCLE_PHASES)} phases recorded"
-        )
-
-    summary = {
-        "phases": phases,
-        "total_duration_seconds": total if phases_with_window > 0 else None,
-        "phases_recorded": phases_with_window,
-        "phases_total": len(_LIFECYCLE_PHASES),
-    }
-    return lines, summary
-
-
 def _render_external_provenance(id: str, spawned: bool, json_out: bool) -> None:
     """`backlog provenance` under an external backend: exact-id tracker read
     plus the sidecar provenance edges (the AC2 provenance path). Footnote-minted
@@ -5384,6 +5267,7 @@ def _render_external_provenance(id: str, spawned: bool, json_out: bool) -> None:
             "node_id": node.id,
             "title": node.title,
             "edges": [_edge("node_birth", birth_result), _edge("spawn", spawn_result)],
+            "pr": pr_block(sc),
             "sessions": sc.sessions,
             "lifecycle": None,  # roster derives from sc.sessions; kept for shape parity
             "source_node_id": sc.source_node_id,
@@ -5402,6 +5286,7 @@ def _render_external_provenance(id: str, spawned: bool, json_out: bool) -> None:
     typer.echo(f"provenance for {node.id}: {node.title or ''}")
     typer.echo(f"  node_birth: {sc.source_session_id or '(none)'}")
     typer.echo(f"  spawn: {sc.spawned_by_session or '(none)'}")
+    typer.echo(render_pr_line(pr_block(sc)))
     typer.echo(f"  sessions: {len(sc.sessions)} row(s)")
     if spawned:
         for d, nid in walk_rows:
@@ -5505,7 +5390,9 @@ def cmd_provenance(
 
     # Lifecycle roster (): per-phase start/end/duration + an honest total,
     # computed once for both the JSON and human paths.
-    roster_lines, roster_summary = _lifecycle_roster(e["sessions"])
+    roster_lines, roster_summary = _lifecycle_roster(
+        e["sessions"], registry_status_index()
+    )
 
     if json_out:
         import dataclasses
@@ -5526,6 +5413,7 @@ def cmd_provenance(
             ],
             # Append-only lifecycle provenance in raw append order ().
             # read_graph's defaults guarantee the key, so no fallback guard.
+            "pr": pr_block(e),
             "sessions": e["sessions"],
             # Per-phase roster with starts, durations, and an honest total
             # (absent values are null, never 0). See _lifecycle_roster.
@@ -5573,6 +5461,7 @@ def cmd_provenance(
     if e.get("source_plan_path"):
         lines.append(f"    plan: {e['source_plan_path']}")
     _fmt_edge("spawn", spawn_result, spawn_session, spawn_harness)
+    lines.append(render_pr_line(pr_block(e)))
 
     lines.append(f"  related: {'(none)' if not related_ids else ''}".rstrip())
     for rid in related_ids:
