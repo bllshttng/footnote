@@ -39,6 +39,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "compaction",
     "component-verdict",
     "provider-cap",
+    "source-pin",
     "court-orphans",
     "court-fold",
     "detect",
@@ -244,6 +245,15 @@ async fn run(args: Vec<String>) -> i32 {
     // stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard.
     if matches!(verb, "component-verdict") {
         return fno_agents::component_update::run_component_verdict(&args[1..]);
+    }
+
+    // `source-pin` is the HIDDEN decision verb for machine-wide update source
+    // eligibility (x-bf5f): resolve|record|sync. A refusal is data (exit 0,
+    // decision: refuse), not a process error, so the Python transport can map
+    // it to its own refusal message verbatim. Same `matches!` treatment as
+    // `component-verdict` so the routable-verb parity guard does not see it.
+    if matches!(verb, "source-pin") {
+        return fno_agents::source_pin::run_source_pin(&args[1..]);
     }
 
     // `task-context-prepare`/`-gate`/`-stage`/`-show`/`-revalidate`/`-payload`
