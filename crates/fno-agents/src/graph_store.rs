@@ -2008,21 +2008,6 @@ pub fn create_backup(path: &Path) -> Option<PathBuf> {
             }
         }
     }
-    let mut existing: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .ok()?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().starts_with(&prefix))
-                .unwrap_or(false)
-        })
-        .collect();
-    existing.sort();
-    if existing.len() > GRAPH_BACKUP_KEEP {
-        for old in &existing[..existing.len() - GRAPH_BACKUP_KEEP] {
-            let _ = std::fs::remove_file(old);
-        }
-    }
     let _ = rotate_backups(&dir, &prefix);
     Some(backup)
 }
