@@ -48,14 +48,14 @@ pub const DEFAULT_INTERVAL_MS: u64 = 250;
 const MAX_ENTER_DELAY_MS: u64 = 60_000;
 
 /// The settle delay for one recipient harness row of a contract. Split out so
-/// the per-provider divergence is testable against a stub contract (the
+/// the per-harness divergence is testable against a stub contract (the
 /// packaged rows can read equal, which would certify nothing).
 fn contract_enter_delay_ms(
     contract: &crate::harness_capabilities::HarnessContract,
-    provider: MailInjectProvider,
+    harness: MailInjectHarness,
 ) -> u64 {
     contract
-        .capabilities(provider.harness_name())
+        .capabilities(harness.harness_name())
         .expect("submit-delay capability for a known harness")
         .send_keys_enter_delay_ms as u64
 }
@@ -65,9 +65,9 @@ fn contract_enter_delay_ms(
 /// while the codex TUI is still ingesting the paste, so the envelope sits
 /// unsent in its composer. Callers resolve the recipient first; `claude_ask`
 /// passes `Claude` because its lane is claude-only.
-pub fn default_enter_delay_ms(provider: MailInjectProvider) -> u64 {
+pub fn default_enter_delay_ms(harness: MailInjectHarness) -> u64 {
     crate::harness_capabilities::HarnessContract::packaged()
-        .map(|contract| contract_enter_delay_ms(&contract, provider))
+        .map(|contract| contract_enter_delay_ms(&contract, harness))
         .expect("embedded submit-delay capability")
 }
 
@@ -83,7 +83,7 @@ pub fn enter_delay_for_harness(name: &str) -> u64 {
         .expect("embedded submit-delay capability");
     match contract.capabilities(name) {
         Ok(caps) => caps.send_keys_enter_delay_ms.max(0) as u64,
-        Err(_) => contract_enter_delay_ms(&contract, MailInjectProvider::Claude),
+        Err(_) => contract_enter_delay_ms(&contract, MailInjectHarness::Claude),
     }
 }
 
@@ -128,22 +128,22 @@ const CR_RESUBMIT_EVERY: u32 = 8;
 /// confirm target resolve from the HOSTED harness's own row - the TUI
 /// receiving the paste - never from this variant's lane label.
 #[derive(Debug, PartialEq, Clone, Copy)]
-pub enum MailInjectProvider {
+pub enum MailInjectHarness {
     Claude,
     Codex,
     Keeper,
 }
 
-impl MailInjectProvider {
+impl MailInjectHarness {
     /// The capability-table row name for this recipient harness. For a keeper
     /// recipient the ROW name is the hosted harness, resolved at delivery
     /// from the registry row ([`enter_delay_for_harness`]); this lane label
     /// is only the audit distinction, and the settle delay never reads it.
     pub fn harness_name(self) -> &'static str {
         match self {
-            MailInjectProvider::Claude => "claude",
-            MailInjectProvider::Codex => "codex",
-            MailInjectProvider::Keeper => "keeper-hosted",
+            MailInjectHarness::Claude => "claude",
+            MailInjectHarness::Codex => "codex",
+            MailInjectHarness::Keeper => "keeper-hosted",
         }
     }
 }
@@ -165,7 +165,7 @@ pub struct MailInjectArgs {
     /// Recipient: full session UUID OR its 8-hex short id (roster accepts either)
     /// for claude; the codex threadId (full UUID) for codex.
     pub session: String,
-    pub provider: MailInjectProvider,
+    pub harness: MailInjectHarness,
     pub attempts: u32,
     pub interval_ms: u64,
     pub enter_delay_ms: u64,
@@ -209,7 +209,7 @@ pub const NOT_INJECTABLE_HELP: &str = concat!(
 /// grammar is unit-tested without a daemon.
 pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut session: Option<String> = None;
-    let mut provider = MailInjectProvider::Claude;
+    let mut harness = MailInjectHarness::Claude;
     let mut attempts = DEFAULT_ATTEMPTS;
     let mut interval_ms = DEFAULT_INTERVAL_MS;
     // Resolved AFTER the parse loop: the default belongs to the RECIPIENT's
@@ -237,10 +237,10 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                     .next()
                     .ok_or((2, "mail-inject: --harness needs a value".to_string()))?
                     .clone();
-                provider = match value.as_str() {
-                    "claude" => MailInjectProvider::Claude,
-                    "codex" => MailInjectProvider::Codex,
-                    name if keeper_lane_harness(name) => MailInjectProvider::Keeper,
+                harness = match value.as_str() {
+                    "claude" => MailInjectHarness::Claude,
+                    "codex" => MailInjectHarness::Codex,
+                    name if keeper_lane_harness(name) => MailInjectHarness::Keeper,
                     _ => {
                         return Err((
                             2,
@@ -310,15 +310,15 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     // The default belongs to the RECIPIENT's row (x-4b0b). For the keeper lane
     // the --harness value IS the hosted harness's row name, so the delay
     // resolves off that row here; lane A keeps its enum-keyed resolution.
-    let enter_delay_ms = enter_delay_ms.unwrap_or_else(|| match provider {
-        MailInjectProvider::Keeper => {
+    let enter_delay_ms = enter_delay_ms.unwrap_or_else(|| match harness {
+        MailInjectHarness::Keeper => {
             enter_delay_for_harness(harness_flag.as_deref().unwrap_or("claude"))
         }
-        _ => default_enter_delay_ms(provider),
+        _ => default_enter_delay_ms(harness),
     });
     Ok(MailInjectArgs {
         session,
-        provider,
+        harness,
         attempts,
         interval_ms,
         enter_delay_ms,
@@ -390,7 +390,7 @@ pub fn emit_raw_inject_audit(
     sender: Option<&str>,
     session: &str,
     text: &str,
-    provider: MailInjectProvider,
+    harness: MailInjectHarness,
     confirmed: bool,
 ) {
     emit_raw_inject_audit_with_origin(
@@ -398,7 +398,7 @@ pub fn emit_raw_inject_audit(
         sender,
         session,
         text,
-        provider,
+        harness,
         confirmed,
         None,
         false,
@@ -410,7 +410,7 @@ pub fn emit_raw_inject_audit_with_origin(
     sender: Option<&str>,
     session: &str,
     text: &str,
-    provider: MailInjectProvider,
+    harness: MailInjectHarness,
     confirmed: bool,
     origin: Option<&str>,
     self_send: bool,
@@ -418,12 +418,12 @@ pub fn emit_raw_inject_audit_with_origin(
     if is_framed_envelope(text) {
         return;
     }
-    let (harness, lane) = match provider {
-        MailInjectProvider::Claude => ("claude", "control.sock"),
-        MailInjectProvider::Codex => ("codex", "codex-daemon"),
+    let (harness, lane) = match harness {
+        MailInjectHarness::Claude => ("claude", "control.sock"),
+        MailInjectHarness::Codex => ("codex", "codex-daemon"),
         // The audit records the LANE; the hosted harness's own row resolved
         // the settle delay and the confirm target at delivery time.
-        MailInjectProvider::Keeper => ("keeper-hosted", "keeper-pty"),
+        MailInjectHarness::Keeper => ("keeper-hosted", "keeper-pty"),
     };
     let payload_for_event: String = text.chars().take(512).collect();
     let mut fields = serde_json::Map::new();
@@ -1035,10 +1035,10 @@ fn single_line_decision(text: &str) -> Option<i32> {
 /// native one. Everything else rides verbatim. The marker is matched only at
 /// payload start - one marker char plus `fno:` - so prose like `see /fno:docs`
 /// and lookalikes like `//fno:x` are untouched.
-fn normalize_verb_marker(text: &str, provider: MailInjectProvider) -> String {
-    let native = match provider {
-        MailInjectProvider::Codex => '$',
-        MailInjectProvider::Claude | MailInjectProvider::Keeper => '/',
+fn normalize_verb_marker(text: &str, harness: MailInjectHarness) -> String {
+    let native = match harness {
+        MailInjectHarness::Codex => '$',
+        MailInjectHarness::Claude | MailInjectHarness::Keeper => '/',
     };
     let Some(rest) = text
         .strip_prefix(['/', '$'])
@@ -1314,7 +1314,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
     // audit record. Claude only, because the codex lane submits a turn with no
     // prompt line, so there is no keystroke for a probe to answer.
     if args.probe {
-        if args.provider != MailInjectProvider::Claude {
+        if args.harness != MailInjectHarness::Claude {
             eprintln!(
                 "mail-inject: --probe is claude-only (the codex lane submits a turn \
                  with no prompt line; the keeper lane resolves its socket off the \
@@ -1370,7 +1370,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
 
     // The verb marker is bidirectional: rewrite it to the receiving harness's
     // native form BEFORE the audit, so the record names what was delivered.
-    let text = normalize_verb_marker(&text, args.provider);
+    let text = normalize_verb_marker(&text, args.harness);
 
     // Forged-envelope predicate on UNWRAPPED bodies (x-4ce4): a single-line
     // payload has no legitimate reason to embed an `<fno_mail>` tag mid-line.
@@ -1379,8 +1379,8 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         return code;
     }
 
-    let result: Result<(), String> = match args.provider {
-        MailInjectProvider::Claude => deliver_via_control_sock(
+    let result: Result<(), String> = match args.harness {
+        MailInjectHarness::Claude => deliver_via_control_sock(
             &args.session,
             &text,
             args.attempts,
@@ -1388,12 +1388,12 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             args.enter_delay_ms,
         )
         .map_err(|reason| reason.to_string()),
-        MailInjectProvider::Codex => {
+        MailInjectHarness::Codex => {
             crate::codex_inject::deliver_via_codex_daemon(&args.session, &text)
                 .await
                 .map_err(|reason| reason.to_string())
         }
-        MailInjectProvider::Keeper => deliver_via_keeper_socket(
+        MailInjectHarness::Keeper => deliver_via_keeper_socket(
             &args.session,
             &text,
             args.attempts,
@@ -1413,7 +1413,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         args.sender.as_deref(),
         &args.session,
         &text,
-        args.provider,
+        args.harness,
         result.is_ok(),
         args.origin.as_deref(),
         args.self_send,
@@ -1500,7 +1500,7 @@ mod tests {
             Some("0ab49ebc"),
             "ses-9",
             "/code-review <level> --comment --fix",
-            MailInjectProvider::Claude,
+            MailInjectHarness::Claude,
             true,
         );
         // Wrapped envelope -> no record (the marker survives in the transcript).
@@ -1509,7 +1509,7 @@ mod tests {
             None,
             "ses-9",
             "<fno_mail from=\"a\">hi</fno_mail>",
-            MailInjectProvider::Codex,
+            MailInjectHarness::Codex,
             true,
         );
         // The ask-lane peer follow-up rides this same binary wrapped in a
@@ -1521,7 +1521,7 @@ mod tests {
             None,
             "ses-9",
             "<cross-session-message from-name=\"peer\">\nstatus?\n</cross-session-message>",
-            MailInjectProvider::Claude,
+            MailInjectHarness::Claude,
             true,
         );
 
@@ -1551,7 +1551,7 @@ mod tests {
             None,
             "ses-9",
             "/compact",
-            MailInjectProvider::Claude,
+            MailInjectHarness::Claude,
             false,
             None,
             true,
@@ -1711,42 +1711,42 @@ mod tests {
         // Operator, 2026-09-14: the marker is bidirectional. A verb typed in
         // either dialect lands in the recipient's native form.
         assert_eq!(
-            normalize_verb_marker("$fno:review medium", MailInjectProvider::Claude),
+            normalize_verb_marker("$fno:review medium", MailInjectHarness::Claude),
             "/fno:review medium"
         );
         assert_eq!(
-            normalize_verb_marker("/fno:review medium", MailInjectProvider::Codex),
+            normalize_verb_marker("/fno:review medium", MailInjectHarness::Codex),
             "$fno:review medium"
         );
         // A payload already in the native form passes through byte-identical.
         assert_eq!(
-            normalize_verb_marker("$fno:reign x-4d9b", MailInjectProvider::Codex),
+            normalize_verb_marker("$fno:reign x-4d9b", MailInjectHarness::Codex),
             "$fno:reign x-4d9b"
         );
         assert_eq!(
-            normalize_verb_marker("/fno:review", MailInjectProvider::Claude),
+            normalize_verb_marker("/fno:review", MailInjectHarness::Claude),
             "/fno:review"
         );
         // The keeper lane hosts a claude pane, so it takes the slash form.
         assert_eq!(
-            normalize_verb_marker("$fno:fix x-1", MailInjectProvider::Keeper),
+            normalize_verb_marker("$fno:fix x-1", MailInjectHarness::Keeper),
             "/fno:fix x-1"
         );
         // Non-verb payloads, mid-line markers, and lookalikes ride verbatim.
         assert_eq!(
-            normalize_verb_marker("hello there", MailInjectProvider::Claude),
+            normalize_verb_marker("hello there", MailInjectHarness::Claude),
             "hello there"
         );
         assert_eq!(
-            normalize_verb_marker("see /fno:docs", MailInjectProvider::Codex),
+            normalize_verb_marker("see /fno:docs", MailInjectHarness::Codex),
             "see /fno:docs"
         );
         assert_eq!(
-            normalize_verb_marker("/compact", MailInjectProvider::Codex),
+            normalize_verb_marker("/compact", MailInjectHarness::Codex),
             "/compact"
         );
         assert_eq!(
-            normalize_verb_marker("//fno:x", MailInjectProvider::Codex),
+            normalize_verb_marker("//fno:x", MailInjectHarness::Codex),
             "//fno:x"
         );
     }
@@ -2325,7 +2325,7 @@ mod tests {
     fn parse_args_defaults_and_overrides() {
         let a = parse_args(&argv(&["--session", "a1b2c3d4"])).unwrap();
         assert_eq!(a.session, "a1b2c3d4");
-        assert_eq!(a.provider, MailInjectProvider::Claude);
+        assert_eq!(a.harness, MailInjectHarness::Claude);
         assert_eq!(a.attempts, DEFAULT_ATTEMPTS);
         assert_eq!(a.interval_ms, DEFAULT_INTERVAL_MS);
         assert_eq!(a.enter_delay_ms, 800);
@@ -2350,9 +2350,9 @@ mod tests {
     #[test]
     fn parse_args_harness_defaults_claude_and_accepts_codex() {
         let d = parse_args(&argv(&["--session", "x"])).unwrap();
-        assert_eq!(d.provider, MailInjectProvider::Claude);
+        assert_eq!(d.harness, MailInjectHarness::Claude);
         let c = parse_args(&argv(&["--session", "x", "--harness", "codex"])).unwrap();
-        assert_eq!(c.provider, MailInjectProvider::Codex);
+        assert_eq!(c.harness, MailInjectHarness::Codex);
         // x-4b0b: the default settle delay follows the RECIPIENT's harness
         // row. This pins the codex row's VALUE through the parse path; the
         // per-provider MECHANISM is certified by the divergent-stub test
@@ -2361,7 +2361,7 @@ mod tests {
         assert_eq!(c.enter_delay_ms, 800);
         // -H is the harness short flag.
         let h = parse_args(&argv(&["--session", "x", "-H", "codex"])).unwrap();
-        assert_eq!(h.provider, MailInjectProvider::Codex);
+        assert_eq!(h.harness, MailInjectHarness::Codex);
         // Unknown harness is a usage error. (A KEEPER-lane harness is not
         // unknown - the keeper lane routes it - so the refusal fixture must
         // be a name no capability row claims.)
@@ -2374,7 +2374,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_delay_resolves_per_provider_on_a_divergent_contract() {
+    fn enter_delay_resolves_per_harness_on_a_divergent_contract() {
         // x-4b0b: certify the MECHANISM, not a value. With both packaged rows
         // reading 800, a `parse` assertion cannot tell a codex-row read from
         // the old claude constant, so diverge the stub: claude 100, codex 222
@@ -2392,17 +2392,17 @@ mod tests {
             );
         let contract = crate::harness_capabilities::HarnessContract::parse(&stub).unwrap();
         assert_eq!(
-            contract_enter_delay_ms(&contract, MailInjectProvider::Claude),
+            contract_enter_delay_ms(&contract, MailInjectHarness::Claude),
             100
         );
         assert_eq!(
-            contract_enter_delay_ms(&contract, MailInjectProvider::Codex),
+            contract_enter_delay_ms(&contract, MailInjectHarness::Codex),
             222
         );
         // The packaged contract keeps its real rows.
         let packaged = crate::harness_capabilities::HarnessContract::packaged().unwrap();
         assert_eq!(
-            contract_enter_delay_ms(&packaged, MailInjectProvider::Codex),
+            contract_enter_delay_ms(&packaged, MailInjectHarness::Codex),
             800
         );
     }
@@ -2697,18 +2697,18 @@ mod tests {
         // its settle delay off THAT harness's packaged row, never a keeper
         // constant and never claude's.
         let a = parse_args(&argv(&["--session", "s1", "--harness", "pi"])).unwrap();
-        assert_eq!(a.provider, MailInjectProvider::Keeper);
+        assert_eq!(a.harness, MailInjectHarness::Keeper);
         assert_eq!(a.enter_delay_ms, enter_delay_for_harness("pi"));
         // Lane A parses unchanged.
         assert_eq!(
-            parse_args(&argv(&["--session", "s1"])).unwrap().provider,
-            MailInjectProvider::Claude
+            parse_args(&argv(&["--session", "s1"])).unwrap().harness,
+            MailInjectHarness::Claude
         );
         assert_eq!(
             parse_args(&argv(&["--session", "s1", "--harness", "codex"]))
                 .unwrap()
-                .provider,
-            MailInjectProvider::Codex
+                .harness,
+            MailInjectHarness::Codex
         );
         // A harness with no lane here refuses: lane A's attach harnesses and
         // unknown names alike.

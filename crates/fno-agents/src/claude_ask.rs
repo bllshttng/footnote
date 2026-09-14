@@ -1657,7 +1657,7 @@ fn ask_via_control_sock(
         crate::mail_inject::DEFAULT_INTERVAL_MS,
         // claude-only lane: the recipient row is always claude (x-4b0b made the
         // delay recipient-resolved; this call site stays pinned to Claude).
-        crate::mail_inject::default_enter_delay_ms(crate::mail_inject::MailInjectProvider::Claude),
+        crate::mail_inject::default_enter_delay_ms(crate::mail_inject::MailInjectHarness::Claude),
     )
     .is_err()
     {
