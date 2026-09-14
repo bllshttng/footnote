@@ -731,68 +731,47 @@ def _stage_check_report() -> Optional[dict[str, Any]]:
     """Stage-drift verdict when Claude runs the plugin from the fno stage.
 
     A directory marketplace never mints a ``gitCommitSha``, so for that
-    install shape the freshness question is a byte comparison of the stage
-    against the source checkout's HEAD, answered by
-    ``fno-agents plugin-install --check --json``. Returns None when this
-    machine's install is not a directory marketplace (the caller keeps its
-    registry-based answer); any transport failure maps to ``unknown`` with
-    the reason in ``detail``, never ``fresh``.
+    install shape freshness is a byte comparison of the stage against source
+    HEAD, answered by ``fno-agents plugin-install --check --json``. Returns
+    None when this machine's install is not a directory marketplace; any
+    transport failure maps to ``unknown`` with the reason in ``detail``,
+    never ``fresh``.
     """
     try:
-        marketplaces = json.loads(_known_marketplaces_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(_known_marketplaces_path().read_text(encoding="utf-8"))
+        source = data["footnote"]["source"]
+    except (OSError, ValueError, KeyError, TypeError):
         return None
-    entry = (marketplaces or {}).get("footnote") if isinstance(marketplaces, dict) else None
-    source = (entry or {}).get("source") if isinstance(entry, dict) else None
     if not isinstance(source, dict) or source.get("source") != "directory":
         return None
     stage_path = str(source.get("path") or "")
     if not stage_path:
         return None
 
-    detail: Optional[str] = None
-    verdict: Any = None
+    def unknown(detail: str) -> dict[str, Any]:
+        return {
+            "status": "unknown", "sha": None, "installed_at": None,
+            "detail": detail, "kind": "stage", "stage": stage_path,
+        }
+
     binary = _cargo_bin_path()
     src = _resolve_source(None)
     if not binary:
-        detail = "no cargo fno-agents binary to run the stage check"
-    elif src is None:
-        detail = "no source checkout to compare against"
-    else:
-        code, out, err = _run_stage_check(
-            [
-                binary,
-                "plugin-install",
-                "--check",
-                "--json",
-                "--stage",
-                stage_path,
-                "--source",
-                str(src),
-            ]
-        )
-        if code not in (0, 3):
-            detail = (
-                f"plugin-install --check exited {code}: {(err or out).strip()}"
-            )
-        else:
-            try:
-                verdict = json.loads(out)
-            except ValueError:
-                detail = "plugin-install --check printed no JSON"
-            if verdict is not None and not isinstance(verdict, dict):
-                detail = "plugin-install --check printed a non-object"
-                verdict = None
-    if verdict is None:
-        return {
-            "status": "unknown",
-            "sha": None,
-            "installed_at": None,
-            "detail": detail or "stage check produced no verdict",
-            "kind": "stage",
-            "stage": stage_path,
-        }
-
+        return unknown("no cargo fno-agents binary to run the stage check")
+    if src is None:
+        return unknown("no source checkout to compare against")
+    code, out, err = _run_stage_check(
+        [binary, "plugin-install", "--check", "--json",
+         "--stage", stage_path, "--source", str(src)]
+    )
+    if code not in (0, 3):
+        return unknown(f"plugin-install --check exited {code}: {(err or out).strip()}")
+    try:
+        verdict = json.loads(out)
+    except ValueError:
+        return unknown("plugin-install --check printed no JSON")
+    if not isinstance(verdict, dict):
+        return unknown("plugin-install --check printed a non-object")
     status = verdict.get("status")
     if status not in ("fresh", "stale", "absent", "unknown"):
         status = "unknown"
@@ -1657,7 +1636,9 @@ def _silent_switch_report(
         # fresh cache stays a bare unknown (never guess an origin).
         if armed.get("unknown"):
             cache = plugin_cache if plugin_cache is not None else _plugin_cache_report()
-            if cache.get("status") == "stale":
+            # A stale STAGE is a different artifact with its own fix; this
+            # cause line is about the git-cached claude plugin only.
+            if cache.get("status") == "stale" and cache.get("kind") != "stage":
                 sha = str(cache.get("sha") or "")[:12]
                 when = str(cache.get("installed_at") or "")[:10] or "?"
                 finding["cause"] = (
