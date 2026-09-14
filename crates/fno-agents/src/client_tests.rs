@@ -2128,7 +2128,7 @@ fn render_list_with_discovered_lane() {
     assert_eq!(parsed["discovered_count"], 1);
     assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
     assert_eq!(parsed["schema_version"], 7);
-    // x-f654: without a codex probe the key is absent, not null.
+    // Without a codex probe the key is absent, not null.
     assert!(parsed.get("codex_loaded").is_none());
 
     let table = render_list_table(&agents, &discovered, Some(3), Some(3));
@@ -2154,7 +2154,7 @@ fn render_list_with_discovered_lane() {
     assert!(table.contains("busy"));
 }
 
-/// x-f654: a codex-filtered list folds the loaded-thread block into the JSON
+/// A codex-filtered list folds the loaded-thread block into the JSON
 /// envelope; the key carries the retired verb's exact payload shape.
 #[test]
 fn render_list_json_folds_in_the_codex_loaded_block_when_probed() {

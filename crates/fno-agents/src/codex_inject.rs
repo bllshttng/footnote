@@ -1283,7 +1283,7 @@ pub async fn discover_loaded_threads() -> Result<Vec<LoadedThread>, &'static str
     }
 }
 
-/// The `codex_loaded` payload block (x-f654): what the retired hidden
+/// The `codex_loaded` payload block: what the retired hidden
 /// `codex-loaded-threads` verb printed, as a value. `Ok` -> `{"available":
 /// true, "threads": [...]}`; every `Err` -> `{"available": false, "reason":
 /// <reason>}`, so "the daemon could not answer" stays distinct from "zero
@@ -2896,7 +2896,7 @@ mod tests {
         assert!(turn.get("sandboxPolicy").is_none());
     }
 
-    /// x-f654: the block keeps the retired verb's exact payload shape.
+    /// The block keeps the retired verb's exact payload shape.
     #[test]
     fn loaded_threads_block_ok_carries_the_thread_rows() {
         let block = loaded_threads_block(Ok(vec![

@@ -377,6 +377,24 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_check_file_budget.sh
 
+      # Law d-fe66560a: top-level verbs are not allowed at all, hidden ones
+      # included. The fno-agents binary's action list may only shrink; the
+      # verb ratchet reads all of fno-agents as ONE baseline leaf, so nothing
+      # else notices the list growing. Same base contract as the file budget
+      # step above.
+      - name: fno-agents action list is shrink-only
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        env:
+          PR_BASE_REF: ${{ github.base_ref || 'main' }}
+          ACTIONS_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: bash scripts/ci/check-client-actions-shrink.sh
+
+      - name: Action list shrink gate selftest
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/ci/test_check_client_actions_shrink.sh
+
       # From review-invocation-single-source.yml.
       - name: Review invocation single-source check
         if: ${{ !cancelled() }}

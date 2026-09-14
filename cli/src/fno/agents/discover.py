@@ -187,8 +187,8 @@ def _codex_daemon_threads_raw(*, env: Optional[dict[str, str]] = None) -> Option
 
     The transport is ``fno-agents list --json --no-discovered --harness codex``:
     the answer rides the ``codex_loaded`` block of an existing verb instead of
-    its own (law d-fe66560a). ``--no-discovered`` is load-bearing - without it
-    the Rust list shells back into this Python discovery and recurses.
+    its own. ``--no-discovered`` is load-bearing - without it the Rust list
+    shells back into this Python discovery and recurses.
 
     None covers every failure mode (missing/stale binary, unavailable daemon,
     incompatible response, timeout) so a caller can tell "cannot answer" apart

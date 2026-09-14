@@ -1305,8 +1305,8 @@ async fn run(args: Vec<String>) -> i32 {
                 exit_code_for(err.code)
             }
             ResponsePayload::Ok(result) => {
-                // x-f654: the loaded-thread answer rides `list --harness codex`
-                // as a field instead of a hidden verb root. Gated on the codex
+                // The loaded-thread answer rides `list --harness codex` as a
+                // field instead of a hidden verb root. Gated on the codex
                 // filter so no other list pays the app-server round trip; an
                 // unreachable daemon becomes `available: false`, never a list
                 // failure. The await must happen here - format_success is sync.
@@ -4359,8 +4359,8 @@ fn render_list_json(
     codex_loaded: Option<&Value>,
 ) -> String {
     let count = agents.as_array().map(|a| a.len()).unwrap_or(0);
-    // `codex_loaded` is additive (x-f654) and present only when the caller
-    // probed the codex daemon (`--harness codex`); the key is omitted otherwise.
+    // `codex_loaded` is additive and present only when the caller probed the
+    // codex daemon (`--harness codex`); the key is omitted otherwise.
     let mut payload = json!({
         "agents": agents,
         "count": count,
