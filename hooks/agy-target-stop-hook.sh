@@ -217,9 +217,6 @@ else
     done
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 fi
-# Same rule as target-stop-hook.sh: no pending state, no candidate path.
-DELIVERY_CANDIDATE=""
-[[ -n "$DELIVERY_PENDING_STATE" ]] && DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
 
 # jq-free event writer (string interpolation, so it also runs on the jq-missing
 # give-up path). Fields are hook-internal and safe to interpolate.
@@ -395,7 +392,7 @@ else
     : > "$SYNTH"
 fi
 # Clean up the synth file on every exit path (loop-check has read it by then).
-trap 'rm -f "$SYNTH" "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
+trap 'rm -f "$SYNTH" 2>/dev/null || true' EXIT
 
 # ── 5. Resolve the fno-agents binary (most-local wins; same order as the shim) ─
 [[ -n "$BIN" ]] || BIN=$(resolve_agents_bin)
@@ -410,12 +407,6 @@ if [[ -z "$BIN" ]]; then
     echo "agy stop-hook: WARNING: fno-agents binary not found for an active session" >&2
     echo "agy stop-hook: install with: cargo install --path crates/fno-agents --bins" >&2
     unavailable_continue_or_allow
-fi
-
-CANDIDATE_READY=0
-if [[ -n "$DELIVERY_CANDIDATE" && "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
-    && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
-    CANDIDATE_READY=1
 fi
 
 # ── 7. Invoke loop-check (transcript scan only; agy stdin has no last message) ─
@@ -470,10 +461,16 @@ fi
 if [[ -n "$TERMINATION_REASON" ]]; then
     FINALIZE_STATE="$STATE_FILE"
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
-        if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
-            && { [[ $CANDIDATE_READY -ne 1 ]] \
-                || ! mv "$DELIVERY_CANDIDATE" "$DELIVERY_PENDING_STATE"; }; then
-            emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
+        # Staged here only, as in target-stop-hook.sh: the manifest is write-once.
+        if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]]; then
+            [[ -n "$DELIVERY_PENDING_STATE" ]] \
+                || emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
+            PENDING_TMP="${DELIVERY_PENDING_STATE}.tmp.$$"
+            if ! cp "$STATE_FILE" "$PENDING_TMP" 2>/dev/null \
+                || ! mv "$PENDING_TMP" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
+                rm -f "$PENDING_TMP" 2>/dev/null || true
+                emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
+            fi
         fi
         FINALIZE_STATE="$DELIVERY_PENDING_STATE"
     fi

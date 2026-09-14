@@ -23,7 +23,7 @@
 #   K11 foreign target + matching king still gates the king
 #   K12 agy foreign target + matching king reaches the king refusal
 #   K15 claude shim, king stop, no pending state -> no candidate in the checkout
-#   K16 claude shim, target stop -> candidate still staged beside the pending state
+#   K16 claude shim, DoneDelivery -> retry state staged after loop-check, handed to finalize
 
 set -uo pipefail
 
@@ -504,8 +504,10 @@ STUB
     cleanup
 }
 
-# ── K16: a target stop still stages its candidate beside the pending state ──
-# The guard that keeps K15 clean must not stop the copy a real delivery needs.
+# ── K16: a DoneDelivery stop stages its retry state, and nothing earlier ────
+# finalize needs the pending copy so a failed delivery can retry on the next
+# stop. It must exist when finalize runs, and no stop may stage anything before
+# loop-check has decided.
 {
     setup_king
     cat > "${TMP_DIR}/.fno/target-state.md" <<'MANIFEST'
@@ -516,25 +518,40 @@ created_at: 2026-08-18T00:00:00Z
 ---
 MANIFEST
     SEEN="${TMP_DIR}/loopcheck-saw"
+    SAW="${TMP_DIR}/finalize-saw"
     cat > "$BIN" <<STUB
 #!/usr/bin/env bash
 if [[ "\$1" == "manifest-for-session" ]]; then exit 1; fi
 if [[ "\$1" == "loop-check" ]]; then
-    find "${TMP_DIR}" -name '*.candidate.*' -print > "${SEEN}"
-    echo '{"decision":"allow","message":"nothing to do"}'
+    find "${TMP_DIR}" \( -name '*delivery-finalize-pending-*' -o -name '*.candidate.*' \) -print > "${SEEN}"
+    echo '{"decision":"allow","termination_reason":"DoneDelivery","message":"delivered"}'
+    exit 0
+fi
+if [[ "\$1" == "finalize" ]]; then
+    state=""
+    while [[ \$# -gt 0 ]]; do
+        [[ "\$1" == "--state" ]] && state="\$2"
+        shift
+    done
+    { echo "state=\${state}"; [[ -f "\$state" ]] && echo "exists"; } > "${SAW}"
     exit 0
 fi
 exit 0
 STUB
     chmod +x "$BIN"
     run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
-    COUNT="$(grep -c . "$SEEN" 2>/dev/null || true)"
+    LEFTOVER="$(find "$TMP_DIR" \( -name '*.tmp.*' -o -name '*.candidate.*' -o -name '*delivery-finalize-pending-*' \) -print)"
     if [[ ! -f "$SEEN" ]]; then
         fail "K16: loop-check never ran (rc=$CLAUDE_RC)"
-    elif [[ "$COUNT" != "1" ]] || ! grep -q "delivery-finalize-pending-.*\.candidate\." "$SEEN"; then
-        fail "K16: expected one pending-state candidate, saw ${COUNT}: $(cat "$SEEN")"
+    elif [[ -s "$SEEN" ]]; then
+        fail "K16: state staged before loop-check decided: $(cat "$SEEN")"
+    elif ! grep -q "^state=.*delivery-finalize-pending-" "$SAW" 2>/dev/null \
+        || ! grep -qx "exists" "$SAW"; then
+        fail "K16: finalize was not handed an existing pending state: $(cat "$SAW" 2>/dev/null)"
+    elif [[ "$CLAUDE_RC" -ne 0 || -n "$LEFTOVER" ]]; then
+        fail "K16: rc=$CLAUDE_RC, left behind: ${LEFTOVER:-nothing}"
     else
-        pass "K16: a target stop still stages its candidate beside the pending state"
+        pass "K16: a DoneDelivery stop stages its retry state only after loop-check, then cleans it"
     fi
     cleanup
 }
