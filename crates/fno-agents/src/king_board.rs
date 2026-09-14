@@ -53,7 +53,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use budget::{fno_py_cmd, now_secs_board, run_json, Budget, HAND_RUN_BUDGET_MS};
 pub(crate) use claims::read_claims;
-pub(crate) use classify::{node_has_pr, read_claimed_nodes};
+pub(crate) use classify::{entry_by_id, node_has_pr, read_claimed_nodes};
 pub(crate) use prs::read_prs;
 pub(crate) use queues::{
     build_board, parse_lane, queue_json, read_blocked_rows, BoardInputs, Queue,
@@ -1010,19 +1010,11 @@ fn sort_driver_rows_pr_first(rows: &mut [Value], entries: Option<&[Value]>) {
     let is_pr_bound = |row: &Value| {
         s_str(row, "node")
             .and_then(|id| {
-                entries
-                    .unwrap_or(&[])
-                    .iter()
-                    .find(|e| {
-                        s_str(e, "id")
-                            .map(|i| i.eq_ignore_ascii_case(id))
-                            .unwrap_or(false)
-                    })
-                    .map(|node| {
-                        !TERMINAL_RUNGS.contains(&s_str(node, "status").unwrap_or(""))
-                            && node.get("superseded_by").is_none()
-                            && node_has_pr(node)
-                    })
+                entry_by_id(entries.unwrap_or(&[]), id).map(|node| {
+                    !TERMINAL_RUNGS.contains(&s_str(node, "status").unwrap_or(""))
+                        && node.get("superseded_by").is_none()
+                        && node_has_pr(node)
+                })
             })
             .unwrap_or(false)
     };

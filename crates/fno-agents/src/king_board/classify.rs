@@ -74,18 +74,11 @@ pub(crate) fn read_claimed_nodes(
     let mut holders: Vec<String> = Vec::new();
     let mut seen_holders: HashSet<String> = HashSet::new();
     for (node_id, holder) in &held {
-        let node = entries
-            .iter()
-            .find(|e| {
-                s_str(e, "id")
-                    .map(|i| i.eq_ignore_ascii_case(node_id))
-                    .unwrap_or(false)
-            })
-            .or_else(|| {
-                entries
-                    .iter()
-                    .find(|e| s_str(e, "slug").map(|s| s == node_id).unwrap_or(false))
-            });
+        let node = entry_by_id(entries, node_id).or_else(|| {
+            entries
+                .iter()
+                .find(|e| s_str(e, "slug").map(|s| s == node_id).unwrap_or(false))
+        });
         let Some(node) = node else {
             warnings.push(format!("stalled_holder: {node_id} unreadable: not found"));
             continue;
@@ -232,6 +225,16 @@ pub(crate) fn claim_is_dead(
     matches!(holder_reading(Some(probe)), HolderReading::Inactive)
 }
 
+/// The case-insensitive entry-by-id find shared by the claimed-node lookup
+/// and the driver sort: one join, one case rule.
+pub(crate) fn entry_by_id<'a>(entries: &'a [Value], id: &str) -> Option<&'a Value> {
+    entries.iter().find(|e| {
+        s_str(e, "id")
+            .map(|i| i.eq_ignore_ascii_case(id))
+            .unwrap_or(false)
+    })
+}
+
 /// A node bound to a PR, by `pr_number` or any `additional_prs` entry.
 pub(crate) fn node_has_pr(node: &Value) -> bool {
     node.get("pr_number").map(truthy).unwrap_or(false)
@@ -303,9 +306,9 @@ pub(crate) fn roster_verdict(
         {
             continue;
         }
-        if let Some(t) = row.get("token").and_then(Value::as_str) {
-            tokens.push(t);
-        }
+        // A candidate row with no token is a missing probe, not an absent
+        // candidate: the fold reads it unmeasured, never none.
+        tokens.push(row.get("token").and_then(Value::as_str).unwrap_or(""));
     }
     fold_candidates(&tokens, activity)
 }
