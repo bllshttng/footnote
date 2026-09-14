@@ -790,8 +790,8 @@ def update_readiness(
 
     degraded_reason = "; ".join(degraded) if degraded else None
 
-    if gate_refused and pin is not None:
-        guidance = "update blocked: " + (
+    if pin is not None and (gate_refused or (pin.get("guidance") and not update_ready)):
+        guidance = pin.get("guidance") or "update blocked: " + (
             pin.get("refusal") or "the resolved source failed the source-pin gate"
         )
     else:
@@ -840,16 +840,7 @@ def update_readiness(
     )
     return {
         "update_ready": update_ready,
-        "source_pin": (
-            {
-                "decision": pin.get("decision"),
-                "eligibility": pin.get("eligibility"),
-                "refusal": pin.get("refusal"),
-                "warning": pin.get("warning"),
-            }
-            if pin
-            else None
-        ),
+        "source_pin": pin,
         "installed_rev": installed_rev,
         "source_rev": source_rev,
         "python_tool": {"script": front_script, "running": running, "same": same},
