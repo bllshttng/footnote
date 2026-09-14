@@ -2898,10 +2898,12 @@ def _raw_send(
 
     # 1. Refuse an empty or whitespace-only payload. Any single line is a
     #    legal raw payload (law d-5976045c): a slash verb, a codex skill verb,
-    #    or a plain word.
+    #    or a plain word. A bare marker is nothing to invoke.
     stripped = payload.strip()
     if not stripped:
         _refused("payload is empty", usage=True)
+    if stripped in ("/", "$"):
+        _refused("payload is just a bare marker; nothing to invoke", usage=True)
 
     # 2. Single line: the transport is one bracketed paste plus one CR, so a
     #    second line would ride in as trailing content on the same turn.

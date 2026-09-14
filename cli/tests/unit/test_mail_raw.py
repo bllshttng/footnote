@@ -158,6 +158,17 @@ def test_raw_refuses_an_empty_payload(mailbox, monkeypatch, capsys):
     assert "payload is empty" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("bare", ["/", "$"])
+def test_raw_refuses_a_bare_marker(mailbox, monkeypatch, capsys, bare):
+    from fno.mail.cli import _raw_send
+
+    _seed_claude(mailbox, monkeypatch)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("claudepeer", bare, self_ok=False)
+    assert exc.value.exit_code != 0
+    assert "bare marker" in capsys.readouterr().err
+
+
 def test_raw_refuses_multiline_payload(mailbox, monkeypatch, capsys):
     from fno.mail.cli import _raw_send
 
