@@ -770,6 +770,15 @@ fn node_binding_from_entries(root: &Path, entries: &[Value], facts: &PrFacts) ->
         entries,
     );
     if let Some(detail) = keys.unbound_detail() {
+        if facts.url.is_empty() {
+            // The backref key scopes by url; with none it was unevaluable,
+            // not empty, so the answer is Unknown rather than a refusal.
+            return ProbeOutcome::Inconclusive(
+                "PR carried no comparable url, so the graph back-pointer key \
+                 could not be scoped; refusing to assume unbound"
+                    .to_string(),
+            );
+        }
         return ProbeOutcome::Refused(format!(
             "PR {n} is unbound: {detail}. A merge the graph cannot see is refused. \
              Bind it: pick or file the node (fno backlog idea \"...\"), run \
@@ -1217,6 +1226,20 @@ mod tests {
         };
         assert!(reason.contains("closure-trailer"));
         assert!(reason.contains("no flag bypasses this gate"));
+
+        // No comparable url leaves the backref key unevaluable: Unknown, not
+        // a refusal on a PR that may be bound through the back-pointer.
+        let facts = PrFacts {
+            head_ref: "docs/crown-succeed-faq".to_string(),
+            url: String::new(),
+            body: Some(String::new()),
+            ..open_facts()
+        };
+        let outcome = node_binding_from_entries(Path::new("/this/repo"), &entries, &facts);
+        let ProbeOutcome::Inconclusive(reason) = outcome else {
+            unreachable!("an unscopeable backref key is Inconclusive")
+        };
+        assert!(reason.contains("could not be scoped"));
     }
 
     #[test]
