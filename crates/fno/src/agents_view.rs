@@ -4336,6 +4336,7 @@ config_dir = "~/.claude-alt"
         RegistryAgent {
             model: None,
             route: None,
+            route_provider_id: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
