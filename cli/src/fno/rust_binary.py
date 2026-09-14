@@ -248,6 +248,13 @@ def verb_call(
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise unavailable(f"fno-agents {verb} failed: {exc}") from exc
     if proc.returncode != 0:
+        # With passthrough_stderr the child owns the real stderr (None here),
+        # so name where it went instead of crashing on strip().
+        if passthrough_stderr:
+            raise unavailable(
+                f"fno-agents {verb} exited {proc.returncode}"
+                " (its stderr went to your terminal)"
+            )
         raise unavailable(
             f"fno-agents {verb} exited {proc.returncode}: {proc.stderr.strip()[:200]}"
         )

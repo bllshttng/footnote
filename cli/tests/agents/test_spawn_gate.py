@@ -945,6 +945,81 @@ class TestReignTyped:
 # AC3-HP/EDGE: the durable fleet incident gate (x-77db)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# A nonzero gate exit is reported as itself, never as a strip crash
+# ---------------------------------------------------------------------------
+
+def _fake_gate_binary(tmp_path: Path, body: str) -> Path:
+    fake = tmp_path / "bin" / "fno-agents"
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_text(body)
+    fake.chmod(0o755)
+    return fake
+
+
+def _point_binary(monkeypatch, fake: Path) -> None:
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: fake)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: fake)
+
+
+class TestGateExitReporting:
+    def test_nonzero_exit_with_passthrough_names_the_exit_code(
+        self, tmp_path, monkeypatch
+    ):
+        from fno.rust_binary import VerbUnavailable, verb_call
+
+        fake = _fake_gate_binary(
+            tmp_path,
+            "#!/bin/sh\necho 'spawn queued: waiting for a slot' >&2\nexit 1\n",
+        )
+        _point_binary(monkeypatch, fake)
+        with pytest.raises(VerbUnavailable) as exc:
+            verb_call("spawn-gate", {}, passthrough_stderr=True)
+        message = str(exc.value)
+        assert "exited 1" in message
+        # stderr went to the terminal, so the message says where it went
+        # instead of pretending to quote it.
+        assert "terminal" in message
+
+    def test_captured_stderr_still_travels_in_the_message(
+        self, tmp_path, monkeypatch
+    ):
+        from fno.rust_binary import VerbUnavailable, verb_call
+
+        stderr_text = "".join(f"-{i:03d}" for i in range(100))
+        fake = _fake_gate_binary(
+            tmp_path, f"#!/bin/sh\necho '{stderr_text}' >&2\nexit 1\n"
+        )
+        _point_binary(monkeypatch, fake)
+        with pytest.raises(VerbUnavailable) as exc:
+            verb_call("spawn-gate", {}, passthrough_stderr=False)
+        message = str(exc.value)
+        assert "exited 1" in message
+        assert stderr_text[:200] in message
+        assert stderr_text[200:240] not in message
+
+    def test_run_gate_refusal_names_the_real_exit_not_the_strip_error(
+        self, tmp_path, monkeypatch
+    ):
+        fake = _fake_gate_binary(tmp_path, "#!/bin/sh\nexit 87\n")
+        _point_binary(monkeypatch, fake)
+        events = []
+        monkeypatch.setattr(
+            spawn_gate,
+            "_emit_gate_event",
+            lambda kind, **data: events.append((kind, data)),
+        )
+        with pytest.raises(spawn_gate.GateRefused):
+            spawn_gate.run_gate("w", "pane")
+        assert [k for k, _ in events] == ["spawn_gate_refused"]
+        data = events[0][1]
+        assert data["reason"] == "gate_unavailable"
+        assert "exited 87" in data["error"]
+        assert "NoneType" not in data["error"]
+
+
 def _write_incident_state(tmp_path: Path, state: str) -> Path:
     """Point FNO_AGENTS_HOME at a home whose fleet-stop.json holds `state`."""
     home = tmp_path / ".fno" / "agents"
