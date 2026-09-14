@@ -320,8 +320,22 @@ def test_lifecycle_empty_sessions_no_crash(tmp_graph, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# x-d72f - one-call answer: the PR block + per-session registry liveness
+# One-call answer: the PR block + per-session registry liveness
 # ---------------------------------------------------------------------------
+
+
+def test_pr_line_number_without_url_renders_the_number(tmp_graph, tmp_path, monkeypatch):
+    """A legacy node with pr_number but no pr_url renders the number, never the
+    string None (such nodes exist: repo-scoped stamping refuses urlless nodes)."""
+    import fno.provenance.resolver as resolver_mod
+    monkeypatch.setattr(resolver_mod, "_DEFAULT_PROJECTS_ROOT", tmp_path / "empty")
+
+    _write_node(tmp_graph, _base_node("ab-prv00003", pr_number=777, pr_url=None))
+
+    r = _invoke("backlog", "provenance", "ab-prv00003")
+    assert r.exit_code == 0, r.output
+    assert "pr: #777" in r.output
+    assert "None" not in r.output
 
 
 def _pin_registry(monkeypatch, tmp_path, agents):

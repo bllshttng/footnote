@@ -1,4 +1,4 @@
-"""Read-side projections for `fno backlog provenance` (x-d72f).
+"""Read-side projections for `fno backlog provenance`.
 
 ``cli/src/fno/graph/cli.py`` is over its line budget and shrink-only, so the
 lifecycle roster renderer lives here, extended with the two columns the
@@ -206,5 +206,8 @@ def render_pr_line(pr: dict) -> str:
     num, url = pr.get("number"), pr.get("url")
     if num is None and not url:
         return "  pr: (none)"
-    head = f"  pr: #{num}" if num is not None else "  pr:"
-    return f"{head} {url}".rstrip()
+    if num is None:
+        return f"  pr: {url}"
+    if not url:
+        return f"  pr: #{num}"
+    return f"  pr: #{num} {url}"
