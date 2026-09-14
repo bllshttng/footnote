@@ -6360,7 +6360,7 @@ def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> boo
         proc = subprocess.run(
             argv,
             input=text,
-            capture_output=True,
+            stdout=subprocess.PIPE,  # stderr inherits: the crate's self-teaching text (refusal help, the x-8f6d route hint) reaches the sender
             text=True,
             timeout=timeout,
         )

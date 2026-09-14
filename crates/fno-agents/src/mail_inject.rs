@@ -335,6 +335,39 @@ pub fn outcome_json(delivered: bool, reason: &str) -> String {
     serde_json::json!({ "delivered": delivered, "reason": reason }).to_string()
 }
 
+/// The portal route for an idle claude thread row (x-8f6d). A not-confirmed
+/// raw inject there cannot prove landing: the content confirm greps the
+/// transcript for the payload's first line, a dialog command writes no turn,
+/// and the paste measurably fails to land on an idle thread at all. The
+/// outcome names the route that reaches an idle thread instead.
+fn thread_route_hint(substrate: Option<&str>, name: &str) -> Option<String> {
+    if substrate != Some("thread") {
+        return None;
+    }
+    Some(format!(
+        "idle thread row: this control.sock paste cannot prove landing. The measured route:\n  \
+         fno mux thread {name} --portal new          # opens the portal pane\n  \
+         fno mux pane ls                                   # read the portal pane's <session>:<pane-id>\n  \
+         fno mux pane send <session>:<pane-id> --text <payload> --submit --raw\n  \
+         fno mux pane send <session>:<pane-id> --raw --submit   # bare Enter (Continue a dialog)"
+    ))
+}
+
+/// Resolve the hint off the recipient's registry row: full session uuid, or the
+/// 8-hex short id the roster accepts (a row whose uuid starts with it). None
+/// when the registry is unreadable or the row is not an idle thread.
+fn route_hint_for_session(home: &crate::paths::AgentsHome, session: &str) -> Option<String> {
+    let registry = crate::state::load_registry(&home.registry_json()).ok()?;
+    let entry = registry.entries.iter().find(|e| {
+        e.harness_session_id.as_deref() == Some(session)
+            || (session.len() == 8
+                && e.harness_session_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with(session)))
+    })?;
+    thread_route_hint(entry.substrate.as_deref(), &entry.name)
+}
+
 /// Exit code for an outcome: 0 when delivered, 1 otherwise. Python branches on the
 /// JSON `delivered` field; the exit code is the same signal for shell callers.
 pub fn outcome_exit(delivered: bool) -> i32 {
@@ -1392,6 +1425,17 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             if reason == NOT_INJECTABLE {
                 eprintln!("{NOT_INJECTABLE_HELP}");
             }
+            // x-8f6d: an unconfirmed control.sock paste into an idle thread row
+            // cannot prove landing and measurably may not land at all, so the
+            // outcome names the route that reaches an idle thread. Operator
+            // ruling on 1a5328246: the hint lives in the crate producing the
+            // unconfirmed raw outcome; the runner inherits stderr so it reaches
+            // the sender beside the Python receipt.
+            if reason == "not-confirmed" && args.provider == MailInjectProvider::Claude {
+                if let Some(h) = route_hint_for_session(&home, &args.session) {
+                    eprintln!("{h}");
+                }
+            }
             emit(false, &reason)
         }
     }
@@ -2395,6 +2439,24 @@ mod tests {
         assert!(
             NOT_INJECTABLE_HELP.contains("NOT a liveness verdict"),
             "the help line is the self-explaining half: it must say what the token is not"
+        );
+    }
+
+    /// The hint fires only for an idle thread row and names the two commands the
+    /// operator's specimen measured working (x-8f6d).
+    #[test]
+    fn thread_route_hint_names_the_portal_route() {
+        let h = thread_route_hint(Some("thread"), "king-fno-g6").expect("thread row hints");
+        assert!(h.contains("fno mux thread king-fno-g6 --portal new"));
+        assert!(h.contains("--submit --raw"));
+        assert!(h.contains("bare Enter"));
+        assert!(
+            thread_route_hint(Some("pane"), "w").is_none(),
+            "a pane row gets no hint"
+        );
+        assert!(
+            thread_route_hint(None, "w").is_none(),
+            "an unknown substrate gets no hint"
         );
     }
 

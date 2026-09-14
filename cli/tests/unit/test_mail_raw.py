@@ -1341,50 +1341,31 @@ def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):
     assert not durable, "AC30: unconfirmed never queues durable"
 
 
-def test_raw_unconfirmed_thread_row_prints_portal_route(mailbox, monkeypatch, capsys):
-    """AC1-HP (x-8f6d): a not-confirmed raw inject into a thread row (substrate
-    thread, no pane) appends the portal route to the receipt; exit 0, never
-    durable."""
-    from fno.agents.registry import load_registry, write_registry
-    from fno.mail.cli import _raw_send
+def test_run_mail_inject_lets_crate_stderr_reach_the_sender(mailbox, monkeypatch, capsys):
+    """AC1-HP (x-8f6d, ruling on 1a5328246): the crate authors the route hint
+    on stderr for an unconfirmed thread-row inject; the runner inherits stderr
+    so it reaches the sender beside the receipt."""
+    import subprocess as sp
+    from fno.agents.dispatch import _run_mail_inject
 
-    _seed_claude(mailbox, monkeypatch)
-    monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude",
-        lambda s, t, sender=None, **_kwargs: False,
-    )
-    rows = load_registry()
-    next(r for r in rows if r.name == "claudepeer").substrate = "thread"
-    write_registry(rows)
-    with pytest.raises(typer.Exit) as exc:
-        _raw_send("claudepeer", "/remote-control", self_ok=False)
-    assert exc.value.exit_code == 0
-    out = capsys.readouterr().out
-    assert "unconfirmed" in out
-    assert "fno mux thread claudepeer --portal new" in out
-    assert "--submit --raw" in out
+    seen = {}
 
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return sp.CompletedProcess(
+            argv,
+            1,
+            stdout=json.dumps({"delivered": False, "reason": "not-confirmed"}),
+            stderr="",
+        )
 
-def test_raw_unconfirmed_pane_row_receipt_unchanged(mailbox, monkeypatch, capsys):
-    """AC1-ERR (x-8f6d): a row that does not read substrate thread keeps the
-    single-line receipt; no route block."""
-    from fno.agents.registry import load_registry, write_registry
-    from fno.mail.cli import _raw_send
-
-    _seed_claude(mailbox, monkeypatch)
-    monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude",
-        lambda s, t, sender=None, **_kwargs: False,
-    )
-    rows = load_registry()
-    next(r for r in rows if r.name == "claudepeer").substrate = "pane"
-    write_registry(rows)
-    with pytest.raises(typer.Exit) as exc:
-        _raw_send("claudepeer", "/remote-control", self_ok=False)
-    assert exc.value.exit_code == 0
-    out = capsys.readouterr().out
-    assert "unconfirmed" in out
-    assert "portal" not in out
+    monkeypatch.setattr("fno.agents.dispatch.subprocess.run", fake_run)
+    recorded = []
+    ok = _run_mail_inject(["mail-inject"], "x", 5.0, recorded.append)
+    assert ok is False
+    assert seen.get("stdout") == sp.PIPE, "stdout is the parsed verdict channel"
+    assert "capture_output" not in seen, "capturing stderr would swallow the crate's hint"
+    assert "stderr" not in seen, "stderr inherits so the hint reaches the sender"
 
 
 def test_raw_refuses_self_send_without_self_flag(mailbox, monkeypatch, capsys):

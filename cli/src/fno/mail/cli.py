@@ -79,7 +79,6 @@ from fno.inbox.store import (
 )
 from fno import paths
 from fno.mail.thread_force import resolve_pane_entry as _resolve_pane_entry
-from fno.mail import raw_receipt
 
 
 class DaemonState(str, Enum):
@@ -3393,7 +3392,10 @@ def _raw_send(
         print(f"injected.{note}" if note else "injected")
         raise typer.Exit(code=0)
     if review_request and delivered == "unconfirmed":
-        print(raw_receipt.unconfirmed_review_line(), file=sys.stderr)
+        print(
+            "unconfirmed (review request was not positively classified; do not retry blindly)",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=0)
     # not-confirmed: the transport returns one bool for two different worlds --
     # poll-budget exhaustion on a paste that DID land, and a clean send failure
@@ -3401,8 +3403,11 @@ def _raw_send(
     # nothing was sent. Do NOT claim "sent"; both readings keep the same standing
     # order, because the one we cannot rule out is the landed one and re-queueing
     # it is how a verb fires twice. Exit 0, never durable.
-    for line in raw_receipt.unconfirmed_lines(entry):
-        print(line)
+    print(
+        "unconfirmed (not confirmed: either the confirm budget expired on a "
+        "payload that landed, or the transport refused and nothing was sent - "
+        "check the recipient before assuming either; never re-queue)"
+    )
     raise typer.Exit(code=0)
 
 
