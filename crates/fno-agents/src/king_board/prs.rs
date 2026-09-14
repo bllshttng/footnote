@@ -213,9 +213,10 @@ pub(crate) fn read_prs(
 }
 
 /// One candidate's merge-gate verdict: the payload `fno do pr status` prints
-/// as JSON, read even on a non-zero exit (that exit code is the CI verdict,
-/// so a PR that went red between the listing and the gate still answers with
-/// its full row instead of reading as a dead child).
+/// as JSON on stdout. A non-zero exit (the exit code is the CI verdict) reads
+/// as an unanswered gate, not a verdict: the runner keeps only the error text,
+/// so a PR that went red between the listing and the gate renders
+/// not-actionable with a warning naming the exit, never as mergeable.
 fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, String> {
     let mut cmd = fno_py_cmd();
     cmd.extend([
