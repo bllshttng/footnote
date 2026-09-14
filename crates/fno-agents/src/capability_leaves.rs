@@ -16,6 +16,16 @@ use serde_json::Value;
 /// declared list, with nothing on stdout.
 pub fn run_capabilities(args: &[String]) -> i32 {
     let json = args.iter().any(|a| a == "--json" || a == "-J");
+    // An unknown flag refuses (exit 2) rather than reading as a positional:
+    // the retired Python leaf's Typer usage error did the same, and a typo
+    // like `--jsn` must not read as a clean answer.
+    let unknown = args
+        .iter()
+        .find(|a| a.starts_with('-') && *a != "--json" && *a != "-J");
+    if let Some(flag) = unknown {
+        eprintln!("fno agents capabilities: unknown flag {flag:?} (expected [--json|-J])");
+        return 2;
+    }
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if positional.len() != 1 {
         eprintln!("fno agents capabilities: exactly one harness argument is required");
@@ -153,5 +163,15 @@ mod tests {
     fn target_family_refuses_a_missing_message() {
         assert_eq!(run_target_family(&[]), 2);
         assert_eq!(run_target_family(&["--message".to_string()]), 2);
+    }
+
+    #[test]
+    fn capabilities_refuses_an_unknown_flag() {
+        // The retired Python leaf's Typer usage error exited 2; the typo must
+        // not read as a clean answer.
+        assert_eq!(
+            run_capabilities(&["codex".to_string(), "--jsn".to_string()]),
+            2
+        );
     }
 }

@@ -86,6 +86,7 @@ pub(crate) fn node_identity(stdout: &str) -> Option<(String, Option<String>, Opt
 pub(crate) async fn run_fno_captured(
     argv: &[&str],
     timeout: Duration,
+    deadline: tokio::time::Instant,
 ) -> Option<(bool, String, String)> {
     let mut command = crate::process_admission::tokio_command(argv[0]);
     command
@@ -93,7 +94,11 @@ pub(crate) async fn run_fno_captured(
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(timeout, fut).await {
+    // Two bounds: the per-subprocess budget AND the whole dispatch's
+    // deadline, so two sequential legs can never exceed the one budget the
+    // retired porcelain spent on the entire dispatch.
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    match tokio::time::timeout(timeout.min(remaining), fut).await {
         Err(_) => None,
         Ok(Err(_)) => None,
         Ok(Ok(o)) => Some((

@@ -2692,6 +2692,7 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
     // budget is seconds, not the digest's 800ms; a hung dispatch still fails
     // open to a notice rather than wedging.
     let dispatch_timeout = crate::dispatch_launch::dispatch_timeout();
+    let deadline = tokio::time::Instant::now() + dispatch_timeout;
     let fno = fno_bin().display().to_string();
 
     // Steps 1-2 (x-3873 change 3): resolve the node identity. A targeted node
@@ -2700,18 +2701,22 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
     // next`, `null` or empty output on an empty bench).
     let picked = if let Some(pinned) = node {
         let argv = [fno.as_str(), "backlog", "get", pinned];
-        let answer = match crate::dispatch_launch::run_fno_captured(&argv, dispatch_timeout).await {
-            Some((true, out, _)) => crate::dispatch_launch::node_identity(&out)
-                .ok_or_else(|| "grab work failed: the node record carries no id".to_string()),
-            _ => Err("grab work failed: the node read produced no answer".to_string()),
-        };
+        let answer =
+            match crate::dispatch_launch::run_fno_captured(&argv, dispatch_timeout, deadline).await
+            {
+                Some((true, out, _)) => crate::dispatch_launch::node_identity(&out)
+                    .ok_or_else(|| "grab work failed: the node record carries no id".to_string()),
+                _ => Err("grab work failed: the node read produced no answer".to_string()),
+            };
         answer
     } else {
         let argv = [fno.as_str(), "backlog", "next"];
-        let answer = match crate::dispatch_launch::run_fno_captured(&argv, dispatch_timeout).await {
-            Some((true, out, _)) => crate::dispatch_launch::node_identity(&out),
-            _ => None,
-        };
+        let answer =
+            match crate::dispatch_launch::run_fno_captured(&argv, dispatch_timeout, deadline).await
+            {
+                Some((true, out, _)) => crate::dispatch_launch::node_identity(&out),
+                _ => None,
+            };
         answer.ok_or_else(|| "no ready work".to_string())
     };
     let (node_id, slug, parent) = match picked {
@@ -2732,7 +2737,7 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
     let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
     // Step 4: the outcome maps to the operator's one-liner. Both streams are
     // captured - the door's refusal receipt lives on stderr.
-    match crate::dispatch_launch::run_fno_captured(&borrowed, dispatch_timeout).await {
+    match crate::dispatch_launch::run_fno_captured(&borrowed, dispatch_timeout, deadline).await {
         None => "grab work: timed out".to_string(),
         Some((exit_ok, out, err)) => crate::dispatch_launch::dispatch_notice(
             exit_ok,
