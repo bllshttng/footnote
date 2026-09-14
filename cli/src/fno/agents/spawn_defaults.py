@@ -117,6 +117,48 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
     }
 )
 
+
+def extract_existing_pane(args: Sequence[str]) -> tuple[List[str], Optional[int]]:
+    """Remove fno's ``--pane`` target before Typer parses spawn arguments.
+
+    The spawn seam owns this flag because it is a control-plane target, not a
+    provider option. Values after a value flag and after either passthrough
+    boundary remain opaque to fno.
+    """
+    out: List[str] = []
+    pane: Optional[int] = None
+    it = iter(enumerate(args))
+    for index, token in it:
+        if token in ("--argv", "--"):
+            out.extend(args[index:])
+            break
+        key, equals, value = token.partition("=")
+        if key != "--pane":
+            out.append(token)
+            if not equals and token in _SPAWN_VALUE_FLAGS:
+                try:
+                    _, next_value = next(it)
+                except StopIteration:
+                    continue
+                out.append(next_value)
+            continue
+        if pane is not None:
+            raise ValueError("--pane may be specified only once")
+        if not equals:
+            try:
+                _, value = next(it)
+            except StopIteration as exc:
+                raise ValueError("--pane needs a pane id") from exc
+        if value.startswith("-"):
+            raise ValueError("--pane needs a pane id")
+        try:
+            pane = int(value)
+        except ValueError as exc:
+            raise ValueError(f"--pane needs an integer pane id, got {value!r}") from exc
+    else:
+        return out, pane
+    return out, pane
+
 # Tokens that pin the substrate explicitly (a positional substrate word conflicts
 # with any of these -> exit 2). `--headless`/`-p` and `-o/--once` mean headless;
 # `-H` selects the harness and `-P` the vendor, so both are value flags here.

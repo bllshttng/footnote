@@ -1034,6 +1034,7 @@ def _parse_wait_seconds(raw: str) -> float:
 
 @agents_app.command("spawn")
 def cmd_spawn(
+    ctx: typer.Context,
     message: str = typer.Argument("", help="The prompt to seed the worker with."),
     passthrough: list[str] | None = typer.Argument(
         None,
@@ -1290,7 +1291,6 @@ def cmd_spawn(
             "Mux tab selector (number, id:<n>, name:<s>, active/new, or group name). Pane only."
         ),
     ),
-    pane: int | None = typer.Option(None, "--pane", help="Start in an existing pristine idle pane by id."),
     mux_session: str | None = typer.Option(
         None,
         "--mux-session",
@@ -1386,6 +1386,7 @@ def cmd_spawn(
     daemon; this Python path exits 13 with guidance. Flag reference:
     docs/guides/agents-spawn-flags.md.
     """
+    pane = ctx.meta.get("fno_spawn_existing_pane")
     # --squad is a hidden back-compat alias for --workspace (US2); --workspace wins.
     squad = squad if squad is not None else squad_compat
 

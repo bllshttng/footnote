@@ -307,6 +307,17 @@ def test_spawn_value_flags_cover_every_cmd_spawn_value_option():
     )
 
 
+def test_existing_pane_is_removed_only_from_the_fno_spawn_head():
+    from fno.agents.spawn_defaults import extract_existing_pane
+
+    args, pane = extract_existing_pane(
+        ["spawn", "--name", "worker", "--pane=19", "work", "--", "--pane", "7"]
+    )
+
+    assert pane == 19
+    assert args == ["spawn", "--name", "worker", "work", "--", "--pane", "7"]
+
+
 # --- x-1caa: the `--` passthrough boundary at the seam ------------------------
 
 def test_passthrough_fence_tokens_are_not_prompt_positionals():
