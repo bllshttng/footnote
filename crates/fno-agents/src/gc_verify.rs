@@ -4,14 +4,21 @@
 //!
 //! A pass requires, for every receipt in the window: a build stamp naming
 //! the CURRENT binary (a dry run, an older daemon, a fixture run never
-//! counts), the FULL required op set (`native-stop`, `active-surface`,
-//! `resume-evidence`, each at a confirmed or measured not-applicable
-//! outcome), and nothing unconfirmed. An empty store, an unreadable
-//! receipt, a partial effect set: each is a named refusal with a nonzero
-//! exit - this verb must fail before its evidence exists, because it is
-//! the plan's done probe. The required set is what closes the x-5aef hole:
-//! the auditor's synthetic receipt carried one op and the gate certified
-//! it; a pass now means the promised outcome, not a nonempty list.
+//! counts), the FULL required op set (`native-stop`,
+//! `active-surface`, `resume-evidence`, `mux-member`, each at a confirmed or
+//! measured not-applicable outcome), and nothing unconfirmed. An empty
+//! store, an unreadable receipt, a partial effect set: each is a named
+//! refusal with a nonzero exit - this verb must fail before its evidence
+//! exists, because it is the plan's done probe. The required set is what
+//! closes the x-5aef hole: the auditor's synthetic receipt carried one op
+//! and the gate certified it; a pass now means the promised outcome, not a
+//! nonempty list.
+//!
+//! The gate also derives its cohort (x-aafe): every in-window
+//! `agent_row_reaped` event that does not carry `receipt_staged` names a
+//! session that must have a receipt file on disk, checked by existence, so
+//! a retirement that dropped a row without persisting its receipt is
+//! visible without anyone passing `--expect-sessions`.
 //!
 //! A stale build (a receipt stamped by any other binary, including the
 //! previous deploy) SKIPS: it can never verify, and it must not rebrand the
@@ -58,6 +65,10 @@ pub struct VerifyReport {
     pub expected: Vec<String>,
     /// Expected sessions with no verified retirement (AC2-HP).
     pub missing: Vec<String>,
+    /// In-window `agent_row_reaped` events the derived cohort examined
+    /// (x-aafe): a zero names itself, so "checked the log, found nothing"
+    /// never reads as "the log was not read".
+    pub reaped_events: usize,
 }
 
 impl VerifyReport {
@@ -89,6 +100,7 @@ impl VerifyReport {
             })).collect::<Vec<_>>(),
             "expected": self.expected,
             "missing": self.missing,
+            "reaped_events": self.reaped_events,
             "build": current_build(),
         })
     }
@@ -130,15 +142,20 @@ pub fn current_build() -> String {
     format!("fno-agents {version} rev {rev}{dirty}")
 }
 
-/// The ops every verified retirement must carry (x-5aef task 2.1): a pass
-/// means the promised outcome, not a nonempty list. The auditor's synthetic
-/// receipt carried `active-surface` alone and the old nonempty check
-/// certified it. `resume-evidence` is what makes the receipt a recovery
-/// record instead of an obituary: absent or failed, the gate refuses.
-///
-/// Mux is named in the refusal text as context, never as a requirement: no
-/// fno-agents call site emits a mux effect yet (owner: x-7649).
-pub const REQUIRED_OPS: [&str; 3] = ["native-stop", "active-surface", "resume-evidence"];
+/// The ops every verified retirement must carry (x-5aef task 2.1, x-aafe
+/// task 1.2): a pass means the promised outcome, not a nonempty list. The
+/// auditor's synthetic receipt carried `active-surface` alone and the old
+/// nonempty check certified it. `resume-evidence` is what makes the receipt
+/// a recovery record instead of an obituary: absent or failed, the gate
+/// refuses. `mux-member` is the squad-store half (x-aafe): a session still
+/// held in the shared mux store is not retired, and `not-applicable` is the
+/// measured answer for a row with no membership.
+pub const REQUIRED_OPS: [&str; 4] = [
+    "native-stop",
+    "active-surface",
+    "resume-evidence",
+    "mux-member",
+];
 
 /// The outcomes that count as applied (or measured not-applicable) for a
 /// required op.
@@ -166,6 +183,7 @@ pub fn verify(home: &AgentsHome, since_secs: u64, expected: &[String]) -> Verify
         // missing: name it, or the JSON reads expected-without-missing and
         // a consumer re-derives the gap the gate already knows.
         audit_cohort(&mut report);
+        audit_event_cohort(&mut report, home, chrono::Utc::now(), since_secs);
         return report;
     };
     let now = chrono::Utc::now();
@@ -220,6 +238,7 @@ pub fn verify(home: &AgentsHome, since_secs: u64, expected: &[String]) -> Verify
         });
     }
     audit_cohort(&mut report);
+    audit_event_cohort(&mut report, home, now, since_secs);
     report
 }
 
@@ -308,8 +327,12 @@ fn audit_receipt(
         report.problems.push(VerifyProblem {
             receipt: name.to_string(),
             reason: format!(
-                "required effect op(s) {} absent (this receipt carries: {}). Note: mux effects are not required here; no fno-agents call site emits one yet (owner: x-7649).",
-                missing.iter().map(|o| format!("{o:?}")).collect::<Vec<_>>().join(", "),
+                "required effect op(s) {} absent (this receipt carries: {})",
+                missing
+                    .iter()
+                    .map(|o| format!("{o:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 carried.join(", ")
             ),
         });
@@ -365,6 +388,79 @@ fn audit_cohort(report: &mut VerifyReport) {
     }
 }
 
+/// The derived cohort (x-aafe task 1.2), always on: every in-window
+/// `agent_row_reaped` event whose door did not stamp `receipt_staged`
+/// (roster-reap stamps it; the sweep and merge doors write the receipt
+/// before the row drop) names a session that must have a receipt FILE on
+/// disk. Existence is the test, so a stale-build receipt is accounted for
+/// and only a genuinely lost receipt reddens. An absent log contributes
+/// nothing; an unread log is not an empty one.
+fn audit_event_cohort(
+    report: &mut VerifyReport,
+    home: &AgentsHome,
+    now: chrono::DateTime<chrono::Utc>,
+    since_secs: u64,
+) {
+    let active = home.events_jsonl();
+    let rotated = crate::events::rotated_path(&active);
+    for file in [rotated, active] {
+        let raw = match std::fs::read_to_string(&file) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                report.problems.push(VerifyProblem {
+                    receipt: file.to_string_lossy().to_string(),
+                    reason: format!("events log unreadable: {err}"),
+                });
+                continue;
+            }
+        };
+        for line in raw.lines() {
+            let Ok(event) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if event.get("type").and_then(Value::as_str) != Some("agent_row_reaped") {
+                continue;
+            }
+            let Some(ts) = event
+                .get("ts")
+                .and_then(Value::as_str)
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+            else {
+                continue;
+            };
+            if (now - ts).num_seconds() > since_secs as i64 {
+                continue; // outside the window: not this report's population
+            }
+            report.reaped_events += 1;
+            let Some(data) = event.get("data") else {
+                continue;
+            };
+            if data.get("receipt_staged").is_some() {
+                continue; // roster-reap door: carries its own accounting
+            }
+            let harness = data.get("harness").and_then(Value::as_str).unwrap_or("");
+            let session_id = data
+                .get("harness_session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if harness.is_empty() || session_id.is_empty() {
+                continue;
+            }
+            let name = data.get("name").and_then(Value::as_str).unwrap_or("");
+            if !crate::receipt::reap_receipt_path_for(home, harness, session_id).exists() {
+                report.problems.push(VerifyProblem {
+                    receipt: "events".into(),
+                    reason: format!(
+                        "session {harness}:{session_id} ({name}) reaped at {ts} with no receipt on disk"
+                    ),
+                });
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,11 +510,12 @@ mod tests {
     }
 
     /// The full required op set, all confirmed: the shape a real retirement
-    /// stages since x-5aef task 1.1.
+    /// stages since x-aafe task 1.1 (the mux-member op included).
     fn confirmed_effects() -> Vec<EffectRecord> {
         vec![
             effect("native-stop", "confirmed-removed"),
             effect("active-surface", "confirmed-removed"),
+            effect("mux-member", "confirmed-removed"),
             effect("resume-evidence", "confirmed-removed"),
         ]
     }
@@ -625,8 +722,8 @@ mod tests {
             refusal
         );
         assert!(
-            refusal.reason.contains("mux effects are not required here"),
-            "the refusal carries the mux context: {:?}",
+            refusal.reason.contains("mux-member"),
+            "the refusal names the missing mux op: {:?}",
             refusal
         );
     }
@@ -642,6 +739,7 @@ mod tests {
         full.effects = vec![
             effect("native-stop", "confirmed-removed"),
             effect("active-surface", "confirmed-already-absent"),
+            effect("mux-member", "not-applicable"),
             effect("resume-evidence", "not-applicable"),
         ];
         write_reap_receipt(&home, &full).unwrap();
@@ -654,6 +752,7 @@ mod tests {
         failed.effects = vec![
             effect("native-stop", "confirmed-removed"),
             effect("active-surface", "confirmed-removed"),
+            effect("mux-member", "confirmed-removed"),
             effect("resume-evidence", "failed"),
         ];
         write_reap_receipt(&home, &failed).unwrap();
@@ -668,6 +767,170 @@ mod tests {
             "{:?}",
             report.problems
         );
+    }
+
+    /// x-aafe AC2-HP: a current-build receipt carrying the pre-x-aafe op set
+    /// (everything but mux-member) refuses, names the missing op, and the
+    /// stale owner note is gone from the refusal.
+    #[test]
+    fn ac2_hp_a_receipt_without_the_mux_member_op_refuses() {
+        let home = temp_home();
+        let mut receipt = build_reap_receipt(&row("premux"), None).unwrap();
+        stamp(&mut receipt, Some(current_build().as_str()));
+        receipt.effects = vec![
+            effect("native-stop", "confirmed-removed"),
+            effect("active-surface", "confirmed-removed"),
+            effect("resume-evidence", "confirmed-removed"),
+        ];
+        write_reap_receipt(&home, &receipt).unwrap();
+
+        let report = verify(&home, 24 * 3600, &[]);
+        assert!(!report.passes(), "{:?}", report.verified);
+        let refusal = report
+            .problems
+            .iter()
+            .find(|p| p.receipt != "window of 86400s")
+            .expect("a per-receipt refusal names the missing op");
+        assert!(refusal.reason.contains("mux-member"), "{:?}", refusal);
+        assert!(
+            !refusal.reason.contains("x-7649"),
+            "the stale owner note is gone: {:?}",
+            refusal
+        );
+    }
+
+    /// x-aafe AC2-EDGE: all four ops with mux-member measured
+    /// not-applicable, and no events log: the gate passes.
+    #[test]
+    fn ac2_edge_not_applicable_mux_member_passes_with_no_events_log() {
+        let home = temp_home();
+        let mut receipt = build_reap_receipt(&row("nomux"), None).unwrap();
+        stamp(&mut receipt, Some(current_build().as_str()));
+        receipt.effects = vec![
+            effect("native-stop", "confirmed-removed"),
+            effect("active-surface", "confirmed-removed"),
+            effect("mux-member", "not-applicable"),
+            effect("resume-evidence", "confirmed-removed"),
+        ];
+        write_reap_receipt(&home, &receipt).unwrap();
+        let report = verify(&home, 24 * 3600, &[]);
+        assert!(report.passes(), "{:?}", report.problems);
+        assert_eq!(report.reaped_events, 0, "no log read: zero names itself");
+    }
+
+    /// x-aafe AC3-HP: an in-window reaped event with no `receipt_staged`
+    /// stamp, for a session with no receipt file, fails the gate without
+    /// anyone passing `--expect-sessions`.
+    #[test]
+    fn ac3_hp_a_reaped_event_without_a_receipt_fails_the_gate() {
+        let home = temp_home();
+        write_event(
+            &home,
+            &serde_json::json!({
+                "name": "row-a",
+                "harness": "codex",
+                "harness_session_id": "sess-lost",
+            }),
+        );
+        // A live unrelated receipt so the window is not empty-shaped: the
+        // assertion targets the events problem specifically.
+        let mut receipt = build_reap_receipt(&row("live"), None).unwrap();
+        stamp(&mut receipt, Some(current_build().as_str()));
+        receipt.effects = confirmed_effects();
+        write_reap_receipt(&home, &receipt).unwrap();
+
+        let report = verify(&home, 24 * 3600, &[]);
+        assert!(!report.passes(), "{:?}", report.problems);
+        let problem = report
+            .problems
+            .iter()
+            .find(|p| p.receipt == "events")
+            .expect("the derived cohort names the lost receipt");
+        assert!(
+            problem.reason.contains("codex:sess-lost")
+                && problem.reason.contains("row-a")
+                && problem.reason.contains("no receipt on disk"),
+            "{:?}",
+            problem
+        );
+        assert_eq!(report.reaped_events, 1);
+    }
+
+    /// x-aafe AC3-EDGE: a `receipt_staged` event (roster-reap), an
+    /// out-of-window event, and an event whose receipt exists but is
+    /// stale-build add no derived-cohort problem.
+    #[test]
+    fn ac3_edge_stamped_out_of_window_and_stale_receipt_events_add_nothing() {
+        let home = temp_home();
+        // roster-reap door: carries receipt_staged.
+        write_event(
+            &home,
+            &serde_json::json!({
+                "name": "stamped-row",
+                "harness": "codex",
+                "harness_session_id": "sess-stamped",
+                "receipt_staged": true,
+            }),
+        );
+        // Outside the window.
+        let old_ts = (chrono::Utc::now() - chrono::Duration::seconds(48 * 3600)).to_rfc3339();
+        write_event_at(
+            &home,
+            &old_ts,
+            &serde_json::json!({
+                "name": "old-row",
+                "harness": "codex",
+                "harness_session_id": "sess-old",
+            }),
+        );
+        // A stale-build receipt on disk: existence satisfies the cohort.
+        let mut stale = build_reap_receipt(&row("staleholder"), None).unwrap();
+        stamp(&mut stale, Some("fno-agents 0.0.1"));
+        stale.effects = confirmed_effects();
+        write_reap_receipt(&home, &stale).unwrap();
+        write_event(
+            &home,
+            &serde_json::json!({
+                "name": "stale-row",
+                "harness": "codex",
+                "harness_session_id": "sess-staleholder",
+            }),
+        );
+
+        // A verified receipt keeps the rest of the report green so any
+        // failure is attributable to the derived cohort.
+        let mut receipt = build_reap_receipt(&row("live"), None).unwrap();
+        stamp(&mut receipt, Some(current_build().as_str()));
+        receipt.effects = confirmed_effects();
+        write_reap_receipt(&home, &receipt).unwrap();
+
+        let report = verify(&home, 24 * 3600, &[]);
+        assert!(report.passes(), "{:?}", report.problems);
+        // Both in-window events were examined; only their disposition
+        // spared them.
+        assert_eq!(report.reaped_events, 2);
+    }
+
+    /// The test event writer: the unified envelope shape (`ts`, `type`,
+    /// `source`, `data`), appended to the home's events log.
+    fn write_event(home: &AgentsHome, data: &serde_json::Value) {
+        write_event_at(home, &chrono::Utc::now().to_rfc3339(), data);
+    }
+
+    fn write_event_at(home: &AgentsHome, ts: &str, data: &serde_json::Value) {
+        use std::io::Write;
+        let line = serde_json::json!({
+            "ts": ts,
+            "type": "agent_row_reaped",
+            "source": "daemon",
+            "data": data,
+        });
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(home.events_jsonl())
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
     }
 
     /// x-5aef AC2-HP: a window holding a verified receipt for `a` only,

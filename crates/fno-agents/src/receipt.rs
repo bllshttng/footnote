@@ -150,10 +150,20 @@ pub fn receipt_filename_part(s: &str) -> String {
 /// Where reap receipts live: `<agents home>/reap-receipts/`, one file per
 /// reaped row keyed by `<harness>-<session id>`, the resume identity.
 pub fn reap_receipt_path(home: &AgentsHome, receipt: &ReapReceipt) -> std::path::PathBuf {
+    reap_receipt_path_for(home, &receipt.harness, &receipt.harness_session_id)
+}
+
+/// The receipt path for one resume identity, so a reader without a receipt
+/// in hand (the verify gate's event-derived cohort) spells the key once.
+pub fn reap_receipt_path_for(
+    home: &AgentsHome,
+    harness: &str,
+    session_id: &str,
+) -> std::path::PathBuf {
     home.root().join("reap-receipts").join(format!(
         "{}-{}.json",
-        receipt_filename_part(&receipt.harness),
-        receipt_filename_part(&receipt.harness_session_id)
+        receipt_filename_part(harness),
+        receipt_filename_part(session_id)
     ))
 }
 

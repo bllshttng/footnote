@@ -4347,6 +4347,7 @@ fn the_archived_session_record_survives_cwd_deletion_and_resolves() {
     receipt.effects = vec![
         crate::gc_native::stop_outcome_effect(true, None),
         crate::daemon::CascadeOutcome::Removed.effect_record("active-surface"),
+        crate::daemon::CascadeOutcome::NotApplicable.effect_record("mux-member"),
         crate::gc_sweep::resume_evidence_effect(&receipt),
     ];
     receipt.writer_build = Some(crate::gc_verify::current_build());

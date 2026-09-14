@@ -3,8 +3,6 @@
 //! non-applied outcome rewrites the receipt and refuses, the same hold shape
 //! the active-surface removal uses.
 
-use super::*;
-
 use crate::daemon::CascadeOutcome;
 use crate::gc_sweep::{
     stage_session_retirement, RetireMode, RetireRefusal, StagedRetirement, StopObservation,
