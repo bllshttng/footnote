@@ -71,15 +71,20 @@ fn run_checked_stdin(cmd: &[String], cwd: Option<&Path>, stdin: &str) -> Result<
         command.current_dir(dir);
     }
     let mut child = command.spawn().map_err(|e| format!("{}: {e}", cmd[0]))?;
-    child
+    let mut stdin_handle = child
         .stdin
         .take()
-        .ok_or_else(|| format!("{}: no stdin", cmd[0]))?
-        .write_all(stdin.as_bytes())
-        .map_err(|e| format!("{}: {e}", cmd[0]))?;
+        .ok_or_else(|| format!("{}: no stdin", cmd[0]))?;
+    let input = stdin.to_string();
+    // The child's stdout pipe fills while it consumes stdin, so write from a
+    // thread: hashing a 3.8k-file stage deadlocks a single-threaded write.
+    let writer = std::thread::spawn(move || {
+        let _ = stdin_handle.write_all(input.as_bytes());
+    });
     let out = child
         .wait_with_output()
         .map_err(|e| format!("{}: {e}", cmd[0]))?;
+    let _ = writer.join();
     if !out.status.success() {
         return Err(format!(
             "{} exited {}: {}",
