@@ -202,7 +202,7 @@ def is_open_phase_row(row: object, phase: str) -> bool:
         and bool(row["session_id"].strip())
         and isinstance(row.get("started_at"), str)
         and bool(row["started_at"].strip())
-        and "ended_at" not in row
+        and row.get("ended_at") is None  # absent OR null counts open
     )
 
 
@@ -287,9 +287,8 @@ def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
 
 
 def closed_worker_session_ids(entry: dict) -> set[str]:
-    """Session ids whose own phase row on this node closed and none is open
-    (the x-6f98 close receipt): finished with THIS node ahead of the
-    predicate, whatever the transcript did afterwards."""
+    """Session ids whose own phase row closed and none is open (the x-6f98
+    receipt): finished with THIS node ahead of the predicate."""
     closed: set[str] = set()
     open_ids: set[str] = set()
     for row in entry.get("sessions") or []:

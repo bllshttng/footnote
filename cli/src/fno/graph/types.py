@@ -344,6 +344,11 @@ class Node(BaseModel):
     # store.append_session_record. Empty on legacy nodes.
     sessions: list[SessionRecord] = Field(default_factory=list)
 
+    # The status the STORE holds, planted by _check_status_drift from the
+    # wire's `status` key. `status` above stays the single-entry derived
+    # view; wedge verbs (requeue, hold, dispatch) read this one.
+    persisted_status: Optional[str] = None
+
     model_config = {"extra": "allow"}
 
     @field_validator("rank", mode="before")
@@ -388,6 +393,12 @@ class Node(BaseModel):
         legacy = data.pop("_status", None)
         if persisted is None:
             persisted = legacy
+        # The store's own status is kept beside the derived one: the Rust
+        # typed model carries the stored status, and verbs that settle wedges
+        # (requeue, hold) must read what the store holds, never the
+        # single-entry approximation this model computes on `status`.
+        if persisted is not None:
+            data["persisted_status"] = persisted
         if persisted is None:
             return data
 

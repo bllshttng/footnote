@@ -78,11 +78,14 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, claims_root: Path
                     {
                         "id": "x-t1",
                         "slug": "task-rows",
-                        "status": "ready",
                         "title": "rows",
+                        "type": "feature",
+                        "priority": "p2",
+                        "status": "ready",
                         "plan_path": str(plan),
                     },
-                    {"id": "x-t2", "slug": "no-plan", "status": "ready", "title": "np"},
+                    {"id": "x-t2", "slug": "no-plan", "title": "np",
+                     "type": "feature", "priority": "p2", "status": "ready"},
                 ]
             }
         )
@@ -462,7 +465,7 @@ def test_exited_graph_write_releases_the_claim(
     def _wedge(*a, **k):
         raise SystemExit(1)
 
-    monkeypatch.setattr(store, "locked_mutate_graph", _wedge)
+    monkeypatch.setattr(store, "commit_rows_via_store", _wedge)
     result = _task_update(
         monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
         "--owner", SID_A,

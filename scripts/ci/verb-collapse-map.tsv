@@ -214,6 +214,7 @@ backlog migrate-updated-at	T1	backlog migrate-updated-at	0
 backlog new	T1	backlog new	38
 backlog next	KEEP	backlog next	54	deliberate readability slack for a high-traffic distinct operation
 backlog note	T1	backlog note	1
+backlog notes	T1	backlog notes	0
 backlog pick	T1	backlog pick	2
 backlog project-root	T1	backlog project-root	6
 backlog provenance	T1	backlog provenance	7
@@ -619,3 +620,4 @@ do review post-dispositions	T1	do review post-dispositions	1
 doctor graph export	T1	doctor graph export	0
 backlog version	T1	backlog version	19	
 agents prove-it-verdicts	T1	agents prove-it-verdicts	1	
+agents honesty-sweep	T1	agents honesty-sweep	0	

@@ -119,16 +119,19 @@ pub mod graph_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
 pub mod heal;
+pub mod honesty_sweep;
 mod identity;
 pub mod interrupt_classify;
 pub mod kill_criteria;
 pub mod king_board;
 pub mod king_checkin;
+pub mod king_escalation;
 pub mod king_history;
 pub mod king_ledger;
 pub mod king_termination;
 pub mod lane_heal;
 pub mod law_match;
+mod lifecycle_child;
 pub mod liveness_sweep;
 pub mod logs;
 pub mod logs_client;
@@ -894,6 +897,9 @@ mod tests {
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
+    // The keeper's render trigger failed a pass (waves 8-9 store cutover);
+    // carries the version and a stderr tail, and the backoff retries it.
+    "graph_render_failed",
     "agent_stopped",
     // Stop/rm claims release (x-9c91): the receipt event for the claims a
     // stopped or removed worker held; one emit per stop/rm that ran one.

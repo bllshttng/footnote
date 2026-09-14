@@ -180,7 +180,9 @@ def test_malformed_sessions_coerce_rather_than_raise(ledger):
 
 def _graph(tmp_path: Path, rows: list[dict] | None = None) -> Path:
     path = tmp_path / "graph.json"
-    node = {"id": "ab-12345678", "title": "T", "cost_usd": None,
+    node = {"id": "ab-12345678", "title": "T", "slug": "ab-12345678",
+            "type": "feature", "priority": "p2", "status": "idea",
+            "cost_usd": None,
             "cost_sessions": rows if rows is not None else []}
     path.write_text(json.dumps({"entries": [node]}))
     return path
@@ -386,7 +388,7 @@ def test_cost_update_degrades_when_the_graph_write_raises(tmp_path, monkeypatch,
     def boom(*a, **k):
         raise OSError("read-only .fno")
 
-    monkeypatch.setattr(gs, "locked_mutate_graph", boom)
+    monkeypatch.setattr(gs, "commit_rows_via_store", boom)
     assert _update_graph_node(graph_path, "ab-12345678", "S1", 4.0) is False
     assert "read-only .fno" in capsys.readouterr().err
 

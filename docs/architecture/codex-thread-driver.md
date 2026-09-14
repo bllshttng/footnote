@@ -35,13 +35,11 @@ agy --conversation <uuid> --input-format stream-json --output-format stream-json
 
 That is the boot-once, drive-many property `codex exec resume` lacks, and it is the same shape as `provider.rs`'s `claude_stream_json_resume_argv`. So agy's lane can reuse machinery fno already ships for claude. Its `agent_response` steps also carry `text_delta` and a per-step `duration_seconds`, so a driver can attribute latency, which `codex exec resume` does not permit.
 
-**opencode's `true` is the one bit not earned to this page's standard.** `harness_map.py`'s `substrate_default` returns `thread` for any harness whose bit is true. So opencode is the only harness routed onto a thread lane by default. Every harness with a false bit defaults to `headless`, a one-shot.
+**opencode's `true` now has an honest steering path.** `harness_map.py`'s `substrate_default` returns `thread` for any harness whose spawn claim is native, so opencode is routed onto the serve thread lane by default. The `opencode_serve_journey.rs` evidence covers launch, full-session identity, attach-writer steering, readback, and session liveness; server-kill survival, review, and viewport selection remain unproven.
 
-Meanwhile that lane has four gaps. It has no e2e spawn test through the real mux socket. It has no CI-installed binary behind its flag checks. It has no steering surface. Its liveness signal is the detached writer pid. That pid exits at the end of the first turn, while the session keeps working.
+The serve lane does not use opencode's general store-lookup identity path. `POST /session` returns the full session id, and every later turn binds that id to the shared serve. The detached writer's pid is capture metadata only; liveness comes from `GET /session/<id>`, so a completed writer does not make the session read dead.
 
-That last gap carries a reap hazard behind an opt-in setting rather than a live outage. It is a risk to close, not a fire.
-
-The wider point is the one to take from this page. A single flag is covering two different claims. "Has a durable session lane" and "has a driver fno can steer" are not the same assertion. One flag standing for both is the shape AGENTS.md warns about under *never infer the axis from a value*.
+The wider point remains: a durable session and a driver fno can steer are separate claims. The opencode spawn claim is native because this lane proves both, while the other opencode shapes remain explicitly refused or unmeasured.
 
 ## Three lanes, and which one you actually need
 

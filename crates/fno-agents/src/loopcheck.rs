@@ -11680,9 +11680,10 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         bound_breached(history.total, dry, manifest.max_iterations, waiting)
     };
     // Shared spine of both blind-board blocks: bounded, quiet emit, block.
-    let blind_block = |message: &str, actionable: i64, dry: u64| -> (i32, String) {
+    // The reading is what the branch measured (x-ff27), never a guess.
+    let blind_block = |reading: &str, message: &str, actionable: i64, dry: u64| -> (i32, String) {
         if let Some(b) = bounded(dry, message) {
-            return terminate(b.reason, &b.message, 0, b.fires, &[]);
+            return terminate(b.reason, &b.message, 0, b.fires, &[reading.to_owned()]);
         }
         emit("king_loop_check", king_quiet_body(&session_id, actionable));
         (0, king_output("block", None, message, actionable, dry + 1))
@@ -11696,7 +11697,8 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             // code marks the degraded path; the shim keys on the decision
             // field, never the code.
             if let Some(b) = bounded(dry, &format!("king board unreadable: {e}")) {
-                return terminate(b.reason, &b.message, 0, b.fires, &[]);
+                let reading = crate::king_escalation::reading_board_unreadable();
+                return terminate(b.reason, &b.message, 0, b.fires, &[reading]);
             }
             emit(
                 "king_loop_check",
@@ -11723,6 +11725,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             // Bounded, and each blocking fire emits its row so the counters
             // advance; the old return left both frozen and blocked forever.
             return blind_block(
+                &crate::king_escalation::reading_questions_unreadable(),
                 "board clean but outstanding operator questions are unreadable; blocking completion",
                 0,
                 dry,
@@ -11768,6 +11771,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             // x-c911: a floor count cannot see blind queues; refuse to certify.
             if board.unreadable_sources {
                 return blind_block(
+                    &crate::king_escalation::reading_sources_unreadable(),
                     "board quiet but some sources are unreadable; blocking completion",
                     0,
                     dry,
@@ -11781,29 +11785,23 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                 &[],
             );
         }
-        let message = match &drain_error {
-            Some(e) => {
-                format!("board quiet but scope delivery is unreadable: {e}; blocking completion")
-            }
-            None => format!("board quiet; {undelivered} scope nodes still undelivered (drive each scope node to done or superseded to drain)"),
-        };
+        let message =
+            crate::king_termination::king_quiet_message(undelivered, drain_error.as_ref());
         let shrank = undelivered != i64::MAX
             && history
                 .last_undelivered
                 .is_some_and(|prev| undelivered < prev);
         let dry = if shrank { 0 } else { dry };
+        let reading = match &drain_error {
+            Some(_) => crate::king_escalation::reading_delivery_unreadable(&manifest.scope),
+            None => crate::king_escalation::reading_undelivered(&manifest.scope),
+        };
         emit(
             "king_loop_check",
-            serde_json::json!({
-                "session_id": session_id,
-                "actionable": 0,
-                "undelivered": undelivered,
-                "actionable_ids": [],
-                "cleared": shrank,
-            }),
+            crate::king_termination::king_undelivered_body(&session_id, undelivered, shrank),
         );
         if let Some(b) = bounded(dry, &message) {
-            return terminate(b.reason, &b.message, 0, b.fires, &[]);
+            return terminate(b.reason, &b.message, 0, b.fires, &[reading]);
         }
         return (0, king_output("block", None, &message, 0, dry + 1));
     }
@@ -11821,13 +11819,14 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     // an exhausted king names the reason that actually stopped it.
     let waiting = format!("{} rows still actionable", board.actionable);
     if let Some(b) = bounded(dry, &waiting) {
-        return terminate(
-            b.reason,
-            &b.message,
-            board.actionable,
-            b.fires,
-            &board.actionable_ids,
-        );
+        // An actionable floor with no readable rows is the partially-blind
+        // board: it names its reading, never an empty set (x-ff27).
+        let stalled = if board.actionable_ids.is_empty() {
+            vec![crate::king_escalation::reading_board_unreadable()]
+        } else {
+            board.actionable_ids.clone()
+        };
+        return terminate(b.reason, &b.message, board.actionable, b.fires, &stalled);
     }
 
     match crate::king_termination::capacity_gate(

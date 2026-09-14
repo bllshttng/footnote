@@ -171,39 +171,56 @@ done <<< "$PINNED_PHRASES"
 # Resolution: a `graduates-to:` value is written by the same hand that owns
 # the corpus, and a gate whose input is a field the guarded party writes does
 # not measure the guarded party. So the value must resolve against the backlog
-# graph at run time. An id-shaped value resolves by node id; anything else
-# resolves when the value, or any one sentence of it, equals a filed node's
-# title after whitespace-collapse, trailing-period strip, and case-folding.
-# No graph file is the legitimate skip (a consumer repo without the backlog);
-# a graph that exists but cannot be read fails loud, on the shipped-verb
-# registry precedent above.
-GRAPH_JSON="${FNO_GRAPH_JSON:-${HOME}/.fno/graph.json}"
-if [[ -n "$GRAD_LINES" && -f "$GRAPH_JSON" ]]; then
-  if ! GRAD_REPORT="$(GRAD_LINES="$GRAD_LINES" GRAPH_JSON="$GRAPH_JSON" python3 - <<'PY'
-import json, os, re, sys
+# at run time. An id-shaped value resolves by node id; anything else resolves
+# when the value, or any one sentence of it, equals a filed node's title after
+# whitespace-collapse, trailing-period strip, and case-folding. The read goes
+# through the store api (the typed client is import-light; this checkout's
+# `cli/src` is on the path), never the file. No graph file is the legitimate
+# skip (a consumer repo without a working store); a graph that exists but
+# cannot be read fails loud, on the shipped-verb registry precedent above.
+# FNO_GRAPH_JSON (or GRAPH_JSON) pins the store, so a sandbox or a consumer
+# repo can point the gate at its own graph.
+GRAPH_TARGET="${FNO_GRAPH_JSON:-${GRAPH_JSON:-$HOME/.fno/graph.json}}"
+if [[ -n "$GRAD_LINES" && -f "$GRAPH_TARGET" ]]; then
+  REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  if ! GRAD_REPORT="$(GRAPH_TARGET="$GRAPH_TARGET" GRAD_LINES="$GRAD_LINES" PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
+import os
+import re
+import sys
+
 node_id = re.compile(r"\b(?:x-[0-9a-f]{4}|ab-[0-9a-f]{8})\b")
 
 def norm(s):
     return " ".join(s.split()).rstrip(".").casefold()
 
 try:
-    with open(os.environ["GRAPH_JSON"], encoding="utf-8") as fh:
-        graph = json.load(fh)
-except (OSError, ValueError) as exc:
+    # The stdlib-only leg of the api: the keeper client speaks the same
+    # `api` op the typed client wraps, and store.py imports nothing outside
+    # the standard library. The typed layer needs pydantic, which a bare
+    # python3 does not carry.
+    from pathlib import Path
+
+    from fno.graph.store import _client_for
+
+    graph_path = Path(os.environ["GRAPH_TARGET"])
+
+    reply = _client_for(graph_path).request(
+        "api", {"op": "nodes", "filter": {}, "include_archived": True}
+    )
+except Exception as exc:
     sys.stderr.write(
-        "check-pitfalls: the backlog graph at %s cannot be read (%s).\n"
+        "check-pitfalls: the backlog cannot be read through the store api (%s).\n"
         "  graduates-to: values must resolve against it; refusing to pass\n"
-        "  every entry against an unreadable graph.\n" % (os.environ["GRAPH_JSON"], exc)
+        "  every entry against an unreadable graph.\n" % (exc,)
     )
     sys.exit(1)
 
 ids, titles = set(), set()
-for n in graph.get("entries", []):
-    if isinstance(n, dict):
-        if isinstance(n.get("id"), str):
-            ids.add(n["id"])
-        if isinstance(n.get("title"), str):
-            titles.add(norm(n["title"]))
+for n in reply.get("nodes", []):
+    if isinstance(n.get("id"), str):
+        ids.add(n["id"])
+    if isinstance(n.get("title"), str):
+        titles.add(norm(n["title"]))
 
 for rec in os.environ["GRAD_LINES"].splitlines():
     if not rec or "\t" not in rec:
@@ -221,7 +238,7 @@ for rec in os.environ["GRAD_LINES"].splitlines():
     )
 PY
   )"; then
-    exit 1  # the python pass already explained the unreadable graph on stderr
+    exit 1  # the python pass already explained the unreadable store on stderr
   fi
   while IFS= read -r line; do
     [[ -n "$line" ]] && add_violation "$line"

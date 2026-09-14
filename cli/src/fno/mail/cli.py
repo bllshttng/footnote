@@ -759,7 +759,7 @@ def _append_ruling_to_node(subject: str, body: str, *, graph_path: Path) -> str:
         return current
 
     try:
-        graph_store.locked_mutate_graph(graph_path, mutator)
+        graph_store.commit_rows_via_store(graph_path, mutator)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise typer.Exit(code=2) from exc

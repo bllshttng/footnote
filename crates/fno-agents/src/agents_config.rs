@@ -63,12 +63,28 @@ fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
         warn_once_if_yaml(&path);
         return vec![path];
     }
-    let mut out = vec![cwd.join(".fno/config.toml")];
+    // A daemon lazy-started from a worktree the reaper later deleted keeps
+    // that dead directory captured as its config anchor; every lookup under
+    // it then fails and every getter silently takes its default (x-8f73
+    // review). Re-anchor to the agents home, the nearest always-there
+    // directory, so the daemon keeps reading the operator's global config.
+    let home = crate::paths::AgentsHome::from_env_opt();
+    let anchor: &Path = if cwd.is_dir() {
+        cwd
+    } else {
+        match &home {
+            Some(h) => h.root(),
+            // Nothing declared (test regime): keep the anchor as given; the
+            // missing project candidates then fall through to global.
+            None => cwd,
+        }
+    };
+    let mut out = vec![anchor.join(".fno/config.toml")];
     // Exactly "1" suppresses, any other value inert, matching the Python check.
     let suppress_canonical = std::env::var_os("FNO_NO_CANONICAL_CONFIG")
         .is_some_and(|v| v == *std::ffi::OsStr::new("1"));
     if !suppress_canonical {
-        if let Some(canonical) = crate::paths::canonical_repo_root(cwd)
+        if let Some(canonical) = crate::paths::canonical_repo_root(anchor)
             .map(|root| root.join(".fno/config.toml"))
             .filter(|c| !out.contains(c))
         {
@@ -1086,6 +1102,27 @@ mod tests {
         clear_config_env();
         let cwd = write_project_settings("state-reap-defaults", "schema_version = 1\n");
         assert_eq!(state_reap_config(&cwd), StateReapConfig::default());
+        clear_config_env();
+    }
+
+    /// x-8f73 review: a dead config anchor (the launch worktree reaped under a
+    /// long-lived daemon) must not silently default every getter; the reader
+    /// re-anchors to the agents home.
+    #[test]
+    fn a_dead_cwd_anchor_reanchors_to_the_agents_home() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join(".fno");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("config.toml"), "[agents]\nmax_live = 7\n").unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", home.path());
+        let dead = tempfile::tempdir().unwrap();
+        let dead_path = dead.path().to_path_buf();
+        drop(dead);
+        assert!(!dead_path.is_dir());
+        assert_eq!(max_live(&dead_path), 7);
+        std::env::remove_var("FNO_AGENTS_HOME");
         clear_config_env();
     }
 

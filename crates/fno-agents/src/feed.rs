@@ -498,7 +498,7 @@ fn parse_args(rest: &[String]) -> Result<FeedArgs, String> {
     Ok(args)
 }
 
-/// The graph path, resolved as the fno crate's `backlog_view::graph_path`
+/// The store path, resolved as the fno crate's `backlog_view::graph_path`
 /// does: `FNO_GRAPH_JSON` > `$HOME/.fno/graph.json` (the agents home's parent,
 /// so a test home redirects it too).
 fn graph_path(home: &AgentsHome) -> PathBuf {
@@ -571,24 +571,21 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
             String::new()
         });
 
-    let (graph_entries, graph_note): (Vec<Value>, Option<String>) =
-        match graph_store::read_raw(&graph_path(home)) {
-            Ok(graph_store::RawRead::Entries(list)) => (list, None),
-            // An absent graph is still a skipped store for the feed's
-            // purposes: the operator should know the lifecycle leg is absent,
-            // even though read_raw treats absent as empty (AC3).
-            Ok(graph_store::RawRead::Empty) => {
-                (Vec::new(), Some("graph store skipped (absent)".to_string()))
+    let (graph_entries, graph_note): (Vec<Value>, Option<String>) = {
+        // The lifecycle leg reads the store, never the file. An absent store
+        // is still a skipped store for the feed's purposes: the operator
+        // should know the lifecycle leg is absent, so its absence keeps its
+        // own note (AC3) where a present-but-empty store is just empty.
+        let path = graph_path(home);
+        if !path.exists() {
+            (Vec::new(), Some("graph store skipped (absent)".to_string()))
+        } else {
+            match crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)) {
+                Ok(list) => (list, None),
+                Err(e) => (Vec::new(), Some(format!("graph store skipped ({})", e.0))),
             }
-            Ok(graph_store::RawRead::MalformedRoot) => (
-                Vec::new(),
-                Some("graph store skipped (root carries no entries key)".to_string()),
-            ),
-            Ok(graph_store::RawRead::Corrupt(why)) => {
-                (Vec::new(), Some(format!("graph store skipped ({why})")))
-            }
-            Err(e) => (Vec::new(), Some(format!("graph store skipped ({e})"))),
-        };
+        }
+    };
     if let Some(note) = graph_note {
         eprintln!("fno-agents feed: {note}");
     }

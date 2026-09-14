@@ -744,6 +744,8 @@ def _project(event: dict[str, Any]) -> str | None:
         precheck_entries = read_entries("decide")
     except ExternalMetadataUnavailable:
         return None
+    except Exception:  # noqa: BLE001 - the store refusing to serve IS unreadable
+        precheck_entries = []
     if resolve_node(subject, precheck_entries).kind != "exact":
         # read_entries swallows a corrupt default graph to [], which resolves
         # the same as a genuinely unmatched subject. On the default backend,

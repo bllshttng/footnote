@@ -250,9 +250,9 @@ def test_send_live_miss_durables_to_job_address(runner, isolated, monkeypatch):
 def test_pr_resolves_to_node_and_delivers(runner, isolated, monkeypatch):
     # Seed the graph with one node carrying PR 4242, held live.
     monkeypatch.setattr(
-        "fno.graph.store.read_graph",
+        "fno.graph.api.wire_rows",
         lambda *a, **k: [
-            {"id": "x-pr42", "title": "pr node", "pr_number": 4242, "status": "ready"}
+            {"id": "x-pr42", "title": "pr node", "slug": "x-pr42", "type": "feature", "priority": "p2", "pr_number": 4242, "status": "ready"}
         ],
     )
     _acquire_node("x-pr42", "33333333-3333-3333-3333-333333333333")
@@ -282,7 +282,7 @@ def test_pr_refuses_when_ambiguous_across_nodes(runner, isolated, monkeypatch):
     # Two nodes carry PR 5050 (per-repo numbers collide on the global graph).
     # pr:<n> must refuse rather than silently route to one of them.
     monkeypatch.setattr(
-        "fno.graph.store.read_graph",
+        "fno.graph.api.wire_rows",
         lambda *a, **k: [
             {"id": "x-a", "pr_number": 5050, "status": "ready"},
             {"id": "x-b", "pr_number": 5050, "status": "ready"},
@@ -301,7 +301,7 @@ def test_pr_refuses_when_ambiguous_across_nodes(runner, isolated, monkeypatch):
 def test_pr_resolves_via_additional_prs(runner, isolated, monkeypatch):
     # A PR carried only as a secondary entry (additional_prs) still resolves.
     monkeypatch.setattr(
-        "fno.graph.store.read_graph",
+        "fno.graph.api.wire_rows",
         lambda *a, **k: [
             {
                 "id": "x-multi",

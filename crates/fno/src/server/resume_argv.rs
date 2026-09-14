@@ -244,7 +244,7 @@ pub(super) fn resume_argv_for(harness: &str, session_id: &str) -> Result<Vec<Str
 /// replay re-runs the gesture and the staged argv is consumed at argv
 /// construction, so the second pass spawns exactly the pane the first pass
 /// would have - only the argv construction moved off-loop.
-pub(super) enum ResumeReplay {
+pub(crate) enum ResumeReplay {
     /// Re-enter `resume_one` for the row (`Command::ResumeAgent`).
     Gesture { name: String },
     /// Re-enter the held-worker resume behind `Command::FocusPane(pid)`.

@@ -142,7 +142,7 @@ def test_graph_unreadable_degrades(env, monkeypatch):
     def _boom(_path):
         raise OSError("transient")
 
-    monkeypatch.setattr(gs, "read_graph", _boom)
+    monkeypatch.setattr("fno.graph.api.wire_rows", _boom)
     res = runner.invoke(app, ["do", "plan", "sync"])
     assert res.exit_code == 0, res.output
     assert "unreadable" in res.output

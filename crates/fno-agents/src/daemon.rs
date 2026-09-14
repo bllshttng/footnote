@@ -1562,23 +1562,6 @@ pub(crate) fn live_liveness_prober(
 /// Cheap in steady state: no markers -> one dir stat, no roster load. A stop
 /// failure leaves the marker for the next tick (retry); a marker whose session is
 /// already gone is dropped as stale.
-/// Run `claude stop <short>`, refusing to wait past `timeout`. `kill_on_drop`:
-/// on timeout the `output()` future is dropped, so the hung child does not
-/// keep running past the deadline this call gave up at (self-review finding:
-/// this was hand-duplicated at the RPC call site below; one shared helper
-/// now backs both).
-pub(crate) async fn bounded_claude_stop(
-    short: &str,
-    timeout: Duration,
-) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
-    let stop = tokio::process::Command::new("claude")
-        .arg("stop")
-        .arg(short)
-        .kill_on_drop(true)
-        .output();
-    tokio::time::timeout(timeout, stop).await
-}
-
 async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
     // read_markers (dir list + N file reads) and the roster load/parse are
     // blocking fs; run them off the async runtime so a slow disk or a large
@@ -1626,7 +1609,9 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                 // sweep. A timeout leaves the marker for the next tick, since
                 // it is retried every tick, which is the failure this feature
                 // exists to prevent.
-                let stopped = bounded_claude_stop(&short, Duration::from_secs(15)).await;
+                let stopped =
+                    crate::lifecycle_child::bounded_claude_stop(&short, Duration::from_secs(15))
+                        .await;
                 match stopped {
                     // retired-ok: a daemon log line naming its own teardown call.
                     Err(_) => eprintln!("daemon: claude stop {short} timed out (retry next tick)"),
@@ -6216,7 +6201,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
     };
     // Bound the subprocess so a hung `claude` can never wedge this RPC
     // handler, the same way the background-sweep twin above is bounded.
-    match bounded_claude_stop(&short, Duration::from_secs(15)).await {
+    match crate::lifecycle_child::bounded_claude_stop(&short, Duration::from_secs(15)).await {
         Err(_) => Response::err(
             req.id,
             ErrorCode::Internal,
@@ -6846,10 +6831,9 @@ fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
             .transport_short()
             .map(str::to_string)
             .or_else(|| e.session_id.clone()),
-        // Python writes opencode ids to the canonical harness_session_id and
-        // drops `session_id` on write (it is Rust-set only), so falling through
-        // to `session_id` would hand the probe None for every pane row and make
-        // it a permanent no-op.
+        // Python writes opencode ids to the canonical harness_session_id and drops
+        // `session_id` on write; falling through to it would hand the probe None
+        // for every pane row and make it a permanent no-op.
         "opencode" => e
             .harness_session_id
             .clone()
@@ -6859,6 +6843,7 @@ fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
     crate::provider::AgentEntry {
         name: e.name.clone(),
         provider: e.harness_name().to_string(),
+        substrate: e.substrate.clone(),
         session_id,
         cwd: PathBuf::from(&e.cwd),
     }

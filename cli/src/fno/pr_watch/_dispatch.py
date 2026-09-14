@@ -681,7 +681,7 @@ def _run_tick(
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
     from fno.graph._reconcile import ReconcileError
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
     from fno.paths import graph_json as default_graph_json
     from fno.pr_watch import decide
     from fno.pr_watch._state import WatermarkStore, make_watermark_key
@@ -696,7 +696,7 @@ def _run_tick(
     # backend has no equivalent yet, so this tick degrades to "nothing to
     # sweep" rather than reading the wrong store (mirrors _catchup_roots'
     # existing no-graph degrade for the same daemon).
-    entries = read_graph(gpath) if active_backend_name() == "graph" and gpath.exists() else []
+    entries = wire_rows(path=gpath) if active_backend_name() == "graph" and gpath.exists() else []
     candidates = discover_fn(entries)
 
     store = WatermarkStore(path=store_path)

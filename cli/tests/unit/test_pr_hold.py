@@ -53,7 +53,15 @@ def _graph(tmp_path, monkeypatch, *, plan_body: str, pr_body: str = "", entries=
         "pr_url": "https://github.com/o/r/pull/42",
         "plan_path": str(plan),
     }]
-    graph.write_text(json.dumps({"entries": resolved_entries}))
+    # Rows the way the store writes them: the typed api drops a row the
+    # model cannot parse, so seeds carry the stamped fields.
+    complete = []
+    for e in resolved_entries:
+        row = {"type": "feature", "priority": "p2", "status": "idea", **e}
+        row.setdefault("title", e.get("id", "node"))
+        row.setdefault("slug", e.get("id", "node"))
+        complete.append(row)
+    graph.write_text(json.dumps({"entries": complete}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     # x-a93a: hold_for_pr scopes its "anything to check" gate by matching an
     # entry's own `cwd` against this repo's canonical root
@@ -124,7 +132,11 @@ def test_hold_for_pr_catches_a_held_node_named_only_on_the_trailer(tmp_path, mon
                 "pr_url": "https://github.com/o/r/pull/42",
                 "plan_path": str(unheld_plan),
             },
-            {"id": "x-1111", "cwd": str(tmp_path), "plan_path": str(held_plan)},
+            {"id": "x-1111",
+            "slug": "x-1111", "title": "x-1111", 
+            "type": "feature",
+            "priority": "p2",
+            "status": "idea", "cwd": str(tmp_path), "plan_path": str(held_plan)},
         ],
     )
     verdict = _hold.hold_for_pr(42, str(tmp_path))
@@ -145,7 +157,7 @@ def test_hold_for_pr_trailer_only_claim_with_no_ref_stamp_is_still_checked(tmp_p
         monkeypatch,
         plan_body="---\nstatus: ready\n---\n",
         pr_body="Backlog-Closure: x-1111",
-        entries=[{"id": "x-1111", "cwd": str(tmp_path), "plan_path": str(plan)}],
+        entries=[{"id": "x-1111", "slug": "x-1111", "title": "x-1111",  "type": "feature", "priority": "p2", "status": "idea", "cwd": str(tmp_path), "plan_path": str(plan)}],
     )
     assert _hold.hold_for_pr(42, str(tmp_path)) is None
 
@@ -162,7 +174,7 @@ def test_hold_for_pr_fails_closed_on_a_closure_query_error_even_when_unstamped(
     plan.write_text("---\nstatus: ready\n---\n")
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"entries": [
-        {"id": "x-1111", "cwd": str(tmp_path), "plan_path": str(plan)},
+        {"id": "x-1111", "slug": "x-1111", "title": "x-1111",  "type": "feature", "priority": "p2", "status": "idea", "cwd": str(tmp_path), "plan_path": str(plan)},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
@@ -196,7 +208,11 @@ def test_hold_for_pr_returns_none_with_no_gh_call_when_repo_has_zero_backlog_nod
     plan.write_text("---\nstatus: ready\n---\n")
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"entries": [
-        {"id": "x-2222", "cwd": str(other_root), "plan_path": str(plan)},
+        {"id": "x-2222",
+            "slug": "x-2222", "title": "x-2222", 
+            "type": "feature",
+            "priority": "p2",
+            "status": "idea", "cwd": str(other_root), "plan_path": str(plan)},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: our_root)
@@ -221,7 +237,11 @@ def test_hold_for_pr_still_checks_when_this_repos_project_has_a_ref_less_node(
     plan.write_text("---\nstatus: ready\n---\n")
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"entries": [
-        {"id": "x-3333", "cwd": str(tmp_path), "plan_path": str(plan)},
+        {"id": "x-3333",
+            "slug": "x-3333", "title": "x-3333", 
+            "type": "feature",
+            "priority": "p2",
+            "status": "idea", "cwd": str(tmp_path), "plan_path": str(plan)},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
@@ -252,7 +272,11 @@ def test_hold_for_pr_still_checks_when_the_matching_node_has_a_null_project(
     plan.write_text("---\nstatus: ready\n---\n")
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"entries": [
-        {"id": "x-4444", "cwd": str(tmp_path), "plan_path": str(plan), "project": None},
+        {"id": "x-4444",
+            "slug": "x-4444", "title": "x-4444", 
+            "type": "feature",
+            "priority": "p2",
+            "status": "idea", "cwd": str(tmp_path), "plan_path": str(plan), "project": None},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
@@ -297,7 +321,11 @@ def test_hold_for_pr_resolves_root_from_the_passed_cwd_not_the_process_cwd(
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"entries": [
         {
-            "id": "x-5555", "cwd": str(target_repo), "pr_number": 42,
+            "id": "x-5555",
+            "slug": "x-5555", "title": "x-5555", 
+            "type": "feature",
+            "priority": "p2",
+            "status": "idea", "cwd": str(target_repo), "pr_number": 42,
             "pr_url": "https://github.com/o/r/pull/42", "plan_path": str(plan),
         },
     ]}))
@@ -343,7 +371,11 @@ def test_hold_for_pr_falls_back_to_show_toplevel_when_canonical_worktree_is_none
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"entries": [
         {
-            "id": "x-7777", "cwd": str(target_repo), "pr_number": 42,
+            "id": "x-7777",
+            "slug": "x-7777", "title": "x-7777", 
+            "type": "feature",
+            "priority": "p2",
+            "status": "idea", "cwd": str(target_repo), "pr_number": 42,
             "pr_url": "https://github.com/o/r/pull/42", "plan_path": str(plan),
         },
     ]}))
@@ -383,6 +415,10 @@ def test_hold_for_pr_still_checks_a_node_whose_stored_cwd_has_drifted(
     graph.write_text(json.dumps({"entries": [
         {
             "id": "x-6666",
+            "slug": "x-6666", "title": "x-6666", 
+            "type": "feature",
+            "priority": "p2",
+            "status": "idea",
             "cwd": "/nonexistent/stale/checkout",
             "project": "footnote",
             "pr_number": 42,
@@ -445,9 +481,9 @@ def test_hold_for_pr_refuses_on_ambiguous_pr_to_node_match(tmp_path, monkeypatch
             # Both carry pr_number 42 and no pr_url, so neither can be proven
             # foreign to this repo: a genuine ambiguity, not a cross-repo
             # collision.
-            {"id": "x-a001", "cwd": str(tmp_path), "pr_number": 42,
+            {"id": "x-a001", "slug": "x-a001", "title": "x-a001",  "type": "feature", "priority": "p2", "status": "idea", "cwd": str(tmp_path), "pr_number": 42,
              "plan_path": str(held_plan)},
-            {"id": "x-a002", "cwd": str(tmp_path), "pr_number": 42,
+            {"id": "x-a002", "slug": "x-a002", "title": "x-a002",  "type": "feature", "priority": "p2", "status": "idea", "cwd": str(tmp_path), "pr_number": 42,
              "plan_path": str(unheld_plan)},
         ],
     )

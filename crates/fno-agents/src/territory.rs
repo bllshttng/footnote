@@ -1084,7 +1084,7 @@ pub fn blueprint_feed_deliver(
         if node_id.is_empty() {
             continue;
         }
-        let ok = deliver_one(&bin, &worker_name, &node_id);
+        let (ok, receipt) = deliver_one(&bin, &worker_name, &node_id);
         if let Some(fed) = record.get_mut("fed").and_then(Value::as_object_mut) {
             fed.insert(
                 node_id.clone(),
@@ -1094,7 +1094,12 @@ pub fn blueprint_feed_deliver(
         if ok {
             delivered.push(node_id);
         } else {
-            failed.push(json!({"id": node_id, "reason": "mail send failed"}));
+            let reason = if receipt.is_empty() {
+                "mail send failed".to_string()
+            } else {
+                receipt
+            };
+            failed.push(json!({"id": node_id, "reason": reason}));
         }
     }
     write_record(config_cwd, &key, &mut record);
@@ -1110,7 +1115,10 @@ pub fn blueprint_feed_deliver(
     })
 }
 
-fn deliver_one(bin: &str, worker_name: &str, node_id: &str) -> bool {
+/// One feed idea mailed to the standing worker. Returns whether the send
+/// LANDED (exit 0 is only a queue acceptance; the receipt says which) and
+/// the receipt line for the failure record.
+fn deliver_one(bin: &str, worker_name: &str, node_id: &str) -> (bool, String) {
     use std::process::Command;
     let out = Command::new(bin)
         .args([
@@ -1122,8 +1130,16 @@ fn deliver_one(bin: &str, worker_name: &str, node_id: &str) -> bool {
         ])
         .output();
     match out {
-        Ok(o) => o.status.success(),
-        Err(_) => false,
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
+            let landed =
+                crate::mail_inject::mail_send_landed(o.status.code().unwrap_or(1), &stdout);
+            (
+                landed,
+                crate::mail_inject::mail_send_receipt(&stdout).to_string(),
+            )
+        }
+        Err(_) => (false, String::new()),
     }
 }
 
@@ -1846,5 +1862,52 @@ path = "/repo/alpha"
             .as_str()
             .unwrap()
             .contains("worker_not_live"));
+    }
+
+    #[test]
+    fn deliver_reads_the_receipt_not_the_exit_code() {
+        // AC7-HP: exit 0 on a durable queue is not a landing. The idea stays
+        // due and the failure carries the receipt, not a fixed string.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _env = env_guard();
+        std::env::set_var("FNO_CONFIG", tmp.path().join("config.toml"));
+        std::env::set_var("FNO_HOME", tmp.path());
+        let mut reg = registry_fixture();
+        reg["agents"].as_array_mut().unwrap().push(json!({
+            "name": "blueprinter-e-1-abcdef", "status": "live", "cwd": "/repo/alpha",
+            "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
+            "pid": std::process::id()
+        }));
+        let plan = tmp.path().join("idea-plan.md");
+        std::fs::write(&plan, "---\nstatus: design\n---\n").unwrap();
+        let graph = json!({"entries": [
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress", "priority": "p1"},
+            {"id": "e-1a", "parent": "e-1", "project": "alpha", "status": "idea", "priority": "p2",
+             "plan_path": plan.to_str().unwrap()}
+        ]});
+        let (_cwd, registry) = write_fixture(tmp.path(), BASE_CONFIG, graph, reg);
+        let mut rec = read_record(tmp.path(), "e-1");
+        rec["worker"] = json!({
+            "name": "blueprinter-e-1-abcdef",
+            "spawned_at": "2020-01-01T00:00:00Z"
+        });
+        write_record(tmp.path(), "e-1", &mut rec);
+        let script = tmp.path().join("mail_fno.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho 'msg-t queued (durable) [live-miss]'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out =
+            blueprint_feed_deliver(tmp.path(), &registry, "e-1", Some(script.to_str().unwrap()));
+        assert_eq!(out["action"], "deliver", "{out}");
+        let failed = out["failed"].as_array().unwrap();
+        assert_eq!(failed.len(), 1, "{out}");
+        assert_eq!(failed[0]["id"], "e-1a");
+        assert_eq!(failed[0]["reason"], "msg-t queued (durable) [live-miss]");
+        let after = read_record(tmp.path(), "e-1");
+        assert_eq!(after["fed"]["e-1a"]["ok"], json!(false), "{after}");
     }
 }

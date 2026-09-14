@@ -323,7 +323,7 @@ def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd
     legacy root-list graph.json as an empty `{"entries": []}`, which every
     later cost attribution then read as a blank board.
     """
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     if not graph_path.exists():
         # The likeliest cause is a worktree whose `.fno/` symlink was never
@@ -347,7 +347,7 @@ def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd
         return entries
 
     try:
-        locked_mutate_graph(graph_path, mutator)
+        commit_rows_via_store(graph_path, mutator)
     except SystemExit:
         # locked_mutate_graph exits on an unreadable graph. That is right for a
         # backlog command and wrong here: a corrupt graph must not take down the

@@ -6,9 +6,11 @@
 # the unblock allowlist, the plans-directory carveout, and the off knob allow
 # (AC2); a pass shape, an uncrowned row, and an unreadable registry all allow,
 # the unreadable case with a line on stderr (AC3); a Task limb of the court
-# allows via its payload agent_id or its subagents/ transcript, anything else
-# fail-closes. The registry row, reign manifest, knob and plans dir
-# are stubbed per case; no real fno state.
+# allows via its payload agent_id, its subagents/ transcript, or an open
+# Task/Agent tool_use in the parent transcript (the live claude shape),
+# anything else fail-closes; writes under the auto-memory root allow for
+# king and limb alike. The registry row, reign manifest, knob and plans
+# dir are stubbed per case; no real fno state.
 
 set -uo pipefail
 
@@ -344,6 +346,75 @@ OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
   && pass "limb: empty transcript denied" \
   || fail "limb empty rc=$RC out=${OUT:0:300}"
+
+# ── Memory carve-out: auto-memory is not implementation. The live specimen:
+# a crowned court refused a memory Write the operator asked for (measured
+# 2026-09-14). HOME is redirected so the check runs against a fixture
+# projects root.
+export HOME="$TMP/home"
+MEMPROJ="$HOME/.claude/projects/-Users-bb16-code-footnote-footnote"
+MEMDIR="$MEMPROJ/memory"
+mkdir -p "$MEMDIR"
+OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","content":"ruling"}}' "$SID" "$TMP/repo" "$MEMDIR/feedback-codex-spawns-luna-not-astra.md")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "memory: court Write of a memory note allowed" \
+  || fail "memory Write rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(edit_payload "$MEMDIR/MEMORY.md")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "memory: court Edit of MEMORY.md allowed" \
+  || fail "memory Edit rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "echo ruling >> $MEMDIR/MEMORY.md")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "memory: Bash append into MEMORY.md allowed" \
+  || fail "memory append rc=$RC out=$OUT"
+
+# A sibling in the project dir but outside memory/ is still implementation
+# surface: denied. So is a stray directly under the projects root.
+OUT="$(run_guard "$(edit_payload "$MEMPROJ/notes.md")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "memory: project-dir sibling outside memory/ denied" \
+  || fail "memory sibling rc=$RC out=${OUT:0:300}"
+
+OUT="$(run_guard "$(edit_payload "$HOME/.claude/projects/stray.md")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "memory: stray directly under projects root denied" \
+  || fail "memory stray rc=$RC out=${OUT:0:300}"
+
+# ── Third limb signature: the live claude payload carries no agent_id and its
+# transcript_path names the parent MAIN transcript (the refusal of 2026-09-14).
+# The world marker is an open Task/Agent tool_use in that transcript.
+PARENT_TRANS="$TMP/transcripts/$SID/main.jsonl"
+mkdir -p "$(dirname "$PARENT_TRANS")"
+printf '{"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_open01","name":"Agent","input":{"description":"Update codex model memory","subagent_type":"general-purpose"}}]}}\n' > "$PARENT_TRANS"
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$PARENT_TRANS")")"; RC=$?
+ERR="$(cat "$TMP/stderr.txt")"
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"limb of crowned session $SID"* ]] \
+  && pass "limb: open Agent tool_use in the parent transcript allows (live incident shape)" \
+  || fail "limb open-agent rc=$RC out=$OUT err=$ERR"
+
+# After the limb's tool_result lands, the same write is the king's again.
+printf '{"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_open01","content":"done"}]}}\n' >> "$PARENT_TRANS"
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$PARENT_TRANS")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "limb: resolved Agent tool_use denies again" \
+  || fail "limb resolved rc=$RC out=${OUT:0:300}"
+
+# A transcript with no Agent/Task tool_use at all keeps court treatment.
+printf '{"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_r1","name":"Read","input":{"file_path":"/tmp/x"}}]}}\n' > "$PARENT_TRANS"
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$PARENT_TRANS")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "limb: transcript with no spawn tool_use denied" \
+  || fail "limb no-spawn rc=$RC out=${OUT:0:300}"
+
+# An aborted spawn the king worked past has a LATER tool_use after it: it no
+# longer holds the allowance, so the write is the king's own again (denied).
+printf '{"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_open01","name":"Agent","input":{"description":"aborted"}}]}}\n{"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_r2","name":"Read","input":{"file_path":"/tmp/x"}}]}}\n' > "$PARENT_TRANS"
+OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$PARENT_TRANS")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "limb: orphaned open spawn with later tool_use denied" \
+  || fail "limb orphan rc=$RC out=${OUT:0:300}"
 
 # Positive control on the harness itself: the stub fno must be reachable and
 # the crown read live, else every "allow" above is a silent stub failure.

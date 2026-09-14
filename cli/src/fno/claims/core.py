@@ -2174,7 +2174,8 @@ def _clear_lock_mirror_for_reaped(
     """
     import sys
 
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph import api as graph_api
+    from fno.graph.store import commit_rows_via_store
     from fno.paths import graph_json
     from fno.tracker import active_backend_name
 
@@ -2190,9 +2191,13 @@ def _clear_lock_mirror_for_reaped(
     # sweep whose reaped ids match no graph row (tests, foreign repos) must
     # not take the graph lock and rewrite a file it has no change for.
     try:
+        rows = [
+            n.model_dump(by_alias=True)
+            for n in graph_api.nodes(include_archived=True, path=graph_json()).nodes
+        ]
         present = {
             e.get("id")
-            for e in read_graph(graph_json())
+            for e in rows
             if isinstance(e, dict) and e.get("id") in wanted
         }
     except Exception as exc:  # noqa: BLE001 - mirror hygiene never fails the sweep
@@ -2204,7 +2209,7 @@ def _clear_lock_mirror_for_reaped(
     def _clear(entries: list[dict]) -> list[dict]:
         from fno.claims.io import node_has_live_claim
 
-        # locked_mutate_graph re-runs the mutator on a version conflict;
+        # commit_rows_via_store re-runs the mutator on a version conflict;
         # rebuilt per attempt so retries never double-count.
         cleared.clear()
         for e in entries:
@@ -2220,7 +2225,7 @@ def _clear_lock_mirror_for_reaped(
         return entries
 
     try:
-        locked_mutate_graph(graph_json(), _clear)
+        commit_rows_via_store(graph_json(), _clear)
     except Exception as exc:  # noqa: BLE001 - mirror hygiene never fails the sweep
         print(f"claim reap: lock-mirror clear failed: {exc}", file=sys.stderr)
         return 0

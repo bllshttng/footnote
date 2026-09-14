@@ -62,6 +62,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "judge",
     "kill-check",
     "king-checkin",
+    "king-escalation-text",
     "king-history",
     "reign-ledger",
     "route-slot",
@@ -84,6 +85,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ping",
     "pr-heal",
     "probe-run",
+    "honesty-sweep",
     "prove-it-verdicts",
     "test-run",
     "promote",
@@ -310,6 +312,16 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::law_match::run_law_match(&args[1..]);
     }
 
+    // `king-escalation-text` is the hidden binary-direct transport for the
+    // king escalation renderer (x-ff27): the question/mail text renderer
+    // ported out of `fno.king.escalate`. Python keeps the question fold and
+    // the liveness read; this side only renders. Same `matches!` treatment
+    // as `law-match` so the routable-verb parity guard does not see it - no
+    // advertised fno verb is added.
+    if matches!(verb, "king-escalation-text") {
+        return fno_agents::king_escalation::run_king_escalation_text(&args[1..]);
+    }
+
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the
     // app-server `review/start` RPC is the codex counterpart of claude's
     // `--raw /code-review` (the Python raw router sends exact review verbs here;
@@ -423,6 +435,13 @@ async fn run(args: Vec<String>) -> i32 {
     // ALL_CLIENT_ACTIONS like every direct dispatch). No daemon, from cwd.
     if matches!(verb, "state") {
         return fno_agents::state_path::run(&args[1..]);
+    }
+
+    // `honesty-sweep`: declared-vs-measured sweeps over declared populations
+    // (see its own doc in honesty_sweep.rs). Direct dispatch; no daemon RPC -
+    // a sweep reads tables, manifests, or piped rows from disk.
+    if verb == "honesty-sweep" {
+        return fno_agents::honesty_sweep::run_honesty_sweep(&args[1..]);
     }
 
     // `probe-run`: see its own doc in acceptance_evidence.rs. Direct dispatch.

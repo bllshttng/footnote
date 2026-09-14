@@ -21,6 +21,7 @@ from fno.graph.store import (
     _write_json,
     locked_mutate_graph,
     read_graph,
+    render_canonical_views,
 )
 
 # Since the store port every test here rides the keeper, so the module needs
@@ -497,17 +498,22 @@ def test_touched_at_unchanged_on_blocked_node_unrelated_write(tmp_path):
     assert blocked.get("touched_at") == "2020-01-01T00:00:00+00:00"
 
 
-def test_mutate_fail_open_when_vault_root_raises(tmp_path, monkeypatch):
-    """A malformed settings file that makes vault_root() raise must not crash a
-    graph mutation (Codex P2 on PR #430): graph.json is already written, so the
+def test_render_pass_fail_open_when_vault_root_raises(tmp_path, monkeypatch):
+    """A malformed settings file that makes vault_root() raise must not crash
+    the view pass (Codex P2 on PR #430): graph.json is already written, so the
     Obsidian-gating decision falls open to no-scaffolding."""
     import fno.paths as paths_mod
+
+    import fno.graph._constants as gc
 
     def boom():
         raise RuntimeError("malformed settings")
 
     monkeypatch.setattr(paths_mod, "vault_root", boom)
     path = tmp_path / "graph.json"
+    monkeypatch.setattr("fno.paths.graph_json", lambda: path)
+    monkeypatch.setitem(vars(gc), "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setitem(vars(gc), "GRAPH_HTML", tmp_path / "graph.html")
 
     def mutator(entries):
         entries.append({"id": "ab-failopen", "title": "FailOpen"})
@@ -515,24 +521,27 @@ def test_mutate_fail_open_when_vault_root_raises(tmp_path, monkeypatch):
 
     # Must not raise despite vault_root() blowing up.
     locked_mutate_graph(path, mutator)
+    render_canonical_views()
     result = _read_json(path)
     assert any(e.get("id") == "ab-failopen" for e in result)
-    # graph.md rendered next to the json, fail-open without Obsidian frontmatter.
+    # graph.md rendered, fail-open without Obsidian frontmatter.
     md = (tmp_path / "graph.md").read_text()
     assert "kanban-plugin: board" not in md
 
 
-def test_regression_mutate_renders_siblings_not_global(tmp_path, monkeypatch):
-    """Regression: locked_mutate_graph renders graph.html/.md next to the
-    graph.json it mutated, never the global ~/.fno targets.
+def test_regression_view_pass_renders_the_store_not_global(tmp_path, monkeypatch):
+    """Regression: the view pass renders the canonical store it reads, never
+    the global ~/.fno targets.
 
     Guards the board-server bug where running the test suite clobbered the
-    real ~/.fno/graph.html (served by serve_board.py over Tailscale)
-    with single-fixture-node renders. Simulate the global location via a
-    monkeypatched state_dir; if the auto-render ever falls back to the global
+    real ~/.fno/graph.html (served by serve_board.py over Tailscale) with
+    single-fixture-node renders. Simulate the global location via a
+    monkeypatched state_dir; if the pass ever falls back to the global
     default again, the fake_home assertions below trip instead of polluting
     the developer's actual ~/.fno.
     """
+    import fno.graph._constants as gc
+
     fake_home = tmp_path / "fake_home_fno"
     fake_home.mkdir()
     monkeypatch.setattr(
@@ -542,14 +551,18 @@ def test_regression_mutate_renders_siblings_not_global(tmp_path, monkeypatch):
     graph_dir = tmp_path / "work"
     graph_dir.mkdir()
     path = graph_dir / "graph.json"
+    monkeypatch.setattr("fno.paths.graph_json", lambda: path)
+    monkeypatch.setitem(vars(gc), "GRAPH_HTML", graph_dir / "graph.html")
+    monkeypatch.setitem(vars(gc), "GRAPH_MD", graph_dir / "graph.md")
 
     def mutator(entries):
         entries.append({"id": "ab-sibling1", "title": "Sib"})
         return entries
 
     locked_mutate_graph(path, mutator)
+    render_canonical_views()
 
-    # Renders land next to the mutated graph.json.
+    # Renders land beside the canonical store the pass read.
     assert (graph_dir / "graph.html").exists()
     assert (graph_dir / "graph.md").exists()
     # The (simulated) global location is never written.
@@ -557,8 +570,9 @@ def test_regression_mutate_renders_siblings_not_global(tmp_path, monkeypatch):
 
 
 def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
-    """Mutating the canonical graph.json renders to GRAPH_HTML/GRAPH_MD (what
-    `fno backlog view` and serve_board.py read), not graph.json's siblings.
+    """A write to the canonical graph.json renders to GRAPH_HTML/GRAPH_MD
+    (what `fno backlog view` and serve_board.py read), not graph.json's
+    siblings.
 
     Covers the config.paths.graph_json override case: when the configured
     graph.json lives outside state_dir, the board targets stay in state_dir so
@@ -584,6 +598,7 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
         return entries
 
     locked_mutate_graph(graph_json, mutator)
+    render_canonical_views()
 
     # Board targets (state_dir) get the render, not graph.json's siblings.
     assert (state_dir / "graph.html").exists()
@@ -592,7 +607,7 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
 
 
 def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
-    """A mutation cannot clobber the private served board back to live-only."""
+    """A write cannot clobber the private served board back to live-only."""
     import fno.graph._constants as gc
 
     state_dir = tmp_path / "state"
@@ -615,6 +630,7 @@ def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
         graph_json,
         lambda entries: [*entries, {"id": "ab-live0001", "title": "live"}],
     )
+    render_canonical_views()
 
     assert "ARCHIVE-AUTO-RENDER-MARKER" in (state_dir / "graph.html").read_text()
 
@@ -876,6 +892,8 @@ def test_reap_open_session_record_removes_exact_open_row_with_readback(tmp_path)
         "status_before": "in_progress",
         "status_after": "in_progress",
         "remaining_open_do": 1,
+        # The keeper's receipt names the settled node on every form.
+        "node_ids": ["ab-reap0001"],
     }
     rows = json.loads(path.read_text())["entries"][0]["sessions"]
     assert [(r["harness"], r["session_id"]) for r in rows] == [("codex", "live-session")]

@@ -677,7 +677,7 @@ def _create_graph_node(
     )
     from fno.graph._intake import detect_project_from_settings
     from fno.graph.cli import _build_backlog_node, _graph_path
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     gpath = graph_path or _graph_path()
     try:
@@ -713,7 +713,7 @@ def _create_graph_node(
         entries.append(node)
         return entries
 
-    locked_mutate_graph(gpath, mutator)
+    commit_rows_via_store(gpath, mutator)
     return holder[0]
 
 

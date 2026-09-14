@@ -992,11 +992,11 @@ def status(
                 # read_ids); the seam documents a full-read fallback so a stale
                 # keeper never reads as "no entry" and skips the closed-session
                 # filter below.
-                from fno.graph.store import read_graph_strict
+                from fno.graph import api as graph_api_strict
 
                 reply = {
                     "entries": [
-                        e for e in read_graph_strict(graph_json())
+                        e for e in graph_api_strict.wire_rows(path=graph_json())
                         if isinstance(e, dict) and e.get("id") == node_id
                     ],
                 }
@@ -1341,7 +1341,7 @@ def _node_settlement(reading: Optional[RosterReading] = None):
                     cache["terminal"] = None
                     return None
                 from fno.graph.statuses import is_terminal_entry
-                from fno.graph.store import read_graph
+                from fno.graph import api as graph_api
                 from fno.paths import graph_json
 
                 # is_terminal_entry, not a bare completed_at test: read_graph
@@ -1349,7 +1349,12 @@ def _node_settlement(reading: Optional[RosterReading] = None):
                 # "deferred:<ts>" row still carries deferral inside
                 # completed_at, and deferral is a returnable rung.
                 cache["terminal"] = frozenset(
-                    e.get("id") for e in read_graph(graph_json()) if is_terminal_entry(e)
+                    e.get("id")
+                    for e in (
+                        n.model_dump(by_alias=True)
+                        for n in graph_api.nodes(include_archived=True, path=graph_json()).nodes
+                    )
+                    if is_terminal_entry(e)
                 )
             except Exception:  # noqa: BLE001 - an unreadable graph proves nothing
                 cache["terminal"] = None

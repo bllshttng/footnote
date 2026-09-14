@@ -293,6 +293,11 @@ pub fn api_version(graph: &Path) -> Result<i64, String> {
             .parse::<i64>()
             .map_err(|error| format!("api_version is not an integer: {error}")),
         Ok(None) => Ok(0),
+        // A db created but not yet committed (another thread or process is
+        // inside open()'s DDL) has no graph_meta yet: the probe reads 0, the
+        // same answer an absent db gives, and the creator's commit lands on
+        // the next read.
+        Err(error) if error.contains("no such table") => Ok(0),
         Err(error) => Err(error),
     }
 }
@@ -306,6 +311,25 @@ fn stamp_meta(connection: &Connection, key: &str, value: &str) -> Result<(), Str
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// The last store version the canonical view pass rendered (graph_meta of
+/// the shadow db, which both backends maintain). `None` = nothing rendered
+/// since the counter was born, so the next settled trigger owes a render.
+pub fn rendered_version(graph: &Path) -> Result<Option<String>, String> {
+    if !database_path(graph).exists() {
+        return Ok(None);
+    }
+    let connection = open(graph)?;
+    meta(&connection, "rendered_version")
+}
+
+/// Stamp the rendered marker. The render trigger's own bookkeeping: it runs
+/// on the keeper's render thread, outside any mutation, so this writes meta
+/// directly, the same lane `export_now`'s stamp uses.
+pub fn set_rendered_version(graph: &Path, value: &str) -> Result<(), String> {
+    let connection = open(graph)?;
+    stamp_meta(&connection, "rendered_version", value)
 }
 
 /// The relational shadow write: only the ids whose canonical JSON differs

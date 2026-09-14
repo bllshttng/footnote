@@ -342,7 +342,7 @@ def _default_link(node_id: str, owner_id: str) -> None:
     a missing endpoint skips rather than dangles.
     """
     from fno.graph.cli import _graph_path
-    from fno.graph.store import locked_mutate_graph, set_related
+    from fno.graph.store import commit_rows_via_store, set_related
 
     def mutator(es: list[dict]) -> list[dict]:
         if not any(e.get("id") == owner_id for e in es):
@@ -354,7 +354,7 @@ def _default_link(node_id: str, owner_id: str) -> None:
         set_related(es, node_id, desired)
         return es
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
 
 
 def sweep_carveouts(

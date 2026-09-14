@@ -123,3 +123,39 @@ pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<SessionRecord>
     }
     Ok(out)
 }
+
+/// Fill ONE open window on a RAW entry's sessions rows: for callers whose
+/// entry the typed model refused but that still owes its close. The caller
+/// names the window it is settling; returns whether any row closed.
+pub fn fill_open_window_raw(
+    entry: &mut Value,
+    session_id: &str,
+    phase: Option<&str>,
+    harness: Option<&str>,
+    ended_at: &str,
+    ended_by: &str,
+) -> bool {
+    let Some(list) = entry.get_mut("sessions").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut closed = false;
+    for record in list.iter_mut() {
+        let Some(obj) = record.as_object_mut() else {
+            continue;
+        };
+        if obj.get("session_id").and_then(Value::as_str) == Some(session_id)
+            && obj.get("ended_at").and_then(Value::as_str).is_none()
+            && phase.map_or(true, |want| {
+                obj.get("phase").and_then(Value::as_str) == Some(want)
+            })
+            && harness.map_or(true, |want| {
+                obj.get("harness").and_then(Value::as_str) == Some(want)
+            })
+        {
+            obj.insert("ended_at".into(), Value::String(ended_at.to_string()));
+            obj.insert("ended_by".into(), Value::String(ended_by.to_string()));
+            closed = true;
+        }
+    }
+    closed
+}

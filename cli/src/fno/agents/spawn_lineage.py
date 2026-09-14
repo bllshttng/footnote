@@ -88,13 +88,10 @@ from fno.agents.spawn_phase import infer_phase as _infer_phase  # noqa: E402
 def _resolve_spawn_merge_grant(message: str) -> dict:
     """The spawner's OWN merge-grant verdict for a do-phase worker.
 
-    Explicit refusal first (the message carries --no-merge), then the standing
-    config: auto_merge enabled with grant=dispatch grants, and every other
-    shape records an explicit false anyway. Recording the false - rather than
-    omitting the grant - is what makes AC9-EDGE work (a newer refusal outranks
-    an older grant at resolve time, because the newest RECEIPT wins) and keeps
-    the verdict the spawner's own observation: a worker can never mint or
-    rewrite it, and absence on a row this old predating the field reads as
+    Explicit refusal first (--no-merge), then the standing config. Recording
+    the false - rather than omitting the grant - is what makes AC9-EDGE work
+    (the newest RECEIPT wins at resolve time), keeps the verdict the
+    spawner's own observation, and makes a predating absence read as
     "nobody resolved", never as a grant.
     """
     from datetime import datetime, timezone
@@ -239,8 +236,7 @@ def _stamp_launch_edge(node: "str | None") -> None:
 
     The sibling of :func:`_stamp_spawned_session_row`, which records who WORKED
     it. Refuses rather than half-writes: no node, no write; no proven parent
-    session, no write; never overwrites an existing edge, because launch is the
-    FIRST launch. Never raises. Why: docs/architecture/node-provenance.md.
+    session, no write; launch is the FIRST launch, never overwritten.
     """
     if not node:
         return
@@ -248,11 +244,11 @@ def _stamp_launch_edge(node: "str | None") -> None:
     if not session_id:
         return
 
-    # Read before paying the locked write; the sibling stamp already spends a
-    # keeper cycle here. Say when nothing was written, or a graph missing the
-    # node commits an unchanged snapshot and exits 0.
+    # Read before paying the locked write; say when nothing was written, or
+    # a graph missing the node commits an unchanged snapshot and exits 0.
     try:
-        from fno.graph.store import locked_mutate_graph, read_graph
+        from fno.graph.api import wire_rows
+        from fno.graph.store import commit_rows_via_store
         from fno.paths import graph_json
         from fno.tracker import active_backend_name
 
@@ -260,14 +256,15 @@ def _stamp_launch_edge(node: "str | None") -> None:
             # Under an external tracker this graph.json is not the record.
             return
 
-        existing = next((r for r in read_graph() if r.get("id") == node), None)
+        existing = next((r for r in wire_rows(path=graph_json()) if r.get("id") == node), None)
         if existing is None:
             print(f"spawn: launch edge not recorded on {node} (node not in graph); "
                   f"the edge was not written. Skipped.", file=sys.stderr)
             return
         if existing.get("spawned_by_session"):
-            print(f"spawn: launch edge on {node} already names "
-                  f"{existing['spawned_by_session']}; kept.", file=sys.stderr)
+            who = existing["spawned_by_session"]
+            print(f"spawn: launch edge on {node} already names {who}; kept.",
+                  file=sys.stderr)
             return
 
         def mutator(entries: "list[dict]") -> "list[dict]":
@@ -281,7 +278,7 @@ def _stamp_launch_edge(node: "str | None") -> None:
                 row["spawned_by_cwd"] = parent_cwd
             return entries
 
-        locked_mutate_graph(graph_json(), mutator)
+        commit_rows_via_store(graph_json(), mutator)
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
         print(f"spawn: launch edge not recorded on {node}: {exc}", file=sys.stderr)
 

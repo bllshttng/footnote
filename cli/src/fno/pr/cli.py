@@ -941,7 +941,7 @@ def closure_trailer(
         "contained_in descendants (repeatable).",
     ),
 ) -> None:
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
     from fno.paths import graph_json
     from fno.pr.closure import render_pr_closure_trailer
     from fno.tracker import active_backend_name
@@ -955,7 +955,7 @@ def closure_trailer(
         return
 
     try:
-        entries = read_graph(graph_json())
+        entries = wire_rows(path=graph_json())
     except Exception:
         return
     # render_pr_closure_trailer silently drops a malformed id with no other

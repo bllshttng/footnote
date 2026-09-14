@@ -35,13 +35,16 @@ def contradictory_graph(tmp_path, monkeypatch):
     g = tmp_path / "graph.json"
     g.write_text(
         json.dumps({"entries": [
-            {"id": "N-1", "pr_number": 999, "pr_url": "https://graph/999",
+            {"id": "n-000001", "title": "n-000001",
+             "pr_number": 999, "pr_url": "https://graph/999",
              "cwd": "/graph-cwd", "size": "GRAPH-SIZE", "source_cwd": "/graph-src",
-             "slug": "graph-slug-1", "type": "epic", "project": "graph-proj",
+             "slug": "graph-slug-1", "type": "epic", "priority": "p2",
+             "status": "idea", "project": "graph-proj",
              "mission_active": True, "session_id": "sess-graph"},
-            {"id": "N-2", "pr_number": 999, "pr_url": "https://graph/999b",
+            {"id": "n-000002", "pr_number": 999, "pr_url": "https://graph/999b",
              "cwd": "/graph-cwd", "size": None, "type": "feature",
-             "mission_active": False},
+             "priority": "p2", "status": "idea", "slug": "graph-slug-2",
+             "title": "n-000002", "mission_active": False},
         ]}),
         encoding="utf-8",
     )
@@ -61,9 +64,9 @@ def _write_sidecar(sidecars: Path, id: str, **fields) -> None:
 
 def test_pr_scan_class_reads_sidecar_not_graph(external_store, contradictory_graph):
     """Reader class: scan-by-PR (mail job addressing, pr merge node resolve)."""
-    _write_sidecar(external_store, "N-1", pr_number=7,
+    _write_sidecar(external_store, "n-000001", pr_number=7,
                    pr_url="https://ext/7", cwd="/ext-cwd")
-    _write_sidecar(external_store, "N-2",
+    _write_sidecar(external_store, "n-000002",
                    additional_prs=[{"number": 7, "url": "https://ext/7b"}])
     _write_sidecar(external_store, "N-3", pr_number=None)
 
@@ -72,7 +75,7 @@ def test_pr_scan_class_reads_sidecar_not_graph(external_store, contradictory_gra
     ids = _node_ids_for_pr(7)
     # Both PR-bearing sidecars found (primary + additional); the graph's 999s
     # are invisible, and a PR the store does not carry resolves to nothing.
-    assert set(ids) == {"N-1", "N-2"}
+    assert set(ids) == {"n-000001", "n-000002"}
     assert _node_ids_for_pr(999) == []
 
 
@@ -81,14 +84,14 @@ def test_pr_node_resolver_runs_over_sidecar_rows(external_store, contradictory_g
     from fno.pr._merge import _find_pr_node_id
     from fno.tracker import sidecar as sidecar_store
 
-    _write_sidecar(external_store, "N-1", pr_number=7, pr_url="https://ext/7")
+    _write_sidecar(external_store, "n-000001", pr_number=7, pr_url="https://ext/7")
     rows = [
         {"id": nid, "pr_number": sc.pr_number, "pr_url": sc.pr_url,
          "additional_prs": sc.additional_prs}
         for nid, sc in sidecar_store.load_all().items()
     ]
     # Url match resolves through the sidecar sentinel, not the graph's 999.
-    assert _find_pr_node_id(rows, 7, "https://ext/7") == "N-1"
+    assert _find_pr_node_id(rows, 7, "https://ext/7") == "n-000001"
     # The graph-only number never resolves.
     assert _find_pr_node_id(rows, 999, "https://graph/999") is None
 
@@ -97,7 +100,7 @@ def test_cwd_roots_scan_reads_sidecar(external_store, contradictory_graph, tmp_p
     """Reader class: cwd/source_cwd root scan (outstanding capture collection)."""
     live = tmp_path / "live-root"
     live.mkdir()
-    _write_sidecar(external_store, "N-1", cwd=str(live), source_cwd="/absent")
+    _write_sidecar(external_store, "n-000001", cwd=str(live), source_cwd="/absent")
     from fno.outstanding.core import _capture_project_roots
 
     roots = _capture_project_roots(tmp_path)
@@ -148,9 +151,9 @@ def test_metadata_class_guards_external(external_store, contradictory_graph):
         ]
 
     assert _active_missions() == []
-    assert _graph_entry("N-1") is None
-    assert _default_node_resolver("N-1") is None
-    assert _slug_for_node("N-1") == ""
+    assert _graph_entry("n-000001") is None
+    assert _default_node_resolver("n-000001") is None
+    assert _slug_for_node("n-000001") == ""
 
 
 def test_metadata_class_reads_graph_backend(contradictory_graph, monkeypatch):
@@ -168,11 +171,11 @@ def test_metadata_class_reads_graph_backend(contradictory_graph, monkeypatch):
         e["id"]
         for e in rows
         if isinstance(e, dict) and e.get("mission_active") is True
-    ] == ["N-1"]
-    assert _graph_entry("N-2")["type"] == "feature"
-    assert _graph_entry("N-1")["project"] == "graph-proj"
-    assert _slug_for_node("N-1") == "graph-slug-1"
-    assert _default_node_resolver("N-1") == "sess-graph"
+    ] == ["n-000001"]
+    assert _graph_entry("n-000002")["type"] == "feature"
+    assert _graph_entry("n-000001")["project"] == "graph-proj"
+    assert _slug_for_node("n-000001") == "graph-slug-1"
+    assert _default_node_resolver("n-000001") == "sess-graph"
     assert _default_node_resolver("graph-slug-1") == "sess-graph"
 
 
@@ -183,18 +186,21 @@ def test_graph_mode_scans_project_from_the_store(tmp_path, monkeypatch):
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
     g = tmp_path / "graph.json"
     g.write_text(json.dumps({"entries": [
-        {"id": "ab-1", "pr_number": 42, "cwd": "/repo", "size": "L"},
-        {"id": "ab-2"},
+        {"id": "ab-00000001", "slug": "ab-00000001", "title": "ab-00000001", "type": "feature",
+         "priority": "p2", "status": "idea", "pr_number": 42, "cwd": "/repo",
+         "size": "L"},
+        {"id": "ab-00000002", "slug": "ab-00000002", "title": "ab-00000002", "type": "feature",
+         "priority": "p2", "status": "idea"},
     ]}), encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
 
     from fno.mail.job_address import _node_ids_for_pr
     from fno.tracker import sidecar as sidecar_store
 
-    assert _node_ids_for_pr(42) == ["ab-1"]
+    assert _node_ids_for_pr(42) == ["ab-00000001"]
     all_loaded = sidecar_store.load_all()
-    assert all_loaded["ab-1"].cwd == "/repo"
+    assert all_loaded["ab-00000001"].cwd == "/repo"
     # The size pin is footnote-minted metadata, NOT a sidecar field: the
     # projection must not carry it even though the entry does.
-    assert "size" not in type(all_loaded["ab-1"]).model_fields
-    assert all_loaded["ab-2"].pr_number is None
+    assert "size" not in type(all_loaded["ab-00000001"]).model_fields
+    assert all_loaded["ab-00000002"].pr_number is None

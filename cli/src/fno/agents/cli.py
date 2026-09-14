@@ -1034,6 +1034,7 @@ def _parse_wait_seconds(raw: str) -> float:
 
 @agents_app.command("spawn")
 def cmd_spawn(
+    ctx: typer.Context,
     message: str = typer.Argument("", help="The prompt to seed the worker with."),
     passthrough: list[str] | None = typer.Argument(
         None,
@@ -1385,6 +1386,7 @@ def cmd_spawn(
     daemon; this Python path exits 13 with guidance. Flag reference:
     docs/guides/agents-spawn-flags.md.
     """
+    pane = ctx.meta.get("fno_spawn_existing_pane")
     # --squad is a hidden back-compat alias for --workspace (US2); --workspace wins.
     squad = squad if squad is not None else squad_compat
 
@@ -1518,7 +1520,7 @@ def cmd_spawn(
         defaulted = True
         pane_implied = bool(
             passthrough or split or at or tab or bounded_placement or squad
-            or monitor is not None or uncarried is not None
+            or pane is not None or monitor is not None or uncarried is not None
         )
         try:
             seatable = thread_seatable(harness)
@@ -1685,6 +1687,19 @@ def cmd_spawn(
             raise typer.Exit(code=2)
 
     from fno.agents.spawn_defaults import placement_refusal
+
+    if pane is not None:
+        from fno.agents.mux_spawn import pane_placement_conflict
+
+        if conflict := pane_placement_conflict(
+            pane, workspace=squad, split=split, at=at, tab=tab,
+            bounded=bounded_placement,
+        ):
+            print(conflict, file=sys.stderr)
+            raise typer.Exit(code=2)
+        if substrate != "pane" or once:
+            print("--pane applies only to --substrate pane (thread/headless have no existing mux pane target)", file=sys.stderr)
+            raise typer.Exit(code=2)
 
     refusal = placement_refusal(
         substrate=substrate, once=once, squad=squad, split=split, at=at,
@@ -2359,6 +2374,7 @@ def cmd_spawn(
                     split=split,
                     at=at,
                     tab=tab,
+                    pane=pane,
                     bounded_placement=bounded_placement,
                     crown_level=crown_level,
                     crown_scope=crown_scope,

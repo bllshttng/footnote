@@ -82,14 +82,14 @@ GRAPH_JSON="$TMP/graph.json" run_test "pass-through: description" 0 "add login f
 GRAPH_JSON="$TMP/graph.json" run_test "resolve: known ID -> plan_path" 0 "internal/plans/foo.md" "" resolve_arg "ab-12345678"
 
 # 4. unknown ID soft-fails (echoes arg + stderr warning)
-GRAPH_JSON="$TMP/graph.json" run_test "unknown ID soft-fails" 0 "ab-deadbeef" "unknown id" resolve_arg "ab-deadbeef"
+GRAPH_JSON="$TMP/graph.json" run_test "unknown ID soft-fails" 0 "ab-deadbeef" "no match for" resolve_arg "ab-deadbeef"
 
 # 5. unknown ID under RESOLVE_STRICT=1 returns nonzero
 tmpstderr5=$(mktemp)
 got5=$(RESOLVE_STRICT=1 GRAPH_JSON="$TMP/graph.json" resolve_arg "ab-deadbeef" 2>"$tmpstderr5")
 rc5=$?
 err5=$(cat "$tmpstderr5"); rm -f "$tmpstderr5"
-if [[ "$rc5" -ne 0 && "$err5" =~ unknown\ id ]]; then
+if [[ "$rc5" -ne 0 && "$err5" =~ no\ match\ for ]]; then
     pass "strict mode: unknown ID exits nonzero"
 else
     fail "strict mode: unknown ID exits nonzero" "rc=$rc5 stdout=$got5 stderr=$err5"

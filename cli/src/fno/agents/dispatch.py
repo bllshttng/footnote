@@ -6507,6 +6507,8 @@ def _mail_inject_claude(
         str(binary), "mail-inject", "--session", recipient,
         "--enter-delay-ms", str(enter_delay_ms),
     ]
+    if harness and harness != "claude":
+        argv += ["--harness", harness]
     if sender:
         argv += ["--sender", sender]
     if origin:
@@ -7268,11 +7270,9 @@ def _deliver_live(
             reason_out=reason_out,
         )
 
-    # Route key is the canonical harness, legacy provider as fallback (x-ec59):
-    # an unknown harness with no inject lane (e.g. opencode) falls through to the
-    # daemon deliver RPC by name and demotes to durable cleanly (never a KeyError).
+    # Route key is the canonical harness; opencode uses the shared attach writer.
     route_harness = entry.harness
-    if route_harness != "claude":
+    if route_harness not in ("claude", "opencode"):
         # Route codex/gemini through the daemon deliver RPC (now <fno_mail>-wrapped).
         result = _daemon_rpc(
             "agent.deliver",

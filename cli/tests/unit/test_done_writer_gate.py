@@ -28,6 +28,10 @@ def _seed_graph(home: Path, *, plan_path: str) -> Path:
                 "entries": [
                     {
                         "id": "x-fixture",
+                        "slug": "x-fixture",
+                        "title": "x-fixture",
+                        "type": "feature",
+                        "priority": "p2",
                         "plan_path": plan_path,
                         "pr_number": 505,
                         "status": "in_review",
@@ -128,7 +132,13 @@ def done_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _seed(g: Path, entry: dict) -> None:
-    g.write_text(json.dumps({"entries": [entry]}, indent=2) + "\n")
+    row = {"type": "feature", "priority": "p2", "status": "idea", **entry}
+    # The store derives done from completed_at on every write.
+    if row["status"] == "done" and not row.get("completed_at"):
+        row["completed_at"] = "2026-09-01T00:00:00Z"
+    row.setdefault("title", entry.get("id", "node"))
+    row.setdefault("slug", entry.get("id", "node"))
+    g.write_text(json.dumps({"entries": [row]}, indent=2) + "\n")
 
 
 def _node(g: Path, node_id: str) -> dict:

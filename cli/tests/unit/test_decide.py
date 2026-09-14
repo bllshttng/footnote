@@ -2655,7 +2655,9 @@ def test_a_corrupt_graph_does_not_produce_a_receipt_that_lies(
 
     res = runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold"])
     assert res.exit_code == 0, res.output
-    assert "the graph could not be read" in res.output
+    # The degrade warning prints on stderr; click 8.2's runner keeps the
+    # streams apart, so the assertion reads both.
+    assert "the graph could not be read" in res.output + (res.stderr or "")
 
 
 def test_one_id_is_one_row_even_if_the_index_holds_it_twice(

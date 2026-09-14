@@ -34,9 +34,12 @@ def _node(node_id: str, **overrides) -> dict:
         "pr_number": None,
         "pr_url": None,
         "status": "ready",
+        "plan_path": "plans/x.md",
         "created_at": "2026-01-01T00:00:00+00:00",
     }
     base.update(overrides)
+    if base["status"] == "done":
+        base.setdefault("completed_at", "2026-08-01T00:00:00+00:00")
     return base
 
 

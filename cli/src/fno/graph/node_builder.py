@@ -346,7 +346,8 @@ def cmd_new(
         normalize_difficulty,
     )
     from fno.graph.fuzzy import suggest_domain
-    from fno.graph.store import read_graph, locked_mutate_graph
+    from fno.graph.api import wire_rows
+    from fno.graph.store import commit_rows_via_store
 
     try:
         validate_source_kind(source_kind)
@@ -364,7 +365,7 @@ def cmd_new(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2)
 
-    entries = read_graph(_graph_path())
+    entries = wire_rows(path=_graph_path())
 
     if not force_domain:
         sugg = suggest_domain(domain, entries)
@@ -432,7 +433,7 @@ def cmd_new(
         es.append(node)
         return es
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
 
     # Filing-time dedup net (plan x-6ac7): `fno backlog new` is a reachable plan-less
     # birth path with its own mutator, so it gets the same post-write warn as
@@ -442,7 +443,7 @@ def cmd_new(
         try:
             from fno.graph._intake import _find_node, _warn_similar_nodes
 
-            post_entries = read_graph(_graph_path())
+            post_entries = wire_rows(path=_graph_path())
             node = _find_node(post_entries, new_id_holder[0] or "")
             if node is not None:
                 _warn_similar_nodes(node, post_entries, intake_hint=False)

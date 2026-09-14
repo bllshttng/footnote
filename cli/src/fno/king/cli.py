@@ -792,7 +792,7 @@ def escalate_cmd(
     except Exception:  # noqa: BLE001 - an unresolvable session never blocks the ask
         session_id = None
     # The caller's own liveness, read not asserted: unknown reads as dead
-    # inside question_text, with the reason named.
+    # in the renderer, with the reason named.
     try:
         state = reign_state(session_id=session_id)
         live, unknown_reason = state.live, state.unknown_reason
@@ -832,7 +832,7 @@ def drain_cmd(
     nonzero on purpose - a walk that cannot see the scope must not read the
     failure as drained.
     """
-    from fno.graph.store import GraphUnreadableError, StoreUnavailable
+    from fno.graph.store import GraphCorruptError, GraphUnreadableError, StoreUnavailable
     from fno.king import drain_cache
     from fno.king.scope import scope_undelivered
     from fno.tracker import active_backend_name
@@ -852,7 +852,7 @@ def drain_cmd(
         entries = read_entries("king drain", strict=True)
         undelivered = scope_undelivered(scope, entries)
     except (
-        ExternalMetadataUnavailable, GraphUnreadableError, StoreUnavailable, ValueError
+        ExternalMetadataUnavailable, GraphCorruptError, GraphUnreadableError, StoreUnavailable, ValueError
     ) as exc:
         typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
         raise typer.Exit(1) from exc

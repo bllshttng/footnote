@@ -545,8 +545,8 @@ def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:
     """
     from fno.claims.core import list_claims
     from fno.claims.lanes import LANE_HOLDER_PREFIX, LANE_SLOT_PREFIX
+    from fno.graph.api import wire_rows
     from fno.graph.collision import has_file_surface, resolve_plan_path
-    from fno.graph.store import read_graph
     from fno.paths import graph_json
 
     held: set[str] = set()
@@ -561,7 +561,7 @@ def _live_worked_entries(claims_root: Optional[Path] = None) -> list[dict]:
     if not held:
         return []
     entries = [
-        e for e in read_graph(graph_json())
+        e for e in wire_rows(path=graph_json())
         if e.get("id") in held and e.get("plan_path")
     ]
     # A comparator with no readable surface is skipped inside find_collisions,
@@ -2520,16 +2520,16 @@ def join_node(
 def _join_node(
     node_id: str, workers: Optional[int] = None, *, model: Optional[str] = None
 ) -> dict:
+    from fno.graph.api import wire_rows
     """Spawn width-bounded joiners into a held node's worktree (x-8d1d).
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.claims.core import claim_status
     from fno.graph.collision import resolve_plan_path
-    from fno.graph.store import read_graph
     from fno.paths import graph_json
 
-    entry = next((e for e in read_graph(graph_json()) if e.get("id") == node_id), None)
+    entry = next((e for e in wire_rows(path=graph_json()) if e.get("id") == node_id), None)
     if entry is None:
         raise JoinRefuse(2, f"no graph node {node_id}")
     plan_raw = entry.get("plan_path")
@@ -3460,6 +3460,7 @@ def advance(
 
 
 def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> list[dict]:
+    from fno.graph.api import wire_rows
     """Ready, direct ``blocked_by`` dependents of the closed node.
 
     Reads the graph (``read_graph`` recomputes ``status`` at read), so a
@@ -3478,11 +3479,10 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     graph read error so advance_dependents skips rather than guessing (Failure
     Modes: Errors).
     """
-    from fno.graph.store import read_graph
     from fno.paths import graph_json
     from fno.graph.ladder import is_cold_dispatchable
 
-    entries = read_graph(graph_json())
+    entries = wire_rows(path=graph_json())
     # Containers are never dispatched as workers (x-33b2): a dependent that is
     # itself some other node's `parent` is an epic, and `/target` builds its
     # leaves, not the box. Mirror cmd_next's `_pick_ready` exclusion on this
@@ -3504,13 +3504,10 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
             continue
         if closed_node_id not in (e.get("blocked_by") or []):
             continue
-        # "now-unblocked" == ready OR a plan-less idea (x-e24a): blocker done + no
-        # other open blocker. A still-blocked dependent reads `blocked` (status
-        # derivation resolves an unresolved blocker to blocked, never idea), so an
-        # idea-status dependent is genuinely unblocked and cold-dispatchable; a
-        # claimed/done/deferred one reads its own bucket. A linked-but-undesigned
-        # stub (Rung.IDEA) is filtered out by is_cold_dispatchable's rung check.
-        if e.get("status") != "ready" and not is_cold_dispatchable(e):
+        # "now-unblocked" == ready OR a plan-less idea (x-e24a). The stored
+        # status is the honest readiness: the derived view still reads
+        # `blocked` from the blocked_by edge the close just satisfied.
+        if (e.get("persisted_status") or e.get("status")) != "ready" and not is_cold_dispatchable(e):
             continue
         if selection_guards(e, by_id, staleness_days=staleness_days):
             continue  # dead-ancestor or stale-quarantine - do not revive
@@ -3548,6 +3545,7 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
 
 
 def _project_unblocked(node_ids: list[str]) -> None:
+    from fno.graph.api import wire_rows
     """Best-effort graph->doc projection for the given ids (advance's unblocked
     dependents). Reads the graph fresh and calls the shared converger directly
     (never imports graph.cli). Never raises: a projection failure must not block
@@ -3555,11 +3553,10 @@ def _project_unblocked(node_ids: list[str]) -> None:
     if not node_ids:
         return
     try:
-        from fno.graph.store import read_graph
         from fno.paths import graph_json
         from fno.plan._project import project_graph_nodes
 
-        project_graph_nodes(read_graph(graph_json()), node_ids)
+        project_graph_nodes(wire_rows(path=graph_json()), node_ids)
     except Exception as exc:  # noqa: BLE001 - convergence, never fatal
         sys.stderr.write(f"warning: unblocked-dependent projection failed: {exc}\n")
 
@@ -4207,12 +4204,12 @@ def _spawn_headroom(provider: Optional[str] = None) -> int:
 def _set_mission_active(epic_id: str, active: bool) -> bool:
     """Set/clear the epic's ``mission_active`` graph field. Returns whether it changed.
 
-    One locked graph mutation via locked_mutate_graph (never a direct Edit/Write -
+    One locked graph mutation via commit_rows_via_store (never a direct Edit/Write -
     the HARD-GATE). Idempotent: setting an already-active mission (or clearing an
     inactive one) is a no-op that returns False.
     """
     from fno.graph._intake import _find_node
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.paths import graph_json
 
     changed = [False]
@@ -4230,7 +4227,7 @@ def _set_mission_active(epic_id: str, active: bool) -> bool:
             changed[0] = True
         return entries
 
-    locked_mutate_graph(graph_json(), mutator)
+    commit_rows_via_store(graph_json(), mutator)
     return changed[0]
 
 
@@ -4247,6 +4244,7 @@ def advance_epic(
     continuation: bool = False,
     source: Optional[str] = None,
 ) -> AdvanceEpicResult:
+    from fno.graph.api import wire_rows
     """Advance (or stop) an epic mission: mark active + converge pass 1.
 
     Refuses a non-container node by name (an epic's work is its children, never
@@ -4268,11 +4266,10 @@ def advance_epic(
     ev_path = events_path if events_path is not None else _events_path(project_root)
 
     from fno.graph._intake import _find_node, descendants_of
-    from fno.graph.store import read_graph
     from fno.paths import graph_json
 
     try:
-        entries = read_graph(graph_json())
+        entries = wire_rows(path=graph_json())
     except Exception as exc:  # noqa: BLE001 - a graph read fault skips cleanly
         return AdvanceEpicResult(epic_id, error=f"graph-error: {str(exc)[:120]}")
 

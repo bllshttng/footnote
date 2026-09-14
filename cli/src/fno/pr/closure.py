@@ -145,7 +145,7 @@ def known_node_ids() -> frozenset[str]:
     at merge, so the real node never closes and nothing says so.
     """
     try:
-        from fno.graph.store import read_graph
+        from fno.graph import api as graph_api
         from fno.paths import graph_json
         from fno.tracker import active_backend_name
 
@@ -156,7 +156,10 @@ def known_node_ids() -> frozenset[str]:
             return frozenset()
         return frozenset(
             e["id"]
-            for e in read_graph(graph_json())
+            for e in (
+                n.model_dump(by_alias=True)
+                for n in graph_api.nodes(include_archived=True, path=graph_json()).nodes
+            )
             if isinstance(e, dict) and isinstance(e.get("id"), str)
         )
     except Exception as exc:
@@ -458,7 +461,7 @@ def bind_created_pr_from_branch(
     A caller holding an authoritative ``node_id`` skips branch resolution
     entirely; the branch lookup below is the fallback for callers that do not.
     """
-    from fno.graph.store import locked_mutate_graph, read_graph_strict
+    from fno.graph.store import commit_rows_via_store, read_graph_strict
     from fno.paths import graph_json
     from fno.tracker import active_backend_name
 
@@ -502,5 +505,5 @@ def bind_created_pr_from_branch(
         ))
         return entries
 
-    locked_mutate_graph(path, _mutate)
+    commit_rows_via_store(path, _mutate)
     return box[0]

@@ -92,6 +92,7 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
     {
         "--role", "--resume", "-r", "--add-dir", "--agent", "--tools",
         "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x", "--tab",
+        "--pane",
         "--node", "--slug", "--plan", "--name", "--recorded-provider",
         # x-6de8: --route/--account/--crown were absent, so their VALUES read as
         # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
@@ -115,6 +116,28 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         "--mux-session",
     }
 )
+
+
+def extract_existing_pane(args: Sequence[str]) -> tuple[List[str], Optional[int]]:
+    """Remove fno's control-plane pane target before Typer parses."""
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in ("--argv", "--"):
+            return list(args), None
+        key, equals, raw = token.partition("=")
+        if key == "--pane":
+            if not equals:
+                raw = args[index + 1] if index + 1 < len(args) else ""
+            try:
+                pane = int(raw)
+            except ValueError as exc:
+                raise ValueError(f"--pane needs an integer pane id, got {raw!r}") from exc
+            out = list(args)
+            del out[index:index + (1 if equals else 2)]
+            return out, pane
+        index += 1 + (not equals and token in _SPAWN_VALUE_FLAGS)
+    return list(args), None
 
 # Tokens that pin the substrate explicitly (a positional substrate word conflicts
 # with any of these -> exit 2). `--headless`/`-p` and `-o/--once` mean headless;

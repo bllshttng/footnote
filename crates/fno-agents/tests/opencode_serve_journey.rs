@@ -1,17 +1,10 @@
-//! The unattended journey for opencode's serve lane. It covers the LAUNCH
-//! half: boot the shared serve, dispatch a worker (session mint, permission
-//! grant, registry row, detached `run --attach` writer), wait for the turn to
-//! complete by polling the structured message readback, and assert the
-//! receipt's claims against the server. Cleanup deletes the session and stops
-//! the private serve.
+//! The unattended journey for opencode's serve lane. It covers launch,
+//! attach-writer steering, structured readback, and session liveness after the
+//! writer exits. Cleanup deletes the session and stops the private serve.
 //!
-//! It does NOT cover the steps the `thread` bit asserts
-//! (docs/architecture/codex-thread-driver.md, "What earns the bit"):
-//! server-kill survival, cold-process resume with a recalled token, the
-//! review lane, viewport selection - and steering (`ask`, mail inject) is
-//! refused until the HTTP steering lane ships. That is why the bit reads
-//! false: this journey proves the launch half only, and extending it to the
-//! full bar is what flips the bit back.
+//! Server-kill survival, review-lane selection, and viewport materialisation
+//! remain separate environment checks. They must not be inferred from a
+//! successful launch or a non-empty reply.
 //!
 //! Opt-in: runs only when `FNO_JOURNEY_OPENCODE=1` AND an `opencode` binary is
 //! on PATH (CI has neither - x-9a96). The live run against opencode 1.14.50 +
@@ -20,6 +13,7 @@
 
 use fno_agents::opencode_serve::{
     delete_session, dispatch_opencode_serve, ensure_serve, fetch_messages, fetch_session,
+    steer_existing_session,
 };
 use fno_agents::paths::AgentsHome;
 use fno_agents::state::load_registry;
@@ -170,6 +164,8 @@ fn opencode_bg_worker_completes_unattended_over_serve() {
     let row = reg.find("wk-journey").expect("registry row");
     assert_eq!(row.harness.as_deref(), Some("opencode"));
     assert_eq!(row.harness_session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(row.substrate.as_deref(), Some("thread"));
+    assert!(row.pid.is_none(), "writer pid is not session liveness");
 
     // Structured capture is the SERVE's message readback, not the writer's
     // stdout (the attach writer prints nothing - verified live). The readback
@@ -214,6 +210,42 @@ fn opencode_bg_worker_completes_unattended_over_serve() {
             .exists(),
         "writer log file missing"
     );
+
+    // Steering reuses the launch writer and confirms a new serve message by
+    // id. The recalled token is the positive session marker for the second
+    // turn; a merely non-empty reply would only prove transport.
+    let recalled = "serve-session-recall-efa4";
+    let steer_id = steer_existing_session(
+        &home,
+        &session_id,
+        &format!("Remember this token exactly: {recalled}"),
+        &cwd,
+        None,
+        Duration::from_secs(60),
+    )
+    .expect("steering readback");
+    assert!(
+        steer_id.starts_with("msg_"),
+        "steering message id: {steer_id}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut recalled_reply = None;
+    while Instant::now() < deadline {
+        if let Ok(messages) = fetch_messages(&serve.base_url, &serve.token, &session_id) {
+            if last_assistant_text(&messages).is_some_and(|text| text.contains(recalled)) {
+                recalled_reply = Some(());
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    assert!(
+        recalled_reply.is_some(),
+        "second turn did not recall {recalled}"
+    );
+    // The serve session remains addressable after the one-turn writer exits.
+    fetch_session(&serve.base_url, &serve.token, &session_id)
+        .expect("session liveness readback after writer exit");
 
     // Cleanup: session deleted; the reaper drops the serve pid on exit.
     delete_session(&serve.base_url, &serve.token, &session_id).expect("session teardown");

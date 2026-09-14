@@ -2,18 +2,12 @@
 
 Each call drives the store keeper's ``api`` command (one op per function,
 same name and fields) and parses the reply into ``fno.graph.types`` models.
-The backend is the store's own choice; callers never learn which one
-answered. This wave ships the six functions the plan's verification names
-plus the AC16 typed views; the remaining Rust names gain wrappers when
-group 3 moves their first callers. ``cmd_version`` is the
-``fno backlog version`` verb body, registered in ``fno.graph.cli``.
+``cmd_version`` is the ``fno backlog version`` verb body.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
-
-import typer
 
 from fno.graph._constants import GRAPH_JSON
 from fno.graph.store import _client_for
@@ -65,19 +59,13 @@ def nodes(
     order_by: str = "ordinal",
     path: Path = GRAPH_JSON,
 ) -> NodeConnection:
-    page = {
-        "first": first,
-        "after": after,
-        "include_archived": include_archived,
-        "order_by": order_by,
-    }
+    page = {"first": first, "after": after, "include_archived": include_archived, "order_by": order_by}
     body = filter.model_dump(exclude_none=True) if filter else {}
     return _connection(_api("nodes", {"filter": body, **page}, path=path))
 
 
 def comments(node_id: str, *, first: Optional[int] = None, path: Path = GRAPH_JSON) -> list:
-    """The node's progress notes, typed; the connection's page info is
-    keeper-side detail no caller needs this wave."""
+    """The node's progress notes, typed; page info is keeper-side detail."""
     reply = _api("comments", {"id": node_id, "first": first}, path=path)
     return [Comment.model_validate(row) for row in reply.get("nodes", [])]
 
@@ -104,4 +92,31 @@ def comment_create(node_id: str, input: CommentCreateInput, *, path: Path = GRAP
 
 def cmd_version() -> None:
     """Print the store's mutation counter: it grows one per write."""
+    import typer
+
     typer.echo(version())
+
+
+def wire_rows(*, path: Path = GRAPH_JSON) -> list[dict]:
+    """Wire rows; absent store reads empty; unrepresentable rows ride
+    verbatim; the dumped status IS the stored status."""
+    from fno.graph.store import StoreUnavailable
+    from pydantic import ValidationError
+
+    try:
+        reply = _api("rows", {}, path=path)
+    except StoreUnavailable:
+        if not path.exists():
+            return []
+        raise
+    out: list[dict] = []
+    for row in reply.get("rows") or []:
+        try:
+            dumped = Node.model_validate(row).model_dump(by_alias=True)
+        except ValidationError:
+            out.append(row)  # an unrepresentable row rides verbatim
+            continue
+        if dumped.get("persisted_status"):
+            dumped["status"] = dumped["persisted_status"]
+        out.append(dumped)
+    return out

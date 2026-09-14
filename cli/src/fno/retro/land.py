@@ -77,7 +77,7 @@ def _default_create(
     """
     from fno.graph._constants import mint_node_id, validate_priority_write
     from fno.graph.cli import _build_backlog_node, _graph_path
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     validate_priority_write(priority)
 
@@ -110,7 +110,7 @@ def _default_create(
         entries.append(node)
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    commit_rows_via_store(_graph_path(), mutator)
     return new_id_holder[0] or ""
 
 

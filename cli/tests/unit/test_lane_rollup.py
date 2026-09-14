@@ -35,7 +35,9 @@ def graph(tmp_path, monkeypatch):
                         "id": "x-aaaa",
                         "slug": "alpha-work",
                         "title": "Alpha work",
-                        "status": "in-progress",
+                        "type": "feature",
+                        "priority": "p2",
+                        "status": "in_progress",
                         "domain": "code",
                     }
                 ]

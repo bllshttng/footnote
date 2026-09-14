@@ -322,7 +322,7 @@ def build_report(
     _refuse_tracker_owned_on_external_backend("advance")
 
     from fno.backlog import advance as adv
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
     from fno.paths import graph_json
 
     # One call into the native leg. The narration reads the reply's drops;
@@ -341,7 +341,8 @@ def build_report(
 
     winner = survivors[0] if survivors else None
     subject_id = node_id or (winner or {}).get("id")
-    by_id = {e.get("id"): e for e in read_graph(graph_json()) if e.get("id")}
+    # The total fold: an explain answers for every row, even a typed-drop.
+    by_id = {e.get("id"): e for e in wire_rows(path=graph_json()) if e.get("id")}
     subject = by_id.get(subject_id) if subject_id else None
 
     asked: dict = {}
@@ -366,7 +367,7 @@ def build_report(
             ),
         }
         if asked["never_a_candidate"]:
-            asked["status"] = by_id[node_id].get("status")
+            asked["status"] = by_id[node_id].get("persisted_status")
 
     routing = routing_for(subject)
     armed, rank_source = adv._auto_continue_resolve()

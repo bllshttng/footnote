@@ -46,6 +46,14 @@ A row that resolves but hosts no pane (`mux == None`) never attaches. Attaching 
 
 Selector focus ignores `FNO_SERVER` (and the deprecated `FNO_SESSION`). That variable names the server you sit in, not the one the target pane lives in. An explicit `--server` still overrides, as it does for `where`.
 
+## Placement and worker start
+
+Pane placement belongs to the mux pane verbs. Worker start belongs to `fno agents spawn`. The four spawn creation flags remain convenience paths. `--workspace` selects a workspace. `--split` and `--at` place relative to an anchor. `--tab` selects a tab or pane group.
+
+Scripts that already placed a pane must use `fno agents spawn --pane <id>`. Spawn resolves that pane, requires the mux's positive `pristine_idle_shell` marker, refuses an occupied or unresolvable target, and starts the worker in place. The receipt keeps the pane id supplied by the script. This keeps future placement features in `fno mux pane` instead of duplicating them as more spawn flags.
+
+The older claim that spawn has no `--tab` is incorrect. `--tab` is declared in `cli/src/fno/agents/cli.py` and accepts a visible number, `id:<n>`, `name:<s>`, `ordinal:<n>`, `active`, `new`, or a pane-group name. The bare-number-versus-`id:` selector complaint belongs to `fno mux tab join --src`, not to spawn's `--tab`. The focus-race observation is a reason to target an explicit pane with `--pane`, not evidence that `--tab` is absent.
+
 ## The web-bridge state file
 
 `fno mux serve --web` prints its URL and token once at bind. It also writes `<mux dir>/web-<session>.json` (the resolved mux dir, `<state_dir>/mux` by default) at bind: `{"bind", "port", "token", "pid"}`, mode 0600. The bridge removes the file on exit, including Ctrl-C via graceful shutdown. Removal is pid-guarded: a newer bridge for the same session owns the file, and an older bridge's exit must not delete it.

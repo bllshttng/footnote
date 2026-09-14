@@ -15,8 +15,16 @@ from fno import stub_manifest as sm
 
 
 def _graph(tmp_path, entries):
+    """Rows the way the store writes them: the typed api drops a row the
+    model cannot parse, so seeds carry the stamped fields."""
+    complete = []
+    for e in entries:
+        row = {"type": "feature", "priority": "p2", "status": "idea", **e}
+        row.setdefault("title", e.get("id", "node"))
+        row.setdefault("slug", e.get("id", "node"))
+        complete.append(row)
     p = tmp_path / "graph.json"
-    p.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    p.write_text(json.dumps({"entries": complete}), encoding="utf-8")
     return p
 
 
@@ -126,7 +134,12 @@ def test_pr_recorded_in_additional_prs_is_found(tmp_path):
     # be matched (ints and /pull/<n> URLs).
     gp = _graph(tmp_path, [{
         "id": "x-9", "pr_number": 7, "dep": "contract",
-        "additional_prs": [42, "https://github.com/o/r/pull/99"],
+        # Object entries, the shape the store writes (a raw int or bare URL
+        # row is legacy and the typed read drops it).
+        "additional_prs": [
+            {"number": 42},
+            {"url": "https://github.com/o/r/pull/99"},
+        ],
     }])
     sm.write("x-9", [{"stub_id": "a", "file": "f.ts", "kind": "function"}], tmp_path)
     assert sm.unreconciled_manifest_for_pr(42, tmp_path, graph_path=gp) is not None

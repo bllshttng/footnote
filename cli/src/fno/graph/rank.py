@@ -30,9 +30,9 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
     """Return a truthful dispatcher note for a successfully ranked node."""
     try:
         from fno.graph._intake import descendants_of
-        from fno.graph.store import read_graph
+        from fno.graph.api import wire_rows
 
-        entries = read_graph(graph_path)
+        entries = wire_rows(path=graph_path)
         if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
             raise ValueError("graph read returned an unreadable shape")
         reading = _drain_receipt()
@@ -155,7 +155,7 @@ def cmd_rank(
     from fno.graph._constants import has_node_id_prefix, _rank_band
     from fno.graph._intake import _find_node, _live_epic_for, _epics_with_child_progress
     from fno.graph.render import _project_key, make_kanban_column
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
     from fno.graph.cli import _graph_path, _project_plans_from_graph
 
     if not has_node_id_prefix(task_id):
@@ -338,7 +338,7 @@ def cmd_rank(
         return entries
 
     graph_path = _graph_path()
-    locked_mutate_graph(graph_path, mutator)
+    commit_rows_via_store(graph_path, mutator)
     if result.get("action") == "--clear":
         typer.echo(
             f"Cleared rank on {result['id']} (rejoined the unranked flow in {result['lane']})"

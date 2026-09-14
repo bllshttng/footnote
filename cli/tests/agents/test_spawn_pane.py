@@ -4124,7 +4124,6 @@ def test_happy_routed_panes_malformed_config_file_refuses(
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.dispatch import DispatchAskError
     from fno.agents.mux_spawn import dispatch_spawn_pane
-    from fno.config import load_settings
 
     config_path = tmp_path / "config.toml"
     config_path.write_text("[agents\nhappy_routed_panes = true\n", encoding="utf-8")

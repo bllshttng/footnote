@@ -247,10 +247,11 @@ pub fn turn_start_request_json_with_effort(
 /// posture, which would silently drop the grant with a slower fuse. Sending it
 /// per turn makes resume carry it for free.
 ///
-/// Only `writableRoots` is set. `networkAccess` and the tmp exclusions are left
-/// off so they keep the defaults the scalar posture already resolved to
-/// (network off): this change grants directories and must not widen anything
-/// else. The roots are ADDITIVE to the workspace - a bounded thread reports
+/// The turn's policy echoes the resolved posture with `writableRoots` widened
+/// and `networkAccess` forced on. The keeper socket and `gh` egress share one
+/// seatbelt switch, so a thread worker without network cannot claim a node
+/// even with every directory granted (measured 2026-09-14, live app-server).
+/// The roots are ADDITIVE to the workspace - a bounded thread reports
 /// `writableRoots: []` and can still write its own cwd - so naming the state
 /// root does not take the worktree away.
 ///
@@ -280,6 +281,7 @@ pub(crate) fn sandbox_policy_with_roots(resolved: Option<&Value>, state_dirs: &[
         }
     }
     policy["writableRoots"] = json!(roots);
+    policy["networkAccess"] = json!(true);
     policy
 }
 
@@ -304,16 +306,17 @@ fn granted_roots(cwd: &Path, state_dirs: &[String]) -> Vec<String> {
 
 /// `turn/start` takes a whole `sandboxPolicy` object, never a `writableRoots`
 /// delta, so the policy is built FROM the thread's own resolved posture
-/// (`resolved`) with only the roots widened. Hand-building the object instead
-/// replaces every sibling field - `networkAccess`, the tmp exclusions, roots
-/// the posture already carried - with the server's defaults, which would let a
-/// directory grant silently change the worker's network access.
+/// (`resolved`) with the roots widened and network forced on. Hand-building
+/// the object instead replaces every sibling field - the tmp exclusions, roots
+/// the posture already carried - with the server's defaults.
 ///
-/// With no resolved posture to echo, it falls back to the minimal object. The
-/// scalar posture this replaces measured `networkAccess: false`, the same as
-/// the default, so the fallback matches on the measured configuration.
+/// With no resolved posture to echo, it falls back to the minimal object.
+/// A known bounded posture then carries the policy even with no root granted
+/// (a non-repo cwd with no published state dirs), because network is part of
+/// what a bounded worker needs; a `dangerFullAccess` thread resolves `None`
+/// and keeps today's frame.
 ///
-/// Empty `state_dirs` builds today's frame byte-for-byte.
+/// No resolved posture and no state dirs builds today's frame byte-for-byte.
 pub fn turn_start_request_json_full(
     id: u64,
     thread_id: &str,
@@ -329,7 +332,7 @@ pub fn turn_start_request_json_full(
     if let Some(effort) = effort.filter(|effort| !effort.is_empty()) {
         params["effort"] = json!(effort);
     }
-    if !state_dirs.is_empty() {
+    if !state_dirs.is_empty() || resolved.is_some() {
         params["sandboxPolicy"] = sandbox_policy_with_roots(resolved, state_dirs);
     }
     json!({
@@ -2224,11 +2227,67 @@ mod tests {
             value["params"]["sandboxPolicy"]["writableRoots"],
             json!(["/Users/x/.fno"])
         );
-        // Nothing else widens. The scalar posture already resolved network
-        // access off, and this change grants directories only.
-        assert!(value["params"]["sandboxPolicy"]
-            .get("networkAccess")
-            .is_none());
+        // Network rides with the grant: the keeper socket and gh egress share
+        // one seatbelt switch, so a directory grant without network still
+        // cannot claim a node.
+        assert_eq!(value["params"]["sandboxPolicy"]["networkAccess"], true);
+    }
+
+    /// The turn replaces the WHOLE policy, so a bounded thread whose server
+    /// posture reads network off would keep starving: its `false` would stand.
+    /// The force-on must overwrite exactly that field and echo the rest.
+    #[test]
+    fn turn_start_forces_network_on_a_network_off_posture() {
+        let resolved = json!({
+            "type": "workspaceWrite",
+            "writableRoots": ["/repo/already-granted"],
+            "networkAccess": false,
+            "excludeSlashTmp": false,
+            "excludeTmpdirEnvVar": true,
+        });
+        let roots = vec!["/Users/x/.fno".to_string()];
+        let value: Value = serde_json::from_str(&turn_start_request_json_full(
+            7,
+            "thread-1",
+            "go",
+            None,
+            &roots,
+            Some(&resolved),
+        ))
+        .unwrap();
+        let policy = &value["params"]["sandboxPolicy"];
+        assert_eq!(policy["networkAccess"], true);
+        assert_eq!(
+            policy["writableRoots"],
+            json!(["/repo/already-granted", "/Users/x/.fno"])
+        );
+        assert_eq!(policy["excludeSlashTmp"], false);
+        assert_eq!(policy["excludeTmpdirEnvVar"], true);
+    }
+
+    /// A resolved bounded posture carries the policy on its own, roots or
+    /// none: network is part of what a bounded worker needs, and a non-repo
+    /// cwd with no published state dirs grants no roots at all.
+    #[test]
+    fn turn_start_sends_the_policy_for_a_resolved_posture_with_no_roots() {
+        let resolved = json!({
+            "type": "workspaceWrite",
+            "writableRoots": [],
+            "networkAccess": false,
+        });
+        let value: Value = serde_json::from_str(&turn_start_request_json_full(
+            7,
+            "thread-1",
+            "go",
+            None,
+            &[],
+            Some(&resolved),
+        ))
+        .unwrap();
+        let policy = &value["params"]["sandboxPolicy"];
+        assert_eq!(policy["type"], "workspaceWrite");
+        assert_eq!(policy["networkAccess"], true);
+        assert_eq!(policy["writableRoots"], json!([]));
     }
 
     #[test]

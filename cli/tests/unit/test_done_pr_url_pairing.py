@@ -33,7 +33,9 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     ):
         monkeypatch.setattr(mod, attr, val)
     g.write_text(json.dumps({"entries": [
-        {"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"},
+        {"id": "ab-00000001", "title": "t", "slug": "ab-00000001",
+         "type": "feature", "priority": "p2", "status": "idea",
+         "domain": "code", "project": "p"},
     ]}, indent=2) + "\n")
     return g
 

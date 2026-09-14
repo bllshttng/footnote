@@ -204,12 +204,15 @@ def test_map_covers_current_surface_once():
     # the Python gate transport calls, landed in parallel: 627 -> 628. This
     # branch allocated `do pr hold` / `pr hold` rows then removed them when
     # the writer moved into crates: counted from the merged file, 628.
-    # x-3873 allocates `agents capabilities` and `agents target-family`, the
-    # two read leaves that replace the retired `fno agents dispatch
-    # capabilities`/`family`: 628 -> 630, then deletes the five `agents
-    # dispatch *` rows and the five bare `dispatch *` rows with the verb
-    # itself: 630 -> 620.
-    assert len(mapped) == 620, (
+    # x-83ca allocates `agents honesty-sweep`, the binary-direct
+    # declared-vs-measured sweep verb (refs 0): 628 -> 629.
+    # x-f743 allocates `backlog notes`, the verbatim forwarder to the native
+    # `backlog-notes` reader: 629 -> 630. x-3873 allocates `agents
+    # capabilities` and `agents target-family`, the two read leaves that
+    # replace the retired dispatch query leaves, then deletes the five
+    # `agents dispatch *` rows and the five bare `dispatch *` rows with the
+    # verb itself: counted from the merged file, 630 -> 622.
+    assert len(mapped) == 622, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
