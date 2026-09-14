@@ -39,6 +39,22 @@ const HARNESS_DEFAULT_VENDOR: [(&str, &str); 4] = [
     ("agy", "google"),
 ];
 
+/// The harness whose own lane bills `vendor` by default, so a mismatch
+/// remedy names the flag that actually works (-H codex, not -P openai -
+/// openai is not a configured provider here). Vendors no harness serves by
+/// default (zai, deepseek) have no -H answer, so the caller falls back to
+/// the -P spelling.
+fn harness_for_vendor(vendor: &str) -> Option<&'static str> {
+    CHAIN_HARNESSES
+        .iter()
+        .find(|h| {
+            HARNESS_DEFAULT_VENDOR
+                .iter()
+                .any(|(name, v)| *name == **h && *v == vendor)
+        })
+        .copied()
+}
+
 /// A model string's implied vendor, by prefix or tier word. A pure string
 /// opinion and never a routing input: the pairing is legal and --model is
 /// deliberate passthrough.
@@ -523,7 +539,23 @@ fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
     if lane == implied {
         return Ok(json!({"verdict": "ok", "message": Value::Null, "event": Value::Null}));
     }
-    let refusing = model_source.is_some() && flag_value(&refs, &["--account"]).is_none();
+    // A spawn whose harness nobody typed is not a deliberate passthrough:
+    // --node dispatch harnesses come from a resolver, and an untyped -H
+    // came from config or a default (x-8fb6). A typed -H beside a typed
+    // model is the operator's own pairing, so it only warns. The --account
+    // downgrade and the early --route return stay as they are.
+    let harness_typed = payload
+        .get("harness_typed")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let refusing =
+        (model_source.is_some() || !harness_typed || flag_value(&refs, &["--node"]).is_some())
+            && flag_value(&refs, &["--account"]).is_none();
+    let model_str = model.clone().unwrap_or_default();
+    let remedy = match harness_for_vendor(&implied) {
+        Some(h) => format!("-H {h}"),
+        None => format!("-P {implied}"),
+    };
     let event = json!({
         "model": model,
         "implied_vendor": implied,
@@ -532,15 +564,24 @@ fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
         "outcome": if refusing { "refused" } else { "warned" },
     });
     if refusing {
-        let src = model_source.unwrap_or_default();
+        if let Some(src) = model_source {
+            return Ok(json!({
+                "verdict": "refuse",
+                "event": event,
+                "message": format!(
+                    "fno agents spawn: refusing to spawn. {src} supplies --model {model_str}, \
+            which implies vendor {implied}, but this spawn resolves the {lane} lane. Set a model \
+            for the {lane} lane at {src}, or pass {remedy}."
+                ),
+            }));
+        }
         return Ok(json!({
             "verdict": "refuse",
             "event": event,
             "message": format!(
-                "fno agents spawn: refusing to spawn. {src} supplies --model {model:?}, \
-        which implies vendor {implied}, but this spawn resolves the {lane} lane. Nothing typed this \
-        pairing, and the worker would start, report live, and fail on its first inference. Set a model \
-        for the {lane} lane at {src}, or name the vendor on this spawn with -P {implied}."
+                "fno agents spawn: refusing to spawn. --model {model_str} implies vendor {implied}, \
+        but nothing typed the harness and this spawn resolves the {lane} lane. No routing.models row \
+        declares that model, so nothing names its harness. Pass {remedy}, or declare a routing.models row for the model."
             ),
         }));
     }
@@ -548,8 +589,8 @@ fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
         "verdict": "warn",
         "event": event,
         "message": format!(
-            "fno agents spawn: --model {model:?} implies vendor {implied}, but the resolved \
-    lane is {lane}; the model rides that lane's CLI as-is. Name the vendor with -P {implied} to route it."
+            "fno agents spawn: --model {model_str} implies vendor {implied}, but the resolved \
+    lane is {lane}; the model rides that lane's CLI as-is. Pass {remedy} to run it on the harness that serves {implied}."
         ),
     }))
 }
@@ -897,6 +938,92 @@ mod tests {
         .unwrap();
         assert_eq!(out["verdict"], "refuse");
         assert_eq!(out["event"]["outcome"], "refused");
+    }
+
+    #[test]
+    fn model_vendor_typed_mismatch_warn_names_the_harness_flag() {
+        // AC3: a typed -H beside a typed model proceeds with a warning whose
+        // remedy is the harness flag that works, and the model prints as its
+        // string, never Option debug.
+        let out = resolve(json!({
+            "kind": "model-vendor",
+            "argv_tail": ["spawn", "--model", "gpt-6-astra", "-H", "claude"],
+            "harness": "claude",
+            "harness_typed": true,
+        }))
+        .unwrap();
+        assert_eq!(out["verdict"], "warn");
+        let msg = out["message"].as_str().unwrap();
+        assert!(msg.contains("-H codex"));
+        assert!(!msg.contains("-P openai"));
+        assert!(!msg.contains("Some("));
+        assert!(msg.contains("--model gpt-6-astra"));
+    }
+
+    #[test]
+    fn model_vendor_untyped_harness_refuses() {
+        // AC5: a typed model with nothing typing the harness refuses before
+        // launch, naming -H codex and the missing row.
+        let out = resolve(json!({
+            "kind": "model-vendor",
+            "argv_tail": ["spawn", "--model", "gpt-9-preview"],
+            "harness": "claude",
+            "harness_typed": false,
+        }))
+        .unwrap();
+        assert_eq!(out["verdict"], "refuse");
+        let msg = out["message"].as_str().unwrap();
+        assert!(msg.contains("refusing to spawn"));
+        assert!(msg.contains("-H codex"));
+        assert!(msg.contains("No routing.models row declares that model"));
+    }
+
+    #[test]
+    fn model_vendor_node_dispatch_refuses_mismatch() {
+        // AC8a: --node dispatch whose resolved harness mismatches the typed
+        // model's vendor refuses even though -H was on the argv (the
+        // resolver put it there).
+        let out = resolve(json!({
+            "kind": "model-vendor",
+            "argv_tail": ["spawn", "--node", "x-0000", "--model", "gpt-5.6-sol", "-H", "claude"],
+            "harness": "claude",
+            "harness_typed": true,
+        }))
+        .unwrap();
+        assert_eq!(out["verdict"], "refuse");
+        assert!(out["message"].as_str().unwrap().contains("-H codex"));
+    }
+
+    #[test]
+    fn model_vendor_account_downgrade_stays_warn() {
+        // AC8b: an explicit --account downgrades refusal to warn, as before.
+        let out = resolve(json!({
+            "kind": "model-vendor",
+            "argv_tail": ["spawn", "--model", "glm-5.3", "--account", "zai-main", "-H", "claude"],
+            "harness": "claude",
+            "harness_typed": false,
+            "model_source": "agents.profiles.target.model",
+        }))
+        .unwrap();
+        assert_eq!(out["verdict"], "warn");
+    }
+
+    #[test]
+    fn model_vendor_injected_opus_on_codex_names_claude() {
+        // AC10b: an injected anthropic-voiced model on a codex spawn refuses
+        // naming -H claude, never -P anthropic.
+        let out = resolve(json!({
+            "kind": "model-vendor",
+            "argv_tail": ["spawn", "--model", "claude-opus-5"],
+            "harness": "codex",
+            "harness_typed": false,
+            "model_source": "agents.profiles.target.model",
+        }))
+        .unwrap();
+        assert_eq!(out["verdict"], "refuse");
+        let msg = out["message"].as_str().unwrap();
+        assert!(msg.contains("-H claude"));
+        assert!(!msg.contains("-P anthropic"));
     }
 
     #[test]
