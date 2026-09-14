@@ -6324,8 +6324,8 @@ async fn a_bound_byte_no_entry_offers_dismisses_without_action() {
             name: "w1".into(),
             pane_id: None,
             // The paneless bg row is Unmeasured (no badge, no activity
-            // reading), so the remove measures (x-b5d1): every door that
-            // removes a `?` row skips the stop leg it cannot answer.
+            // reading), so the flag rides along (x-b5d1, x-a33f): the
+            // server no longer reads it, but the wire shape is pinned.
             measure: true,
         }],
         "the remove byte removed the live row in one gesture"
@@ -6335,8 +6335,8 @@ async fn a_bound_byte_no_entry_offers_dismisses_without_action() {
 #[test]
 fn the_remove_entry_on_a_live_row_is_selectable_and_carries_the_key() {
     // (x-e763) The old inert gate (greyed Remove, "stop first") asserted a
-    // server refusal that no longer exists: the server orchestrates
-    // stop-then-rm in one gesture. The live-row menu's Remove is now a
+    // server refusal that no longer exists: rm alone is sent, and the
+    // daemon's rm ends a live row's process itself. The live-row menu's Remove is now a
     // real entry, selectable, carrying its menu-key hint.
     let mut v = view_with_agents(vec![paneless_bg_row("w1")]);
     assert!(v.open_row_menu(1, Anchor::Center));
@@ -11518,8 +11518,8 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
 
 #[tokio::test]
 async fn selector_x_on_live_agent_arms_remove_confirm() {
-    // x-f191 scope b: x on a live row arms ONE remove confirm (the server
-    // composes stop-then-rm); nothing sends until the confirm commits.
+    // x-a33f: x on a live row arms ONE remove confirm (the daemon's rm ends
+    // the row's process itself); nothing sends until the confirm commits.
     let mut v = view_with_agents(vec![lifecycle_row("worker-a", false, false)]);
     v.set_squad_view(1, SectionView::Expanded);
     v.selector = Some(agent_row_at(&v, |a| a.name == "worker-a"));
