@@ -39,7 +39,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, Mapping, Optional, cast
+from typing import Any, Literal, Mapping, Optional, cast
 
 import tomli_w
 import yaml
@@ -2260,9 +2260,8 @@ class AgentsBlock(SweepKeys):
     )
     pane_group_max: int = 4
     min_free_gb: float = 4.0
-    # x-8c8c: swap ceiling beside min_free_gb; <= 0 disables; a bare callable
-    # in Annotated is a before-validator (pydantic v2).
-    max_swap_pct: Annotated[float, lambda v: _finite_or(v, 90.0)] = 90.0
+    # x-8c8c: swap ceiling (percent used) beside min_free_gb; <= 0 disables.
+    max_swap_pct: float = 90.0
     # Deprecated and ignored since 2026-09-09: admission decides on the
     # fleet's CPU share (max_fleet_cpu_share), never on a load trigger.
     max_load_per_cpu: float = 8.0
@@ -2433,15 +2432,13 @@ class AgentsBlock(SweepKeys):
             )
         return self
 
-    @field_validator("min_free_gb", mode="before")
+    @field_validator("min_free_gb", "max_swap_pct", mode="before")
     @classmethod
-    def _coerce_min_free_gb(cls, v: object) -> object:
-        """Coerce a non-numeric min_free_gb to the default (4.0); never raise.
-
+    def _coerce_ram_floor_terms(cls, v: object, info: ValidationInfo) -> object:
+        """Coerce a non-numeric RAM-floor term to its default; never raise.
         <= 0 is a VALID value (guard disabled), so only unparseable input
-        falls back to the default.
-        """
-        return _finite_or(v, 4.0)
+        falls back to the default (4.0 floor, 90.0 swap ceiling)."""
+        return _finite_or(v, 4.0 if info.field_name == "min_free_gb" else 90.0)
 
     @field_validator("max_load_per_cpu", mode="before")
     @classmethod
