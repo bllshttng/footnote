@@ -23,6 +23,8 @@ from typing import Callable, Literal, Sequence
 
 import typer
 
+from fno.rust_binary import resolve_binary
+
 Status = Literal["pass", "fail", "skip"]
 PROBE_TIMEOUT_S = 5.0
 INSTRUMENT_TIMEOUT_S = 30.0
@@ -372,11 +374,27 @@ def _registration_membership(harness: str, root: Path) -> tuple[list[str], list[
 
 
 def _sweep_has_finding(output: str, harness: str) -> bool:
+    # Fail closed: invalid JSON, a missing harness-capabilities population, or
+    # any status other than measured reads as a finding, never as a pass.
     try:
-        section = output.split("=== 3.", 1)[1].split("=== 4.", 1)[0]
-    except IndexError:
+        report = json.loads(output)
+    except json.JSONDecodeError:
         return True
-    return bool(re.search(rf"(?m)^\s*{re.escape(harness)}\.", section))
+    if not isinstance(report, dict):
+        return True
+    population = next(
+        (
+            entry
+            for entry in report.get("populations", [])
+            if isinstance(entry, dict) and entry.get("name") == "harness-capabilities"
+        ),
+        None,
+    )
+    if not isinstance(population, dict) or population.get("status") != "measured":
+        return True
+    return any(
+        pair.get("row") == harness for pair in population.get("named_pairs", []) if isinstance(pair, dict)
+    )
 
 
 def _required_registrations(harness: str, root: Path) -> set[str]:
@@ -408,7 +426,14 @@ def _required_registrations(harness: str, root: Path) -> set[str]:
 def line_row_matches(harness: str, *, repo_root: Path | None = None) -> LineVerdict:
     root = _repo_root(repo_root)
     sweep = run_instrument(
-        ["python3", "scripts/diagnostics/capability-honesty-sweep.py"], cwd=root
+        [
+            str(resolve_binary() or "fno-agents"),
+            "honesty-sweep",
+            "--population",
+            "harness-capabilities",
+            "--json",
+        ],
+        cwd=root,
     )
     # The build produces the copies; this probe only asks whether a hand edit
     # has dirtied them (the same diff the rust-ci generated-copies step runs).

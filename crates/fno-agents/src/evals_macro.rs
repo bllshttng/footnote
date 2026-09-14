@@ -251,15 +251,22 @@ fn parse_since(raw: &str) -> Result<DateTime<Utc>, String> {
 // -- Journal reader ----------------------------------------------------------
 
 /// Sorted-key compact serialization: the dedup signature. Deterministic
-/// within one run, which is all the seen-set needs.
-fn canonical_json(v: &Value) -> String {
+/// within one run, which is all the seen-set needs. Keys serialize as JSON
+/// strings, so values that differ only inside a key cannot collide.
+pub(crate) fn canonical_json(v: &Value) -> String {
     match v {
         Value::Object(m) => {
             let mut keys: Vec<&String> = m.keys().collect();
             keys.sort();
             let inner: Vec<String> = keys
                 .into_iter()
-                .map(|k| format!("{k}:{}", canonical_json(&m[k.as_str()])))
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        Value::String((*k).clone()),
+                        canonical_json(&m[k.as_str()])
+                    )
+                })
                 .collect();
             format!("{{{}}}", inner.join(","))
         }

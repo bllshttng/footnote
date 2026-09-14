@@ -204,7 +204,9 @@ def test_map_covers_current_surface_once():
     # the Python gate transport calls, landed in parallel: 627 -> 628. This
     # branch allocated `do pr hold` / `pr hold` rows then removed them when
     # the writer moved into crates: counted from the merged file, 628.
-    assert len(mapped) == 628, (
+    # x-83ca allocates `agents honesty-sweep`, the binary-direct
+    # declared-vs-measured sweep verb (refs 0): 628 -> 629.
+    assert len(mapped) == 629, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
