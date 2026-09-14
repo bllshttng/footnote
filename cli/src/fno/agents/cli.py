@@ -1719,7 +1719,7 @@ def cmd_spawn(
     from fno.agents.spawn_defaults import placement_refusal
 
     if pane is not None:
-        from fno.agents.existing_pane import pane_placement_conflict
+        from fno.agents.mux_spawn import pane_placement_conflict
 
         if conflict := pane_placement_conflict(
             pane, workspace=squad, split=split, at=at, tab=tab,
