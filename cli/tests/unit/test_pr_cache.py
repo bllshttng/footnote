@@ -3,9 +3,9 @@
 The load-bearing claim: N sessions polling one PR issue ONE network read per
 TTL (a secondary limit counts request rate, so transport does not save you -
 only coalescing does), and the row they share is keyed by HEAD because a
-verdict is a fact about one commit. Plus the 403 discipline: a
-secondary-limit failure poisons the row with an exponential backoff, and
-callers inside the window get the last row DEGRADED to unknown - never its
+verdict is a fact about one commit. Plus the 403 discipline: whether GitHub
+is refusing the machine is the fleet budget ledger's answer, and callers
+under a live backoff get the newest row DEGRADED to unknown - never its
 green verdict, and never a fixed-interval retry that sustains the refusal.
 """
 from __future__ import annotations
@@ -16,8 +16,18 @@ import time
 
 import pytest
 
-from fno.pr import _cache, _rest, _status
+from fno.pr import _cache, _quota, _rest, _status
 from fno.pr._proc import Result
+
+
+@pytest.fixture(autouse=True)
+def quiet_budget(monkeypatch):
+    """Keep every cached_status call off the real fleet ledger: the pre-check
+    asks `_quota.backoff_live`, which without this stub spawns the real
+    fno-agents binary and reads the operator's machine-wide budget. Tests of
+    the backoff path re-stub it to True."""
+    monkeypatch.setattr(_quota, "backoff_live", lambda: False)
+
 
 # Verbatim as measured 2026-08-24T01:01:17Z during a live secondary refusal:
 # GitHub's own wording contains NO "secondary", so the refusal this suite
@@ -52,20 +62,64 @@ def _assert_locked(real_flock, lock_path):
             real_flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-def test_pr_status_cache_lock_revalidates_inode_for_backoff_writer(tmp_path, monkeypatch):
-    p = tmp_path / "cache" / "row.json"
-    lock_path = p.with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True)
-    lock_path.touch()
-    real_flock = _replace_path_on_first_flock(monkeypatch, _cache, lock_path)
-    real_write = _cache._write_row_locked
+def test_a_live_ledger_backoff_serves_the_fresh_row_with_zero_gh_calls(
+    cache_env, monkeypatch, capsys
+):
+    """AC4-HP: a live fleet backoff short-circuits the pre-check BEFORE the
+    head read, so a fresh cached row answers with zero gh invocations of any
+    kind - the head read itself would be a held call."""
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 0
+    capsys.readouterr()
+    monkeypatch.setattr(_quota, "backoff_live", lambda: True)
+    reads_before = head["reads"]
+    assert _cache.cached_status("42") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "green"
+    assert out["cached"] is True
+    assert head["reads"] == reads_before, "no head read under a live backoff"
+    assert calls["n"] == 1, "no check-set read either"
 
-    def checked_write(*args, **kwargs):
-        _assert_locked(real_flock, lock_path)
-        return real_write(*args, **kwargs)
 
-    monkeypatch.setattr(_cache, "_write_row_locked", checked_write)
-    _cache._arm_backoff_row(p, fresh_output={"verdict": "error"})
+def test_a_live_ledger_backoff_serves_a_stale_row_degraded(
+    cache_env, monkeypatch, capsys
+):
+    """AC4-HP's stale half: the row answers under a backoff, but past the TTL
+    it is served degraded - unknown, unsettled, never the stale green."""
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 0
+    capsys.readouterr()
+    row = json.loads(_row_path(cache_dir).read_text())
+    row["ts"] -= 3600
+    _row_path(cache_dir).write_text(json.dumps(row))
+    monkeypatch.setattr(_quota, "backoff_live", lambda: True)
+    reads_before = head["reads"]
+    assert _cache.cached_status("42") == 3
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "unknown"
+    assert out["stale_verdict"] == "green"
+    assert out["settled"] is False
+    assert head["reads"] == reads_before, "no head read under a live backoff"
+    assert calls["n"] == 1, "no check-set read either"
+
+
+def test_no_live_backoff_spends_the_head_read_every_call(
+    cache_env, monkeypatch, capsys
+):
+    """The control: outside a backoff the pre-check is inert and the head read
+    fires on every call, so a push is still noticed on the very next tick."""
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 0
+    capsys.readouterr()
+    assert _cache.cached_status("42") == 0
+    assert head["reads"] == 2, "no ledger backoff, no short-circuit"
+
 
 
 def test_pr_status_cache_lock_revalidates_inode_for_status_refresh(cache_env, monkeypatch, capsys):
@@ -325,33 +379,18 @@ def test_superseded_head_row_is_pruned(cache_env, monkeypatch, capsys):
     assert _row_path(cache_dir, sha="b" * 40).exists()
 
 
-def test_secondary_limit_failure_sets_backoff_and_serves_degraded(cache_env, monkeypatch, capsys):
-    """Inside a backoff window the fresh check set is UNREADABLE, so the last
-    row is served degraded: verdict unknown, settled/green/ready false, exit
-    3 - the prior verdict survives only under stale_verdict. A watcher
-    grepping settled:true must wait out the window, not wake on green."""
+def test_secondary_refusal_writes_nothing_and_stays_loud(cache_env, monkeypatch, capsys):
+    """A refused read leaves NO row and NO refusal memory in this cache: the
+    fleet ledger owns the backoff now, and the loud error must reach every
+    caller instead of being replayed from disk."""
     cache_dir, head = cache_env
     err = (None, _secondary_reason())
-    fetch, calls = _fetch_spy([_GREEN, err])
+    fetch, calls = _fetch_spy([err, err])
     monkeypatch.setattr(_status, "_fetch", fetch)
-    assert _cache.cached_status("42") == 0
-    # Expire the good row, then hit the secondary limit once.
-    row = json.loads(_row_path(cache_dir).read_text())
-    row["ts"] -= 3600
-    _row_path(cache_dir).write_text(json.dumps(row))
     assert _cache.cached_status("42") == 4
-    capsys.readouterr()
-    # Inside the backoff window: NO new check-set read, last row served degraded.
-    assert _cache.cached_status("42") == 3
-    assert calls["n"] == 2, "a backoff window must not re-read the check set"
-    out = json.loads(capsys.readouterr().out)
-    assert out["verdict"] == "unknown"
-    assert out["stale_verdict"] == "green"
-    assert out["settled"] is False
-    assert out["green"] is False
-    assert out["ready"] is False
-    assert "secondary rate limit" in out["stale_reason"]
-    assert out["cached"] is True
+    assert _cache.cached_status("42") == 4
+    assert calls["n"] == 2, "no cache to ride out: every call re-reads loudly"
+    assert not _row_path(cache_dir).exists(), "no row, no backoff fields, nothing"
 
 
 def test_ttl_hit_serves_the_human_verdict_line(cache_env, monkeypatch, capsys):
@@ -378,15 +417,11 @@ def test_stale_serve_renders_the_degraded_line(cache_env, monkeypatch, capsys):
     `ready` without touching `ready_blockers`, so without the reason in the
     clause the line would read NOT-ready beside `no blockers`."""
     cache_dir, head = cache_env
-    err = (None, _secondary_reason())
-    fetch, calls = _fetch_spy([_GREEN, err])
+    fetch, calls = _fetch_spy([_GREEN])
     monkeypatch.setattr(_status, "_fetch", fetch)
     assert _cache.cached_status("42") == 0
-    row = json.loads(_row_path(cache_dir).read_text())
-    row["ts"] -= 3600
-    _row_path(cache_dir).write_text(json.dumps(row))
-    assert _cache.cached_status("42") == 4
     capsys.readouterr()
+    head["fail"] = True
     assert _cache.cached_status("42") == 3
     cap = capsys.readouterr()
     out = json.loads(cap.out)
@@ -400,8 +435,10 @@ def test_stale_serve_renders_the_degraded_line(cache_env, monkeypatch, capsys):
 
 
 def test_head_unreadable_serves_newest_row_degraded(cache_env, monkeypatch, capsys):
-    """Head read failing (secondary window / network): fail CLOSED. The newest
-    existing row is served degraded with zero network, never its green."""
+    """AC4-ERR: no live ledger backoff, head unreadable: fail CLOSED. The
+    newest existing row is served degraded (unknown, unsettled) with zero
+    check-set network, and this cache writes NO refusal memory of its own -
+    no backoff fields on any row, no refused sentinel file."""
     cache_dir, head = cache_env
     fetch, calls = _fetch_spy([_GREEN])
     monkeypatch.setattr(_status, "_fetch", fetch)
@@ -414,6 +451,10 @@ def test_head_unreadable_serves_newest_row_degraded(cache_env, monkeypatch, caps
     assert out["verdict"] == "unknown"
     assert out["settled"] is False
     assert out["ready"] is False
+    row = json.loads(_row_path(cache_dir).read_text())
+    assert "backoff_until" not in row, "no per-row backoff may be written"
+    assert "fail_count" not in row
+    assert not (cache_dir / "owner--repo-42-refused.json").exists(), "no sentinel"
 
 
 def test_head_unreadable_with_no_row_goes_loud(cache_env, monkeypatch, capsys):
@@ -431,144 +472,6 @@ def test_head_unreadable_with_no_row_goes_loud(cache_env, monkeypatch, capsys):
     assert out["settled"] is False
 
 
-def test_head_read_refused_by_secondary_limit_arms_the_window(
-    cache_env, monkeypatch, capsys
-):
-    """The p0 chain: the head read is the first network call a waiter makes,
-    so its refusal is the moment the window must open. Without arming here the
-    head-unreadable arm serves the newest row degraded and returns BEFORE the
-    locked-miss writer ever runs, so every waiter re-attempts the head read
-    each tick at full rate - the fixed-interval retry that sustains a
-    secondary window - while the zero-network pre-check reads a backoff_until
-    nothing ever wrote."""
-    cache_dir, head = cache_env
-    fetch, calls = _fetch_spy([_GREEN])
-    monkeypatch.setattr(_status, "_fetch", fetch)
-    assert _cache.cached_status("42") == 0
-    capsys.readouterr()
-    head["fail"] = True
-    head["fail_reason"] = _secondary_reason()
-    assert _cache.cached_status("42") == 3
-    row = json.loads(_row_path(cache_dir).read_text())
-    assert row["backoff_until"] > time.time(), "the head refusal must arm the window"
-    assert row["fail_count"] == 1
-    assert row["output"]["verdict"] == "green", "the last good verdict survives"
-    capsys.readouterr()
-    reads_after_refusal = head["reads"]
-    # Inside the window the pre-check short-circuits with zero network. The
-    # fresh green row serves DEGRADED, not verbatim: the arm stamped it
-    # head_unverified (the head could not be read, so the green is a fact
-    # about a head the PR may have moved past).
-    assert _cache.cached_status("42") == 3
-    out = json.loads(capsys.readouterr().out)
-    assert out["cached"] is True
-    assert out["verdict"] == "unknown"
-    assert out["stale_verdict"] == "green"
-    assert head["reads"] == reads_after_refusal, "no head read inside the window"
-    assert calls["n"] == 1, "the window must not re-read the check set"
-
-
-def test_head_read_refused_without_the_verdict_arms_nothing(
-    cache_env, monkeypatch, capsys
-):
-    """A head failure that is NOT a classified secondary limit (plain prose,
-    no structured field) must not arm a window: gating on prose here would
-    rebuild the coupling this fix removes."""
-    cache_dir, head = cache_env
-    fetch, calls = _fetch_spy([_GREEN])
-    monkeypatch.setattr(_status, "_fetch", fetch)
-    assert _cache.cached_status("42") == 0
-    capsys.readouterr()
-    head["fail"] = True  # default fail_reason is plain prose, no class
-    assert _cache.cached_status("42") == 3
-    row = json.loads(_row_path(cache_dir).read_text())
-    assert not row.get("backoff_until"), "prose alone must not arm a window"
-    # And the next tick still spends its head read (no window to ride out).
-    reads_before = head["reads"]
-    assert _cache.cached_status("42") == 3
-    assert head["reads"] == reads_before + 1
-
-
-def test_head_read_refusal_opens_a_sentinel_when_no_servable_row_exists(
-    cache_env, monkeypatch, capsys
-):
-    """A never-cached PR still gets a window. Without a sentinel row the
-    fallback live read re-attempts the refused head read every tick and the
-    structured verdict is printed but never persisted - the fleet polls at
-    full interval through the whole window."""
-    cache_dir, head = cache_env
-    head["fail"] = True
-    head["fail_reason"] = _secondary_reason()
-    fetch, calls = _fetch_spy([])
-    monkeypatch.setattr(_status, "_fetch", fetch)
-    assert _cache.cached_status("42") == 3
-    rows = list(cache_dir.glob("owner--repo-42-*.json"))
-    assert len(rows) == 1, f"exactly the sentinel row, got: {[p.name for p in rows]}"
-    row = json.loads(rows[0].read_text())
-    assert row["backoff_until"] > time.time()
-    assert row["exit"] == 4
-    assert row["output"]["rate_limit_class"] == "secondary"
-    assert row["output"]["verdict"] == "error"
-    capsys.readouterr()
-    reads_after_refusal = head["reads"]
-    # Inside the window the pre-check serves the sentinel degraded (unknown,
-    # unsettled - head_unverified): zero network of any kind.
-    assert _cache.cached_status("42") == 3
-    out = json.loads(capsys.readouterr().out)
-    assert out["cached"] is True
-    assert out["verdict"] == "unknown"
-    assert out["settled"] is False
-    assert head["reads"] == reads_after_refusal, "no head read inside the window"
-    assert calls["n"] == 0, "no check-set read"
-
-
-def test_head_read_refusal_skips_arming_an_unservable_foreign_row(
-    cache_env, monkeypatch, capsys
-):
-    """A window on a row the pre-check cannot serve (foreign schema, no
-    output) short-circuits nothing: the arm must skip it and open a sentinel
-    instead, or fail_count climbs every tick to no effect."""
-    cache_dir, head = cache_env
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    foreign = cache_dir / "owner--repo-42-foreignbad01.json"
-    foreign.write_text(json.dumps({"ts": time.time(), "exit": "bad-schema", "xyz": 1}))
-    head["fail"] = True
-    head["fail_reason"] = _secondary_reason()
-    fetch, calls = _fetch_spy([])
-    monkeypatch.setattr(_status, "_fetch", fetch)
-    assert _cache.cached_status("42") == 3
-    # The foreign row is untouched: no backoff fields written onto it.
-    foreign_row = json.loads(foreign.read_text())
-    assert "backoff_until" not in foreign_row
-    # A sentinel exists and holds the window instead.
-    sentinel = cache_dir / "owner--repo-42-refused.json"
-    assert sentinel.exists()
-    assert json.loads(sentinel.read_text())["backoff_until"] > time.time()
-
-
-def test_backoff_is_exponential_and_capped(cache_env, monkeypatch, capsys):
-    cache_dir, head = cache_env
-    monkeypatch.setattr(_cache, "_backoff_cap", lambda: 900)
-    err = (None, _secondary_reason())
-    fetch, _ = _fetch_spy([err])
-    monkeypatch.setattr(_status, "_fetch", fetch)
-    for _ in range(6):
-        # Forcing a fresh miss each round: expire the row and clear the
-        # servable output so the backoff write path (not degraded serving) runs.
-        p = _row_path(cache_dir)
-        if p.exists():
-            row = json.loads(p.read_text())
-            row["ts"] -= 3600
-            row["output"] = None
-            p.write_text(json.dumps(row))
-        _cache.cached_status("42")
-        capsys.readouterr()
-    row = json.loads(_row_path(cache_dir).read_text())
-    # 2^0..2^4 minutes of failures: k capped at 8 -> 2^8*60 > 900 -> 900.
-    assert row["fail_count"] == 6
-    assert row["backoff_until"] - row["ts"] <= 900
-
-
 def test_transient_failure_is_never_cached(cache_env, monkeypatch, capsys):
     cache_dir, head = cache_env
     err = (None, "could not resolve to a PullRequest")
@@ -582,16 +485,17 @@ def test_transient_failure_is_never_cached(cache_env, monkeypatch, capsys):
 
 
 def test_first_read_secondary_failure_stays_loud(cache_env, monkeypatch, capsys):
-    """No prior verdict exists: the backoff row serves the ERROR row (verdict
-    error, settled false), never a fabricated green."""
+    """No prior verdict exists: a refused first read fabricates nothing. The
+    error is loud, no row lands, and the next caller spends its own read."""
     cache_dir, head = cache_env
     err = (None, _secondary_reason())
-    fetch, calls = _fetch_spy([err])
+    fetch, calls = _fetch_spy([err, err])
     monkeypatch.setattr(_status, "_fetch", fetch)
     assert _cache.cached_status("42") == 4
     capsys.readouterr()
-    assert _cache.cached_status("42") == 4  # inside backoff, no re-read
-    assert calls["n"] == 1
+    assert _cache.cached_status("42") == 4
+    assert calls["n"] == 2, "no refusal memory in this cache to replay"
+    assert not _row_path(cache_dir).exists()
     out = json.loads(capsys.readouterr().out)
     assert out["verdict"] == "error"
     assert out["settled"] is False
@@ -716,44 +620,6 @@ def test_refresh_with_an_unreadable_head_goes_loud_not_stale(
     assert "stale_reason" not in out
 
 
-def test_a_refused_refresh_never_deepens_the_backoff_window(
-    cache_env, monkeypatch, capsys
-):
-    """`--refresh` punches through a live backoff window; it must not double it.
-
-    The degraded `unknown` serve inside a backoff window is exactly when an
-    operator reaches for the escape hatch, so the collision is the modal case,
-    not an edge one. Letting the refused read escalate `fail_count` walks the
-    whole fleet's wait toward the 900s cap one keystroke at a time - the
-    "retry that sustains the very refusal it is waiting out" this module
-    exists to refuse.
-    """
-    cache_dir, head = cache_env
-    err = (None, _secondary_reason())
-    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
-    _cache.cached_status("42")
-    p = _row_path(cache_dir)
-    row = json.loads(p.read_text())
-    row["ts"] -= 3600  # past the TTL, so the next call is a real miss
-    p.write_text(json.dumps(row))
-
-    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: err)
-    _cache.cached_status("42")
-    opened = json.loads(p.read_text())
-    assert opened["fail_count"] == 1
-    window = opened["backoff_until"]
-
-    capsys.readouterr()
-    fetch, calls = _fetch_spy([err])
-    monkeypatch.setattr(_status, "_fetch", fetch)
-    assert _cache.cached_status("42", refresh=True) == 4
-    assert calls["n"] == 1, "the escape hatch still spends its one read"
-    after = json.loads(p.read_text())
-    assert after["fail_count"] == 1, "a refused refresh must not escalate"
-    assert after["backoff_until"] == pytest.approx(window, abs=1.0)
-    assert after["output"] == opened["output"], "the last good verdict survives"
-
-
 def test_an_unknown_flag_is_refused_whatever_its_dash_count(monkeypatch):
     """The refusal must cover EVERY flag shape, not only the two-dash one.
 
@@ -807,55 +673,6 @@ def test_a_non_finite_row_number_reads_as_a_miss_not_a_crash(cache_env, monkeypa
     # No traceback: the row is unusable, so the live read decides.
     assert _cache.cached_status("42") == 0
     assert calls["n"] == 1
-
-
-def test_a_window_expiring_during_the_read_still_holds_the_refresh(
-    cache_env, monkeypatch, capsys
-):
-    """`held` is decided from the PRE-read clock, never the post-read one.
-
-    `run_status` can burn tens of seconds before a secondary-limit refusal and
-    the shortest window is 60s. Deciding after the read let a window that
-    expired mid-call flip `held` false, so the refused `--refresh` doubled the
-    fleet's wait - the exact harm the comment beside it refuses.
-    """
-    cache_dir, head = cache_env
-    err = (None, _secondary_reason())
-    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
-    _cache.cached_status("42")
-    p = _row_path(cache_dir)
-    row = json.loads(p.read_text())
-    row["ts"] -= 3600
-    p.write_text(json.dumps(row))
-    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: err)
-    _cache.cached_status("42")
-    opened = json.loads(p.read_text())
-    assert opened["fail_count"] == 1
-    capsys.readouterr()
-
-    # A CONTROLLED clock, because the real one cannot be made to cross a 60s
-    # window inside a test. Writing the expiry to the row mid-read does not
-    # work either: `prior_until` is read from the in-memory row before the
-    # call, so that version of this test passed against the unfixed code -
-    # a test that cannot fail, which is the defect this file exists to catch.
-    row = json.loads(p.read_text())
-    t0 = row["backoff_until"] - 30  # 30s of window left when the read starts
-    clock = iter([t0, t0, t0 + 120])  # pre-lock, pre-read, post-read
-    last = [t0 + 120]
-
-    def fake_clock():
-        try:
-            last[0] = next(clock)
-        except StopIteration:
-            pass
-        return last[0]
-
-    monkeypatch.setattr(_cache.time, "time", fake_clock)
-    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: err)
-    assert _cache.cached_status("42", refresh=True) == 4
-    after = json.loads(p.read_text())
-    assert after["fail_count"] == 1, "a refused refresh must not escalate"
-    assert after["backoff_until"] <= row["backoff_until"], "nor extend the window"
 
 
 def test_an_out_of_range_finite_ts_reads_as_a_miss_not_a_crash(cache_env, monkeypatch, capsys):
@@ -947,8 +764,6 @@ def test_stale_serve_makes_no_failure_diagnosis(capsys, tmp_path, monkeypatch):
                 {"check": "smoke", "step": "Lint", "first_error": "E1 boom"}
             ],
         },
-        "fail_count": 0,
-        "backoff_until": 0,
     }
     code = _cache._serve(row, stale=True)
     cap = capsys.readouterr()
@@ -960,15 +775,14 @@ def test_stale_serve_makes_no_failure_diagnosis(capsys, tmp_path, monkeypatch):
 
 
 def test_live_backoff_window_serves_degraded_with_zero_network(capsys, tmp_path, monkeypatch):
-    """x-4eac: inside a secondary-rate-limit window the HEAD read is itself
-    the refused call, so a waiter's tick must answer from the row without
-    touching GitHub. A fresh (< TTL) row does NOT short-circuit: a push keeps
-    being noticed on the next tick, exactly as before."""
+    """The fleet ledger holds a live backoff: the HEAD read is itself a held
+    call, so a waiter's tick must answer from the newest row without touching
+    GitHub. The row is stale (> TTL), so it serves degraded, never green."""
     import json as _json
     import time as _time
 
     monkeypatch.setenv("FNO_PR_STATUS_CACHE_DIR", str(tmp_path))
-    from fno.pr import _cache, _rest
+    from fno.pr import _cache, _quota, _rest
 
     (tmp_path / "Owner--Repo-9-abc123def000.json").write_text(
         _json.dumps(
@@ -983,8 +797,6 @@ def test_live_backoff_window_serves_degraded_with_zero_network(capsys, tmp_path,
                     "head": "abc123def000",
                     "checks": {"total": 1},
                 },
-                "fail_count": 1,
-                "backoff_until": _time.time() + 300,
             }
         )
     )
@@ -994,6 +806,7 @@ def test_live_backoff_window_serves_degraded_with_zero_network(capsys, tmp_path,
 
     monkeypatch.setattr(_rest, "fetch_pr_info_rest", boom)
     monkeypatch.setattr(_rest, "_repo_slug", lambda cwd, runner=None: "Owner/Repo")
+    monkeypatch.setattr(_quota, "backoff_live", lambda: True)
     rc = _cache.cached_status("9")
     cap = capsys.readouterr()
     assert rc == 3
