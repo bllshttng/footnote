@@ -225,7 +225,7 @@ impl Provider for ClaudeProvider {
             "--name".into(),
             ctx.name.clone(),
             "--".into(),
-            normalize_claude_command(&ctx.message),
+            render_verb_seed(&ctx.message, "claude"),
         ]);
         argv
     }
@@ -243,7 +243,7 @@ impl Provider for ClaudeProvider {
             Some(&ctx.session_id),
         )
         .expect("embedded claude headless-resume capability");
-        argv.extend(["--".into(), normalize_claude_command(&ctx.message)]);
+        argv.extend(["--".into(), render_verb_seed(&ctx.message, "claude")]);
         argv
     }
 
@@ -434,31 +434,102 @@ impl ProviderWithPty for ClaudeInteractiveProvider {
 /// `cli/tests/agents/fixtures/codex-jsonl-sample.jsonl`.
 pub struct CodexProvider;
 
-pub fn normalize_codex_command(message: &str) -> String {
-    let command = message.trim();
-    if let Some(verb) = command.strip_prefix("/fno:") {
-        format!("$fno:{verb}")
-    } else if let Some(verb) = command.strip_prefix('/') {
-        format!("$fno:{verb}")
-    } else if command.starts_with("$fno:") {
-        command.to_string()
-    } else {
-        message.to_string()
+/// The verb-token shape every reader shares (x-c976): a leading `/` or `$`
+/// sigil, no second `/` inside the token (an absolute path never matches),
+/// an optional `fno:` namespace, and a lowercase-word remainder. Returns
+/// `(verb, namespaced)`; both sigils parse.
+pub fn parse_verb_token(tok: &str) -> Option<(&str, bool)> {
+    let sigil = tok.chars().next()?;
+    if sigil != '/' && sigil != '$' {
+        return None;
     }
+    let body = &tok[1..];
+    if body.is_empty() || body.contains('/') {
+        return None;
+    }
+    let (verb, namespaced) = match body.strip_prefix("fno:") {
+        Some(rest) => (rest, true),
+        None => (body, false),
+    };
+    let mut it = verb.chars();
+    match it.next() {
+        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
+        _ => return None,
+    }
+    if !verb
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    Some((verb, namespaced))
 }
 
-/// Mirror of [`normalize_codex_command`] for the claude target. A seed's
-/// sigil says WHO WROTE it, never which harness runs it (x-413d), so a
-/// codex-authored `$fno:verb` command is rewritten to claude's native
-/// `/fno:verb` spelling before delivery. First token only: commands cannot
-/// be inline but skills can, and rewriting an inline mention would corrupt
-/// prose. A slash seed is already claude's spelling and passes through.
-pub fn normalize_claude_command(message: &str) -> String {
+/// The ONE verb-seed renderer (x-c976): parse the message's FIRST token and
+/// render it for `harness` from the capability row. A seed's sigil says WHO
+/// WROTE it, never which harness runs it (x-413d). The rest of the message
+/// is kept byte for byte; a first token that does not parse, a harness the
+/// contract cannot answer for, or a bare `$verb` on a codex-skill surface
+/// returns the message unchanged.
+pub fn render_verb_seed(message: &str, harness: &str) -> String {
     let command = message.trim();
-    if let Some(verb) = command.strip_prefix("$fno:") {
-        format!("/fno:{verb}")
-    } else {
-        message.to_string()
+    let first = command.split_whitespace().next().unwrap_or("");
+    let Some((verb, namespaced)) = parse_verb_token(first) else {
+        return message.to_string();
+    };
+    let Ok(contract) = crate::harness_capabilities::HarnessContract::packaged() else {
+        return message.to_string();
+    };
+    let Ok(caps) = contract.capabilities(harness) else {
+        return message.to_string();
+    };
+    let tail = &command[first.len()..];
+    let native = |v: &str| caps.native_verbs.iter().any(|n| n == v);
+    match caps.command_surface.as_str() {
+        "codex-skill" => {
+            if !first.starts_with('/') {
+                return message.to_string();
+            }
+            // The namespaced spelling is unambiguous by namespace: it always
+            // rewrites, native or not (`/fno:review` names the fno lane even
+            // though bare `/review` is codex's native verb).
+            if namespaced {
+                return format!("$fno:{verb}{tail}");
+            }
+            // A bare `/verb` is rewritten only when it is nobody's native
+            // verb and IS a footnote work verb (the name-mint vocabulary);
+            // an unknown verb stays literal instead of being captured into
+            // a phantom `$fno:` skill.
+            if native(&format!("/{verb}")) {
+                return message.to_string();
+            }
+            if crate::naming::is_word_code_verb(verb) {
+                return format!("$fno:{verb}{tail}");
+            }
+            message.to_string()
+        }
+        "slash" => {
+            if !namespaced {
+                // A bare `$verb` says nothing about this surface; a native
+                // verb stays literal (`/undo` on opencode). Both pass
+                // through, as does a bare `/verb` when the prefix is empty
+                // (claude/agy inject the skill natively).
+                if !first.starts_with('/') || native(&format!("/{verb}")) {
+                    return message.to_string();
+                }
+                let prefix = caps.slash_prefix.as_str();
+                if prefix.is_empty() {
+                    return message.to_string();
+                }
+                return format!("/{prefix}{verb}{tail}");
+            }
+            if harness == "agy" {
+                format!("/{verb}{tail}")
+            } else {
+                format!("/fno:{verb}{tail}")
+            }
+        }
+        _ => message.to_string(),
     }
 }
 
@@ -662,7 +733,7 @@ impl Provider for CodexProvider {
         // Behind `--`: clap's own prescription ("to pass ... as a value, use
         // '-- ...'"), so a leading-flag seed is the PROMPT, not a flag.
         argv.push("--".into());
-        argv.push(normalize_codex_command(&ctx.message));
+        argv.push(render_verb_seed(&ctx.message, "codex"));
         argv
     }
 
@@ -681,7 +752,7 @@ impl Provider for CodexProvider {
         // Behind `--`: clap's own prescription ("to pass ... as a value, use
         // '-- ...'"), so a leading-flag seed is the PROMPT, not a flag.
         argv.push("--".into());
-        argv.push(normalize_codex_command(&ctx.message));
+        argv.push(render_verb_seed(&ctx.message, "codex"));
         argv
     }
 
@@ -2072,7 +2143,7 @@ mod tests {
         );
 
         assert_eq!(
-            normalize_codex_command("  review this\n  code  "),
+            render_verb_seed("  review this\n  code  ", "codex"),
             "  review this\n  code  "
         );
     }
@@ -2108,15 +2179,79 @@ mod tests {
             Some("/fno:blueprint x-81ad")
         );
 
-        assert_eq!(normalize_claude_command("/fno:target x"), "/fno:target x");
+        assert_eq!(render_verb_seed("/fno:target x", "claude"), "/fno:target x");
         assert_eq!(
-            normalize_claude_command("do a $fno:blueprint"),
+            render_verb_seed("do a $fno:blueprint", "claude"),
             "do a $fno:blueprint"
         );
         assert_eq!(
-            normalize_claude_command("build feature X"),
+            render_verb_seed("build feature X", "claude"),
             "build feature X"
         );
+    }
+
+    /// x-c976: the one renderer reads every sigil spelling and renders per
+    /// harness. Codex receives `$fno:verb` from all three seed spellings;
+    /// its native verbs and foreign prose stay literal.
+    #[test]
+    fn render_verb_seed_codex_accepts_every_sigil_and_keeps_natives() {
+        for seed in ["/fno:target x-81ad", "/target x-81ad", "$fno:target x-81ad"] {
+            assert_eq!(
+                render_verb_seed(seed, "codex"),
+                "$fno:target x-81ad",
+                "seed: {seed}"
+            );
+        }
+        for seed in [
+            "/review",
+            "/model gpt-5.6-luna",
+            "/compact",
+            "/usr/bin/script x",
+            "/diff",
+            "see /fno:docs",
+            "  review this\n  code  ",
+        ] {
+            assert_eq!(render_verb_seed(seed, "codex"), seed, "seed: {seed}");
+        }
+    }
+
+    /// x-c976: slash surfaces render the namespaced spelling per row; agy
+    /// strips the namespace it injects natively.
+    #[test]
+    fn render_verb_seed_slash_surfaces_render_per_harness() {
+        assert_eq!(
+            render_verb_seed("$fno:blueprint x", "claude"),
+            "/fno:blueprint x"
+        );
+        assert_eq!(
+            render_verb_seed("$fno:blueprint x", "opencode"),
+            "/fno:blueprint x"
+        );
+        assert_eq!(render_verb_seed("$fno:blueprint x", "agy"), "/blueprint x");
+        assert_eq!(render_verb_seed("/undo", "opencode"), "/undo");
+        assert_eq!(
+            render_verb_seed("do a $fno:blueprint", "claude"),
+            "do a $fno:blueprint"
+        );
+    }
+
+    /// x-c976: the parse owner reads both sigils with the shared shape rule.
+    #[test]
+    fn parse_verb_token_reads_both_sigils_and_rejects_paths() {
+        assert_eq!(parse_verb_token("/fno:target"), Some(("target", true)));
+        assert_eq!(parse_verb_token("$fno:target"), Some(("target", true)));
+        assert_eq!(parse_verb_token("/target"), Some(("target", false)));
+        assert_eq!(parse_verb_token("$target"), Some(("target", false)));
+        for tok in [
+            "/Users/bb16/plan.md",
+            "$HOME/x",
+            "//fno:x",
+            "/Target",
+            "review",
+            "/fno:",
+        ] {
+            assert_eq!(parse_verb_token(tok), None, "token: {tok}");
+        }
     }
 
     /// The plan-dir grant is independent of git-repo-ness (x-6163), so even a
