@@ -87,8 +87,11 @@ pub struct Snapshot {
 }
 
 pub fn ledger_path() -> PathBuf {
+    // A HOME-unset context (cron, launchd) must not scatter the ledger into
+    // whatever cwd invoked gh; the temp dir keeps admission working and the
+    // file out of sight until HOME comes back.
     crate::agents_config::machine_locks_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| std::env::temp_dir().join("fno-locks"))
         .join("github-request-budget.json")
 }
 
@@ -189,9 +192,17 @@ fn graphql_mutation(cmd: &[&str]) -> bool {
         }
         i += 1;
     }
-    query
-        .map(|q| q.trim_start().starts_with("mutation"))
-        .unwrap_or(false)
+    query.map(is_mutation_query).unwrap_or(false)
+}
+
+/// An unreadable query (a literal `@file` argv, gh loads it client-side)
+/// fails toward the WRITE cost: an unprovable read is charged as a mutation,
+/// never the reverse.
+fn is_mutation_query(q: String) -> bool {
+    if q.trim_start().starts_with('@') {
+        return true;
+    }
+    q.trim_start().starts_with("mutation")
 }
 
 /// The request cost of one gh argv, in GitHub's advertised points: a GET or
@@ -566,6 +577,11 @@ mod tests {
         assert_eq!(
             points_for(&argv(&["api", "graphql", "-f", "query=query { x }"])),
             1
+        );
+        // An unreadable query fails toward the write cost.
+        assert_eq!(
+            points_for(&argv(&["api", "graphql", "-f", "query=@x.graphql"])),
+            5
         );
         // gh-wide options never change the cost of the command word.
         assert_eq!(points_for(&argv(&["-R", "o/r", "pr", "merge", "1"])), 5);
