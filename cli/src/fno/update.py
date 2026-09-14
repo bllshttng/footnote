@@ -786,7 +786,7 @@ def update_readiness(
 
     degraded_reason = "; ".join(degraded) if degraded else None
 
-    if gate_refused:
+    if gate_refused and pin is not None:
         guidance = "update blocked: " + (
             pin.get("refusal") or "the resolved source failed the source-pin gate"
         )
