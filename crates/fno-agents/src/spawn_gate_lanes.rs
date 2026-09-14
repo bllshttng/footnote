@@ -9,8 +9,8 @@
 //! refusal, never a zero — assuming an empty lane oversubscribes a shared
 //! account, which is the harm the provider cap exists to prevent.
 
-use std::collections::BTreeSet;
 use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -164,13 +164,23 @@ fn run_with_budget(cmd: &mut Command) -> Option<std::process::Output> {
 
 /// `Ok(true)` alive, `Ok(false)` provably gone, `Err(())` undecidable — the
 /// port of `spawn_gate._pid_alive`'s None: a denied inspection presents as an
-/// undecided case, never as a decided death.
-fn pid_liveness(pid: u32) -> Result<bool, ()> {
+/// undecided case, never as a decided death. When `recorded` carries the
+/// row's `pid_start_time`, a live pid of a DIFFERENT incarnation (the pid was
+/// recycled) reads as gone: the current start token is compared in the
+/// registry's own units, as `daemon::pid_is_ours` does. An unreadable current
+/// token against a recorded one is undecidable, never a silent count.
+fn pid_liveness(pid: u32, recorded: Option<u64>) -> Result<bool, ()> {
     if pid <= 1 {
         return Ok(false);
     }
     match claims::probe_pid(pid as i32) {
-        PidProbe::Created(_) => Ok(true),
+        PidProbe::Created(_) => match recorded {
+            None => Ok(true),
+            Some(rec) => match crate::daemon::process_start_time(pid) {
+                Some(now) => Ok(now == rec),
+                None => Err(()),
+            },
+        },
         PidProbe::Absent => Ok(false),
         PidProbe::Refused => Err(()),
     }
@@ -198,7 +208,7 @@ fn provider_roster_live_short_ids(wanted: &BTreeSet<String>) -> Result<BTreeSet<
         }
         match worker.pid {
             None => {}
-            Some(pid) => match pid_liveness(pid) {
+            Some(pid) => match pid_liveness(pid, None) {
                 Ok(true) => {
                     live.insert(short);
                 }
@@ -222,15 +232,162 @@ fn provider_roster_live_short_ids(wanted: &BTreeSet<String>) -> Result<BTreeSet<
 // The provider count
 // ---------------------------------------------------------------------------
 
+/// A transcript quieter than this, on a row with an open operator question,
+/// parks the row out of its provider lane count (the reaper's default quiet
+/// grace).
+const OPERATOR_WAIT_QUIET_S: u64 = 900;
+
+/// Rows waiting on the operator: an open question they asked, and a transcript
+/// quiet at least OPERATOR_WAIT_QUIET_S. Row name -> oldest open question id.
+/// Only claude rows with a session id qualify; the transcript lookup is
+/// claude-only. A question is open when an `operator_question` row carries its
+/// id and no `operator_question_closed` row does. An unparsable line never
+/// qualifies a row (the count's rule: an unreadable source never produces a
+/// smaller number).
+fn awaiting_operator(
+    rows: &[&RegistryEntry],
+    questions_raw: &str,
+    transcript_age_s: impl Fn(&str) -> Option<u64>,
+) -> BTreeMap<String, String> {
+    let mut asks: Vec<(String, Option<String>, Option<String>)> = Vec::new(); // qid, session_id, asker
+    let mut closed: HashSet<String> = HashSet::new();
+    for line in questions_raw.lines() {
+        if !line.contains("operator_question") {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let kind = val.get("type").and_then(Value::as_str).unwrap_or("");
+        let data = val
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let Some(qid) = data.get("question_id").and_then(Value::as_str) else {
+            continue;
+        };
+        match kind {
+            "operator_question" => asks.push((
+                qid.to_string(),
+                data.get("session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                data.get("asker")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            )),
+            "operator_question_closed" => {
+                closed.insert(qid.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    let mut waiting: BTreeMap<String, String> = BTreeMap::new();
+    for row in rows {
+        if row.harness_name() != "claude" {
+            continue;
+        }
+        let Some(sid) = row.harness_session_id.as_deref() else {
+            continue;
+        };
+        if sid.is_empty() {
+            continue;
+        }
+        let Some(age) = transcript_age_s(sid) else {
+            continue;
+        };
+        if age < OPERATOR_WAIT_QUIET_S {
+            continue;
+        }
+        let short = sid.get(..8).unwrap_or(sid).to_lowercase();
+        // File order is journal order, so the first OPEN ask is the oldest:
+        // closed asks are filtered before the find, or a closed first question
+        // would hide a newer open one.
+        if let Some((qid, _, _)) = asks
+            .iter()
+            .filter(|(qid, _, _)| !closed.contains(qid))
+            .find(|(_, q_session, q_asker)| match q_session {
+                Some(s) => s.eq_ignore_ascii_case(sid),
+                None => q_asker
+                    .as_deref()
+                    .is_some_and(|a| a.to_lowercase() == short),
+            })
+        {
+            waiting.insert(row.name.clone(), qid.clone());
+        }
+    }
+    waiting
+}
+
+/// The raw questions journal beside the agents home (`<fno_dir>/questions.jsonl`,
+/// the path `needs.rs` `default_sources` reads). Never fails: a missing journal
+/// means no questions, and any other read error pushes one warning and means no
+/// questions, so waiting workers stay counted.
+pub(crate) fn read_questions_journal(registry_path: &Path, warnings: &mut Vec<String>) -> String {
+    match registry_path.parent().and_then(Path::parent) {
+        Some(fno_dir) => {
+            let path = fno_dir.join("questions.jsonl");
+            std::fs::read_to_string(path).unwrap_or_else(|e| {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warnings.push(format!(
+                        "operator questions unreadable ({e}); waiting workers counted"
+                    ));
+                }
+                String::new()
+            })
+        }
+        None => String::new(),
+    }
+}
+
+/// Transcript quiet in seconds for a claude session id; `None` when the
+/// transcript cannot be found or its age cannot be read.
+fn transcript_age_s(sid: &str) -> Option<u64> {
+    let path = crate::claude_drive::find_transcript(sid)?;
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    std::time::SystemTime::now()
+        .duration_since(modified)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// IO wrapper over `awaiting_operator`: reads the questions journal and
+/// measures transcript quiet through the claude transcript lookup. Never
+/// fails: an unreadable journal reads as no questions, so waiting workers
+/// stay counted.
+pub(crate) fn read_awaiting_operator(
+    registry_path: &Path,
+    rows: &[&RegistryEntry],
+    warnings: &mut Vec<String>,
+) -> BTreeMap<String, String> {
+    let raw = read_questions_journal(registry_path, warnings);
+    awaiting_operator(rows, &raw, transcript_age_s)
+}
+
 /// Count rows of ONE provider only when status and positive liveness agree
-/// (the port of `spawn_gate.provider_live_count`). Returns the count plus the
-/// names of the rows it included, so a display that recounts cannot disagree
-/// with the refusal. Every unreadable source is an `Err`, never a zero.
+/// (the port of `spawn_gate.provider_live_count`). Returns the count, the
+/// names of the rows it included, and the parked pairs it left out: a claude
+/// row with an open operator question and a quiet transcript holds its process
+/// and its slot but spends nothing on the lane, so it stops counting against
+/// the provider cap. Every unreadable source is an `Err`, never a zero.
 pub(crate) fn provider_live_count(
     registry_path: &Path,
     provider: &str,
     warnings: &mut Vec<String>,
-) -> Result<(usize, Vec<String>), String> {
+) -> Result<(usize, Vec<String>, Vec<(String, String)>), String> {
+    let questions_raw = read_questions_journal(registry_path, warnings);
+    provider_live_count_with_questions(registry_path, provider, &questions_raw, warnings)
+}
+
+/// The same count over a pre-read journal, so a caller counting MANY providers
+/// (the lanes probe) reads the journal once instead of once per provider.
+pub(crate) fn provider_live_count_with_questions(
+    registry_path: &Path,
+    provider: &str,
+    questions_raw: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(usize, Vec<String>, Vec<(String, String)>), String> {
     let registry =
         load_registry(registry_path).map_err(|e| format!("fno registry unreadable: {e}"))?;
     let live_rows: Vec<&RegistryEntry> = registry
@@ -270,6 +427,8 @@ pub(crate) fn provider_live_count(
         .filter(|row| row.provider.as_deref() == Some(provider))
         .collect();
 
+    let waiting = awaiting_operator(&candidates, questions_raw, transcript_age_s);
+
     let bg_short_ids: BTreeSet<String> = candidates
         .iter()
         .filter(|row| row.pid.is_none() && row.harness_name() == "claude")
@@ -284,15 +443,20 @@ pub(crate) fn provider_live_count(
 
     let mut count = 0usize;
     let mut counted_names: Vec<String> = Vec::new();
+    let mut parked: Vec<(String, String)> = Vec::new();
 
     for row in &candidates {
+        if let Some(qid) = waiting.get(row.name.as_str()) {
+            parked.push((row.name.clone(), qid.clone()));
+            continue;
+        }
         if let Some(pid) = row.pid {
             if row.pid_start_time.is_none() {
                 // A pid without its incarnation token: a decided death skips,
                 // and the pane probe settles everything else. An undecidable
                 // pid does NOT fault here - the pane gets the chance first,
                 // exactly as the Python counter ordered it.
-                if pid_liveness(pid as u32) == Ok(false) {
+                if pid_liveness(pid, None) == Ok(false) {
                     continue;
                 }
                 match pane_state(row)? {
@@ -311,7 +475,7 @@ pub(crate) fn provider_live_count(
                 continue;
             }
             // With a recorded start time, pid reuse fails closed.
-            if pid_liveness(pid as u32)
+            if pid_liveness(pid, row.pid_start_time)
                 .map_err(|_| format!("process incarnation unreadable for {}", row.name))?
             {
                 count += 1;
@@ -339,8 +503,12 @@ pub(crate) fn provider_live_count(
             }
         }
     }
-    count += provider_live_slot_claims(provider, &counted_names, warnings)?;
-    Ok((count, counted_names))
+    // A parked row's own worker reservation must not count it back: the
+    // claims dedup sees both lists.
+    let mut claim_seen = counted_names.clone();
+    claim_seen.extend(parked.iter().map(|(n, _)| n.clone()));
+    count += provider_live_slot_claims(provider, &claim_seen, warnings)?;
+    Ok((count, counted_names, parked))
 }
 
 /// Pane liveness for one row: `Some(bool)` decided, `None` when the row
@@ -671,12 +839,19 @@ mod tests {
     fn live_row(name: &str, provider: &str, pid: Option<u32>) -> String {
         let fields = pid
             .map(|p| {
-                let start = claims::process_create_time_ms(p as i32).unwrap_or(0);
+                let start = crate::daemon::process_start_time(p).unwrap_or(0);
                 format!(r#","pid":{p},"pid_start_time":{start}"#)
             })
             .unwrap_or_default();
         format!(
             r#"{{"name":"{name}","provider":"{provider}","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z"{fields}}}"#
+        )
+    }
+
+    /// A claude worker row with a session id and no pid (the bg shape).
+    fn claude_row_json(name: &str, sid: &str) -> String {
+        format!(
+            r#"{{"name":"{name}","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","harness_session_id":"{sid}"}}"#
         )
     }
 
@@ -703,10 +878,278 @@ mod tests {
             ],
         );
         let mut warnings = Vec::new();
-        let (count, counted) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
+        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
         assert_eq!(count, 2, "two live zai rows");
         assert_eq!(counted, vec!["a".to_string(), "b".to_string()]);
+        assert!(parked.is_empty(), "no parked rows in the plain fixture");
         std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC7-ERR: a recycled pid, alive but a different process incarnation
+    /// than the recorded start token, is not counted; the correct incarnation
+    /// still is.
+    #[test]
+    fn provider_count_skips_a_recycled_pid() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-recycled-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        let me = std::process::id();
+        let good = crate::daemon::process_start_time(me).unwrap_or(0);
+        let reg = dir.join("registry.json");
+        write_registry(
+            &reg,
+            &[
+                live_row("good", "zai", Some(me)),
+                format!(
+                    r#"{{"name":"recycled","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{me},"pid_start_time":{}}}"#,
+                    good + 1
+                ),
+            ],
+        );
+        let mut warnings = Vec::new();
+        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
+        assert_eq!(count, 1, "the recycled incarnation must not count");
+        assert_eq!(counted, vec!["good".to_string()]);
+        assert!(parked.is_empty(), "no parked rows in the plain fixture");
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unparsable journal line never qualifies a row; the parseable one
+    /// after it still does.
+    #[test]
+    fn awaiting_operator_ignores_an_unparsable_line() {
+        let a = "aaaaaaaa-0000-0000-0000-00000000000a";
+        let rows = vec![serde_json::from_str::<RegistryEntry>(&claude_row_json("a", a)).unwrap()];
+        let row_refs: Vec<&RegistryEntry> = rows.iter().collect();
+        let questions = format!(
+            "{{not json\n{{\"type\":\"operator_question\",\"data\":{{\"question_id\":\"q-1\",\"session_id\":\"{a}\"}}}}\n"
+        );
+        let waiting = awaiting_operator(&row_refs, &questions, |sid| (sid == a).then_some(3600));
+        assert_eq!(waiting.get("a"), Some(&"q-1".to_string()));
+    }
+
+    /// AC1-HP at the helper: an open question plus a quiet transcript maps the
+    /// row to its question id; a row with no question stays out even when its
+    /// transcript is just as quiet.
+    #[test]
+    fn awaiting_operator_maps_an_open_quiet_question_to_its_row() {
+        let a = "aaaaaaaa-0000-0000-0000-00000000000a";
+        let b = "bbbbbbbb-0000-0000-0000-00000000000b";
+        let rows: Vec<RegistryEntry> = [claude_row_json("a", a), claude_row_json("b", b)]
+            .iter()
+            .map(|s| serde_json::from_str::<RegistryEntry>(s).unwrap())
+            .collect();
+        let row_refs: Vec<&RegistryEntry> = rows.iter().collect();
+        let questions = format!(
+            "{{\"type\":\"operator_question\",\"data\":{{\"question_id\":\"q-1\",\"session_id\":\"{a}\"}}}}\n"
+        );
+        // Both transcripts quiet past the grace; only row a holds an open ask.
+        let waiting = awaiting_operator(&row_refs, &questions, |_| Some(3600));
+        assert_eq!(waiting.get("a"), Some(&"q-1".to_string()));
+        assert_eq!(waiting.get("b"), None, "no open question, no park");
+    }
+
+    /// AC1-ACTIVE: a transcript quiet only 60 s never parks a row.
+    #[test]
+    fn awaiting_operator_needs_the_quiet_grace() {
+        let a = "aaaaaaaa-0000-0000-0000-00000000000a";
+        let rows = vec![serde_json::from_str::<RegistryEntry>(&claude_row_json("a", a)).unwrap()];
+        let row_refs: Vec<&RegistryEntry> = rows.iter().collect();
+        let questions = format!(
+            "{{\"type\":\"operator_question\",\"data\":{{\"question_id\":\"q-1\",\"session_id\":\"{a}\"}}}}\n"
+        );
+        let waiting = awaiting_operator(&row_refs, &questions, |_| Some(60));
+        assert!(waiting.is_empty());
+    }
+
+    /// AC1-CLOSED: a closed question does not park its row.
+    #[test]
+    fn awaiting_operator_skips_a_closed_question() {
+        let a = "aaaaaaaa-0000-0000-0000-00000000000a";
+        let rows = vec![serde_json::from_str::<RegistryEntry>(&claude_row_json("a", a)).unwrap()];
+        let row_refs: Vec<&RegistryEntry> = rows.iter().collect();
+        let questions = format!(
+            "{{\"type\":\"operator_question\",\"data\":{{\"question_id\":\"q-1\",\"session_id\":\"{a}\"}}}}\n{{\"type\":\"operator_question_closed\",\"data\":{{\"question_id\":\"q-1\"}}}}\n"
+        );
+        let waiting = awaiting_operator(&row_refs, &questions, |_| Some(3600));
+        assert!(waiting.is_empty());
+    }
+
+    /// The asker arm: a question carrying only the 8-character asker short id
+    /// still binds to its row.
+    #[test]
+    fn awaiting_operator_matches_a_bare_asker_short_id() {
+        let a = "aaaaaaaa-0000-0000-0000-00000000000a";
+        let rows = vec![serde_json::from_str::<RegistryEntry>(&claude_row_json("a", a)).unwrap()];
+        let row_refs: Vec<&RegistryEntry> = rows.iter().collect();
+        let questions =
+            "{\"type\":\"operator_question\",\"data\":{\"question_id\":\"q-1\",\"asker\":\"aaaaaaaa\"}}\n";
+        let waiting = awaiting_operator(&row_refs, questions, |_| Some(3600));
+        assert_eq!(waiting.get("a"), Some(&"q-1".to_string()));
+    }
+
+    /// AC1-ERR: an unreadable questions path (a directory) pushes exactly one
+    /// warning and reads as no questions; waiting workers stay counted.
+    #[test]
+    fn read_awaiting_operator_warns_once_on_an_unreadable_journal() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-qdir-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("questions.jsonl")).unwrap();
+        let reg = dir.join("agents").join("registry.json");
+        let mut warnings = Vec::new();
+        let waiting = read_awaiting_operator(&reg, &[], &mut warnings);
+        assert!(waiting.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("operator questions unreadable"),
+            "{warnings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC1-HP through the real counter: the parked row drops out of the count
+    /// and its liveness is never probed (its pid token is deliberately wrong),
+    /// while its question id travels in the parked list.
+    #[test]
+    fn provider_count_parks_a_worker_waiting_on_the_operator() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-parked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        let projects = dir.join("projects");
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, &projects);
+        let agents = dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let reg = agents.join("registry.json");
+        let a = "aaaaaaaa-0000-0000-0000-00000000000a";
+        let b = "bbbbbbbb-0000-0000-0000-00000000000b";
+        std::fs::write(
+            dir.join("questions.jsonl"),
+            format!(
+                "{{\"type\":\"operator_question\",\"data\":{{\"question_id\":\"q-1\",\"session_id\":\"{a}\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        let proj = projects.join("-tmp-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let t = proj.join(format!("{a}.jsonl"));
+        std::fs::write(&t, b"{}\n").unwrap();
+        let old = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        std::fs::File::options()
+            .write(true)
+            .open(&t)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(old)),
+            )
+            .unwrap();
+        let me = std::process::id();
+        let good = crate::daemon::process_start_time(me).unwrap_or(0);
+        write_registry(
+            &reg,
+            &[
+                format!(
+                    r#"{{"name":"a","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","harness_session_id":"{a}","pid":{me},"pid_start_time":{}}}"#,
+                    good + 1
+                ),
+                format!(
+                    r#"{{"name":"b","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","harness_session_id":"{b}","pid":{me},"pid_start_time":{good}}}"#
+                ),
+            ],
+        );
+        let mut warnings = Vec::new();
+        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
+        assert_eq!(count, 1, "the waiting worker stops holding the lane");
+        assert_eq!(counted, vec!["b".to_string()]);
+        assert_eq!(parked, vec![("a".to_string(), "q-1".to_string())]);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC2-HP: a parked row's own provider-tagged reservation does not count
+    /// the row back into its lane.
+    #[test]
+    fn provider_count_skips_a_parked_rows_own_slot_claim() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-pclaim-{}", std::process::id()));
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let agents = dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let reg = agents.join("registry.json");
+        let a = "aaaaaaaa-0000-0000-0000-00000000000a";
+        std::fs::write(
+            dir.join("questions.jsonl"),
+            format!(
+                "{{\"type\":\"operator_question\",\"data\":{{\"question_id\":\"q-1\",\"session_id\":\"{a}\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        let proj = dir.join("projects").join("-tmp-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let t = proj.join(format!("{a}.jsonl"));
+        std::fs::write(&t, b"{}\n").unwrap();
+        let old = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        std::fs::File::options()
+            .write(true)
+            .open(&t)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(old)),
+            )
+            .unwrap();
+        // A live worker:a reservation tagged zai, held by this live process.
+        let host = claims::hostname();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let lock = claims_dir.join(format!("{}.lock", claims::encode_key("worker:a")));
+        std::fs::write(
+            &lock,
+            format!("schema_version: {}\nkey: worker:a\nholder: h\nacquired_at: {now}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n", claims::SCHEMA_VERSION, std::process::id()),
+        )
+        .unwrap();
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, dir.join("projects"));
+        let me = std::process::id();
+        write_registry(
+            &reg,
+            &[claude_row_json("a", a), live_row("good", "zai", Some(me))],
+        );
+        let mut warnings = Vec::new();
+        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
+        assert_eq!(
+            count, 1,
+            "the reservation must not count the parked row back"
+        );
+        assert_eq!(counted, vec!["good".to_string()]);
+        assert_eq!(parked, vec![("a".to_string(), "q-1".to_string())]);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -65,6 +65,18 @@ expect "gwp: tee into space manifest" block \
 expect "gwp: sed -i on space manifest" block \
   '{"tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ /home/u/.fno/spaces/proj-1234abcd/worktrees/wt/target-state.md"}}'
 
+# ── Wave 10.1: graph.db and its WAL siblings join the protected family ────────
+expect "gwp: >> graph.db" block \
+  '{"tool_name":"Bash","tool_input":{"command":"echo x > ~/.fno/graph.db"}}'
+expect "gwp: cp into graph.db-shm" block \
+  '{"tool_name":"Bash","tool_input":{"command":"cp staged ~/.fno/graph.db-shm"}}'
+expect "gwp: Edit graph.db" block \
+  '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/graph.db","old_string":"a","new_string":"b"}}'
+expect "gwp: Edit graph.db-wal" block \
+  '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/graph.db-wal","old_string":"a","new_string":"b"}}'
+expect "gwp: backups/ graph.db.<stamp> snapshot stays editable" approve \
+  '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/backups/graph.db.20260914T120000000000","old_string":"a","new_string":"b"}}'
+
 # ── AC3-HP: Edit to target-state.md blocked (unconditional immutability) ──────
 expect "AC3-HP: Edit target-state.md" block \
   '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/target-state.md","old_string":"a","new_string":"b"}}'

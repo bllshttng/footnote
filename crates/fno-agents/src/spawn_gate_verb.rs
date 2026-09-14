@@ -158,8 +158,19 @@ mod probe {
             });
         }
 
-        // The slot count: the same counter the gate refuses on.
-        let slots = spawn_gate::slot_count(&registry_path, &mut warnings);
+        // The slot count: the same counter the gate refuses on. The rows are
+        // named right away, so every verdict this answer can take (refused on
+        // max_live, refused later, accepted) carries them.
+        let (slot_row_entries, slot_claims) =
+            spawn_gate::slot_reading(&registry_path, &mut warnings);
+        let slots = slot_row_entries.len() + slot_claims;
+        out.insert(
+            "slot_rows".into(),
+            json!(slot_row_entries
+                .iter()
+                .map(|r| json!({"name": r.name, "node": r.node, "provider": r.provider}))
+                .collect::<Vec<_>>()),
+        );
 
         let mut ram_row: Option<Value> = None;
         let mut cpu_rows: Vec<Value> = Vec::new();
@@ -616,14 +627,32 @@ fn lanes_answer(
     providers.dedup();
 
     let mut lanes = Map::new();
+    // One journal read for the whole probe: every provider's lane count
+    // judges the same waiting-worker question at the same instant.
+    let questions_raw = spawn_gate_lanes::read_questions_journal(registry_path, warnings);
     for provider in providers {
         let cap = spawn_gate_lanes::provider_lanes_cap(config_cwd, &provider);
-        match spawn_gate_lanes::provider_live_count(registry_path, &provider, warnings) {
-            Ok((live, counted)) => {
+        match spawn_gate_lanes::provider_live_count_with_questions(
+            registry_path,
+            &provider,
+            &questions_raw,
+            warnings,
+        ) {
+            Ok((live, counted, parked)) => {
                 let mut lane = Map::new();
                 lane.insert("cap".into(), json!(cap));
                 lane.insert("live".into(), json!(live));
                 lane.insert("counted".into(), json!(counted));
+                lane.insert(
+                    "parked".into(),
+                    json!(parked
+                        .iter()
+                        .map(|(name, qid)| serde_json::json!({
+                            "name": name,
+                            "question_id": json!(qid),
+                        }))
+                        .collect::<Vec<_>>()),
+                );
                 lanes.insert(provider, Value::Object(lane));
             }
             Err(error) => {
@@ -659,5 +688,83 @@ mod tests {
     fn ram_floor_row_refuses_at_the_ceiling() {
         let row = ram_floor_row(Some(35.0), 4.0, Some(94.0), 90.0);
         assert_eq!(row["verdict"].as_str().unwrap(), "refuse");
+    }
+
+    /// AC6-HP: the probe answer names the rows behind the slot count in every
+    /// verdict, and `live_workers` stays the slot count (rows + reservations),
+    /// so `fno agents gate-status` can show them with no second walk.
+    #[test]
+    fn probe_answer_names_its_slot_rows() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        // Pin the whole config: FNO_CONFIG is the sole candidate when set, so
+        // a parallel test's stray FNO_CONFIG (or no config at all, whose
+        // max_live default is 3) cannot flip the verdict under this fixture.
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            // max_swap_pct 0 disables the swap term: the machine this runs on
+            // may genuinely sit above the default 90 percent cap (x-8c8c),
+            // which would refuse the probe before the assertions.
+            "[agents]\nmax_live = 28\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+
+        let me = std::process::id();
+        let good = crate::daemon::process_start_time(me).unwrap_or(0);
+        let row = |name: &str| {
+            format!(
+                r#"{{"name":"{name}","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{me},"pid_start_time":{good}}}"#
+            )
+        };
+        std::fs::write(
+            home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":{},"entries":[{}, {}, {}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                row("p1"),
+                row("p2"),
+                row("p2") // duplicate name, still a distinct row the count sees
+            ),
+        )
+        .unwrap();
+
+        let answer = probe::answer(&json!({}));
+        let slot_rows = answer["slot_rows"].as_array().expect("slot_rows array");
+        assert_eq!(slot_rows.len(), 3, "{slot_rows:?}");
+        for r in slot_rows {
+            assert!(r.get("name").is_some(), "{r:?}");
+            assert!(r.get("node").is_some(), "{r:?}");
+            assert!(r.get("provider").is_some(), "{r:?}");
+        }
+        assert_eq!(answer["live_workers"], 3, "slots stay rows + reservations");
+        assert_eq!(answer["verdict"], "accepted");
+
+        std::env::remove_var(crate::paths::HOME_ENV);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
