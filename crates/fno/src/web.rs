@@ -20,8 +20,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::client::humanize_ago;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -913,7 +914,8 @@ fn bind_addr(bind: &str, port: u16) -> String {
 // ---------------------------------------------------------------------------
 
 async fn page() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], PAGE)
+    let body = PAGE.replacen("<!--fno-nav-->", &nav_fragment(NavPage::Live), 1);
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body)
 }
 
 #[derive(serde::Deserialize)]
@@ -927,18 +929,206 @@ async fn backlog(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Respon
         q.t.as_deref(),
         &st.token,
         "FNO_NO_OPEN=1 fno backlog view",
+        NavPage::Backlog,
     )
     .await
 }
 
 async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
+    let authorized = token_ok(q.t.as_deref(), &st.token);
+    let modified = std::fs::metadata(&st.reign_html)
+        .and_then(|m| m.modified())
+        .ok();
+    if crown_needs_republish(authorized, modified, SystemTime::now()) {
+        start_crown_republish(&st.reign_html);
+    }
     backlog_response(
         &st.reign_html,
         q.t.as_deref(),
         &st.token,
-        "fno agents king ledger",
+        "fno agents king ledger (a render has started; reload in about a minute)",
+        NavPage::Crown,
     )
     .await
+}
+
+/// Which page the bridge serves; the shared nav fragment marks the current
+/// one so a reader always knows where they are.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NavPage {
+    Live,
+    Backlog,
+    Crown,
+}
+
+fn token_ok(supplied: Option<&str>, expected: &str) -> bool {
+    supplied.is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
+}
+
+/// Republish-on-read: a render costs about a minute, so the bridge serves the
+/// current file at once and starts ONE background render when the page is
+/// stale. `crown()` checks; this spawns through the fleet admission gate.
+const CROWN_REPUBLISH_AFTER: Duration = Duration::from_secs(300);
+const CROWN_REPUBLISH_TIMEOUT: Duration = Duration::from_secs(300);
+static CROWN_REPUBLISHING: AtomicBool = AtomicBool::new(false);
+
+/// Pure staleness verdict: unauthorized reads start nothing, a missing file
+/// is maximally stale, a future mtime reads as fresh, and anything older
+/// than the threshold needs a render.
+fn crown_needs_republish(authorized: bool, modified: Option<SystemTime>, now: SystemTime) -> bool {
+    if !authorized {
+        return false;
+    }
+    match modified {
+        None => true,
+        Some(m) if m > now => false,
+        Some(m) => now
+            .duration_since(m)
+            .map(|age| age > CROWN_REPUBLISH_AFTER)
+            .unwrap_or(false),
+    }
+}
+
+/// Single-flight background render. `--out` names the exact path the bridge
+/// reads, so writer and reader agree whatever the Python state root resolves
+/// to. Admission refusal, non-zero exit or timeout each log and clear the
+/// flag, so a later read may retry.
+fn start_crown_republish(out: &Path) {
+    if CROWN_REPUBLISHING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return; // a render is already in flight
+    }
+    let out = out.to_path_buf();
+    tokio::spawn(async move {
+        let fno = std::env::current_exe().unwrap_or_else(|_| "fno".into());
+        let mut cmd = crate::process_admission::tokio_command(&fno);
+        cmd.args(["agents", "king", "ledger", "--out"]).arg(&out);
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let result = match crate::process_admission::tokio_spawn(&mut cmd) {
+            Err(e) => Err(format!("{e}")),
+            Ok(mut child) => {
+                let stderr = child.stderr.take();
+                let tail = tokio::spawn(async move {
+                    let mut buf = String::new();
+                    if let Some(mut s) = stderr {
+                        use tokio::io::AsyncReadExt;
+                        let mut chunk = vec![0u8; 4096];
+                        loop {
+                            match s.read(&mut chunk).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => buf.push_str(&String::from_utf8_lossy(&chunk[..n])),
+                            }
+                        }
+                    }
+                    buf
+                });
+                match tokio::time::timeout(CROWN_REPUBLISH_TIMEOUT, child.wait()).await {
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        Err("timed out after 300s".to_string())
+                    }
+                    Ok(Err(e)) => Err(format!("{e}")),
+                    Ok(Ok(status)) if !status.success() => {
+                        let last = tail
+                            .await
+                            .unwrap_or_default()
+                            .lines()
+                            .last()
+                            .unwrap_or_default()
+                            .to_string();
+                        Err(last)
+                    }
+                    Ok(Ok(_)) => Ok(()),
+                }
+            }
+        };
+        if let Err(e) = result {
+            eprintln!("fno mux web: `fno agents king ledger --out <reign.html>` failed: {e}");
+        }
+        CROWN_REPUBLISHING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// One sticky nav shared by the live, backlog and crown pages. Links are
+/// computed in the browser from `location.pathname`, so any mount prefix
+/// works, and no prefix works too.
+fn nav_fragment(current: NavPage) -> String {
+    let name = |p: NavPage| match p {
+        NavPage::Live => "live",
+        NavPage::Backlog => "backlog",
+        NavPage::Crown => "crown",
+    };
+    let link = |p: NavPage| {
+        if p == current {
+            format!(
+                "<a data-page=\"{}\" aria-current=\"page\" href=\"#\">{}</a>",
+                name(p),
+                name(p)
+            )
+        } else {
+            format!("<a data-page=\"{}\" href=\"#\">{}</a>", name(p), name(p))
+        }
+    };
+    // The backlog page's own filter bar is sticky at top:0 and would slide
+    // under the nav, so only that page's fragment lifts it.
+    let controls = if current == NavPage::Backlog {
+        ".controls{top:var(--fno-nav-h)}"
+    } else {
+        ""
+    };
+    format!(
+        "<nav class=\"fno-nav\" data-current=\"{}\" aria-label=\"fno pages\">\
+         <style>:root{{--fno-nav-h:42px}}\
+         nav.fno-nav{{position:sticky;top:0;z-index:1000;display:flex;align-items:center;gap:18px;\
+         padding:6px 14px;background:#14181a;color:#e3e8e4;\
+         font:13px/1 system-ui,-apple-system,Segoe UI,sans-serif;box-sizing:border-box}}\
+         nav.fno-nav *{{box-sizing:border-box}}\
+         nav.fno-nav a{{color:#b9c2cf;text-decoration:none;display:flex;align-items:center;\
+         min-height:30px;padding:0 4px;border-bottom:2px solid transparent}}\
+         nav.fno-nav a[aria-current=\"page\"]{{color:#fff;border-bottom-color:#c99b45}}\
+         nav.fno-nav a:hover{{color:#fff}}{controls}</style>\
+         {}{}{}\
+         <script>(function(){{var nav=document.querySelector(\"nav.fno-nav\");if(!nav)return;\
+         var p=location.pathname,base;\
+         if(nav.dataset.current===\"live\"){{base=p.endsWith(\"/\")?p:p+\"/\";}}\
+         else{{base=p.slice(0,p.lastIndexOf(\"/\")+1);}}\
+         nav.dataset.base=base;\
+         var q=new URLSearchParams(location.search),t=q.get(\"t\")||\"\",pj=q.get(\"project\");\
+         nav.querySelectorAll(\"a\").forEach(function(a){{\
+         var page=a.dataset.page;\
+         a.href=base+(page===\"live\"?\"\":page)+\"?t=\"+encodeURIComponent(t)\
+         +(pj?\"&project=\"+encodeURIComponent(pj):\"\");}});}})();</script></nav>",
+        name(current),
+        link(NavPage::Live),
+        link(NavPage::Backlog),
+        link(NavPage::Crown),
+    )
+}
+
+/// Insert the nav fragment right after the first `<body ...>` tag (ASCII
+/// case-insensitive; graph.html opens with `<body data-local="true">`).
+/// With no body tag at all, prepend.
+fn with_nav(html: &str, current: NavPage) -> String {
+    let fragment = nav_fragment(current);
+    let lower = html.to_ascii_lowercase();
+    let injected = match lower
+        .find("<body")
+        .and_then(|start| lower[start..].find('>').map(|end| start + end + 1))
+    {
+        Some(at) => {
+            let mut out = String::with_capacity(html.len() + fragment.len());
+            out.push_str(&html[..at]);
+            out.push_str(&fragment);
+            out.push_str(&html[at..]);
+            out
+        }
+        None => format!("{fragment}{html}"),
+    };
+    injected
 }
 
 async fn backlog_response(
@@ -946,10 +1136,9 @@ async fn backlog_response(
     supplied: Option<&str>,
     expected: &str,
     render_hint: &str,
+    nav: NavPage,
 ) -> Response {
-    let authorized =
-        supplied.is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()));
-    if !authorized {
+    if !token_ok(supplied, expected) {
         return (
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -964,7 +1153,7 @@ async fn backlog_response(
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
                 (header::CACHE_CONTROL, "no-store"),
             ],
-            body,
+            with_nav(&body, nav),
         )
             .into_response(),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => (
@@ -1445,7 +1634,14 @@ console.log("evictedRowCount: 18 cases ok");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("graph.html");
         std::fs::write(&path, "PRIVATE-BACKLOG-MARKER").unwrap();
-        let response = backlog_response(&path, Some("right"), "right", "fno backlog view").await;
+        let response = backlog_response(
+            &path,
+            Some("right"),
+            "right",
+            "fno backlog view",
+            NavPage::Backlog,
+        )
+        .await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
@@ -1456,7 +1652,14 @@ console.log("evictedRowCount: 18 cases ok");
             .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("PRIVATE-BACKLOG-MARKER"));
 
-        let denied = backlog_response(&path, Some("wrong"), "right", "fno backlog view").await;
+        let denied = backlog_response(
+            &path,
+            Some("wrong"),
+            "right",
+            "fno backlog view",
+            NavPage::Backlog,
+        )
+        .await;
         assert_eq!(denied.status(), axum::http::StatusCode::UNAUTHORIZED);
         let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
             .await
@@ -1476,6 +1679,7 @@ console.log("evictedRowCount: 18 cases ok");
             Some("right"),
             "right",
             "FNO_NO_OPEN=1 fno backlog view",
+            NavPage::Backlog,
         )
         .await;
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
@@ -1487,10 +1691,52 @@ console.log("evictedRowCount: 18 cases ok");
     }
 
     #[test]
-    fn page_preserves_the_token_in_the_backlog_link() {
-        assert!(PAGE.contains("id=\"backlog-link\""));
-        assert!(PAGE.contains("/backlog?t=${encodeURIComponent(token)}"));
-        assert!(PAGE.contains("project=${encodeURIComponent(backlogProject)}"));
+    fn page_serves_the_shared_nav_not_absolute_links() {
+        assert!(!PAGE.contains("\"/backlog?t="));
+        assert!(!PAGE.contains("\"/crown?t="));
+        assert!(!PAGE.contains("${location.host}/ws"));
+        assert!(PAGE.contains("<!--fno-nav-->"));
+        assert!(PAGE.contains("const base = document.querySelector(\"nav.fno-nav\").dataset.base;"));
+        assert!(PAGE.contains("${location.host}${base}ws?t="));
+    }
+
+    #[test]
+    fn nav_fragment_marks_one_current_page_and_carries_the_query_parts() {
+        for (page, name) in [
+            (NavPage::Live, "live"),
+            (NavPage::Backlog, "backlog"),
+            (NavPage::Crown, "crown"),
+        ] {
+            let frag = nav_fragment(page);
+            // The CSS selector also names the attribute; count the link tags.
+            assert_eq!(frag.matches("aria-current=\"page\" href=\"#\"").count(), 1);
+            assert!(frag.contains(&format!("data-current=\"{name}\"")));
+            assert!(frag.contains(&format!(
+                "<a data-page=\"{name}\" aria-current=\"page\" href=\"#\">{name}</a>"
+            )));
+            assert!(frag.contains("encodeURIComponent(t)"));
+            assert!(frag.contains("encodeURIComponent(pj)"));
+        }
+    }
+
+    #[test]
+    fn with_nav_inserts_after_the_body_tag() {
+        let out = with_nav(
+            "<html><body data-local=\"true\"><p>x</p></body></html>",
+            NavPage::Backlog,
+        );
+        assert!(out.contains("<body data-local=\"true\"><nav class=\"fno-nav\""));
+        let out = with_nav("<html><BODY><p>x</p></BODY></html>", NavPage::Crown);
+        assert!(out.contains("<BODY><nav class=\"fno-nav\""));
+        let out = with_nav("<p>no body</p>", NavPage::Live);
+        assert!(out.starts_with("<nav class=\"fno-nav\""));
+    }
+
+    #[test]
+    fn only_the_backlog_nav_offsets_the_controls_bar() {
+        assert!(nav_fragment(NavPage::Backlog).contains(".controls{top:var(--fno-nav-h)}"));
+        assert!(!nav_fragment(NavPage::Live).contains(".controls"));
+        assert!(!nav_fragment(NavPage::Crown).contains(".controls"));
     }
 
     #[test]
@@ -1508,9 +1754,15 @@ console.log("evictedRowCount: 18 cases ok");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("reign.html");
-        std::fs::write(&path, "PRIVATE-CROWN-MARKER").unwrap();
-        let response =
-            backlog_response(&path, Some("right"), "right", "fno agents king ledger").await;
+        std::fs::write(&path, "<body><p>PRIVATE-CROWN-MARKER</p></body>").unwrap();
+        let response = backlog_response(
+            &path,
+            Some("right"),
+            "right",
+            "fno agents king ledger",
+            NavPage::Crown,
+        )
+        .await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
@@ -1520,9 +1772,17 @@ console.log("evictedRowCount: 18 cases ok");
             .await
             .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("PRIVATE-CROWN-MARKER"));
-
-        let denied =
-            backlog_response(&path, Some("wrong"), "right", "fno agents king ledger").await;
+        // The served crown page carries the shared nav (inserted after <body>).
+        let text = String::from_utf8_lossy(&body).to_string();
+        assert!(text.contains("nav class=\"fno-nav\" data-current=\"crown\""));
+        let denied = backlog_response(
+            &path,
+            Some("wrong"),
+            "right",
+            "fno agents king ledger",
+            NavPage::Crown,
+        )
+        .await;
         assert_eq!(denied.status(), axum::http::StatusCode::UNAUTHORIZED);
         let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
             .await
@@ -1541,7 +1801,8 @@ console.log("evictedRowCount: 18 cases ok");
             &dir.join("reign.html"),
             Some("right"),
             "right",
-            "fno agents king ledger",
+            "fno agents king ledger (a render has started; reload in about a minute)",
+            NavPage::Crown,
         )
         .await;
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
@@ -1553,9 +1814,36 @@ console.log("evictedRowCount: 18 cases ok");
     }
 
     #[test]
-    fn page_preserves_the_token_in_the_crown_link() {
-        assert!(PAGE.contains("id=\"crown-link\""));
-        assert!(PAGE.contains("/crown?t=${encodeURIComponent(token)}"));
+    fn crown_republish_truth_table() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        // Unauthorized never starts a render.
+        assert!(!crown_needs_republish(false, None, now));
+        // A missing file is maximally stale.
+        assert!(crown_needs_republish(true, None, now));
+        // Fresh, and a future mtime, read as fresh.
+        let fresh = now.checked_sub(Duration::from_secs(10)).unwrap();
+        assert!(!crown_needs_republish(true, Some(fresh), now));
+        let future = now.checked_add(Duration::from_secs(10)).unwrap();
+        assert!(!crown_needs_republish(true, Some(future), now));
+        // Older than the threshold needs a render.
+        let stale = now
+            .checked_sub(CROWN_REPUBLISH_AFTER + Duration::from_secs(1))
+            .unwrap();
+        assert!(crown_needs_republish(true, Some(stale), now));
+        // Exactly at the threshold is still fresh ("older than" is strict).
+        let boundary = now.checked_sub(CROWN_REPUBLISH_AFTER).unwrap();
+        assert!(!crown_needs_republish(true, Some(boundary), now));
+    }
+
+    #[tokio::test]
+    async fn republish_is_single_flight() {
+        // With the flag held, a second start returns without spawning: no task
+        // ever runs, so the flag survives the call untouched.
+        CROWN_REPUBLISHING.store(true, Ordering::SeqCst);
+        start_crown_republish(Path::new("/tmp/never-written-reign.html"));
+        tokio::task::yield_now().await;
+        assert!(CROWN_REPUBLISHING.load(Ordering::SeqCst));
+        CROWN_REPUBLISHING.store(false, Ordering::SeqCst);
     }
 
     #[test]

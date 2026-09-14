@@ -1,13 +1,13 @@
-//! `reign-ledger`: the reign ledger page for `fno agents king ledger`.
+//! `reign-ledger`: the Crown Ledger page for `fno agents king ledger`.
 //!
 //! Python resolves the court (registry adjudication, manifest limbs, the
 //! caller's paths) and hands one court JSON over; the native side owns the
 //! page assembly, the same split `king-history` applies to the journal
 //! readback, so the Python-tree ratchet holds. The crown-to-nodes join stays
 //! in the fold the Python side already ran (`scope_nodes` rides in the court
-//! JSON); titles, omitted members, uncrowned epics, and orphan leaves are
-//! read from the graph through the SAME compiler `court-fold` uses, so the
-//! page cannot disagree with the court about who holds a node.
+//! JSON); titles, uncrowned epics, and orphan leaves are read from the graph
+//! through the SAME compiler `court-fold` uses, so the page cannot disagree
+//! with the court about who holds a node.
 //!
 //! `reign-ledger --court-json PATH --graph PATH --generated TS --out PATH`
 //!
@@ -33,70 +33,9 @@ fn plural(n: i64, one: &str) -> String {
     }
 }
 
-/// The counts fragment in lifecycle order; a status outside the vocabulary
-/// keeps its place at the end rather than vanishing.
-fn counts_line(fold: &Value) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(counts) = fold.get("counts").and_then(|c| c.as_object()) {
-        for status in COUNT_ORDER {
-            if let Some(n) = counts.get(status).and_then(|v| v.as_i64()) {
-                parts.push(format!("{status} {n}"));
-            }
-        }
-        let mut leftovers: Vec<String> = counts
-            .keys()
-            .filter(|k| !COUNT_ORDER.contains(&k.as_str()))
-            .cloned()
-            .collect();
-        leftovers.sort();
-        for key in leftovers {
-            let n = counts.get(&key).and_then(|v| v.as_i64()).unwrap_or(0);
-            parts.push(format!("{key} {n}"));
-        }
-    }
-    parts.join(", ")
+fn status_label(status: &str) -> String {
+    status.replace('_', " ")
 }
-
-fn titles_of(entries: &[Value]) -> BTreeMap<String, &Value> {
-    let mut out = BTreeMap::new();
-    for e in entries {
-        if let Some(id) = s_str(e, "id") {
-            out.insert(id.to_string(), e);
-        }
-    }
-    out
-}
-
-fn row_tr(n: &Value, titles: &BTreeMap<String, &Value>) -> String {
-    let id = s_str(n, "id").unwrap_or("");
-    let title = titles
-        .get(id)
-        .and_then(|e| s_str(e, "title"))
-        .unwrap_or("-");
-    let worker = n
-        .get("worker")
-        .map(|w| match w {
-            Value::Null => String::new(),
-            Value::String(s) => esc(s),
-            other => esc(&other.to_string()),
-        })
-        .unwrap_or_default();
-    let pr = n
-        .get("pr_number")
-        .and_then(|p| p.as_i64())
-        .map(|p| format!("#{p}"))
-        .unwrap_or_default();
-    format!(
-        "<tr><td>{}</td><td>{}</td>{}<td>{}</td><td>{}</td></tr>",
-        esc(id),
-        esc(title),
-        pill_td(s_str(n, "status").unwrap_or("")),
-        worker,
-        pr
-    )
-}
-
-const TABLE_HEAD: &str = "<table><thead><tr><th>node</th><th>title</th><th>status</th><th>worker</th><th>pr</th></tr></thead><tbody>";
 
 /// The member ids of one crown at its own level, or None when the scope
 /// cannot compile (the fold's verdict already says so in place).
@@ -110,99 +49,365 @@ fn members_of(
     compile_forced(scope, entries, projects, level).ok()
 }
 
-fn crown_section(
-    crown: &Value,
-    titles: &BTreeMap<String, &Value>,
-    _entries: &[Value],
-    _projects: &Result<HashMap<String, String>, String>,
-    members: Option<&BTreeSet<String>>,
-) -> String {
-    let level = match crown.get("level").and_then(|l| l.as_i64()) {
-        Some(l) => format!("L{l}"),
-        None => "L?".to_string(),
+fn titles_of(entries: &[Value]) -> BTreeMap<String, &Value> {
+    let mut out = BTreeMap::new();
+    for e in entries {
+        if let Some(id) = s_str(e, "id") {
+            out.insert(id.to_string(), e);
+        }
+    }
+    out
+}
+
+/// Counts in lifecycle order, zero entries dropped; a status outside the
+/// vocabulary keeps its place at the end rather than vanishing.
+fn counts_in_order(fold: &Value) -> Vec<(String, i64)> {
+    let mut out: Vec<(String, i64)> = Vec::new();
+    if let Some(counts) = fold.get("counts").and_then(|c| c.as_object()) {
+        for status in COUNT_ORDER {
+            if let Some(n) = counts.get(status).and_then(|v| v.as_i64()) {
+                if n > 0 {
+                    out.push((status.to_string(), n));
+                }
+            }
+        }
+        let mut leftovers: Vec<String> = counts
+            .keys()
+            .filter(|k| !COUNT_ORDER.contains(&k.as_str()))
+            .cloned()
+            .collect();
+        leftovers.sort();
+        for key in leftovers {
+            let n = counts.get(&key).and_then(|v| v.as_i64()).unwrap_or(0);
+            if n > 0 {
+                out.push((key, n));
+            }
+        }
+    }
+    out
+}
+
+fn active_sum(fold: &Value) -> i64 {
+    ACTIVE_STATUSES
+        .iter()
+        .filter_map(|s| {
+            fold.get("counts")
+                .and_then(|c| c.get(*s))
+                .and_then(|v| v.as_i64())
+        })
+        .sum()
+}
+
+fn chip_td(status: &str) -> String {
+    let s = esc(status);
+    format!(
+        "<td><span class=\"chip s-{s}\">{}</span></td>",
+        esc(&status_label(status))
+    )
+}
+
+/// The work cell names the slug in words; the graph entry's title rides in
+/// the title attribute. A slug-less row falls back to the title itself.
+fn work_cell(slug: &str, title: &str) -> String {
+    if slug.is_empty() {
+        let work = if title.is_empty() { "-" } else { title };
+        return format!("<td class=\"slug\">{}</td>", esc(work));
+    }
+    let words = slug.replace('-', " ");
+    if title.is_empty() {
+        format!("<td class=\"slug\">{}</td>", esc(&words))
+    } else {
+        format!(
+            "<td class=\"slug\" title=\"{}\">{}</td>",
+            esc(title),
+            esc(&words)
+        )
+    }
+}
+
+fn sess_cell(count: usize, worker: Option<&str>) -> String {
+    let held = match worker {
+        Some(w) if !w.is_empty() => format!(" · held by {}", esc(w)),
+        _ => String::new(),
     };
-    let agree = match crown.get("agree") {
-        Some(Value::Bool(true)) => "yes",
-        Some(Value::Bool(false)) => "no",
-        _ => "?",
+    if count == 0 {
+        format!("<td class=\"num\"><span class=\"sess zero\" title=\"no session recorded{held}\">0</span></td>")
+    } else {
+        format!("<td class=\"num\"><span class=\"sess\" title=\"{count} session(s) recorded{held}\">{count}</span></td>")
+    }
+}
+
+/// The PR cell links only an https url; any other scheme (a javascript: url,
+/// say) renders as plain text, and no PR at all renders a dash.
+fn pr_cell(pr_number: Option<i64>, pr_url: Option<&str>) -> String {
+    match pr_number {
+        None => "<td class=\"num\"><span class=\"pr none\">-</span></td>".to_string(),
+        Some(n) => {
+            if pr_url.map(|u| u.starts_with("https://")).unwrap_or(false) {
+                format!(
+                    "<td class=\"num\"><a class=\"pr\" href=\"{}\">#{n}</a></td>",
+                    esc(pr_url.unwrap())
+                )
+            } else {
+                format!("<td class=\"num\">#{n}</td>")
+            }
+        }
+    }
+}
+
+/// One row of the Active territory table; the fold row carries the live
+/// fold data, the graph entry carries the title and pr_url.
+fn active_row(n: &Value, titles: &BTreeMap<String, &Value>) -> String {
+    let id = s_str(n, "id").unwrap_or("");
+    let entry = titles.get(id).copied();
+    let title = entry.and_then(|e| s_str(e, "title")).unwrap_or("");
+    let slug = s_str(n, "slug").unwrap_or("");
+    let pr_number = n.get("pr_number").and_then(|p| p.as_i64());
+    let pr_url = entry.and_then(|e| s_str(e, "pr_url"));
+    let worker = n.get("worker").and_then(|w| w.as_str());
+    let sessions = n
+        .get("sessions")
+        .and_then(|s| s.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    format!(
+        "<tr><td class=\"id\">{}</td>{}{}{}{}</tr>",
+        esc(id),
+        chip_td(s_str(n, "status").unwrap_or("")),
+        work_cell(slug, title),
+        sess_cell(sessions, worker),
+        pr_cell(pr_number, pr_url),
+    )
+}
+
+/// Rows for the uncrowned-epic and orphan-leaf tables, which read graph
+/// entries directly rather than fold rows.
+fn entry_row(e: &Value) -> String {
+    format!(
+        "<tr><td class=\"id\">{}</td><td class=\"slug\">{}</td>{}<td class=\"num\">{}</td></tr>",
+        esc(s_str(e, "id").unwrap_or("")),
+        esc(s_str(e, "title").unwrap_or("-")),
+        chip_td(s_str(e, "status").unwrap_or("")),
+        esc(s_str(e, "priority").unwrap_or("")),
+    )
+}
+
+fn bar_and_legend(fold: &Value) -> String {
+    let ordered = counts_in_order(fold);
+    if ordered.is_empty() {
+        return String::new();
+    }
+    let aria = ordered
+        .iter()
+        .map(|(s, n)| format!("{} {n}", status_label(s)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let segs: String = ordered
+        .iter()
+        .map(|(s, n)| {
+            let cls = esc(s);
+            format!(
+                "<span class=\"seg s-{cls}\" style=\"flex:{n}\" title=\"{}: {n}\"></span>",
+                esc(&status_label(s))
+            )
+        })
+        .collect();
+    let legend: String = ordered
+        .iter()
+        .map(|(s, n)| {
+            let cls = esc(s);
+            format!(
+                "<li><span class=\"dot s-{cls}\"></span><span class=\"lg-n\">{n}</span><span class=\"lg-l\">{}</span></li>",
+                esc(&status_label(s))
+            )
+        })
+        .collect();
+    format!("<div class=\"bar\" role=\"img\" aria-label=\"{aria}\">{segs}</div><ul class=\"legend\">{legend}</ul>")
+}
+
+fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>) -> String {
+    let level = crown.get("level").and_then(|l| l.as_i64());
+    let rung = level
+        .map(|l| format!("L{l}"))
+        .unwrap_or_else(|| "L?".to_string());
+    let card_cls = if level == Some(1) {
+        "crown root"
+    } else {
+        "crown"
     };
+    let status = s_str(crown, "status").unwrap_or("-");
+    let dot_cls = if status == "live" {
+        "status-dot live"
+    } else {
+        "status-dot other"
+    };
+    let (agree_txt, agree_cls) = match crown.get("agree") {
+        Some(Value::Bool(true)) => ("agree", "tag tag-ok"),
+        Some(Value::Bool(false)) => ("disagree", "tag tag-bad"),
+        _ => ("unknown", "tag tag-warn"),
+    };
+    let source_tag = s_str(crown, "crown_source")
+        .map(|src| {
+            let cls = match src {
+                "split" => "tag tag-bad",
+                "row" | "manifest" => "tag tag-warn",
+                _ => "tag",
+            };
+            format!(
+                "<span class=\"{cls}\" title=\"which readers see this crown\">{}</span>",
+                esc(src)
+            )
+        })
+        .unwrap_or_default();
     let mut out = format!(
-        "<section class=\"crown\"><h2>{} &middot; {} &middot; {}</h2><p class=\"meta\">grantor {} &middot; status {} &middot; agree {agree}</p>",
+        "<article class=\"{card_cls}\"><header class=\"ch\"><div class=\"ch-l\">\
+         <span class=\"rung\">{rung}</span><h2>{}</h2>\
+         <span class=\"{dot_cls}\" title=\"crown status: {}\"></span></div>\
+         <div class=\"ch-r\"><span class=\"{agree_cls}\">{agree_txt}</span>{source_tag}</div></header>",
         esc(s_str(crown, "scope").unwrap_or("-")),
-        level,
+        esc(status),
+    );
+    out.push_str(&format!(
+        "<p class=\"holder\">held by <b>{}</b> · granted by {}</p>",
         esc(s_str(crown, "holder").unwrap_or("-")),
         esc(s_str(crown, "grantor").unwrap_or("-")),
-        esc(s_str(crown, "status").unwrap_or("-")),
-    );
+    ));
     if let Some(reason) = s_str(crown, "reason") {
-        out.push_str(&format!("<p class=\"meta\">{}</p>", esc(reason)));
+        out.push_str(&format!("<p class=\"holder\">{}</p>", esc(reason)));
     }
     let fold = crown.get("scope_nodes").cloned().unwrap_or(json!({}));
     if s_str(&fold, "status") == Some("unresolved") {
         out.push_str(&format!(
-            "<p class=\"note\">scope fold: unresolved - {}</p>",
+            "<p class=\"holder\">scope fold: unresolved - {}</p>",
             esc(s_str(&fold, "reason").unwrap_or(""))
         ));
     } else {
-        let listed = fold
+        let done = fold
+            .get("counts")
+            .and_then(|c| c.get("done"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        out.push_str(&format!(
+            "<div class=\"stats\"><span><b>{}</b> nodes</span><span><b>{}</b> active</span><span><b>{done}</b> done</span></div>",
+            as_i64(&fold, "total"),
+            active_sum(&fold),
+        ));
+        out.push_str(&bar_and_legend(&fold));
+        let rows: String = fold
             .get("nodes")
             .and_then(|n| n.as_array())
             .cloned()
-            .unwrap_or_default();
-        let listed_ids: BTreeSet<&str> = listed.iter().filter_map(|n| s_str(n, "id")).collect();
-        // The rows below back-fill the fold's omitted members from the graph,
-        // so "not listed" may only claim what the back-fill could not name.
-        let backfilled = members
-            .map(|m| {
-                m.iter()
-                    .filter(|id| !listed_ids.contains(id.as_str()))
-                    .count() as i64
-            })
-            .unwrap_or(0);
-        let unlisted = as_i64(&fold, "omitted") - backfilled;
-        let unlisted = if unlisted > 0 {
-            format!(" ({unlisted} not listed)")
-        } else {
-            String::new()
-        };
+            .unwrap_or_default()
+            .iter()
+            .map(|n| active_row(n, titles))
+            .collect();
         out.push_str(&format!(
-            "<p class=\"counts\">{} nodes: {}{unlisted}</p>",
-            as_i64(&fold, "total"),
-            esc(&counts_line(&fold)),
-        ));
-        let mut rows: Vec<String> = listed.iter().map(|n| row_tr(n, titles)).collect();
-        // The omitted half of the scope renders with titles too: a count with
-        // no names is a number where a fact should be.
-        if let Some(members) = members {
-            for id in members {
-                if listed_ids.contains(id.as_str()) {
-                    continue;
-                }
-                let entry = titles.get(id).copied().cloned().unwrap_or(json!({}));
-                rows.push(format!(
-                    "<tr><td>{}</td><td>{}</td>{}<td></td><td></td></tr>",
-                    esc(id),
-                    esc(s_str(&entry, "title").unwrap_or("-")),
-                    pill_td(s_str(&entry, "status").unwrap_or("")),
-                ));
-            }
-        }
-        out.push_str(&format!(
-            "<div class=\"tscroll\">{TABLE_HEAD}{}</tbody></table></div>",
-            rows.join("")
+            "<div class=\"tscroll\"><table><caption>Active territory</caption>\
+             <thead><tr><th>node</th><th>state</th><th>work</th><th class=\"num\">ses</th><th class=\"num\">PR</th></tr></thead>\
+             <tbody>{rows}</tbody></table></div>"
         ));
     }
-    out.push_str("</section>");
+    out.push_str("</article>");
     out
+}
+
+fn rung_heading(level: Option<i64>, count: usize) -> String {
+    match level {
+        Some(1) => "Rung 1 - the whole project".to_string(),
+        Some(n) => {
+            let word = if count == 1 {
+                "territory"
+            } else {
+                "territories"
+            };
+            format!("Rung {n} - {count} {word} granted beneath it")
+        }
+        None => "Rung ? - crowns with no level".to_string(),
+    }
+}
+
+fn reader_str(v: Option<&Value>) -> &'static str {
+    match v {
+        Some(Value::Bool(true)) => "true",
+        Some(Value::Bool(false)) => "false",
+        _ => "unknown",
+    }
+}
+
+/// A verdict tile; a count the court did not report renders ? and never 0.
+fn fact(v: Option<&Value>, label: &str, bad: bool) -> String {
+    let n = v.and_then(|x| x.as_i64());
+    let shown = n.map_or("?".to_string(), |x| x.to_string());
+    let cls = if bad { "fact bad" } else { "fact" };
+    format!("<div class=\"{cls}\"><span class=\"fv\">{shown}</span><span class=\"fl\">{label}</span></div>")
+}
+
+/// Four states, never a falsely healthy page: the court cannot be read, it
+/// holds no crowns, it agrees with itself, or it disagrees with itself.
+fn verdict_card(court: &Value, summary: &Value) -> String {
+    let crowns = court.get("crowns").and_then(|c| c.as_array());
+    let (cls, body) = match crowns {
+        None => (
+            "verdict bad",
+            format!(
+                "<div class=\"vmain\"><span class=\"mark\">!</span><span>The court cannot be read.</span></div>\
+                 <p class=\"vnote\">{}</p>\
+                 <p class=\"vnote\">This is not an empty court; nothing was checked.</p>",
+                esc(s_str(summary, "reason").unwrap_or("reason unavailable"))
+            ),
+        ),
+        Some(c) if c.is_empty() => (
+            "verdict empty",
+            "<div class=\"vmain\"><span>The court holds no live crowns.</span></div>".to_string(),
+        ),
+        Some(_) => {
+            let disagreements = as_i64(summary, "disagreements");
+            let unknowns = as_i64(summary, "unknowns");
+            let splits = as_i64(summary, "splits");
+            let (cls, mark, text) = if disagreements == 0 && unknowns == 0 && splits == 0 {
+                ("verdict", "✓", "The court agrees with itself.")
+            } else {
+                ("verdict bad", "!", "The court disagrees with itself.")
+            };
+            let tiles = format!(
+                "{}{}{}{}{}",
+                fact(summary.get("total"), "crowns", false),
+                fact(summary.get("splits"), "splits", splits > 0),
+                fact(summary.get("disagreements"), "disagreements", disagreements > 0),
+                fact(summary.get("unknowns"), "unknowns", unknowns > 0),
+                fact(
+                    summary.get("manifest_only"),
+                    "manifest only",
+                    as_i64(summary, "manifest_only") > 0
+                ),
+            );
+            (
+                cls,
+                format!(
+                    "<div class=\"vmain\"><span class=\"mark\">{mark}</span><span>{text}</span></div>\
+                     <div class=\"facts\">{tiles}</div>"
+                ),
+            )
+        }
+    };
+    let mut sweep_note = String::new();
+    if crowns.map(|c| !c.is_empty()).unwrap_or(false)
+        && summary.get("sweep_ran") == Some(&Value::Bool(false))
+    {
+        sweep_note = "<p class=\"vnote\">orphan sweep did not run (stale or missing binary): zero manifest-only entries is an absence, not a finding</p>".to_string();
+    }
+    format!(
+        "<section class=\"{cls}\">{body}{sweep_note}\
+         <div class=\"readers\">graph_readable {} · registry_readable {} · sweep_ran {}</div></section>",
+        reader_str(court.get("graph_readable")),
+        reader_str(court.get("registry_readable")),
+        reader_str(summary.get("sweep_ran")),
+    )
 }
 
 /// Epics in no crown's territory: absent from every fold, so the page names
 /// them instead of letting their absence read as zero.
-fn uncrowned_section(
-    _crowns: &[Value],
-    compiled: &[Option<BTreeSet<String>>],
-    entries: &[Value],
-) -> String {
+fn uncrowned_section(compiled: &[Option<BTreeSet<String>>], entries: &[Value]) -> String {
     let mut covered: BTreeSet<String> = BTreeSet::new();
     for members in compiled.iter().flatten() {
         covered.extend(members.iter().cloned());
@@ -226,21 +431,13 @@ fn uncrowned_section(
             s_str(e, "title").unwrap_or("").to_string(),
         )
     });
-    let rows: String = orphans
-        .iter()
-        .map(|e| {
-            format!(
-                "<tr><td>{}</td><td>{}</td>{}<td>{}</td></tr>",
-                esc(s_str(e, "id").unwrap_or("")),
-                esc(s_str(e, "title").unwrap_or("-")),
-                pill_td(s_str(e, "status").unwrap_or("")),
-                esc(s_str(e, "priority").unwrap_or("")),
-            )
-        })
-        .collect();
+    let rows: String = orphans.iter().map(|e| entry_row(e)).collect();
     format!(
-        "<section class=\"crown\"><h2>uncrowned epics</h2><p class=\"meta\">{} uncrowned, {p1} at p1</p>\
-         <div class=\"tscroll\"><table><thead><tr><th>node</th><th>title</th><th>status</th><th>priority</th></tr></thead><tbody>{rows}</tbody></table></div></section>",
+        "<h2 class=\"sect\">uncrowned epics</h2><article class=\"crown\">\
+         <p class=\"holder\">{} uncrowned, {p1} at p1</p>\
+         <div class=\"tscroll\"><table><caption>Uncrowned epics</caption>\
+         <thead><tr><th>node</th><th>work</th><th>state</th><th class=\"num\">priority</th></tr></thead>\
+         <tbody>{rows}</tbody></table></div></article>",
         orphans.len()
     )
 }
@@ -272,143 +469,246 @@ fn orphan_leaves_section(entries: &[Value]) -> String {
             s_str(e, "title").unwrap_or("").to_string(),
         )
     });
-    let rows: String = leaves
-        .iter()
-        .map(|e| {
-            format!(
-                "<tr><td>{}</td><td>{}</td>{}<td>{}</td></tr>",
-                esc(s_str(e, "id").unwrap_or("")),
-                esc(s_str(e, "title").unwrap_or("-")),
-                pill_td(s_str(e, "status").unwrap_or("")),
-                esc(s_str(e, "priority").unwrap_or("")),
-            )
-        })
-        .collect();
+    let rows: String = leaves.iter().map(|e| entry_row(e)).collect();
     let word = if leaves.len() == 1 {
         "orphan leaf"
     } else {
         "orphan leaves"
     };
     format!(
-        "<section class=\"crown\"><h2>orphan leaves</h2><p class=\"meta\">{n} {word}, {p1} at p1</p>\
-         <div class=\"tscroll\"><table><thead><tr><th>node</th><th>title</th><th>status</th><th>priority</th></tr></thead><tbody>{rows}</tbody></table></div></section>",
+        "<h2 class=\"sect\">orphan leaves</h2><article class=\"crown\">\
+         <p class=\"holder\">{n} {word}, {p1} at p1</p>\
+         <div class=\"tscroll\"><table><caption>Orphan leaves</caption>\
+         <thead><tr><th>node</th><th>work</th><th>state</th><th class=\"num\">priority</th></tr></thead>\
+         <tbody>{rows}</tbody></table></div></article>",
         n = leaves.len(),
     )
 }
 
-// Palette, pills and tabular numerals ported from the operator's court
-// board (internal/fno/backlog/backlog.html), not a third style.
-const CSS: &str = ":root{--bg:#f6f5f9;--surface:#fff;--line:#dedae8;--ink:#1a1922;--muted:#6b677e;\
---accent:#9a5418;--accent-soft:#f2e4d4;--ready:#9a5f08;--ready-bg:#fdf0dc;--done:#1f7358;--done-bg:#dff0e8;\
---idea:#5c5975;--idea-bg:#e9e7f0;--prog:#3b5bbf;--prog-bg:#e2e7f8;--defer:#62606e;--defer-bg:#e6e4ec;\
---blocked:#a8331f;--blocked-bg:#f8e2de;--sup:#7c5c8c;--sup-bg:#efe6f3}\
-@media (prefers-color-scheme:dark){:root{--bg:#121118;--surface:#1a1922;--line:#302d3d;--ink:#eae8f2;\
---muted:#8e8aa3;--accent:#e09a55;--accent-soft:#33261a;--ready:#f0ad4e;--ready-bg:#3a2b13;--done:#59c79c;\
---done-bg:#14342a;--idea:#9d99b5;--idea-bg:#26242f;--prog:#7f9cf5;--prog-bg:#1d2440;--defer:#8b8799;\
---defer-bg:#232130;--blocked:#f0715c;--blocked-bg:#3a1d18;--sup:#b490c4;--sup-bg:#2d2337}}\
-body{font-family:-apple-system,'Segoe UI',sans-serif;margin:24px auto;max-width:900px;color:var(--ink);background:var(--bg)}\
-h1{font-size:20px;margin:0 0 4px}.meta{color:var(--muted);font-size:12px;margin:2px 0}\
-.note{color:var(--blocked);font-size:12.5px}.counts{font-variant-numeric:tabular-nums}\
-section.crown{border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin:14px 0;background:var(--surface)}\
-section.crown h2{font-size:14px;margin:0 0 4px;font-family:ui-monospace,monospace}\
-.tscroll{overflow-x:auto}\
-table{width:100%;min-width:34rem;border-collapse:collapse;font-size:12px;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums}\
-th{text-align:left;color:var(--muted);font-weight:500;padding:3px 8px 3px 0;border-bottom:1px solid var(--line)}\
-td{padding:3px 8px 3px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}\
-th:first-child,td:first-child{white-space:nowrap}\
-.pill{display:inline-block;font-size:10px;font-weight:500;padding:1px 6px;border-radius:5px;letter-spacing:.04em}\
-.s-in_progress{color:var(--prog);background:var(--prog-bg)}.s-in_review{color:var(--accent);background:var(--accent-soft)}\
-.s-ready{color:var(--ready);background:var(--ready-bg)}.s-done{color:var(--done);background:var(--done-bg)}\
-.s-idea,.s-design{color:var(--idea);background:var(--idea-bg)}.s-deferred{color:var(--defer);background:var(--defer-bg)}\
-.s-blocked{color:var(--blocked);background:var(--blocked-bg)}.s-superseded{color:var(--sup);background:var(--sup-bg)}";
-
-/// The status cell as a pill; a status outside the vocabulary renders as the
-/// neutral pill base, the same fallback the court board uses.
-fn pill_td(status: &str) -> String {
-    if status.is_empty() {
-        return "<td></td>".to_string();
-    }
-    let s = esc(status);
-    format!("<td><span class=\"pill s-{s}\">{s}</span></td>")
+// Palette and layout ported from the operator's approved Crown Ledger
+// design; the `.tscroll{overflow-x:auto}` and `overflow-wrap:anywhere`
+// guarantees from the phone-readability pass are kept verbatim.
+const CSS: &str = r##":root{
+  --ground:#F4F6F4; --surface:#FCFDFC; --surface-2:#EDF0EE;
+  --ink:#191E1B; --ink-mut:#5B6661; --rule:#D7DCD8; --rule-2:#C3CAC5;
+  --brass:#8A6A2F; --brass-soft:#B99A5E;
+  --c-done:#3F7A52; --c-in_review:#3A6B8F; --c-in_progress:#A87318; --c-ready:#2E7D74;
+  --c-design:#6B5896; --c-blocked:#A4483C; --c-idea:#93A09A; --c-deferred:#BAC3BE; --c-superseded:#D2D8D4;
+  --ok:#3F7A52; --bad:#A4483C;
+  --shadow:0 1px 2px rgba(25,30,27,.05),0 8px 24px -14px rgba(25,30,27,.22);
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --body:"Public Sans",system-ui,-apple-system,Segoe UI,sans-serif;
+  --disp:"Fraunces","Iowan Old Style",Georgia,serif;
 }
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#14181A; --surface:#1B2023; --surface-2:#232A2D;
+  --ink:#E3E8E4; --ink-mut:#8B9993; --rule:#2B3337; --rule-2:#3A4448;
+  --brass:#C99B45; --brass-soft:#8C6E31;
+  --c-done:#6DBF87; --c-in_review:#7FB4DC; --c-in_progress:#DCAB4A; --c-ready:#5FBDB1;
+  --c-design:#A996D6; --c-blocked:#E08878; --c-idea:#6B7873; --c-deferred:#404B47; --c-superseded:#2F3835;
+  --ok:#6DBF87; --bad:#E08878;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -14px rgba(0,0,0,.7);
+}}
+:root[data-theme="dark"]{
+  --ground:#14181A; --surface:#1B2023; --surface-2:#232A2D;
+  --ink:#E3E8E4; --ink-mut:#8B9993; --rule:#2B3337; --rule-2:#3A4448;
+  --brass:#C99B45; --brass-soft:#8C6E31;
+  --c-done:#6DBF87; --c-in_review:#7FB4DC; --c-in_progress:#DCAB4A; --c-ready:#5FBDB1;
+  --c-design:#A996D6; --c-blocked:#E08878; --c-idea:#6B7873; --c-deferred:#404B47; --c-superseded:#2F3835;
+  --ok:#6DBF87; --bad:#E08878;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -14px rgba(0,0,0,.7);
+}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font-family:var(--body);line-height:1.5;
+  -webkit-font-smoothing:antialiased;padding:clamp(20px,4vw,52px) clamp(16px,4vw,40px) 72px}
+.wrap{max-width:1120px;margin:0 auto;display:flex;flex-direction:column;gap:34px}
+a{color:var(--brass)}
+:focus-visible{outline:2px solid var(--brass);outline-offset:2px;border-radius:3px}
+.masthead{display:flex;flex-direction:column;gap:10px;border-bottom:2px solid var(--ink);padding-bottom:18px}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-mut)}
+h1{font-family:var(--disp);font-weight:700;font-size:clamp(34px,5.6vw,58px);line-height:1.02;margin:0;
+   letter-spacing:-.015em;text-wrap:balance}
+.dek{margin:0;max-width:64ch;color:var(--ink-mut);font-size:15.5px}
+.verdict{display:flex;flex-wrap:wrap;align-items:center;gap:18px 26px;padding:16px 20px;
+  background:var(--surface);border:1px solid var(--rule);border-left:4px solid var(--ok);
+  border-radius:2px;box-shadow:var(--shadow)}
+.verdict.bad{border-left-color:var(--bad)}
+.verdict.bad .mark{color:var(--bad)}
+.verdict.empty{border-left-color:var(--rule-2)}
+.vmain{display:flex;align-items:baseline;gap:10px;font-family:var(--disp);font-size:19px;font-weight:500}
+.vmain .mark{color:var(--ok);font-family:var(--mono);font-weight:600}
+.facts{display:flex;gap:22px;margin-left:auto;flex-wrap:wrap}
+.fact{display:flex;flex-direction:column;align-items:flex-start}
+.fv{font-family:var(--mono);font-size:19px;font-weight:600;font-variant-numeric:tabular-nums}
+.fact.bad .fv{color:var(--bad)}
+.fl{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mut)}
+.readers{font-family:var(--mono);font-size:11.5px;color:var(--ink-mut);width:100%;
+  border-top:1px dashed var(--rule);padding-top:10px}
+.vnote{margin:0;width:100%;font-size:12.5px;color:var(--ink-mut)}
+.sect{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--ink-mut);display:flex;align-items:center;gap:12px;margin:0}
+.sect::after{content:"";flex:1;height:1px;background:var(--rule)}
+.crown{background:var(--surface);border:1px solid var(--rule);border-radius:2px;padding:20px 22px 6px;
+  display:flex;flex-direction:column;gap:13px;box-shadow:var(--shadow)}
+.crown.root{border-top:3px solid var(--brass)}
+.ch{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+.ch-l{display:flex;align-items:center;gap:11px}
+.ch h2{font-family:var(--mono);font-size:20px;font-weight:600;margin:0;letter-spacing:-.01em}
+.rung{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--brass);
+  border:1px solid var(--brass-soft);border-radius:2px;padding:2px 6px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.status-dot.other{background:var(--c-in_progress)}
+.ch-r{display:flex;gap:7px}
+.tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;padding:3px 8px;border-radius:2px;
+  background:var(--surface-2);color:var(--ink-mut);border:1px solid var(--rule)}
+.tag-ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
+.tag-bad{color:var(--bad);border-color:var(--bad)}
+.tag-warn{color:var(--c-in_progress);border-color:color-mix(in srgb,var(--c-in_progress) 45%,transparent)}
+.holder{margin:0;font-size:13.5px;color:var(--ink-mut)}
+.holder b{color:var(--ink);font-family:var(--mono);font-weight:600;font-size:13px}
+.stats{display:flex;gap:20px;font-size:12.5px;color:var(--ink-mut)}
+.stats b{font-family:var(--mono);font-size:15px;color:var(--ink);font-variant-numeric:tabular-nums}
+.bar{display:flex;height:9px;border-radius:1px;overflow:hidden;background:var(--surface-2);gap:1px}
+.seg{display:block;min-width:2px}
+.legend{list-style:none;display:flex;flex-wrap:wrap;gap:5px 15px;margin:0;padding:0}
+.legend li{display:flex;align-items:baseline;gap:5px;font-size:11.5px;color:var(--ink-mut)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;transform:translateY(-1px)}
+.lg-n{font-family:var(--mono);font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.s-done,.dot.s-done{background:var(--c-done)} .s-in_review,.dot.s-in_review{background:var(--c-in_review)}
+.s-in_progress,.dot.s-in_progress{background:var(--c-in_progress)} .s-ready,.dot.s-ready{background:var(--c-ready)}
+.s-design,.dot.s-design{background:var(--c-design)} .s-blocked,.dot.s-blocked{background:var(--c-blocked)}
+.s-idea,.dot.s-idea{background:var(--c-idea)} .s-deferred,.dot.s-deferred{background:var(--c-deferred)}
+.s-superseded,.dot.s-superseded{background:var(--c-superseded)}
+.tscroll{overflow-x:auto}
+.tscroll{margin:0 -22px;padding:0 22px;max-height:340px;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+caption{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--ink-mut);padding:8px 0 6px}
+th{text-align:left;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-mut);font-weight:400;border-bottom:1px solid var(--rule-2);padding:5px 9px 5px 0;
+  position:sticky;top:0;background:var(--surface)}
+td{padding:6px 9px 6px 0;border-bottom:1px solid var(--rule);vertical-align:baseline;overflow-wrap:anywhere}
+tr:last-child td{border-bottom:none}
+td.id{font-family:var(--mono);font-weight:600;white-space:nowrap}
+td.slug{color:var(--ink-mut);min-width:22ch}
+.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.chip{font-family:var(--mono);font-size:10px;letter-spacing:.04em;padding:2px 7px;border-radius:9px;
+  white-space:nowrap;color:#fff}
+.chip.s-idea,.chip.s-deferred,.chip.s-superseded{color:var(--ground)}
+.pr{font-weight:600;text-decoration:none;border-bottom:1px solid var(--brass-soft)}
+.pr.none{color:var(--rule-2);border:none}
+.sess.zero{color:var(--rule-2)}
+.grid{display:grid;gap:20px;grid-template-columns:repeat(auto-fit,minmax(min(430px,100%),1fr))}
+@media(max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}.tscroll{margin:0 -18px;padding:0 18px}}
+footer{font-family:var(--mono);font-size:11px;color:var(--ink-mut);border-top:1px solid var(--rule);padding-top:14px;
+  display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
+"##;
 
-/// The whole page. An empty court renders "no live crowns"; an unreadable
-/// registry renders the named reason. Never a blank or falsely healthy page.
+/// The whole page. Four verdict states; an unreadable registry and an empty
+/// court are measurements, never a blank or falsely healthy page.
 pub fn render(court: &Value, entries: &[Value], generated: &str) -> String {
     let projects: Result<HashMap<String, String>, String> =
         crate::king_board::project_map(&std::env::current_dir().unwrap_or_default());
     let summary = court.get("summary").cloned().unwrap_or(json!({}));
     let crowns = court.get("crowns").and_then(|c| c.as_array()).cloned();
     let titles = titles_of(entries);
+    let gen = esc(generated);
     let mut out = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Reign Ledger</title><style>{CSS}</style></head><body>\
-         <h1>Reign Ledger</h1><p class=\"meta\">generated {generated}</p>"
+         <title>Crown Ledger</title>\
+         <link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Fraunces:wght@500;700&family=JetBrains+Mono:wght@400;600&family=Public+Sans:wght@400;600&display=swap\">\
+         <style>{CSS}</style></head><body><div class=\"wrap\">\
+         <header class=\"masthead\">\
+         <span class=\"eyebrow\">fno agents court · {gen} · <span class=\"age\" data-generated=\"{gen}\"></span></span>\
+         <h1>Crown Ledger</h1>\
+         <p class=\"dek\">Who rules which territory in the fleet, what each crown still owes, and whether the manifest and the registry tell the same story about any of it.</p>\
+         </header>"
     );
-    match &crowns {
-        None => out.push_str(&format!(
-            "<p class=\"note\">court: CANNOT READ - {}. This is not an empty court; nothing was checked.</p>",
-            esc(s_str(&summary, "reason").unwrap_or("reason unavailable"))
-        )),
-        Some(crowns) if crowns.is_empty() => {
-            out.push_str("<p class=\"meta\">no live crowns</p>");
-        }
-        Some(_) => {
-            let total = as_i64(&summary, "total");
-            let disagreements = as_i64(&summary, "disagreements");
-            let unknowns = as_i64(&summary, "unknowns");
-            let splits = as_i64(&summary, "splits");
-            out.push_str(&format!(
-                "<p class=\"meta\">{} {}, {} {}, {} {}, {} {}</p>",
-                total,
-                plural(total, "crown"),
-                disagreements,
-                plural(disagreements, "disagreement"),
-                unknowns,
-                plural(unknowns, "unknown"),
-                splits,
-                plural(splits, "split"),
-            ));
-            let manifest_only = as_i64(&summary, "manifest_only");
-            if manifest_only > 0 {
+    out.push_str(&verdict_card(court, &summary));
+    if let Some(crowns) = &crowns {
+        if !crowns.is_empty() {
+            // Rungs: level ascending, null level last, court order within a
+            // level; level 1 renders full width, the rest share the grid.
+            let mut order: Vec<&Value> = crowns.iter().collect();
+            order.sort_by_key(|c| {
+                let l = c.get("level").and_then(|l| l.as_i64());
+                (l.is_none(), l.unwrap_or(0))
+            });
+            let mut groups: Vec<(Option<i64>, Vec<&Value>)> = Vec::new();
+            for c in order {
+                let level = c.get("level").and_then(|l| l.as_i64());
+                match groups.last_mut() {
+                    Some((l, v)) if *l == level => v.push(c),
+                    _ => groups.push((level, vec![c])),
+                }
+            }
+            for (level, group) in &groups {
                 out.push_str(&format!(
-                    "<p class=\"meta\">{} manifest-only</p>",
-                    manifest_only
+                    "<h2 class=\"sect\">{}</h2>",
+                    rung_heading(*level, group.len())
                 ));
+                if *level == Some(1) {
+                    for c in group {
+                        out.push_str(&crown_card(c, &titles));
+                    }
+                } else {
+                    out.push_str("<div class=\"grid\">");
+                    for c in group {
+                        out.push_str(&crown_card(c, &titles));
+                    }
+                    out.push_str("</div>");
+                }
             }
         }
-    }
-    if crowns.as_ref().map(|c| !c.is_empty()).unwrap_or(false)
-        && summary.get("sweep_ran") == Some(&Value::Bool(false))
-    {
-        out.push_str(
-            "<p class=\"note\">orphan sweep did not run (stale or missing binary): \
-             zero manifest-only entries is an absence, not a finding</p>",
-        );
-    }
-    if let Some(crowns) = &crowns {
-        // One compile per crown, shared by the crown sections and the
-        // uncrowned union: the page renders the join twice otherwise.
+        // One compile per crown, shared by the uncrowned union: the page
+        // renders the join twice otherwise.
         let compiled: Vec<Option<BTreeSet<String>>> = crowns
             .iter()
             .map(|c| members_of(c, entries, &projects))
             .collect();
-        for (crown, members) in crowns.iter().zip(&compiled) {
-            out.push_str(&crown_section(
-                crown,
-                &titles,
-                entries,
-                &projects,
-                members.as_ref(),
-            ));
-        }
         if !entries.is_empty() {
-            out.push_str(&uncrowned_section(crowns, &compiled, entries));
+            out.push_str(&uncrowned_section(&compiled, entries));
             out.push_str(&orphan_leaves_section(entries));
         }
     }
-    out.push_str("</body></html>");
+    // Footer: crown count always (when the court is a list); the root
+    // scope's size only when an L1 crown with a resolved fold exists.
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(crowns) = &crowns {
+        parts.push(format!(
+            "{} {}",
+            as_i64(&summary, "total"),
+            plural(as_i64(&summary, "total"), "crown")
+        ));
+        let root = crowns
+            .iter()
+            .find(|c| c.get("level").and_then(|l| l.as_i64()) == Some(1));
+        if let Some(root) = root {
+            let fold = root.get("scope_nodes").cloned().unwrap_or(json!({}));
+            if s_str(&fold, "status") != Some("unresolved") {
+                parts.push(format!(
+                    "{} nodes in the root scope",
+                    as_i64(&fold, "total")
+                ));
+                parts.push(format!("{} active", active_sum(&fold)));
+            }
+        }
+    }
+    let right = if parts.is_empty() {
+        String::new()
+    } else {
+        format!("<span>{}</span>", parts.join(" · "))
+    };
+    out.push_str(&format!(
+        "<footer><span>generated from fno agents court -n</span>{right}</footer>"
+    ));
+    out.push_str(
+        "</div><script>(function(){var el=document.querySelector(\".age\");if(!el)return;\
+         var t=Date.parse(el.getAttribute(\"data-generated\"));if(isNaN(t))return;\
+         var m=Math.floor((Date.now()-t)/60000);if(m<0)m=0;\
+         el.textContent=m<60?m+\" min ago\":Math.floor(m/60)+\" h ago\";})();</script></body></html>",
+    );
     out
 }
 
@@ -521,7 +821,7 @@ mod tests {
     fn base_crown() -> Value {
         json!({
             "holder": "king", "level": 2, "scope": "e-1", "grantor": "human",
-            "status": "busy", "agree": true, "reason": null, "crown_source": "row",
+            "status": "live", "agree": true, "reason": null, "crown_source": "both",
             "scope_nodes": {"status": "ok", "counts": {"in_progress": 1, "done": 2},
                 "total": 3, "omitted": 1,
                 "nodes": [{"id": "x-1", "status": "in_progress", "worker": "w1",
@@ -540,7 +840,7 @@ mod tests {
     fn one_section_per_crown_names_scope_and_holder() {
         let court = base_court(json!([base_crown(), base_crown()]));
         let page = page(court, vec![]);
-        assert_eq!(page.matches("<section").count(), 2);
+        assert_eq!(page.matches("<article class=\"crown").count(), 2);
         assert!(page.contains("e-1") && page.contains("king"));
     }
 
@@ -557,6 +857,7 @@ mod tests {
     fn empty_court_renders_the_measurement() {
         let page = page(base_court(json!([])), vec![]);
         assert!(page.contains("no live crowns"));
+        assert!(page.contains("verdict empty"));
     }
 
     #[test]
@@ -564,8 +865,11 @@ mod tests {
         let court = json!({"crowns": null, "registry_readable": false,
             "summary": {"reason": "registry unreadable: disk on fire"}});
         let page = page(court, vec![]);
+        assert!(page.contains("The court cannot be read."));
         assert!(page.contains("registry unreadable: disk on fire"));
+        assert!(page.contains("This is not an empty court; nothing was checked."));
         assert!(!page.contains("no live crowns"));
+        assert!(!page.contains("class=\"facts\""));
     }
 
     #[test]
@@ -575,7 +879,9 @@ mod tests {
         crown["scope_nodes"]["nodes"] = json!([{"id": "x-1", "status": "in_progress",
             "worker": "<img>", "pr_number": 7}]);
         let page = page(base_court(json!([crown])), vec![]);
-        assert!(!page.contains("<script>"));
+        // The page carries its own inline age script, so the hostile payload
+        // is what must stay raw-HTML-free, not the script tag itself.
+        assert!(!page.contains("<script>x</script>"));
         assert!(page.contains("&lt;script&gt;"));
         assert!(!page.contains("<img"));
     }
@@ -585,18 +891,11 @@ mod tests {
         let mut crown = base_crown();
         crown["scope_nodes"]["counts"] = json!({"zebra": 1, "done": 2, "in_progress": 1});
         let page = page(base_court(json!([crown])), vec![]);
-        assert!(page.contains("in_progress 1, done 2, zebra 1"));
-    }
-
-    #[test]
-    fn omitted_members_render_with_titles() {
-        let entries = vec![
-            json!({"id": "e-1", "type": "epic", "title": "the crown epic", "status": "in_progress"}),
-            json!({"id": "x-done", "parent": "e-1", "title": "shipped thing", "status": "done"}),
-        ];
-        let page = page(base_court(json!([base_crown()])), entries);
-        assert!(page.contains("shipped thing"));
-        assert!(page.contains("the crown epic"));
+        let legend = &page[page.find("<ul class=\"legend\">").unwrap()..];
+        let ip = legend.find(">in progress<").unwrap();
+        let dn = legend.find(">done<").unwrap();
+        let zb = legend.find(">zebra<").unwrap();
+        assert!(ip < dn && dn < zb);
     }
 
     #[test]
@@ -722,27 +1021,144 @@ mod tests {
     }
 
     #[test]
-    fn counts_line_stays_silent_when_every_member_is_listed() {
-        let entries = vec![
-            json!({"id": "e-1", "type": "epic", "title": "the crown epic", "status": "in_progress"}),
-            json!({"id": "x-done", "parent": "e-1", "title": "shipped thing", "status": "done"}),
-        ];
-        let page = page(base_court(json!([base_crown()])), entries);
-        assert!(page.contains("3 nodes:"));
-        assert!(!page.contains("not listed"));
-    }
-
-    #[test]
-    fn counts_line_names_what_the_rows_cannot_show() {
-        let mut crown = base_crown();
-        crown.as_object_mut().unwrap().remove("scope");
-        let page = page(base_court(json!([crown])), vec![]);
-        assert!(page.contains("(1 not listed)"));
-    }
-
-    #[test]
     fn statuses_render_as_pills() {
         let page = page(base_court(json!([base_crown()])), vec![]);
-        assert!(page.contains("<span class=\"pill s-in_progress\">in_progress</span>"));
+        assert!(page.contains("<span class=\"chip s-in_progress\">in progress</span>"));
+    }
+
+    #[test]
+    fn masthead_carries_the_generated_stamp_and_age_hook() {
+        let page = page(base_court(json!([base_crown()])), vec![]);
+        assert!(page.contains("<h1>Crown Ledger</h1>"));
+        assert!(page.contains("fno agents court · 2026-09-12T00:00:00Z"));
+        assert!(page.contains("<span class=\"age\" data-generated=\"2026-09-12T00:00:00Z\">"));
+        assert!(page.contains("Date.parse(el.getAttribute(\"data-generated\"))"));
+    }
+
+    #[test]
+    fn verdict_agrees_when_the_counts_are_all_zero() {
+        let page = page(base_court(json!([base_crown()])), vec![]);
+        assert!(page.contains("The court agrees with itself."));
+        assert!(page.contains("<span class=\"mark\">✓</span>"));
+        assert!(page.contains(
+            "<div class=\"fact\"><span class=\"fv\">1</span><span class=\"fl\">crowns</span></div>"
+        ));
+    }
+
+    #[test]
+    fn verdict_disagrees_and_marks_bad_facts() {
+        let mut court = base_court(json!([base_crown()]));
+        court["summary"]["disagreements"] = json!(1);
+        let page = page(court, vec![]);
+        assert!(page.contains("The court disagrees with itself."));
+        assert!(page.contains("verdict bad"));
+        assert!(page.contains(
+            "<div class=\"fact bad\"><span class=\"fv\">1</span><span class=\"fl\">disagreements</span></div>"
+        ));
+    }
+
+    #[test]
+    fn null_counts_render_question_marks_not_zeroes() {
+        let mut court = base_court(json!([base_crown()]));
+        court["summary"]["splits"] = Value::Null;
+        let page = page(court, vec![]);
+        assert!(page.contains(
+            "<div class=\"fact\"><span class=\"fv\">?</span><span class=\"fl\">splits</span></div>"
+        ));
+    }
+
+    #[test]
+    fn readers_line_prints_unknown_for_null() {
+        let mut court = base_court(json!([base_crown()]));
+        court["graph_readable"] = Value::Null;
+        let page = page(court, vec![]);
+        assert!(page.contains("graph_readable unknown · registry_readable true · sweep_ran true"));
+    }
+
+    #[test]
+    fn rungs_group_crowns_by_level_with_headings() {
+        let mut l2a = base_crown();
+        l2a["scope"] = json!("e-a");
+        let mut l2b = base_crown();
+        l2b["scope"] = json!("e-b");
+        let mut l1 = base_crown();
+        l1["level"] = json!(1);
+        l1["scope"] = json!("fno");
+        let page = page(base_court(json!([l2a, l1, l2b])), vec![]);
+        let h1 = page
+            .find("Rung 1 - the whole project")
+            .expect("rung 1 heading");
+        let root = page.find("class=\"crown root\"").expect("root card");
+        let h2 = page
+            .find("Rung 2 - 2 territories granted beneath it")
+            .expect("rung 2 heading");
+        assert!(h1 < root && root < h2);
+        let la = page.find("<h2>e-a</h2>").unwrap();
+        let lb = page.find("<h2>e-b</h2>").unwrap();
+        assert!(la < lb);
+    }
+
+    #[test]
+    fn crown_card_shows_stats_bar_and_legend() {
+        let page = page(base_court(json!([base_crown()])), vec![]);
+        assert!(page.contains(
+            "<span><b>3</b> nodes</span><span><b>1</b> active</span><span><b>2</b> done</span>"
+        ));
+        assert!(page.contains("style=\"flex:1\""));
+        assert!(page.contains("style=\"flex:2\""));
+        assert!(page.contains("aria-label=\"in progress 1, done 2\""));
+    }
+
+    #[test]
+    fn work_cell_uses_slug_words_with_the_title_as_tip() {
+        let mut crown = base_crown();
+        crown["scope_nodes"]["nodes"] = json!([{"id": "x-1", "status": "in_progress",
+            "slug": "x-1-add-the-thing", "sessions": ["s1"]}]);
+        let entries =
+            vec![json!({"id": "x-1", "slug": "x-1-add-the-thing", "title": "Add the thing"})];
+        let page = page(base_court(json!([crown])), entries);
+        assert!(page.contains("<td class=\"slug\" title=\"Add the thing\">x 1 add the thing</td>"));
+    }
+
+    #[test]
+    fn pr_links_only_https_urls() {
+        let mut crown = base_crown();
+        crown["scope_nodes"]["nodes"] = json!([
+            {"id": "x-1", "status": "in_progress", "pr_number": 7, "sessions": []},
+            {"id": "x-2", "status": "ready", "pr_number": 8, "sessions": []},
+            {"id": "x-3", "status": "blocked", "sessions": []}
+        ]);
+        let entries = vec![
+            json!({"id": "x-1", "pr_url": "javascript:alert(1)"}),
+            json!({"id": "x-2", "pr_url": "https://github.com/o/r/pull/8"}),
+        ];
+        let page = page(base_court(json!([crown])), entries);
+        assert!(page.contains("<td class=\"num\">#7</td>"));
+        assert!(!page.contains("javascript:alert"));
+        assert!(page.contains("<a class=\"pr\" href=\"https://github.com/o/r/pull/8\">#8</a>"));
+        assert!(page.contains("<span class=\"pr none\">-</span>"));
+    }
+
+    #[test]
+    fn font_stacks_keep_system_fallbacks() {
+        let page = page(base_court(json!([base_crown()])), vec![]);
+        assert!(page.contains("\"JetBrains Mono\",ui-monospace,SFMono-Regular,Menlo,monospace"));
+        assert!(page.contains("\"Public Sans\",system-ui,-apple-system,Segoe UI,sans-serif"));
+        assert!(page.contains("\"Fraunces\",\"Iowan Old Style\",Georgia,serif"));
+    }
+
+    #[test]
+    fn grid_fits_a_narrow_phone() {
+        let page = page(base_court(json!([base_crown()])), vec![]);
+        assert!(page.contains("grid-template-columns:repeat(auto-fit,minmax(min(430px,100%),1fr))"));
+    }
+
+    #[test]
+    fn page_contains_no_em_dash() {
+        let entries = vec![
+            json!({"id": "e-1", "type": "epic", "title": "free one", "status": "ready", "priority": "p2"}),
+        ];
+        let page = page(base_court(json!([base_crown(), base_crown()])), entries);
+        assert!(!page.contains('\u{2014}'));
     }
 }
