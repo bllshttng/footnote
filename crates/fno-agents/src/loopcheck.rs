@@ -1533,15 +1533,17 @@ pub use crate::review_freshness::{
 // Child modules named by their question (the file budget's remedy): the
 // coverage row's state deriver, the receipt line, and attestation authorship
 // live there, not here.
+mod async_wait;
 mod authorship;
 mod coverage_receipt;
 mod review_state;
 mod watch_lease;
+use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason};
 use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
 pub use coverage_receipt::coverage_receipt_line;
-use watch_lease::{harness_can_idle, watch_window_ms, watching_harness_refusal, ARM_HINT_LEAD};
+use watch_lease::{harness_can_idle, watch_window_ms, watching_harness_refusal};
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
@@ -10356,64 +10358,6 @@ fn run_done(
     Ok(info)
 }
 
-/// Whether the PR is in the async-wait class a `<watching>` tag may idle on
-/// (x-e2c8): PR open, local HEAD pushed, no unaddressed findings (inline OR
-/// operator), and the sole remaining blocker is CI still pending or an
-/// outstanding bot review. Returns the blocker label, or None if anything else
-/// blocks. External truth only - the tag is a request, this is the authority.
-/// `head_shipped` is passed in rather than recomputed. It used to be
-/// `pr.head_oid == local_head` here, a third copy of a predicate that must
-/// agree with `done()`, and the copies drifted: this one returning false is
-/// why a `<watching>` tag could not rescue a session whose branch had moved
-/// past its own merge. One caller computes it once via `head_is_shipped`.
-fn async_wait_class(
-    pr: &PrInfo,
-    open_findings_empty: bool,
-    head_shipped: bool,
-) -> Option<&'static str> {
-    if pr.state != PrState::Open
-        || !head_shipped
-        || !pr.unaddressed_findings.is_empty()
-        || !open_findings_empty
-    {
-        return None;
-    }
-    // CI still pending AND nothing has concluded red yet: idle on CI. If a
-    // check has ALREADY failed while others run, do NOT idle - the agent should
-    // start debugging the failure now rather than wait out the rest (gemini).
-    if pr.ci_has_pending && !matches!(pr.ci_conclusion, CiConclusion::Failure(_)) {
-        return Some("ci");
-    }
-    // Awaiting an EXTERNAL bot review: a real GitHub login WILL post it, so
-    // idling until it does is correct. `reviewed == false` with an EMPTY
-    // missing_bots is instead a LOCAL-attestation gate (config.review.reviewers,
-    // e.g. sigma) or an unaddressed finding - work the agent must DO, and no
-    // GitHub reviewer will ever appear to wake it, so idling would park the
-    // session forever. Require an outstanding bot (codex P1).
-    //
-    // An outstanding LOCAL reviewer disqualifies the wait even when a bot is
-    // also outstanding (codex review of x-cdc7): the session has work it can do
-    // right now, and if the bot never posts, idling means that work never
-    // happens and the run dies on budget with the gate still unmet.
-    //
-    // x-b167: idle ONLY when every missing bot is in an idlable nudge state
-    // (Awaiting, a genuine async wait; or NotNudgeable, today's status quo). A
-    // NeedsNudge bot is work to DO (post its trigger) and an Unresponsive bot is
-    // a wait nobody ends - idling on either parks the session. This is the same
-    // rule x-cdc7 gave unattested_reviewers. An empty bot_nudges (not classified)
-    // means every-bot-idlable vacuously, preserving pre-x-b167 behavior.
-    if pr.ci_conclusion.is_ok()
-        && !pr.reviewed
-        && !pr.review_skipped
-        && (!pr.missing_bots.is_empty() || !pr.stale_bots.is_empty())
-        && pr.unattested_reviewers.is_empty()
-        && pr.bot_nudges.iter().all(|n| nudge_class_idlable(&n.class))
-    {
-        return Some("review");
-    }
-    None
-}
-
 /// First 8 chars of a sha, never bytes. `&s[..8]` panics when byte offset 8
 /// lands inside a multibyte character, and one of these strings comes from a
 /// user-writable events.jsonl - a panic there takes the whole stop gate down.
@@ -10421,45 +10365,6 @@ fn short_sha(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
-/// The arm-and-tag ritual (x-e2c8, US3) that converts an unwatched async wait
-/// into a single idle turn. Supersedes the old "wait silently" prose: waiting
-/// silently still costs a full model invocation every ~90s tick, whereas arming
-/// a harness-tracked watcher and emitting `<watching>` idles the session to ZERO
-/// invocations until the watcher fires. The `gh pr checks` shape is a template
-/// (gh's `--watch` exit varies by version); the design depends only on the task
-/// EXITING, never on its exit code.
-///
-/// The bound uses shell builtins, never `timeout(1)`: the plugin must work on
-/// hosts where that binary (and `gtimeout`) is absent, so naming it makes the
-/// watcher no-op and the session idle forever on a wait that never started.
-/// The watchdog is reaped once the wait returns - left alive, it wakes 30m
-/// later and kills whatever now holds that recycled pid (codex P1).
-fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
-    // The watcher must WAIT on the actual blocker (codex P2): a review wait
-    // has CI already green, so a checks watcher returns instantly and the
-    // session just re-blocks. Both waits are the sanctioned `fno do pr wait`
-    // verb, one plain command per wait: it polls REST at a 60s interval
-    // (`gh pr checks --watch` / `gh pr view` are GraphQL, and a fleet of 60s
-    // GraphQL watchers is exactly what exhausts the per-USER quota the merge
-    // guard needs), it greps for the POSITIVE settled marker so a
-    // rate-limited read keeps the watcher waiting instead of reading as
-    // "nothing pending", and a plain command is the one shape a
-    // worktree-isolated session's Bash guard always admits - an inline
-    // `while`/`$(...)` loop is refused as "too complex to verify", which
-    // wedged the very turn this hint was trying to unblock.
-    let watcher = if blocker == "review" {
-        format!(
-            "background Bash `fno do pr wait {pr_number} --until review --timeout=30m` (wakes when a new review posts, or after ~30m)"
-        )
-    } else {
-        format!(
-            "background Bash `fno do pr wait {pr_number} --until settled --timeout=30m` (wakes when CI settles - green or red - or after ~30m)"
-        )
-    };
-    format!(
-        "{ARM_HINT_LEAD} with a hard timeout (e.g. {watcher}), then end your turn with `<watching reason=\"{blocker}\" pr=\"{pr_number}\" timeout=\"30m\">` and nothing else - the session then idles until the watcher exits."
-    )
-}
 /// Plan-fidelity stop gate (x-cbab). The stop-gate half of AC5; the merge gate
 /// (`_merge.py`, which imports the core in-process) is the other. Shells
 /// `fno do plan fidelity --json <plan_path>` and blocks DonePRGreen when a planned
@@ -11110,6 +11015,15 @@ fn build_block_reason(
             short_sha(&pr.head_oid),
             short_sha(local_head)
         );
+    }
+
+    // A conflicting head has work to do NOW (rebase): "CI still running" or
+    // "declare ci.declared_none" would prescribe waiting out checks GitHub
+    // never started. It follows the head arm on purpose: a local head that
+    // differs from the PR head means the worker may have rebased already and
+    // just not pushed.
+    if let Some(r) = conflicting_reason(pr) {
+        return r;
     }
 
     if !pr.ci_conclusion.is_ok() {
