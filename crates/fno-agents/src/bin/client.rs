@@ -83,6 +83,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ping",
     "pr-heal",
     "probe-run",
+    "honesty-sweep",
     "prove-it-verdicts",
     "test-run",
     "promote",
@@ -421,6 +422,13 @@ async fn run(args: Vec<String>) -> i32 {
     // ALL_CLIENT_ACTIONS like every direct dispatch). No daemon, from cwd.
     if matches!(verb, "state") {
         return fno_agents::state_path::run(&args[1..]);
+    }
+
+    // `honesty-sweep`: declared-vs-measured sweeps over declared populations
+    // (see its own doc in honesty_sweep.rs). Direct dispatch; no daemon RPC -
+    // a sweep reads tables, manifests, or piped rows from disk.
+    if verb == "honesty-sweep" {
+        return fno_agents::honesty_sweep::run_honesty_sweep(&args[1..]);
     }
 
     // `probe-run`: see its own doc in acceptance_evidence.rs. Direct dispatch.

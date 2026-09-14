@@ -118,6 +118,7 @@ pub mod graph_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
 pub mod heal;
+pub mod honesty_sweep;
 mod identity;
 pub mod interrupt_classify;
 pub mod kill_criteria;
