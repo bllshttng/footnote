@@ -901,6 +901,22 @@ def _lane_b_worker_binary() -> Optional[Path]:
     return Path(found) if found else None
 
 
+def refuse_codex_thread_without_runtime() -> None:
+    """Refuse the codex thread lane up front when the worker runtime is absent.
+
+    The precondition is capability, not capacity: it needs no gate answer, and
+    the lane's own exit-13 contract (the spawn routing table's `codex +
+    once=False -> exit 13`) outranks the gate transport's fail-closed 87 for a
+    runtime that was never installed.
+    """
+    if _lane_b_worker_binary() is None:
+        raise DispatchAskError(
+            "lane-B thread spawn needs the fno-agents runtime; install it "
+            "(cargo build --release -p fno-agents) or use --substrate pane",
+            exit_code=13,
+        )
+
+
 def _lane_b_keeper_socket(name: str) -> Path:
     """``<state-root>/mux/threads/<name>.sock``: the pane-less keeper's
     socket, session-keyed beside the pane keepers' ``mux/panes/`` (see

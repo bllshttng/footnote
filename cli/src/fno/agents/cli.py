@@ -2272,6 +2272,20 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2)
 
+    # The codex thread lane's runtime precondition is capability, not
+    # capacity: it needs no gate answer, and the lane's own exit-13 contract
+    # outranks the gate transport's fail-closed 87 for a runtime that was
+    # never installed.
+    if harness == "codex" and not once and substrate == "bg":
+        from fno.agents.dispatch import refuse_codex_thread_without_runtime
+        from fno.agents.dispatch_errors import DispatchAskError
+
+        try:
+            refuse_codex_thread_without_runtime()
+        except DispatchAskError as exc:
+            print(str(exc), file=sys.stderr)
+            raise typer.Exit(code=exc.exit_code) from exc
+
     from fno.agents.spawn_gate import WAITABLE_REFUSAL_REASONS, GateRefused, run_gate
 
     # Anything outside the gate's own waitable set (policy or config)
