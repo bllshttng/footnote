@@ -71,6 +71,7 @@ from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
+from fno.agents.send_result import DispatchSendResult
 from fno.agents.stop_receipt import emit_shellout_stop, wake_set_refusal
 from fno.agents.registry import (
     AgentEntry,
@@ -4917,30 +4918,6 @@ def register_mcp_channel(
 _SEND_MAX_BODY_BYTES = 1024 * 1024  # 1 MiB
 
 
-@dataclass
-class DispatchSendResult:
-    """Return shape for :func:`dispatch_send`.
-
-    ``msg_id``   The envelope id written to the store (``msg-<8hex>``).
-    ``delivery`` ``"hosted"`` if live socket/MCP delivery succeeded;
-                 ``"durable"`` if the peer was offline, non-claude, or
-                 injection failed and the message was queued durable.
-    """
-
-    msg_id: str
-    delivery: str  # "hosted" | "durable"
-    # The live lane's own cause when delivery demoted to durable (node x-1904):
-    # the claude control.sock vocabulary (not-confirmed / attach-failed / ...),
-    # a codex RPC reason, or a mux token. None when no live attempt ran (the
-    # recipient was asleep, so durable was written upfront with no live miss).
-    reason: Optional[str] = None
-    # Set by the --to-project anycast path (resolve_to_project): the registry
-    # name the project resolved to (when one live peer), and the destination
-    # project (for the durable-queue and resolved-recipient stdout lines).
-    recipient: Optional[str] = None
-    to_project: Optional[str] = None
-
-
 def rpc_roundtrip(
     sock_path: Path,
     method: str,
@@ -8091,7 +8068,10 @@ def dispatch_send(
                 registry_lock_timeout=registry_stamp_timeout_seconds,
             )
 
-            return DispatchSendResult(msg_id=msg_id, delivery=delivery, reason=live_miss_reason)
+            return DispatchSendResult(
+                msg_id=msg_id, delivery=delivery, reason=live_miss_reason,
+                durable_owner=durable_owner if delivery == "durable" else None,
+            )
 
     except AgentLockTimeout as exc:
         # INVARIANT, and it is load-bearing: this handler guards the whole
@@ -8625,4 +8605,5 @@ def dispatch_send_to_project(
         delivery="durable",
         recipient=None,
         to_project=project,
+        durable_owner=DurableOwner.INBOX_DRAIN.value,
     )
