@@ -31,6 +31,7 @@
 use crate::graph_get::{default_graph_path, external_backend_selected};
 use crate::graph_store::{self, entry_id, s_str};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -107,9 +108,31 @@ pub fn run_prove_it_verdicts(args: &[String]) -> i32 {
     };
     graph_store::apply_readiness_overlay(&mut entries);
 
+    // Journal record bodies by node: the third place a routing note lives.
+    // A missing journal file reads as no records.
+    let journal_bodies: HashMap<String, Vec<String>> =
+        match crate::backlog::note_history::read(&graph_path, None, 0, usize::MAX) {
+            Ok((records, _)) => {
+                let mut map: HashMap<String, Vec<String>> = HashMap::new();
+                for rec in records {
+                    let Some(node) = rec.get("node_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let body = rec
+                        .get("original")
+                        .map(crate::backlog::note_history::record_body)
+                        .unwrap_or("")
+                        .to_string();
+                    map.entry(node.to_string()).or_default().push(body);
+                }
+                map
+            }
+            Err(_) => HashMap::new(),
+        };
+
     let mut unreadable: Vec<Value> = Vec::new();
     let rulings = load_rulings();
-    let rows = build_rows(&entries, &mut unreadable, &rulings);
+    let rows = build_rows(&entries, &mut unreadable, &rulings, &journal_bodies);
 
     let mut exit = 0;
     if route {
@@ -139,7 +162,12 @@ struct Report {
     mtime: SystemTime,
 }
 
-fn build_rows(entries: &[Value], unreadable: &mut Vec<Value>, rulings: &[Value]) -> Vec<Value> {
+fn build_rows(
+    entries: &[Value],
+    unreadable: &mut Vec<Value>,
+    rulings: &[Value],
+    journal_bodies: &HashMap<String, Vec<String>>,
+) -> Vec<Value> {
     let mut rows = Vec::new();
     for entry in entries.iter().filter(|e| e.is_object()) {
         let Some(node) = entry_id(entry) else {
@@ -207,13 +235,13 @@ fn build_rows(entries: &[Value], unreadable: &mut Vec<Value>, rulings: &[Value])
         {
             let retired = scored[i + 1..].iter().any(|pass| pass_retires(pass, fail));
             if !retired {
-                rows.push(row_for(node, entry, fail, rulings));
+                rows.push(row_for(node, entry, fail, rulings, journal_bodies));
             }
         }
         // The newest PASS/FAIL record is still the node's headline verdict.
         let newest = scored[scored.len() - 1];
         if newest.verdict == "PASS" {
-            rows.push(row_for(node, entry, newest, rulings));
+            rows.push(row_for(node, entry, newest, rulings, journal_bodies));
         }
     }
     rows
@@ -312,11 +340,19 @@ fn pass_retires(pass: &Report, fail: &Report) -> bool {
     }
 }
 
-fn row_for(node: &str, entry: &Value, win: &Report, rulings: &[Value]) -> Value {
+fn row_for(
+    node: &str,
+    entry: &Value,
+    win: &Report,
+    rulings: &[Value],
+    journal_bodies: &HashMap<String, Vec<String>>,
+) -> Value {
     let status = s_str(entry, "status").map(str::to_string);
-    // `routed` reads the graph, the ledger this run already has: any progress
-    // note naming the report means the note (the delivery leg) already ran.
-    let routed = entry
+    // `routed` reads the graph, the ledger this run already has: the report
+    // path named in any progress note (the legacy place), the current_state
+    // body, or a journal record body means the note (the delivery leg)
+    // already ran.
+    let in_notes = entry
         .get("progress_notes")
         .and_then(Value::as_array)
         .map(|notes| {
@@ -328,6 +364,17 @@ fn row_for(node: &str, entry: &Value, win: &Report, rulings: &[Value]) -> Value 
             })
         })
         .unwrap_or(false);
+    let in_state = entry
+        .get(crate::backlog::node_state::STATE_KEY)
+        .and_then(|s| s.get("body"))
+        .and_then(Value::as_str)
+        .map(|t| t.contains(&win.path))
+        .unwrap_or(false);
+    let in_journal = journal_bodies
+        .get(node)
+        .map(|bodies| bodies.iter().any(|b| b.contains(&win.path)))
+        .unwrap_or(false);
+    let routed = in_notes || in_state || in_journal;
     let mut ruled_by = None;
     let mut open = false;
     if win.verdict == "FAIL" {
@@ -689,7 +736,7 @@ mod tests {
             json!({"id": "x-ccc", "status": "done", "plan_path": mk("c.md"), "cwd": dir.path().display().to_string()}),
         ];
         let mut unreadable = Vec::new();
-        let rows = build_rows(&entries, &mut unreadable, &[]);
+        let rows = build_rows(&entries, &mut unreadable, &[], &HashMap::new());
 
         assert_eq!(rows.len(), 2, "no PASS/FAIL record means no row: {rows:?}");
         let a = rows.iter().find(|r| r["node"] == "x-aaa").expect("row a");
@@ -739,7 +786,7 @@ mod tests {
             json!({"id": "x-aaa", "status": "in_progress", "plan_path": plans.join("a.md").display().to_string(), "cwd": dir.path().display().to_string()}),
         ];
         let mut unreadable = Vec::new();
-        let rows = build_rows(&entries, &mut unreadable, &[]);
+        let rows = build_rows(&entries, &mut unreadable, &[], &HashMap::new());
 
         assert_eq!(rows.len(), 2, "both rows surface: {rows:?}");
         let f = rows
@@ -828,7 +875,7 @@ mod tests {
             })
             .collect();
         let mut unreadable = Vec::new();
-        let rows = build_rows(&entries, &mut unreadable, &[]);
+        let rows = build_rows(&entries, &mut unreadable, &[], &HashMap::new());
 
         assert_eq!(
             rows.len(),
@@ -892,7 +939,7 @@ mod tests {
             json!({"id": "x-bbb", "status": "ready", "plan_path": "plans/rel.md"}),
         ];
         let mut unreadable = Vec::new();
-        let rows = build_rows(&entries, &mut unreadable, &[]);
+        let rows = build_rows(&entries, &mut unreadable, &[], &HashMap::new());
         assert!(rows.is_empty(), "no legal record, no row: {rows:?}");
         assert_eq!(
             unreadable.len(),
@@ -951,7 +998,7 @@ mod tests {
             mtime: SystemTime::now(),
         };
         let rulings: Vec<Value> = vec![json!({"decision_id": "d-2", "text": "unrelated"})];
-        let row = row_for("x-aaa", &entry, &win, &rulings);
+        let row = row_for("x-aaa", &entry, &win, &rulings, &HashMap::new());
         assert_eq!(
             row["routed"], true,
             "a note naming the report is the routed marker"
@@ -962,7 +1009,7 @@ mod tests {
             json!({"decision_id": "d-1", "text": "ruled on /plans/a.md.artifacts/coverage/REPORT.md: wont_fix"}),
             json!({"decision_id": "d-2", "text": "unrelated"}),
         ];
-        let row = row_for("x-aaa", &entry, &win, &rulings);
+        let row = row_for("x-aaa", &entry, &win, &rulings, &HashMap::new());
         assert_eq!(row["ruled_by"], "d-1");
         assert_eq!(
             row["open"], false,
@@ -971,6 +1018,86 @@ mod tests {
 
         assert_eq!(ruling_for(&rulings, "/nowhere/else.md"), None);
         assert_eq!(ruling_for(&[], report_path), None);
+    }
+
+    #[test]
+    fn a_current_state_body_naming_the_report_reads_routed() {
+        let report_path = "/plans/b.md.artifacts/REPORT.md";
+        let entry = json!({
+            "id": "x-bbb",
+            "status": "in_progress",
+            "current_state": {"revision": 6, "body": format!("routed the FAIL at {report_path}")},
+        });
+        let win = Report {
+            path: report_path.to_string(),
+            verdict: "FAIL".to_string(),
+            claim: "c".to_string(),
+            retires: None,
+            mtime: SystemTime::now(),
+        };
+        let row = row_for("x-bbb", &entry, &win, &[], &HashMap::new());
+        assert_eq!(row["routed"], true, "current_state.body is a routed marker");
+        // A state body naming something else does not route.
+        let other = json!({
+            "id": "x-bbb",
+            "status": "in_progress",
+            "current_state": {"revision": 6, "body": "unrelated prose"},
+        });
+        let row = row_for("x-bbb", &other, &win, &[], &HashMap::new());
+        assert_eq!(row["routed"], false);
+    }
+
+    #[test]
+    fn a_journal_body_naming_the_report_reads_routed() {
+        let report_path = "/plans/c.md.artifacts/REPORT.md";
+        let entry = json!({"id": "x-ccc", "status": "in_progress"});
+        let win = Report {
+            path: report_path.to_string(),
+            verdict: "FAIL".to_string(),
+            claim: "c".to_string(),
+            retires: None,
+            mtime: SystemTime::now(),
+        };
+        let mut journal: HashMap<String, Vec<String>> = HashMap::new();
+        journal.insert(
+            "x-ccc".to_string(),
+            vec![format!("replaced state after routing {report_path}")],
+        );
+        let row = row_for("x-ccc", &entry, &win, &[], &journal);
+        assert_eq!(
+            row["routed"], true,
+            "journal record body is a routed marker"
+        );
+        // A journal record with a legacy `text` original reads the same way.
+        let mut journal = HashMap::new();
+        journal.insert(
+            "x-ccc".to_string(),
+            vec![format!("legacy migration note {report_path}")],
+        );
+        let row = row_for("x-ccc", &entry, &win, &[], &journal);
+        assert_eq!(row["routed"], true);
+        let empty: HashMap<String, Vec<String>> = HashMap::new();
+        let row = row_for("x-ccc", &entry, &win, &[], &empty);
+        assert_eq!(row["routed"], false);
+    }
+
+    #[test]
+    fn a_legacy_progress_note_still_reads_routed() {
+        let report_path = "/plans/d.md.artifacts/REPORT.md";
+        let entry = json!({
+            "id": "x-ddd",
+            "status": "in_progress",
+            "progress_notes": [{"text": format!("delivered {report_path}")}],
+        });
+        let win = Report {
+            path: report_path.to_string(),
+            verdict: "FAIL".to_string(),
+            claim: "c".to_string(),
+            retires: None,
+            mtime: SystemTime::now(),
+        };
+        let row = row_for("x-ddd", &entry, &win, &[], &HashMap::new());
+        assert_eq!(row["routed"], true, "the legacy read is unchanged");
     }
 
     fn jsonl_of_envelopes(rows: &[(&str, &str, Value)]) -> String {

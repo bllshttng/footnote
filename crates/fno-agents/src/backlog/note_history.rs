@@ -59,6 +59,16 @@ impl HistoryRecord {
     }
 }
 
+/// The prose a reader shows for one journal line: `original.body`, else
+/// `original.text` (the legacy migration row), else empty.
+pub fn record_body(original: &Value) -> &str {
+    original
+        .get("body")
+        .or_else(|| original.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
 /// The one path function serving writers and readers: `<graph>.history/notes.jsonl`
 /// next to the graph file. Derived from the graph path, never a home-directory
 /// literal.

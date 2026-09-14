@@ -206,7 +206,9 @@ def test_map_covers_current_surface_once():
     # the writer moved into crates: counted from the merged file, 628.
     # x-83ca allocates `agents honesty-sweep`, the binary-direct
     # declared-vs-measured sweep verb (refs 0): 628 -> 629.
-    assert len(mapped) == 629, (
+    # x-f743 allocates `backlog notes`, the verbatim forwarder to the native
+    # `backlog-notes` reader: 629 -> 630.
+    assert len(mapped) == 630, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
