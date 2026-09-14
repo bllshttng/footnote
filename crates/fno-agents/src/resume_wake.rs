@@ -12,6 +12,76 @@ use crate::paths::AgentsHome;
 use crate::state;
 use crate::truth_probe::family1_truth_state;
 use serde_json::Value;
+use std::path::Path;
+
+/// Acquire the `session:<uuid>` single-writer claim for an interactive dead-row
+/// resume, anchored to THIS process. `exec` keeps the pid, so the claim is held
+/// by the resumed claude and self-releases when the operator quits (no explicit
+/// release). Two racing resumers both probe dead, but only one wins this atomic
+/// claim; the loser gets `Err` and refuses instead of opening a second writer on
+/// one transcript - the residual double-writer window the liveness probe alone
+/// cannot close. `root` is `None` in prod (session: keys route to
+/// `$FNO_CLAIMS_ROOT`/`$HOME`); tests inject a temp root.
+/// How long the session single-writer claim guards a mux-pane relaunch.
+/// The launching process exits once the pane is up, so the claim cannot ride
+/// the holder pid the way the in-terminal exec's does (a PID-only claim goes
+/// Stale the moment that pid dies, so a second resumer would steal it before
+/// the resumed claude is probe-live). This TTL keeps the claim Live across
+/// that launch-to-probe-live window; once claude is probe-live the truth probe
+/// (not this claim) stops a second relaunch. Picked wide against slow startup;
+/// after it expires, a crashed worker can be re-resumed rather than blocked.
+pub(crate) const MUX_RESUME_CLAIM_TTL_MS: u64 = 120_000;
+
+pub(crate) fn acquire_resume_session_claim(
+    uuid: &str,
+    root: Option<&Path>,
+    ttl_ms: Option<u64>,
+) -> Result<(), (i32, String)> {
+    acquire_named_session_claim(&format!("session:{uuid}"), uuid, root, ttl_ms)
+}
+
+/// Used directly by the dead-row `claude --resume` relaunch (keyed
+/// `session:{uuid}`). The live-row headless wake uses the matching
+/// `resume-attach:{short_id}` key too, but acquires it Python-side
+/// (`resume_cli.py`'s `_resume_claude_wake`, gated on skip-eligibility) --
+/// this Rust arm delegates the wake itself and does not call this function
+/// for that key. Two different key prefixes by design: a live wake and a
+/// dead relaunch are mutually exclusive outcomes of one truth-state read,
+/// never racing each other for the same row, but two concurrent resumes
+/// both landing on the SAME arm for the same row do race -- each key only
+/// needs to guard against its own arm's double-writer.
+pub(crate) fn acquire_named_session_claim(
+    key: &str,
+    label: &str,
+    root: Option<&Path>,
+    ttl_ms: Option<u64>,
+) -> Result<(), (i32, String)> {
+    use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
+    let holder = format!("resume:{}", std::process::id());
+    let opts = AcquireOpts {
+        root: root.map(Path::to_path_buf),
+        reason: Some("interactive resume single-writer".to_string()),
+        ttl_ms: ttl_ms.map(|t| t as i64),
+        ..Default::default()
+    };
+    match acquire(key, &holder, opts) {
+        AcquireOutcome::Acquired(_) => Ok(()),
+        AcquireOutcome::HeldByOther { holder, pid, host } => Err((
+            11,
+            format!(
+                "fno agents resume: session {label} is held live by another writer \
+                 ({holder}, pid={}, host={host}); not opening a second writer on one transcript.",
+                // The Python twins print the bare pid / `None`, never `Some(n)`.
+                pid.map(|p| p.to_string())
+                    .unwrap_or_else(|| "None".to_string())
+            ),
+        )),
+        AcquireOutcome::Error(e) => Err((
+            12,
+            format!("fno agents resume: could not claim session {label}: {e}"),
+        )),
+    }
+}
 
 /// Default injected wake text when the caller passes no `--message`. Matches
 /// the Python wake lane's `_DEFAULT_WAKE_MESSAGE` so the two runtimes stay in
