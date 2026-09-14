@@ -65,6 +65,7 @@ from fno.mail.receipts import (
     demotion_receipt,
     durable_leg_story,
     durable_window_tail,
+    print_project_demotion,
 )
 from fno.inbox.store import (
     DEPRECATED_KINDS,
@@ -4088,39 +4089,8 @@ def cmd_send(
                 f"{result.msg_id} delivered (hosted) to {result.recipient} "
                 f"[project {to_project}]"
             )
-        elif result.recipient is not None:
-            # A live peer resolved but injection demoted to durable: the envelope
-            # is addressed to that PEER, not the project, so the receipt says so.
-            # A bus-only peer gets the designed-queue receipt, not a warning.
-            from fno.agents.dispatch import BUS_ONLY_POLICY
-
-            if result.reason == BUS_ONLY_POLICY:
-                from fno.mail import hold as _hold
-
-                _note = _hold.bounce_reason(result.recipient)
-                print(
-                    f"{result.msg_id} queued (durable) for {result.recipient} "
-                    f"[project {to_project}] "
-                    f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
-                    + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
-                    + durable_window_tail(result.durable_owner)
-                )
-            else:
-                # The anycast lane reaches the SAME dispatch_send as the by-name
-                # lane, so it must carry the same cause.
-                _warn_deferred(result.recipient, reason=result.reason)
-                print(demotion_receipt(
-                    result.msg_id,
-                    reason=result.reason, owner=result.durable_owner,
-                    target=result.recipient, project=to_project,
-                ))
         else:
-            _warn_deferred(to_project, project=True)
-            print(
-                f"{result.msg_id} queued (durable) for project {to_project} "
-                f"[param-forced: --to-project]"
-                + durable_window_tail(DurableOwner.INBOX_DRAIN.value)
-            )
+            print_project_demotion(result, to_project)
         return
 
     # Job-address mode (x-8f8c part 2): node:<id> / pr:<n> names the work, not a

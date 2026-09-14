@@ -111,10 +111,8 @@ def demotion_receipt(
     """The stdout line for a durable demotion (x-1904, refined by x-1602).
 
     A live-lane failure renders as legs, never as an error token; a plain
-    live-miss keeps its transcript-age suffix (read for ``age_target``, the
-    recipient the miss concerns); the line ends in the drain window for the
-    owner class stamped on the send. Callers keep ``_warn_deferred`` on
-    stderr; this returns the line only.
+    live-miss keeps its transcript-age suffix (``age_target`` names the
+    recipient the miss concerns); the line ends in the drain window.
     """
     token = durable_leg_story(reason)
     if token is None:
@@ -125,6 +123,47 @@ def demotion_receipt(
     if project:
         where += f" [project {project}]"
     return f"{msg_id} queued (durable){where} [{token}]" + durable_window_tail(owner)
+
+
+def print_project_demotion(result, to_project: str) -> None:
+    """Stdout receipt(s) for a --to-project send that wrote durable.
+
+    A resolved live peer demoted to durable is addressed to that PEER (the
+    anycast lane reaches the same dispatch_send as the by-name lane, so it
+    carries the same cause); a bus-only peer gets the designed-queue receipt;
+    no peer queues to the project inbox itself. Split from mail.cli
+    (file-budget) beside the rest of the receipt logic.
+    """
+    if result.recipient is not None:
+        from fno.agents.dispatch import BUS_ONLY_POLICY
+
+        if result.reason == BUS_ONLY_POLICY:
+            from fno.mail import hold as _hold
+
+            _note = _hold.bounce_reason(result.recipient)
+            print(
+                f"{result.msg_id} queued (durable) for {result.recipient} "
+                f"[project {to_project}] "
+                f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
+                + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
+                + durable_window_tail(result.durable_owner)
+            )
+        else:
+            _warn_deferred(result.recipient, reason=result.reason)
+            print(demotion_receipt(
+                result.msg_id,
+                reason=result.reason, owner=result.durable_owner,
+                target=result.recipient, project=to_project,
+            ))
+        return
+    from fno.inbox.store import DurableOwner
+
+    _warn_deferred(to_project, project=True)
+    print(
+        f"{result.msg_id} queued (durable) for project {to_project} "
+        f"[param-forced: --to-project]"
+        + durable_window_tail(DurableOwner.INBOX_DRAIN.value)
+    )
 
 
 def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] = None) -> None:
