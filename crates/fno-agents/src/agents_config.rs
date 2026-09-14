@@ -158,6 +158,43 @@ pub(crate) fn config_lookup(cwd: &Path, keys: &[&str]) -> Option<toml::Value> {
     })
 }
 
+/// Per-field merged table across the candidates, the way Python's loader
+/// deep-merges candidate files: the highest-priority candidate that defines a
+/// field wins that field, and a lower candidate's other fields still fill in.
+/// First-hit-wins [`config_lookup`] cannot answer a provider record split
+/// across tiers (base_url project-side, api_key_file global-side).
+pub(crate) fn config_table_merged(cwd: &Path, keys: &[&str]) -> Option<toml::Table> {
+    let mut merged = toml::Table::new();
+    let mut found = false;
+    for path in config_candidates(cwd) {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(table) = parse_config(&content) else {
+            continue;
+        };
+        let mut cur = &table;
+        let mut ok = true;
+        for k in keys {
+            match cur.get(*k).and_then(toml::Value::as_table) {
+                Some(t) => cur = t,
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        found = true;
+        for (k, v) in cur {
+            merged.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    found.then_some(merged)
+}
+
 fn resolve_state_path(raw: &str, cwd: &Path) -> Option<PathBuf> {
     let expanded = if let Some(rest) = raw.strip_prefix("~/") {
         PathBuf::from(std::env::var_os("HOME")?).join(rest)
