@@ -184,7 +184,10 @@ check_log_absent() {
 #   $SANDBOX/scenario/                      (per-scenario marker files)
 # ---------------------------------------------------------------------------
 TMPDIR_BASE="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_BASE"' EXIT
+# A keeper spawned inside a scenario can still be writing its store files when
+# the last assertion lands, and one late sqlite WAL write makes the cleanup rm
+# fail the whole step. Kill every process rooted in the tree first.
+trap 'pkill -9 -f "$TMPDIR_BASE" 2>/dev/null; sleep 0.5; rm -rf "$TMPDIR_BASE"' EXIT
 
 NODE_ID="ab-12345678"
 SESSION_ID="20260605T120000Z-12345-abc"

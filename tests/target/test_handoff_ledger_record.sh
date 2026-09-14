@@ -27,7 +27,9 @@ fail() { FAIL=$((FAIL+1)); printf '[handoff-ledger] FAIL: %s\n' "$*" >&2; }
 command -v jq >/dev/null 2>&1 || { printf '[handoff-ledger] SKIP: jq not on PATH\n' >&2; exit 77; }
 
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "${TMP_DIR:-/nonexistent}"' EXIT
+# Same straggler-keeper guard as tests/test-handoff.sh: a late store write must
+# not fail the cleanup rm.
+trap 'pkill -9 -f "${TMP_DIR:-/nonexistent}" 2>/dev/null; sleep 0.5; rm -rf "${TMP_DIR:-/nonexistent}"' EXIT
 HOME_DIR="${TMP_DIR}/home"; mkdir -p "$HOME_DIR"
 PROJ="${TMP_DIR}/proj"
 FNO_DIR="${PROJ}/.fno"
