@@ -438,3 +438,105 @@ def _worktree_ensure_for_launch(
     if ensured.returncode != 0:
         return None
     return ensured.stdout.strip() or None
+
+
+@dataclasses.dataclass
+class NodeSeed:
+    """The rendered seed for a node-driven spawn (x-e53e change 1), plus the
+    launch workdir resolution x-3873 change 1 moved into the spawn door."""
+
+    node_id: str
+    message: str
+    slug: Optional[str]
+    plan_path: Optional[str]
+    env: dict
+    receipt: dict
+    recorded_cwd: Optional[str]
+
+    def ensure_launch_workdir(self, agent_name: str, harness: str) -> Optional[Path]:
+        """The launch workdir for a node-seeded spawn with no explicit cwd
+        source: the worktree ensure's answer, never the node's recorded cwd
+        (the canonical checkout for every organically filed node). A ``None``
+        answer already printed its hold line - the caller exits 2 and the node
+        stays claimable rather than launching on canonical main."""
+        return ensure_launch_workdir(self.recorded_cwd, self.node_id, agent_name, harness)
+
+
+def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]:
+    """Render a node's seed (verb command + brief env) for the spawn door.
+
+    Prints its own refusal and returns None when the node carries no
+    dispatch_verb, or when the seed render refuses (an unanswerable lifecycle
+    or an over-budget brief) - a truncated brief is never seeded.
+    """
+    from fno.agents.harness_map import DispatchResolveError, resolve_dispatch
+    from fno.graph.ladder import plan_rung as _node_plan_rung
+    from fno.provenance.autobrief import resolve_dispatch_brief
+
+    seed_rec: Optional[dict] = None
+    try:
+        from fno.graph.load import load_graph
+        for candidate in load_graph():
+            if candidate.get("id") == node or candidate.get("slug") == node:
+                seed_rec = candidate
+                break
+    except Exception:  # noqa: BLE001 - an unreadable graph cannot seed a spawn
+        seed_rec = None
+    seed_node_id = (seed_rec or {}).get("id") or node
+    if not isinstance(seed_rec, dict) or not str(seed_rec.get("dispatch_verb") or "").strip():
+        print(
+            f"refusing node-seeded spawn: node {seed_node_id} carries no "
+            "dispatch_verb and no message was typed; an idle worker holds "
+            "a fleet slot and reads as alive. Encode one with `fno backlog "
+            f"update {seed_node_id} --dispatch-verb <verb>`.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        node_brief, node_brief_source = resolve_dispatch_brief(seed_rec)
+        resolved_seed = resolve_dispatch(
+            harness=harness,
+            node_id=str(seed_node_id),
+            verb=str(seed_rec.get("dispatch_verb")).strip(),
+            difficulty=seed_rec.get("difficulty"),
+            plan_rung=_node_plan_rung(seed_rec).value,
+            brief=node_brief,
+            trigger="autonomous",
+        )
+    except DispatchResolveError as exc:
+        # An unanswerable lifecycle or an explicit >8KB brief (the one
+        # failure the brief chain leaves to this gate) refuses here, before
+        # any worker exists; a truncated brief is never seeded.
+        print(str(exc), file=sys.stderr)
+        return None
+    return NodeSeed(
+        node_id=str(seed_node_id),
+        message=resolved_seed["command"],
+        slug=seed_rec.get("slug"),
+        plan_path=seed_rec.get("plan_path"),
+        env=resolved_seed.get("env") or {},
+        receipt={
+            "verb_source": "declared",
+            "brief_source": node_brief_source,
+        },
+        recorded_cwd=seed_rec.get("_resolved_cwd") or seed_rec.get("cwd"),
+    )
+
+
+def ensure_launch_workdir(
+    recorded_cwd: Optional[str], node_id: str, agent_name: str, harness: str
+) -> Optional[Path]:
+    """Resolve the launch workdir through the worktree ensure verb, printing
+    the hold line on a refusal (x-3873 change 1)."""
+    ensured = _worktree_ensure_for_launch(
+        Path(recorded_cwd) if recorded_cwd else Path.cwd(), agent_name, harness
+    )
+    if ensured is None:
+        print(
+            f"fno agents spawn: worktree ensure refused or misconfigured for "
+            f"{node_id}; holding the node rather than launching on canonical "
+            "main",
+            file=sys.stderr,
+        )
+        return None
+    return Path(ensured)

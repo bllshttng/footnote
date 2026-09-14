@@ -9,10 +9,6 @@ claim:
   - fno.claims.cli:cli
   - Work-claim coordination primitive
   - hidden: true
-dispatch:
-  - fno.dispatch:dispatch_app
-  - Dispatch ready work into mux panes.
-  - hidden: true
 king:
   - fno.king.cli:agents_king_app
   - The king session manifest and escalation controls.

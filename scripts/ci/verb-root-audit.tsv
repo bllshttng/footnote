@@ -20,7 +20,7 @@ context	19	19	15	2	keep-and-fold	whoami context
 cost	5	5	7	1	keep-and-fold	whoami cost	
 decide	220	220	24	11	keep-and-fold	backlog decide	
 delivery	0	0	6	1	keep-and-fold	do delivery	ZERO calls but LIVE: crates/fno-agents/src/delivery_completion.rs shells `fno delivery evaluate --json`. Call count alone would have deleted it.
-dispatch	22	22	40	16	merge	agents dispatch	third entry point for starting work beside agents spawn and think dispatch
+dispatch	22	22	40	16	retired	(retired; use fno agents spawn --node)	d-496680aa: one launch verb, and it is spawn; the verb and its root alias are deleted
 doctor	109	108	89	14	keep-as-root	doctor	
 done	26	26	49	2	merge	backlog done	backlog done already exists and is the same operation; the root is a second spelling
 evals	1	1	22	7	keep-and-fold	doctor evals	only 1 call but skills/ship gates a doc deliverable on `fno evals grade`.

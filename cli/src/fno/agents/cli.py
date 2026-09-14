@@ -1549,90 +1549,32 @@ def cmd_spawn(
         )
 
     # x-e53e change 1: `--node` with no typed message resolves the seed from
-    # the node - verb via resolve_dispatch for this harness, brief via the
-    # node's chain. A typed message wins.
+    # the node (render + launch workdir, one module); x-3873 change 1 adds the
+    # worktree ensure, so a node-seeded spawn with no explicit cwd source never
+    # lands on the node's recorded cwd (the canonical checkout). A typed
+    # message, --cwd or --here keeps the pre-change resolution.
     node_seed_env: dict = {}
     node_seed_receipt: dict = {}
     seed_slug: Optional[str] = None
     seed_plan: Optional[str] = None
     if node is not None and not (message or "").strip():
-        from fno.graph.ladder import plan_rung as _node_plan_rung
-        from fno.provenance.autobrief import resolve_dispatch_brief
+        from fno.agents.node_dispatch import render_node_seed
 
-        seed_rec: Optional[dict] = None
-        try:
-            from fno.graph.load import load_graph
-            for candidate in load_graph():
-                if candidate.get("id") == node or candidate.get("slug") == node:
-                    seed_rec = candidate
-                    break
-        except Exception:  # noqa: BLE001 - an unreadable graph cannot seed a spawn
-            seed_rec = None
-        seed_node_id = (seed_rec or {}).get("id") or node
-        if not isinstance(seed_rec, dict) or not str(seed_rec.get("dispatch_verb") or "").strip():
-            print(
-                f"refusing node-seeded spawn: node {seed_node_id} carries no "
-                "dispatch_verb and no message was typed; an idle worker holds "
-                "a fleet slot and reads as alive. Encode one with `fno backlog "
-                f"update {seed_node_id} --dispatch-verb <verb>`.",
-                file=sys.stderr,
-            )
+        seed = render_node_seed(node, harness=harness)
+        if seed is None:
+            # The render printed its own refusal; the node stays claimable.
             raise typer.Exit(code=2)
-        try:
-            from fno.agents.harness_map import resolve_dispatch
-
-            node_brief, node_brief_source = resolve_dispatch_brief(seed_rec)
-            resolved_seed = resolve_dispatch(
-                harness=harness,
-                node_id=str(seed_node_id),
-                verb=str(seed_rec.get("dispatch_verb")).strip(),
-                difficulty=seed_rec.get("difficulty"),
-                plan_rung=_node_plan_rung(seed_rec).value,
-                brief=node_brief,
-                trigger="autonomous",
-            )
-        except DispatchResolveError as exc:
-            # An unanswerable lifecycle or an explicit >8KB brief (the one
-            # failure the brief chain leaves to this gate) refuses here, before
-            # any worker exists; a truncated brief is never seeded.
-            print(str(exc), file=sys.stderr)
-            raise typer.Exit(code=2) from exc
-        message = resolved_seed["command"]
-        seed_slug = seed_rec.get("slug")
-        seed_plan = seed_rec.get("plan_path")
-        node_seed_env = resolved_seed.get("env") or {}
-        node_seed_receipt = {
-            "verb_source": "declared",
-            "brief_source": node_brief_source,
-        }
-        # x-3873 change 1: a node-seeded spawn with no explicit cwd source
-        # launches in an ensured worktree, not the node's recorded cwd (the
-        # canonical checkout for every organically filed node). The ensure
-        # runs here, before the family-2 guard takes `dispatch:<id>`; a
-        # typed message, --cwd or --here keeps the pre-change resolution.
+        message = seed.message
+        seed_slug = seed.slug
+        seed_plan = seed.plan_path
+        node_seed_env = seed.env
+        node_seed_receipt = seed.receipt
         if cwd is None and not here:
-            from fno.agents.node_dispatch import _worktree_ensure_for_launch
-
-            recorded_cwd = seed_rec.get("_resolved_cwd") or seed_rec.get("cwd")
-            ensured = _worktree_ensure_for_launch(
-                Path(recorded_cwd) if recorded_cwd else Path.cwd(),
-                name,
-                harness,
-            )
+            ensured = seed.ensure_launch_workdir(name, harness)
             if ensured is None:
-                print(
-                    f"fno agents spawn: worktree ensure refused or "
-                    f"misconfigured for {seed_node_id}; holding the node "
-                    "rather than launching on canonical main",
-                    file=sys.stderr,
-                )
                 raise typer.Exit(code=2)
-            workdir = Path(ensured).resolve()
-            # Re-derive the receipt's moved-cwd note against the ensured
-            # workdir: the first derivation ran before the seed branch read.
-            _moved_cwd = (
-                str(workdir) if not cwd and workdir != Path(os.getcwd()).resolve() else None
-            )
+            workdir = ensured.resolve()
+            _moved_cwd = str(workdir) if workdir != Path(os.getcwd()).resolve() else None
 
     from fno.agents.spawn_defaults import resolve_spawn_gates, seedless_thread_refusal
 

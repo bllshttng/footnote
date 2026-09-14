@@ -483,10 +483,10 @@ async fn run(args: Vec<String>) -> i32 {
     // registration as the other direct leaves, so the parity tests stay in
     // sync.
     if verb == "capabilities" {
-        return fno_agents::client_verbs::run_capabilities(&args[1..]);
+        return fno_agents::capability_leaves::run_capabilities(&args[1..]);
     }
     if verb == "target-family" {
-        return fno_agents::client_verbs::run_target_family(&args[1..]);
+        return fno_agents::capability_leaves::run_target_family(&args[1..]);
     }
 
     // `review-coverage`: standalone review_coverage producer (see its own doc

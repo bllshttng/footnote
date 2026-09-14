@@ -61,6 +61,7 @@ mod bounded_cmd;
 mod bounded_spawn;
 mod cancel_sentinel;
 pub mod canonical_check;
+pub mod capability_leaves;
 pub mod census;
 pub mod check_supersession;
 pub mod claim_verbs;

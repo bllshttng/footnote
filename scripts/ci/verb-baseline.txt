@@ -73,7 +73,6 @@ decide list
 decide reindex
 decide retract !--origin
 delivery
-dispatch
 do
 doctor !--context-audit !--context-budget !--context-entry !--context-harness !--context-host
 done

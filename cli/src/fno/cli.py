@@ -292,11 +292,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Restart running fno processes (agents daemon; mux with --mux) onto fresh builds.",
         {"hidden": True},
     ),
-    "dispatch": (
-        "fno.dispatch:dispatch_app",
-        "Dispatch the next ready node (mux leader+g shells `dispatch next`).",
-        {"hidden": True},
-    ),
 }
 
 # T1 actions are parsed by the group dispatcher and keep their existing typing.
@@ -312,7 +307,6 @@ COLLAPSE_KEEP: dict[str, set[str]] = {
     "carveout": set(),
     "claim": {"release"},
     "config": {"accounts", "get", "set"},
-    "dispatch": set(),
     "do": set(),
     "doctor": set(),
     "evals": set(),
