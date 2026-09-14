@@ -33,7 +33,9 @@ def test_publish_review_call_round_trips_the_payload(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_run(argv, input=None, capture_output=True, text=True, timeout=None):
+    def fake_run(
+        argv, input=None, capture_output=True, text=True, timeout=None, stdout=None, stderr=None
+    ):
         seen["argv"] = argv
         seen["input"] = input
         seen["timeout"] = timeout
@@ -59,7 +61,9 @@ def test_publish_review_call_round_trips_the_payload(tmp_path, monkeypatch):
 def test_publish_review_call_raises_a_named_refusal_on_failure(tmp_path, monkeypatch):
     import fno.rust_binary as rb
 
-    def fake_run(argv, input=None, capture_output=True, text=True, timeout=None):
+    def fake_run(
+        argv, input=None, capture_output=True, text=True, timeout=None, stdout=None, stderr=None
+    ):
         class Proc:
             returncode = 1
             stdout = ""
